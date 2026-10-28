@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
-
 import asyncio
 import json
 import uuid
@@ -12,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import EvaluationJudger, JudgeResult

@@ -58,9 +58,12 @@ def complete_scores(eval_ref_path: str, expected_case_ids: set[str]) -> dict[str
         score = row.get("score")
         if case_id in scores or not case_id:
             raise EvaluationInfrastructureError("Evaluation contains duplicate or missing case identities")
-        if (isinstance(score, bool) or not isinstance(score, (int, float))
-                or not math.isfinite(score) or not 0 <= score <= 1 or row.get("status") not in {"passed", "failed"}
-                or (row.get("metadata") or {}).get("infrastructure_skip")):
+        numeric = not isinstance(score, bool) and isinstance(score, (int, float))
+        finite = numeric and math.isfinite(score)
+        in_range = finite and 0 <= score <= 1
+        status_ok = row.get("status") in {"passed", "failed"}
+        skipped = bool((row.get("metadata") or {}).get("infrastructure_skip"))
+        if not in_range or not status_ok or skipped:
             raise EvaluationInfrastructureError(f"Invalid correctness score for {case_id}")
         result_path = Path(row["result_path"])
         result_path = source.parent / result_path if not result_path.is_absolute() else result_path
@@ -69,7 +72,9 @@ def complete_scores(eval_ref_path: str, expected_case_ids: set[str]) -> dict[str
         if (result.get("execution_status") == "error" or result.get("status") not in {"passed", "failed"}
                 or result.get("score") != score):
             raise EvaluationInfrastructureError(f"Inconsistent or failed execution for {case_id}")
-        if evaluation.get("method") == "llm_as_judge" and evaluation.get("metadata", {}).get("score_mode") != "continuous":
+        judge_method = evaluation.get("method") == "llm_as_judge"
+        continuous = evaluation.get("metadata", {}).get("score_mode") == "continuous"
+        if judge_method and not continuous:
             raise EvaluationInfrastructureError("Binary LLM grades cannot enter a continuous promotion run")
         scores[case_id] = float(score)
     if set(scores) != expected_case_ids or not scores:
@@ -105,10 +110,14 @@ def full_evaluation_decision(
     *, max_regression: float, proof: dict[str, Any], identity: str,
 ) -> dict[str, Any]:
     """Decide the second and final evaluation without averaging away case failures."""
-    if (not baseline or set(scores) != set(baseline) or not targets or not targets <= set(baseline)
-            or proof.get("identity") != identity or proof.get("qualified") is not True
-            or set(proof.get("target_case_ids", [])) != targets
-            or proof.get("baseline_scores_digest") != digest(baseline)):
+    same_cases = bool(baseline) and set(scores) == set(baseline)
+    targets_known = bool(targets) and targets <= set(baseline)
+    proof_matches = proof.get("identity") == identity and proof.get("qualified") is True
+    targets_match = set(proof.get("target_case_ids", [])) == targets
+    digest_matches = proof.get("baseline_scores_digest") == digest(baseline)
+    if not same_cases or not targets_known or not proof_matches:
+        raise EvaluationInfrastructureError("Full evaluation lacks its matching target improvement proof")
+    if not targets_match or not digest_matches:
         raise EvaluationInfrastructureError("Full evaluation lacks its matching target improvement proof")
     failed_targets = sorted(case_id for case_id in targets if scores[case_id] - baseline[case_id] <= EPSILON)
     regressed_others = sorted(case_id for case_id in set(baseline) - targets

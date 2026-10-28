@@ -64,6 +64,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
     MemberWorktreeCoordinator,
 )
 
+
 @dataclass(frozen=True)
 class _ActionExecutionContext:
     integration_dir: Path | None
@@ -728,7 +729,8 @@ class MemberActionExecutorAgent:
             action, plan_summary, allowed_skills, allowed_tools,
             action_worktree=action_worktree,
         )
-        user_message += f"\nHost runtime iteration ceiling: {self._runtime_iteration_hard_limit}; runtime.yaml cannot change it."
+        ceiling = self._runtime_iteration_hard_limit
+        user_message += f"\nHost runtime iteration ceiling: {ceiling}; runtime.yaml cannot change it."
         user_message += "\n\n" + REGISTRY_GUIDANCE
         message = user_message
         last_response_text = ""
@@ -754,7 +756,8 @@ class MemberActionExecutorAgent:
                     parsed = self._parse_action_response(response_text)
                     errors = [str(error) for error in parsed.get("errors", []) if str(error).strip()]
                     if str(parsed.get("status", "failed")) != "succeeded":
-                        raise ValueError("; ".join(errors) or "agent reported failed status; inspect and correct the action")
+                        message = "; ".join(errors) or "agent reported failed status; inspect and correct the action"
+                        raise ValueError(message)
                     # Accept legacy payloads for compatibility; native tool writes are primary.
                     if parsed.get("file_writes"):
                         self._apply_structured_file_writes(

@@ -86,10 +86,12 @@ class BaselineJudgeContext:
             if expected != actual:
                 raise EvaluationInfrastructureError("Baseline deliverables differ from the evidence originally judged")
         score = data.get("score")
-        if (isinstance(score, bool) or not isinstance(score, (int, float))
-                or not math.isfinite(score) or not 0 <= score <= 1
-                or data.get("status") not in {"passed", "failed"}
-                or data.get("execution_status") == "error"):
+        numeric = not isinstance(score, bool) and isinstance(score, (int, float))
+        finite = numeric and math.isfinite(score)
+        in_range = finite and 0 <= score <= 1
+        status_ok = data.get("status") in {"passed", "failed"}
+        execution_ok = data.get("execution_status") != "error"
+        if not in_range or not status_ok or not execution_ok:
             raise EvaluationInfrastructureError("Baseline does not contain a valid correctness grade")
         return data
 
@@ -111,7 +113,9 @@ def baseline_contexts(eval_ref_path: str, cases: list[dict[str, Any]]) -> dict[s
             raise EvaluationInfrastructureError(f"Baseline does not cover case {case_id}")
         path = Path(index[case_id]["result_path"])
         path = (source.parent / path).resolve() if not path.is_absolute() else path.resolve()
-        context = BaselineJudgeContext(case_id, str(source), str(path), case_identity(case), _evidence_digest(path.parent))
+        context = BaselineJudgeContext(
+            case_id, str(source), str(path), case_identity(case), _evidence_digest(path.parent),
+        )
         context.validate(case)
         result[case_id] = context
     return result

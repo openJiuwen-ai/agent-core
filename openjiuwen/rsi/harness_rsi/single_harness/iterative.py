@@ -131,6 +131,23 @@ class IterativeSingleHarnessResult:
     best_score: float | None
 
 
+def _llm_judge_protocol(evaluator: EvaluatorConfig) -> dict[str, Any]:
+    method = evaluator.evaluation_method.strip().lower().replace("-", "_")
+    if method != "llm_as_judge":
+        return {}
+    from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
+
+    try:
+        protocol = judge_protocol_identity(evaluator.score_mode, evaluator.judge_baseline_comparison)
+    except TypeError:
+        protocol = judge_protocol_identity()
+    if evaluator.score_mode == "binary":
+        contract = "threshold_binary_v1"
+    else:
+        contract = "continuous"
+    return {"llm_judge_score_contract": contract, "judge_protocol": protocol}
+
+
 class SingleHarnessIterativeOptimizationOrchestrator:
     """Run epochs, batches, candidate gates, and checkpoints for one harness.
 
@@ -174,7 +191,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         )
         self.config = replace(
             config, member_optimizer=restricted_member_config,
-            evaluator=replace(config.evaluator, score_mode="continuous") if config.promotion.continuous else config.evaluator,
+            evaluator=(
+                replace(config.evaluator, score_mode="continuous")
+                if config.promotion.continuous
+                else config.evaluator
+            ),
         )
         self.evaluator = evaluator or TeamEvaluator(self.config.evaluator)
         self.analyzer = analyzer or EvaluationResultAnalyzer(self.config.evaluation_result_analyzer)
@@ -314,7 +335,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             expected_case_ids=all_case_ids,
         )
-        needs_baseline = (request.auto_full_baseline or self.config.promotion.continuous) and not str(state.get("baseline_eval_ref_path", "") or "")
+        missing_baseline = not str(state.get("baseline_eval_ref_path", "") or "")
+        needs_baseline = (request.auto_full_baseline or self.config.promotion.continuous) and missing_baseline
         if not resuming_existing_state or needs_baseline:
             _write_yaml_atomic(state_path, state)
             await emit(on_event, root_node_event(state))
@@ -493,7 +515,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             output_dir=analysis_dir,
                             node_ref=epoch_node_ref,
                             source_stage=(
-                                "single_harness_batch" if analysis_round_index == 1 else "single_harness_residual_repair"
+                                (
+                                    "single_harness_batch"
+                                    if analysis_round_index == 1
+                                    else "single_harness_residual_repair"
+                                )
                             ),
                             prior_candidate_feedback=_prior_candidate_feedback(state, active_cases),
                             on_event=on_event,
@@ -1097,8 +1123,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         self, cases: list[dict[str, Any]], harness_refs_path: str,
         baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     ) -> dict[str, Any]:
-        from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
-
         adapter_config = getattr(self.evaluator, "config", None)
         if isinstance(adapter_config, EvaluatorConfig):
             adapter_config = evaluator_protocol_config(adapter_config)
@@ -1108,12 +1132,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "config": evaluator_protocol_config(self.config.evaluator),
                 "adapter": f"{type(self.evaluator).__module__}.{type(self.evaluator).__qualname__}",
                 "adapter_config": adapter_config,
-                **({"llm_judge_score_contract": "threshold_binary_v1" if self.config.evaluator.score_mode == "binary" else "continuous",
-                    "judge_protocol": judge_protocol_identity(
-                        self.config.evaluator.score_mode, self.config.evaluator.judge_baseline_comparison,
-                    )}
-                   if self.config.evaluator.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge"
-                   else {}),
+                **_llm_judge_protocol(self.config.evaluator),
             },
             cases=cases,
         )
@@ -1121,6 +1140,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             context["baseline_contexts"] = {str(case["case_id"]): baseline_contexts[str(case["case_id"])].fingerprint
                                              for case in cases}
         return context
+
+    evaluation_context = _evaluation_context
 
     def _source_passing_case_ids(
         self, cases: list[dict[str, Any]], harness_refs_path: str, prior_eval_refs: list[str],
@@ -1253,7 +1274,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         if baseline_contexts is not None:
             if "baseline_contexts" not in parameters:
                 raise ValueError("evaluator does not support baseline-aware candidate judging")
-            stage_kwargs["baseline_contexts"] = {str(case["case_id"]): baseline_contexts[str(case["case_id"])] for case in cases}
+            stage_kwargs["baseline_contexts"] = {
+                str(case["case_id"]): baseline_contexts[str(case["case_id"])] for case in cases
+            }
         if "case_concurrency" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
@@ -1273,6 +1296,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 baseline_contexts[str(case["case_id"])].validate(case)
         stamp_evaluation(result, context)
         return result
+
+    evaluate = _evaluate
 
     @model_usage_stage("analyze")
     async def _analyze(
@@ -1325,6 +1350,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             raise
         await emit(on_event, NodeStageEvent(node_ref=node_ref, stage=analysis_stage_payload("done")))
         return result
+
+    analyze = _analyze
 
     async def _candidate_gate(
         self,
@@ -1555,12 +1582,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             else float(self.config.member_optimizer.candidate_min_target_behavior_delta))
         failing_target_case_ids = sorted(target_case_ids if self.config.promotion.continuous
                                          else set(target_case_ids) - _passing_case_ids(paired_source_eval_ref))
-        improved_target_case_ids = sorted(
-            case_id
-            for case_id in failing_target_case_ids
-            if (candidate_case_scores.get(case_id, 0.0) > source_case_scores.get(case_id, 0.0)
-                + min_target_delta + (1e-9 if self.config.promotion.continuous else 0.0))
-        )
+        improved_target_case_ids = []
+        for case_id in failing_target_case_ids:
+            margin = min_target_delta
+            if self.config.promotion.continuous:
+                margin += 1e-9
+            candidate_score = candidate_case_scores.get(case_id, 0.0)
+            source_score = source_case_scores.get(case_id, 0.0)
+            if candidate_score > source_score + margin:
+                improved_target_case_ids.append(case_id)
+        improved_target_case_ids = sorted(improved_target_case_ids)
         unimproved_target_case_ids = sorted(set(failing_target_case_ids) - set(improved_target_case_ids))
         regressed_target_case_ids = sorted(
             case_id
@@ -1708,9 +1739,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
             for case_id in target_case_ids
         }
-        if (not accepted and not _eval_has_errors(candidate_eval_ref) and "inconclusive" not in reason
-                and failure_class != "behavior_evidence_inconclusive"
-                and not _is_operational_repair({"candidate_behavior_by_case": candidate_behavior_by_case})):
+        can_pair = not accepted and not _eval_has_errors(candidate_eval_ref)
+        definite = "inconclusive" not in reason and failure_class != "behavior_evidence_inconclusive"
+        operational = _is_operational_repair({"candidate_behavior_by_case": candidate_behavior_by_case})
+        if can_pair and definite and not operational:
             paired_feedback = {
                 "by_case": {
                     case_id: [
@@ -1748,7 +1780,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "accepted"
                 if accepted
                 else "inconclusive"
-                if "inconclusive" in reason or "error_cases" in reason or failure_class == "behavior_evidence_inconclusive"
+                if "inconclusive" in reason or "error_cases" in reason
                 else "rejected"
             ),
             "reason": reason,
@@ -1817,6 +1849,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "target_confirmation": target_confirmation,
             "retention": retention,
         }
+
+
+    candidate_gate = _candidate_gate
 
 
 def _dataset_artifact(request: IterativeSingleHarnessRequest) -> DatasetArtifact:
@@ -4238,16 +4273,30 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
 
         proof = state.get("best_improvement_proof") or {}
         best_identity = package_fingerprint(str(state["best_harness_refs_path"]))
-        evaluation_field = "full_eval_ref_path" if policy_version == "continuous_two_stage_v2" else "confirmation_eval_ref_path"
-        accepted_gates = [gate for gate in accepted_gates
-                          if gate.get("candidate_harness_refs_path") == state["best_harness_refs_path"]
-                          and gate.get(evaluation_field) == state.get("best_eval_ref_path")
-                          and gate.get("improvement_proof") == proof
-                          and proof.get("qualified") is True and proof.get("package_fingerprint") == best_identity]
         if policy_version == "continuous_two_stage_v2":
-            accepted_gates = [gate for gate in accepted_gates if gate.get("full_engineering_passed") is True
-                              and gate.get("full_checks", {}).get("accepted") is True
-                              and proof.get("scope") == "target_cases"]
+            evaluation_field = "full_eval_ref_path"
+        else:
+            evaluation_field = "confirmation_eval_ref_path"
+        matching_gates = []
+        for gate in accepted_gates:
+            same_refs = gate.get("candidate_harness_refs_path") == state["best_harness_refs_path"]
+            same_eval = gate.get(evaluation_field) == state.get("best_eval_ref_path")
+            same_proof = gate.get("improvement_proof") == proof
+            qualified = proof.get("qualified") is True
+            same_package = proof.get("package_fingerprint") == best_identity
+            matched = same_refs and same_eval and same_proof
+            if matched and qualified and same_package:
+                matching_gates.append(gate)
+        accepted_gates = matching_gates
+        if policy_version == "continuous_two_stage_v2":
+            engineering_gates = []
+            for gate in accepted_gates:
+                engineering_ok = gate.get("full_engineering_passed") is True
+                checks_ok = gate.get("full_checks", {}).get("accepted") is True
+                target_scope = proof.get("scope") == "target_cases"
+                if engineering_ok and checks_ok and target_scope:
+                    engineering_gates.append(gate)
+            accepted_gates = engineering_gates
         if best_identity == package_fingerprint(str(state["source_harness_refs_path"])):
             accepted_gates = []
     if not accepted_gates:

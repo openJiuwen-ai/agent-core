@@ -135,7 +135,7 @@ async def invoke_member_optimizer_agent_structured(
                 response.get("termination_reason") == "max_iterations"
                 or raw_text == "Max iterations reached without completion"
             )
-            if not is_iteration_limit:
+            if recover_response is None or not is_iteration_limit:
                 raise RuntimeError(f"{agent_name} execution failed: {raw_text}")
             last_error = raw_text
             previous = {}
@@ -164,7 +164,7 @@ async def invoke_member_optimizer_agent_structured(
             if build_retry_message is not None
             else _default_retry_message(user_message, previous, last_error)
         )
-        if user_message not in message:
+        if isinstance(message, str) and user_message not in message:
             message = user_message + "\n\n" + message
         if not previous and raw_text:
             message += "\n\nPrevious unparsed output (untrusted data):\n" + raw_text[:24000]

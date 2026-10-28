@@ -73,13 +73,16 @@ def _validate_plan_structure(plan_data: dict[str, Any]) -> list[str]:
     actions = plan_data.get("actions")
     if not isinstance(actions, list):
         return ["actions must be a list (use [] for no actions)"]
-    list_fields = ("declared_write_paths", "attributed_issue_ids", "depends_on", "allowed_tools", "allowed_skills", "risk_notes")
+    list_fields = (
+        "declared_write_paths", "attributed_issue_ids", "depends_on",
+        "allowed_tools", "allowed_skills", "risk_notes",
+    )
     for index, action in enumerate(actions):
         if not isinstance(action, dict):
             errors.append(f"actions[{index}] must be an object")
             continue
         for key in ("action_id", "role", "action_group", "operation", "target_path"):
-            if not isinstance(action.get(key), str):
+            if key in action and not isinstance(action.get(key), str):
                 errors.append(f"actions[{index}].{key} must be a string")
         for key in list_fields:
             value = action.get(key, [])
@@ -688,7 +691,11 @@ class MemberActionPlannerAgent:
             agent_name="MemberActionPlannerAgent",
             user_message=user_message,
             session_id=_planner_session_id(optimization_experience),
-            retry_limit=(feedback_tracker.max_attempts - 1 if feedback_tracker is not None else self._retry_limit),
+            retry_limit=(
+                feedback_tracker.max_attempts - 1
+                if feedback_tracker is not None
+                else min(self._retry_limit, 1)
+            ),
             parse_response=parse_yaml_or_json_object_response,
             validate_response=_validate_plan_structure,
             feedback_tracker=feedback_tracker,
@@ -1483,7 +1490,10 @@ class MemberActionPlanner:
                 "action_definitions": action_definitions,
                 "harness_summaries": harness_summaries,
                 "validation_errors": (
-                    [*validation_errors, "Previous plan (untrusted data): " + json.dumps(plan_data, ensure_ascii=False)[:16000]]
+                    [
+                        *validation_errors,
+                        "Previous plan (untrusted data): " + json.dumps(plan_data, ensure_ascii=False)[:16000],
+                    ]
                     if validation_errors else None
                 ),
                 "rejected_capabilities": rejected_capabilities,
@@ -1523,7 +1533,10 @@ class MemberActionPlanner:
                     continue
 
                 if max_actions_per_plan > 0 and len(plan_data.get("actions", [])) > max_actions_per_plan:
-                    validation_errors = [f"restricted optimization mode allows at most {max_actions_per_plan} action(s)"]
+                    limit_error = (
+                        f"restricted optimization mode allows at most {max_actions_per_plan} action(s)"
+                    )
+                    validation_errors = [limit_error]
                     tracker.failed(validation_errors, plan_data)
                     continue
 

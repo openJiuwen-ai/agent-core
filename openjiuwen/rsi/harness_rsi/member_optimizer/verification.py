@@ -230,9 +230,17 @@ def _check_rail_runtime_contract(role: str, root: Path, target: str) -> Verifica
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             owner = node.func.value
-            if (node.func.attr == "get" and isinstance(owner, ast.Attribute) and owner.attr == "inputs"
-                    and isinstance(owner.value, ast.Name) and owner.value.id == "ctx"):
-                errors.append("Hook inputs are typed dataclasses; use ctx.inputs.response/react_iteration, not ctx.inputs.get")
+            called_get = node.func.attr == "get"
+            on_inputs = isinstance(owner, ast.Attribute) and owner.attr == "inputs"
+            on_ctx = False
+            if on_inputs:
+                on_ctx = isinstance(owner.value, ast.Name) and owner.value.id == "ctx"
+            if called_get and on_inputs and on_ctx:
+                message = (
+                    "Hook inputs are typed dataclasses; "
+                    "use ctx.inputs.response/react_iteration, not ctx.inputs.get"
+                )
+                errors.append(message)
         for hook in ast.walk(tree):
             if not isinstance(hook, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -636,11 +644,9 @@ def _check_effective_prompt_binding(role: str, sections: list[Any]) -> Verificat
     """Use the runtime binder on an isolated prompt builder, without agent hooks."""
     from openjiuwen.harness.extension_binder import _bind_prompt_section
     from openjiuwen.harness.prompts.builder import SystemPromptBuilder
-    from openjiuwen.harness.prompts.sections.identity import build_identity_section
 
     try:
         builder = SystemPromptBuilder(language="en")
-        builder.add_section(build_identity_section("en"))
         preview = SimpleNamespace(
             system_prompt_builder=builder,
             apply_prompt_builder_to_react_agent=builder.build,
@@ -1125,20 +1131,26 @@ def _snapshot_repair_files(root: Path) -> dict[str, bytes]:
     """Capture package bytes for progress checks and protected-file rollback."""
     if not root.is_dir():
         return {}
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*") if path.is_file() and not path.is_symlink()
-        and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    }
+    snapshot: dict[str, bytes] = {}
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        snapshot[path.relative_to(root).as_posix()] = path.read_bytes()
+    return snapshot
 
 
 def _enforce_repair_scope(root: Path, before: dict[str, bytes], after: dict[str, bytes]) -> list[str]:
     changed = [name for name in before.keys() | after.keys() if before.get(name) != after.get(name)]
     runtime_names = {"AGENT.md", "SOUL.md", "IDENTITY.md", "USER.md", "HEARTBEAT.md"}
-    forbidden = [
-        name for name in changed if not package_write_allowed(name, repair=True)
-        and name not in runtime_names and not name.startswith(("context/", "memory/"))
-    ]
+    forbidden = []
+    for name in changed:
+        if package_write_allowed(name, repair=True):
+            continue
+        if name in runtime_names or name.startswith(("context/", "memory/")):
+            continue
+        forbidden.append(name)
     for name in forbidden:
         path = root / name
         if name in before:
@@ -1534,12 +1546,9 @@ class HarnessChangeVerifier:
                         reason = "repair made no file changes; use read/edit tools to address the failed checks"
                         repairs.extend(replace(item, status="failed", error=reason) for item in repair_items)
                         remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
-                        if not tracker.failed("no_file_changes", after_attempt):
-                            role_stop_reasons[role] = tracker.stop_reason
-                            break
-                        failed = [asdict(check) for check in failed_checks]
-                        failed.append({"name": failed[0]["name"], "status": "failed", "error": reason})
-                        continue
+                        tracker.failed("no_file_changes", after_attempt)
+                        role_stop_reasons[role] = "no_progress"
+                        break
 
                     expected_tool_names = {
                         check.name.rsplit(":", 1)[-1]
@@ -1594,7 +1603,9 @@ class HarnessChangeVerifier:
                     )
                     repairs.append(repair)
                     remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
-                    if is_retryable_model_call_failure(exc) and tracker.failed(str(exc), _snapshot_repair_files(integration_dir)):
+                    retryable = is_retryable_model_call_failure(exc)
+                    progressed = tracker.failed(str(exc), _snapshot_repair_files(integration_dir))
+                    if retryable and progressed:
                         failed = [asdict(check) for check in failed_checks]
                         failed.append({"name": failed[0]["name"], "status": "failed", "error": str(exc)})
                         continue

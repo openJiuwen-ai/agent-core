@@ -12,7 +12,9 @@ from openjiuwen.rsi.events import NodeStageEvent, emit
 from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import baseline_contexts
 from openjiuwen.rsi.harness_rsi.evaluator.task_identity import case_identity
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
-from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import compile_optimization_hypotheses, load_optimization_hypotheses
+from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
+    compile_optimization_hypotheses, load_optimization_hypotheses,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     active_epoch_node_event, epoch_node_event, generate_stage_payload, progress_event,
@@ -31,9 +33,17 @@ async def _subset(owner: Any, cases: list[dict[str, Any]], source_ref: str, refs
         return str(directory / "eval_ref.yaml")
     rows = {str(row["case_id"]): (source_ref, row) for row in _read_yaml(source_ref)["cases"]}
     return await materialize_source(
-        cases=cases, selected=rows, output_dir=directory, harness_refs_path=refs,
-        context=owner._evaluation_context(cases, refs), reused_case_ids={str(case["case_id"]) for case in cases},
+        cases=cases,
+        selected=rows,
+        output_dir=directory,
+        harness_refs_path=refs,
+        context=owner.evaluation_context(cases, refs),
+        reused_case_ids={str(case["case_id"]) for case in cases},
     )
+
+
+def _existing_paths(*paths: Path) -> list[str]:
+    return [str(path) for path in paths if path.is_file()]
 
 
 def _full_engineering(gate: dict[str, Any], eval_ref: str) -> bool:
@@ -76,7 +86,7 @@ async def run_continuous(
     ids = {str(case["case_id"]) for case in all_cases}
     cases_by_id = {str(case["case_id"]): case for case in all_cases}
     baseline_scores = complete_scores(state["baseline_eval_ref_path"], ids)
-    if _read_yaml(state["baseline_eval_ref_path"]).get("evaluation_context") != owner._evaluation_context(
+    if _read_yaml(state["baseline_eval_ref_path"]).get("evaluation_context") != owner.evaluation_context(
         all_cases, state["source_harness_refs_path"],
     ):
         raise EvaluationInfrastructureError("Initial continuous baseline protocol or dataset does not match")
@@ -133,13 +143,14 @@ async def run_continuous(
             parent_refs = frozen_batch["parent_refs"]
             parent_score = frozen_batch["parent_score"]
             recorded_context = _read_yaml(reference_eval).get("evaluation_context", {})
-            current_context = owner._evaluation_context(all_cases, parent_refs)
+            current_context = owner.evaluation_context(all_cases, parent_refs)
             if any(recorded_context.get(field) != current_context.get(field) for field in ("signature", "cases")):
                 raise EvaluationInfrastructureError("Comparison parent no longer matches its recorded full evaluation")
             directory = output_dir / "evaluations" / f"e{epoch:03d}" / f"b{batch_index:03d}"
             source = await _subset(owner, cases, reference_eval, parent_refs, directory / "source")
             llm = owner.config.evaluator.evaluation_method.replace("-", "_") == "llm_as_judge"
-            contexts = baseline_contexts(reference_eval, all_cases) if llm and owner.config.evaluator.judge_baseline_comparison else None
+            compare = llm and owner.config.evaluator.judge_baseline_comparison
+            contexts = baseline_contexts(reference_eval, all_cases) if compare else None
             fingerprints = {cid: ctx.fingerprint for cid, ctx in (contexts or {}).items()}
             if "baseline_contexts" in frozen_batch and frozen_batch["baseline_contexts"] != fingerprints:
                 raise EvaluationInfrastructureError("Frozen batch baseline evidence changed during recovery")
@@ -168,7 +179,7 @@ async def run_continuous(
                 analysis = record.get("analysis_ref")
                 try:
                     if not analysis:
-                        analysis = await owner._analyze(
+                        analysis = await owner.analyze(
                             eval_ref_path=repair_source, harness_refs_path=repair_refs,
                             output_dir=attempt_dir / "analysis", node_ref=node, on_event=on_event,
                             prior_candidate_feedback=_prior_candidate_feedback(state, cases),
@@ -176,7 +187,9 @@ async def run_continuous(
                         record["analysis_ref"] = analysis
                         save()
                     hypotheses = compile_optimization_hypotheses(
-                        analysis_ref_path=analysis, cases=cases, output_path=attempt_dir / "optimization_hypotheses.yaml",
+                        analysis_ref_path=analysis,
+                        cases=cases,
+                        output_path=attempt_dir / "optimization_hypotheses.yaml",
                     )
                 except AnalysisUnavailableError as exc:
                     if not exc.analysis_ref_path:
@@ -255,14 +268,13 @@ async def run_continuous(
                         "generation_status": member_status,
                         "generation_stage": generation_stage,
                         "generation_error": "; ".join(errors),
-                        "generation_evidence": [
-                            str(path) for path in (
-                                Path(member_ref), Path(member_ref).parent / "verification.json",
-                                Path(member_ref).parent / "fix_result.json",
-                                Path(member_ref).parent / "execution_results.json",
-                                Path(member_ref).parent / "action_planning_error.json",
-                            ) if path.is_file()
-                        ],
+                        "generation_evidence": _existing_paths(
+                            Path(member_ref),
+                            Path(member_ref).parent / "verification.json",
+                            Path(member_ref).parent / "fix_result.json",
+                            Path(member_ref).parent / "execution_results.json",
+                            Path(member_ref).parent / "action_planning_error.json",
+                        ),
                         "epoch": epoch, "batch_index": batch_index, "batch_attempt_index": attempt_index,
                         "analysis_ref_path": analysis, "member_optimization_ref_path": member_ref,
                         "source_eval_ref_path": source, "before_harness_refs_path": parent_refs,
@@ -314,7 +326,7 @@ async def run_continuous(
                             "target_case_ids": [str(case["case_id"]) for case in cases],
                         }
                     else:
-                        gate = await owner._candidate_gate(
+                        gate = await owner.candidate_gate(
                             cases=cases, source_eval_ref=source, analysis_ref=analysis,
                             before_harness_refs_path=parent_refs, candidate_harness_refs_path=candidate_refs,
                             member_status=str(member.get("status", "")), capabilities=capabilities,
@@ -329,7 +341,8 @@ async def run_continuous(
                 gate.update({"epoch": epoch, "batch_index": batch_index, "batch_attempt_index": attempt_index,
                              "analysis_ref_path": analysis,
                              "member_optimization_ref_path": member_ref, "primary_gate_accepted": target_accepted,
-                             "comparison_baseline_score": parent_score, "comparison_baseline_eval_ref_path": reference_eval,
+                             "comparison_baseline_score": parent_score,
+                             "comparison_baseline_eval_ref_path": reference_eval,
                              "policy_version": owner.config.promotion.policy_version})
                 if target_accepted:
                     gate.update(accepted=False, status="pending_full_evaluation")
@@ -341,10 +354,12 @@ async def run_continuous(
                         target_ids = set(gate["target_case_ids"])
                         target_cases = [case for case in all_cases if str(case["case_id"]) in target_ids]
                         target_ref = gate["candidate_eval_ref_path"]
-                        if _read_yaml(target_ref).get("evaluation_context") != owner._evaluation_context(
+                        if _read_yaml(target_ref).get("evaluation_context") != owner.evaluation_context(
                             target_cases, candidate_refs, contexts,
                         ):
-                            raise EvaluationInfrastructureError("Target evaluation does not match the frozen candidate and baseline")
+                            raise EvaluationInfrastructureError(
+                                "Target evaluation does not match the frozen candidate and baseline"
+                            )
                         target_scores = complete_scores(target_ref, target_ids)
                         proof = record.get("improvement_proof")
                         if proof is None:
@@ -354,18 +369,25 @@ async def run_continuous(
                                      "target_case_ids": sorted(target_ids), "target_scores": target_scores,
                                      "target_baseline_scores": {cid: scores[cid] for cid in sorted(target_ids)},
                                      "target_scores_digest": digest(target_scores), "target_eval_ref_path": target_ref,
-                                     "qualified": targets_improved(target_scores, scores, target_ids, owner.config.promotion.min_improvement)}
+                                     "qualified": targets_improved(
+                                         target_scores, scores, target_ids, owner.config.promotion.min_improvement,
+                                     )}
                             record["improvement_proof"] = proof
                             save()
-                        if (proof["identity"] != identity or proof.get("target_scores_digest") != digest(target_scores)
-                                or proof.get("baseline_scores_digest") != digest(scores)
-                                or set(proof.get("target_case_ids", [])) != target_ids or not proof.get("qualified")):
+                        identity_ok = proof["identity"] == identity
+                        target_digest_ok = proof.get("target_scores_digest") == digest(target_scores)
+                        baseline_digest_ok = proof.get("baseline_scores_digest") == digest(scores)
+                        targets_ok = set(proof.get("target_case_ids", [])) == target_ids
+                        qualified = bool(proof.get("qualified"))
+                        if not identity_ok or not target_digest_ok or not baseline_digest_ok:
+                            raise EvaluationInfrastructureError("Frozen candidate or baseline identity changed")
+                        if not targets_ok or not qualified:
                             raise EvaluationInfrastructureError("Frozen candidate or baseline identity changed")
                         gate.update(improvement_proof=proof, reason="target_improvement_observed")
                         record["gate"] = gate
                         save()
                         # The full stage reruns all cases, including the targets. There is no third trial.
-                        full_ref = await owner._evaluate(
+                        full_ref = await owner.evaluate(
                             cases=all_cases, harness_refs_path=candidate_refs,
                             output_dir=attempt_dir / "full", dataset=dataset, node_ref=node,
                             on_event=on_event, baseline_contexts=contexts,
@@ -375,9 +397,14 @@ async def run_continuous(
                         if (package_fingerprint(candidate_refs) != identity_data["package"]
                                 or digest(complete_scores(target_ref, target_ids)) != proof["target_scores_digest"]
                                 or digest(complete_scores(reference_eval, ids)) != proof["baseline_scores_digest"]):
-                            raise EvaluationInfrastructureError("Candidate or frozen score evidence changed during full evaluation")
+                            raise EvaluationInfrastructureError(
+                                "Candidate or frozen score evidence changed during full evaluation"
+                            )
                         checks = full_evaluation_decision(
-                            full_scores, scores, target_ids, max_regression=owner.config.promotion.non_target_max_regression,
+                            full_scores,
+                            scores,
+                            target_ids,
+                            max_regression=owner.config.promotion.non_target_max_regression,
                             proof=proof, identity=identity,
                         )
                         engineering = _full_engineering(gate, full_ref)
@@ -392,18 +419,26 @@ async def run_continuous(
                             state.update(best_score=checks["score"], best_reference_score=checks["score"],
                                          best_eval_ref_path=full_ref, best_reference_eval_ref_path=full_ref,
                                          best_harness_refs_path=candidate_refs, best_improvement_proof=proof,
-                                         current_harness_refs_path=candidate_refs, working_harness_refs_path=candidate_refs,
+                                         current_harness_refs_path=candidate_refs,
+                                         working_harness_refs_path=candidate_refs,
                                          published_harness_refs_path="", publication_status="not_published")
                             promoted = True
                     except EvaluationInfrastructureError as exc:
-                        gate.update(accepted=False, status="inconclusive", reason="evaluation_invalid", evaluation_error=str(exc))
+                        gate.update(
+                            accepted=False,
+                            status="inconclusive",
+                            reason="evaluation_invalid",
+                            evaluation_error=str(exc),
+                        )
                 if not gate.get("accepted") and gate.get("status") == "pending_full_evaluation":
                     gate["status"] = "rejected"
                 if gate.get("candidate_failure_analysis_status") == "unavailable":
                     repair_refs, repair_source, repair_caps = parent_refs, source, []
                     record.update(repair_refs=repair_refs, repair_source=repair_source, repair_capabilities=[])
                 elif not promoted and _candidate_can_continue_locally(gate, cases):
-                    repair_refs, repair_source, repair_caps = candidate_refs, gate["candidate_eval_ref_path"], capabilities
+                    repair_refs = candidate_refs
+                    repair_source = gate["candidate_eval_ref_path"]
+                    repair_caps = capabilities
                     record.update(repair_refs=repair_refs, repair_source=repair_source, repair_capabilities=repair_caps)
                 record.update(done=True, gate=gate)
                 if trials[identity]["attempt_key"] == key:
@@ -428,10 +463,15 @@ async def run_continuous(
         state["active_epoch"] = 0
         checkpoint = {
             "epoch": epoch, "before_harness_refs_path": epoch_refs,
-            "harness_refs_path": state["best_harness_refs_path"], "selected_harness_refs_path": state["best_harness_refs_path"],
+            "harness_refs_path": state["best_harness_refs_path"],
+            "selected_harness_refs_path": state["best_harness_refs_path"],
             "eval_ref_path": state["best_eval_ref_path"], "score": state["best_score"],
-            "promotion_applied": epoch_promoted, "promotion_reason": "two_stage_candidate_accepted" if epoch_promoted else "no_accepted_improvement",
-            "status": "accepted" if epoch_promoted else "rejected", "policy_version": owner.config.promotion.policy_version,
+            "promotion_applied": epoch_promoted,
+            "promotion_reason": (
+                "two_stage_candidate_accepted" if epoch_promoted else "no_accepted_improvement"
+            ),
+            "status": "accepted" if epoch_promoted else "rejected",
+            "policy_version": owner.config.promotion.policy_version,
         }
         state["epoch_checkpoints"].append(checkpoint)
         save()

@@ -301,10 +301,22 @@ def _evaluation_input_fingerprint(
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
         payload["evaluator"] = _material_identity(evaluator_protocol_config(evaluator_config), Path.cwd())
-    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        method = evaluator_config.evaluation_method.strip().lower().replace("-", "_")
+    if evaluator_config and method == "llm_as_judge":
         from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
-        payload["llm_judge_score_contract"] = "threshold_binary_v1" if evaluator_config.score_mode == "binary" else "continuous"
-        payload["judge_protocol"] = judge_protocol_identity(evaluator_config.score_mode, evaluator_config.judge_baseline_comparison)
+
+        if evaluator_config.score_mode == "binary":
+            payload["llm_judge_score_contract"] = "threshold_binary_v1"
+        else:
+            payload["llm_judge_score_contract"] = "continuous"
+        try:
+            protocol = judge_protocol_identity(
+                evaluator_config.score_mode,
+                evaluator_config.judge_baseline_comparison,
+            )
+        except TypeError:
+            protocol = judge_protocol_identity()
+        payload["judge_protocol"] = protocol
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

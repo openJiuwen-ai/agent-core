@@ -329,6 +329,13 @@ class OrchestratorSchedulingConfig:
             raise ValueError("scheduling.promotion_policy must be epoch_full_evaluation")
 
 
+def _require_unit_interval(value: float, name: str) -> None:
+    numeric = not isinstance(value, bool) and isinstance(value, (int, float))
+    finite = numeric and math.isfinite(value)
+    if not finite or not 0 <= value <= 1:
+        raise ValueError(f"{name} must be a finite number between 0 and 1")
+
+
 @dataclass(frozen=True, slots=True)
 class PromotionConfig:
     """Versioned score authority; historical tasks retain their original policy."""
@@ -340,13 +347,8 @@ class PromotionConfig:
     def __post_init__(self) -> None:
         if self.policy_version not in {"legacy_epoch_v1", "continuous_two_stage_v2"}:
             raise ValueError("unsupported promotion.policy_version; start a new task using continuous_two_stage_v2")
-        if (isinstance(self.min_improvement, bool) or not isinstance(self.min_improvement, (int, float))
-                or not math.isfinite(self.min_improvement) or not 0 <= self.min_improvement <= 1):
-            raise ValueError("promotion.min_improvement must be a finite number between 0 and 1")
-        if (isinstance(self.non_target_max_regression, bool)
-                or not isinstance(self.non_target_max_regression, (int, float))
-                or not math.isfinite(self.non_target_max_regression) or not 0 <= self.non_target_max_regression <= 1):
-            raise ValueError("promotion.non_target_max_regression must be a finite number between 0 and 1")
+        _require_unit_interval(self.min_improvement, "promotion.min_improvement")
+        _require_unit_interval(self.non_target_max_regression, "promotion.non_target_max_regression")
 
     @property
     def continuous(self) -> bool:

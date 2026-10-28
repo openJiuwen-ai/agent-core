@@ -194,7 +194,8 @@ def _document(root: Path, manifest: str) -> tuple[dict[str, Any], list[RegistryI
                 if previous is not None:
                     if previous != item:
                         code = "prompt_section_duplicate" if prompt else "registry_conflict"
-                        issues.append(RegistryIssue(code, manifest, index, f"conflicting registrations: {previous!r}; {item!r}"))
+                        detail = f"conflicting registrations: {previous!r}; {item!r}"
+                        issues.append(RegistryIssue(code, manifest, index, detail))
                     continue
                 seen[identity] = item
                 result.append(item)
@@ -286,7 +287,8 @@ def upsert_prompt_section(
             continue
         if item.get("file") != target:
             if not replace_existing:
-                raise ValueError(f"prompt_section_duplicate: {name!r} already refers to {item.get('file', 'inline content')!r}")
+                existing = item.get("file", "inline content")
+                raise ValueError(f"prompt_section_duplicate: {name!r} already refers to {existing!r}")
             item.pop("content", None)
             item["file"] = target
         if selected is not None:

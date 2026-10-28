@@ -186,7 +186,9 @@ async def run_judge_agent(
 
     payload = await asyncio.to_thread(inline_evidence, workspace, include_images=True)
     if payload is not None:
-        return await _invoke_complete_evidence(_judge_model(config), payload, legacy=not _has_baseline(config, workspace))
+        return await _invoke_complete_evidence(
+            _judge_model(config), payload, legacy=not _has_baseline(config, workspace),
+        )
     budget = JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
     agent = build_judge_agent(config, workspace, log_path, budget=budget)
     try:
@@ -233,7 +235,9 @@ async def run_judge_closeout(config: EvaluatorConfig, workspace: Path, *, feedba
     )
     if payload is None:  # ``required=True`` makes this defensive only.
         raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
-    return await _invoke_complete_evidence(model, payload, feedback=feedback, legacy=not _has_baseline(config, workspace))
+    return await _invoke_complete_evidence(
+        model, payload, feedback=feedback, legacy=not _has_baseline(config, workspace),
+    )
 
 
 async def _invoke_complete_evidence(

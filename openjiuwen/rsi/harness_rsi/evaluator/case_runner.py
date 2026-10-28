@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
-
 import hashlib
 import json
 import os
@@ -17,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import task_input
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (

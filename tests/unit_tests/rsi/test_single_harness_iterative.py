@@ -877,8 +877,6 @@ class _Analyzer:
 def test_missing_acceptance_stops_before_optimizer_and_candidate_evaluation(tmp_path):
     from unittest.mock import AsyncMock
 
-    from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError
-
     class IncompleteAnalyzer(_Analyzer):
         async def analyze(self, *args, **kwargs):
             path = await super().analyze(*args, **kwargs)
@@ -899,14 +897,14 @@ def test_missing_acceptance_stops_before_optimizer_and_candidate_evaluation(tmp_
                                      data_loader=DataLoaderConfig(batch_size=1)),
         evaluator=_Evaluator(), analyzer=IncompleteAnalyzer(), member_optimizer=optimizer,
     )
-    with pytest.raises(AnalysisUnavailableError, match="acceptance_observable"):
-        asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(
-            dataset_files=[str(dataset)], harness_refs_path=str(refs), output_dir=str(run_dir),
-        )))
+    asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(
+        dataset_files=[str(dataset)], harness_refs_path=str(refs), output_dir=str(run_dir),
+    )))
     optimizer.optimize.assert_not_awaited()
     state = yaml.safe_load((run_dir / "single_harness_state.yaml").read_text(encoding="utf-8"))
-    assert state["status"] == "failed"
+    assert state["status"] == "completed"
     assert not state["candidate_gates"]
+    assert state["analysis_failures"]
     assert list(run_dir.rglob("eval_ref.yaml"))
 
 
@@ -1219,12 +1217,14 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
         "skill",
         "tool",
         "rail",
+        "config",
     ]
     assert orchestrator.config.member_optimizer.action_group_configs == [
         "prompt",
         "skill",
         "tool",
         "rail",
+        "config",
     ]
     assert orchestrator.config.member_optimizer.allowed_prompt_surfaces == ["prompt_section"]
     assert orchestrator.config.member_optimizer.max_roles_per_run == 1
