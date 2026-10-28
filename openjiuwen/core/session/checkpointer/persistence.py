@@ -966,10 +966,18 @@ def _enable_sqlite_wal(engine: AsyncEngine) -> None:
     WAL allows one writer and concurrent readers. Listens for sync_engine connect
     and runs PRAGMA journal_mode=WAL on each new connection.
     """
+    _set_sqlite_journal_mode(engine, "WAL")
+
+
+def _set_sqlite_journal_mode(engine: AsyncEngine, mode: str) -> None:
+    """Select a validated SQLite journal mode on each connection."""
+    if mode not in {"WAL", "DELETE"}:
+        raise ValueError("db_journal_mode must be WAL or DELETE")
+
     @event.listens_for(engine.sync_engine, "connect")
     def _set_sqlite_pragma(dbapi_conn, connection_record):
         cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA journal_mode={mode}")
         cursor.close()
 
 
@@ -984,6 +992,7 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
             "db_path": "checkpointer.db",     # Optional: Path to database file
             "db_client": AsyncEngine,         # Optional: Pre-configured database engine
             "db_timeout": 30,                 # Optional: SQLite lock wait seconds (default: 30)
+            "db_journal_mode": "WAL",        # Optional: WAL or DELETE; overrides db_enable_wal
             "db_enable_wal": True,            # Optional: Enable SQLite WAL mode (default: True)
         }
     """
@@ -998,6 +1007,7 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 - 'db_path': Path to database file (default: "checkpointer")
                 - 'db_client': Pre-configured AsyncEngine instance (optional)
                 - 'db_timeout': Seconds to wait when SQLite DB is locked (default: 30)
+                - 'db_journal_mode': Explicit WAL or DELETE journal mode (optional)
                 - 'db_enable_wal': Enable SQLite WAL mode for better concurrency (default: True)
         
         Returns:
@@ -1016,6 +1026,11 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 # Ensure parent directory exists; SQLite cannot create it.
                 if db_path and not db_path.strip().startswith(":memory:"):
                     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+                journal_mode = conf.get("db_journal_mode")
+                if journal_mode is not None:
+                    if not isinstance(journal_mode, str) or journal_mode.strip().upper() not in {"WAL", "DELETE"}:
+                        raise ValueError("db_journal_mode must be WAL or DELETE")
+                    journal_mode = journal_mode.strip().upper()
                 # Timeout (seconds) to wait when DB is locked; reduces OperationalError.
                 db_timeout = conf.get("db_timeout", 30)
                 engine = create_async_engine(
@@ -1023,7 +1038,9 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                     connect_args={"timeout": db_timeout},
                 )
                 # Enable WAL mode if configured (default: True)
-                if conf.get("db_enable_wal", True):
+                if journal_mode is not None:
+                    _set_sqlite_journal_mode(engine, journal_mode)
+                elif conf.get("db_enable_wal", True):
                     _enable_sqlite_wal(engine)
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
