@@ -64,7 +64,6 @@ from openjiuwen.rsi.harness_rsi.model_call import (
     RetryableModelOutputError,
     is_retryable_model_call_failure,
 )
-from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, correction_message
 from openjiuwen.rsi.harness_rsi.schema import (
     EvaluationResultAnalysisArtifact,
     EvaluationResultAnalysisInvocation,
@@ -1075,7 +1074,6 @@ def _normalize_case_diagnoses(
     require_cluster = isinstance(raw_diagnoses, list) and len(candidates) > 1
     for index, raw in enumerate(candidates):
         diagnosis = dict(raw)
-        diagnosis.setdefault("failure_layer", "unknown")
         failure_cluster = _diagnosis_failure_cluster(diagnosis)
         if require_cluster and not failure_cluster:
             continue
@@ -2710,9 +2708,15 @@ class DiagnosisAgentStrategy:
                 )
                 attempt_dir.mkdir(parents=True, exist_ok=True)
                 evidence_archive.mkdir(exist_ok=True)
-                shutil.copytree(runtime_dir / "runtime_evidence", evidence_archive / "runtime_evidence", dirs_exist_ok=True)
+                runtime_evidence_dir = runtime_dir / "runtime_evidence"
+                if runtime_evidence_dir.is_dir():
+                    shutil.copytree(
+                        runtime_evidence_dir, evidence_archive / "runtime_evidence", dirs_exist_ok=True,
+                    )
                 for name in ("evidence_manifest.json", "runtime_log_search.json", "task_clauses.json"):
-                    shutil.copy2(runtime_dir / name, evidence_archive / name)
+                    source = runtime_dir / name
+                    if source.is_file():
+                        shutil.copy2(source, evidence_archive / name)
                 case_feedback = _case_prior_candidate_feedback(
                     prior_candidate_feedback,
                     case.case_id,
@@ -2739,100 +2743,97 @@ class DiagnosisAgentStrategy:
                     agent = await self._build_agent(str(runtime_dir), invocation_log_dir=str(attempt_dir / "logs"))
                 else:
                     agent = await self._build_agent(str(runtime_dir))
-                tracker = FeedbackTracker(
-                    self._config.output_repair,
-                    max_attempts=max(0, self._config.diagnosis_agent_max_retries) + 1,
-                )
                 validation_inventory = _build_validation_inventory(case)
                 verifier_inventory = _build_verifier_inventory(case)
-                message = prompt
-                accepted: list[dict[str, Any]] = []
-                invalid_outputs: list[str] = []
-                validation_conflicts: list[str] = []
-                for attempt in range(tracker.max_attempts):
-                    invocation_error = ""
-                    try:
-                        raw = await _run_agent(agent, message, max_retries=0)
-                    except Exception as exc:
-                        iteration_limit = isinstance(exc, DiagnosisAgentExecutionError) and (
-                            exc.termination_reason == "max_iterations"
-                            or str(exc) == "Max iterations reached without completion"
-                        )
-                        if not iteration_limit and not is_retryable_model_call_failure(exc):
-                            raise
-                        invocation_error = f"{type(exc).__name__}: {exc}"
-                        raw = f"Agent attempt failed: {exc}"
-                    if not invocation_error:
-                        invalid_outputs.append(raw)
-                    parsed = _extract_json_object(raw) if not invocation_error else None
-                    diagnoses = (
-                        _normalize_case_diagnoses(parsed, prior_candidate_feedback=case_feedback)
-                        if parsed is not None else []
-                    )
-                    validation_conflicts = [f"Agent attempt failed: {invocation_error}"] if invocation_error else []
-                    if not diagnoses and not invocation_error:
-                        validation_conflicts.append("Output must contain a valid JSON object with usable diagnoses")
-                    for index, diagnosis in enumerate(diagnoses, start=1):
-                        conflicts = [
-                            f"{key} must be a non-empty string"
-                            for key in ("summary", "root_cause", "target_ref")
-                            if not isinstance(diagnosis.get(key), str) or not diagnosis[key].strip()
-                        ]
-                        conflicts.extend(_diagnosis_validation_conflicts(
-                            diagnosis, validation_inventory, verifier_inventory, public_task=case.input,
-                        ))
-                        if conflicts:
-                            validation_conflicts.extend(f"diagnoses[{index - 1}]: {error}" for error in conflicts)
-                        elif not any(_diagnoses_are_duplicate(diagnosis, item) for item in accepted):
-                            accepted.append(diagnosis)
-                    progress_state = _diagnosis_repair_progress(validation_conflicts, accepted)
-                    can_retry = tracker.failed(progress_state["unresolved"], progress_state) if validation_conflicts else False
-                    _write_json(attempt_dir / f"attempt_{attempt + 1:02d}.json", {
-                        "case_id": case.case_id, "raw_output": raw,
-                        "invocation_error": invocation_error,
-                        "validation_errors": validation_conflicts, "accepted_count": len(accepted),
-                        "progress_state": progress_state,
-                        "stop_reason": tracker.stop_reason if validation_conflicts else "validated",
-                    })
-                    if not validation_conflicts or not can_retry:
-                        break
-                    message = correction_message(prompt, raw, validation_conflicts)
-                    message += (
-                        "\nPreviously validated diagnoses are preserved by the controller. "
-                        "Fix the invalid diagnoses without changing their supported causal claims. "
-                        "A quote mismatch or missing field is a schema/citation error, not evidence "
-                        "that the causal recommendation is false. Select a legal clause_id from task_clauses.json; "
-                        "the controller restores the authoritative text. Do not repair a real contract conflict by "
-                        "changing a boolean without correcting the recommendation."
-                    )
-                diagnoses = accepted[:_MAX_DIAGNOSES_PER_CASE]
+                raw = await _run_agent(
+                    agent,
+                    prompt,
+                    max_retries=self._config.diagnosis_agent_max_retries,
+                )
+                invalid_outputs = [raw]
+                parsed = _extract_json_object(raw)
+                diagnoses = (
+                    _normalize_case_diagnoses(parsed, prior_candidate_feedback=case_feedback)
+                    if parsed is not None else []
+                )
                 if not diagnoses:
-                    if not invalid_outputs:
-                        raise DiagnosisAgentExecutionError("Diagnosis attempts exhausted: " + "; ".join(validation_conflicts))
-                    if not any(_extract_json_object(raw) is not None for raw in invalid_outputs):
-                        raise _unusable_diagnosis_output_error(case.case_id, invalid_outputs)
-                    logger.warning("per-case diagnosis validation exhausted for %s: %s", case.case_id,
-                                   "; ".join(validation_conflicts))
-                    failure = _diagnosis_evidence_conflict_result(case, validation_conflicts)
-                    failure.update({
-                        "summary": "Diagnosis did not pass output/evidence validation within the bounded budget.",
-                        "critical_mistake": "Output validation failed; inspect preserved raw attempts for the exact cause.",
-                        "diagnosis_status": "validation_failed",
-                        "evidence_manifest_path": str(evidence_archive / "evidence_manifest.json"),
-                        "execution_termination": read_execution_context(
-                            Path(case.result_path).parent, case.execution_metadata,
-                            recorded_termination_reason=case.termination_reason,
-                        )["execution_termination"],
-                        "output_repair": {"attempts": tracker.attempts, "stop_reason": tracker.stop_reason},
-                    })
-                    return [failure]
+                    repair_raw = await _run_agent(
+                        agent,
+                        _build_json_repair_prompt(prompt, raw),
+                        max_retries=0,
+                    )
+                    invalid_outputs.append(repair_raw)
+                    repair_parsed = _extract_json_object(repair_raw)
+                    if repair_parsed is not None:
+                        repair_diagnoses = _normalize_case_diagnoses(
+                            repair_parsed,
+                            prior_candidate_feedback=case_feedback,
+                        )
+                        if repair_diagnoses:
+                            raw = repair_raw
+                            parsed = repair_parsed
+                            diagnoses = repair_diagnoses
+                if not diagnoses:
+                    raise _unusable_diagnosis_output_error(case.case_id, invalid_outputs)
+                validation_conflicts = _case_diagnoses_validation_conflicts(
+                    diagnoses,
+                    validation_inventory,
+                    verifier_inventory,
+                    public_task=case.input,
+                )
                 if validation_conflicts:
-                    for diagnosis in diagnoses:
-                        diagnosis["output_repair"] = {
-                            "status": "partial", "attempts": tracker.attempts,
-                            "stop_reason": tracker.stop_reason, "remaining_errors": validation_conflicts,
-                        }
+                    repair_raw = await _run_agent(
+                        agent,
+                        _build_evidence_conflict_repair_prompt(
+                            original_prompt=prompt,
+                            previous_output=raw,
+                            conflicts=validation_conflicts,
+                            validation_inventory=validation_inventory,
+                            verifier_inventory=verifier_inventory,
+                        ),
+                        max_retries=0,
+                    )
+                    repair_parsed = _extract_json_object(repair_raw)
+                    if repair_parsed is not None:
+                        repair_diagnoses = _normalize_case_diagnoses(
+                            repair_parsed,
+                            prior_candidate_feedback=case_feedback,
+                        )
+                        if repair_diagnoses:
+                            repaired_conflicts = _case_diagnoses_validation_conflicts(
+                                repair_diagnoses,
+                                validation_inventory,
+                                verifier_inventory,
+                                public_task=case.input,
+                            )
+                            if not repaired_conflicts:
+                                diagnoses = repair_diagnoses
+                                validation_conflicts = []
+                            else:
+                                validation_conflicts = repaired_conflicts
+                        else:
+                            validation_conflicts = [
+                                *validation_conflicts,
+                                "evidence-conflict repair output contained no diagnoses",
+                            ]
+                    else:
+                        validation_conflicts = [
+                            *validation_conflicts,
+                            "evidence-conflict repair output did not contain JSON",
+                        ]
+                if validation_conflicts:
+                    logger.warning(
+                        "per-case diagnosis evidence conflict for %s after repair: %s",
+                        case.case_id,
+                        "; ".join(validation_conflicts),
+                    )
+                    return [_diagnosis_evidence_conflict_result(case, validation_conflicts)]
                 diagnosis_count = len(diagnoses)
+                termination = read_execution_context(
+                    Path(case.result_path).parent,
+                    case.execution_metadata,
+                    recorded_termination_reason=case.termination_reason,
+                )["execution_termination"]
                 return [
                     {
                         "case_id": case.case_id,
@@ -2842,17 +2843,9 @@ class DiagnosisAgentStrategy:
                         "evaluation_passed": case.evaluation_passed,
                         "evaluation_reason": case.evaluation_reason,
                         **diagnosis,
-                        "execution_termination": read_execution_context(
-                            Path(case.result_path).parent, case.execution_metadata,
-                            recorded_termination_reason=case.termination_reason,
-                        )["execution_termination"],
-                        "evidence_manifest_path": str(evidence_archive / "evidence_manifest.json"),
+                        "execution_termination": termination,
                         "verifier_failure_output_excerpt": str(
-                            verifier_inventory.get(
-                                "verifier_failure_output_excerpt",
-                                "",
-                            )
-                            or ""
+                            verifier_inventory.get("verifier_failure_output_excerpt", "") or ""
                         ),
                     }
                     for index, diagnosis in enumerate(diagnoses, start=1)
@@ -2954,9 +2947,22 @@ async def _run_agent(
     *,
     max_retries: int,
 ) -> str:
-    """Run one diagnosis attempt; the caller owns output correction budgets."""
+    """Run the diagnosis DeepAgent and perform one bounded JSON repair."""
+    model_call_retries = max(0, int(max_retries or 0))
+    last_raw = await run_deep_agent_text(
+        agent,
+        prompt,
+        operation_name="diagnosis agent",
+        max_retries=model_call_retries,
+    )
+    if _extract_json_object(last_raw) is not None or model_call_retries == 0:
+        return last_raw
+
     return await run_deep_agent_text(
-        agent, prompt, operation_name="diagnosis agent", max_retries=max_retries,
+        agent,
+        _build_json_repair_prompt(prompt, last_raw),
+        operation_name="diagnosis agent JSON repair",
+        max_retries=model_call_retries,
     )
 
 

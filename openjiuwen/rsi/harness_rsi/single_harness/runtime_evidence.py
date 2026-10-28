@@ -15,9 +15,16 @@ def inconclusive_capability_cases(
     if not required:
         return set()
     ref = Path(eval_ref_path)
-    payload = yaml.safe_load(ref.read_text(encoding="utf-8")) or {}
+    try:
+        payload = yaml.safe_load(ref.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        return set(required)
+    if not isinstance(payload, dict):
+        return set(required)
     inconclusive = set()
     for case in payload.get("cases", []):
+        if not isinstance(case, dict):
+            continue
         case_id = str(case.get("case_id", ""))
         if case_id not in required:
             continue

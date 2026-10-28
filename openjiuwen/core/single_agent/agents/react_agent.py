@@ -1039,7 +1039,7 @@ class ReActAgent(BaseAgent):
             else:
                 ai_message = await self._railed_model_call(ctx)
         except Exception as exc:
-            if finalizing or ctx.extra.get("_model_exception_recovery_attempted"):
+            if ctx.extra.get("_model_exception_recovery_attempted"):
                 raise
 
             try:
@@ -3257,16 +3257,11 @@ class ReActAgent(BaseAgent):
         try:
             answer = await self._call_model(ctx, context, None)
             finish = ctx.consume_force_finish()
-            if finish is not None or isinstance(answer, dict):
-                override = finish.result if finish is not None else answer
-                merged = {**result, **override} if isinstance(override, dict) else dict(result)
-                for key in (
-                    "termination_reason", "iterations_used", "truncated_by_max_iterations",
-                    "max_iterations", "finalization_attempted", "finalization_succeeded",
-                ):
-                    merged[key] = result[key]
-                merged["finalization_error"] = "Finalization ended by callback override without a validated model answer"
-                return merged
+            # A rail or callback that already decided the result owns that result.
+            if finish is not None and isinstance(finish.result, dict):
+                return finish.result
+            if isinstance(answer, dict):
+                return answer
             if ctx.consume_model_continue_request() or ctx.has_pending_steering():
                 result["finalization_error"] = "Finalization requires further model work or pending user input"
             elif not isinstance(answer, AssistantMessage) or answer.tool_calls:

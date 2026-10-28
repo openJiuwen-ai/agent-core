@@ -166,6 +166,7 @@ class InvocationLogScope:
         }
         self.truncated = False
         self.write_error = ""
+        self.last_capture_error = ""
         self.bytes_written = 0
         self.dropped_records = 0
         self._lock = threading.Lock()
@@ -243,6 +244,12 @@ class InvocationLogScope:
             except OSError as exc:
                 # Capture failure must never interrupt the agent or recurse into logging.
                 self.write_error = type(exc).__name__
+
+    def record_capture_failure(self, error_name: str) -> None:
+        """Count one malformed record without disabling the rest of this invocation."""
+        with self._lock:
+            self.dropped_records += 1
+            self.last_capture_error = error_name
 
     def _close(self) -> None:
         with self._lock:
@@ -325,8 +332,8 @@ def capture_invocation_log(
     try:
         _capture(scope, log_type, level, message, args, event, event_type, exc_info)
     except Exception as exc:
-        # A malformed diagnostic event must not change normal logger behavior.
-        scope.write_error = type(exc).__name__
+        # A malformed record must not fuse the invocation log or drop invocation_end.
+        scope.record_capture_failure(type(exc).__name__)
 
 
 def _capture(

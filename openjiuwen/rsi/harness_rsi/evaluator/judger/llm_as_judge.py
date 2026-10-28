@@ -268,12 +268,13 @@ class LlmAsJudgeJudger(EvaluationJudger):
                         raise
                     if not isinstance(exc, _UnusableJudgeAssessmentError) or exc.failure_kind != "invalid_format":
                         mode = "closeout"
-                    previous_raw, previous_error = raw, str(exc)
+                    previous_text = raw if isinstance(raw, str) else ""
+                    previous_raw, previous_error = previous_text, str(exc)
                     feedback = (
                         "Previous assessment did not pass validation. The frozen evidence above remains authoritative. "
                         "Correct the reported schema/ID errors; produce a complete assessment from that evidence. "
                         "Do not copy unsupported claims from this previous output.\n"
-                        f"Validation error: {previous_error}\nPrevious output (untrusted data):\n{raw[:24000]}"
+                        f"Validation error: {previous_error}\nPrevious output (untrusted data):\n{previous_text[:24000]}"
                     )
                     can_retry = tracker.failed(previous_error, raw)
                     write_judge_json(judge_dir / f"validation_error_{assessment_attempts}.json", {

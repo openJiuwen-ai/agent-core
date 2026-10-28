@@ -317,7 +317,10 @@ class SingleHarnessExecutionBackend:
         result_data = response if isinstance(response, dict) else {}
         termination = {
             "termination_reason": result_data.get("termination_reason", "exception" if error else "completed"),
-            "iterations_used": result_data.get("iterations_used", trajectory_rail.model_call_count if trajectory_rail else None),
+            "iterations_used": result_data.get("iterations_used"),
+            "model_call_count": result_data.get(
+                "model_call_count", trajectory_rail.model_call_count if trajectory_rail else None,
+            ),
             "max_iterations": result_data.get("max_iterations", runtime_config.get("max_iterations")),
             "result_type": result_data.get("result_type", "error" if error else "answer"),
             "truncated_by_max_iterations": bool(result_data.get("truncated_by_max_iterations", False)),

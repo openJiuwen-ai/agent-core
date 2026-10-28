@@ -210,6 +210,20 @@ def _truncate_text(value: Any, max_chars: int) -> Any:
     return f"{value[:max_chars]}...[truncated {len(value) - max_chars} chars]"
 
 
+def _tool_payload_truncated(detail: Any) -> bool:
+    """Detect bounded-copy markers in tool arguments and tool results."""
+    if not isinstance(detail, dict):
+        return False
+    for key in ("call_args", "call_result"):
+        try:
+            rendered = json.dumps(detail.get(key), ensure_ascii=False)
+        except (TypeError, ValueError):
+            rendered = str(detail.get(key))
+        if "...[truncated " in rendered:
+            return True
+    return False
+
+
 def role_execution_evidence(
     trace_root: Path,
     role_name: str,
@@ -274,8 +288,8 @@ def role_execution_evidence(
         ):
             reasons.add("redacted_tool_arguments")
         payloads_truncated = any(
-            "...[truncated " in json.dumps(step.get("detail", {}).get("call_args"), ensure_ascii=False)
-            for step in steps if step.get("kind") == "tool"
+            step.get("kind") == "tool" and _tool_payload_truncated(step.get("detail", {}))
+            for step in steps
         )
         evidence["payloads_truncated"] = payloads_truncated
         evidence["timing_complete"] = not reasons and not payloads_truncated

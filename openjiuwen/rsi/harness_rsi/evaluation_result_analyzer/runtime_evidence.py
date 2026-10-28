@@ -101,7 +101,13 @@ def read_execution_context(
             if not any(key in inline for key in ("path", "file")):
                 value = _project(inline, fields)
                 status = "available" if value else "unknown"
-        provenance = str(source) if source else "outside_case_rejected"
+        if source is None:
+            provenance = "outside_case_rejected"
+        else:
+            try:
+                provenance = source.relative_to(case_dir.resolve()).as_posix()
+            except ValueError:
+                provenance = "outside_case_rejected"
         if name == "execution_termination" and recorded_termination_reason and not value.get("termination_reason"):
             value["termination_reason"] = recorded_termination_reason
             status = "partial" if status != "available" else status
