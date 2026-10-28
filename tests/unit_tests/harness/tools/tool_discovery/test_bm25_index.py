@@ -66,3 +66,25 @@ def test_exact_tool_name_match_requires_identifier_boundaries():
     matches = index.search("please use search_skill_extra", limit=2)
 
     assert [tool.name for tool in matches] == ["search_skill_extra", "search_skill"]
+
+
+def test_extra_search_text_matches_without_changing_returned_tool_info():
+    tool = _tool("cron_create_job", "Create a scheduled job")
+    index = BM25ToolIndex.build(
+        [tool],
+        extra_search_texts=["提醒我 定时提醒 闹钟"],
+    )
+
+    matches = index.search("提醒我明天开会")
+
+    assert matches == [tool]
+    assert matches[0].description == "Create a scheduled job"
+
+
+def test_extra_search_text_participates_in_index_fingerprint():
+    tool = _tool("cron_create_job", "Create a scheduled job")
+
+    first = BM25ToolIndex.build([tool], extra_search_texts=["提醒"])
+    second = BM25ToolIndex.build([tool], extra_search_texts=["日程"])
+
+    assert first.source_fingerprint != second.source_fingerprint
