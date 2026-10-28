@@ -280,6 +280,7 @@ async def test_pc_search_body_passes_through_optional_fields(patch_httpx):
     body = _FakeAsyncClient.last["json"]
     assert body == {
         "query": "q",
+        "rerank": False,
         "top_k": 5,
         "strategy_type": "semantic",
         "min_score": 0.3,
