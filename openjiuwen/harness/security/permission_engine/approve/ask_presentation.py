@@ -82,7 +82,8 @@ _RULE_RISK_LABELS = {
     "shell_docker_privileged": "Docker 特权运行",
 }
 
-_RULE_ID_RE = re.compile(r"(?:builtin|rules)\[([^\]]+)\]")
+# Composed policies label rule hits by source; keep legacy rules[...] support.
+_RULE_ID_RE = re.compile(r"(?:builtin|rules|user|cloud)\[([^\]]+)\]")
 _FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,15}$")
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
 _ACTION_RANK = {"write": 0, "delete": 0, "exec": 1, "read": 2}

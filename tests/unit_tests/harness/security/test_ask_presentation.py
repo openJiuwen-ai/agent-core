@@ -320,6 +320,52 @@ def test_static_risk_levels_use_commands_and_matched_rule_severity() -> None:
     assert pres.risk_level == "高"
 
 
+@pytest.mark.parametrize("source", ["user", "cloud", "builtin"])
+@pytest.mark.parametrize(
+    ("rule_id", "command"),
+    [
+        ("shell_ask_chmod", 'chmod -R a-w ./target && echo "EXIT_OK" && ls -la ./target'),
+        ("shell_delete_files", "echo RISK005_DEL; rmdir ./to_delete"),
+    ],
+)
+def test_composed_high_rule_reaches_approval_metadata_and_message(
+    tmp_path: Path, source: str, rule_id: str, command: str,
+) -> None:
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import evaluate_tiered_policy
+
+    config = {
+        "enabled": True,
+        "package_builtin_rules": False,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "rules": [{
+            "id": rule_id,
+            "tools": ["bash"],
+            "pattern": r"re:\b(?:chmod|rmdir)\b",
+            "severity": "HIGH",
+            "action": "ask",
+            "layer": source,
+        }],
+        "composition": {"schema_version": 1, "source_order": [source]},
+        "file_guard": {"enabled": False},
+        "net_guard": {"enabled": False},
+    }
+    args = {"command": command, "shell_type": "bash", "workdir": str(tmp_path)}
+    original_args = dict(args)
+    permission, matched_rule = evaluate_tiered_policy(config, "bash", args)
+    assert permission == PermissionLevel.ASK
+    assert f"{source}[{rule_id}]" in matched_rule
+    result = PermissionResult(permission, matched_rule=matched_rule)
+    call = SimpleNamespace(name="bash", arguments=args)
+    rail = PermissionInterruptRail(config=config)
+
+    assert rail._build_interrupt_metadata(call, result)["ask_risk_level"] == "高"
+    assert "**风险等级：高风险**" in rail._build_message(call, result)
+    assert result.permission == PermissionLevel.ASK
+    assert args == original_args
+
+
 def test_legacy_manual_presentation_still_renders_summary() -> None:
     from openjiuwen.harness.security.permission_engine.approve.ask_presentation import PermissionAskPresentation
 
