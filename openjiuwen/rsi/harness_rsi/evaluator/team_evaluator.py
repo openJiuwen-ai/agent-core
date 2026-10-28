@@ -18,6 +18,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.config.config import evaluator_protocol_config
 from openjiuwen.rsi.harness_rsi.data_loader import load_json_cases
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import file_fingerprint, validate_case_fields
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
@@ -25,10 +26,12 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     build_backend,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import build_judger
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
 from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
+from openjiuwen.rsi.harness_rsi.evaluator.transport import transient_transport_error
 from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
     EvaluationCaseTraceRef,
@@ -36,30 +39,6 @@ from openjiuwen.rsi.harness_rsi.schema import (
 
 CASE_RESULTS_DIR_NAME = "cases"
 _EVALUATION_INPUT_FILE = "evaluation_input.json"
-_TRANSIENT_ERROR_MARKERS = (
-    "connection error",
-    "connection reset",
-    "connection refused",
-    "connection aborted",
-    "connectionerror",
-    "remoteprotocolerror",
-    "peer closed connection",
-    "incomplete chunked read",
-    "server disconnected",
-    "remotedisconnected",
-    "timed out",
-    "timeout",
-    "temporarily unavailable",
-    "temporary failure in name resolution",
-    "could not resolve host",
-    "service unavailable",
-    "rate limit",
-    "too many requests",
-    "http 429",
-    "http 502",
-    "http 503",
-    "http 504",
-)
 
 
 class TeamEvaluator:
@@ -109,10 +88,17 @@ class TeamEvaluator:
         dataset: DatasetArtifact | None = None,
         on_case_stage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         case_concurrency: int = 1,
+        baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     ) -> str:
         """Persist case results in input order; concurrency is opt-in per evaluation."""
         if isinstance(case_concurrency, bool) or not isinstance(case_concurrency, int) or case_concurrency < 1:
             raise ValueError("case_concurrency must be a positive integer")
+        if baseline_contexts is not None:
+            for case in cases:
+                context = baseline_contexts.get(str(case.get("case_id")))
+                if context is None:
+                    raise EvaluationInfrastructureError("Candidate evaluation is missing its same-case baseline")
+                context.validate(case)
         if (isinstance(self.case_runner, CaseRunner)
                 and isinstance(self.case_runner.backend, SingleHarnessExecutionBackend)
                 and self.case_runner.judger is not None):
@@ -138,6 +124,7 @@ class TeamEvaluator:
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
             evaluator_config=self.config,
+            baseline_contexts=baseline_contexts,
             harness_refs=harness_refs,
         )
         manifest_path = eval_dir / _EVALUATION_INPUT_FILE
@@ -186,14 +173,19 @@ class TeamEvaluator:
             await report_case(case_index, case_id)
             for attempt in range(retry_limit + 1):
                 try:
-                    case_ref = await runner.execute(
-                        case=deepcopy({**case, "case_id": case_id}),
-                        output_dir=str(case_output_dir),
-                        team_skill_ref_path=team_skill_ref_path,
-                        harness_refs=deepcopy(harness_refs),
-                    )
+                    if baseline_contexts is not None:
+                        case_ref = await runner.execute(
+                            case=deepcopy({**case, "case_id": case_id}), output_dir=str(case_output_dir),
+                            team_skill_ref_path=team_skill_ref_path, harness_refs=deepcopy(harness_refs),
+                            baseline_context=baseline_contexts[case_id],
+                        )
+                    else:
+                        case_ref = await runner.execute(
+                            case=deepcopy({**case, "case_id": case_id}), output_dir=str(case_output_dir),
+                            team_skill_ref_path=team_skill_ref_path, harness_refs=deepcopy(harness_refs),
+                        )
                 except EvaluationInfrastructureError as exc:
-                    transient_error = _transient_transport_error(str(exc))
+                    transient_error = transient_transport_error(str(exc))
                     if not transient_error or attempt >= retry_limit:
                         raise
                     retry_history.append(
@@ -286,6 +278,7 @@ def _evaluation_input_fingerprint(
     team_skill_ref_path: str,
     harness_refs_path: str,
     evaluator_config: EvaluatorConfig | None = None,
+    baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     harness_refs: dict[str, str] | None = None,
 ) -> str:
     payload = {
@@ -294,6 +287,8 @@ def _evaluation_input_fingerprint(
         "team_skill": _path_identity(team_skill_ref_path),
         "harness_refs": _path_identity(harness_refs_path),
     }
+    if baseline_contexts is not None:
+        payload["baseline_contexts"] = {key: value.fingerprint for key, value in baseline_contexts.items()}
     packages = {}
     refs_path = str(harness_refs_path or "").strip()
     if refs_path:
@@ -305,11 +300,23 @@ def _evaluation_input_fingerprint(
     if evaluator_config:
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
-        payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
-    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        payload["evaluator"] = _material_identity(evaluator_protocol_config(evaluator_config), Path.cwd())
+        method = evaluator_config.evaluation_method.strip().lower().replace("-", "_")
+    if evaluator_config and method == "llm_as_judge":
         from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
-        payload["llm_judge_score_contract"] = "threshold_binary_v1"
-        payload["judge_protocol"] = judge_protocol_identity()
+
+        if evaluator_config.score_mode == "binary":
+            payload["llm_judge_score_contract"] = "threshold_binary_v1"
+        else:
+            payload["llm_judge_score_contract"] = "continuous"
+        try:
+            protocol = judge_protocol_identity(
+                evaluator_config.score_mode,
+                evaluator_config.judge_baseline_comparison,
+            )
+        except TypeError:
+            protocol = judge_protocol_identity()
+        payload["judge_protocol"] = protocol
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -388,15 +395,7 @@ def _transient_case_error(case_ref: EvaluationCaseTraceRef) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     error = str(payload.get("error", "") or "").strip()
-    return _transient_transport_error(error)
-
-
-def _transient_transport_error(error: str) -> str:
-    """Return the original error when it describes a retryable transport failure."""
-    lowered = error.lower()
-    if any(marker in lowered for marker in _TRANSIENT_ERROR_MARKERS):
-        return error
-    return ""
+    return transient_transport_error(error)
 
 
 def _eval_id_from_dir(eval_dir: Path) -> str:

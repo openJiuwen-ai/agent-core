@@ -10,6 +10,7 @@ from openjiuwen.rsi.harness_rsi.config.config import (
     MemberOptimizerConfig,
     ModelConfigs,
     OrchestratorSchedulingConfig,
+    PromotionConfig,
 )
 from openjiuwen.rsi.harness_rsi.config.loader import load_auto_coordinating_harness_config
 from openjiuwen.rsi.harness_rsi.feedback import OutputRepairConfig
@@ -22,6 +23,7 @@ __all__ = [
     "MemberOptimizerConfig",
     "ModelConfigs",
     "OrchestratorSchedulingConfig",
+    "PromotionConfig",
     "OutputRepairConfig",
     "load_auto_coordinating_harness_config",
 ]

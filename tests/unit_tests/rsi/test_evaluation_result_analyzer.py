@@ -103,6 +103,8 @@ class TestAnalyzerConfiguration:
     def test_config_parses_diagnosis_agent_fields(self) -> None:
         from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
 
+        assert EvaluationResultAnalyzerConfig().diagnosis_agent_max_iterations == 300
+        assert EvaluationResultAnalyzerConfig.from_dict({}).diagnosis_agent_max_iterations == 300
         config = EvaluationResultAnalyzerConfig.from_dict(
             {
                 "model_config_ref": "models/analyzer.yaml",

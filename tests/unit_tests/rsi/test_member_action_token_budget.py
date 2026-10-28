@@ -1,136 +1,85 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Artifact generation must respect the configured model output budget."""
+"""Interactive author requests preserve the configured output budget."""
 
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import certifi
 import httpx
 import pytest
-import yaml
 from openai import AsyncOpenAI
 
-from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+from openjiuwen.core.runner import Runner
 from openjiuwen.rsi.harness_rsi.member_optimizer import action_executor
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import MemberActionExecutorAgent
+from openjiuwen.rsi.harness_rsi.member_optimizer.schema import MemberOptimizationAction
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("configured", [4096, 16384, None])
-async def test_artifact_generation_does_not_add_output_cap(monkeypatch, configured):
-    model = SimpleNamespace(
-        model_config=ModelRequestConfig(max_tokens=configured),
-        invoke=AsyncMock(return_value=SimpleNamespace(content='{"status":"succeeded"}')),
-    )
-    monkeypatch.setattr(action_executor, "load_member_optimizer_model", lambda _: model)
-    agent = action_executor.MemberActionExecutorAgent("mock-model.yaml")
-
-    output = await agent._invoke_direct_action("Generate the declared artifact.")
-
-    assert output == '{"status":"succeeded"}'
-    assert model.invoke.await_count == 1
-    assert "max_tokens" not in model.invoke.await_args.kwargs
-    assert model.invoke.await_args.kwargs["tools"] is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action_group", ["skill", "tool"])
-@pytest.mark.parametrize(
-    "model_name, extra_body",
-    [
-        ("deepseek-v4-pro", {"thinking": {"type": "disabled"}}),
-        ("deepseek-v4-pro", {"thinking": {"type": "enabled"}}),
-        ("qwen-plus", {"enable_thinking": False, "custom_option": "preserved"}),
-        ("custom-model", {}),
-    ],
-)
-async def test_artifact_generation_preserves_wire_model_options(
-    tmp_path,
-    monkeypatch,
-    action_group,
-    model_name,
-    extra_body,
-):
-    config_path = tmp_path / "model.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "model_client_config": {
-                    "client_provider": "OpenAI",
-                    "api_base": "https://example.test/v1",
-                    "api_key": "test-only",
-                    "ssl_cert": certifi.where(),
-                    "max_retries": 0,
-                },
-                "model_request_config": {
-                    "model": model_name,
-                    "max_tokens": 16384,
-                    "extra_body": extra_body,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+@pytest.mark.parametrize("cap", [None, 4096, 16384])
+@pytest.mark.parametrize("group", ["skill", "prompt"])
+async def test_interactive_author_reads_edits_and_preserves_request_budget(tmp_path, monkeypatch, cap, group):
+    package = tmp_path / "package"
+    package.mkdir()
+    target = package / "identity.md"
+    target.write_text("Original identity.", encoding="utf-8")
+    config = tmp_path / "model.json"
+    config.write_text(json.dumps({
+        "model_client_config": {"client_provider": "OpenAI", "api_key": "test-only",
+                                "api_base": "https://example.test/v1", "ssl_cert": certifi.where()},
+        "model_request_config": {"model": "custom-model", "max_tokens": cap},
+    }), encoding="utf-8")
     requests = []
-    content = '{"status":"succeeded","file_writes":[]}'
+    agents = []
+    build = action_executor.create_action_execution_agent
+
+    def capture_agent(**kwargs):
+        agent = build(**kwargs)
+        agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(action_executor, "create_action_execution_agent", capture_agent)
 
     def respond(request):
-        requests.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "test-completion",
-                "object": "chat.completion",
-                "created": 0,
-                "model": model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": content},
-                    }
-                ],
-            },
-        )
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            message = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "read-original", "type": "function", "function": {
+                    "name": "read_file", "arguments": json.dumps({"file_path": str(target)}),
+                },
+            }]}
+        elif len(requests) == 2:
+            assert "Original identity" in str(body["messages"])
+            message = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "apply-change", "type": "function", "function": {
+                    "name": "edit_file", "arguments": json.dumps({"file_path": str(target),
+                        "old_string": "Original", "new_string": "Updated"}),
+                },
+            }]}
+        else:
+            message = {"role": "assistant", "content": json.dumps({"status": "succeeded",
+                "changed_files": ["identity.md"], "errors": []})}
+        return httpx.Response(200, json={"id": f"turn-{len(requests)}", "object": "chat.completion",
+            "created": 0, "model": "custom-model", "choices": [{"index": 0,
+            "finish_reason": "tool_calls" if message.get("tool_calls") else "stop", "message": message}]})
 
-    async with AsyncOpenAI(
-        api_key="test-only",
-        base_url="https://example.test/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-    ) as sdk:
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.schedule_image_support_probe", lambda *args, **kwargs: None)
+    async with AsyncOpenAI(api_key="test-only", base_url="https://example.test/v1",
+                           http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))) as sdk:
         monkeypatch.setattr(OpenAIModelClient, "_create_async_openai_client", lambda self, **kwargs: sdk)
-        agent = action_executor.MemberActionExecutorAgent(str(config_path))
-        invoke = getattr(agent, f"_invoke_direct_{action_group}_action")
-        assert await invoke("Generate the declared artifact.") == content
-
-    assert len(requests) == 1
-    body = requests[0]
-    assert body["model"] == model_name
-    assert "max_tokens" not in body
-    assert "max_completion_tokens" not in body
-    if model_name.startswith("deepseek"):
-        assert body["thinking"] == {"type": "disabled"}
-    elif model_name == "qwen-plus":
-        assert body["enable_thinking"] is False
-        assert body["custom_option"] == "preserved"
-    else:
-        assert "thinking" not in body
-        assert "enable_thinking" not in body
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["", '{"status":"succeeded","file_writes":[]}'])
-async def test_truncated_artifact_response_is_not_an_answer_or_format_retry(monkeypatch, content):
-    model = SimpleNamespace(
-        model_config=ModelRequestConfig(max_tokens=16384),
-        invoke=AsyncMock(return_value=SimpleNamespace(content=content, finish_reason="length")),
-    )
-    monkeypatch.setattr(action_executor, "load_member_optimizer_model", lambda _: model)
-    agent = action_executor.MemberActionExecutorAgent("mock-model.yaml")
-
-    with pytest.raises(RuntimeError, match="finish_reason=length"):
-        await agent._invoke_direct_action("Generate the declared artifact.")
-
-    assert model.invoke.await_count == 1
+        action = MemberOptimizationAction(action_id="interactive-budget", role="solver", action_group=group,
+            operation="modify", action_type="prompt_improvement", target_path="identity.md",
+            declared_write_paths=["identity.md"], description="Update identity", rationale="Observed requirement")
+        result = await MemberActionExecutorAgent(str(config)).execute_action(package, action, "summary", [], [])
+    assert result["status"] == "succeeded", result
+    assert target.read_text(encoding="utf-8") == "Updated identity."
+    assert len(requests) == 3
+    operation_id = agents[0].deep_config.sys_operation.id
+    assert Runner.resource_mgr.get_sys_operation(operation_id) is None
+    for body in requests:
+        assert {item["function"]["name"] for item in body["tools"]} >= {"read_file", "edit_file", "write_file"}
+        if cap is None:
+            assert "max_tokens" not in body
+        else:
+            assert body["max_tokens"] == cap

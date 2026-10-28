@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import EvaluationJudger, JudgeResult
@@ -30,6 +31,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
     scoring_contract,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import optimization_signals_contract
+from openjiuwen.rsi.harness_rsi.evaluator.transport import transient_transport_error
 from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, run_model_call_with_retries
 
 if TYPE_CHECKING:
@@ -104,11 +106,14 @@ class LlmAsJudgeJudger(EvaluationJudger):
         case: dict[str, Any],
         execution_result: CaseExecutionResult,
         output_dir: str = "",
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> JudgeResult:
         self.validate_case(case)
+        if baseline_context is not None and not self._config.judge_baseline_comparison:
+            raise EvaluationInfrastructureError("Baseline comparison is disabled for this evaluator")
         case = normalize_grading_case(case)
         if execution_result.execution_status != "passed":
-            return self._failure_result(execution_result.error)
+            return self._execution_failure_result(execution_result.error)
         if not output_dir:
             raise EvaluationInfrastructureError("llm_as_judge requires a case output directory")
         case_dir = await asyncio.to_thread(Path(output_dir).resolve)
@@ -124,20 +129,34 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 workspace=workspace,
                 behaviors=behaviors,
                 forbidden=forbidden,
+                baseline_context=baseline_context,
+                score_mode=self._config.score_mode,
             )
-            return await self._evaluate(
+            result = await self._evaluate(
                 workspace,
                 judge_dir,
                 behaviors,
                 forbidden,
                 penalty_mode=case.get("reference", {}).get("penalty_mode", "ceiling"),
             )
+            if baseline_context is not None:
+                baseline_context.validate(case)
+                result.metadata["baseline_context_fingerprint"] = baseline_context.fingerprint
+            return result
         except EvaluationInfrastructureError as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise
         except Exception as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise EvaluationInfrastructureError(f"LLM evaluator failed; inspect {judge_dir / 'error.json'}") from exc
+
+    def _execution_failure_result(self, error: str) -> JudgeResult:
+        """Score a solver crash as a continuous harness failure, except transport errors."""
+        reason = error or "case execution failed"
+        metadata: dict[str, Any] = {}
+        if self._config.score_mode == "continuous" and not transient_transport_error(reason):
+            metadata["score_mode"] = "continuous"
+        return JudgeResult(method=self.method, score=0.0, passed=False, reason=reason, metadata=metadata)
 
     @staticmethod
     def _record_unusable_assessment(
@@ -288,11 +307,28 @@ class LlmAsJudgeJudger(EvaluationJudger):
                         "recovery": recovery,
                         "model_calls": diagnostics,
                     })
+        request_path = workspace / "request.json"
+        request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
+        if request.get("baseline") is not None:
+            # The caller computes the numeric delta; model commentary cannot change either grade.
+            baseline = request["baseline"]
+            baseline_behaviors = {
+                str(item["id"]): item for item in baseline["grading"].get("assessment", {}).get("behaviors", [])
+            }
+            normalized["baseline_comparison"] = {
+                "case_id": baseline["case_id"], "baseline_score": baseline["score"],
+                "context_fingerprint": baseline["context_fingerprint"],
+                "score_delta": score - baseline["score"],
+                "criteria": [{"id": item["id"], "candidate_score": item["score"],
+                              "baseline": baseline_behaviors.get(str(item["id"])),
+                              "candidate_reason": item["reason"], "candidate_evidence": item["evidence"]}
+                             for item in normalized["behaviors"]],
+            }
         write_judge_json(judge_dir / "assessment.json", normalized)
         passed = score >= self._config.judge_success_score
         return JudgeResult(
             method=self.method,
-            score=float(passed),
+            score=score if self._config.score_mode == "continuous" else float(passed),
             passed=passed,
             reason=normalized["overall_reason"],
             metadata={
@@ -301,6 +337,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 "requirement_results": requirements,
                 "judge_dir": str(judge_dir),
                 "pass_threshold": self._config.judge_success_score,
+                "score_mode": self._config.score_mode,
                 "optimization_signals": optimization_signals_contract(
                     continuous_score=score,
                     source="llm_as_judge.assessment.overall_score",
