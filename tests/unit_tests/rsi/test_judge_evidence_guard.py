@@ -112,7 +112,7 @@ async def test_actual_model_boundary_forwards_adjusted_budget(tmp_path, monkeypa
     assert rows == messages
     assert isinstance(rows[1], UserMessage)
     assert 'max_tokens' not in options
-    assert model.model_config.max_tokens == 100000
+    assert model.model_config.max_tokens is None
 
 
 def test_byte_cap_and_immutable_input():
