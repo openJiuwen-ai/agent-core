@@ -57,6 +57,18 @@ EXTERNAL_MEMORY_SEARCH_SCHEMA = {
                 "type": "number",
                 "description": "Optional minimum similarity score.",
             },
+            "start_time": {
+                "type": "integer",
+                "description": "Optional. Search memories created at or after this Unix timestamp (milliseconds).",
+            },
+            "end_time": {
+                "type": "integer",
+                "description": "Optional. Search memories created before this Unix timestamp (milliseconds).",
+            },
+            "only_actived": {
+                "type": "boolean",
+                "description": "Optional. If true, only return activated memories. (default: false)",
+            },
         },
         "required": ["query"],
     },
@@ -192,6 +204,15 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
         min_score = args.get("min_score")
         if min_score is not None:
             body["min_score"] = min_score
+        start_time = args.get("start_time")
+        if start_time is not None:
+            body["start_time"] = start_time
+        end_time = args.get("end_time")
+        if end_time is not None:
+            body["end_time"] = end_time
+        only_actived = args.get("only_actived")
+        if only_actived is not None:
+            body["only_actived"] = only_actived
         return body
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
