@@ -580,16 +580,49 @@ def _first_unread_offset(ranges: list) -> int:
 _FILE_READ_REGISTRY: Dict[str, _FileReadState] = {}
 
 _HISTORY_LOCK = asyncio.Lock()
+_HISTORY_FILE_LOCKS: Dict[str, threading.Lock] = {}
+_HISTORY_FILE_LOCKS_GUARD = threading.Lock()
 MAX_HISTORY_PER_FILE: int = 100
+
+
+def _get_history_file_lock(history_path: str) -> threading.Lock:
+    """Return the process-wide threading lock for a normalized history file path."""
+    key = os.path.normcase(os.path.abspath(history_path))
+    with _HISTORY_FILE_LOCKS_GUARD:
+        lock = _HISTORY_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _HISTORY_FILE_LOCKS[key] = lock
+        return lock
+
+
+def _append_op_history_sync(
+        history_path: str, file_path: str, entry: Dict[str, Any]) -> None:
+    """Holds the per-history-file threading lock; caller additionally holds _HISTORY_LOCK."""
+    with _get_history_file_lock(history_path):
+        history: Dict[str, list] = {}
+        if os.path.exists(history_path):
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        entries = history.setdefault(file_path, [])
+        entries.append(entry)
+        if len(entries) > MAX_HISTORY_PER_FILE:
+            history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
+        tmp = history_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, history_path)
 
 
 async def _append_op_history(history_path: str, file_path: str, action: str,
                               old_content: Optional[str], new_content: Optional[str]) -> None:
     """Append a write/edit/delete operation to the per-workspace history JSON file.
 
-    Async-safe: concurrent coroutines share _HISTORY_LOCK so reads and writes
-    to the JSON file are serialised without blocking the event loop.
-    The JSON file is the single source of truth; there is no in-memory cache.
+    Read-modify-write runs in a worker thread. Concurrent writers for the same
+    history file are serialised by a threading lock; a process-wide asyncio lock
+    still queues coroutines as before. The JSON file is the single source of
+    truth; there is no in-memory cache.
     """
     entry = {
         "action": action,
@@ -599,19 +632,7 @@ async def _append_op_history(history_path: str, file_path: str, action: str,
     }
     try:
         async with _HISTORY_LOCK:
-            history: Dict[str, list] = {}
-            if os.path.exists(history_path):
-                with open(history_path, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-            entries = history.setdefault(file_path, [])
-            entries.append(entry)
-            if len(entries) > MAX_HISTORY_PER_FILE:
-                history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
-            os.makedirs(os.path.dirname(history_path), exist_ok=True)
-            tmp = history_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, history_path)
+            await asyncio.to_thread(_append_op_history_sync, history_path, file_path, entry)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[_append_op_history] Failed to persist file op history to %s: %s", history_path, exc)
 
@@ -715,39 +736,49 @@ async def _record_rm_targets_before_deletion(
             logger.warning("[_record_rm_targets_before_deletion] %s: %s", abs_path, exc)
 
 
+def _detect_and_record_deletions_sync(history_path: str) -> None:
+    """Scan history and record delete entries for paths that no longer exist."""
+    with _get_history_file_lock(history_path):
+        if not os.path.exists(history_path):
+            return
+        with open(history_path, "r", encoding="utf-8") as f:
+            history: Dict[str, list] = json.load(f)
+        now = datetime.now(timezone.utc).isoformat()
+        deletions_added = False
+        for file_path, entries in history.items():
+            if not entries:
+                continue
+            if entries[-1].get("action") == "delete":
+                continue
+            if not os.path.exists(file_path):
+                old_content = entries[-1].get("new_content")
+                entries.append({
+                    "action": "delete",
+                    "timestamp": now,
+                    "old_content": old_content,
+                    "new_content": None,
+                })
+                if len(entries) > MAX_HISTORY_PER_FILE:
+                    history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
+                deletions_added = True
+        if not deletions_added:
+            return
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
+        tmp = history_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, history_path)
+
+
 async def _detect_and_record_deletions(history_path: str) -> None:
-    """After bash execution, scan history to detect and record files that no longer exist."""
+    """After bash execution, scan history to detect and record files that no longer exist.
+
+    Read-modify-write runs in a worker thread. Uses the same per-history-file
+    threading lock as append so deletion detection and append do not interleave.
+    """
     try:
         async with _HISTORY_LOCK:
-            if not os.path.exists(history_path):
-                return
-            with open(history_path, "r", encoding="utf-8") as f:
-                history: Dict[str, list] = json.load(f)
-            now = datetime.now(timezone.utc).isoformat()
-            deletions_added = False
-            for file_path, entries in history.items():
-                if not entries:
-                    continue
-                if entries[-1].get("action") == "delete":
-                    continue
-                if not os.path.exists(file_path):
-                    old_content = entries[-1].get("new_content")
-                    entries.append({
-                        "action": "delete",
-                        "timestamp": now,
-                        "old_content": old_content,
-                        "new_content": None,
-                    })
-                    if len(entries) > MAX_HISTORY_PER_FILE:
-                        history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
-                    deletions_added = True
-            if not deletions_added:
-                return
-            os.makedirs(os.path.dirname(history_path), exist_ok=True)
-            tmp = history_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, history_path)
+            await asyncio.to_thread(_detect_and_record_deletions_sync, history_path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[_detect_and_record_deletions] %s: %s", history_path, exc)
 

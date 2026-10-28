@@ -32,17 +32,24 @@ def _read_checkpoint(path: str) -> tuple[set[str], list[dict]]:
     seen: set[str] = set()
     rows: list[dict] = []
     if not os.path.exists(path):
+        logger.info("[rollout] checkpoint missing path=%s", path)
         return seen, rows
+    skipped = 0
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             row = _try_parse_jsonl(line)
-            if row is None:
+            if row is None or row.get("id") is None:
+                if line.strip():
+                    skipped += 1
                 continue
-            item_id = row.get("id")
-            if item_id is None:
-                continue
-            seen.add(str(item_id))
+            seen.add(str(row["id"]))
             rows.append(row)
+    logger.info(
+        "[rollout] checkpoint loaded=%s skipped=%s path=%s",
+        len(rows),
+        skipped,
+        path,
+    )
     return seen, rows
 
 
@@ -62,6 +69,23 @@ def _blank_failure(item: dict, *, phase: str, reason: str) -> dict:
 
 def _timeout_failure(item: dict, task_timeout: int) -> dict:
     return _blank_failure(item, phase="timeout", reason=f"task-timeout-{task_timeout}s")
+
+
+_LOG_TEXT_LIMIT = 300
+
+
+def _clip_for_log(value: Any) -> Any:
+    """Shorten long strings so a rollout row can be printed without the whole task."""
+    if isinstance(value, str) and len(value) > _LOG_TEXT_LIMIT:
+        return f"{value[:_LOG_TEXT_LIMIT]}...[{len(value)} chars]"
+    if isinstance(value, dict):
+        return {str(key): _clip_for_log(item) for key, item in value.items()}
+    if isinstance(value, list):
+        clipped = [_clip_for_log(item) for item in value[:8]]
+        if len(value) > 8:
+            clipped.append(f"...[{len(value)} items]")
+        return clipped
+    return value
 
 
 def _exception_failure(item: dict, exc: Exception, task_timeout: int) -> dict:
@@ -101,6 +125,10 @@ class _Progress:
                 res.get("id", "?"),
                 res.get("hard", "?"),
             )
+        logger.info(
+            "[rollout] result %s",
+            json.dumps(_clip_for_log(res), ensure_ascii=False),
+        )
         outf.write(json.dumps(res, ensure_ascii=False) + "\n")
         outf.flush()
 
@@ -117,15 +145,47 @@ class _DrainContext:
     error_factory: Callable[[dict, Exception], dict]
 
 
+def _log_submit(item: dict) -> None:
+    logger.info("[rollout] submit id=%s", item.get("id", "?"))
+
+
+def _log_error(item: dict, exc: Exception) -> None:
+    logger.warning(
+        "[rollout] error id=%s %s: %s",
+        item.get("id", "?"),
+        type(exc).__name__,
+        exc,
+    )
+
+
 def _drain_as_completed(ctx: _DrainContext) -> None:
+    started_at: dict[str, float] = {}
+
+    def _tracked(item: dict) -> dict:
+        item_id = str(item.get("id", "?"))
+        started_at[item_id] = time.perf_counter()
+        logger.info("[rollout] running id=%s", item_id)
+        return ctx.process_one(item)
+
     with ThreadPoolExecutor(max_workers=ctx.workers) as pool:
-        futures = {pool.submit(ctx.process_one, item): item for item in ctx.pending}
+        futures = {}
+        for item in ctx.pending:
+            _log_submit(item)
+            futures[pool.submit(_tracked, item)] = item
         for fut in as_completed(futures):
-            item = futures[fut]
+            item = futures.get(fut)
+            if item is None:
+                continue
+            item_id = str(item.get("id", "?"))
+            started = started_at.get(item_id)
+            elapsed = time.perf_counter() - started if started is not None else None
             try:
                 res = fut.result()
             except Exception as exc:  # noqa: BLE001
+                _log_error(item, exc)
                 res = ctx.error_factory(item, exc)
+            if elapsed is not None:
+                logger.info("[rollout] returned id=%s elapsed=%.1fs", item_id, elapsed)
             ctx.progress.record(ctx.outf, res)
 
 
@@ -144,37 +204,74 @@ def _drain_with_timeout(
     forever and exhausting the pool.
     """
     started_at: dict[str, float] = {}
+    last_wait_log = time.perf_counter()
 
     def _tracked(item: dict) -> dict:
-        started_at[str(item["id"])] = time.time()
+        item_id = str(item["id"])
+        started_at[item_id] = time.perf_counter()
+        logger.info("[rollout] running id=%s timeout=%ss", item_id, timeout_secs)
         return ctx.process_one(item)
 
     pool = ThreadPoolExecutor(max_workers=ctx.workers)
     try:
-        futures = {pool.submit(_tracked, item): item for item in ctx.pending}
+        futures = {}
+        for item in ctx.pending:
+            _log_submit(item)
+            futures[pool.submit(_tracked, item)] = item
         outstanding = set(futures)
         while outstanding:
             finished, _ = wait(outstanding, timeout=poll, return_when=FIRST_COMPLETED)
-            now = time.time()
+            now = time.perf_counter()
             timed_out: list[Any] = []
             for fut in outstanding - finished:
-                item_id = str(futures[fut]["id"])
+                item_id = str(futures.get(fut, {}).get("id", "?"))
                 started = started_at.get(item_id)
                 if started is not None and now - started >= timeout_secs:
                     timed_out.append(fut)
 
+            if not finished and not timed_out and now - last_wait_log >= 30:
+                running: list[str] = []
+                queued: list[str] = []
+                for fut in outstanding:
+                    item_id = str(futures.get(fut, {}).get("id", "?"))
+                    started = started_at.get(item_id)
+                    if started is None:
+                        queued.append(item_id)
+                    else:
+                        running.append(f"{item_id}:{now - started:.0f}s")
+                logger.info(
+                    "[rollout] waiting running=%s queued=%s outstanding=%s",
+                    ",".join(running) or "-",
+                    ",".join(queued) or "-",
+                    len(outstanding),
+                )
+                last_wait_log = now
+
             for fut in finished:
                 outstanding.remove(fut)
-                item = futures[fut]
+                item = futures.get(fut)
+                if item is None:
+                    continue
+                item_id = str(item.get("id", "?"))
+                started = started_at.get(item_id)
                 try:
                     res = fut.result()
                 except Exception as exc:  # noqa: BLE001
+                    _log_error(item, exc)
                     res = ctx.error_factory(item, exc)
+                if started is not None:
+                    logger.info(
+                        "[rollout] returned id=%s elapsed=%.1fs",
+                        item_id,
+                        time.perf_counter() - started,
+                    )
                 ctx.progress.record(ctx.outf, res)
 
             for fut in timed_out:
                 outstanding.remove(fut)
-                item = futures[fut]
+                item = futures.get(fut)
+                if item is None:
+                    continue
                 # Best-effort: cancels only if the worker has not started yet.
                 if not fut.cancel():
                     logger.warning(
@@ -211,6 +308,7 @@ def run_parallel_rollout(
     done_ids, existing = _read_checkpoint(results_path)
     pending = [item for item in items if str(item["id"]) not in done_ids]
     if not pending:
+        logger.info("[rollout] nothing pending loaded=%s path=%s", len(existing), results_path)
         if after_batch is not None:
             after_batch(existing)
         return existing
@@ -221,11 +319,20 @@ def run_parallel_rollout(
         total=len(existing) + len(pending),
         rows=list(existing),
     )
-    if existing:
-        logger.info("[rollout] resuming: %s/%s already done", progress.completed, progress.total)
-
     timeout_secs = int(task_timeout) if task_timeout is not None else 0
     poll = max(float(poll_interval), 0.05)
+    batch_started = time.perf_counter()
+    logger.info(
+        "[rollout] start pending=%s done=%s workers=%s timeout=%s poll=%ss out=%s",
+        len(pending),
+        len(existing),
+        workers,
+        timeout_secs or "none",
+        poll,
+        out_root,
+    )
+    if existing:
+        logger.info("[rollout] resuming: %s/%s already done", progress.completed, progress.total)
 
     def _timeout_row(item: dict) -> dict:
         if make_timeout_result is not None:
@@ -256,6 +363,13 @@ def run_parallel_rollout(
                 timeout_factory=_timeout_row,
             )
 
+    logger.info(
+        "[rollout] batch done completed=%s/%s correct=%s elapsed=%.1fs",
+        progress.completed,
+        progress.total,
+        progress.correct,
+        time.perf_counter() - batch_started,
+    )
     if after_batch is not None:
         after_batch(progress.rows)
     return progress.rows

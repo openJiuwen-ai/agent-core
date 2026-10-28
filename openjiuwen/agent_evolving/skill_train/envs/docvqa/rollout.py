@@ -14,7 +14,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openjiuwen.agent_evolving.skill_train.envs.docvqa.evaluator import evaluate
 from openjiuwen.agent_evolving.skill_train.envs.io_helpers import (
@@ -25,8 +25,10 @@ from openjiuwen.agent_evolving.skill_train.envs.rollout_batch import run_paralle
 from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
     GatewayUnreachableError,
     default_exec_prompt,
+    default_exec_prompt_multi,
     exec_work_dir_for,
     prepare_workspace,
+    render_skill_bundle_mds,
     render_skill_md,
     run_jiuwenswarm_cli_exec,
 )
@@ -54,6 +56,7 @@ class DocVQAItemConfig:
     image_detail: str = "auto"
     diagnostic_mode: bool = False
     diagnostic_instruction: str = ""
+    skills: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -70,6 +73,7 @@ class DocVQABatchConfig:
     task_timeout: int = 600
     diagnostic_mode: bool = False
     diagnostic_instruction: str = ""
+    skills: dict[str, str] = field(default_factory=dict)
 
 
 def _system_prompt(skill_content: str) -> str:
@@ -198,6 +202,7 @@ def _item_from_batch(cfg: DocVQABatchConfig) -> DocVQAItemConfig:
         image_detail=cfg.image_detail,
         diagnostic_mode=cfg.diagnostic_mode,
         diagnostic_instruction=cfg.diagnostic_instruction,
+        skills=dict(cfg.skills or {}),
     )
 
 
@@ -245,17 +250,30 @@ def _run_exec_once(
 ) -> tuple[str, str, str]:
     """One jiuwenswarm CLI turn with the page image copied into the workspace."""
     work_dir = exec_work_dir_for(cfg.out_root, str(item["id"]))
-    skill_md = render_skill_md(cfg.skill_content)
     task_text = _exec_task_text(user_text, previous_response)
-    prepare_workspace(
-        work_dir=work_dir,
-        skill_md=skill_md,
-        task_text=task_text,
-        images=[item["image_path"]],
-    )
+    hint = "answer the question about the attached document image."
+    if cfg.skills and len(cfg.skills) > 1:
+        skill_mds = render_skill_bundle_mds(cfg.skills)
+        skill_md = next(iter(skill_mds.values()))
+        prepare_workspace(
+            work_dir=work_dir,
+            skill_mds=skill_mds,
+            task_text=task_text,
+            images=[item["image_path"]],
+        )
+        prompt = default_exec_prompt_multi(hint, list(cfg.skills.keys()))
+    else:
+        skill_md = render_skill_md(cfg.skill_content)
+        prepare_workspace(
+            work_dir=work_dir,
+            skill_md=skill_md,
+            task_text=task_text,
+            images=[item["image_path"]],
+        )
+        prompt = default_exec_prompt(hint)
     response, raw = run_jiuwenswarm_cli_exec(
         work_dir=work_dir,
-        prompt=default_exec_prompt("answer the question about the attached document image."),
+        prompt=prompt,
         timeout=cfg.exec_timeout,
     )
     return response or raw, skill_md, task_text

@@ -189,22 +189,81 @@ class TestEventParsing:
         assert kinds == ["tool_call", "tool_result", "tool_call", "tool_result", "text"]
         assert steps[0]["summary"] == "read_file task.md"
         assert steps[2]["summary"] == "bash ls"
-        assert steps[3]["summary"].startswith("bash: [error] " + "x" * 200)
-        assert "[+200 chars]" in steps[3]["summary"]
+        # results smaller than the per-step budget survive intact
+        assert steps[3]["summary"] == "bash: [error] " + "x" * 400
         # deltas + identical final are folded into a single text step
         assert steps[4]["summary"] == "The answer is <answer>Paris</answer>"
         assert [s["index"] for s in steps] == [1, 2, 3, 4, 5]
+
+    def test_long_result_keeps_head_and_tail(self):
+        body = "HEAD_MARK " + "m" * 5000 + " TAIL_MARK"
+        raw = _stream(_frame("chat.tool_result", tool_name="bash", result=body, success=True))
+        (step,) = jx.parse_jiuwenswarm_trace_steps(raw)
+        assert len(step["summary"]) <= jx.trace_result_chars()
+        assert "HEAD_MARK" in step["summary"]
+        assert "TAIL_MARK" in step["summary"]
+        assert "chars]..." in step["summary"]
+
+    def test_long_final_answer_keeps_head_and_tail(self):
+        answer = "<answer>OPEN " + "a" * 5000 + " CLOSE</answer>"
+        raw = _stream(_frame("chat.final", content=answer, event_type="chat.final"))
+        (step,) = jx.parse_jiuwenswarm_trace_steps(raw)
+        assert step["type"] == "text"
+        assert step["summary"].startswith("<answer>OPEN ")
+        assert step["summary"].endswith("CLOSE</answer>")
+        assert len(step["summary"]) <= jx.trace_text_chars()
 
     def test_format_steps_and_summary(self):
         text = jx.format_jiuwenswarm_trace_steps(_RAW)
         assert text.splitlines()[0] == "[1] tool_call: read_file task.md"
         assert "reasoning:" not in text
+        assert "omitted" not in text  # short transcript: nothing dropped
         assert jx.format_jiuwenswarm_trace_steps("") == ""
         summary = jx.build_trace_summary(_RAW, "<answer>Paris</answer>")
         assert "- tool calls: 2" in summary
         assert "- final answer format: tagged" in summary
         # summary still counts reasoning events from the raw stream
         assert "- reasoning events: 1" in summary
+
+    def test_format_over_budget_keeps_tail_and_marks_gaps(self):
+        frames = [_frame("chat.tool_call", tool_name="bash", arguments={"command": "kickoff " + "c" * 300})]
+        for index in range(60):
+            frames.append(_frame("chat.tool_result", tool_name="bash", result=f"out {index} " + "r" * 400, success=True))
+        frames.append(_frame("chat.final", content="<answer>FINAL_ANSWER</answer>", event_type="chat.final"))
+        raw = _stream(*frames)
+
+        text = jx.format_jiuwenswarm_trace_steps(raw, max_chars=6000)
+        assert len(text) <= 6000
+        assert "FINAL_ANSWER" in text
+        assert "[1] tool_call" in text  # head still admitted
+        assert "steps " in text and "omitted" in text
+        # nothing beyond the budget is silently lost: the marker names the range
+        assert "omitted (" in text and "chars) ..." in text
+
+    def test_format_over_budget_keeps_error_steps(self):
+        frames = [
+            _frame("chat.tool_call", tool_name="bash", arguments={"command": "boom " + "c" * 300}),
+            _frame("chat.error", error="MIDDLE_ERROR_MARKER"),
+        ]
+        for index in range(60):
+            frames.append(_frame("chat.tool_result", tool_name="bash", result=f"out {index} " + "r" * 400, success=True))
+        frames.append(_frame("chat.final", content="<answer>DONE</answer>", event_type="chat.final"))
+        text = jx.format_jiuwenswarm_trace_steps(_stream(*frames), max_chars=6000)
+        assert "MIDDLE_ERROR_MARKER" in text
+        assert "DONE" in text
+
+    def test_budget_knobs_read_env(self, monkeypatch):
+        monkeypatch.setenv("REFLACT_TRACE_MAX_CHARS", "5000")
+        monkeypatch.setenv("REFLACT_TRACE_RESULT_CHARS", "120")
+        monkeypatch.setenv("REFLACT_TRACE_TEXT_CHARS", "80")
+        monkeypatch.setenv("REFLACT_TRACE_CALL_CHARS", "60")
+        assert jx.trace_max_chars() == 5000
+        assert jx.trace_result_chars() == 120
+        assert jx.trace_text_chars() == 80
+        assert jx.trace_call_chars() == 60
+        # a malformed or non-positive value falls back to the built-in default
+        monkeypatch.setenv("REFLACT_TRACE_MAX_CHARS", "0")
+        assert jx.trace_max_chars() == jx._DEFAULT_MAX_CHARS
 
     def test_parse_steps_across_attempts(self):
         raw = (

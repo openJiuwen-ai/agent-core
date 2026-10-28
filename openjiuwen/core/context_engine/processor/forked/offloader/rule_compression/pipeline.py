@@ -12,11 +12,16 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.query_terms import extract_query_terms
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.router import RuleContentRouter
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
+from openjiuwen.core.context_engine.token.encode_guard import CHARS_PER_TOKEN
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 
-CHARACTERS_PER_TOKEN = 3
 RULE_COMPRESSION_DUMP_DIR_ENV = "OPENJIUWEN_RULE_COMPRESSION_DUMP_DIR"
+# A pass with the same or a looser character budget already had its chance: the
+# content and the rules did not change, so repeating detect/repair cannot unlock
+# new savings. Only a tighter budget may retry — TTL runs at half the ADD budget,
+# which keeps the expensive path bounded while preserving the fallback pass.
+RULE_COMPRESSION_ATTEMPTED_CHARS_KEY = "rule_compression_attempted_chars"
 
 
 class RuleCompressionPipeline:
@@ -40,7 +45,7 @@ class RuleCompressionPipeline:
     @staticmethod
     def context_character_capacity(context: ModelContext) -> int:
         context_tokens = context.context_window_tokens()
-        return max(int(context_tokens or 0) * CHARACTERS_PER_TOKEN, 1)
+        return max(int(context_tokens or 0) * CHARS_PER_TOKEN, 1)
 
     def compress(
         self,
@@ -57,6 +62,13 @@ class RuleCompressionPipeline:
         if not force and len(message.content) <= max_chars:
             return message
 
+        metadata = dict(getattr(message, "metadata", None) or {})
+        attempted_chars = int(metadata.get(RULE_COMPRESSION_ATTEMPTED_CHARS_KEY) or 0)
+        if 0 < attempted_chars <= max_chars:
+            return message
+
+        metadata[RULE_COMPRESSION_ATTEMPTED_CHARS_KEY] = max_chars
+
         original = message.content
         tool_name, tool_arguments = self._tool_info_for_message(
             message,
@@ -68,19 +80,18 @@ class RuleCompressionPipeline:
             tool_arguments,
         )
         rule_ctx = RuleContext(
-            max_tokens=max(max_chars // CHARACTERS_PER_TOKEN, 1),
-            head_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
-            tail_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
-            count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
+            max_tokens=max(max_chars // CHARS_PER_TOKEN, 1),
+            head_tokens=max(max_chars // (CHARS_PER_TOKEN * 2), 1),
+            tail_tokens=max(max_chars // (CHARS_PER_TOKEN * 2), 1),
+            count_tokens=lambda text: max(len(text) // CHARS_PER_TOKEN, 1),
             query_terms=query_terms,
             tool_name=tool_name,
         )
         result = self._router.compress(original, rule_ctx)
         content = result.content
         if not result.modified:
-            return message
+            return message.model_copy(update={"metadata": metadata})
 
-        metadata = dict(getattr(message, "metadata", None) or {})
         metadata.update(
             {
                 "rule_compressed_at": self.current_time(),

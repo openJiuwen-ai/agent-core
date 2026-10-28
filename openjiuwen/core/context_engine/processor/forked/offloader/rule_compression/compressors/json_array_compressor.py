@@ -6,11 +6,10 @@ import json
 from collections import Counter
 from typing import Any
 
-from json_repair import loads as repair_json_loads
-
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
     ERROR_RE,
     fits_budget_and_saves,
+    safe_repair_json_loads,
 )
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
     ContentType,
@@ -246,14 +245,5 @@ class JsonArrayCompressor:
 
 
 def _load_json_array(content: str) -> list[Any] | None:
-    try:
-        rows = json.loads(content)
-    except (TypeError, ValueError):
-        stripped = content.lstrip()
-        if not stripped.startswith("["):
-            return None
-        try:
-            rows = repair_json_loads(content)
-        except (TypeError, ValueError):
-            return None
+    rows = safe_repair_json_loads(content)
     return rows if isinstance(rows, list) else None

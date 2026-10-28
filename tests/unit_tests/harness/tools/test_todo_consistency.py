@@ -14,7 +14,7 @@ from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
 from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.tools.todo import TodoCreateTool, TodoListTool, TodoModifyTool
+from openjiuwen.harness.tools.todo import TodoCreateTool, TodoGetTool, TodoListTool, TodoModifyTool, TodoTool
 from openjiuwen.harness.tools.todo_store import _BINDING, bind_todo_batch, prepare_todo_batch
 
 
@@ -101,6 +101,27 @@ async def test_parallel_updates_and_separate_instances(env):
     assert saved["todos"][0]["status"] == "completed"
     assert saved["todos"][1]["content"] == "changed"
     assert len({r.todo_snapshot["revision"] for r in results}) == 2
+
+
+@pytest.mark.asyncio
+async def test_native_transactions_are_independent_of_legacy_io_decorators(env, monkeypatch):
+    c, m, listing, session, path = env
+
+    async def legacy_decorator(*args, **kwargs):
+        raise AssertionError("A transaction must not read or stage through a legacy I/O decorator")
+
+    monkeypatch.setattr(TodoTool, "load_todos", legacy_decorator)
+    monkeypatch.setattr(TodoTool, "save_todos", legacy_decorator)
+    first = await create(c, session)
+    await asyncio.gather(update(m, session, "A", status="completed"),
+                         update(m, session, "B", content="changed"))
+    fetched = await TodoGetTool(SimpleNamespace(fs=lambda: m.fs), m.workspace).invoke({"id": "B"}, session=session)
+    listed = await listing.invoke({}, session=session)
+    disk = json.loads(path.read_text())
+    assert disk["revision"] == first.todo_snapshot["revision"] + 2
+    assert [(row["id"], row["status"]) for row in disk["todos"]] == [("A", "completed"), ("B", "pending")]
+    assert fetched.todo_snapshot == listed.todo_snapshot == disk
+    assert disk["todos"][1]["content"] == "changed"
 
 
 @pytest.mark.asyncio

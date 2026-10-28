@@ -497,7 +497,7 @@ class TaskPlanningRail(DeepAgentRail):
 
         async def apply():
             try:
-                todos = await tool.load_todos(session_id)
+                todos = await tool._load_todos(session_id)
             except Exception:
                 logger.debug("TaskPlanningRail: no todos to sync")
                 return
@@ -526,7 +526,7 @@ class TaskPlanningRail(DeepAgentRail):
             if not changed:
                 return
 
-            await tool.save_todos(session_id, todos)
+            await tool._save_todos(session_id, todos)
             logger.info(
                 "TaskPlanningRail: synced %d todos from TaskPlan",
                 len(todos),

@@ -268,15 +268,29 @@ class EnvAdapter(ABC):
 
         Override only when an environment needs a custom reflection pipeline.
         Callers drop ``None`` entries from the returned list.
+
+        Optional ``skills`` kwargs (name→body) enables multi-skill attribution;
+        analysts should emit ``skill_name`` on each patch.
         """
         from openjiuwen.agent_evolving.skill_train.reflect import ReflectRequest, run_minibatch_reflect
+        from openjiuwen.agent_evolving.skill_train.skill_bundle import (
+            format_skill_bundle,
+            normalize_skills,
+        )
 
         pred_dir = _resolve_prediction_dir(out_dir, kwargs.get("prediction_dir"))
         patch_dir = _patches_root(out_dir, kwargs.get("patches_dir"))
         mode = getattr(self, "_cfg", {}).get("skill_update_mode", "patch")
+        skills = kwargs.get("skills")
+        if skills is not None:
+            bundle = normalize_skills(skills=skills)
+            skill_view = format_skill_bundle(bundle)
+        else:
+            bundle = normalize_skills(skill_content)
+            skill_view = skill_content if isinstance(skill_content, str) else format_skill_bundle(bundle)
         request = ReflectRequest.assemble(
             results,
-            skill_content,
+            skill_view,
             prediction_dir=pred_dir,
             patches_dir=patch_dir,
             workers=self.analyst_workers,
@@ -289,6 +303,7 @@ class EnvAdapter(ABC):
             step_buffer_context=str(kwargs.get("step_buffer_context") or ""),
             meta_skill_context=str(kwargs.get("meta_skill_context") or ""),
             update_mode=mode,
+            skill_names=list(bundle.keys()),
         )
         return run_minibatch_reflect(request)
 

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Last-resort deterministic token estimate based on Unicode string length."""
+"""Last-resort deterministic token estimate based on Unicode code points."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from typing import List
 
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.encode_guard import estimate_tokens
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class StringLengthCounter(TokenCounter):
-    """Count canonical serialized text by Unicode code-point length."""
+    """Count canonical serialized text with the code-point estimate (see ``estimate_tokens``)."""
 
     measurement_source = "string_length_fallback"
     measurement_estimated = True
@@ -26,7 +27,7 @@ class StringLengthCounter(TokenCounter):
         self.measurement_fallback_reason = fallback_reason
 
     def count(self, text: str, *, model: str = "", **kwargs) -> int:
-        return len(str(text)) // 3
+        return estimate_tokens(str(text))
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

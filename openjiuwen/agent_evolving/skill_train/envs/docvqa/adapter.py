@@ -73,10 +73,13 @@ class DocVQAAdapter(DatasetEnvAdapter):
         skill_content: str,
         rollout_extras: dict,
     ) -> DocVQABatchConfig:
+        from openjiuwen.agent_evolving.skill_train.skill_bundle import resolve_rollout_skills
+
         rt = self.runtime
+        skill_view, bundle = resolve_rollout_skills(skill_content, rollout_extras.get("skills"))
         return DocVQABatchConfig(
             out_root=out_dir,
-            skill_content=skill_content,
+            skill_content=skill_view,
             max_turns=rt.max_turns,
             exec_timeout=rt.exec_timeout,
             workers=rt.workers,
@@ -85,6 +88,7 @@ class DocVQAAdapter(DatasetEnvAdapter):
             diagnostic_mode=bool(rollout_extras.get("diagnostic_mode", False)),
             diagnostic_instruction=str(rollout_extras.get("diagnostic_instruction", "")),
             task_timeout=rt.task_timeout,
+            skills=bundle,
         )
 
     def rollout(self, env_manager, skill_content: str, out_dir: str, **kwargs) -> list[dict]:

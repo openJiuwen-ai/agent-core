@@ -23,7 +23,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple, cast
 
 from openjiuwen.agent_evolving.skill_train.envs.base import EnvAdapter
 from openjiuwen.agent_evolving.skill_train.gate import (
@@ -47,6 +47,14 @@ from openjiuwen.agent_evolving.skill_train.meta_skill import (
     save_meta_skill_result,
 )
 from openjiuwen.agent_evolving.skill_train.scoring import compute_score, skill_hash
+from openjiuwen.agent_evolving.skill_train.skill_bundle import (
+    DEFAULT_SKILL_NAME,
+    SkillBundle,
+    copy_bundle,
+    format_skill_bundle,
+    is_default_singleton,
+    primary_skill,
+)
 from openjiuwen.agent_evolving.skill_train.slow_update import (
     SlowUpdateInputs,
     extract_slow_update_field,
@@ -80,40 +88,132 @@ def display_epoch_of(epoch_index: int) -> int:
     return int(epoch_index) + 1
 
 
-def save_skill_version(out_root: str, step: int, content: str) -> None:
-    """Snapshot the skill document produced at *step*."""
+def save_skill_version(out_root: str, step: int, content: str | SkillBundle) -> None:
+    """Snapshot skill document(s) produced at *step*.
+
+    Single default skill keeps ``skills/skill_vXXXX.md``. Named / multi-skill
+    runs write ``skills/<name>/skill_vXXXX.md``.
+    """
+    if isinstance(content, Mapping) and not isinstance(content, str):
+        bundle = dict(content)
+        if is_default_singleton(bundle):
+            skills_dir = Path(out_root) / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            (skills_dir / f"skill_v{step:04d}.md").write_text(
+                next(iter(bundle.values())), encoding="utf-8"
+            )
+            return
+        for name, body in bundle.items():
+            skill_dir = Path(out_root) / "skills" / name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / f"skill_v{step:04d}.md").write_text(body, encoding="utf-8")
+        return
     skills_dir = Path(out_root) / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
-    (skills_dir / f"skill_v{step:04d}.md").write_text(content, encoding="utf-8")
+    (skills_dir / f"skill_v{step:04d}.md").write_text(str(content), encoding="utf-8")
 
 
-def load_skill_version(out_root: str, step: int) -> str:
+def load_skill_version(out_root: str, step: int, skill_name: str = DEFAULT_SKILL_NAME) -> str:
     """Read back the skill document snapshotted at *step*."""
-    return (Path(out_root) / "skills" / f"skill_v{step:04d}.md").read_text(encoding="utf-8")
+    named = Path(out_root) / "skills" / skill_name / f"skill_v{step:04d}.md"
+    if named.is_file():
+        return named.read_text(encoding="utf-8")
+    legacy = Path(out_root) / "skills" / f"skill_v{step:04d}.md"
+    return legacy.read_text(encoding="utf-8")
+
+
+def load_skill_bundle_version(out_root: str, step: int, skill_names: list[str]) -> SkillBundle:
+    """Load a full skill bundle snapshotted at *step*."""
+    return {name: load_skill_version(out_root, step, name) for name in skill_names}
+
+
+def save_best_skills(out_root: str, best: SkillBundle) -> None:
+    """Persist best skill(s); always write per-name files when multi-skill."""
+    root = Path(out_root)
+    if is_default_singleton(best):
+        (root / "best_skill.md").write_text(next(iter(best.values())), encoding="utf-8")
+        return
+    best_dir = root / "best_skills"
+    best_dir.mkdir(parents=True, exist_ok=True)
+    for name, body in best.items():
+        skill_dir = best_dir / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
+    # Also leave a concatenated view for quick inspection.
+    (root / "best_skill.md").write_text(format_skill_bundle(best), encoding="utf-8")
 
 
 @dataclass
 class SkillProgress:
-    """The current/best skill bookkeeping every stage reads and updates."""
+    """Current/best skill bookkeeping (single or multi-skill bundle)."""
 
-    current_skill: str
+    current_skills: SkillBundle
     current_score: float
-    best_skill: str
+    best_skills: SkillBundle
     best_score: float
     best_step: int
+
+    @classmethod
+    def from_single(
+        cls,
+        current_skill: str,
+        current_score: float,
+        best_skill: str,
+        best_score: float,
+        best_step: int,
+    ) -> SkillProgress:
+        return cls(
+            current_skills={DEFAULT_SKILL_NAME: current_skill},
+            current_score=current_score,
+            best_skills={DEFAULT_SKILL_NAME: best_skill},
+            best_score=best_score,
+            best_step=best_step,
+        )
+
+    @property
+    def current_skill(self) -> str:
+        """Legacy single-document view (primary or formatted bundle)."""
+        return primary_skill(self.current_skills)
+
+    @current_skill.setter
+    def current_skill(self, value: str) -> None:
+        if len(self.current_skills) == 1:
+            name = next(iter(self.current_skills))
+            self.current_skills[name] = value
+        else:
+            # Slow-update / resume paths that rewrite a string skill keep default.
+            self.current_skills = {DEFAULT_SKILL_NAME: value}
+
+    @property
+    def best_skill(self) -> str:
+        return primary_skill(self.best_skills)
+
+    @best_skill.setter
+    def best_skill(self, value: str) -> None:
+        if len(self.best_skills) == 1:
+            name = next(iter(self.best_skills))
+            self.best_skills[name] = value
+        else:
+            self.best_skills = {DEFAULT_SKILL_NAME: value}
+
+    def skill_names(self) -> list[str]:
+        return list(self.current_skills.keys())
 
     def gate_state(self) -> GateState:
         """Expose this progress as the immutable snapshot the gate expects."""
         return GateState(
-            current_skill=self.current_skill,
+            current_skill=format_skill_bundle(self.current_skills),
             current_score=self.current_score,
-            best_skill=self.best_skill,
+            best_skill=format_skill_bundle(self.best_skills),
             best_score=self.best_score,
             best_step=self.best_step,
         )
 
     def adopt(self, verdict: GateResult) -> str:
-        """Apply a gate verdict in place and return the action it chose."""
+        """Apply a gate verdict whose skill fields are formatted strings.
+
+        Prefer :meth:`adopt_bundle` when the candidate is a real skill mapping.
+        """
         self.current_skill = verdict.current_skill
         self.current_score = verdict.current_score
         self.best_skill = verdict.best_skill
@@ -121,13 +221,30 @@ class SkillProgress:
         self.best_step = verdict.best_step
         return verdict.action
 
+    def adopt_bundle(self, candidate: SkillBundle, verdict: GateResult) -> str:
+        """Apply *verdict* while storing *candidate* as the live skill bodies."""
+        action = verdict.action
+        if action == "reject":
+            return action
+        self.current_skills = copy_bundle(candidate)
+        self.current_score = verdict.current_score
+        if action == "accept_new_best":
+            self.best_skills = copy_bundle(candidate)
+            self.best_score = verdict.best_score
+            self.best_step = verdict.best_step
+        return action
+
     def promote(self, skill: str, score: float, step: int) -> str:
         """Accept *skill* unconditionally, recording a new best when it wins."""
-        self.current_skill = skill
+        return self.promote_bundle({DEFAULT_SKILL_NAME: skill}, score, step)
+
+    def promote_bundle(self, skills: SkillBundle, score: float, step: int) -> str:
+        """Accept a full skill bundle unconditionally."""
+        self.current_skills = copy_bundle(skills)
         self.current_score = score
         if score <= self.best_score:
             return "accept"
-        self.best_skill = skill
+        self.best_skills = copy_bundle(skills)
         self.best_score = score
         self.best_step = step
         return "accept_new_best"
@@ -137,6 +254,9 @@ class SkillProgress:
             "global_step": global_step,
             "current_skill": self.current_skill,
             "best_skill": self.best_skill,
+            "current_skills": copy_bundle(self.current_skills),
+            "best_skills": copy_bundle(self.best_skills),
+            "skill_names": self.skill_names(),
             "current_score": self.current_score,
             "best_score": self.best_score,
             "best_step": self.best_step,
@@ -144,9 +264,9 @@ class SkillProgress:
 
 
 def persist_runtime(out_root: str, global_step: int, progress: SkillProgress) -> None:
-    """Checkpoint the trainer's mutable state plus the current best skill."""
+    """Checkpoint the trainer's mutable state plus the current best skill(s)."""
     save_runtime_state(out_root, progress.runtime_state(global_step))
-    Path(out_root, "best_skill.md").write_text(progress.best_skill, encoding="utf-8")
+    save_best_skills(out_root, progress.best_skills)
 
 
 class SampledBatch(NamedTuple):
@@ -210,9 +330,19 @@ class SlowUpdateRequest:
     gate_mixed_weight: float
     sel_env: Any
     sel_cache: ScoreCache
+    current_skills: Optional[SkillBundle] = None
+    best_skills: Optional[SkillBundle] = None
 
     def progress(self) -> SkillProgress:
-        return SkillProgress(
+        if self.current_skills is not None and self.best_skills is not None:
+            return SkillProgress(
+                current_skills=copy_bundle(self.current_skills),
+                current_score=self.current_score,
+                best_skills=copy_bundle(self.best_skills),
+                best_score=self.best_score,
+                best_step=self.best_step,
+            )
+        return SkillProgress.from_single(
             current_skill=self.current_skill,
             current_score=self.current_score,
             best_skill=self.best_skill,
@@ -233,6 +363,8 @@ class SlowUpdateOutcome(NamedTuple):
     best_score: float
     best_step: int
     comparison_pairs: Optional[List[dict]]
+    current_skills: Optional[SkillBundle] = None
+    best_skills: Optional[SkillBundle] = None
 
 
 class SlowUpdateStage:
@@ -263,10 +395,12 @@ class SlowUpdateStage:
             self.progress.best_score,
             self.progress.best_step,
             pairs,
+            copy_bundle(self.progress.current_skills),
+            copy_bundle(self.progress.best_skills),
         )
 
     def _checkpoint(self) -> None:
-        save_skill_version(self.req.out_root, self.req.global_step, self.progress.current_skill)
+        save_skill_version(self.req.out_root, self.req.global_step, self.progress.current_skills)
         persist_runtime(self.req.out_root, self.req.global_step, self.progress)
 
     # -- resume path ---------------------------------------------------------
@@ -287,15 +421,22 @@ class SlowUpdateStage:
         guidance = saved.get("slow_update_content")
         accepted = _RESUME_ACCEPT_GATED if self.req.slow_gate_with_selection else _RESUME_ACCEPT_FORCED
         if guidance and display >= 2 and saved.get("action") in accepted:
-            self.progress.current_skill = replace_slow_update_field(self.progress.current_skill, guidance)
+            self.progress.current_skills = {
+                name: replace_slow_update_field(body, guidance)
+                for name, body in self.progress.current_skills.items()
+            }
         return self._finish(self._saved_pairs())
 
     # -- epoch 1 -------------------------------------------------------------
 
     def _seed_placeholder(self) -> SlowUpdateOutcome:
         """Epoch 1 only reserves the protected region; there is nothing to compare."""
-        self.progress.current_skill = inject_empty_slow_update_field(self.progress.current_skill)
-        save_skill_version(self.req.out_root, self.req.global_step, self.progress.current_skill)
+        updated = {
+            name: inject_empty_slow_update_field(body)
+            for name, body in self.progress.current_skills.items()
+        }
+        self.progress.current_skills = updated
+        save_skill_version(self.req.out_root, self.req.global_step, self.progress.current_skills)
         save_json(self.marker, {"action": "inject_placeholder", "epoch": self.req.display_epoch})
         persist_runtime(self.req.out_root, self.req.global_step, self.progress)
         logger.info("[SLOW UPDATE epoch %s] injected empty placeholder", self.req.display_epoch)
@@ -314,7 +455,10 @@ class SlowUpdateStage:
             save_json(self.marker, {"action": "skip_no_prev_history", "epoch": display})
             return self._finish(None)
 
-        prev_skill = load_skill_version(req.out_root, prev_step)
+        names = self.progress.skill_names()
+        prev_bundle = load_skill_bundle_version(req.out_root, prev_step, names)
+        prev_skill = format_skill_bundle(prev_bundle)
+        curr_skill = format_skill_bundle(self.progress.current_skills)
         slow_seed = req.epoch_seed()
         batch = sample_train_batch(
             req.adapter,
@@ -333,7 +477,7 @@ class SlowUpdateStage:
                 adapter=req.adapter,
                 env=batch.env,
                 prev_skill=prev_skill,
-                curr_skill=self.progress.current_skill,
+                curr_skill=curr_skill,
                 prev_dir=prev_dir,
                 curr_dir=curr_dir,
             )
@@ -347,7 +491,7 @@ class SlowUpdateStage:
                 adapter=req.adapter,
                 dataloader=req.dataloader,
                 prev_skill=prev_skill,
-                curr_skill=self.progress.current_skill,
+                curr_skill=curr_skill,
                 initial_items=batch.items,
                 initial_prev_results=results_prev,
                 initial_curr_results=results_curr,
@@ -363,7 +507,7 @@ class SlowUpdateStage:
 
         draft = run_slow_update(
             SlowUpdateInputs(
-                skill_content=self.progress.current_skill,
+                skill_content=curr_skill,
                 results_prev=results_prev,
                 results_curr=results_curr,
                 items=batch.items,
@@ -401,6 +545,12 @@ class SlowUpdateStage:
             len(everything),
         )
 
+    def _apply_guidance_bundle(self, guidance: str) -> SkillBundle:
+        return {
+            name: replace_slow_update_field(body, guidance)
+            for name, body in self.progress.current_skills.items()
+        }
+
     def _adopt_guidance(
         self,
         draft: Optional[Dict[str, Any]],
@@ -418,7 +568,8 @@ class SlowUpdateStage:
             return record
 
         record = dict(draft or {})
-        candidate = replace_slow_update_field(self.progress.current_skill, guidance)
+        candidate_bundle = self._apply_guidance_bundle(guidance)
+        candidate = format_skill_bundle(candidate_bundle)
         candidate_hash = skill_hash(candidate)
         Path(self.dir, "candidate_skill.md").write_text(candidate, encoding="utf-8")
         record.update(
@@ -432,9 +583,9 @@ class SlowUpdateStage:
         )
 
         if self.req.slow_gate_with_selection:
-            self._gate_candidate(record, candidate, candidate_hash)
+            self._gate_candidate(record, candidate_bundle, candidate, candidate_hash)
         else:
-            self.progress.current_skill = replace_slow_update_field(self.progress.current_skill, guidance)
+            self.progress.current_skills = candidate_bundle
             self.req.sel_cache[skill_hash(self.progress.current_skill)] = (self.progress.current_score, 0.0)
             record["action"] = "force_accept"
             logger.info(
@@ -444,13 +595,21 @@ class SlowUpdateStage:
             )
         return record
 
-    def _gate_candidate(self, record: Dict[str, Any], candidate: str, candidate_hash: str) -> None:
+    def _gate_candidate(
+        self,
+        record: Dict[str, Any],
+        candidate_bundle: SkillBundle,
+        candidate: str,
+        candidate_hash: str,
+    ) -> None:
         """Score the slow-update candidate and let the selection gate decide."""
         req = self.req
         cached = req.sel_cache.get(candidate_hash)
         if cached is None:
             eval_dir = os.path.join(self.dir, "selection_eval")
-            cached = compute_score(req.adapter.rollout(req.sel_env, candidate, eval_dir))
+            cached = compute_score(
+                req.adapter.rollout(req.sel_env, candidate, eval_dir, skills=candidate_bundle)
+            )
             req.sel_cache[candidate_hash] = cached
         sel_hard, sel_soft = cached
 
@@ -467,7 +626,7 @@ class SlowUpdateStage:
         )
         record["selection_hard"] = sel_hard
         record["selection_soft"] = sel_soft
-        record["action"] = self.progress.adopt(verdict)
+        record["action"] = self.progress.adopt_bundle(candidate_bundle, verdict)
         logger.info("[slow gate] action=%s hard=%.4f", verdict.action, sel_hard)
 
 

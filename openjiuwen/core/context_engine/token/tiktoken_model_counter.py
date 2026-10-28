@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List
 
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.encode_guard import CountCache, count_with_guard
 from openjiuwen.core.context_engine.token.native_tokenizer_counter import NativeTokenizerCounter
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -116,6 +117,7 @@ class TiktokenModelCounter(TokenCounter):
             special_tokens=special_tokens,
         )
         self._model = model
+        self._count_cache = CountCache()
         self.measurement_source = measurement_source
         self.measurement_estimated = measurement_source != "native_tokenizer"
         self.measurement_tokenizer = tokenizer_model or path.name
@@ -123,7 +125,12 @@ class TiktokenModelCounter(TokenCounter):
         self.measurement_fallback_tokenizer_model = fallback_tokenizer_model
 
     def count(self, text: str, *, model: str = "", **kwargs) -> int:
-        return len(self._encoding.encode(str(text), allowed_special="all"))
+        text = str(text)
+        return count_with_guard(
+            text,
+            cache=self._count_cache,
+            encode=lambda value: len(self._encoding.encode(value, allowed_special="all")),
+        )
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

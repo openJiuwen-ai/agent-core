@@ -181,8 +181,8 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
             conflict=False, atomic_replace=True)))
         self.tool = TodoCreateTool(operation=self.mock_operation)
-        self.tool.load_todos = AsyncMock(return_value=[])
-        self.tool.save_todos = AsyncMock()
+        self.tool._load_todos = AsyncMock(return_value=[])
+        self.tool._save_todos = AsyncMock()
         self.mock_session = MagicMock()
         self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
@@ -204,7 +204,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             ]
         }, session=self.mock_session)
         self.assertIn("Successfully created 3 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 3)
         self.assertEqual(saved[0].status, TodoStatus.IN_PROGRESS)
         self.assertEqual(saved[1].status, TodoStatus.PENDING)
@@ -220,7 +220,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         }
         result = await self.tool.invoke(inputs, session=self.mock_session)
         self.assertIn("Successfully created 3 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 3)
         self.assertIn("目标、用户需求及功能边界", saved[0].description)
         self.assertIn("开发计划、分配任务", saved[2].description)
@@ -233,7 +233,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         ]
         result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
         self.assertIn("Successfully created 2 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].selected_model_id, "fast")
         self.assertEqual(saved[1].selected_model_id, "smart")
         self.assertEqual(saved[0].status, TodoStatus.IN_PROGRESS)
@@ -262,7 +262,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         """activeForm and description are optional; missing fields default to empty strings."""
         result = await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
         self.assertIn("Successfully created 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].activeForm, "")
         self.assertEqual(saved[0].description, "")
 
@@ -274,7 +274,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             session=self.mock_session,
         )
         self.assertIn("Successfully created 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].activeForm, "Doing")
         self.assertEqual(saved[0].description, "")
 
@@ -284,7 +284,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             {"tasks": [{"content": "Task 1"}]},
             session=self.mock_session,
         )
-        self.tool.save_todos.reset_mock()
+        self.tool._save_todos.reset_mock()
 
         with self.assertRaises(Exception) as cm:
             await self.tool.invoke(
@@ -293,7 +293,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("todo_create has already rebuilt", str(cm.exception))
         # save_todos must NOT be called on the rejected second attempt
-        self.tool.save_todos.assert_not_awaited()
+        self.tool._save_todos.assert_not_awaited()
 
     async def test_reset_allows_new_create(self):
         """After reset_invoke_marker, a new todo_create succeeds."""
@@ -301,7 +301,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             {"tasks": [{"content": "Task 1"}]},
             session=self.mock_session,
         )
-        self.tool.save_todos.reset_mock()
+        self.tool._save_todos.reset_mock()
 
         self.tool.reset_invoke_marker(self.mock_session.get_session_id())
         result = await self.tool.invoke(
@@ -309,7 +309,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             session=self.mock_session,
         )
         self.assertIn("Successfully created 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(saved[0].content, "Task 2")
 
 
@@ -331,7 +331,7 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
             TodoItem(id="completed_task", content="Completed Task", status=TodoStatus.COMPLETED),
             TodoItem(id="cancelled_task", content="Cancelled Task", status=TodoStatus.CANCELLED),
         ]
-        self.tool.load_todos = AsyncMock(return_value=self.test_todos)
+        self.tool._load_todos = AsyncMock(return_value=self.test_todos)
         self.mock_session = MagicMock()
         self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
@@ -392,8 +392,8 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         self.test_todo_ids = [todo.id for todo in self.test_todos]
-        self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
-        self.tool.save_todos = AsyncMock()
+        self.tool._load_todos = AsyncMock(return_value=self.test_todos.copy())
+        self.tool._save_todos = AsyncMock()
         self.mock_session = MagicMock()
         self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
@@ -409,7 +409,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         """Deletes specified task by ID."""
         result = await self.tool.invoke({"action": "delete", "ids": [self.test_todo_ids[1]]}, session=self.mock_session)
         self.assertIn(f"Successfully deleted 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 2)
         self.assertEqual(saved[0].content, "Task 1")
         self.assertEqual(saved[1].content, "Task 3")
@@ -425,7 +425,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
                         "activeForm": "Executing Updated Task 1", "status": TodoStatus.COMPLETED.value}]
         result = await self.tool.invoke({"action": "update", "todos": update_data}, session=self.mock_session)
         self.assertIn("Successfully updated 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         updated = next(t for t in saved if t.id == self.test_todo_ids[0])
         self.assertEqual(updated.content, "Updated Task 1")
         self.assertEqual(updated.status, TodoStatus.COMPLETED)
@@ -437,7 +437,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
             "todos": [{"id": self.test_todo_ids[0], "status": TodoStatus.COMPLETED.value}],
         }, session=self.mock_session)
         self.assertIn("Successfully updated 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         updated = next(t for t in saved if t.id == self.test_todo_ids[0])
         self.assertEqual(updated.status, TodoStatus.COMPLETED)
         self.assertEqual(updated.content, "Task 1")
@@ -451,7 +451,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
                        "status": TodoStatus.PENDING.value}],
         }, session=self.mock_session)
         self.assertIn("Successfully updated 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         updated = next(t for t in saved if t.id == self.test_todo_ids[0])
         self.assertEqual(updated.selected_model_id, "smart")
 
@@ -464,7 +464,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
                        "description": "description of New Task 4", "status": TodoStatus.PENDING.value}],
         }, session=self.mock_session)
         self.assertIn("Successfully appended 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[-1].id, new_id)
 
@@ -479,7 +479,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
             ]},
         }, session=self.mock_session)
         self.assertIn(f"Successfully inserted 1 task(s) after target task", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[1].id, new_id)
 
@@ -494,7 +494,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
             ]},
         }, session=self.mock_session)
         self.assertIn(f"Successfully inserted 1 task(s) before target task", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[1].id, new_id)
 
@@ -502,7 +502,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         """Cancels specified task."""
         result = await self.tool.invoke({"action": "cancel", "ids": [self.test_todo_ids[1]]}, session=self.mock_session)
         self.assertIn(f"Successfully cancelled 1 task(s)", result["message"])
-        saved = self.tool.save_todos.call_args[0][1]
+        saved = self.tool._save_todos.call_args[0][1]
         cancelled = next(t for t in saved if t.id == self.test_todo_ids[1])
         self.assertEqual(cancelled.status, TodoStatus.CANCELLED)
 
@@ -542,7 +542,7 @@ class TestTodoGetTool(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         self.test_todo_ids = [todo.id for todo in self.test_todos]
-        self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
+        self.tool._load_todos = AsyncMock(return_value=self.test_todos.copy())
         self.mock_session = MagicMock()
         self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
@@ -594,12 +594,12 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
             conflict=False, atomic_replace=True)))
         self.create_tool = TodoCreateTool(operation=self.mock_operation)
-        self.create_tool.load_todos = AsyncMock(return_value=[])
-        self.create_tool.save_todos = AsyncMock()
+        self.create_tool._load_todos = AsyncMock(return_value=[])
+        self.create_tool._save_todos = AsyncMock()
         self.list_tool = TodoListTool(operation=self.mock_operation)
         self.modify_tool = TodoModifyTool(operation=self.mock_operation)
-        self.modify_tool.load_todos = AsyncMock(return_value=[])
-        self.modify_tool.save_todos = AsyncMock()
+        self.modify_tool._load_todos = AsyncMock(return_value=[])
+        self.modify_tool._save_todos = AsyncMock()
         self.mock_session = MagicMock()
         self.mock_session.get_session_id.return_value = "test_session_id"
 
@@ -612,27 +612,27 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
                 {"content": "Task 2"},
             ]
         }, session=self.mock_session)
-        saved = self.create_tool.save_todos.call_args[0][1]
+        saved = self.create_tool._save_todos.call_args[0][1]
         self.assertEqual([t.generation_token for t in saved], ["gen-1", "gen-1"])
 
     async def test_create_without_token_leaves_items_unstamped(self):
         """No session token: items stay unstamped (fail-open)."""
         self.mock_session.get_state.return_value = None
         await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
-        saved = self.create_tool.save_todos.call_args[0][1]
+        saved = self.create_tool._save_todos.call_args[0][1]
         self.assertTrue(all(t.generation_token is None for t in saved))
 
     async def test_create_with_non_string_token_is_fail_open(self):
         """Non-string session state value is ignored (fail-open)."""
         self.mock_session.get_state.return_value = 12345
         await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
-        saved = self.create_tool.save_todos.call_args[0][1]
+        saved = self.create_tool._save_todos.call_args[0][1]
         self.assertTrue(all(t.generation_token is None for t in saved))
 
     async def test_list_filters_superseded_generation(self):
         """List hides old-generation items; current generation and unstamped
         items stay visible; completed items are hidden regardless."""
-        self.list_tool.load_todos = AsyncMock(return_value=[
+        self.list_tool._load_todos = AsyncMock(return_value=[
             TodoItem(id="old", content="old gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
             TodoItem(id="cur", content="current gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
             TodoItem(id="legacy", content="unstamped task", status=TodoStatus.PENDING, generation_token=None),
@@ -648,7 +648,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_without_session_token_shows_all_active(self):
         """No session token: generation filtering is disabled entirely."""
-        self.list_tool.load_todos = AsyncMock(return_value=[
+        self.list_tool._load_todos = AsyncMock(return_value=[
             TodoItem(id="old", content="old gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
             TodoItem(id="cur", content="current gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
         ])
@@ -661,7 +661,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         """Old-generation in_progress leftovers must not consume the current
         generation's single in_progress slot (mirrors the List view filter);
         appending a current-generation in_progress task must succeed."""
-        self.modify_tool.load_todos = AsyncMock(return_value=[
+        self.modify_tool._load_todos = AsyncMock(return_value=[
             TodoItem(id="old", content="superseded task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
         ])
         self.mock_session.get_state.return_value = "gen-1"
@@ -670,13 +670,13 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
             "todos": [{"id": "new", "content": "current task", "status": TodoStatus.IN_PROGRESS.value}],
         }, session=self.mock_session)
         self.assertIn("Successfully appended", result["message"])
-        saved = self.modify_tool.save_todos.call_args[0][1]
+        saved = self.modify_tool._save_todos.call_args[0][1]
         self.assertEqual([t.id for t in saved], ["old", "new"])
 
     async def test_modify_append_same_generation_in_progress_rejected(self):
         """The generation pre-filter must not relax the current generation's
         own single in_progress constraint."""
-        self.modify_tool.load_todos = AsyncMock(return_value=[
+        self.modify_tool._load_todos = AsyncMock(return_value=[
             TodoItem(id="cur", content="current task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
         ])
         self.mock_session.get_state.return_value = "gen-1"
@@ -685,12 +685,12 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
                 "action": "append",
                 "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
             }, session=self.mock_session)
-        self.modify_tool.save_todos.assert_not_awaited()
+        self.modify_tool._save_todos.assert_not_awaited()
 
     async def test_modify_append_without_token_keeps_legacy_behavior(self):
         """No session token: any on-disk in_progress still counts and the
         append is rejected (legacy behavior preserved)."""
-        self.modify_tool.load_todos = AsyncMock(return_value=[
+        self.modify_tool._load_todos = AsyncMock(return_value=[
             TodoItem(id="old", content="unstamped task", status=TodoStatus.IN_PROGRESS, generation_token=None),
         ])
         self.mock_session.get_state.return_value = None
@@ -699,7 +699,7 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
                 "action": "append",
                 "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
             }, session=self.mock_session)
-        self.modify_tool.save_todos.assert_not_awaited()
+        self.modify_tool._save_todos.assert_not_awaited()
 
 
 if __name__ == "__main__":

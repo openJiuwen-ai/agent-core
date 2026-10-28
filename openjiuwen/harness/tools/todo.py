@@ -132,6 +132,10 @@ class TodoTool(Tool):
         return self._get_file_path(session_id)
 
     async def load_todos(self, session_id: str) -> List[TodoItem]:
+        """Read through the legacy API; native transactions use their own view."""
+        return await self._load_todos(session_id)
+
+    async def _load_todos(self, session_id: str) -> list[TodoItem]:
         tx = current_transaction(self, session_id)
         if tx is not None:
             if tx.pending is not None:
@@ -150,6 +154,10 @@ class TodoTool(Tool):
         return TodoItems(snapshot)
 
     async def save_todos(self, session_id: str, todos: List[TodoItem]):
+        """Keep the legacy API separate from transaction-local staging."""
+        return await self._save_todos(session_id, todos)
+
+    async def _save_todos(self, session_id: str, todos: list[TodoItem]):
         tx = current_transaction(self, session_id)
         if tx is not None:
             tx.pending = tx.items.records(todos)
@@ -187,9 +195,9 @@ class TodoTool(Tool):
     async def update_todos(self, session_id: str, callback, **kwargs):
         """Apply a host mutation to the latest items within the same transaction."""
         async def apply():
-            items = await self.load_todos(session_id)
+            items = await self._load_todos(session_id)
             result = await callback(items)
-            await self.save_todos(session_id, items)
+            await self._save_todos(session_id, items)
             return result
         return await transact(self, session_id, apply, **kwargs)
 
@@ -403,7 +411,7 @@ class TodoCreateTool(TodoTool):
                 )
             )
 
-        await self.save_todos(session_id, new_todos)
+        await self._save_todos(session_id, new_todos)
         tx.new_plan = _uuid.uuid4().hex
         tx.created = True
         tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
@@ -451,7 +459,7 @@ class TodoListTool(TodoTool):
             )
 
         try:
-            tasks = await self.load_todos(session_id)
+            tasks = await self._load_todos(session_id)
             active_tasks = [
                 t for t in tasks
                 if t.status not in (TodoStatus.CANCELLED, TodoStatus.COMPLETED)
@@ -527,7 +535,7 @@ class TodoGetTool(TodoTool):
             )
 
         try:
-            tasks = await self.load_todos(session_id)
+            tasks = await self._load_todos(session_id)
             for task in tasks:
                 if task.id == task_id:
                     return {"todo": task.to_dict()}
@@ -591,7 +599,7 @@ class TodoModifyTool(TodoTool):
                     reason="Invalid input: 'action' field is required"
                 )
 
-            current_todos = await self.load_todos(session_id)
+            current_todos = await self._load_todos(session_id)
             generation_token = self._session_generation_token(session)
 
             if action == "delete":
@@ -779,7 +787,7 @@ class TodoModifyTool(TodoTool):
                 remaining_todos.append(todo)
         if deleted_count == 0:
             return f"No tasks deleted: None of the provided IDs ({', '.join(ids)}) were found"
-        await self.save_todos(session_id, remaining_todos)
+        await self._save_todos(session_id, remaining_todos)
         return f"Successfully deleted {deleted_count} task(s) (IDs: {', '.join(delete_ids)})"
 
     async def _cancel_todos(self, session_id: str, ids: List[str], current_todos: List[TodoItem]) -> str:
@@ -792,7 +800,7 @@ class TodoModifyTool(TodoTool):
                 cancelled_ids.append(todo.id)
         if cancelled_count == 0:
             return f"No tasks cancelled: None of the provided IDs ({', '.join(ids)}) were found"
-        await self.save_todos(session_id, current_todos)
+        await self._save_todos(session_id, current_todos)
         return f"Successfully cancelled {cancelled_count} task(s) (IDs: {', '.join(cancelled_ids)})"
 
     async def _update_todos(
@@ -831,7 +839,7 @@ class TodoModifyTool(TodoTool):
                 current_todo.generation_token = generation_token
             updated_count += 1
         self._validate_single_in_progress(current_todos, generation_token)
-        await self.save_todos(session_id, current_todos)
+        await self._save_todos(session_id, current_todos)
         if errors:
             result_msg = f"Updated {updated_count} task(s). {len(errors)} item(s) failed: {'; '.join(errors)}"
         else:
@@ -860,7 +868,7 @@ class TodoModifyTool(TodoTool):
             )
             todo_ids.add(todo_id)
         self._validate_single_in_progress(current_todos, generation_token)
-        await self.save_todos(session_id, current_todos)
+        await self._save_todos(session_id, current_todos)
         return f"Successfully appended {len(todos_data)} task(s)"
 
     async def _insert_after_todos(
@@ -892,7 +900,7 @@ class TodoModifyTool(TodoTool):
             current_todos[:target_index + 1] + insert_todos + current_todos[target_index + 1:]
         )
         self._validate_single_in_progress(updated_todos, generation_token)
-        await self.save_todos(session_id, updated_todos)
+        await self._save_todos(session_id, updated_todos)
         return f"Successfully inserted {len(insert_todos)} task(s) after target task, id: '{target_id}'"
 
     async def _insert_before_todos(
@@ -924,7 +932,7 @@ class TodoModifyTool(TodoTool):
             current_todos[:target_index] + insert_todos + current_todos[target_index:]
         )
         self._validate_single_in_progress(updated_todos, generation_token)
-        await self.save_todos(session_id, updated_todos)
+        await self._save_todos(session_id, updated_todos)
         return f"Successfully inserted {len(insert_todos)} task(s) before target task, id: '{target_id}'"
 
 

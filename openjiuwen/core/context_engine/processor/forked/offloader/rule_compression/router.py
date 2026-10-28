@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Protocol
 
-from json_repair import loads as repair_json_loads
-
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
+    safe_repair_json_loads,
     strip_display_line_prefixes,
     strip_display_line_prefixes_preserving_body_whitespace,
 )
@@ -22,13 +20,6 @@ from .compressors.json_array_compressor import JsonArrayCompressor
 from .compressors.log_compressor import LogCompressor
 from .compressors.plain_text_compressor import PlainTextCompressor
 from .compressors.search_results_compressor import SearchResultsCompressor
-
-# json_repair walks character-by-character (skip_to_character). Oversized tool
-# blobs (e.g. fetch_webpage wrapping CDN JS / multi-page API JSON in a `[...]`
-# envelope) can block the asyncio event loop for minutes and drop WebSocket
-# heartbeats (OA.05000010). Skip repair above this size and fall through to
-# cheaper detectors / PLAIN_TEXT truncation+offload.
-_JSON_REPAIR_MAX_CHARS = 65_536
 
 
 class RuleCompressor(Protocol):
@@ -89,10 +80,7 @@ class RuleContentRouter:
             return ContentType.PLAIN_TEXT
         display_text = strip_display_line_prefixes(text)
         json_text = self._json_detection_text(text)
-        try:
-            parsed = json.loads(json_text)
-        except (TypeError, ValueError):
-            parsed = self._repair_json_array(json_text)
+        parsed = self._repair_json_array(json_text)
         if isinstance(parsed, list):
             return ContentType.JSON_ARRAY
         html_detection_text = self._html_detection_text(text)
@@ -137,14 +125,8 @@ class RuleContentRouter:
 
     @staticmethod
     def _repair_json_array(content: str) -> object | None:
-        if not content.lstrip().startswith("["):
-            return None
-        if len(content) > _JSON_REPAIR_MAX_CHARS:
-            return None
-        try:
-            return repair_json_loads(content)
-        except (TypeError, ValueError):
-            return None
+        # Shared budget: json.loads first, then capped json_repair for `[...]` only.
+        return safe_repair_json_loads(content)
 
     @staticmethod
     def _html_detection_text(content: str) -> str:

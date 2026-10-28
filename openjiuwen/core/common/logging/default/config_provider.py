@@ -147,6 +147,7 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
 
     config = {
         "backend": "default",
+        "propagate": logging_config.get("propagate", True),
         "log_file": _resolve_log_file(log_path, configured_log_file),
         "output": copy.deepcopy(configured_output),
         "level": normalize_log_level(

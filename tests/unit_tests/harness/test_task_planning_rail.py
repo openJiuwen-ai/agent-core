@@ -145,6 +145,12 @@ def _snapshot_boundary(tool, todos):
     import json
     from types import SimpleNamespace
 
+    tool._load_todos = tool.load_todos
+
+    async def stage(session_id, items):
+        return await tool.save_todos(session_id, items)
+
+    tool._save_todos = stage
     raw = json.dumps([t.to_dict() for t in todos])
     tool.fs = SimpleNamespace(read_file=AsyncMock(return_value=SimpleNamespace(code=0,
         data=SimpleNamespace(content=raw, exists=True, content_sha256=hashlib.sha256(raw.encode()).hexdigest()))))

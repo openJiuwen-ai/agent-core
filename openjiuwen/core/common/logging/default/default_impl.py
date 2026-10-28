@@ -16,7 +16,9 @@ import logging
 import os
 import shutil
 import sys
+import threading
 from collections.abc import Mapping
+from contextlib import nullcontext
 from logging.handlers import RotatingFileHandler
 from typing import (
     Any,
@@ -24,14 +26,15 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.common.logging.browser_context import is_browser_agent_log_context
-from openjiuwen.core.common.logging.base_impl import (
-    format_log_filename,
-    resolve_log_type_label,
-    StructuredLoggerMixin,
-)
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging.base_impl import (
+    StructuredLoggerMixin,
+    format_log_filename,
+    resolve_log_type_label,
+)
+from openjiuwen.core.common.logging.browser_context import is_browser_agent_log_context
+from openjiuwen.core.common.logging.default.queued_output import ConsoleHandler, QueuedOutput
 from openjiuwen.core.common.logging.events import (
     LogLevel,
 )
@@ -41,6 +44,15 @@ from openjiuwen.core.common.logging.utils import (
     get_session_id,
     normalize_and_validate_log_path,
 )
+
+
+def _close_handlers_after_error(handlers: list[logging.Handler], error: Exception) -> None:
+    """Close every unused handler without replacing the original setup failure."""
+    for handler in handlers:
+        try:
+            handler.close()
+        except Exception as cleanup_error:  # noqa: BLE001 - preserve the original failure
+            error.add_note(f"Failed to close a log output handler: {cleanup_error}")
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -227,10 +239,10 @@ class ContextFilter(logging.Filter):
             Always returns True (does not filter any records)
         """
         # Get trace_id from context variable (adapted for async environments)
-        record.trace_id = get_session_id()
+        record.__dict__.setdefault("trace_id", get_session_id())
 
         from openjiuwen.core.common.logging.utils import get_member_id
-        record.member_id = get_member_id()
+        record.__dict__.setdefault("member_id", get_member_id())
 
         # request_id for precise log↔span join (diagnosis evidence). Falls back
         # to empty when outside a run span — keeps the format string valid.
@@ -239,12 +251,12 @@ class ContextFilter(logging.Filter):
                 get_current_request_id,
             )
 
-            record.request_id = get_current_request_id()
+            record.__dict__.setdefault("request_id", get_current_request_id())
         except Exception:
-            record.request_id = ""
+            record.__dict__.setdefault("request_id", "")
 
         # Set log type, special handling for performance type
-        record.log_type = resolve_log_type_label(self.log_type)
+        record.__dict__.setdefault("log_type", resolve_log_type_label(self.log_type))
 
         return True
 
@@ -314,6 +326,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
     - Automatic context information injection
     """
 
+    _setup_lock = threading.RLock()
+
     def __init__(self, log_type: str, config: Dict[str, Any]) -> None:
         """
         Initialize default logger
@@ -325,7 +339,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         self.log_type = log_type
         self.config = config.copy()  # Use copy to avoid external modification impact
         self._logger = logging.getLogger(log_type)
-        self._setup_logger()
+        with self._setup_lock:
+            self._setup_logger()
 
     def _setup_logger(self) -> None:
         """
@@ -333,35 +348,66 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
 
         Set log level, output targets, and formatter according to configuration.
         """
-        # Parse log level
-        level_config = self.config.get("level", "WARNING")
-        if isinstance(level_config, str):
-            level = getattr(logging, level_config.upper(), logging.WARNING)
-        elif isinstance(level_config, int):
-            level = level_config
-        else:
-            level = logging.WARNING
+        # Validate and wait before sealing old output. A rejected replacement
+        # leaves its ingress, queued records and configuration untouched.
+        handlers = self._create_output_handlers()
+        previous = next((handler for handler in self._logger.handlers if isinstance(handler, QueuedOutput)), None)
+        try:
+            # Keep producers out only for the commit, not while waiting for I/O:
+            # Condition.wait_for releases the lock while the listener drains.
+            with previous.condition if previous is not None else nullcontext():
+                if previous is not None and not previous.ready_for_replacement():
+                    raise build_error(
+                        StatusCode.COMMON_LOG_CONFIG_INVALID,
+                        error_msg="previous log output is still blocked; retry after it recovers",
+                    )
 
-        self._logger.setLevel(level)
-        self._logger.propagate = self.config.get("propagate", True)
+                level_config = self.config.get("level", "WARNING")
+                if isinstance(level_config, str):
+                    level = getattr(logging, level_config.upper(), logging.WARNING)
+                elif isinstance(level_config, int):
+                    level = level_config
+                else:
+                    level = logging.WARNING
+                level = logging._checkLevel(level)  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
+                # Starting the consumer can fail too; old output remains live
+                # until its successor has successfully started.
+                output = QueuedOutput(handlers)
+                output.addFilter(ContextFilter(self.log_type))
+                self._logger.setLevel(level)
+                self._logger.propagate = self.config.get("propagate", True)
+                self._queue_handler = output
+                with logging._lock:  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    self._logger.handlers = [output] + [
+                        handler for handler in self._logger.handlers if not isinstance(handler, QueuedOutput)
+                    ]
+                if previous is not None:
+                    output.route = previous.route
+                    output.route[0] = output
+                    previous.request_stop()
+        except Exception as error:
+            _close_handlers_after_error(handlers, error)
+            raise
+
+        if previous is not None:
+            # The swap is committed. Slow final flush/close cannot turn success
+            # into a rejection with a sealed old route. Bound cleanup and reject
+            # another replacement until that retiring consumer has exited.
+            output.retiring_thread = previous.listener._thread  # pylint: disable=protected-access
+            previous.stop()
+            previous.close()
+
+    def _create_output_handlers(self) -> list[logging.Handler]:
+        """Create sinks owned and closed exclusively by the output consumer."""
         # Get output targets and log file path
         output = self.config.get("output", ["console"])
         log_file = self.config.get("log_file", f"{self.log_type}.log")
 
         normalize_and_validate_log_path(log_file)
 
-        # Clear existing handlers
-        for handler in self._logger.handlers[:]:
-            handler.close()
-            self._logger.removeHandler(handler)
-
-        # Add console handler
-        if "console" in output:
-            stream_handler = logging.StreamHandler(stream=sys.stdout)
-            stream_handler.addFilter(ContextFilter(self.log_type))
-            stream_handler.setFormatter(self._get_formatter())
-            self._logger.addHandler(stream_handler)
+        handlers: list[logging.Handler] = []
+        formatter = self._get_formatter()
 
         # Add file handler
         if "file" in output:
@@ -397,9 +443,20 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                 log_file_pattern=log_file_pattern,
                 backup_file_pattern=backup_file_pattern,
             )
-            file_handler.addFilter(ContextFilter(self.log_type))
-            file_handler.setFormatter(self._get_formatter())
-            self._logger.addHandler(file_handler)
+            file_handler.setFormatter(formatter)
+            handlers.append(file_handler)
+
+        # Add console handler
+        if "console" in output:
+            try:
+                stream_handler = ConsoleHandler(stream=sys.stdout)
+                stream_handler.setFormatter(formatter)
+                handlers.insert(0, stream_handler)
+            except Exception as error:
+                _close_handlers_after_error(handlers, error)
+                raise
+
+        return handlers
 
     def _get_formatter(self) -> logging.Formatter:
         """
@@ -558,16 +615,44 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         Args:
             config: New configuration dictionary
         """
-        self.config = config.copy()
-        self._setup_logger()
+        with self._setup_lock:
+            previous_config = self.config
+            self.config = config.copy()
+            try:
+                self._setup_logger()
+            except Exception:
+                self.config = previous_config
+                raise
 
     def logger(self):
         return self._logger
 
+    def flush(self, timeout: float = 2.0) -> bool:
+        """Wait up to timeout seconds for previously queued built-in output.
+
+        This explicit barrier can block. Call from a worker when used in asyncio.
+        True means records were processed, not that every sink succeeded; inspect
+        get_queue_stats() for failures and discards.
+        """
+        return self._current_output().drain(timeout)
+
+    def _current_output(self) -> QueuedOutput:
+        # Same-name wrappers log through the shared stdlib logger. Barriers and
+        # diagnostics must follow its active pipeline, while close stays owned.
+        return next(
+            (handler for handler in self._logger.handlers if isinstance(handler, QueuedOutput)),
+            self._queue_handler,
+        )
+
+    def get_queue_stats(self) -> dict[str, Any]:
+        """Snapshot queue depth, peak, drops by level and output failures."""
+        return self._current_output().stats()
+
     def close(self) -> None:
-        """Release logger handlers owned by this instance."""
-        for handler in self._logger.handlers[:]:
-            try:
-                handler.close()
-            finally:
-                self._logger.removeHandler(handler)
+        """Seal and drain owned output for at most two seconds.
+
+        Keep the sealed handler attached to prevent stdlib lastResort fallback.
+        A later setup replaces it. User handlers remain owned by their callers.
+        """
+        with self._setup_lock:
+            self._queue_handler.close()

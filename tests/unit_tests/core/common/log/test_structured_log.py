@@ -77,10 +77,8 @@ def test_logger(logger_config):  # type: ignore
     yield logger
     # Cleanup
     LogManager.reset()
-    import sys
-    if sys.platform.startswith("win"):
-        # On Windows, logging handlers should be closed before deleting logging files
-        safe_close_logger_handlers(logger)
+    # Join the consumer before capture/temp files disappear on every platform.
+    safe_close_logger_handlers(logger)
 
 
 def test_create_agent_event():
@@ -458,6 +456,7 @@ def test_log_string_message(test_logger, temp_log_dir):  # type: ignore
     test_logger.info("Test message")  # type: ignore
 
     # Check that log file was created
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     assert os.path.exists(log_file)
 
@@ -473,6 +472,7 @@ def test_log_with_event_type(test_logger, temp_log_dir):  # type: ignore
         "Agent started", event_type=LogEventType.AGENT_START, module_id="agent_123"
     )
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -488,6 +488,7 @@ def test_log_with_event_object(test_logger, temp_log_dir):  # type: ignore
 
     test_logger.info("", event=event)  # type: ignore
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -502,6 +503,7 @@ def test_log_with_message_field(test_logger, temp_log_dir):  # type: ignore
 
     test_logger.info("Custom message", event=event)  # type: ignore
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -517,6 +519,7 @@ def test_log_different_levels(test_logger, temp_log_dir):  # type: ignore
     test_logger.error("Error message")  # type: ignore
     test_logger.critical("Critical message")  # type: ignore
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -534,6 +537,7 @@ def test_log_exception_with_stacktrace(test_logger, temp_log_dir):  # type: igno
     except Exception:
         test_logger.exception("Exception occurred")  # type: ignore
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -547,6 +551,7 @@ def test_log_with_trace_id(test_logger, temp_log_dir):  # type: ignore
     try:
         test_logger.info("Message with trace")  # type: ignore
 
+        assert test_logger.flush()
         log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
         with open(log_file, "r", encoding="utf-8") as f:
             content = f.read()
@@ -566,6 +571,7 @@ def test_log_with_custom_kwargs(test_logger, temp_log_dir):  # type: ignore
         metadata={"custom_field": "custom_value"},
     )
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -579,6 +585,7 @@ def test_log_json_format(test_logger, temp_log_dir):  # type: ignore
 
     test_logger.info("", event=event)  # type: ignore
 
+    assert test_logger.flush()
     log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
     with open(log_file, "r", encoding="utf-8") as f:
         content = f.read()

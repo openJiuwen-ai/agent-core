@@ -151,6 +151,39 @@ class TestRunOfflineTraining:
         assert captured["adapter"][1] == "searchqa"
         assert captured["config"].target_backend == "jiuwenswarm_cli_exec"
 
+    def test_skillsbench_uses_per_task_loop(self, isolated_env, monkeypatch):
+        captured = {}
+
+        def _run(**kwargs):
+            captured["config"] = kwargs["config"]
+            captured["adapter"] = kwargs["adapter"]
+            return {"n_tasks": 0}
+
+        monkeypatch.setattr(launch, "build_trainer", lambda resolved: "trainer")
+        monkeypatch.setattr(
+            "openjiuwen.agent_evolving.skill_train.envs.skillsbench.per_task_train.run_per_task_training",
+            _run,
+        )
+        monkeypatch.setattr(
+            "openjiuwen.agent_evolving.skill_train.registry.get_env_adapter",
+            lambda name, **kw: ("adapter", name),
+        )
+        opts = launch.TrainLaunchOptions(
+            env_name="skillsbench",
+            target_backend="jiuwenswarm_cli_exec",
+            split_dir=str(isolated_env),
+            output_dir=str(isolated_env.parent / "out"),
+            optimizer_model="opt",
+        )
+        assert launch.run_offline_training(opts) == {"n_tasks": 0}
+        assert captured["adapter"][1] == "skillsbench"
+        assert captured["config"].num_epochs == 3
+        assert captured["config"].use_gate is False
+        assert captured["config"].use_slow_update is False
+        assert captured["config"].use_meta_skill is False
+        assert captured["config"].skill_update_mode == "patch"
+        assert captured["config"].edit_budget == 8
+
 
 class TestTrainerBackendWiring:
     def test_configure_target_backend_sets_trace_gate(self, monkeypatch):
@@ -200,3 +233,22 @@ class TestReflectAttachment:
         (tmp_path / "jiuwenswarm_trace_steps.txt").write_text("[1] tool_call: read_file task.md\n", encoding="utf-8")
         assert spec.resolve({}, str(tmp_path)) == "[1] tool_call: read_file task.md"
         assert not any("openjiuwen_trace" in a.filename for a in _ATTACHMENTS)
+
+    def test_final_answer_attachment_carries_response(self, tmp_path):
+        """The analyst must see the answer verbatim even when steps are elided."""
+        from openjiuwen.agent_evolving.skill_train.reflect import _ATTACHMENTS
+
+        spec = next(a for a in _ATTACHMENTS if a.item_key == "response")
+        assert spec.heading == "Final Answer"
+        assert spec.enabled()  # always on: no env gate
+        assert not spec.filename  # read from the rollout row, not a file
+        assert spec.resolve({"response": "  <answer>B8 = 7610.3</answer>  "}, str(tmp_path)) == (
+            "<answer>B8 = 7610.3</answer>"
+        )
+        assert spec.resolve({}, str(tmp_path)) == ""
+
+    def test_final_answer_precedes_nothing_dropped(self):
+        from openjiuwen.agent_evolving.skill_train.reflect import _ATTACHMENTS
+
+        headings = [attachment.heading for attachment in _ATTACHMENTS]
+        assert headings.index("Final Answer") == headings.index("JiuwenSwarm Trace Steps") + 1

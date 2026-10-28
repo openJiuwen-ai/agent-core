@@ -38,8 +38,18 @@ DEFAULT_CHAT_MODE = "code.normal"
 DEFAULT_EMPTY_RESPONSE_RETRIES = 1
 
 _STEP_TRUNCATE = 500
-_RESULT_TRUNCATE = 200
-_DEFAULT_MAX_CHARS = 4000
+_RESULT_TRUNCATE = 900
+_TEXT_TRUNCATE = 900
+_DEFAULT_MAX_CHARS = 12000
+_VERIFIER_OUTPUT_CHARS = 3000
+#: Share of a per-step budget spent on the tail. Test output, assertion errors
+#: and final conclusions live at the end, so the tail outweighs the head.
+_TAIL_KEEP_RATIO = 0.6
+#: Room reserved for the "...[+N chars]..." marker when splitting a string.
+_MARKER_RESERVE = 24
+#: Convergence passes for the trim loop in truncate_middle(); the marker
+#: narrows as the omitted count shrinks, so a couple of passes settle it.
+_TRUNCATE_CONVERGE_PASSES = 3
 _ATTEMPT_HEADER_RE = re.compile(r"(?m)^={5,}.*={5,}\s*$")
 
 # Exit codes of ``jiuwenswarm chat`` (see jiuwenswarm/cli/chat.py).
@@ -66,6 +76,37 @@ def _parse_int(value: str | None, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer knob, falling back to *default*."""
+    value = _parse_int(os.getenv(name), default)
+    return value if value > 0 else default
+
+
+def trace_max_chars() -> int:
+    """Char budget for one rendered ``jiuwenswarm_trace_steps.txt``."""
+    return _env_int("REFLACT_TRACE_MAX_CHARS", _DEFAULT_MAX_CHARS)
+
+
+def trace_call_chars() -> int:
+    """Char budget for one tool-call argument summary."""
+    return _env_int("REFLACT_TRACE_CALL_CHARS", _STEP_TRUNCATE)
+
+
+def trace_result_chars() -> int:
+    """Char budget for one tool-result summary."""
+    return _env_int("REFLACT_TRACE_RESULT_CHARS", _RESULT_TRUNCATE)
+
+
+def trace_text_chars() -> int:
+    """Char budget for one assistant text / final-answer step."""
+    return _env_int("REFLACT_TRACE_TEXT_CHARS", _TEXT_TRUNCATE)
+
+
+def verifier_output_chars() -> int:
+    """Char budget for the verifier excerpt shown to the reflector."""
+    return _env_int("REFLACT_VERIFIER_OUTPUT_CHARS", _VERIFIER_OUTPUT_CHARS)
 
 
 def get_jiuwenswarm_exec_config() -> JiuwenswarmExecConfig:
@@ -220,7 +261,7 @@ def _stage_attachments(root: Path, images: list[str]) -> list[str]:
 def prepare_workspace(
     *,
     work_dir: str,
-    skill_md: str,
+    skill_md: str = "",
     task_text: str = "",
     task_filename: str = "task.md",
     images: list[str] | None = None,
@@ -228,6 +269,7 @@ def prepare_workspace(
     copy_files: list[tuple[str, str]] | None = None,
     link_dirs: list[tuple[str, str]] | None = None,
     skill_name: str = TARGET_SKILL_NAME,
+    skill_mds: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Create an isolated per-item workspace.
 
@@ -240,14 +282,28 @@ def prepare_workspace(
           ATTACHMENTS.md              (when images given)
           <extra_files / copy_files / link_dirs>
 
-    Returns ``(skill_path, task_path)``.
+    When ``skill_mds`` is provided, each name gets its own
+    ``.agents/skills/<name>/SKILL.md``. Returns ``(primary_skill_path, task_path)``.
     """
     root = _reset_workdir(Path(work_dir))
-    skill_path = _write_under(
-        root,
-        f".agents/skills/{skill_name}/SKILL.md",
-        skill_md,
-    )
+    if skill_mds:
+        skill_path = ""
+        for name, body in skill_mds.items():
+            path = _write_under(
+                root,
+                f".agents/skills/{name}/SKILL.md",
+                body,
+            )
+            if not skill_path:
+                skill_path = str(path)
+    else:
+        skill_path = str(
+            _write_under(
+                root,
+                f".agents/skills/{skill_name}/SKILL.md",
+                skill_md,
+            )
+        )
     task_path = root / task_filename
     if task_text:
         task_path.write_text(task_text, encoding="utf-8")
@@ -274,7 +330,28 @@ def prepare_workspace(
             + "\n"
         )
         (root / "ATTACHMENTS.md").write_text(manifest, encoding="utf-8")
-    return str(skill_path), str(task_path)
+    return skill_path, str(task_path)
+
+
+def render_skill_bundle_mds(skills: dict[str, str]) -> dict[str, str]:
+    """Wrap each skill body with Agent Skills frontmatter keyed by name."""
+    return {
+        name: render_skill_md(body, name=name)
+        for name, body in skills.items()
+    }
+
+
+def default_exec_prompt_multi(task_hint: str, skill_names: list[str]) -> str:
+    """Item-level prompt when several skills are injected into the workspace."""
+    if len(skill_names) <= 1:
+        name = skill_names[0] if skill_names else TARGET_SKILL_NAME
+        return default_exec_prompt(task_hint, skill_name=name)
+    paths = ", ".join(f"`{skill_relpath(name)}`" for name in skill_names)
+    return (
+        f"Read these skill files directly; do not call a Skill tool: {paths}.\n"
+        f"Read `task.md` and {task_hint.strip()}\n"
+        "Return the final answer inside <answer>...</answer>."
+    )
 
 
 def exec_work_dir_for(out_root: str, item_id: str) -> str:
@@ -405,6 +482,35 @@ def _truncate(text: Any, limit: int) -> str:
     return text[:limit] + f"...[+{len(text) - limit} chars]"
 
 
+def truncate_middle(text: Any, limit: int, *, keep_tail_ratio: float = _TAIL_KEEP_RATIO) -> str:
+    """Keep the head and (more of) the tail, eliding the middle.
+
+    Tool output, verifier logs and final answers put the load-bearing detail at
+    the end (computed values, assertion failures, conclusions), so the tail
+    gets the larger share of the budget. The result never exceeds *limit*.
+    """
+    text = str(text or "").strip()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    budget = max(0, limit - _MARKER_RESERVE)
+    tail = min(len(text), int(budget * keep_tail_ratio))
+    head = min(len(text) - tail, max(0, budget - tail))
+    # The marker width depends on the omitted count, so converge on the budget.
+    for _ in range(_TRUNCATE_CONVERGE_PASSES):
+        omitted = len(text) - head - tail
+        marker = f"...[+{omitted} chars]..."
+        overflow = head + len(marker) + tail - limit
+        if overflow <= 0:
+            break
+        trim_head = min(head, overflow)
+        head -= trim_head
+        overflow -= trim_head
+        if overflow > 0:
+            tail -= min(tail, overflow)
+    suffix = text[-tail:] if tail else ""
+    return f"{text[:head]}...[+{len(text) - head - tail} chars]...{suffix}"
+
+
 def _jsonish(value: Any) -> str:
     if value is None:
         return ""
@@ -444,18 +550,20 @@ def _tool_result_fields(payload: dict[str, Any]) -> tuple[str, Any, bool]:
 
 
 def _summarize_tool_call(name: str, args: Any) -> str:
+    limit = trace_call_chars()
     if isinstance(args, dict):
         if name in {"read_file", "ReadFile", "Read", "read"}:
-            return f"{name} {args.get('path') or args.get('file_path') or ''}".rstrip()
+            return _truncate(f"{name} {args.get('path') or args.get('file_path') or ''}".rstrip(), limit)
         if name in {"bash", "Bash", "run_bash", "shell"}:
-            return f"{name} {args.get('command', '')}".rstrip()
+            return _truncate(f"{name} {args.get('command', '')}".rstrip(), limit)
         if name in {"grep", "Grep"}:
-            return f"{name} {args.get('pattern', '')}".rstrip()
+            return _truncate(f"{name} {args.get('pattern', '')}".rstrip(), limit)
         if name in {"glob", "Glob"}:
-            return f"{name} {args.get('pattern', '') or args.get('glob', '')}".rstrip()
+            return _truncate(f"{name} {args.get('pattern', '') or args.get('glob', '')}".rstrip(), limit)
         if name in {"write_file", "edit_file", "Write", "Edit"}:
-            return f"{name} {args.get('path') or args.get('file_path') or ''}".rstrip()
-    return _truncate(f"{name} {_jsonish(args)}", _STEP_TRUNCATE)
+            return _truncate(f"{name} {args.get('path') or args.get('file_path') or ''}".rstrip(), limit)
+    return _truncate(f"{name} {_jsonish(args)}", limit)
+
 
 
 def parse_jiuwenswarm_trace_steps(raw: str) -> list[dict[str, Any]]:
@@ -496,12 +604,12 @@ class _StepCollector:
         text = "".join(self._delta_buf).strip()
         self._delta_buf.clear()
         if text:
-            self.add("text", _truncate(text, _STEP_TRUNCATE))
+            self.add("text", truncate_middle(text, trace_text_chars()))
 
     def final_text(self, text: Any) -> None:
         if not isinstance(text, str) or not text.strip():
             return
-        summary = _truncate(text, _STEP_TRUNCATE)
+        summary = truncate_middle(text, trace_text_chars())
         # The final frame usually repeats the streamed deltas verbatim.
         if self.steps and self.steps[-1]["type"] == "text" and self.steps[-1]["summary"] == summary:
             return
@@ -524,35 +632,131 @@ def _parse_attempt_steps(chunk: str) -> list[dict[str, Any]]:
             collector.add("tool_call", _summarize_tool_call(name, args))
         elif event == "chat.tool_result":
             name, result, is_error = _tool_result_fields(payload)
-            summary = _truncate(_jsonish(result), _RESULT_TRUNCATE)
-            if is_error:
-                summary = f"[error] {summary}"
-            collector.add("tool_result", f"{name}: {summary}".strip())
+            prefix = f"{name}: [error] " if is_error else f"{name}: "
+            summary = truncate_middle(
+                _jsonish(result), max(1, trace_result_chars() - len(prefix))
+            )
+            collector.add("tool_result", f"{prefix}{summary}".strip())
         elif event == "chat.final":
             collector.flush_deltas()
             if payload.get("event_type") == "team.error":
-                collector.add("error", _truncate(payload.get("error") or "team.error", _STEP_TRUNCATE))
+                collector.add(
+                    "error",
+                    truncate_middle(payload.get("error") or "team.error", trace_text_chars()),
+                )
             elif _is_content_final(payload):
                 collector.final_text(payload.get("content"))
         elif event == "chat.error":
             collector.flush_deltas()
             collector.add(
                 "error",
-                _truncate(payload.get("error") or payload.get("message") or "error", _STEP_TRUNCATE),
+                truncate_middle(
+                    payload.get("error") or payload.get("message") or "error",
+                    trace_text_chars(),
+                ),
             )
     collector.flush_deltas()
     return collector.steps
 
 
-def format_jiuwenswarm_trace_steps(raw: str, *, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
-    """Render parsed steps as ``[n] type: summary`` lines."""
+_OMITTED_STEPS_TEMPLATE = "[... steps {start}-{end} omitted ({count} steps, {chars} chars) ...]"
+
+
+def _format_step_line(step: dict[str, Any]) -> str:
+    return f"[{step['index']}] {step['type']}: {step['summary']}"
+
+
+def _assemble_with_budget(
+    steps: list[dict[str, Any]],
+    lines: list[str],
+    max_chars: int,
+) -> str:
+    """Pick which steps to show when the rendered transcript exceeds budget.
+
+    The tail is what matters for reflection (computed values, write-back
+    confirmation, the final answer), so it is admitted first; the head then
+    fills whatever budget is left (task/skill reads, the first data dump).
+    Omitted runs are rendered as an explicit marker carrying the range and the
+    number of characters hidden, so the analyst never mistakes "not shown" for
+    "never happened".
+    """
+    total = len(steps)
+    lines = list(lines)
+    kept = set(range(max(0, total - 3), total))
+    # The final answer is never dropped; nor is any error step.
+    compulsory = {total - 1} if total else set()
+    compulsory.update(position for position, step in enumerate(steps) if step["type"] == "error")
+    kept.update(compulsory)
+
+    def width(position: int) -> int:
+        return len(lines[position]) + 1
+
+    used = sum(width(position) for position in kept)
+
+    # Grow backwards from the tail while staying under the soft cap.
+    soft_cap = int(max_chars * 0.8)
+    cursor = min(kept) - 1
+    while cursor >= 0 and used + width(cursor) <= soft_cap:
+        kept.add(cursor)
+        used += width(cursor)
+        cursor -= 1
+    frontier = cursor
+
+    # Spend the remaining budget on the leading steps.
+    head_budget = max_chars - used - 48
+    position = 0
+    while position <= frontier and width(position) <= head_budget:
+        kept.add(position)
+        head_budget -= width(position)
+        used += width(position)
+        position += 1
+
+    def render(keep: set[int]) -> str:
+        blocks: list[str] = []
+        cursor = 0
+        while cursor < total:
+            if cursor in keep:
+                blocks.append(lines[cursor])
+                cursor += 1
+                continue
+            start = cursor
+            while cursor < total and cursor not in keep:
+                cursor += 1
+            blocks.append(
+                _OMITTED_STEPS_TEMPLATE.format(
+                    start=steps[start]["index"],
+                    end=steps[cursor - 1]["index"],
+                    count=cursor - start,
+                    chars=sum(width(index) for index in range(start, cursor)),
+                )
+            )
+        return "\n".join(blocks)
+
+    text = render(kept)
+    # Hard clamp: drop the earliest non-compulsory head steps until it fits.
+    while len(text) > max_chars:
+        droppable = sorted(kept - compulsory)
+        if not droppable:
+            break
+        kept.discard(droppable[0])
+        text = render(kept)
+    return text
+
+
+def format_jiuwenswarm_trace_steps(raw: str, *, max_chars: int | None = None) -> str:
+    """Render parsed steps as ``[n] type: summary`` lines under a char budget.
+
+    Over budget, steps are dropped from the middle -- never from the tail --
+    and every gap is annotated. Budget defaults to ``REFLACT_TRACE_MAX_CHARS``.
+    """
     steps = parse_jiuwenswarm_trace_steps(raw)
     if not steps:
         return ""
-    text = "\n".join(f"[{s['index']}] {s['type']}: {s['summary']}" for s in steps)
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n...[jiuwenswarm trace steps truncated]..."
-    return text
+    limit = trace_max_chars() if max_chars is None else max_chars
+    lines = [_format_step_line(step) for step in steps]
+    if sum(len(line) + 1 for line in lines) - 1 <= limit:
+        return "\n".join(lines)
+    return _assemble_with_budget(steps, lines, limit)
 
 
 def build_trace_summary(raw: str, response: str) -> str:

@@ -49,6 +49,11 @@ def _register_builtins() -> None:
         "openjiuwen.agent_evolving.skill_train.envs.officeqa.adapter",
         "OfficeQAAdapter",
     )
+    _try_register(
+        "skillsbench",
+        "openjiuwen.agent_evolving.skill_train.envs.skillsbench.adapter",
+        "SkillsBenchAdapter",
+    )
 
 
 def get_env_adapter(env_name: str, **kwargs: Any) -> EnvAdapter:

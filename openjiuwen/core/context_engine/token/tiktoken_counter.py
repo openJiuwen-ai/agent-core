@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text, sanitize_value_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.encode_guard import CountCache, count_with_guard, estimate_tokens
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
@@ -261,7 +262,6 @@ def start_background_warm_up() -> None:
         _warm_up_thread.start()
 
 
-
 class TiktokenCounter(TokenCounter):
     """
     A token counter powered by tiktoken.
@@ -290,6 +290,8 @@ class TiktokenCounter(TokenCounter):
         "_enc",
         "_model",
         "_fallback_warning_printed",
+        "_count_cache",
+        "_base_measurement",
         "measurement_source",
         "measurement_tokenizer",
         "measurement_fallback_reason",
@@ -306,6 +308,7 @@ class TiktokenCounter(TokenCounter):
         fallback_tokenizer_model: str | None = None,
     ) -> None:
         self._model = model
+        self._count_cache = CountCache()
         self.measurement_source = source_override or "tiktoken"
         self.measurement_tokenizer = None
         self.measurement_fallback_reason = fallback_reason
@@ -337,29 +340,39 @@ class TiktokenCounter(TokenCounter):
             if self.measurement_fallback_reason is None:
                 self.measurement_fallback_reason = "tiktoken_unavailable"
             self._fallback_warning_printed = False
+        self._base_measurement = (
+            self.measurement_source,
+            self.measurement_tokenizer,
+            self.measurement_fallback_reason,
+        )
 
     # ------------------------------------------------------------------
     # Core interfaces
     # ------------------------------------------------------------------
     def count(self, text: str, *, model: str = "", **kwargs) -> int:
-        if self._enc is not None:
-            try:
-                return len(self._enc.encode(text, disallowed_special=()))
-            except UnicodeEncodeError:
-                logger.warning(
-                    f"Tiktoken encoding failed for text (len={len(text)}), "
-                    "using three-character Unicode length fallback."
-                )
-                self.measurement_source = "string_length_fallback"
-                self.measurement_tokenizer = "unicode_codepoints"
-                self.measurement_fallback_reason = "text_encoding_failed"
-                return len(text) // 3
-        if not self._fallback_warning_printed:
-            self._fallback_warning_printed = True
-            logger.warning(
-                "Tiktoken initialization failed, using three-character Unicode length fallback for token counting."
+        if self._enc is None:
+            if not self._fallback_warning_printed:
+                self._fallback_warning_printed = True
+                logger.warning("Tiktoken initialization failed, using the character-based token estimate.")
+            return estimate_tokens(text)
+        try:
+            count = count_with_guard(
+                text,
+                cache=self._count_cache,
+                encode=lambda value: len(self._enc.encode(value, disallowed_special=())),
             )
-        return len(text) // 3
+        except UnicodeEncodeError:
+            # Deliberately uncached: this estimate must not be replayed as an exact
+            # count, and the attribution below belongs to this count only.
+            logger.warning(
+                f"Tiktoken encoding failed for text (len={len(text)}), using the character-based token estimate."
+            )
+            self.measurement_source = "string_length_fallback"
+            self.measurement_tokenizer = "unicode_codepoints"
+            self.measurement_fallback_reason = "text_encoding_failed"
+            return estimate_tokens(text)
+        self.measurement_source, self.measurement_tokenizer, self.measurement_fallback_reason = self._base_measurement
+        return count
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:
