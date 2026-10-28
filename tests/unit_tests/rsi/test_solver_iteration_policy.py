@@ -27,4 +27,4 @@ def test_changed_solver_budget_invalidates_cached_evaluation(tmp_path):
     changed = evaluation_context(harness_refs_path=str(refs), evaluator_config=configured.evaluator, cases=[])
     assert configured.evaluator.solver_max_iterations == 240
     assert baseline["signature"] != changed["signature"]
-    assert replace(configured.evaluator, solver_max_iterations=100) == EvaluatorConfig()
+    assert replace(configured.evaluator, solver_max_iterations=300) == EvaluatorConfig()
