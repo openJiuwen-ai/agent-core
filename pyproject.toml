@@ -45,7 +45,7 @@ dependencies = [
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
     "dashscope>=1.25.6",
-    "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router",
+    "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter_261030#subdirectory=intelli_router",
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
