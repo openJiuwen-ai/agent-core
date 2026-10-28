@@ -64,5 +64,4 @@ member_optimizer:
 scheduling:
   evaluation_strategy: hybrid
   coordination_strategy: team_first_single_pass
-  promotion_policy: epoch_full_evaluation
   full_evaluation_enabled: true

@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 import yaml
 
-from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig, EvaluatorConfig, MemberOptimizerConfig
+from openjiuwen.rsi.harness_rsi.config import (
+    AutoCoordinatingHarnessConfig,
+    EvaluatorConfig,
+    MemberOptimizerConfig,
+    PromotionConfig,
+)
 from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     SingleHarnessIterativeOptimizationOrchestrator,
@@ -199,6 +204,7 @@ def test_partial_verifier_progress_reenters_analysis_with_candidate_feedback(
     optimizer = SequentialOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(
@@ -388,6 +394,7 @@ def test_candidate_gate_respects_capability_activation_phase(
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),

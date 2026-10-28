@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 import yaml
 
-from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig, EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import evaluation_context
 
 
@@ -23,11 +23,12 @@ def test_changed_solver_budget_invalidates_cached_evaluation(tmp_path):
     refs = tmp_path / "refs.yaml"
     refs.write_text(yaml.safe_dump({"harness_refs": {"solver": str(package)}}), encoding="utf-8")
     configured = AutoCoordinatingHarnessConfig.from_dict({"evaluator": {"solver_max_iterations": 240}})
-    baseline = evaluation_context(harness_refs_path=str(refs), evaluator_config=EvaluatorConfig(), cases=[])
+    default_evaluator = AutoCoordinatingHarnessConfig().evaluator
+    baseline = evaluation_context(harness_refs_path=str(refs), evaluator_config=default_evaluator, cases=[])
     changed = evaluation_context(harness_refs_path=str(refs), evaluator_config=configured.evaluator, cases=[])
     assert configured.evaluator.solver_max_iterations == 240
     assert baseline["signature"] != changed["signature"]
-    assert replace(configured.evaluator, solver_max_iterations=300) == EvaluatorConfig()
+    assert replace(configured.evaluator, solver_max_iterations=300) == default_evaluator
 
 
 def test_explicit_member_runtime_hard_limit_is_kept():

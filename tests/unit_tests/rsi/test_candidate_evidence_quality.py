@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
+from openjiuwen.rsi.harness_rsi.config import (
+    AutoCoordinatingHarnessConfig,
+    PromotionConfig,
+)
 from openjiuwen.rsi.harness_rsi.single_harness.iterative import SingleHarnessIterativeOptimizationOrchestrator
 
 
@@ -37,7 +40,8 @@ async def test_missing_timing_requests_evidence_instead_of_claiming_late_activat
             })
 
     controller = SingleHarnessIterativeOptimizationOrchestrator(
-        AutoCoordinatingHarnessConfig(), evaluator=Evaluator(), analyzer=object(), member_optimizer=object(),
+        AutoCoordinatingHarnessConfig(promotion=PromotionConfig(policy_version="legacy_epoch_v1")),
+        evaluator=Evaluator(), analyzer=object(), member_optimizer=object(),
     )
     analysis = tmp_path / "analysis_ref.yaml"
     analysis.write_text("issues: []\n", encoding="utf-8")

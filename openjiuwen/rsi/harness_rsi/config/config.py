@@ -300,16 +300,16 @@ class OrchestratorSchedulingConfig:
 
     evaluation_strategy: str = "hybrid"
     coordination_strategy: str = "team_first_single_pass"
-    promotion_policy: str = "epoch_full_evaluation"
     full_evaluation_enabled: bool = True
     full_evaluation_concurrency: int = 2
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OrchestratorSchedulingConfig":
+        if "promotion_policy" in data:
+            raise ValueError("scheduling.promotion_policy must be migrated to promotion.policy_version")
         config = cls(
             evaluation_strategy=str(data.get("evaluation_strategy", "hybrid")),
             coordination_strategy=str(data.get("coordination_strategy", "team_first_single_pass")),
-            promotion_policy=str(data.get("promotion_policy", "epoch_full_evaluation")),
             full_evaluation_enabled=_bool_value(data.get("full_evaluation_enabled"), default=True),
             full_evaluation_concurrency=_int_value(data.get("full_evaluation_concurrency"), default=2),
         )
@@ -325,8 +325,6 @@ class OrchestratorSchedulingConfig:
             raise ValueError("scheduling.evaluation_strategy must be hybrid")
         if self.coordination_strategy != "team_first_single_pass":
             raise ValueError("scheduling.coordination_strategy must be team_first_single_pass")
-        if self.promotion_policy != "epoch_full_evaluation":
-            raise ValueError("scheduling.promotion_policy must be epoch_full_evaluation")
 
 
 def _require_unit_interval(value: float, name: str) -> None:
@@ -340,7 +338,7 @@ def _require_unit_interval(value: float, name: str) -> None:
 class PromotionConfig:
     """Versioned score authority; historical tasks retain their original policy."""
 
-    policy_version: str = "legacy_epoch_v1"
+    policy_version: str = "continuous_two_stage_v2"
     min_improvement: float = 0.05
     non_target_max_regression: float = 0.05
 
@@ -357,10 +355,10 @@ class PromotionConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PromotionConfig":
-        if data.get("policy_version") == "continuous_two_stage_v2" and "confirmation_runs" in data:
+        if data.get("policy_version", cls().policy_version) == "continuous_two_stage_v2" and "confirmation_runs" in data:
             raise ValueError("continuous_two_stage_v2 has only target and full evaluations; remove confirmation_runs")
         return cls(
-            policy_version=str(data.get("policy_version", "legacy_epoch_v1")),
+            policy_version=str(data.get("policy_version", cls().policy_version)),
             min_improvement=_float_value(data.get("min_improvement"), default=0.05),
             non_target_max_regression=_float_value(data.get("non_target_max_regression"), default=0.05),
         )
@@ -380,6 +378,10 @@ class AutoCoordinatingHarnessConfig:
     scheduling: OrchestratorSchedulingConfig = field(default_factory=OrchestratorSchedulingConfig)
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
 
+    def __post_init__(self) -> None:
+        if self.promotion.continuous and self.evaluator.score_mode != "continuous":
+            object.__setattr__(self, "evaluator", replace(self.evaluator, score_mode="continuous"))
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AutoCoordinatingHarnessConfig":
         model_configs = ModelConfigs.from_dict(_mapping(data.get("model_configs")))
@@ -387,9 +389,16 @@ class AutoCoordinatingHarnessConfig:
         analyzer = EvaluationResultAnalyzerConfig.from_dict(_mapping(data.get("evaluation_result_analyzer")))
         member_data = _mapping(data.get("member_optimizer"))
         optimizer = MemberOptimizerConfig.from_dict(member_data)
-        promotion = PromotionConfig.from_dict(_mapping(data.get("promotion")))
-        if promotion.continuous:
-            evaluator = replace(evaluator, score_mode="continuous")
+        scheduling_data = dict(_mapping(data.get("scheduling")))
+        promotion_data = dict(_mapping(data.get("promotion")))
+        if "promotion_policy" in scheduling_data:
+            legacy_policy = scheduling_data.pop("promotion_policy")
+            if legacy_policy != "epoch_full_evaluation":
+                raise ValueError("unsupported scheduling.promotion_policy; use promotion.policy_version")
+            if promotion_data.get("policy_version", "legacy_epoch_v1") != "legacy_epoch_v1":
+                raise ValueError("conflicting scheduling.promotion_policy and promotion.policy_version; remove the old selector")
+            promotion_data["policy_version"] = "legacy_epoch_v1"
+        promotion = PromotionConfig.from_dict(promotion_data)
         model_configs = ModelConfigs(
             evaluation=model_configs.evaluation or evaluator.model_config_ref,
             analysis=model_configs.analysis or analyzer.model_config_ref,
@@ -410,7 +419,7 @@ class AutoCoordinatingHarnessConfig:
                     else evaluator.solver_max_iterations_hard_limit
                 ),
             ),
-            scheduling=OrchestratorSchedulingConfig.from_dict(_mapping(data.get("scheduling"))),
+            scheduling=OrchestratorSchedulingConfig.from_dict(scheduling_data),
             promotion=promotion,
         )
         config.validate()
