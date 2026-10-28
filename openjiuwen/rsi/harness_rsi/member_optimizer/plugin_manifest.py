@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from openjiuwen.harness.resources import find_plugin_manifest
+from openjiuwen.rsi.harness_rsi.member_optimizer.package_registry import expand_skill_mounts, resolve_registry_resource
 
 _REGISTRIES = {
     "prompt_sections": ("prompt_sections/sections.yaml", "sections"),
@@ -73,6 +74,8 @@ def synchronize_plugin_manifest(package: Path) -> None:
             raise ValueError(f"Plugin registry {relative} must contain a {key} list")
         if field == "prompt_sections":
             entries = [_prompt_entry(package, item) for item in entries]
+        elif field == "skills":
+            entries = expand_skill_mounts(package, entries)
         payload[field] = entries
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -80,10 +83,7 @@ def synchronize_plugin_manifest(package: Path) -> None:
 def _prompt_entry(package: Path, item: dict) -> dict:
     entry = dict(item)
     if "file" in entry:
-        path = package / entry["file"]
-        if not path.is_file():
-            path = package / "prompt_sections" / "files" / entry["file"]
-        entry["file"] = path.resolve().relative_to(package.resolve()).as_posix()
+        entry["file"] = resolve_registry_resource(package, entry["file"])
     elif isinstance(entry.get("content"), str):
         entry["content"] = {"en": entry["content"]}
     return entry

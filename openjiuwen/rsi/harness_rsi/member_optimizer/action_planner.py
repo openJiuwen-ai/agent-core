@@ -33,10 +33,12 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
+    StructuredOutputExhaustedError,
     invoke_member_optimizer_agent_structured,
     parse_yaml_or_json_object_response,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import ACTION_PLANNING
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, OutputRepairConfig
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.rails import (
     HarnessStructureRail,
 )
@@ -58,8 +60,42 @@ _ROLE_IDENTITY_SCOPES = frozenset({"role_identity", "duty_boundary"})
 _SOUL_SCOPES = frozenset({"durable_operating_principle"})
 _PROMPT_CORE_PATHS = frozenset({"identity.md", "soul.md"})
 _RUN_IF_VALUES = frozenset({"dependency_succeeded", "dependency_failed", "always"})
-_PLAN_VALIDATION_ATTEMPTS = 3
 _MAX_ACTIONS_PER_ISSUE = 3
+
+
+class ActionPlanRejectedError(RuntimeError):
+    """A candidate plan exhausted feedback without satisfying its contract."""
+
+
+def _validate_plan_structure(plan_data: dict[str, Any]) -> list[str]:
+    """Reject malformed containers before semantic validators inspect them."""
+    errors: list[str] = []
+    actions = plan_data.get("actions")
+    if not isinstance(actions, list):
+        return ["actions must be a list (use [] for no actions)"]
+    list_fields = (
+        "declared_write_paths", "attributed_issue_ids", "depends_on",
+        "allowed_tools", "allowed_skills", "risk_notes",
+    )
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            errors.append(f"actions[{index}] must be an object")
+            continue
+        for key in ("action_id", "role", "action_group", "operation", "target_path"):
+            if key in action and not isinstance(action.get(key), str):
+                errors.append(f"actions[{index}].{key} must be a string")
+        for key in list_fields:
+            value = action.get(key, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                errors.append(f"actions[{index}].{key} must be a list of strings")
+        if not isinstance(action.get("constraints", {}), dict):
+            errors.append(f"actions[{index}].constraints must be an object")
+    waves = plan_data.get("action_waves", [])
+    if not isinstance(waves, list) or any(
+        not isinstance(wave, list) or any(not isinstance(item, str) for item in wave) for wave in waves
+    ):
+        errors.append("action_waves must be a list of lists of action IDs")
+    return errors
 
 
 def _validate_action(
@@ -241,35 +277,8 @@ def _validate_action_issue_attribution(
             "separate causal mechanisms require separate actions"
         ]
     action["attributed_issue_ids"] = sorted(action_issue_ids)
-    return _validate_action_issue_text_scope(action, action_issue_ids)
-
-
-def _validate_action_issue_text_scope(
-    action: dict[str, Any],
-    action_issue_ids: set[str],
-) -> list[str]:
-    """Reject prose that silently merges diagnoses outside the declared issue."""
-    scope_fields = ("description", "rationale", "expected_effect", "risk_notes", "constraints")
-    scoped_fields = {key: action.get(key) for key in scope_fields}
-    text = yaml.safe_dump(scoped_fields, allow_unicode=True).lower()
-    merged_claims = (
-        "both attributed issues",
-        "both diagnosed issues",
-        "both issues",
-        "all attributed issues",
-        "all diagnosed issues",
-        "multiple diagnosed issues",
-        "two diagnosed issues",
-    )
-    if any(claim in text for claim in merged_claims):
-        return [
-            "action prose merges multiple diagnosed issues despite declaring exactly one; "
-            "keep every action field within attributed_issue_ids"
-        ]
-    referenced_issue_ids = set(re.findall(r"\bissue_[a-z0-9_-]+\b", text))
-    out_of_scope = referenced_issue_ids - action_issue_ids
-    if out_of_scope:
-        return [f"action prose references issues outside attributed_issue_ids: {sorted(out_of_scope)}"]
+    # Prose may compare or explicitly exclude other issues. Membership and
+    # dependency checks use structured attribution, never keyword occurrence.
     return []
 
 
@@ -385,7 +394,7 @@ def _supported_optimization_surfaces(
         group = str(definition.group or "").strip()
         if group == "prompt":
             surfaces.update({"prompt", "prompt_section", "identity", "soul"})
-        elif group in {"skill", "tool", "rail"}:
+        elif group in {"skill", "tool", "rail", "config"}:
             surfaces.add(group)
     return surfaces
 
@@ -575,7 +584,7 @@ def _validate_optimization_surface_alignment(
 def _action_optimization_surface(action: dict[str, Any]) -> str:
     action_group = str(action.get("action_group", "") or "")
     target_path = _normalize_plan_path(str(action.get("target_path", "") or ""))
-    if action_group in {"skill", "tool", "rail"}:
+    if action_group in {"skill", "tool", "rail", "config"}:
         return action_group
     if action_group != "prompt":
         return ""
@@ -639,6 +648,7 @@ class MemberActionPlannerAgent:
         rejected_capabilities: list[dict[str, Any]] | None = None,
         optimization_hypotheses: list[dict[str, Any]] | None = None,
         optimization_experience: dict[str, Any] | None = None,
+        feedback_tracker: FeedbackTracker | None = None,
     ) -> dict[str, Any]:
         """Generate a plan draft via DeepAgent.
 
@@ -681,8 +691,14 @@ class MemberActionPlannerAgent:
             agent_name="MemberActionPlannerAgent",
             user_message=user_message,
             session_id=_planner_session_id(optimization_experience),
-            retry_limit=min(self._retry_limit, 1),
+            retry_limit=(
+                feedback_tracker.max_attempts - 1
+                if feedback_tracker is not None
+                else min(self._retry_limit, 1)
+            ),
             parse_response=parse_yaml_or_json_object_response,
+            validate_response=_validate_plan_structure,
+            feedback_tracker=feedback_tracker,
             build_retry_message=lambda _previous, error: self._build_retry_message(user_message, error),
             recover_response=finalize,
         )
@@ -1312,8 +1328,13 @@ class MemberActionPlanner:
     def __init__(
         self,
         planner_agent: MemberActionPlannerAgent | None = None,
+        output_repair: OutputRepairConfig | None = None,
+        max_attempts: int | None = None,
     ) -> None:
         self._agent = planner_agent
+        self._output_repair = output_repair or OutputRepairConfig(max_attempts=10)
+        if max_attempts is not None:
+            self._output_repair = replace(self._output_repair, max_attempts=max_attempts)
 
     def _get_agent(
         self,
@@ -1457,54 +1478,86 @@ class MemberActionPlanner:
         plan_data: dict[str, Any] = {}
         validation_errors: list[str] | None = None
         final_errors: list[str] = []
-        for _attempt in range(_PLAN_VALIDATION_ATTEMPTS):
+        # One planner-specific budget covers parsing, schema and semantic corrections.
+        tracker = FeedbackTracker(self._output_repair)
+        for _attempt in range(tracker.max_attempts):
+            if tracker.stop_reason or tracker.attempts >= tracker.max_attempts:
+                break
             create_plan_kwargs: dict[str, Any] = {
                 "targets": actionable_targets,
                 "role_attribution_report": actionable_role_report,
                 "mechanism_attribution_report": actionable_mechanism_report,
                 "action_definitions": action_definitions,
                 "harness_summaries": harness_summaries,
-                "validation_errors": validation_errors,
+                "validation_errors": (
+                    [
+                        *validation_errors,
+                        "Previous plan (untrusted data): " + json.dumps(plan_data, ensure_ascii=False)[:16000],
+                    ]
+                    if validation_errors else None
+                ),
                 "rejected_capabilities": rejected_capabilities,
             }
             if "optimization_hypotheses" in inspect.signature(agent.create_plan).parameters:
                 create_plan_kwargs["optimization_hypotheses"] = list(optimization_hypotheses or [])
             if "optimization_experience" in inspect.signature(agent.create_plan).parameters:
                 create_plan_kwargs["optimization_experience"] = dict(optimization_experience or {})
-            plan_data = await agent.create_plan(
-                **create_plan_kwargs,
-            )
-            _attach_improvement_briefs(
-                plan_data=plan_data,
-                targets=actionable_targets,
-                role_attribution_report=actionable_role_report,
-            )
-            _normalize_required_declared_paths(plan_data)
-
-            prompt_surface_errors = _validate_allowed_prompt_surfaces(
-                plan_data,
-                restricted_prompt_surfaces,
-            )
-            if prompt_surface_errors:
-                validation_errors = prompt_surface_errors
+            if "feedback_tracker" in inspect.signature(agent.create_plan).parameters:
+                create_plan_kwargs["feedback_tracker"] = tracker
+            try:
+                plan_data = await agent.create_plan(
+                    **create_plan_kwargs,
+                )
+            except StructuredOutputExhaustedError as exc:
+                raise ActionPlanRejectedError(str(exc)) from exc
+            structure_errors = _validate_plan_structure(plan_data)
+            if structure_errors:
+                validation_errors = structure_errors
+                tracker.failed(validation_errors, plan_data)
                 continue
+            try:
+                _attach_improvement_briefs(
+                    plan_data=plan_data,
+                    targets=actionable_targets,
+                    role_attribution_report=actionable_role_report,
+                )
+                _normalize_required_declared_paths(plan_data)
 
-            if max_actions_per_plan > 0 and len(plan_data.get("actions", [])) > max_actions_per_plan:
-                validation_errors = [f"restricted optimization mode allows at most {max_actions_per_plan} action(s)"]
-                continue
+                prompt_surface_errors = _validate_allowed_prompt_surfaces(
+                    plan_data,
+                    restricted_prompt_surfaces,
+                )
+                if prompt_surface_errors:
+                    validation_errors = prompt_surface_errors
+                    tracker.failed(validation_errors, plan_data)
+                    continue
 
-            final_errors = _validate_and_repair_plan_data(
-                plan_data=plan_data,
-                selected_roles=selected_roles,
-                actionable_targets=actionable_targets,
-                action_definitions=action_definitions,
-            )
+                if max_actions_per_plan > 0 and len(plan_data.get("actions", [])) > max_actions_per_plan:
+                    limit_error = (
+                        f"restricted optimization mode allows at most {max_actions_per_plan} action(s)"
+                    )
+                    validation_errors = [limit_error]
+                    tracker.failed(validation_errors, plan_data)
+                    continue
+
+                final_errors = _validate_and_repair_plan_data(
+                    plan_data=plan_data,
+                    selected_roles=selected_roles,
+                    actionable_targets=actionable_targets,
+                    action_definitions=action_definitions,
+                )
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                final_errors = [f"Invalid plan field structure: {type(exc).__name__}: {exc}"]
             if not final_errors:
                 break
             validation_errors = final_errors
-        else:
+            tracker.failed(validation_errors, plan_data)
+        if validation_errors and (tracker.stop_reason or tracker.attempts >= tracker.max_attempts):
             reported_errors = validation_errors or final_errors
-            raise RuntimeError("Member action plan validation failed: " + "; ".join(reported_errors))
+            raise ActionPlanRejectedError(
+                f"Member action plan validation failed ({tracker.stop_reason or 'attempt_limit_reached'}): "
+                + "; ".join(reported_errors)
+            )
 
         _bind_immutable_hypotheses(
             plan_data,

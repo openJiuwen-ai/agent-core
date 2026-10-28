@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for standalone Harness RSI configuration."""
 
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     ModelConfigs,
+    OrchestratorSchedulingConfig,
+    PromotionConfig,
     load_auto_coordinating_harness_config,
 )
 
@@ -171,3 +174,64 @@ def test_invalid_scheduling_strategy_is_rejected() -> None:
 def test_empty_batch_balance_keys_are_rejected() -> None:
     with pytest.raises(ValueError, match="batch_balance_keys"):
         AutoCoordinatingHarnessConfig.from_dict({"data_loader": {"batch_balance_keys": []}})
+
+
+def test_promotion_defaults_match_python_yaml_and_bootstrap(tmp_path: Path) -> None:
+    configs = [
+        AutoCoordinatingHarnessConfig(),
+        AutoCoordinatingHarnessConfig.from_dict({}),
+        load_auto_coordinating_harness_config(str(tmp_path / "orchestrator.yaml")),
+    ]
+    for config in configs:
+        assert config.promotion == PromotionConfig(policy_version="continuous_two_stage_v2")
+        assert config.evaluator.score_mode == "continuous"
+        assert "promotion_policy" not in asdict(config.scheduling)
+
+
+def test_legacy_scheduling_policy_is_migrated_to_promotion() -> None:
+    config = AutoCoordinatingHarnessConfig.from_dict({
+        "scheduling": {"promotion_policy": "epoch_full_evaluation"},
+    })
+    assert config.promotion.policy_version == "legacy_epoch_v1"
+    assert config.evaluator.score_mode == "binary"
+    assert "promotion_policy" not in asdict(config.scheduling)
+    assert AutoCoordinatingHarnessConfig.from_dict(asdict(config)) == config
+
+
+def test_conflicting_promotion_selectors_are_rejected() -> None:
+    with pytest.raises(ValueError, match="scheduling.promotion_policy"):
+        AutoCoordinatingHarnessConfig.from_dict({
+            "scheduling": {"promotion_policy": "epoch_full_evaluation"},
+            "promotion": {"policy_version": "continuous_two_stage_v2"},
+        })
+
+
+def test_explicit_legacy_policy_remains_available() -> None:
+    config = AutoCoordinatingHarnessConfig.from_dict({
+        "promotion": {"policy_version": "legacy_epoch_v1"},
+    })
+    assert not config.promotion.continuous
+    assert config.evaluator.score_mode == "binary"
+
+
+def test_default_promotion_rejects_obsolete_confirmation_runs() -> None:
+    with pytest.raises(ValueError, match="confirmation_runs"):
+        PromotionConfig.from_dict({"confirmation_runs": 2})
+
+
+def test_scheduling_parser_rejects_unmigrated_policy() -> None:
+    with pytest.raises(ValueError, match="promotion.policy_version"):
+        OrchestratorSchedulingConfig.from_dict({"promotion_policy": "epoch_full_evaluation"})
+
+
+def test_unknown_legacy_scheduling_policy_is_rejected() -> None:
+    with pytest.raises(ValueError, match="scheduling.promotion_policy"):
+        AutoCoordinatingHarnessConfig.from_dict({"scheduling": {"promotion_policy": "unknown"}})
+
+
+def test_legacy_migration_preserves_explicit_thresholds() -> None:
+    config = AutoCoordinatingHarnessConfig.from_dict({
+        "scheduling": {"promotion_policy": "epoch_full_evaluation"},
+        "promotion": {"policy_version": "legacy_epoch_v1", "min_improvement": 0.1},
+    })
+    assert config.promotion == PromotionConfig(policy_version="legacy_epoch_v1", min_improvement=0.1)

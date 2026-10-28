@@ -58,7 +58,7 @@ def _arguments(tmp_path):
 
 
 def test_judge_budget_default_and_override():
-    assert EvaluatorConfig().judge_agent_max_iterations == 20
+    assert EvaluatorConfig().judge_agent_max_iterations == 300
     assert EvaluatorConfig.from_dict({"judge_agent_max_iterations": 30}).judge_agent_max_iterations == 30
 
 

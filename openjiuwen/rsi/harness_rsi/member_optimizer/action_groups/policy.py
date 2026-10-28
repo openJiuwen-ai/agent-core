@@ -18,6 +18,7 @@ from openjiuwen.rsi.harness_rsi.schema import ActionDefinition
 ALLOWED_ACTION_GROUPS: Final[frozenset[str]] = frozenset(
     {
         "prompt",
+        "config",
         "rail",
         "skill",
         "tool",
@@ -36,12 +37,16 @@ ALLOWED_OPERATIONS: Final[frozenset[str]] = frozenset(
 ALLOWED_EXECUTOR_TOOLS: Final[frozenset[str]] = frozenset(
     {
         "read_file",
+        "grep",
+        "glob",
+        "list_files",
         "write_file",
         "edit_file",
     }
 )
 
 GROUP_PATH_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
+    "config": ("runtime.yaml",),
     "prompt": (
         "identity.md",
         "soul.md",
@@ -79,7 +84,7 @@ Allowed target_path and declared_write_paths by action_group:
 {path_lines}
 
 Current member optimizer actions are limited to local ExpertHarness package file
-changes on prompt, skill, tool, and rail surfaces.
+changes on prompt, skill, tool, rail, and whitelisted runtime config surfaces.
 
 Operation rules:
 - `search` is allowed only for `skill/search`.
@@ -91,7 +96,11 @@ Operation rules:
   `SKILL.md` plus `skills/skills.yaml`, and keep `skills/skills.yaml`
   mounting the parent `skills` directory.
 - For every non-search action, `candidate_query` and `install_ref` must be empty.
-- Do not output config, mcp, dependency, test, documentation, memory,
+- `config` actions may only add/modify/remove `runtime.yaml`, with exactly that
+  declared write path. Its only supported keys are `max_iterations` (positive
+  integer under the host ceiling) and `on_max_iterations` (error,
+  return_observations). The effective host limit is available in runtime evidence.
+- Do not output arbitrary model config, mcp, dependency, test, documentation, memory,
   knowledge, context, workflow, install, or global environment actions.
 Prompt rules:
 - `identity.md` maps to the `identity` section with priority 10.
@@ -215,6 +224,9 @@ def validate_action_policy(
         errors.extend(_validate_policy_path(declared_path, action_group, "declared_write_path"))
 
     normalized_target_path = _normalize_policy_path(target_path)
+    if action_group == "config":
+        if normalized_target_path != "runtime.yaml" or normalized_declared_paths != {"runtime.yaml"}:
+            errors.append("config actions may only target and declare runtime.yaml")
 
     if action_group == "prompt":
         if operation == "add" and normalized_target_path in {"identity.md", "soul.md"}:

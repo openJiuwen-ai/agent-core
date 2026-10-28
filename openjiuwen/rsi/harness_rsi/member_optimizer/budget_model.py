@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """RSI request policy without locally imposed model capacity limits."""
 from openjiuwen.core.foundation.llm import Model, ModelRequestConfig
-from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import with_rsi_output_budget
+from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import rsi_output_options, with_rsi_output_budget
 
 
 class BudgetedRsiModel(Model):
@@ -14,10 +14,7 @@ class BudgetedRsiModel(Model):
                          model_config=ModelRequestConfig.model_validate(request), **kwargs)
 
     def _budget_options(self, messages, options):
-        options = dict(options)
-        options.pop("max_tokens", None)
-        options.pop("max_completion_tokens", None)
-        return options
+        return rsi_output_options(options)
 
     async def invoke(self, messages, **kwargs):
         return await super().invoke(messages=messages, **self._budget_options(messages, kwargs))
