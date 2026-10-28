@@ -19,7 +19,7 @@ import time
 import pytest
 
 import openjiuwen.core.context_engine.token.tiktoken_counter as tiktoken_counter_module
-from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     TiktokenCounter,
     start_background_warm_up,
@@ -64,7 +64,7 @@ async def test_create_context_loads_encoding_off_loop(monkeypatch):
 
     monkeypatch.setattr(tiktoken, "get_encoding", spy)
 
-    engine = ContextEngine()
+    engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
     context = await engine.create_context("ctx-offload-check")
 
     assert context is not None

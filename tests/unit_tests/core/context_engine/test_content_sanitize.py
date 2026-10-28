@@ -52,6 +52,11 @@ def test_sanitize_leaves_non_image_data_urls_alone() -> None:
     assert sanitize_value_for_text({"url": pdf_url}) == {"url": pdf_url}
 
 
+def test_sanitize_plain_text_fast_path_returns_same_object() -> None:
+    plain = "ordinary text without an encoded payload"
+    assert sanitize_value_for_text(plain) is plain
+
+
 def test_sanitized_serialization_keeps_the_text_parts() -> None:
     text = sanitize_content_for_text(_MULTIMODAL_CONTENT)
     assert "what is on screen?" in text
@@ -86,3 +91,20 @@ def test_forked_pipeline_serialization_is_sanitized() -> None:
     archived = _content_to_text(_MULTIMODAL_CONTENT)
     assert _DATA_URL not in archived and "what is on screen?" in archived
     assert _content_to_text(None) == ""
+
+
+def test_non_forked_fallback_estimators_ignore_base64_payload() -> None:
+    from openjiuwen.core.context_engine.processor import budget_guard
+    from openjiuwen.core.context_engine.processor.compressor import util as compressor_util
+    from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import DialogueCompressor
+    from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import RoundLevelCompressor
+
+    payload_scale = len(_DATA_URL) // 3
+    message = UserMessage(content=_MULTIMODAL_CONTENT)
+
+    assert budget_guard._estimate_text_tokens(_MULTIMODAL_CONTENT) < payload_scale // 10
+    assert compressor_util.estimate_content_tokens(_MULTIMODAL_CONTENT) < payload_scale // 10
+    assert _DATA_URL not in compressor_util.message_to_text(message)
+    assert DialogueCompressor._estimate_content_tokens(_MULTIMODAL_CONTENT) < payload_scale // 10
+    assert RoundLevelCompressor._estimate_content_tokens(_MULTIMODAL_CONTENT) < payload_scale // 10
+    assert _DATA_URL not in RoundLevelCompressor._to_text(_MULTIMODAL_CONTENT)

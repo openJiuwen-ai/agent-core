@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +12,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
@@ -581,12 +581,7 @@ class DialogueCompressor(ContextProcessor):
 
     @staticmethod
     def _estimate_content_tokens(content: Any) -> int:
-        if isinstance(content, str):
-            return len(content) // 3
-        try:
-            return len(json.dumps(content, ensure_ascii=False)) // 3
-        except TypeError:
-            return len(str(content)) // 3
+        return max(len(sanitize_content_for_text(content)) // 3, 1)
 
     @staticmethod
     def _is_valid_blocks_payload(parser_content: Any) -> bool:
