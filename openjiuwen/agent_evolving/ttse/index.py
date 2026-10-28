@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.bm25 import tokenize
 
 from .config import normalize_consult_retrieve_mode

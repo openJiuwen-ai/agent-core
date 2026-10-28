@@ -629,12 +629,19 @@ class TeamAgent(BaseAgent):
         if harness is None or dispatcher is None:
             return
         from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
+        from openjiuwen.harness.rails.evolution.team_ttse_rail import TeamTTSERail
 
         for rail_type in (TeamSkillEvolutionRail, TeamSkillCreateRail):
             for rail in harness.find_rails(rail_type):
                 notify_team_completed = getattr(rail, "notify_team_completed", None)
                 if notify_team_completed is not None:
                     dispatcher.team_completion.register_completion_callback(notify_team_completed)
+        for rail in harness.find_rails(TeamTTSERail):
+            if not isinstance(rail, TeamTTSERail):
+                continue
+            notify_team_accepted = getattr(rail, "notify_team_accepted", None)
+            if notify_team_accepted is not None:
+                dispatcher.team_completion.register_team_completed_callback(notify_team_accepted)
 
     def _register_reliability_local_sink(self) -> None:
         """Wire the leader's reliability rail to its in-process anomaly sink.

@@ -69,6 +69,7 @@ async def induce(
     existing_tips: List[str],
     outcome: str = "success",
     grader_note: str = "",
+    role_note: str = "",
     max_tokens: Optional[int] = None,
 ) -> Tuple[List[str], List[str]]:
     """Extract new FACT/TIP rules from structured task evidence. Returns (facts, tips)."""
@@ -82,7 +83,7 @@ async def induce(
         tool_call_chain=tool_call_chain or "",
         grader_note=grader_note or "",
     )
-    user = induce_prompt(evidence, capabilities, bank, outcome)
+    user = induce_prompt(evidence, capabilities, bank, outcome, role_note=role_note)
     kwargs = {}
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
