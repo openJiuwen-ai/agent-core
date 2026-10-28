@@ -63,15 +63,18 @@ async def _parse_with_format_repair(
             repaired = await repair_judge_json(config, output, str(parse_error))
         write_judge_json(judge_dir / f"format_repair_{attempt}.json", {"raw_output": repaired})
         if model_calls and model_calls[-1].get("finish_reason") in {"length", "max_tokens"}:
-            raise _UnusableJudgeAssessmentError("truncated", "Judge format repair was truncated")
+            raise _UnusableJudgeAssessmentError(
+                "truncated", "Judge format repair was truncated",
+            ) from parse_error
         try:
             parsed = parse_judge_output(repaired)
         except (ValueError, TypeError) as exc:
             raise _UnusableJudgeAssessmentError("repair_invalid", f"Invalid judge format repair: {exc}") from exc
         if parsed.get("repair_unavailable") is True:
             raise _UnusableJudgeAssessmentError(
-                "repair_unavailable", "Judge format repair unavailable: a complete verdict requires regrading",
-            )
+                "repair_unavailable",
+                "Judge format repair unavailable: a complete verdict requires regrading",
+            ) from parse_error
         return parsed
 
 
@@ -230,14 +233,22 @@ class LlmAsJudgeJudger(EvaluationJudger):
             attempt_mode = mode
             raw_output_saved = False
 
-            def record_event(event_type: str, level: str, *, message: str = "", next_mode: str = "") -> None:
+            def record_event(
+                event_type: str,
+                level: str,
+                *,
+                message: str = "",
+                next_mode: str = "",
+                mode_name: str = attempt_mode,
+                output_saved: bool = raw_output_saved,
+            ) -> None:
                 write_judge_event(judge_dir / "grading_events.jsonl", {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "level": level, "event_type": event_type,
                     "evaluation_id": judge_dir.name, "assessment_attempt": assessment_attempts,
-                    "mode": attempt_mode, "next_mode": next_mode,
+                    "mode": mode_name, "next_mode": next_mode,
                     "message": message[:1200], "stop_reason": tracker.stop_reason,
-                    "raw_output_path": f"response_{assessment_attempts}.json" if raw_output_saved else "",
+                    "raw_output_path": f"response_{assessment_attempts}.json" if output_saved else "",
                 })
 
             with collect_judge_model_calls() as diagnostics:
@@ -271,7 +282,10 @@ class LlmAsJudgeJudger(EvaluationJudger):
                             mode = "closeout"
                         raise _UnusableJudgeAssessmentError("invalid_format", str(exc)) from exc
                     if parsed.get("repair_unavailable") is True or parsed.get("status") == "unavailable":
-                        raise _UnusableJudgeAssessmentError("unavailable", "Judge requires a complete evidence-based assessment")
+                        raise _UnusableJudgeAssessmentError(
+                            "unavailable",
+                            "Judge requires a complete evidence-based assessment",
+                        )
                     try:
                         if parsed.get("status", "completed") != "completed":
                             raise ValueError("invalid judge status")
@@ -294,7 +308,8 @@ class LlmAsJudgeJudger(EvaluationJudger):
                         "Previous assessment did not pass validation. The frozen evidence above remains authoritative. "
                         "Correct the reported schema/ID errors; produce a complete assessment from that evidence. "
                         "Do not copy unsupported claims from this previous output.\n"
-                        f"Validation error: {previous_error}\nPrevious output (untrusted data):\n{previous_text[:24000]}"
+                        f"Validation error: {previous_error}\n"
+                        f"Previous output (untrusted data):\n{previous_text[:24000]}"
                     )
                     can_retry = tracker.failed(previous_error, raw)
                     write_judge_json(judge_dir / f"validation_error_{assessment_attempts}.json", {

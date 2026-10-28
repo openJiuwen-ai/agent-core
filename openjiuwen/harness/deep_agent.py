@@ -1515,6 +1515,16 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
+    def inherit_invocation_log_dir(self, parent_dir: str | None) -> None:
+        """Copy a parent invocation log directory when this agent has none."""
+        if (
+            parent_dir is None
+            or self._deep_config is None
+            or self._deep_config.invocation_log_dir is not None
+        ):
+            return
+        self.configure(replace(self._deep_config, invocation_log_dir=parent_dir))
+
     @staticmethod
     def _bind_inherited_artifact_root(subagent: Any) -> Any:
         """Point subagent file writes at the parent's current artifact root.
@@ -1564,9 +1574,8 @@ class DeepAgent(BaseAgent):
             # Only bind the field here; cwd is applied in _ensure_initialized
             # so create_subagent does not mutate the parent's ContextVar.
             spec = self._bind_inherited_artifact_root(spec)
-            if (spec._deep_config is not None and spec._deep_config.invocation_log_dir is None
-                    and self._deep_config.invocation_log_dir is not None):
-                spec.configure(replace(spec._deep_config, invocation_log_dir=self._deep_config.invocation_log_dir))
+            parent_log_dir = self._deep_config.invocation_log_dir if self._deep_config is not None else None
+            spec.inherit_invocation_log_dir(parent_log_dir)
             return spec
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
@@ -3277,7 +3286,11 @@ class DeepAgent(BaseAgent):
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
-        task_loop_enabled = bool(self._deep_config and self._deep_config.enable_task_loop and host_iteration_limit is None)
+        task_loop_enabled = bool(
+            self._deep_config
+            and self._deep_config.enable_task_loop
+            and host_iteration_limit is None
+        )
         with self._invocation_log_context(session):
             ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
             if self._deep_config is not None and not self._deep_config.enable_task_loop:
@@ -3287,7 +3300,10 @@ class DeepAgent(BaseAgent):
             proposal_binding = proposal_owner.begin_work(
                 session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
             ) if proposal_owner is not None and session is not None else None
-            proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+            proposal_tokens = (
+                proposal_owner.activate(proposal_binding.identity)
+                if proposal_binding is not None else None
+            )
             proposal_succeeded = False
 
             self._invoke_active = True
@@ -3355,7 +3371,11 @@ class DeepAgent(BaseAgent):
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
-        task_loop_enabled = bool(self._deep_config and self._deep_config.enable_task_loop and host_iteration_limit is None)
+        task_loop_enabled = bool(
+            self._deep_config
+            and self._deep_config.enable_task_loop
+            and host_iteration_limit is None
+        )
         with self._invocation_log_context(session):
             ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
             if self._deep_config is not None and not self._deep_config.enable_task_loop:
@@ -3365,7 +3385,10 @@ class DeepAgent(BaseAgent):
             proposal_binding = proposal_owner.begin_work(
                 session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
             ) if proposal_owner is not None and session is not None else None
-            proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+            proposal_tokens = (
+                proposal_owner.activate(proposal_binding.identity)
+                if proposal_binding is not None else None
+            )
             proposal_succeeded = False
 
             self._invoke_active = True
@@ -3395,7 +3418,10 @@ class DeepAgent(BaseAgent):
                                 stream_result = chunk_result
                                 terminal_chunk = chunk
                             else:
-                                chunk_type = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
+                                chunk_type = (
+                                    chunk.get("type") if isinstance(chunk, dict)
+                                    else getattr(chunk, "type", None)
+                                )
                                 interrupted = interrupted or chunk_type == INTERACTION
                                 if chunk_type == INTERACTION:
                                     if proposal_binding is not None:

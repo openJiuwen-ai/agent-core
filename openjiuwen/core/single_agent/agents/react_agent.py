@@ -2801,7 +2801,10 @@ class ReActAgent(BaseAgent):
         hard_iteration_limit = cast(ReActAgentConfig, self._config).max_iterations_hard_limit
         supplied_ceiling = inputs.get("_host_max_iterations") if isinstance(inputs, dict) else None
         if type(supplied_ceiling) is int and supplied_ceiling > 0:
-            hard_iteration_limit = min(hard_iteration_limit, supplied_ceiling) if hard_iteration_limit is not None else supplied_ceiling
+            if hard_iteration_limit is None:
+                hard_iteration_limit = supplied_ceiling
+            else:
+                hard_iteration_limit = min(hard_iteration_limit, supplied_ceiling)
         parent_usage_attribution = current_usage_attribution()
         delegation_attribution = current_usage_delegation()
         raw_invocation_id = inputs.get("invocation_id") if isinstance(inputs, dict) else None

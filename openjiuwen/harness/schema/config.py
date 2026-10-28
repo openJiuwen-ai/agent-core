@@ -336,7 +336,11 @@ class DeepAgentConfig:
                 raise ValueError("max_iterations_hard_limit requires single-round mode (enable_task_loop=False)")
             if type(ceiling) is not int or ceiling < 1:
                 raise ValueError("max_iterations_hard_limit must be a positive integer")
-            if self.max_iterations is None or type(self.max_iterations) is not int or not 1 <= self.max_iterations <= ceiling:
+            if (
+                self.max_iterations is None
+                or type(self.max_iterations) is not int
+                or not 1 <= self.max_iterations <= ceiling
+            ):
                 raise ValueError("max_iterations must be positive and within max_iterations_hard_limit")
 
 

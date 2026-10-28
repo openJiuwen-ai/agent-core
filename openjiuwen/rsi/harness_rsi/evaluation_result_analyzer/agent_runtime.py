@@ -134,7 +134,10 @@ async def run_deep_agent_text(
             fallback = json.dumps(result, ensure_ascii=False)
             output = str(result.get("output", result.get("answer", fallback)))
             if result.get("result_type") == "error":
-                raise DiagnosisAgentExecutionError(output, termination_reason=str(result.get("termination_reason") or ""))
+                raise DiagnosisAgentExecutionError(
+                    output,
+                    termination_reason=str(result.get("termination_reason") or ""),
+                )
             return output
         return str(result)
 

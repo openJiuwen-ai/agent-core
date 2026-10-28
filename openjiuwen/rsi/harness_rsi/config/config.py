@@ -83,7 +83,8 @@ class EvaluatorConfig:
             raise ValueError("evaluator.judge_baseline_comparison must be a boolean")
         if type(self.solver_max_iterations) is not int or self.solver_max_iterations < 1:
             raise ValueError("evaluator.solver_max_iterations must be a positive integer")
-        if type(self.solver_max_iterations_hard_limit) is not int or self.solver_max_iterations_hard_limit < self.solver_max_iterations:
+        hard_limit = self.solver_max_iterations_hard_limit
+        if type(hard_limit) is not int or hard_limit < self.solver_max_iterations:
             raise ValueError("evaluator.solver_max_iterations_hard_limit must be an integer >= solver_max_iterations")
         if self.solver_on_max_iterations not in ("error", "return_observations"):
             raise ValueError("evaluator.solver_on_max_iterations is invalid")
@@ -112,7 +113,10 @@ class EvaluatorConfig:
             solver_max_iterations=_solver_iteration_limit(data.get("solver_max_iterations")),
             solver_on_max_iterations=str(data.get("solver_on_max_iterations", "error")),
             solver_max_iterations_hard_limit=_solver_iteration_limit(
-                data.get("solver_max_iterations_hard_limit", max(300, _solver_iteration_limit(data.get("solver_max_iterations")))),
+                data.get(
+                    "solver_max_iterations_hard_limit",
+                    max(300, _solver_iteration_limit(data.get("solver_max_iterations"))),
+                ),
             ),
             jiuwenswarm_executable=str(data.get("jiuwenswarm_executable", "")),
             jiuwenswarm_python=str(data.get("jiuwenswarm_python", "")),

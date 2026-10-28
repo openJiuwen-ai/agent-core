@@ -330,7 +330,8 @@ class SingleHarnessExecutionBackend:
         }
         case_root.mkdir(parents=True, exist_ok=True)
         (case_root / "termination.json").write_text(json.dumps(termination, indent=2), encoding="utf-8")
-        runtime_logs = [path.relative_to(case_root).as_posix() for path in sorted((case_root / "logs").rglob("*.jsonl"))]
+        log_paths = sorted((case_root / "logs").rglob("*.jsonl"))
+        runtime_logs = [path.relative_to(case_root).as_posix() for path in log_paths]
         return CaseExecutionResult(
             response=response,
             execution_status=status,

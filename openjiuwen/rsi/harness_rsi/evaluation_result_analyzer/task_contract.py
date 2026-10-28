@@ -65,8 +65,13 @@ def normalize_contract_checks(diagnosis: dict[str, Any], task: str) -> list[str]
         if not isinstance(check.get("interpretation"), str) or not check["interpretation"].strip():
             errors.append(f"[contract_schema] {field}.interpretation must state the relevant guarantee")
         preserves = check.get("recommendation_preserves_contract")
-        if type(preserves) is not bool:
-            errors.append(f"[contract_schema] {field}.recommendation_preserves_contract is required (boolean)")
+        if not isinstance(preserves, bool):
+            errors.append(
+                f"[contract_schema] {field}.recommendation_preserves_contract is required (boolean)"
+            )
         elif preserves is False:
-            errors.append(f"[contract_conflict] {field}.recommendation_preserves_contract must preserve the original contract")
+            errors.append(
+                f"[contract_conflict] {field}.recommendation_preserves_contract "
+                "must preserve the original contract"
+            )
     return errors
