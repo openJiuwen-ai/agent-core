@@ -346,9 +346,11 @@ class CompiledGraph(ExecutableGraph):
                 await self._checkpointer.post_workflow_execute(session, result, exception)
             elif exception is not None:
                 raise exception
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             if is_main:
-                await self._checkpointer.post_workflow_execute(session, {}, None)
+                # 取消属于异常终止：复用既有的“异常保留快照”语义，
+                # 不能以 {} / None 触发“正常完成”分支把已落盘快照全删。
+                await self._checkpointer.post_workflow_execute(session, {}, exc)
             raise
 
     async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:

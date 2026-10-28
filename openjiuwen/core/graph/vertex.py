@@ -693,7 +693,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     self._stream_done,
                     timeout=stream_timeout
                 )
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     raise result
             except asyncio.TimeoutError:
                 raise build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_TIMEOUT, timeout=stream_timeout,
@@ -750,7 +750,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             logger.debug(f"Succeed to call stream-in node [{self._node_id}]",
                          event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
                          **self._log_message)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             cancelled_tasks = []
             finished_tasks = []
             error_tasks = {}
@@ -784,6 +784,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 },
                 **self._log_message
             )
+            # 取消属于异常终止：回填错误并向上传播，
+            # 不再以 set_result(True) 让调用方把节点误判为“成功完成”。
+            error = build_error(
+                StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR,
+                reason="stream-in node call cancelled",
+                node_id=self._node_id,
+            )
+            raise exc
         except Exception as e:
             logger.error(
                 f"Failed to call stream-in node [{self._node_id}]",
