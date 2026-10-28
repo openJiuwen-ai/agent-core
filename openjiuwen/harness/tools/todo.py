@@ -135,6 +135,10 @@ class TodoTool(Tool):
         """Read through the legacy API; native transactions use their own view."""
         return await self._load_todos(session_id)
 
+    async def read_todos(self, session_id: str) -> list[TodoItem]:
+        """Read the transaction-local view, bypassing legacy cache extensions."""
+        return await self._load_todos(session_id)
+
     async def _load_todos(self, session_id: str) -> list[TodoItem]:
         tx = current_transaction(self, session_id)
         if tx is not None:
@@ -155,6 +159,10 @@ class TodoTool(Tool):
 
     async def save_todos(self, session_id: str, todos: List[TodoItem]):
         """Keep the legacy API separate from transaction-local staging."""
+        return await self._save_todos(session_id, todos)
+
+    async def write_todos(self, session_id: str, todos: list[TodoItem]):
+        """Stage a transaction update, or save items with their read baseline."""
         return await self._save_todos(session_id, todos)
 
     async def _save_todos(self, session_id: str, todos: list[TodoItem]):

@@ -15,7 +15,7 @@ from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockMa
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
 from openjiuwen.harness.schema.task import TaskPlan, TodoItem, TodoStatus
 from openjiuwen.harness.tools.todo import TodoCreateTool, TodoGetTool, TodoListTool, TodoModifyTool, TodoTool
-from openjiuwen.harness.tools.todo_store import _BINDING, bind_todo_batch, prepare_todo_batch
+from openjiuwen.harness.tools.todo_store import _BINDING, bind_todo_batch, prepare_todo_batch, transact
 
 
 @pytest_asyncio.fixture
@@ -139,6 +139,31 @@ async def test_plan_sync_and_append_preserve_both_changes_without_legacy_cache(e
     unchanged = path.read_bytes()
     await rail.after_task_iteration(ctx)
     assert path.read_bytes() == unchanged
+
+
+@pytest.mark.asyncio
+async def test_transactional_host_io_bypasses_legacy_cache_and_stages_updates(env, monkeypatch):
+    creator, modifier, _, session, path = env
+    initial = (await create(creator, session)).todo_snapshot
+
+    async def legacy_cache(*args, **kwargs):
+        raise AssertionError("Transaction I/O must not use the legacy cache")
+
+    monkeypatch.setattr(TodoTool, "load_todos", legacy_cache)
+    monkeypatch.setattr(TodoTool, "save_todos", legacy_cache)
+
+    async def change():
+        items = await modifier.read_todos("session")
+        items[0].status = TodoStatus.COMPLETED
+        await modifier.write_todos("session", items)
+        assert (await modifier.read_todos("session"))[0].status == TodoStatus.COMPLETED
+        assert json.loads(path.read_text()) == initial
+
+    await transact(modifier, "session", change)
+    saved = json.loads(path.read_text())
+    assert saved["revision"] == initial["revision"] + 1
+    assert saved["todos"][0]["status"] == "completed"
+    assert saved["todos"][1] == initial["todos"][1]
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ Todo 工具仍按任务 ID 增、删、改；同一清单的完整读改写在�
 - Todo rail 在已有 after_model_call/before_tool_call 中固定批次计划。未解析的对象由第一次实际 Todo 读取解析，同批调用共享结果；新计划只交给后续批次。
 - 工作启动时用 `capture_plan` 保存归属，异步回调提交时传同一个 expected_plan；不能在冲突后换绑新计划。
 - `TodoTool.update_todos(session_id, callback)` 让宿主回调在最新候选列表上操作。callback 必须只修改清单，不重复外部业务。明确冲突最多三次尝试，其他失败/未知结果不重放。
+- 需要在已有事务内分步读取或暂存的宿主逻辑，可使用 `TodoTool.read_todos` 和 `TodoTool.write_todos`；事务外写入仍须使用带读取基线的列表。这两个入口不会经过旧版缓存扩展。
 - 冲突后必须重新读取当前文件并重新应用修改意图，callback 因此可能执行多次，不能发送消息或执行外部业务。`snapshot_guard` 也可能在每次尝试中重复调用：`committing=True` 表示本次候选即将尝试发布，不代表提交成功。宿主登记必须幂等，已经登记时不重复写入；不能跳过重试时的生命周期检查。`check_active` 在读取前、发布前及异步 guard 返回后复核，防止等待期间失效的任务继续提交。
 - 原 load_todos/save_todos 签名保留；事务内操作候选副本。事务外 save_todos 必须使用 load_todos 返回的带基线列表，不能用裸 list 无条件覆盖。
 - 工具的模型可见返回字典保持原业务内容；附属 `todo_snapshot` 属性仅供框架发布事件，JSON 序列化不会向模型追加完整清单。
