@@ -174,10 +174,13 @@ def test_events_protocol_bus_signature():
     assert unregister_handler_return == "None"
 
     trigger, trigger_return = _method_signature(ExtensionEventBusProtocol.trigger)
-    assert [parameter.name for parameter in trigger] == ["event", "session"]
+    assert [parameter.name for parameter in trigger] == ["event", "session", "handler_ids"]
     assert trigger[0].annotation == "Event"
     assert trigger[1].annotation == "Session | SessionContext | None"
     assert trigger[1].default is None
+    assert trigger[2].kind is inspect.Parameter.KEYWORD_ONLY
+    assert trigger[2].annotation == "Sequence[HandlerId] | None"
+    assert trigger[2].default is None
     assert trigger_return == "EventOutput | None"
     assert (
         EventHandler
