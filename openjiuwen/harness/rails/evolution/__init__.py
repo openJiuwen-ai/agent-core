@@ -62,6 +62,7 @@ from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
     TeamInsightEntry,
 )
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
+from openjiuwen.harness.rails.evolution.team_ttse_rail import TeamTTSERail
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
@@ -109,6 +110,7 @@ __all__ = [
     "unconfigure_ttse_evolution",
     "TTSEConfig",
     "TTSERail",
+    "TeamTTSERail",
     "TTSERecordStore",
     "SuccessDetector",
     "SuccessOutcome",

@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any, List, Optional, Set, Tuple
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 
 _CAP_NAME_RE = re.compile(r"`([^`]+)`")
 
@@ -79,7 +79,11 @@ def _enumerate_skills(agent: Any) -> List[Tuple[str, str]]:
     return out
 
 
-async def _enumerate_capabilities(agent: Optional[Any] = None) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+async def _enumerate_capabilities(
+    agent: Optional[Any] = None,
+    *,
+    fallback: bool = True,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
     if agent is not None and not hasattr(agent, "ability_manager"):
         agent = getattr(agent, "agent", agent)
 
@@ -89,6 +93,8 @@ async def _enumerate_capabilities(agent: Optional[Any] = None) -> Tuple[List[Tup
         skills = _enumerate_skills(agent)
         tools = await _enumerate_tools(agent)
     if not skills and not tools:
+        if not fallback:
+            return skills, tools
         reason = "agent is None" if agent is None else "agent exposed no tools/skills"
         logger.warning(
             "[TTSERail] capability fallback to BASIC_TOOLS (%s names) reason=%s",
@@ -99,14 +105,17 @@ async def _enumerate_capabilities(agent: Optional[Any] = None) -> Tuple[List[Tup
     return skills, tools
 
 
-async def render_capabilities(agent: Optional[Any] = None) -> str:
+async def render_capabilities(agent: Optional[Any] = None, *, fallback: bool = True) -> str:
     """Render the Available Capabilities block fed to the induce prompt.
 
     Accepts an agent or an :class:`AgentCallbackContext` (unwrapped via
     ``.agent``). When the agent is None or exposes no abilities, a built-in
     tool list is rendered so TIPs still reference valid capability names.
+    ``fallback=False`` returns an empty string instead of that built-in list.
     """
-    skills, tools = await _enumerate_capabilities(agent)
+    skills, tools = await _enumerate_capabilities(agent, fallback=fallback)
+    if not skills and not tools:
+        return ""
 
     lines = ["BUILT-IN SKILLS (load a skill's SKILL.md with the read tool when its description matches your task):"]
     for name, desc in skills:

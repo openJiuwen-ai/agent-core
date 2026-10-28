@@ -82,6 +82,7 @@ def induce_prompt(
     capabilities: str,
     bank: ExistingBank,
     outcome: str,
+    role_note: str = "",
 ) -> str:
     if outcome == "success":
         outcome_lbl = "SOLVED SUCCESSFULLY"
@@ -101,6 +102,7 @@ def induce_prompt(
             "extract the wrong actions themselves as tips."
         )
     grader_block = f"\n{evidence.grader_note}\n" if evidence.grader_note else "\n"
+    role_block = f"\n{role_note.strip()}\n" if role_note and role_note.strip() else ""
     return f"""You are extracting reusable knowledge from an agent task that was {outcome_lbl}.
 
 {FACT_TIP_DEFINITION}
@@ -130,7 +132,7 @@ Existing TIPS:
 {bank.tips or "(none)"}
 
 Outcome: {outcome_lbl}
-{grader_block}{guidance}
+{grader_block}{guidance}{role_block}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
 Write each rule in the same language as the User query.

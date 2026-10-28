@@ -14,7 +14,7 @@ import re
 import shutil
 from typing import Any, Dict, Iterable
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 
 from .categories import OTHER_CATEGORY, category_by_id, category_ids, normalize_category
 from .render import build_section_text
