@@ -157,7 +157,23 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
             "coordinating the agent/skill system."
         ),
         "dont_select_when": (
-            "Do not route normal domain tasks here just because they may use a skill or agent internally."
+            "Do not route normal domain tasks here just because they may use a skill or agent internally. "
+            "Do not route planning, assignment, progress chasing, or acceptance of split work here."
+        ),
+    },
+    {
+        "id": "team-planning-and-acceptance",
+        "name": "Team planning, coordination and acceptance",
+        "description": (
+            "Plan, assign, track, review, or hand back work that is split across people or agents."
+        ),
+        "select_when": (
+            "Route here when the primary goal is deciding who does what, writing the task, "
+            "unblocking a handoff, checking a deliverable, or handing the finished result back."
+        ),
+        "dont_select_when": (
+            "Do not route the domain work itself here. Writing the code, analyzing the data, "
+            "editing the document, or researching the topic stays in that business category."
         ),
     },
     {

@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -29,7 +30,7 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
     LLMInvokePolicy,
     invoke_text_with_retry,
 )
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.foundation.llm.model import Model
 
 from .config import TTSEConfig
@@ -335,22 +336,28 @@ def reconcile_dream_clusters(
     return out
 
 
+# Serializes read-modify-write so a threaded caller cannot lose an increment.
+_DREAM_STATE_LOCK = threading.Lock()
+
+
 def bump_dream_session_count(path: str, interval: int) -> Tuple[int, bool]:
     """Persist +1 non-follow-up iteration toward ``dream_interval``.
 
     Returns ``(count_after_increment, interval_reached)``. When the interval
     is reached the stored count is reset to 0 so the next rail instance does
-    not immediately fire again.
+    not immediately fire again. Safe to call from a worker thread: the
+    load/modify/save of one state file is exclusive.
     """
     interval = max(1, int(interval))
-    state = load_dream_state(path)
-    state.non_followup_count = max(0, int(state.non_followup_count or 0)) + 1
-    count = state.non_followup_count
-    reached = count >= interval
-    if reached:
-        state.non_followup_count = 0
-    save_dream_state(path, state)
-    return count, reached
+    with _DREAM_STATE_LOCK:
+        state = load_dream_state(path)
+        state.non_followup_count = max(0, int(state.non_followup_count or 0)) + 1
+        count = state.non_followup_count
+        reached = count >= interval
+        if reached:
+            state.non_followup_count = 0
+        save_dream_state(path, state)
+        return count, reached
 
 
 def should_run_dream(

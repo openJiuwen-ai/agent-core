@@ -330,6 +330,7 @@ async def test_render_and_list_capabilities_live_and_fallback():
     assert "`custom_tool`" in rendered
     live = await list_capability_names(agent)
     assert live == {"office", "custom_tool"}
+    assert await render_capabilities(None, fallback=False) == ""
 
 
 def test_parse_capability_names_from_text():
