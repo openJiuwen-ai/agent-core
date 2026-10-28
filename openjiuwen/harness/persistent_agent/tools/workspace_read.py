@@ -48,7 +48,10 @@ class _PersistentWorkspaceReadTool(Tool):
             english_path_description = (
                 "file_path may be an absolute host path or a workspace-relative path."
                 if permission_profile == "full_access"
-                else "file_path must be a workspace-relative path; absolute paths and `..` path segments are not allowed."
+                else (
+                    "file_path must be a workspace-relative path; "
+                    "absolute paths and `..` path segments are not allowed."
+                )
             )
             localized_path_description = (
                 "file_path 可以使用宿主机绝对路径或工作区相对路径。"
@@ -69,6 +72,11 @@ class _PersistentWorkspaceReadTool(Tool):
                     path_param = properties.get("file_path")
                     if isinstance(path_param, dict):
                         path_description = path_param.get("description", "")
+                        english_param_description = (
+                            "Absolute host path or workspace-relative path for the file to read"
+                            if permission_profile == "full_access"
+                            else "Workspace-relative path for the file to read"
+                        )
                         path_param["description"] = path_description.replace(
                             "要读取的文件绝对路径",
                             "宿主机绝对路径或工作区相对路径"
@@ -76,7 +84,7 @@ class _PersistentWorkspaceReadTool(Tool):
                             else "办公空间内文件的逻辑相对路径（不接受绝对路径或包含 `..` 的路径段）",
                         ).replace(
                             "The absolute path to the file to read",
-                            english_path_description,
+                            english_param_description,
                         )
         super().__init__(card)
         self._base_tool = base_tool
@@ -89,7 +97,8 @@ class _PersistentWorkspaceReadTool(Tool):
         resolved, failure = await self._authorize(requested_path)
         if failure is not None:
             return failure
-        assert resolved is not None
+        if resolved is None:
+            return self._failure("unavailable")
 
         # The authorization decision is already known at this point. A missing
         # authorized target is different from a denied target, and is safe to

@@ -50,7 +50,14 @@ def resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> Resolve
         normalized = "."
     posix_path = PurePosixPath(normalized)
     windows_path = PureWindowsPath(requested_path)
-    if posix_path.is_absolute() or windows_path.is_absolute() or bool(windows_path.drive) or normalized.startswith("/"):
+    if any(
+        (
+            posix_path.is_absolute(),
+            windows_path.is_absolute(),
+            bool(windows_path.drive),
+            normalized.startswith("/"),
+        )
+    ):
         raise WorkspacePathError("forbidden")
 
     parts = tuple(part for part in normalized.split("/") if part not in ("", "."))
@@ -188,7 +195,14 @@ def resolve_write_path(scope: WorkspaceWriteScope, requested_path: str) -> Resol
     normalized = requested_path.replace("\\", "/")
     posix_path = PurePosixPath(normalized)
     windows_path = PureWindowsPath(requested_path)
-    if posix_path.is_absolute() or windows_path.is_absolute() or bool(windows_path.drive) or normalized.startswith("/"):
+    if any(
+        (
+            posix_path.is_absolute(),
+            windows_path.is_absolute(),
+            bool(windows_path.drive),
+            normalized.startswith("/"),
+        )
+    ):
         raise WorkspacePathError("forbidden", "workspace path is not writable")
 
     parts = tuple(part for part in normalized.split("/") if part not in ("", "."))

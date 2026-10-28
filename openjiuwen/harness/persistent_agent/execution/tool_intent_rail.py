@@ -161,7 +161,9 @@ class PersistentToolIntentRail(DeepAgentRail):
         """Record one final outcome for a call that passed the dispatch barrier."""
         state = self._state(ctx)
         emitter = self._binding.control.emitter
-        if state is None or not state["dispatched"] or state["completed"] or emitter is None:
+        if state is None:
+            return
+        if not state["dispatched"] or state["completed"] or emitter is None:
             return
         state["completed"] = True
 
@@ -180,13 +182,13 @@ class PersistentToolIntentRail(DeepAgentRail):
         # Retention uses the actual final dispatch result, never success prose in a transcript.
         # Bind the receipt to the result before later rails may replace its model-visible text.
         call = getattr(ctx.inputs, "tool_call", None)
-        if (
-            state["operation_id"] is not None
-            and call is not None
+        call_matches = (
+            call is not None
             and call.id == state["tool_call_id"]
             and call.name == state["tool_name"]
-            and self._params_digest(call.arguments) == state["params_digest"]
-        ):
+        )
+        digest_matches = call_matches and self._params_digest(call.arguments) == state["params_digest"]
+        if state["operation_id"] is not None and digest_matches:
             record_tool_completion(
                 getattr(ctx.inputs, "tool_msg", None), call, result, exception, state["args_summary"]
             )

@@ -281,7 +281,7 @@ def _open_regular(path) -> tuple[int, int]:
         raise HandoffFileError("not_a_file")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, flags, 0o644)
     except FileNotFoundError:
         raise HandoffFileError("not_found") from None
     except OSError as exc:
@@ -314,7 +314,10 @@ def read_for_handoff(resolved: ResolvedWorkspacePath, max_bytes: int) -> tuple[s
     digest = hashlib.sha256()
     size = 0
     try:
-        while chunk := os.read(descriptor, min(_READ_CHUNK, max_bytes + 1 - size)):
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK, max_bytes + 1 - size))
+            if not chunk:
+                break
             size += len(chunk)
             if size > max_bytes:
                 raise HandoffFileError("too_large")

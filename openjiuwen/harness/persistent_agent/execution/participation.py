@@ -257,7 +257,7 @@ async def judge_participation(spec, context, request, emitter) -> ParticipationO
         )
         try:
             decision, reason, extended = _parse(_content(response))
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             last_error = f"participation judgment failed: {exc}"
             continue
         if mentioned:

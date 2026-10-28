@@ -6,7 +6,7 @@ import asyncio
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -18,22 +18,39 @@ if TYPE_CHECKING:
     from ..schema.build_context import PersistentBuildContext
 
 
-def _declarations(agent):
+class _Declarations(NamedTuple):
     """Immutable selected declarations, excluding mutable model/rail internals."""
+
+    card_id: object
+    tool_owner_id: object
+    system_prompt: object
+    cwd: object
+    project_root: object
+    enable_task_loop: object
+    stream_task_lifecycle_id: int
+    max_iterations: object
+    auto_create_workspace: object
+    completion_timeout: object
+    skills: object
+    tools: tuple
+
+
+def _declarations(agent) -> _Declarations:
+    """Capture selected declarations for drift detection."""
     config = agent.deep_config
-    return (
-        agent.card.id,
-        config.tool_owner_id,
-        config.system_prompt,
-        config.cwd,
-        config.project_root,
-        config.enable_task_loop,
-        id(config.stream_task_lifecycle),
-        config.max_iterations,
-        config.auto_create_workspace,
-        config.completion_timeout,
-        tuple(config.skills or ()) if not isinstance(config.skills, str) else config.skills,
-        tuple((card.id, card.name, card.stateless) for card in config.tools or ()),
+    return _Declarations(
+        card_id=agent.card.id,
+        tool_owner_id=config.tool_owner_id,
+        system_prompt=config.system_prompt,
+        cwd=config.cwd,
+        project_root=config.project_root,
+        enable_task_loop=config.enable_task_loop,
+        stream_task_lifecycle_id=id(config.stream_task_lifecycle),
+        max_iterations=config.max_iterations,
+        auto_create_workspace=config.auto_create_workspace,
+        completion_timeout=config.completion_timeout,
+        skills=tuple(config.skills or ()) if not isinstance(config.skills, str) else config.skills,
+        tools=tuple((card.id, card.name, card.stateless) for card in config.tools or ()),
     )
 
 
@@ -44,7 +61,7 @@ class InvocationState:
     config: object
     model: object
     abilities: object
-    declarations: tuple
+    declarations: _Declarations
     owned_tools: tuple
     loop: asyncio.AbstractEventLoop | None = None
     active_task: asyncio.Task | None = None
@@ -70,12 +87,12 @@ class InvocationState:
 
     def validate_agent(self, agent):
         """Reject mutation or replacement of the bound runtime configuration."""
-        if (
-            agent.deep_config is not self.config
-            or agent.deep_config.model is not self.model
-            or agent.ability_manager is not self.abilities
-            or _declarations(agent) != self.declarations
-        ):
+        if any((
+            agent.deep_config is not self.config,
+            agent.deep_config.model is not self.model,
+            agent.ability_manager is not self.abilities,
+            _declarations(agent) != self.declarations,
+        )):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="Persistent runtime config drift")
 
 
@@ -104,7 +121,7 @@ async def invocation_scope(agent: "DeepAgent", *, context: "PersistentBuildConte
     bound = context.binding
     with bound.lock:
         _validate(agent, context)
-        if state.closed or state.closing or state.stopped or state.active_task is not None:
+        if any((state.closed, state.closing, state.stopped, state.active_task is not None)):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="Persistent call unavailable")
         state.loop = asyncio.get_running_loop()
         state.active_task = task

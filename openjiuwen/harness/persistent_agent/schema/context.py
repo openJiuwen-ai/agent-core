@@ -59,7 +59,7 @@ class GroupMessageQuery(ProtocolModel):
     @model_validator(mode="after")
     def validate_query(self) -> Self:
         """Require at least one criterion and an ordered time range."""
-        if self.query is None and self.since is None and self.until is None and self.sender_id is None:
+        if all((self.query is None, self.since is None, self.until is None, self.sender_id is None)):
             raise PydanticCustomError("persistent_context", "group search requires a query, time range, or sender")
         if self.since is not None and self.until is not None and self.since > self.until:
             raise PydanticCustomError("persistent_context", "group search time range is reversed")
@@ -164,7 +164,8 @@ class MaterialReadResult(InvocationRef):
         """Prevent incomplete or unavailable results from appearing empty."""
         if self.status == "found" and not self.items:
             raise PydanticCustomError("persistent_context", "found material result requires items")
-        if self.status == "empty" and (self.items or not self.query_complete or self.watermark is None):
+        incomplete_absence = self.items or not self.query_complete or self.watermark is None
+        if self.status == "empty" and incomplete_absence:
             raise PydanticCustomError("persistent_context", "empty material result requires complete absence")
         if (
             self.status == "partial"

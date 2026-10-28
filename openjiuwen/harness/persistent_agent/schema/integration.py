@@ -145,10 +145,12 @@ class GroupMessageReader(Protocol):
     async def recent_messages(
         self, context: "PersistentBuildContext", *, after: str | None = None, trigger_message_id: str | None = None
     ) -> "GroupMessagesResult":
-        """Messages after the cursor merged with a backfill from the trigger up to this read's upper bound,
-        deduplicated and without the trigger: a queued Request's trigger may be older than the cursor, and
+        """Messages after the cursor merged with a backfill from the trigger up to this read's upper bound.
+
+        Deduplicated and without the trigger: a queued Request's trigger may be older than the cursor, and
         what was said about it meanwhile is not in the window. ``scanned_through`` is the scan position the
-        host confirmed for the read after the cursor, or None to keep the cursor."""
+        host confirmed for the read after the cursor, or None to keep the cursor.
+        """
 
 
 class NativeReplyAdapter(Protocol):

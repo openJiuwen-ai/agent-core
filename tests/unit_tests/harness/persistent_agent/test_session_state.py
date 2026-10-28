@@ -71,7 +71,6 @@ def interruption(*requests, call_id="call-1"):
                 interrupt_requests={f"{call_id}-{index}": request for index, request in enumerate(requests)},
             )
         },
-        auto_confirm_mapping={f"{call_id}-0": "remember"},
     )
 
 
@@ -261,7 +260,6 @@ def test_interruption_round_trip_keeps_request_types_and_fields():
     assert requests == [permission, ask]
     assert requests[1].questions == ask.questions
     assert restored.ai_message == state.ai_message
-    assert restored.auto_confirm_mapping == state.auto_confirm_mapping
     assert (restored.iteration, restored.original_query) == (1, "please summarize")
 
 

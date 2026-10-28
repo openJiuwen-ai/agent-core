@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from ..schema.spec import PersistentAgentSpec
 
+
 @dataclass(frozen=True)
 class CapacityLimits:
     """Resolved limits of one model, in tokens."""

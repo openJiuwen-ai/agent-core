@@ -440,7 +440,10 @@ async def _drive(control: ExecutionControl, runner) -> AsyncGenerator[AgentEvent
     task = asyncio.create_task(runner)
     task.add_done_callback(lambda _: outbox.put_nowait(_END))
     try:
-        while (event := await outbox.get()) is not _END:
+        while True:
+            event = await outbox.get()
+            if event is _END:
+                break
             yield event
         task.result()
     finally:
@@ -480,13 +483,14 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
                 started["decision_event_id"] = decision_event_id
             await control.emitter.emit(EventType.EXECUTION_STARTED, started)
             record = await _load(context, store)
-            if (
-                "window_management" in spec.enabled_features
-                and request.kind in {"direct_message", "group_message"}
-                and (request.kind == "direct_message" or request.source.sender_kind == "human")
-                and context.execution.recovery_ref is None
-                and record.waiting is None
-            ):
+            window_ready = all((
+                "window_management" in spec.enabled_features,
+                context.execution.recovery_ref is None,
+                record.waiting is None,
+            ))
+            is_direct = request.kind == "direct_message"
+            is_human_group = request.kind == "group_message" and request.source.sender_kind == "human"
+            if window_ready and (is_direct or is_human_group):
                 history = window_messages(context.session)
                 if history_preview(history)["recent"]:
                     await judge_window(spec, context, request.text, history, control.emitter)
@@ -593,7 +597,7 @@ async def abort_persistent_request(context, *, reason: AbortReason) -> None:
     state = binding.runtime
     if agent is None or not isinstance(state, InvocationState):
         return  # The entry checks the reason before it enters the native call.
-    if state.closed or state.closing or state.stopping or state.stopped:
+    if any((state.closed, state.closing, state.stopping, state.stopped)):
         return
     # Published before abort_bound marks the binding as stopping, so cleanup always finds it.
     settled = asyncio.get_running_loop().create_future()
