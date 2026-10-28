@@ -169,12 +169,13 @@ def get_agent_history_root() -> str:
     Unlike ``get_workspace()``/``get_cwd()``, this is anchored to the
     jiuwenswarm host's system working directory rather than the current
     project, so history is not scattered across every project checkout.
-    Honors ``JIUWENSWARM_DATA_DIR`` / ``JIUWENSWARM_HOME`` -- the same
+    Honors ``JIUWENSWARM_DATA_DIR`` / ``JIUWENCLAW_DATA_DIR`` /
+    ``JIUWENSWARM_HOME`` -- the same
     env vars the jiuwenswarm host sets for multi-instance isolation
     (see jiuwenswarm.common.utils.get_user_workspace_dir) -- so agent-core
     stays decoupled from that package while still landing in the same root.
     """
-    data_dir = os.getenv("JIUWENSWARM_DATA_DIR")
+    data_dir = (os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or "").strip()
     if data_dir:
         return str(Path(data_dir).expanduser().resolve())
     home = os.getenv("JIUWENSWARM_HOME") or str(Path.home())
