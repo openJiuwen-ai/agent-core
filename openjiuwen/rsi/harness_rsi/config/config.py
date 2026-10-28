@@ -355,7 +355,10 @@ class PromotionConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PromotionConfig":
-        if data.get("policy_version", cls().policy_version) == "continuous_two_stage_v2" and "confirmation_runs" in data:
+        if (
+            data.get("policy_version", cls().policy_version) == "continuous_two_stage_v2"
+            and "confirmation_runs" in data
+        ):
             raise ValueError("continuous_two_stage_v2 has only target and full evaluations; remove confirmation_runs")
         return cls(
             policy_version=str(data.get("policy_version", cls().policy_version)),
@@ -396,7 +399,9 @@ class AutoCoordinatingHarnessConfig:
             if legacy_policy != "epoch_full_evaluation":
                 raise ValueError("unsupported scheduling.promotion_policy; use promotion.policy_version")
             if promotion_data.get("policy_version", "legacy_epoch_v1") != "legacy_epoch_v1":
-                raise ValueError("conflicting scheduling.promotion_policy and promotion.policy_version; remove the old selector")
+                raise ValueError(
+                    "conflicting scheduling.promotion_policy and promotion.policy_version; remove the old selector"
+                )
             promotion_data["policy_version"] = "legacy_epoch_v1"
         promotion = PromotionConfig.from_dict(promotion_data)
         model_configs = ModelConfigs(
