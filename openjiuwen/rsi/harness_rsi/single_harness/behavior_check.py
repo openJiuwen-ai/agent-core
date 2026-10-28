@@ -235,6 +235,7 @@ async def check_candidate_behavior(
             for attempt in range(tracker.max_attempts):
                 text = ""
                 errors: list[str] = []
+                received_model_output = False
                 try:
                     model = load_member_optimizer_model(model_config_ref)
                     async with asyncio.timeout(900):
@@ -244,6 +245,7 @@ async def check_candidate_behavior(
                             tools=None,
                         )
                     text = str(response.content or "")
+                    received_model_output = True
                     parsed = parse_yaml_or_json_object_response(text)
                     checked = _validate_observation(parsed, evidence)
                     errors = _observation_errors(parsed, checked)
@@ -251,8 +253,10 @@ async def check_candidate_behavior(
                         result = checked
                         result["validation_status"] = "completed"
                 except Exception as exc:
-                    validation_error = isinstance(exc, (ValueError, TypeError, KeyError, yaml.YAMLError))
-                    if not validation_error and not is_retryable_model_call_failure(exc):
+                    invalid_output = received_model_output and isinstance(
+                        exc, (ValueError, TypeError, KeyError, yaml.YAMLError),
+                    )
+                    if not invalid_output and not is_retryable_model_call_failure(exc):
                         result["error_type"] = type(exc).__name__
                         errors = [f"Observation unavailable: {type(exc).__name__}"]
                         result["validation_status"] = "failed"

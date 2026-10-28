@@ -2611,10 +2611,15 @@ class DiagnosisAgentStrategy:
 
         diagnosis_case_inputs = []
         for case in case_inputs:
-            continuous_score = case.evaluation_metadata.get("score_mode") == "continuous"
-            judge_case = case.evaluation_method == "llm_as_judge"
-            incomplete = case.score < 1.0 and (not judge_case or continuous_score)
-            if not case.evaluation_passed or incomplete:
+            if not case.evaluation_passed:
+                diagnosis_case_inputs.append(case)
+                continue
+            metadata = case.evaluation_metadata if isinstance(case.evaluation_metadata, dict) else {}
+            continuous_score = metadata.get("score_mode") == "continuous"
+            incomplete = case.score < 1.0 and (
+                case.evaluation_method != "llm_as_judge" or continuous_score
+            )
+            if incomplete:
                 diagnosis_case_inputs.append(case)
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,
