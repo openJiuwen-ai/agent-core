@@ -622,7 +622,20 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            if self._is_duplicate_tool_event(span, instance_info):
+            # Dedupe is a best-effort optimization and must fail OPEN: with
+            # the probe sharing this method's except-and-return fallback, a
+            # raising probe would swallow the rail's sole execute_tool span
+            # for the call — telemetry loss, strictly worse than the
+            # duplicate it guards against. Its own guard logs and treats
+            # the event as non-duplicate, so span creation proceeds.
+            try:
+                duplicate = self._is_duplicate_tool_event(span, instance_info)
+            except Exception as exc:
+                session_logger.warning(
+                    "otel agent handler: tool dedupe probe failed, fail-open: %s", exc
+                )
+                duplicate = False
+            if duplicate:
                 return
             extra_attrs: dict[str, Any] = {
                 GEN_AI_OPERATION_NAME: _OPERATION_NAME_EXECUTE_TOOL,
