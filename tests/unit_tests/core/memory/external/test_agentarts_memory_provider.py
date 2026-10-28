@@ -218,7 +218,7 @@ async def test_static_service_config_is_read_only_after_construction():
 def test_agentarts_extra_is_declared_in_pyproject():
     project_root = Path(__file__).resolve().parents[5]
     pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'agentarts = ["agentarts-sdk>=0.1.2,<0.2"]' in pyproject
+    assert 'agentarts = ["agentarts-sdk>=0.1.8,<0.2"]' in pyproject
 
 
 def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch):
@@ -441,6 +441,39 @@ async def test_search_tool_defaults_min_score_to_half_when_omitted_or_null():
 
 
 @pytest.mark.asyncio
+async def test_search_tool_passes_time_range_and_activation_filters():
+    provider = AgentArtsMemoryProvider(api_key="k", space_id="space", actor_id="u1")
+    fake = FakeAgentArtsClient()
+    provider._client = fake
+    await provider.initialize(session_id="search-session")
+
+    await provider.handle_tool_call(
+        "external_memory_search",
+        {"query": "x", "start_time": 1700000000000, "end_time": 1700086400000, "only_actived": True},
+    )
+
+    filters = fake.search_calls[-1]["filters"]
+    assert filters.start_time == 1700000000000
+    assert filters.end_time == 1700086400000
+    assert filters.only_actived is True
+
+
+@pytest.mark.asyncio
+async def test_search_tool_omits_time_range_and_activation_filters_when_unset():
+    provider = AgentArtsMemoryProvider(api_key="k", space_id="space", actor_id="u1")
+    fake = FakeAgentArtsClient()
+    provider._client = fake
+    await provider.initialize(session_id="search-session")
+
+    await provider.handle_tool_call("external_memory_search", {"query": "x"})
+
+    filters = fake.search_calls[-1]["filters"]
+    assert not hasattr(filters, "start_time")
+    assert not hasattr(filters, "end_time")
+    assert not hasattr(filters, "only_actived")
+
+
+@pytest.mark.asyncio
 async def test_search_tool_uses_call_runtime_scope_over_initialized_scope():
     provider = AgentArtsMemoryProvider(api_key="k", space_id="space")
     fake = FakeAgentArtsClient()
@@ -506,6 +539,13 @@ def test_tool_schema_and_prompt_are_backend_neutral():
         "event",
         "custom",
     ]
+    # Time-range / activation filters surfaced to the model.
+    assert properties["start_time"]["type"] == "integer"
+    assert "milliseconds" in properties["start_time"]["description"]
+    assert properties["end_time"]["type"] == "integer"
+    assert "milliseconds" in properties["end_time"]["description"]
+    assert properties["only_actived"]["type"] == "boolean"
+    assert "activated" in properties["only_actived"]["description"]
 
     prompt = provider.system_prompt_block()
     assert "External Memory" in prompt
