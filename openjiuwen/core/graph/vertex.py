@@ -751,6 +751,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                          event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
                          **self._log_message)
         except asyncio.CancelledError as exc:
+            # 取消属于异常终止：先把 error 填好，确保即便下方清理阶段的 await 期间
+            # 被二次取消（finally 提前执行），_stream_done 拿到的也是 error 而非
+            # True（误判为“成功完成”）。这是评审指出的二次取消失效问题的根因。
+            error = build_error(
+                StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR,
+                reason="stream-in node call cancelled",
+                node_id=self._node_id,
+            )
             cancelled_tasks = []
             finished_tasks = []
             error_tasks = {}
@@ -772,7 +780,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     pending_tasks.append(task)
 
             if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                try:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    # 清理阶段被二次取消：忽略，统一在末尾以 exc 重新抛出，
+                    # 此时 error 已在进入本分支时赋值，finally 不会再误判为成功。
+                    pass
 
             logger.warning(
                 f"Cancel to call stream-in node [{self._node_id}]",
@@ -783,13 +796,6 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     "error": error_tasks
                 },
                 **self._log_message
-            )
-            # 取消属于异常终止：回填错误并向上传播，
-            # 不再以 set_result(True) 让调用方把节点误判为“成功完成”。
-            error = build_error(
-                StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR,
-                reason="stream-in node call cancelled",
-                node_id=self._node_id,
             )
             raise exc
         except Exception as e:
