@@ -26,6 +26,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     bound_tool_content,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_search import JudgeSearchTool
+from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import MissingJudgeVerdictError, parse_judge_output
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
 
 
@@ -191,7 +192,14 @@ async def run_judge_agent(
             result = result.get("output", result.get("answer", result))
         # The assessment loop owns persistence, parsing and bounded correction.
         # A malformed verdict must reach it unchanged, including at the last turn.
-        return json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+        text = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+        try:
+            parse_judge_output(text)
+        except MissingJudgeVerdictError as exc:
+            raise JudgeIterationLimitError("Judge reading iteration limit reached") from exc
+        except ValueError:
+            return text
+        return text
     finally:
         for rail in agent.configured_rails():
             if isinstance(rail, JudgeReadOnlyRail):
