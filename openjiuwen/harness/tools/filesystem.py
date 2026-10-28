@@ -31,6 +31,7 @@ from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.rg_binary import resolve_rg_binary
+from openjiuwen.harness.tools.scheduled_session_guard import scheduled_session_guard
 
 
 _FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -1274,6 +1275,10 @@ class WriteFileTool(Tool):
         if not isinstance(content, str):
             return ToolOutput(success=False, error="content must be a string")
 
+        cron_guard = scheduled_session_guard(f"{path}\n{content}")
+        if cron_guard is not None:
+            return ToolOutput(success=False, error=cron_guard)
+
         content_bytes = len(content.encode("utf-8", errors="replace"))
         if content_bytes > self.MAX_CONTENT_SIZE:
             return ToolOutput(
@@ -1654,6 +1659,10 @@ class EditFileTool(Tool):
             return ToolOutput(success=False, error="file_path is required")
         if new_str is None:
             return ToolOutput(success=False, error="new_string is required")
+
+        cron_guard = scheduled_session_guard(f"{file_path}\n{new_str}")
+        if cron_guard is not None:
+            return ToolOutput(success=False, error=cron_guard)
 
         try:
             file_path = _resolve_tool_file_path(self.operation, file_path)
