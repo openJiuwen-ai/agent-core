@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import sys
 import threading
 import uuid
@@ -487,7 +488,12 @@ def _build_rail_from_file(params: dict[str, Any], context: Any) -> Any:
         class_name,
         package_root=_source_root(context),
     )
-    rail = rail_cls(**p)
+    factory = getattr(rail_cls, "from_plugin_context", None)
+    rail = factory(params=p, context=context) if callable(factory) else rail_cls(**p)
+    if inspect.isawaitable(rail):
+        if inspect.iscoroutine(rail):
+            rail.close()
+        raise TypeError("File rail from_plugin_context must be synchronous")
     if not isinstance(rail, AgentRail):
         raise TypeError(f"Resolved rail is not an AgentRail: {resolved} (got {type(rail).__name__})")
     return rail

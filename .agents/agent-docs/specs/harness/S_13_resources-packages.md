@@ -18,10 +18,17 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/resources/`、`openjiuwen/harness/extension_binder.py`、`openjiuwen/harness/schema/extension_spec.py`、`openjiuwen/harness/schema/deep_agent_spec.py`（Spec 部分） |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-27 |
 | 关联 feature | F_22_agent-template-card-and-async-loader.md |
 
 ## 范围 / 边界
+
+文件 Rail 可显式实现同步 `from_plugin_context(*, params, context)` classmethod。
+`harness.rail.file` 将已移除路径和类名的参数与当前 `BuildContext` 传给工厂；
+未声明工厂时保留原构造路径。两条路径均要求返回 `AgentRail`，拒绝异步工厂。
+文件 provider 不再声明独立的工厂能力版本常量；构造能力由实际调用和返回值校验体现，宿主不依赖该常量预检。
+运行句柄仅经 context 传递，不序列化进 manifest。JSON 的 file/class 声明不透传任意 params。
+Rail 绑定失败必须撤销该实例的部分初始化，不能只回滚已生成 ResourceRef 的前序资源。
 
 本规约定义 harness 的扩展包机制：Plugin / AgentTemplate 的 manifest 加载、解析、
 绑定、回滚。`resources/` 5 文件 + `extension_binder.py` 是"平台包 → 运行中的 DeepAgent"

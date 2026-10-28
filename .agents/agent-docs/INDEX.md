@@ -9,18 +9,19 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 272 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 268 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 199 |
-| [agent_teams/workflow](#module-3) | 15 |
-| [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 54 |
-| [未分类](#module-6) | 6 |
+| [agent_evolving/ttse](#module-2) | 1 |
+| [agent_teams](#module-3) | 193 |
+| [agent_teams/workflow](#module-4) | 15 |
+| [extensions/observability](#module-5) | 2 |
+| [harness](#module-6) | 55 |
+| [未分类](#module-7) | 6 |
 
 <a id="module-1"></a>
 
@@ -31,6 +32,14 @@ generated: true
 | [SDD-0024](designs/proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | D | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | @alan_cheng | agent_evolving, harness | — | — |
 
 <a id="module-2"></a>
+
+## agent_evolving/ttse
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261029_1036_ttse-consult-prerequisites](features/F_20261029_1036_ttse-consult-prerequisites.md) | F | TTSE 经验检索前置提示词约束 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/render.py, openjiuwen/agent_evolving/ttse/consult.py | 无独立 D：根据用户明确要求加强复杂任务及使用 skill 前的经验检索提示词，属于局部提示词调整，无独立设计。 |
+
+<a id="module-3"></a>
 
 ## agent_teams
 
@@ -236,7 +245,7 @@ generated: true
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | openjiuwen/agent_teams | — | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | openjiuwen/agent_teams | — | — |
 
-<a id="module-3"></a>
+<a id="module-4"></a>
 
 ## agent_teams/workflow
 
@@ -258,7 +267,7 @@ generated: true
 | [SDD-0027](designs/archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | D | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | @xiajing | agent_teams/workflow | — | — |
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | agent_teams/workflow, agent_teams | — | — |
 
-<a id="module-4"></a>
+<a id="module-5"></a>
 
 ## extensions/observability
 
@@ -267,7 +276,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | extensions/observability | — | — |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## harness
 
@@ -303,6 +312,7 @@ generated: true
 | [F_17_browser-runtime-reduction](features/harness/F_17_browser-runtime-reduction.md) | F | Browser runtime reduction | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_18_browser-receipts-and-local-continuity](features/harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](features/harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_20261027_1810_ttse-plugin-runtime](features/F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
 | [F_22_agent-template-card-and-async-loader](features/harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
@@ -328,7 +338,7 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## 未分类
 
