@@ -396,7 +396,8 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
     assert rail.before_invoke_count == 1
     assert rail.after_invoke_count == 1
     assert agent.is_initialized is True
-    assert fake_react.invoke_calls[0]["inputs"] == {
+    assert {key: value for key, value in fake_react.invoke_calls[0]["inputs"].items()
+            if key != "_steering_queue"} == {
         "query": "hello",
         "conversation_id": "c1",
     }
@@ -522,7 +523,8 @@ async def test_stream_single_round_branch() -> None:
     chunks = [chunk async for chunk in agent.stream("stream_input")]
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
-    assert fake_react.stream_calls[0]["inputs"] == {
+    assert {key: value for key, value in fake_react.stream_calls[0]["inputs"].items()
+            if key != "_steering_queue"} == {
         "query": "stream_input",
     }
 
@@ -1886,3 +1888,39 @@ async def test_create_subagent_writes_relative_files_to_inherited_artifact_root(
     sub2 = parent.create_subagent("worker", "sub_sess_2")
     assert sub2._inherited_artifact_root == str(artifact_root.resolve())
     assert "sub_agents" not in sub2._inherited_artifact_root
+
+
+def test_cached_subagent_inherits_log_dir_without_clearing_rails(tmp_path: Path) -> None:
+    """Reused DeepAgent instances keep registered rails when inheriting a log dir."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    child = DeepAgent(AgentCard(name="worker", description="worker")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            workspace=Workspace(root_path=str(workspace)),
+            auto_create_workspace=False,
+            enable_task_loop=False,
+            add_general_purpose_agent=False,
+        )
+    )
+    rail = MagicMock()
+    child._registered_rails = [rail]
+    child._initialized = True
+    parent = DeepAgent(AgentCard(name="parent", description="parent")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            workspace=Workspace(root_path=str(workspace)),
+            auto_create_workspace=False,
+            enable_task_loop=False,
+            add_general_purpose_agent=False,
+            invocation_log_dir=str(tmp_path / "logs"),
+            subagents=[child],
+        )
+    )
+
+    returned = parent.create_subagent("worker", "sub_sess")
+
+    assert returned is child
+    assert child._deep_config.invocation_log_dir == str(tmp_path / "logs")
+    assert child._registered_rails == [rail]
+    assert child._initialized is True

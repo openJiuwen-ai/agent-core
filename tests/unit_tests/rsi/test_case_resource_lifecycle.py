@@ -38,7 +38,7 @@ async def test_case_cleanup_preserves_concurrent_case_and_judge(tmp_path, monkey
     monkeypatch.setattr(case_backend, "_resolve_single_harness_ref", lambda refs: ("solver", "unused"))
     monkeypatch.setattr(case_backend, "load_member_optimizer_model", Mock())
     monkeypatch.setattr(case_backend, "_single_harness_rails", lambda *args, **kwargs: [])
-    monkeypatch.setattr(case_backend, "_attach_single_harness_trajectory_rail", Mock())
+    monkeypatch.setattr(case_backend, "_attach_single_harness_trajectory_rail", Mock(return_value=None))
 
     def factory(**kwargs):
         card = kwargs["card"]
@@ -97,3 +97,36 @@ async def test_case_cleanup_preserves_concurrent_case_and_judge(tmp_path, monkey
         for agent in agents:
             agent.ability_manager.teardown_tools()
         judge_manager.teardown_tools()
+
+
+@pytest.mark.asyncio
+async def test_evidence_archive_failure_keeps_completed_case(tmp_path, monkeypatch):
+    monkeypatch.setattr(Runner, "start", AsyncMock())
+    monkeypatch.setattr(Runner, "stop", AsyncMock())
+    monkeypatch.setattr(case_backend, "_resolve_single_harness_ref", lambda refs: ("solver", "unused"))
+    monkeypatch.setattr(case_backend, "load_member_optimizer_model", Mock())
+    monkeypatch.setattr(case_backend, "_single_harness_rails", lambda *args, **kwargs: [])
+    monkeypatch.setattr(case_backend, "_attach_single_harness_trajectory_rail", Mock(return_value=None))
+
+    def factory(**kwargs):
+        card = kwargs["card"]
+        manager = AbilityManager(owner_id=card.id)
+        agent = SimpleNamespace(
+            card=card, ability_manager=manager,
+            cleanup_task_resources=AsyncMock(), load_plugin=AsyncMock(),
+        )
+        return agent
+
+    monkeypatch.setattr(case_backend, "create_deep_agent", factory)
+    monkeypatch.setattr(case_backend, "run_agent_with_empty_response_recovery", AsyncMock(return_value="done"))
+    monkeypatch.setattr(
+        case_backend, "role_execution_evidence", Mock(side_effect=OSError("disk full")),
+    )
+    backend = case_backend.SingleHarnessExecutionBackend(EvaluatorConfig())
+    result = await backend.execute(
+        case={"case_id": "kept", "input": "test"}, output_dir=str(tmp_path / "kept"), session_id="kept",
+    )
+    assert result.response == "done"
+    assert result.execution_status == "passed"
+    assert result.error == ""
+    assert "disk full" in result.metadata["evidence_error"]

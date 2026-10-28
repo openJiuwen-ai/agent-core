@@ -23,6 +23,7 @@ from openjiuwen.core.common.logging.events import (
     LogEventType,
     LogLevel,
 )
+from openjiuwen.core.common.logging.invocation import capture_invocation_log
 from openjiuwen.core.common.logging.utils import get_session_id
 
 
@@ -87,6 +88,26 @@ class StructuredLoggerMixin:
 
     log_type: str
     config: Dict[str, Any]
+
+    def _capture_invocation_log(
+        self,
+        log_level: LogLevel,
+        msg: Any,
+        args: Tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        *,
+        exception: bool = False,
+    ) -> None:
+        """Capture once before a backend applies its global output level."""
+        capture_invocation_log(
+            self.log_type,
+            log_level,
+            msg,
+            args,
+            event=kwargs.get("event"),
+            event_type=kwargs.get("event_type"),
+            exc_info=True if exception else kwargs.get("exc_info"),
+        )
 
     @staticmethod
     def _auto_format_message(msg: Any, args: Tuple[Any, ...]) -> str:
