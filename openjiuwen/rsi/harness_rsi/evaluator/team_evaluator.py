@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.data_loader import load_json_cases
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import file_fingerprint, validate_case_fields
@@ -122,11 +123,22 @@ class TeamEvaluator:
         case_results_dir = eval_dir / CASE_RESULTS_DIR_NAME
         case_refs: list[EvaluationCaseTraceRef] = []
 
+        refs_path = str(harness_refs_path or "").strip()
+        try:
+            harness_refs = _load_harness_refs(refs_path) if refs_path else {}
+        except FileNotFoundError:
+            logger.warning("Harness refs file is missing: %s", refs_path)
+            raise
+        except (OSError, ValueError, yaml.YAMLError):
+            logger.warning("Harness refs file is unreadable or invalid: %s", refs_path)
+            raise
+
         input_fingerprint = _evaluation_input_fingerprint(
             cases=cases,
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
             evaluator_config=self.config,
+            harness_refs=harness_refs,
         )
         manifest_path = eval_dir / _EVALUATION_INPUT_FILE
         can_resume_cases = _stored_evaluation_fingerprint(manifest_path) == input_fingerprint
@@ -134,12 +146,6 @@ class TeamEvaluator:
             json.dumps({"fingerprint": input_fingerprint}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
-        refs_path = str(harness_refs_path or "").strip()
-        try:
-            harness_refs = _load_harness_refs(refs_path) if refs_path else {}
-        except (OSError, ValueError, yaml.YAMLError):
-            harness_refs = {}
         total_cases = len(cases)
         completed_cases = 0
         stage_lock = asyncio.Lock()
@@ -280,6 +286,7 @@ def _evaluation_input_fingerprint(
     team_skill_ref_path: str,
     harness_refs_path: str,
     evaluator_config: EvaluatorConfig | None = None,
+    harness_refs: dict[str, str] | None = None,
 ) -> str:
     payload = {
         "cases": cases,
@@ -290,10 +297,7 @@ def _evaluation_input_fingerprint(
     packages = {}
     refs_path = str(harness_refs_path or "").strip()
     if refs_path:
-        try:
-            loaded_refs = _load_harness_refs(refs_path)
-        except (OSError, ValueError, yaml.YAMLError):
-            loaded_refs = {}
+        loaded_refs = harness_refs if harness_refs is not None else _load_harness_refs(refs_path)
         for role, package_path in loaded_refs.items():
             package = Path(package_path).expanduser().resolve()
             packages[role] = _path_identity(str(package.parent if package.is_file() else package))

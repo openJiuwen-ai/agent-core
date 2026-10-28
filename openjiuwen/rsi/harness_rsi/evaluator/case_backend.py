@@ -328,10 +328,29 @@ class SingleHarnessExecutionBackend:
             "finalization_succeeded": bool(result_data.get("finalization_succeeded", False)),
             "finalization_error": str(result_data.get("finalization_error", ""))[:2000],
         }
-        case_root.mkdir(parents=True, exist_ok=True)
-        (case_root / "termination.json").write_text(json.dumps(termination, indent=2), encoding="utf-8")
-        log_paths = sorted((case_root / "logs").rglob("*.jsonl"))
-        runtime_logs = [path.relative_to(case_root).as_posix() for path in log_paths]
+        runtime_logs: list[str] = []
+        execution_evidence = None
+        evidence_error = ""
+        try:
+            case_root.mkdir(parents=True, exist_ok=True)
+            (case_root / "termination.json").write_text(json.dumps(termination, indent=2), encoding="utf-8")
+            log_paths = sorted((case_root / "logs").rglob("*.jsonl"))
+            runtime_logs = [path.relative_to(case_root).as_posix() for path in log_paths]
+            execution_evidence = role_execution_evidence(
+                Path(output_dir).expanduser().resolve() / ROLE_TRAJECTORY_DIR_NAME,
+                role_name or "solver",
+                root_recording=root_recording,
+                capture_issues=trajectory_rail.capture_issues if trajectory_rail is not None else None,
+                expected_model_calls=trajectory_rail.model_call_count if trajectory_rail is not None else None,
+                expected_tool_calls=trajectory_rail.tool_call_count if trajectory_rail is not None else None,
+            )
+        except Exception as exc:
+            evidence_error = str(exc)
+            logger.warning(
+                "[SingleHarnessExecutionBackend] failed to archive execution evidence for %s: %s",
+                case.get("case_id", ""),
+                exc,
+            )
         return CaseExecutionResult(
             response=response,
             execution_status=status,
@@ -353,14 +372,8 @@ class SingleHarnessExecutionBackend:
                 runtime_config=runtime_config,
                 execution_termination=termination,
                 runtime_logs=runtime_logs,
-                execution_evidence=role_execution_evidence(
-                    Path(output_dir).expanduser().resolve() / ROLE_TRAJECTORY_DIR_NAME,
-                    role_name or "solver",
-                    root_recording=root_recording,
-                    capture_issues=trajectory_rail.capture_issues if trajectory_rail is not None else None,
-                    expected_model_calls=trajectory_rail.model_call_count if trajectory_rail is not None else None,
-                    expected_tool_calls=trajectory_rail.tool_call_count if trajectory_rail is not None else None,
-                ),
+                execution_evidence=execution_evidence,
+                evidence_error=evidence_error,
             ),
         )
 
@@ -658,6 +671,7 @@ def _single_harness_metadata(
     execution_termination: dict[str, Any] | None = None,
     runtime_logs: list[str] | None = None,
     execution_evidence: dict[str, Any] | None = None,
+    evidence_error: str = "",
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "member_id": role_name,
@@ -680,6 +694,8 @@ def _single_harness_metadata(
         metadata["command_log"] = command_recorder.to_list()
     if swebench_model_patch_path:
         metadata["swebench_model_patch_path"] = swebench_model_patch_path
+    if evidence_error:
+        metadata["evidence_error"] = evidence_error
     return metadata
 
 

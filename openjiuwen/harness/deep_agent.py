@@ -1523,7 +1523,8 @@ class DeepAgent(BaseAgent):
             or self._deep_config.invocation_log_dir is not None
         ):
             return
-        self.configure(replace(self._deep_config, invocation_log_dir=parent_dir))
+        # Assign the field directly. configure() hot-reloads rails and the model.
+        self._deep_config = replace(self._deep_config, invocation_log_dir=parent_dir)
 
     @staticmethod
     def _bind_inherited_artifact_root(subagent: Any) -> Any:

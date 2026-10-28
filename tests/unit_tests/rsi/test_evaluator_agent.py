@@ -6,10 +6,11 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import LlmJudgeSignalExtractor
@@ -18,7 +19,12 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import LlmAsJudgeJudger, ScriptBasedJudger, build_judger, llm_as_judge
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace
-from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeBudgetRail, JudgeReadOnlyRail
+from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_runtime
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import (
+    JudgeBudgetRail,
+    JudgeIterationLimitError,
+    JudgeReadOnlyRail,
+)
 from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import parse_judge_output, score_judge_output, scoring_contract
 from openjiuwen.rsi.harness_rsi.evaluator.team_evaluator import TeamEvaluator, _evaluation_input_fingerprint
 from tests.unit_tests.rsi.test_evaluator import _Backend
@@ -562,3 +568,91 @@ def test_judge_model_or_threshold_changes_invalidate_reused_evaluations(tmp_path
     assert _evaluation_input_fingerprint(**kwargs) != _evaluation_input_fingerprint(
         **{**kwargs, "evaluator_config": replace(config, judge_success_score=0.9)}
     )
+
+
+def _judge_agent():
+    agent = MagicMock()
+    agent.configured_rails.return_value = []
+    agent.cleanup_task_resources = AsyncMock()
+    agent.card = SimpleNamespace(id="judge-id", name="judge")
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_in_budget_missing_verdict_returns_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(judge_runtime, "build_judge_agent", lambda *_args, **_kwargs: _judge_agent())
+    monkeypatch.setattr(Runner, "run_agent", AsyncMock(return_value="Read the file before grading."))
+    text = await judge_runtime.run_judge_agent(
+        EvaluatorConfig(), tmp_path, "judge", tmp_path / "tools.jsonl",
+    )
+    assert text == "Read the file before grading."
+
+
+@pytest.mark.asyncio
+async def test_exhausted_missing_verdict_is_iteration_limit(tmp_path, monkeypatch):
+    captured = {}
+
+    def build(*_args, budget=None, **_kwargs):
+        captured["budget"] = budget
+        return _judge_agent()
+
+    async def run_agent(*_args, **_kwargs):
+        captured["budget"].turns = captured["budget"].iterations
+        return "Read the file before grading."
+
+    monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(judge_runtime, "build_judge_agent", build)
+    monkeypatch.setattr(Runner, "run_agent", run_agent)
+    with pytest.raises(JudgeIterationLimitError):
+        await judge_runtime.run_judge_agent(
+            EvaluatorConfig(judge_agent_max_iterations=1), tmp_path, "judge", tmp_path / "tools.jsonl",
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_harness_refs_stop_evaluation(tmp_path):
+    refs = tmp_path / "refs.yaml"
+    refs.write_text("- broken\n", encoding="utf-8")
+    evaluator = TeamEvaluator(EvaluatorConfig(evaluation_method="exact_match"))
+    with pytest.raises(ValueError):
+        await evaluator.evaluate_batch(
+            cases=[],
+            team_skill_ref_path="",
+            harness_refs_path=str(refs),
+            output_dir=str(tmp_path / "out"),
+        )
+    assert not (tmp_path / "out" / "evaluation_input.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_harness_refs_file_stops_evaluation(tmp_path):
+    evaluator = TeamEvaluator(EvaluatorConfig(evaluation_method="exact_match"))
+    with pytest.raises(FileNotFoundError):
+        await evaluator.evaluate_batch(
+            cases=[],
+            team_skill_ref_path="",
+            harness_refs_path=str(tmp_path / "missing.yaml"),
+            output_dir=str(tmp_path / "out"),
+        )
+
+
+def test_fingerprint_uses_loaded_harness_refs(tmp_path, monkeypatch):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    refs = tmp_path / "refs.yaml"
+    refs.write_text("solver: ignored\n", encoding="utf-8")
+
+    def fail_reload(_path):
+        raise AssertionError("fingerprint reloaded harness refs")
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.harness_rsi.evaluator.team_evaluator._load_harness_refs", fail_reload,
+    )
+    digest = _evaluation_input_fingerprint(
+        cases=[],
+        team_skill_ref_path="",
+        harness_refs_path=str(refs),
+        harness_refs={"solver": str(package)},
+    )
+    assert isinstance(digest, str) and digest
