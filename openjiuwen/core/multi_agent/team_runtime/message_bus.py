@@ -147,13 +147,14 @@ class MessageBus:
                 if subscription is None:
                     continue
                 try:
-                    await subscription.deactivate()
-                    # 真正摘除 MQ 侧订阅，避免 _subscribers 泄漏与同一 session 重复订阅失败
+                    # unsubscribe 内部已含 deactivate：把两步拆开，确保即便
+                    # deactivate 步骤异常，MQ 侧订阅仍被真正摘除，避免
+                    # _subscribers 泄漏与同一 session 重复订阅失败（评审 P2）。
                     await self._mq.unsubscribe(topic)
-                    logger.debug(f"[{self.__class__.__name__}] cleanup_session: deactivated {topic}")
+                    logger.debug(f"[{self.__class__.__name__}] cleanup_session: unsubscribed {topic}")
                 except Exception as exc:
                     logger.error(
-                        f"[{self.__class__.__name__}] cleanup_session: failed to deactivate {topic}: {exc}",
+                        f"[{self.__class__.__name__}] cleanup_session: failed to unsubscribe {topic}: {exc}",
                         exc_info=True,
                     )
 
