@@ -454,6 +454,7 @@ async def test_bridge_skips_when_no_pending() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    tool.save_todos = AsyncMock()
     _snapshot_boundary(tool, todos)
 
     await rail.after_task_iteration(ctx)

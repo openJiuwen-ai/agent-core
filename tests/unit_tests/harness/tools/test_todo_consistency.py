@@ -13,7 +13,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
-from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.schema.task import TaskPlan, TodoItem, TodoStatus
 from openjiuwen.harness.tools.todo import TodoCreateTool, TodoGetTool, TodoListTool, TodoModifyTool, TodoTool
 from openjiuwen.harness.tools.todo_store import _BINDING, bind_todo_batch, prepare_todo_batch
 
@@ -101,6 +101,44 @@ async def test_parallel_updates_and_separate_instances(env):
     assert saved["todos"][0]["status"] == "completed"
     assert saved["todos"][1]["content"] == "changed"
     assert len({r.todo_snapshot["revision"] for r in results}) == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_sync_and_append_preserve_both_changes_without_legacy_cache(env, monkeypatch):
+    from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
+
+    creator, modifier, _, session, path = env
+    before = (await create(creator, session)).todo_snapshot
+    plan = TaskPlan(tasks=[
+        TodoItem(id="A", status=TodoStatus.COMPLETED),
+        TodoItem(id="B", status=TodoStatus.PENDING),
+    ])
+    rail = TaskPlanningRail()
+    rail.tools = [modifier]
+    ctx = SimpleNamespace(session=session, extra={}, agent=SimpleNamespace(
+        load_state=lambda _session: SimpleNamespace(task_plan=plan),
+    ))
+
+    async def legacy_cache(*args, **kwargs):
+        raise AssertionError("Plan sync must not read or write the legacy cache")
+
+    monkeypatch.setattr(TodoTool, "load_todos", legacy_cache)
+    monkeypatch.setattr(TodoTool, "save_todos", legacy_cache)
+    await asyncio.gather(
+        rail.after_task_iteration(ctx),
+        modifier.invoke({"action": "append", "todos": [
+            {"id": "C", "content": "third", "status": "pending"},
+        ]}, session=session),
+    )
+    saved = json.loads(path.read_text())
+    assert saved["revision"] == before["revision"] + 2
+    assert [(item["id"], item["status"]) for item in saved["todos"]] == [
+        ("A", "completed"), ("B", "pending"), ("C", "pending"),
+    ]
+    assert saved["todos"][1] == before["todos"][1]
+    unchanged = path.read_bytes()
+    await rail.after_task_iteration(ctx)
+    assert path.read_bytes() == unchanged
 
 
 @pytest.mark.asyncio

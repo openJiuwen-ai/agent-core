@@ -492,18 +492,12 @@ class TaskPlanningRail(DeepAgentRail):
 
         session_id = ctx.session.get_session_id()
 
-        from openjiuwen.harness.tools.todo_store import bind_todo_batch, transact
+        from openjiuwen.harness.tools.todo_store import bind_todo_batch
         bind_todo_batch(ctx, self._find_todo_tool())
 
-        async def apply():
-            try:
-                todos = await tool._load_todos(session_id)
-            except Exception:
-                logger.debug("TaskPlanningRail: no todos to sync")
-                return
-
+        async def apply(todos):
             if not todos:
-                return
+                return 0
 
             # Sync todo.json FROM TaskPlan (but don't regress terminal states)
             status_by_task_id = {
@@ -523,16 +517,14 @@ class TaskPlanningRail(DeepAgentRail):
                     todo.status = desired
                     changed = True
 
-            if not changed:
-                return
+            return len(todos) if changed else 0
 
-            await tool._save_todos(session_id, todos)
+        count = await tool.update_todos(session_id, apply)
+        if count:
             logger.info(
                 "TaskPlanningRail: synced %d todos from TaskPlan",
-                len(todos),
+                count,
             )
-
-        await transact(tool, session_id, apply)
 
     async def _sync_plan_from_todos(self, ctx: AgentCallbackContext) -> None:
         """Sync TaskPlan FROM todo.json (terminal states only).
