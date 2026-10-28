@@ -1689,7 +1689,11 @@ async def test_workflow_cancel():
 
     from openjiuwen.core.session.checkpointer import CheckpointerFactory
     session_exist = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
-    assert session_exist is False
+    # 取消现在按“异常终止”处理：CompiledGraph._invoke 把 CancelledError 作为 exception
+    # 传给 post_workflow_execute，复用 checkpointer 的“异常保留快照”分支，已落盘快照
+    # 不再被“正常完成”分支全量清理（见 PR #3439 / tests/unit_tests/core/graph/test_cancel_path.py）。
+    # 因此取消后会话仍然存在，便于排查与恢复，而非被立即清理。
+    assert session_exist is True
 
 
 async def test_questioner_context_sharing():

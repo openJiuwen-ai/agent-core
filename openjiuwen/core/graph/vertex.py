@@ -808,6 +808,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             error_callback(e)
             error = e
         finally:
+            # 取消分支已在进入时把 error 置为非 None，故这里 set_result 拿到的是
+            # error 而非 True：下游 StreamActor 看到的是“节点取消/失败”，不会被误判为
+            # 成功完成；trace 发送仍照常执行（已判空保护），不依赖任务是否跑完。
             self._stream_done.set_result(error if error else True)
             await self.__trace_component_stream_input_send__()
 
