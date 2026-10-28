@@ -148,6 +148,8 @@ class MessageBus:
                     continue
                 try:
                     await subscription.deactivate()
+                    # 真正摘除 MQ 侧订阅，避免 _subscribers 泄漏与同一 session 重复订阅失败
+                    await self._mq.unsubscribe(topic)
                     logger.debug(f"[{self.__class__.__name__}] cleanup_session: deactivated {topic}")
                 except Exception as exc:
                     logger.error(
@@ -188,7 +190,8 @@ class MessageBus:
         async with self._subscription_lock:
             for topic, subscription in list(self._active_subscriptions.items()):
                 try:
-                    await subscription.deactivate()
+                    # unsubscribe 内含 deactivate，真正摘除 MQ 侧订阅
+                    await self._mq.unsubscribe(topic)
                     logger.debug(f"[{self.__class__.__name__}] Deactivated subscription: {topic}")
                 except Exception as e:
                     logger.error(
