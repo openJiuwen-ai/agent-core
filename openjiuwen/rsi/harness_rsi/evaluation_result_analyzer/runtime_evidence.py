@@ -11,13 +11,15 @@ from typing import Any
 
 _CONFIG_FIELDS = {
     "max_iterations", "on_max_iterations", "solver_max_iterations", "solver_on_max_iterations",
-    "max_iterations_hard_limit", "host_max_iterations", "hard_max_iterations", "solver_hard_max_iterations", "host_hard_limit",
+    "max_iterations_hard_limit", "host_max_iterations", "hard_max_iterations",
+    "solver_hard_max_iterations", "host_hard_limit",
     "max_output_tokens", "timeout", "timeout_seconds", "role", "case_id", "evaluation_id",
     "task_id", "invocation_id", "status", "source", "effective", "limits", "solver", "runtime",
     "allowed_config_fields", "candidate_editable", "host_limits", "effective_config", "runtime_config",
 }
 _TERMINATION_FIELDS = {
-    "truncated_by_max_iterations", "termination_reason", "result_type", "max_iterations", "iterations_used", "used_iterations",
+    "truncated_by_max_iterations", "termination_reason", "result_type",
+    "max_iterations", "iterations_used", "used_iterations",
     "iteration_count", "on_max_iterations", "budget_exhausted", "finalization_attempted",
     "finalization_succeeded", "finalization_status", "finalization_error", "final_answer_available",
     "final_output_available", "artifacts_available", "output_available", "artifact_count",
@@ -27,7 +29,11 @@ _TERMINATION_FIELDS = {
     "finalization", "attempted", "succeeded", "success", "effective_max_iterations",
     "effective_on_max_iterations", "actual_iterations", "actual_model_calls", "completion_status",
 }
-_SECRET_KEY = re.compile(r"api.?key|authorization|password|secret|credential|access.?token|(?:^|[_-])token$|environment|headers|prompt|messages|request_body|model_config", re.I)
+_SECRET_KEY = re.compile(
+    r"api.?key|authorization|password|secret|credential|access.?token|"
+    r"(?:^|[_-])token$|environment|headers|prompt|messages|request_body|model_config",
+    re.I,
+)
 _SECRET_TEXT = re.compile(
     r"(?i)(bearer\s+)[^\s,;\"']+|"
     r"((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)[\"']?\s*[:=]\s*)"
@@ -90,8 +96,10 @@ def read_execution_context(
                 else:
                     data = json.loads(source.read_text(encoding="utf-8"))
                     if isinstance(data, dict):
-                        value = _project(data, fields)
-                        status = "available"
+                        projected = _project(data, fields)
+                        if isinstance(projected, dict):
+                            value = dict(projected)
+                            status = "available"
                     else:
                         status = "invalid"
             except (OSError, ValueError):
@@ -99,8 +107,10 @@ def read_execution_context(
         elif isinstance(execution.get(name), dict):
             inline = execution[name]
             if not any(key in inline for key in ("path", "file")):
-                value = _project(inline, fields)
-                status = "available" if value else "unknown"
+                projected = _project(inline, fields)
+                if isinstance(projected, dict):
+                    value = dict(projected)
+                    status = "available" if value else "unknown"
         if source is None:
             provenance = "outside_case_rejected"
         else:
@@ -129,7 +139,8 @@ def prepare_runtime_evidence(
                    "total_log_bytes": _MAX_LOG_TOTAL_BYTES, "total_source_bytes": _MAX_LOG_TOTAL_BYTES,
                    "max_log_files": 32},
         "copy_policy": "Complete files within 4 MiB; larger files retain tail and head within input/output budgets. "
-                       "Tail byte offsets are exact; original tail line numbers remain unknown without scanning the omitted middle.",
+                       "Tail byte offsets are exact; original tail line numbers "
+                       "remain unknown without scanning the omitted middle.",
         "structured": {}, "logs": [], "missing": [],
     }
     for name, filename in (("runtime_config", "runtime_config.json"), ("execution_termination", "termination.json")):
@@ -144,7 +155,10 @@ def prepare_runtime_evidence(
     if isinstance(raw_logs, str):
         raw_logs = [raw_logs]
     declared = isinstance(raw_logs, list) and bool(raw_logs)
-    sources = [_local_source(case_dir, item, "logs") for item in raw_logs] if declared else sorted((case_dir / "logs").rglob("*.jsonl"))
+    if declared:
+        sources = [_local_source(case_dir, item, "logs") for item in raw_logs]
+    else:
+        sources = sorted((case_dir / "logs").rglob("*.jsonl"))
     expanded: list[Path | None] = []
     for source in sources:
         if source is not None and source.is_dir():
@@ -231,9 +245,13 @@ def _copy_log(*, source: Path, target: Path, source_budget: int, output_budget: 
                 except ValueError:
                     event = {"excerpt": text}
                 if isinstance(event, dict):
-                    identity = {key: str(event[key])[:160] for key in (
-                        "agent_id", "session_id", "invocation_id", "parent_invocation_id", "role", "trace_id", "member_id",
-                    ) if key in event}
+                    identity = {}
+                    for key in (
+                        "agent_id", "session_id", "invocation_id", "parent_invocation_id",
+                        "role", "trace_id", "member_id",
+                    ):
+                        if key in event:
+                            identity[key] = str(event.get(key, ""))[:160]
                     if identity and identity not in identities and len(identities) < 8:
                         identities.append(_redact(identity))
                     if "truncated" in event:
@@ -323,7 +341,10 @@ def _initial_log_search(runtime_dir: Path, manifest: dict[str, Any]) -> dict[str
                   "then termination keywords including INFO; adjacent hits deduplicated",
         "hits": hits, "omitted_matches": omitted, "max_hits": 50, "max_summary_chars": 500,
         "max_total_bytes": 32768, "truncated": bool(omitted),
-        "notice": "Only bounded copied records were searched. Missing/omitted content is unknown, not negative evidence.",
+        "notice": (
+            "Only bounded copied records were searched. "
+            "Missing/omitted content is unknown, not negative evidence."
+        ),
     }
     path = runtime_dir / "runtime_log_search.json"
     path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")

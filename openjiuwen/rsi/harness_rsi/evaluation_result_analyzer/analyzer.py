@@ -1735,7 +1735,10 @@ def _prepare_diagnosis_evidence(*, case: CaseAnalysisInput, runtime_dir: Path) -
         case_dir=Path(case.result_path).parent, execution=case.execution_metadata, runtime_dir=runtime_dir,
         recorded_termination_reason=case.termination_reason,
     )
-    _write_json(runtime_dir / "task_clauses.json", {"provenance": "case.input", "clauses": build_task_clauses(case.input)})
+    _write_json(
+        runtime_dir / "task_clauses.json",
+        {"provenance": "case.input", "clauses": build_task_clauses(case.input)},
+    )
     history = project_execution_history(
         _read_json_if_exists(Path(case.result_path).parent / "judge" / "normalized_trace.json")
     )
@@ -2214,12 +2217,26 @@ def _diagnosis_validation_conflicts(
     return errors
 
 
+def _contract_clause_ids(item: dict[str, Any]) -> list[Any]:
+    """Collect clause ids without a multi-clause comprehension."""
+    checks = item.get("task_contract_checks") or []
+    clause_ids = []
+    for check in checks:
+        if isinstance(check, dict):
+            clause_ids.append(check.get("clause_id"))
+    return clause_ids
+
+
 def _diagnosis_repair_progress(errors: list[str], accepted: list[dict[str, Any]]) -> dict[str, Any]:
     """Fingerprint unresolved fields/codes and accepted claims, ignoring prose churn."""
     unresolved = []
     for error in errors:
         code = re.search(r"\[([a-z_]+)\]", error)
-        field = re.search(r"(?:task_contract_checks|validation_observations|verifier_observations)(?:\[\d+\])?(?:\.[a-z_]+)?", error)
+        field = re.search(
+            r"(?:task_contract_checks|validation_observations|verifier_observations)"
+            r"(?:\[\d+\])?(?:\.[a-z_]+)?",
+            error,
+        )
         if code or field:
             unresolved.append({"code": code.group(1) if code else "evidence_conflict",
                                "field": field.group(0) if field else "target_ref"})
@@ -2234,7 +2251,7 @@ def _diagnosis_repair_progress(errors: list[str], accepted: list[dict[str, Any]]
     passed = [
         {"target_ref": item.get("target_ref"), "failure_cluster": item.get("failure_cluster"),
          "evidence_refs": item.get("evidence_refs"),
-         "clause_ids": [check.get("clause_id") for check in (item.get("task_contract_checks") or []) if isinstance(check, dict)]}
+         "clause_ids": _contract_clause_ids(item)}
         for item in accepted
     ]
 
@@ -2592,13 +2609,13 @@ class DiagnosisAgentStrategy:
         output_dir = Path(invocation.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        diagnosis_case_inputs = [
-            case for case in case_inputs
-            if not case.evaluation_passed or (
-                case.score < 1.0 and (case.evaluation_method != "llm_as_judge"
-                                     or case.evaluation_metadata.get("score_mode") == "continuous")
-            )
-        ]
+        diagnosis_case_inputs = []
+        for case in case_inputs:
+            continuous_score = case.evaluation_metadata.get("score_mode") == "continuous"
+            judge_case = case.evaluation_method == "llm_as_judge"
+            incomplete = case.score < 1.0 and (not judge_case or continuous_score)
+            if not case.evaluation_passed or incomplete:
+                diagnosis_case_inputs.append(case)
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,
             signals,
@@ -2614,10 +2631,12 @@ class DiagnosisAgentStrategy:
         diagnosis_failed_count = len(
             {str(item.get("case_id", "") or "") for item in per_case_results if item.get("analysis_failed")}
         )
-        diagnosis_partial_count = len({
-            str(item.get("case_id", "") or "") for item in per_case_results
-            if isinstance(item.get("output_repair"), dict) and item["output_repair"].get("status") == "partial"
-        })
+        partial_cases = set()
+        for item in per_case_results:
+            repair = item.get("output_repair") if isinstance(item, dict) else None
+            if isinstance(repair, dict) and repair.get("status") == "partial":
+                partial_cases.add(str(item.get("case_id", "") or ""))
+        diagnosis_partial_count = len(partial_cases)
 
         issues = await self._aggregate_diagnosis(
             per_case_results,

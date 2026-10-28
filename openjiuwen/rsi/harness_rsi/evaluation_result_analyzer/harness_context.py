@@ -172,7 +172,10 @@ def prepare_harness_context(
             "allowed_on_max_iterations": ["error", "return_observations"],
             "max_iterations_range": "positive integer <= effective runtime_config.json max_iterations_hard_limit",
             "effective_values": "runtime_evidence/runtime_config.json; missing historical values are unknown",
-            "policy": "Only these two fields are editable. Host limits, models, authentication and scoring are read-only.",
+            "policy": (
+                "Only these two fields are editable. Host limits, models, "
+                "authentication and scoring are read-only."
+            ),
         }
         for name in ("identity.md", "soul.md"):
             _local_path(root, name)

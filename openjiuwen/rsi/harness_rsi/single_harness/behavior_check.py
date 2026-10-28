@@ -251,7 +251,8 @@ async def check_candidate_behavior(
                         result = checked
                         result["validation_status"] = "completed"
                 except Exception as exc:
-                    if not isinstance(exc, (ValueError, TypeError, KeyError, yaml.YAMLError)) and not is_retryable_model_call_failure(exc):
+                    validation_error = isinstance(exc, (ValueError, TypeError, KeyError, yaml.YAMLError))
+                    if not validation_error and not is_retryable_model_call_failure(exc):
                         result["error_type"] = type(exc).__name__
                         errors = [f"Observation unavailable: {type(exc).__name__}"]
                         result["validation_status"] = "failed"

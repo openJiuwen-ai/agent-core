@@ -65,7 +65,8 @@ def read_runtime_policy(
             raise ValueError("runtime.yaml must be a package-local regular file")
         if policy_path.stat().st_size > 16384:
             raise ValueError("runtime.yaml exceeds the 16 KiB configuration limit")
-        overrides = validate_runtime_policy(yaml.safe_load(policy_path.read_text(encoding="utf-8")), hard_limit=hard_limit)
+        policy_text = policy_path.read_text(encoding="utf-8")
+        overrides = validate_runtime_policy(yaml.safe_load(policy_text), hard_limit=hard_limit)
         values.update(overrides)
         source = RUNTIME_POLICY_FILE
     validate_runtime_policy(values, hard_limit=hard_limit)

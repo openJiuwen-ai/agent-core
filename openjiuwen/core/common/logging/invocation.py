@@ -202,7 +202,7 @@ class InvocationLogScope:
             set_session_id(current_trace)
             set_member_id(current_member)
 
-    def _write(self, level: str, log_type: str, fields: dict[str, Any], *, final: bool = False) -> None:
+    def write_record(self, level: str, log_type: str, fields: dict[str, Any], *, final: bool = False) -> None:
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": _label(level),
@@ -251,7 +251,7 @@ class InvocationLogScope:
             self.dropped_records += 1
             self.last_capture_error = error_name
 
-    def _close(self) -> None:
+    def close_log(self) -> None:
         with self._lock:
             self._closed = True
             try:
@@ -293,7 +293,7 @@ def invocation_log_scope(
     status = "success"
     exception = ""
     try:
-        scope._write("INFO", "invocation", {"event_type": "invocation_start", "status": "running"})
+        scope.write_record("INFO", "invocation", {"event_type": "invocation_start", "status": "running"})
         yield scope
     except BaseException as exc:
         status = "cancelled" if isinstance(exc, (CancelledError, GeneratorExit, KeyboardInterrupt)) else "failure"
@@ -302,14 +302,14 @@ def invocation_log_scope(
         raise
     finally:
         try:
-            scope._write(
+            scope.write_record(
                 "INFO" if status == "success" else "ERROR",
                 "invocation",
                 {"event_type": "invocation_end", "status": status, "exception": exception},
                 final=True,
             )
         finally:
-            scope._close()
+            scope.close_log()
             _ACTIVE_INVOCATION.reset(token)
             set_session_id(previous_trace)
             set_member_id(previous_member)
@@ -366,4 +366,4 @@ def _capture(
     exception = _exception_summary(exc_info)
     if exception:
         fields = {**fields, "exception": exception}
-    scope._write(level_name.upper(), log_type, fields)
+    scope.write_record(level_name.upper(), log_type, fields)

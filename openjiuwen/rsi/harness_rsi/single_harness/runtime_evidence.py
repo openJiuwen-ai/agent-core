@@ -39,6 +39,8 @@ def inconclusive_capability_cases(
         metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
         execution = metadata.get("execution", {}) if isinstance(metadata, dict) else {}
         quality = execution.get("execution_evidence") if isinstance(execution, dict) else None
-        if not isinstance(quality, dict) or quality.get("status") != "complete" or quality.get("timing_complete") is not True:
+        status_complete = isinstance(quality, dict) and quality.get("status") == "complete"
+        timing_complete = isinstance(quality, dict) and quality.get("timing_complete") is True
+        if not status_complete or not timing_complete:
             inconclusive.add(case_id)
     return inconclusive
