@@ -1033,11 +1033,9 @@ class ReActAgent(BaseAgent):
         )
 
         finalizing = bool(ctx.extra.get("_finalizing_max_iterations"))
+        rail_attempt_cap = {"_rail_max_attempts": 1} if finalizing else {}
         try:
-            if finalizing:
-                ai_message = await self._railed_model_call(ctx, _rail_max_attempts=1)
-            else:
-                ai_message = await self._railed_model_call(ctx)
+            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
         except Exception as exc:
             if ctx.extra.get("_model_exception_recovery_attempted"):
                 raise
@@ -1068,7 +1066,7 @@ class ReActAgent(BaseAgent):
                 model_context=context,
                 react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
             )
-            ai_message = await self._railed_model_call(ctx)
+            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
 
         if not isinstance(ai_message, AssistantMessage):
             return ai_message

@@ -167,3 +167,14 @@ def test_normalized_role_trace_marks_bounded_projection_incomplete(tmp_path, mon
     assert len(traces) == 1
     assert traces[0]["projection_complete"] is False
     assert len(traces[0]["messages"]) == 2
+
+
+def test_null_capability_cases_stay_inconclusive(tmp_path):
+    from openjiuwen.rsi.harness_rsi.single_harness.runtime_evidence import inconclusive_capability_cases
+
+    ref = tmp_path / "eval.yaml"
+    ref.write_text("cases:\n", encoding="utf-8")
+    missing = [{"target_case_id": "one"}]
+    assert inconclusive_capability_cases(str(ref), missing) == {"one"}
+    ref.write_text("name: eval\n", encoding="utf-8")
+    assert inconclusive_capability_cases(str(ref), missing) == set()

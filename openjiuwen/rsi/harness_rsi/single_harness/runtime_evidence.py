@@ -22,7 +22,10 @@ def inconclusive_capability_cases(
     if not isinstance(payload, dict):
         return set(required)
     inconclusive = set()
-    for case in payload.get("cases", []):
+    cases = payload.get("cases", [])
+    if not isinstance(cases, list):
+        return set(required)
+    for case in cases:
         if not isinstance(case, dict):
             continue
         case_id = str(case.get("case_id", ""))

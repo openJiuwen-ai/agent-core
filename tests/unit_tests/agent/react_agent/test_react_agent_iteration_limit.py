@@ -137,6 +137,27 @@ async def test_final_window_removes_tools_reintroduced_by_rails(rig):
 
 
 @pytest.mark.asyncio
+async def test_finalization_recovery_keeps_single_rail_attempt(rig):
+    agent, context, _, _, _ = rig
+    ctx = AgentCallbackContext(agent=agent, inputs=InvokeInputs(query="find"), session=MagicMock())
+    ctx.extra["_finalizing_max_iterations"] = True
+    calls = []
+
+    async def railed(_ctx, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("transient")
+        return AssistantMessage(content="recovered")
+
+    with patch.object(agent, "_railed_model_call", side_effect=railed), patch.object(
+        agent, "_recover_from_model_exception", AsyncMock(return_value=True),
+    ):
+        result = await agent._call_model(ctx, context, None)
+    assert result.content == "recovered"
+    assert calls == [{"_rail_max_attempts": 1}, {"_rail_max_attempts": 1}]
+
+
+@pytest.mark.asyncio
 async def test_finalization_preserves_force_finish(rig):
     agent, context, session, _, _ = rig
     agent.config.on_max_iterations = "final_answer"
