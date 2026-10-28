@@ -1,6 +1,6 @@
 # S_28 群聊输入与文件归档
 
-最近修订：2026-10-10。关联特性：[F_112](../features/F_112_group-conversation-and-delegation.md)。
+最近修订：2026-10-22。关联特性：[F_112](../features/F_112_group-conversation-and-delegation.md)。
 
 ## 职责与入口
 
@@ -81,6 +81,10 @@ GroupMessageHandler 位于群聊目录，继承 MessageHandler 的生命周期�
 
 ## 配置与历史
 
+群聊摘录渲染前将宿主或旧 checkpoint 中的 `zh` 语言别名归一为 `cn`，并复用
+`resolve_language` 解析支持的语言；不能直接用原始 blueprint 的语言值索引文案表。
+语言兼容不改变消息正文、收件人或成员消费水位。
+
 普通 Team 与群聊是两个独立的运行时模式。首次运行的结构化输入 `type=group_chat` 建立群聊运行时，普通输入建立普通 Team；无输入的新运行时默认普通 Team。无需 enable_group_chat 开关，摘录条数固定为 5。
 
 模式保存在 `TeamRuntimeContext.team_spec.conversation_mode`，取值为 team 或 group_chat；成员启动通过现有上下文继承，checkpoint 恢复时保留模式。已有运行时不因后续消息切换模式；入口拒绝与模式不一致的外部业务消息，interact 返回 conversation_mode_mismatch。空输入恢复保留现有模式。
@@ -92,6 +96,8 @@ GroupMessageHandler 位于群聊目录，继承 MessageHandler 的生命周期�
 由 core 装配的外部 CLI 成员也继承固定模式，在启动时构造对应工具 schema 与群聊 policy。独立 ExternalTeamClient 默认普通模式，可以拉取群聊摘录，但不会根据收件箱消息自动切换工具集。
 
 Agent 使用 `group_send_message(content, client_message_id, mentions=[])` 发表公开回复，与宿主输入复用同一归档和通知逻辑。
+群聊中的 `send_message(to="user")` 返回错误并提示使用公开群聊工具，不能成功写入宿主不会展示的私信。
+普通 Team 的用户回复和群成员之间的私信不受此约束影响。
 
 公开历史按 team/session 隔离：
 

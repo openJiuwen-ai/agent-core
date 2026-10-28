@@ -26,10 +26,10 @@ from openjiuwen.core.memory.long_term_memory import LongTermMemory
 
 
 class MockMemory(LongTermMemory):
-    """Mock class for LongTermMemory."""
+    """Per-test mock for LongTermMemory (a Singleton — construct via ``create()`` only)."""
 
     def __init__(self):
-        super().__init__()
+        # Intentionally skip LongTermMemory.__init__: real stores are not needed.
         self.add_messages_called = False
         self.add_messages_args = None
         self.add_messages_kwargs = None
@@ -42,6 +42,13 @@ class MockMemory(LongTermMemory):
         self.search_user_history_summary_called = False
         self.search_user_history_summary_kwargs = None
         self.search_user_history_summary_error = None
+
+    @classmethod
+    def create(cls) -> "MockMemory":
+        """Return a fresh mock; plain ``MockMemory()`` would reuse the Singleton instance."""
+        mock = object.__new__(cls)
+        cls.__init__(mock)
+        return mock
 
     async def add_messages(self, *args, **kwargs):
         self.add_messages_called = True
@@ -87,7 +94,7 @@ class TestMemoryWriteComponent:
         Verifies that messages are correctly written to long-term memory
         and the output contains success=True.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
 
         config = MemoryWriteCompConfig(
             memory=mock_memory,
@@ -119,7 +126,7 @@ class TestMemoryWriteComponent:
         Verifies that the timestamp parameter is correctly passed to add_messages.
         """
 
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
 
         config = MemoryWriteCompConfig(memory=mock_memory)
         component = MemoryWriteComponent(config)
@@ -143,7 +150,7 @@ class TestMemoryWriteComponent:
         Verifies COMPONENT_MEMORY_WRITE_INPUT_PARAM_ERROR is raised
         when messages list is empty.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
 
         config = MemoryWriteCompConfig(memory=mock_memory)
         component = MemoryWriteComponent(config)
@@ -166,7 +173,7 @@ class TestMemoryWriteComponent:
         Verifies COMPONENT_MEMORY_WRITE_INPUT_PARAM_ERROR is raised
         when messages field is not provided.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         config = MemoryWriteCompConfig(memory=mock_memory)
         executable = MemoryWriteExecutable(config)
 
@@ -182,7 +189,7 @@ class TestMemoryWriteComponent:
         Verifies COMPONENT_MEMORY_WRITE_INVOKE_CALL_FAILED is raised
         when add_messages throws an exception.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.add_messages_error = Exception("DB connection failed")
 
         config = MemoryWriteCompConfig(memory=mock_memory)
@@ -219,7 +226,7 @@ class TestMemoryRetrievalComponent:
             mem_info=MemInfo(mem_id="summary_1", content="Test summary", type=MemoryType.SUMMARY),
             score=0.8,
         )
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.search_user_mem_result = [mock_mem_result]
         mock_memory.search_user_history_summary_result = [mock_summary_result]
 
@@ -270,7 +277,7 @@ class TestMemoryRetrievalComponent:
                 score=0.88,
             ),
         ]
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.search_user_mem_result = mock_mem_results
         mock_memory.search_user_history_summary_result = mock_summary_results
 
@@ -297,7 +304,7 @@ class TestMemoryRetrievalComponent:
         Test memory retrieval with no matching results.
         Verifies that empty list is returned when no memories match the query.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.search_user_mem_result = []
         mock_memory.search_user_history_summary_result = []
 
@@ -321,7 +328,7 @@ class TestMemoryRetrievalComponent:
         Verifies COMPONENT_MEMORY_RETRIEVAL_INPUT_PARAM_ERROR is raised
         when query is whitespace only.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.search_user_mem_result = []
 
         config = MemoryRetrievalCompConfig(memory=mock_memory)
@@ -345,7 +352,7 @@ class TestMemoryRetrievalComponent:
         Verifies COMPONENT_MEMORY_RETRIEVAL_INPUT_PARAM_ERROR is raised
         when query field is not provided.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         config = MemoryRetrievalCompConfig(memory=mock_memory)
         executable = MemoryRetrievalExecutable(config)
 
@@ -361,7 +368,7 @@ class TestMemoryRetrievalComponent:
         Verifies COMPONENT_MEMORY_RETRIEVAL_INVOKE_CALL_FAILED is raised
         when search_user_mem throws an exception.
         """
-        mock_memory = MockMemory()
+        mock_memory = MockMemory.create()
         mock_memory.search_user_mem_error = Exception("Search failed")
 
         config = MemoryRetrievalCompConfig(memory=mock_memory)

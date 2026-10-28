@@ -13,11 +13,11 @@ from urllib.parse import urlparse
 from openai import OpenAI
 
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.schema.config import (
     VisionModelConfig,
     is_vision_model_config_complete,
 )
-from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 SANDBOX_PATH_MARKER = "home/user"
@@ -65,9 +65,7 @@ def _build_image_content(image_path_or_url: str) -> Dict[str, Any]:
 
     image_path = Path(image_path_or_url).expanduser()
     if not image_path.exists() or not image_path.is_file():
-        raise FileNotFoundError(
-            f"Image path does not exist or is not a file: {image_path_or_url}"
-        )
+        raise FileNotFoundError(f"Image path does not exist or is not a file: {image_path_or_url}")
 
     image_bytes = image_path.read_bytes()
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -107,23 +105,30 @@ def _invoke_chat_completion(
     image_content: Dict[str, Any],
 ) -> str:
     if not config.api_key:
-        raise ValueError(
-            "Vision model config missing api_key."
-        )
+        raise ValueError("Vision model config missing api_key.")
 
-    client = OpenAI(api_key=config.api_key, base_url=config.base_url)
-    response = client.chat.completions.create(
-        model=config.model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    image_content,
-                ],
-            }
-        ],
-    )
+    import httpx
+
+    # Direct connection. The Windows system proxy returns 407 before the vision gateway answers.
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    with httpx.Client(trust_env=False, timeout=timeout) as http_client:
+        client = OpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            http_client=http_client,
+        )
+        response = client.chat.completions.create(
+            model=config.model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        image_content,
+                    ],
+                }
+            ],
+        )
     response_text = _extract_response_text(response)
     if not response_text:
         raise ValueError("Vision model returned empty content.")
@@ -166,7 +171,7 @@ async def _call_vision_model(
                 image_content,
             )
             return response_text, config.model
-        except Exception as exc:  
+        except Exception as exc:
             last_error = exc
             error_text = str(exc)
             is_retryable = any(code in error_text for code in ("429", "500", "502", "503", "504"))
@@ -180,7 +185,6 @@ async def _call_vision_model(
 
 
 class ImageOCRTool(Tool):
-
     def __init__(
         self,
         language: str = "cn",
@@ -225,7 +229,6 @@ class ImageOCRTool(Tool):
 
 
 class VisualQuestionAnsweringTool(Tool):
-
     def __init__(
         self,
         language: str = "cn",

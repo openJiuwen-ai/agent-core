@@ -532,6 +532,9 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_group_to_user": (
+        "Use group_send_message to reply in a group chat; send_message(to='user') is not a public group reply."
+    ),
     "send_message.error_leader_to_user": (
         "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
     ),

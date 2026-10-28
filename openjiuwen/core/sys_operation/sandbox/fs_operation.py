@@ -28,6 +28,7 @@ class FsOperation(BaseFsOperation, BaseSandboxMixin):
     def __init__(self, name: str, mode: OperationMode, description: str, run_config: SandboxRunConfig):
         super().__init__(name, mode, description, run_config)
         self._init_sandbox_context(run_config, op_type="fs")
+        self.supports_conditional_write = bool(run_config.config.supports_conditional_write)
 
     async def read_file(
             self, path: str, *, mode: Literal['text', 'bytes'] = "text",

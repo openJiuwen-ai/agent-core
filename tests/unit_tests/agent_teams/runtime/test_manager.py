@@ -509,6 +509,7 @@ class TestRunOrganizationTurn:
         entry.interact_gate.close_and_drain.assert_not_called()
         session.post_run.assert_not_called()
         agent.invoke.assert_not_called()
+        assert manager.activate.await_args.kwargs["preserve_conversation_mode"] is True
 
     @pytest.mark.asyncio
     async def test_idle_marker_ends_turn_and_runs_finalize(self):
@@ -545,14 +546,20 @@ class TestRunOrganizationTurn:
             )
         )
         manager.finalize = AsyncMock(side_effect=finalize)
+        activated = []
+
+        async def on_activated():
+            activated.append(chunks_consumed.copy())
 
         result = await manager.run_organization_turn(
             team_name="team-a",
             session_id="session-1",
             inputs={"query": "claim task"},
+            on_activated=on_activated,
         )
 
         assert result is True
+        assert activated == [[]]
         agent.stream.assert_called_once()
         agent.invoke.assert_not_awaited()
         assert chunks_consumed == ["content", "idle"]

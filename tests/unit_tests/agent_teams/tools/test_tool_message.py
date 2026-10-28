@@ -320,3 +320,17 @@ async def test_broadcast_leaves_dormant_members_asleep(db):
     assert result.success, result.error
     on_restarted.assert_not_awaited()
     assert (await db.member.get_member("sleepy", TEAM_NAME)).status == MemberStatus.DORMANT.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_group_reply_cannot_disappear_in_private_user_mailbox(db, lang):
+    backend = _backend(db, DEV_1, False)
+    backend.conversation_mode = "group_chat"
+    send = _send_tool(create_team_tools(role="teammate", agent_team=backend, lang=lang))
+    result = await send.invoke({"to": "user", "content": "Received"})
+    assert not result.success
+    assert "group_send_message" in result.error
+    assert await db.message.get_team_messages(team_name=TEAM_NAME) == []
+    coordinated = await send.invoke({"to": DEV_2, "content": "Private coordination"})
+    assert coordinated.success

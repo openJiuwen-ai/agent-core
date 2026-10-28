@@ -269,6 +269,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.database import TeamDatabase
 
 
+class OrganizationWakeRejected(Exception):
+    """An organization wake cannot be delivered in this session mode."""
+
+
 class OrganizationRuntimeManager:
     """Create organizations and bind active leaders without restarting teams."""
 
@@ -833,6 +837,106 @@ class OrganizationRuntimeManager:
                 deleted,
             )
             return result
+
+    async def release_membership(
+        self,
+        *,
+        organization_id: str,
+        owner_team_id: str,
+        session_id: str,
+    ) -> None:
+        """Unregister members without deleting tasks, outputs, or team sessions.
+
+        ``dissolve_organization`` erases organization rows and stops expert
+        teams. This path only detaches the live membership so a finished swarm
+        round is no longer an active organization.
+        """
+
+        async with self._membership_lock:
+            try:
+                _, owner_backend = await self._resolve_leader(owner_team_id, session_id)
+            except ValueError:
+                logger.info(
+                    "organization membership release skipped; owner runtime is gone org=%s team=%s",
+                    organization_id,
+                    owner_team_id,
+                )
+                return
+            manager = get_process_org_manager(
+                organization_id=organization_id,
+                db=owner_backend.db,
+                messager=owner_backend.messager,
+                session_id=session_id,
+            )
+            organization = await manager.get_organization()
+            summary_team = await manager.task_pool.get_summary_team()
+            service = self._unclaimed_services.pop((session_id, organization_id), None)
+            if service is not None:
+                await service.stop()
+
+            member_team_ids = {leader.team_id for leader in organization.leaders} if organization is not None else set()
+            member_team_ids.add(owner_team_id)
+            if summary_team is not None and summary_team.summary_team_id:
+                member_team_ids.add(summary_team.summary_team_id)
+            for team_id in member_team_ids:
+                key = (session_id, team_id)
+                worker = self._leader_turn_workers.pop(key, None)
+                if worker is not None and not worker.done() and worker is not asyncio.current_task():
+                    worker.cancel()
+                self._leader_turn_queues.pop(key, None)
+                self._scheduled_leader_messages = {
+                    message_key for message_key in self._scheduled_leader_messages if message_key[:2] != key
+                }
+                self._scheduled_parent_reviews = {
+                    review_key for review_key in self._scheduled_parent_reviews if review_key[:2] != key
+                }
+                self._scheduled_summary_executions = {
+                    summary_key for summary_key in self._scheduled_summary_executions if summary_key[:2] != key
+                }
+                await self._release_org_subscriber(organization_id, session_id, team_id)
+                entry = await self._team_runtime_manager.pool.get(team_id)
+                if entry is None or entry.current_session_id != session_id:
+                    continue
+                backend = getattr(entry.agent, "team_backend", None)
+                if backend is None:
+                    continue
+                backend.org_task_manager = None
+                backend.org_message_service = None
+                self._unbind_organization_workspace(entry.agent, backend)
+                spawn_manager = getattr(entry.agent, "spawn_manager", None)
+                for handle in getattr(spawn_manager, "spawned_handles", {}).values():
+                    teammate = getattr(handle, "agent_ref", None)
+                    teammate_backend = getattr(teammate, "team_backend", None)
+                    if teammate is not None and teammate_backend is not None:
+                        self._unbind_organization_workspace(teammate, teammate_backend)
+                self._set_owner_lifecycle_prompt(entry.agent, is_owner=False)
+                harness = getattr(entry.agent, "harness", None)
+                remove_tool = getattr(harness, "remove_tool", None)
+                if callable(remove_tool):
+                    from openjiuwen.agent_teams.organization.tools import ORG_LEADER_TOOL_NAMES
+
+                    for tool_name in ORG_LEADER_TOOL_NAMES:
+                        remove_tool(tool_name)
+                self._team_organizations.pop(key, None)
+
+            await manager.task_pool.release_membership()
+            self._summary_team_locks.pop((session_id, organization_id), None)
+            remove_process_org_manager(
+                organization_id=organization_id,
+                db=owner_backend.db,
+                session_id=session_id,
+            )
+            from openjiuwen.agent_teams.organization.workspace import (
+                remove_organization_workspace_manager,
+            )
+
+            remove_organization_workspace_manager(organization_id, session_id)
+            logger.info(
+                "organization membership released: org=%s owner=%s teams=%s",
+                organization_id,
+                owner_team_id,
+                sorted(member_team_ids),
+            )
 
     async def get_organization(self, *, organization_id: str, team_id: str, session_id: str) -> OrganizationSpec | None:
         """Read organization state through an active member's shared database."""
@@ -2340,9 +2444,12 @@ class OrganizationRuntimeManager:
 
         A ``PAUSED`` leader gets a dedicated organization turn. A ``RUNNING``
         leader that is already idle/settled (open stream, no in-flight round)
-        receives the prompt via ``interact`` so the existing stream handles it
-        — no finalize/re-activate reentrancy. Busy ``RUNNING`` leaders keep
-        polling until they pause or settle.
+        receives the prompt on that stream. Team sessions use ``interact``.
+        Group-chat sessions inject the prompt through the current leader
+        runtime so the session mode stays ``group_chat``. Busy ``RUNNING``
+        leaders keep polling until they pause or settle. A permanent mode
+        rejection ends that wake instead of parking it for a retry that
+        cannot succeed.
         """
 
         key = (session_id, team_id)
@@ -2477,6 +2584,13 @@ class OrganizationRuntimeManager:
                         summary_requeued = await self._check_summary_closeout(
                             team_id, session_id, summary_key, queue, original_inputs
                         )
+                except OrganizationWakeRejected as exc:
+                    logger.warning(
+                        "Organization leader wake rejected for team {} session {}: {}",
+                        team_id,
+                        session_id,
+                        exc,
+                    )
                 except Exception:
                     turn_failed = True
                     queue.appendleft(original_inputs)
@@ -2692,22 +2806,35 @@ class OrganizationRuntimeManager:
         session_id: str,
         inputs: object,
     ) -> bool:
-        """Hand an org prompt to a RUNNING idle leader via the interact path."""
+        """Hand an org prompt to a RUNNING idle leader on its open stream."""
         query = inputs.get("query") if isinstance(inputs, dict) else None
         if not str(query or "").strip():
             return False
-        result = await self._team_runtime_manager.interact(
-            str(query),
-            team_name=team_id,
-            session_id=session_id,
-        )
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        backend = getattr(getattr(entry, "agent", None), "team_backend", None)
+        mode = getattr(backend, "conversation_mode", "team")
+        if mode == "group_chat":
+            result = await self._team_runtime_manager.deliver_organization_prompt(
+                str(query),
+                team_name=team_id,
+                session_id=session_id,
+            )
+        else:
+            result = await self._team_runtime_manager.interact(
+                str(query),
+                team_name=team_id,
+                session_id=session_id,
+            )
         if not result:
+            reason = getattr(result, "reason", None)
             team_logger.warning(
                 "Organization interact wake failed for team {} session {}: {}",
                 team_id,
                 session_id,
-                getattr(result, "reason", None),
+                reason,
             )
+            if reason == "conversation_mode_mismatch":
+                raise OrganizationWakeRejected(reason)
             return False
         return True
 

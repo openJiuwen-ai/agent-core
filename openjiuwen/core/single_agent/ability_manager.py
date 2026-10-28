@@ -8,8 +8,8 @@ import asyncio
 import json
 import os
 import traceback
-from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable
+from dataclasses import dataclass, field
+from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable, Set
 
 import anyio
 from pydantic import BaseModel
@@ -74,6 +74,94 @@ class AbilityExecutionError(AgentError):
             **kwargs,
         )
         self.tool_message = tool_message
+
+
+def _unprocessed_tool_note(tool_call: ToolCall, raised: bool) -> ToolMessage:
+    """Stands for a result whose processing did not finish; its content stays out of the context."""
+    name = getattr(tool_call, "name", "") or ""
+    if raised:
+        content = (
+            f"[Error not included] Tool '{name}' raised an exception, but processing of the error did not "
+            "finish; the error content is not included in the context. Verify the actual effect."
+        )
+    else:
+        content = (
+            f"[Result not included] Tool '{name}' returned, but processing of its result did not finish; "
+            "the content is not included in the context. Verify the actual effect."
+        )
+    return ToolMessage(content=content, tool_call_id=tool_call.id)
+
+
+@dataclass
+class _ObservedToolCallContext(AgentCallbackContext):
+    """A tool call's context that remembers the rail chains which failed.
+
+    Used only while results are reported (``on_tool_result``). On an error path the ``@rail``
+    wrapper only logs a failing ON_TOOL_EXCEPTION / AFTER_TOOL_CALL chain and re-raises the
+    tool's error, so that error looks processed although its processing did not finish.
+    """
+
+    failed_events: Set[AgentCallbackEvent] = field(default_factory=set, init=False, repr=False)
+
+    async def fire(self, event: AgentCallbackEvent) -> None:
+        """Fire as usual and remember the event when its chain raises."""
+        try:
+            await super().fire(event)
+        except Exception:
+            self.failed_events.add(event)
+            raise
+
+
+class _ToolResultTracker:
+    """Result state of each call in one batch, reported through ``on_tool_result``.
+
+    Every reported message may enter the context: ``None`` while an attempt runs, a note
+    once the tool returned or raised but rails have not finished, and the final message
+    once they have. Content that has not been fully processed is never reported.
+    """
+
+    def __init__(self, on_tool_result: Callable[[ToolCall, Optional[ToolMessage]], None]):
+        self._report = on_tool_result
+        self._states: Dict[str, str] = {}
+        self._messages: Dict[str, ToolMessage] = {}
+        self._errors: Dict[str, Exception] = {}
+
+    def started(self, tool_call: ToolCall) -> None:
+        """An attempt starts: no result yet, and an earlier attempt's outcome is dropped."""
+        self._states.pop(tool_call.id, None)
+        self._messages.pop(tool_call.id, None)
+        self._errors.pop(tool_call.id, None)
+        self._report(tool_call, None)
+
+    def returned(self, tool_call: ToolCall) -> None:
+        """The tool returned; its result is not processed yet, so only the note may be used."""
+        self._mark(tool_call, "returned", _unprocessed_tool_note(tool_call, raised=False))
+
+    def raised(self, tool_call: ToolCall, error: Exception) -> None:
+        """The tool raised ``error``; its error is not processed yet, so only the note may be used."""
+        self._errors[tool_call.id] = error
+        self._mark(tool_call, "raised", _unprocessed_tool_note(tool_call, raised=True))
+
+    def processed(self, tool_call: ToolCall, message: ToolMessage) -> None:
+        """Every rail finished; ``message`` is the final one."""
+        self._mark(tool_call, "processed", message)
+
+    def state(self, call_id: str) -> Optional[str]:
+        """``returned``, ``raised``, ``processed`` or None while an attempt runs."""
+        return self._states.get(call_id)
+
+    def error(self, call_id: str) -> Optional[Exception]:
+        """The exception the tool itself raised in the current attempt."""
+        return self._errors.get(call_id)
+
+    def message(self, call_id: str) -> Optional[ToolMessage]:
+        """The latest reported message: the note or the final message."""
+        return self._messages.get(call_id)
+
+    def _mark(self, tool_call: ToolCall, state: str, message: ToolMessage) -> None:
+        self._states[tool_call.id] = state
+        self._messages[tool_call.id] = message
+        self._report(tool_call, message)
 
 
 def resolve_tool_message(
@@ -1081,7 +1169,9 @@ class AbilityManager:
             tool_call: Union[ToolCall, List[ToolCall]],
             session: Session,
             parallel_tool_calls: bool = True,
-            tag=None
+            tag=None,
+            *,
+            on_tool_result: Optional[Callable[[ToolCall, Optional[ToolMessage]], None]] = None,
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute ability call(s) with per-tool rail hooks.
 
@@ -1091,6 +1181,13 @@ class AbilityManager:
             ctx: Shared callback context for tool-call lifecycle
             tool_call: Single tool call or list of tool calls
             session: Session instance
+            on_tool_result: Optional synchronous callback receiving, while the batch runs, the
+                message each call would leave in the context: ``None`` when an attempt starts,
+                a note as soon as the tool returns or raises (its content is not processed
+                yet), and the final message once AFTER_TOOL_CALL / ON_TOOL_EXCEPTION rails
+                have finished. Lets a caller keep the facts an abort would otherwise lose.
+                With it, a call whose processing was cut off ends the batch with its note,
+                never with unprocessed content. Interrupted calls are not reported.
 
         Returns:
             List of (result, ToolMessage) tuples
@@ -1098,6 +1195,7 @@ class AbilityManager:
         tool_calls = self._normalize_tool_calls(tool_call)
         if not tool_calls:
             return []
+        tracker = _ToolResultTracker(on_tool_result) if on_tool_result is not None else None
 
         # Each tool call gets an isolated callback context to avoid races
         # between concurrent BEFORE/AFTER_TOOL_CALL hooks. Copy ``extra`` so
@@ -1105,8 +1203,9 @@ class AbilityManager:
         tool_contexts: List[AgentCallbackContext] = []
         call_coros = []
         shared_extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+        context_type = _ObservedToolCallContext if tracker is not None else AgentCallbackContext
         for single_tool_call in tool_calls:
-            tool_ctx = AgentCallbackContext(
+            tool_ctx = context_type(
                 agent=ctx.agent,
                 inputs=ToolCallInputs(
                     tool_call=single_tool_call,
@@ -1133,14 +1232,16 @@ class AbilityManager:
                     ctx.steering_queue
                 )
             tool_contexts.append(tool_ctx)
-            call_coros.append(
-                self._railed_execute_single_tool_call(
-                    ctx=tool_ctx,
-                    tool_call=single_tool_call,
-                    session=session,
-                    tag=tag,
-                )
+            call_coro = self._railed_execute_single_tool_call(
+                ctx=tool_ctx,
+                tool_call=single_tool_call,
+                session=session,
+                tag=tag,
+                tracker=tracker,
             )
+            if tracker is not None:
+                call_coro = self._report_final_tool_message(call_coro, tool_ctx, single_tool_call, tracker)
+            call_coros.append(call_coro)
 
         results = []
         scheduled_tasks: List[asyncio.Task] = []
@@ -1191,6 +1292,11 @@ class AbilityManager:
 
                 if isinstance(result, asyncio.CancelledError):
                     tc = tool_calls[i]
+                    tracked = tracker.message(tc.id) if tracker is not None else None
+                    if tracked is not None:
+                        # The tool had returned or raised before the cancel: keep that fact, not its content.
+                        final_results.append((None, tracked))
+                        continue
                     error_msg = f"[Interrupted] Tool '{tc.name}' execution was cancelled by user."
                     logger.warning(error_msg)
                     tool_message = ToolMessage(
@@ -1225,7 +1331,11 @@ class AbilityManager:
 
                 tool_result = None
                 tool_message = None
-                if isinstance(tool_ctx.inputs, ToolCallInputs):
+                if tracker is not None and tracker.state(tool_calls[i].id) in ("returned", "raised"):
+                    # The tool returned or raised but processing did not finish: neither the result
+                    # on ``inputs.tool_msg`` nor the unprocessed error may reach the context.
+                    tool_message = tracker.message(tool_calls[i].id)
+                elif isinstance(tool_ctx.inputs, ToolCallInputs):
                     tool_result = tool_ctx.inputs.tool_result
                     tool_message = resolve_tool_message(tool_ctx.inputs, result)
 
@@ -1307,6 +1417,36 @@ class AbilityManager:
 
         return final_results
 
+    @staticmethod
+    async def _report_final_tool_message(
+            call_coro,
+            tool_ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            tracker: _ToolResultTracker,
+    ):
+        """Report the final message once AFTER_TOOL_CALL / ON_TOOL_EXCEPTION rails have finished."""
+        inputs = tool_ctx.inputs if isinstance(tool_ctx.inputs, ToolCallInputs) else None
+        try:
+            result = await call_coro
+        except ToolInterruptException:
+            raise
+        except Exception as exc:
+            failed = getattr(tool_ctx, "failed_events", None)
+            if tracker.state(tool_call.id) == "raised" and exc is tracker.error(tool_call.id) and not failed:
+                # The tool's own error came through and every rail chain on the way finished.
+                message = resolve_tool_message(inputs, exc) if inputs is not None else None
+                if message is None:
+                    message = ToolMessage(content=f"Ability execution error: {str(exc)}", tool_call_id=tool_call.id)
+                tracker.processed(tool_call, message)
+            # Otherwise a rail chain failed after the tool returned or raised: the note stays.
+            raise
+        message = resolve_tool_message(inputs, None) if inputs is not None else None
+        if message is None and isinstance(result, tuple) and len(result) == 2:
+            message = result[1]
+        if message is not None:
+            tracker.processed(tool_call, message)
+        return result
+
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,
         after=AgentCallbackEvent.AFTER_TOOL_CALL,
@@ -1318,6 +1458,7 @@ class AbilityManager:
             tool_call: ToolCall,
             session: Session,
             tag=None,
+            tracker: Optional[_ToolResultTracker] = None,
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
         skip_result = None
@@ -1341,12 +1482,28 @@ class AbilityManager:
             if ctx.inputs.tool_args is not None:
                 tool_call.arguments = ctx.inputs.tool_args
 
-        result, tool_msg = await self._execute_single_tool_call(
-            tool_call=tool_call,
-            session=session,
-            tag=tag,
-            callback_context=ctx,
-        )
+        if tracker is not None:
+            # Each attempt starts without a result; an earlier attempt's outcome no longer applies.
+            tracker.started(tool_call)
+            if isinstance(ctx, _ObservedToolCallContext):
+                ctx.failed_events.clear()
+        try:
+            result, tool_msg = await self._execute_single_tool_call(
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+                callback_context=ctx,
+            )
+        except ToolInterruptException:
+            raise
+        except Exception as exc:
+            # Recorded before exception rails run: the call raised, its error is not processed yet.
+            if tracker is not None:
+                tracker.raised(tool_call, exc)
+            raise
+        if tracker is not None:
+            # Recorded before AFTER_TOOL_CALL rails run: the call returned, its result is not processed yet.
+            tracker.returned(tool_call)
 
         if isinstance(ctx.inputs, ToolCallInputs):
             ctx.inputs.tool_call = tool_call

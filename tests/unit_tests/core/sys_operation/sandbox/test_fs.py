@@ -9,6 +9,11 @@ import tempfile
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.config import SandboxGatewayConfig
+from openjiuwen.core.sys_operation.sandbox.fs_operation import FsOperation as SandboxFsOperation
+from openjiuwen.core.sys_operation.sandbox.providers.base_provider import BaseFSProvider
+from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
 
 
 @pytest.mark.asyncio
@@ -34,6 +39,25 @@ async def test_fs_read_write(local_op):
     await local_op.fs().write_file(path=bin_file, content=bin_data, mode="bytes")
     read_bin = await local_op.fs().read_file(path=bin_file, mode="bytes")
     assert read_bin.data.content == bin_data
+
+
+def test_sandbox_conditional_write_capability_defaults_to_unsupported(local_op):
+    assert BaseFSProvider.supports_conditional_write is False
+    assert local_op.fs().supports_conditional_write is False
+
+
+def test_sandbox_conditional_write_capability_is_explicitly_passed_through():
+    fs_operation = SandboxFsOperation(
+        name="fs",
+        mode=OperationMode.SANDBOX,
+        description="sandbox fs",
+        run_config=SandboxRunConfig(
+            config=SandboxGatewayConfig(supports_conditional_write=True),
+            isolation_key_template="test",
+        ),
+    )
+
+    assert fs_operation.supports_conditional_write is True
 
 
 @pytest.mark.asyncio
