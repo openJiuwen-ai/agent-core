@@ -395,6 +395,15 @@ class _JiuwenBoxClient:
         _raise_for_status(response)
         return dict(response.json())
 
+    def file_snapshot(self, sandbox_id: str, path: str, operation: str,
+                      options: dict, content: bytes = b"") -> dict:
+        response = self._client.post(f"/api/v1/sandboxes/{sandbox_id}/file-snapshot", json={
+            "operation": operation, "path": path, "options": options,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        })
+        _raise_for_status(response)
+        return response.json()
+
     def upload_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
         response = self._client.post(
             f"/api/v1/sandboxes/{sandbox_id}/upload",
@@ -1423,6 +1432,27 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         super().__init__(endpoint, config)
         self._init_jiuwenbox(endpoint, config)
 
+    async def _snapshot(self, path: str, operation: str, options: dict, raw: bytes = b"") -> dict:
+        # A request may have committed before a connection fails. Never recreate
+        # the sandbox or replay this operation on an uncertain response.
+        sid = self._get_sandbox_id()
+        if options.get("expected_backend_id", sid) != sid:
+            raise RuntimeError("Todo backend changed after the snapshot read")
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._get_client().file_snapshot, sid, path, operation, options, raw,
+        ))
+        settled = asyncio.gather(worker, return_exceptions=True)
+        cancelled = False
+        while not worker.done():
+            try:
+                await asyncio.shield(settled)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            worker.exception()
+            raise asyncio.CancelledError
+        return {**worker.result(), "backend_id": sid}
+
     async def read_file(self, path: str, mode: str = "text", **kwargs) -> ReadFileResult:
         tail = kwargs.pop("tail", None)
         head = kwargs.pop("head", None)
@@ -1432,6 +1462,19 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         if validation_error:
             return _build_fs_error_result("read_file", validation_error, ReadFileResult)
         try:
+            options = kwargs.get("options") or {}
+            if options.get("snapshot"):
+                if head or tail or line_range:
+                    raise ValueError("Snapshot reads require the complete file")
+                result = await self._snapshot(path, "read", options)
+                if not result.get("ok"):
+                    raise RuntimeError(f"Snapshot read failed: {result.get('error')}")
+                raw = base64.b64decode(result["content_base64"], validate=True)
+                return ReadFileResult(code=0, message="success", data=ReadFileData(
+                    path=path, mode=mode, exists=result["exists"],
+                    content_sha256=result["content_sha256"], backend_id=result["backend_id"],
+                    content=raw if mode == "bytes" else raw.decode(kwargs.get("encoding", "utf-8")),
+                ))
             raw = await self._execute_with_sandbox_retry(
                 lambda sid: self._get_client().download_bytes(sid, path)
             )
@@ -1463,6 +1506,22 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 if append_newline:
                     text += "\n"
                 raw = text.encode("utf-8")
+            options = kwargs.get("options") or {}
+            if options.get("atomic_replace"):
+                if append:
+                    raise ValueError("Conditional replacement forbids append")
+                result = await self._snapshot(path, "compare_replace", {
+                    **options, "permissions": kwargs.get("permissions", "644"),
+                    "create_if_not_exist": kwargs.get("create_if_not_exist", True),
+                }, raw)
+                conflict = result.get("error") == "conflict"
+                if not result.get("ok") and not conflict:
+                    raise RuntimeError(f"Snapshot write failed: {result.get('error')}")
+                return WriteFileResult(
+                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code if conflict else 0,
+                    message="conflict" if conflict else "success",
+                    data=WriteFileData(path=path, size=0 if conflict else len(raw), mode=mode,
+                                       conflict=conflict, atomic_replace=not conflict))
             if append:
                 await self._execute_with_sandbox_retry(
                     lambda sid: self._get_client().append_bytes(sid, path, raw)

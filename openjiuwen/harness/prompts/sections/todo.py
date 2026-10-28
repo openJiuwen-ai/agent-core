@@ -44,7 +44,7 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
   This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
 
 **Task management rules:**
-- Once a planning need is identified, call todo_create immediately before starting execution.
+- When a new plan is needed, call todo_create before execution. Continue or adjust an existing plan with todo_modify; replace it only with explicit plan_action=new/rebuild.
 - Update status via todo_modify as soon as it changes; do not accumulate multiple status changes that have already occurred and update them all later. A single update should normally change only the current task and the next task: set the current task to completed and the next task to in_progress; do not change multiple pending tasks to completed in one call
 - When calling todo_modify to update a task, only include the fields that changed (usually just id and status); do not resend unchanged fields
 - Only one task can be in_progress at a time; complete it before starting the next
@@ -88,7 +88,7 @@ TODO_SYSTEM_PROMPT_CN = """
   这样执行时才能清楚地为每个子项发出一个 task_tool 调用。
 
 **任务管理规则：**
-- **识别到规划需求后，在开始执行前立即调用 todo_create。**
+- **需要新计划时在执行前调用 todo_create；继续、追加或调整已有计划使用 todo_modify，明确替换时才传 plan_action=new/rebuild。**
 - 实时更新状态：任务状态变化时立即调用 todo_modify，不要积攒多个已发生的状态变化后统一更新。单次 update 的状态变更通常只涉及当前任务和下一任务：将当前任务设为 completed，并将下一任务设为 in_progress；不要在一次调用中将多个 pending 任务批量改为 completed
 - 调用 todo_modify 更新时，每次只传入发生变化的字段（通常只有 id 和 status），不要把未变化的字段重新传一遍
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
