@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -328,14 +328,13 @@ class TestBashToolHistoryPath(unittest.TestCase):
         data_dir = tempfile.mkdtemp()
         try:
             set_workspace(workspace)
-            os.environ["JIUWENSWARM_DATA_DIR"] = data_dir
-            tool = BashTool(MagicMock())
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(data_dir))
-            assert not path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = BashTool(MagicMock())
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 

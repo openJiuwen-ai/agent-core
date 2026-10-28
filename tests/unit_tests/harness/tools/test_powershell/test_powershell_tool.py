@@ -10,15 +10,15 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import PowerShellTool
+
+pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
 
 
 def _mock_result(*, stdout: str = "", stderr: str = "", exit_code: int = 0) -> SimpleNamespace:
@@ -103,14 +103,13 @@ class TestPowerShellToolHistoryPath(unittest.TestCase):
         data_dir = tempfile.mkdtemp()
         try:
             set_workspace(workspace)
-            os.environ["JIUWENSWARM_DATA_DIR"] = data_dir
-            tool = PowerShellTool(MagicMock(), agent_id="a")
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(data_dir))
-            assert not path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = PowerShellTool(MagicMock(), agent_id="a")
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 

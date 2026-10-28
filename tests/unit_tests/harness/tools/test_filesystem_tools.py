@@ -1125,6 +1125,22 @@ async def test_read_pdf_truncation_on_token_budget(sys_op, temp_dir, monkeypatch
 # ── history path construction ─────────────────────────────────
 
 
+def test_history_snapshot_is_written_in_private_directory(tmp_path):
+    history_path = tmp_path / ".agent_history" / "file_ops_test.json"
+
+    filesystem_module._write_history_json(str(history_path), {"file.txt": [{"action": "write"}]})
+    filesystem_module._append_op_history_sync(
+        str(history_path), "file.txt", {"action": "edit", "new_content": "updated"}
+    )
+
+    assert [entry["action"] for entry in json.loads(history_path.read_text(encoding="utf-8"))["file.txt"]] == [
+        "write", "edit"
+    ]
+    if os.name != "nt":
+        assert history_path.parent.stat().st_mode & 0o777 == 0o700
+        assert history_path.stat().st_mode & 0o777 == 0o600
+
+
 class TestWriteFileToolHistoryPath(unittest.TestCase):
     """Unit tests for WriteFileTool._build_history_path — no Runner required."""
 
@@ -1157,14 +1173,13 @@ class TestWriteFileToolHistoryPath(unittest.TestCase):
         data_dir = tempfile.mkdtemp()
         try:
             set_workspace(workspace)
-            os.environ["JIUWENSWARM_DATA_DIR"] = data_dir
-            tool = WriteFileTool(MagicMock())
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(data_dir))
-            assert not path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = WriteFileTool(MagicMock())
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -1209,14 +1224,13 @@ class TestEditFileToolHistoryPath(unittest.TestCase):
         data_dir = tempfile.mkdtemp()
         try:
             set_workspace(workspace)
-            os.environ["JIUWENSWARM_DATA_DIR"] = data_dir
-            tool = EditFileTool(MagicMock())
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(data_dir))
-            assert not path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = EditFileTool(MagicMock())
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 

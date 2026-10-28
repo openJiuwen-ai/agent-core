@@ -42,6 +42,7 @@ import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -163,7 +164,7 @@ def set_team_workspace(path: str) -> None:
 
 # ---- Agent history root: cross-project, per-host artifact root ------------
 
-def get_agent_history_root() -> str:
+def get_agent_history_root(operation: Any = None) -> str:
     """Root directory for cross-session agent artifacts (e.g. ``.agent_history/``).
 
     Unlike ``get_workspace()``/``get_cwd()``, this is anchored to the
@@ -177,9 +178,34 @@ def get_agent_history_root() -> str:
     """
     data_dir = (os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or "").strip()
     if data_dir:
-        return str(Path(data_dir).expanduser().resolve())
-    home = os.getenv("JIUWENSWARM_HOME") or str(Path.home())
-    return str((Path(home) / ".jiuwenswarm").expanduser().resolve())
+        root = Path(data_dir).expanduser().resolve()
+    else:
+        home = os.getenv("JIUWENSWARM_HOME")
+        try:
+            root = (Path(home).expanduser() if home else Path.home()) / ".jiuwenswarm"
+            root = root.resolve()
+        except RuntimeError:
+            root = Path(get_workspace() or get_cwd()).resolve()
+
+    config = getattr(operation, "_run_config", None)
+    mode = getattr(operation, "mode", None)
+    sandboxed = getattr(mode, "value", mode) == "sandbox"
+    if getattr(config, "restrict_to_sandbox", False) is not True and not sandboxed:
+        return str(root)
+
+    configured = getattr(config, "sandbox_root", None)
+    roots = configured or [get_workspace(), get_project_root(), get_cwd()]
+    allowed = [Path(path).expanduser().resolve() for path in roots if isinstance(path, str) and path]
+    if any(root == path or root.is_relative_to(path) for path in allowed):
+        return str(root)
+
+    # Keep a restricted agent's history inside the same boundary as its fs tool.
+    for candidate in (get_workspace(), get_project_root(), get_cwd()):
+        if candidate:
+            path = Path(candidate).resolve()
+            if any(path == allowed_root or path.is_relative_to(allowed_root) for allowed_root in allowed):
+                return str(path)
+    return str(allowed[0]) if allowed else str(root)
 
 
 # ---- Bulk initialization ---------------------------------------------------
