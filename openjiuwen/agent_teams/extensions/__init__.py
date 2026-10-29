@@ -1,14 +1,31 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Team extension infrastructure: Ops queries, resolvers, and the bus channel.
+"""Team-side contracts of the team extension mechanism.
 
-This package hosts the team-side building blocks of the team extension
-mechanism. The host registers its extension bus and the team Ops
-namespace; per-event contracts (monitor notifications, policy builds)
-arrive in follow-up changes on top of this base.
+Holds the team monitor event's typed input/output and matcher, the event
+registration entry, the monitor-event bridge, and the Ops-side resource
+resolvers and call-scope bindings consumed at the team's extension
+boundaries. The ``team.build_policy`` contracts arrive in a follow-up
+change.
 """
 
+from openjiuwen.agent_teams.extensions.events import (
+    TEAM_MONITOR_EVENT,
+    build_monitor_event_dispatcher,
+    register_team_event_types,
+    team_monitor_event_core,
+)
+from openjiuwen.agent_teams.extensions.matching import match_team_monitor_event
+from openjiuwen.agent_teams.extensions.models import (
+    TeamMonitorEventInput,
+    TeamMonitorEventOutput,
+)
+from openjiuwen.agent_teams.extensions.monitor_event_bridge import (
+    DEFAULT_MONITOR_EVENT_QUEUE_CAPACITY,
+    MonitorEventDispatcher,
+    TeamMonitorEventBridge,
+)
 from openjiuwen.agent_teams.extensions.ops import (
     MessagePage,
     TaskDependencyInfo,
@@ -24,13 +41,23 @@ from openjiuwen.agent_teams.extensions.resolver import (
 )
 
 __all__ = [
-    "BackendTeamReadView",
+    "DEFAULT_MONITOR_EVENT_QUEUE_CAPACITY",
     "GlobalRunnerPoolResolver",
     "MessagePage",
+    "MonitorEventDispatcher",
     "RuntimePoolResolver",
+    "BackendTeamReadView",
     "TaskDependencyInfo",
+    "TEAM_MONITOR_EVENT",
+    "TeamMonitorEventBridge",
+    "TeamMonitorEventInput",
+    "TeamMonitorEventOutput",
     "TeamReadView",
     "TeamResourceResolver",
     "bind_team_scope",
+    "build_monitor_event_dispatcher",
     "current_team_name",
+    "match_team_monitor_event",
+    "register_team_event_types",
+    "team_monitor_event_core",
 ]
