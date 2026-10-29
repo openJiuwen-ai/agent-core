@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import threading
 import time
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
 from weakref import WeakValueDictionary
@@ -367,6 +368,35 @@ class _JiuwenBoxClient:
         response = self._client.put("/api/v1/timeout", json=body)
         _raise_for_status(response)
 
+    def live_sandbox_ids(self) -> set[str]:
+        """List live or unknown-phase instances without touching activity timestamps.
+
+        Only known inactive phases are excluded. Invalid inventory rows reject
+        the snapshot so live_scopes can conservatively retain known owners.
+        """
+        response = self._client.get("/api/v1/sandboxes")
+        _raise_for_status(response)
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise ValueError("invalid JiuwenBox sandbox inventory")
+        live_ids = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("invalid JiuwenBox sandbox inventory row")
+            sandbox_id = row.get("id")
+            if not isinstance(sandbox_id, str) or not sandbox_id.strip():
+                raise ValueError("invalid JiuwenBox sandbox inventory ID")
+            phase = row.get("phase")
+            if phase in ("stopped", "error", "deleting"):
+                continue
+            if phase not in ("ready", "provisioning"):
+                logger.warning(
+                    "[jiuwenbox] sandbox %s has unknown inventory phase %r; retaining as live",
+                    sandbox_id, phase,
+                )
+            live_ids.add(sandbox_id)
+        return live_ids
+
     def delete_sandbox(self, sandbox_id: str) -> None:
         """DELETE /api/v1/sandboxes/{id}; treat 204 and 404 as success."""
         if not sandbox_id:
@@ -563,6 +593,10 @@ class _DeleteTransportError(Exception):
     """Distinguish remote cleanup failures from strict lifecycle hook failures."""
 
 
+class _SandboxLifecyclePendingError(RuntimeError):
+    """An intentional lifecycle barrier must never trigger host fallback."""
+
+
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
@@ -582,6 +616,8 @@ class _JiuwenBoxProviderMixin:
     # A bulk cleanup must also drain creates that have not published an ID yet.
     _bulk_deletions: ClassVar[int] = 0
     _inflight_recreations: ClassVar[set[asyncio.Task[str]]] = set()
+    _scope_releases: ClassVar[Dict[str, int]] = {}
+    _policy_updates: ClassVar[int] = 0
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
     _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
     _recreate_lock_init: ClassVar[threading.Lock] = threading.Lock()
@@ -882,6 +918,7 @@ class _JiuwenBoxProviderMixin:
         return self._get_or_create_sandbox_id()
 
     def _get_or_create_sandbox_id(self) -> str:
+        self._assert_policy_ready()
         self._assert_not_deleting(self._shared_scope_key())
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id and self._sandbox_id != env_sandbox_id:
@@ -958,6 +995,13 @@ class _JiuwenBoxProviderMixin:
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
 
+    def _assert_policy_ready(self) -> None:
+        with self._shared_lock:
+            if self._policy_updates or self._launcher_extra_params().get("_policy_apply_pending"):
+                raise _SandboxLifecyclePendingError("jiuwenbox policy update is pending")
+            if self._scope_releases.get(self._shared_scope_key()):
+                raise _SandboxLifecyclePendingError("jiuwenbox scope release is pending")
+
     @classmethod
     def _assert_not_deleting(cls, shared_key: str) -> None:
         with cls._shared_lock:
@@ -965,6 +1009,8 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     def _assert_not_deleting_locked(cls, shared_key: str) -> None:
+        if cls._scope_releases.get(shared_key):
+            raise _SandboxLifecyclePendingError("jiuwenbox scope release is pending")
         if cls._bulk_deletions:
             raise RuntimeError("jiuwenbox sandbox bulk deletion is pending")
         pending = [sid for key, sid in cls._pending_deletions if key == shared_key]
@@ -1043,6 +1089,8 @@ class _JiuwenBoxProviderMixin:
         ):
             raise ValueError("shared_key must match the recreation base_url")
         with cls._shared_lock:
+            if cls._policy_updates and reason != "policy_changed":
+                raise _SandboxLifecyclePendingError("jiuwenbox policy update is pending")
             cls._assert_not_deleting_locked(shared_key)
             task = asyncio.create_task(cls._recreate_serialized(
                 base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
@@ -1105,6 +1153,76 @@ class _JiuwenBoxProviderMixin:
             finally:
                 with cls._shared_lock:
                     cls._bulk_deletions -= 1
+
+    @classmethod
+    @asynccontextmanager
+    async def policy_update(cls) -> AsyncIterator[None]:
+        """Block tool-side creation while the host replaces policy and ACLs."""
+        with cls._shared_lock:
+            cls._policy_updates += 1
+            recreations = list(cls._inflight_recreations)
+            locks = list(cls._scope_lifecycle_locks.values())
+        try:
+            await asyncio.gather(*(asyncio.shield(task) for task in recreations), return_exceptions=True)
+            for lock in locks:
+                while not lock.acquire(blocking=False):
+                    await asyncio.sleep(0.01)
+                lock.release()
+            yield
+        finally:
+            with cls._shared_lock:
+                cls._policy_updates -= 1
+
+    @classmethod
+    async def live_scopes(cls) -> set[str]:
+        """Intersect process-owned IDs with remote inventory; keep failed deletes retryable.
+
+        Call inside policy_update so a creator cannot escape the snapshot.
+        An unavailable inventory conservatively retains known scopes, allowing
+        the host to recover a stopped owned service instead of losing its owners.
+        """
+        with cls._shared_lock:
+            cached = dict(cls._shared_sandbox_ids)
+            live = {key for key, _ in cls._pending_deletions}
+        for base_url in {key.split("|", 1)[0] for key in cached}:
+            def inventory(url=base_url) -> set[str]:
+                with _JiuwenBoxClient(base_url=url, timeout_seconds=5.0) as client:
+                    return client.live_sandbox_ids()
+            try:
+                ids = await asyncio.to_thread(inventory)
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning("[jiuwenbox] inventory unavailable; retaining known scopes: %s: %s", base_url, exc)
+                ids = set(cached.values())
+            live.update(key for key, sid in cached.items() if key.split("|", 1)[0] == base_url and sid in ids)
+        return live
+
+    @classmethod
+    async def release_scope(cls, base_url: str, isolation_key: str) -> list[str]:
+        """Drain creation and strictly delete the final holder's scope."""
+        shared_key = build_jiuwenbox_shared_scope_key(base_url, isolation_key)
+        with cls._shared_lock:
+            cls._scope_releases[shared_key] = cls._scope_releases.get(shared_key, 0) + 1
+        lock = None
+        try:
+            lock = await cls.acquire_scope_lifecycle_lock(shared_key)
+            deleted = await cls.delete_cached_sandboxes(
+                shared_key=shared_key, reason="session_released", raise_on_error=True,
+            )
+            providers = await SandboxGateway.get_instance().invalidate_sandbox_cache(
+                "jiuwenbox", base_url, isolation_key=isolation_key,
+            )
+            for provider in providers:
+                provider.invalidate_cached_sandbox()
+            cls.clear_shared_sandbox_for_key(shared_key)
+            cls.pop_lifecycle_hook(shared_key)
+            return deleted
+        finally:
+            if lock is not None:
+                lock.release()
+            with cls._shared_lock:
+                cls._scope_releases[shared_key] -= 1
+                if not cls._scope_releases[shared_key]:
+                    del cls._scope_releases[shared_key]
 
     @classmethod
     async def delete_cached_sandboxes(
@@ -1282,6 +1400,8 @@ class _JiuwenBoxProviderMixin:
                     sandbox_id = await self._recreate_sandbox_after_loss(
                         stale_sandbox_id=stale_sandbox_id,
                     )
+                except _SandboxLifecyclePendingError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     # Recreate failed; retry after sleep.
                     logger.warning(
@@ -1315,6 +1435,7 @@ class _JiuwenBoxProviderMixin:
         )
 
         async with self._get_recreate_lock():
+            self._assert_policy_ready()
             # Double-check launcher.extra_params
             current = self._sandbox_id_from_launcher_extra_params()
             shared_key = self._shared_scope_key()
@@ -1373,6 +1494,8 @@ class _JiuwenBoxProviderMixin:
                     sandbox_id = await self._recreate_sandbox_after_loss(
                         stale_sandbox_id=stale_sandbox_id,
                     )
+                except _SandboxLifecyclePendingError:
+                    raise
                 except Exception as exc:
                     last_error = str(exc)
                     logger.warning(
@@ -1416,6 +1539,9 @@ class _JiuwenBoxProviderMixin:
                 break
 
         if fallback_on_failure:
+            # Policy replacement may have started while the request was in flight.
+            # A captured fallback setting must not bypass the lifecycle barrier.
+            self._assert_policy_ready()
             logger.info(
                 "[jiuwenbox] sandbox pipeline failed (%s), falling back to local exec",
                 last_error,
@@ -1438,6 +1564,25 @@ def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: Optional[str]
     """Build the provider key; omit the suffix for a provider without isolation."""
     base_key = base_url.rstrip("/")
     return f"{base_key}|{isolation_key}" if isinstance(isolation_key, str) and isolation_key else base_key
+
+
+def jiuwenbox_policy_update() -> AbstractAsyncContextManager[None]:
+    """Host policy-update barrier; ordinary tool acquisitions fail closed until exit."""
+    return _JiuwenBoxProviderMixin.policy_update()
+
+
+async def get_live_jiuwenbox_scopes() -> set[str]:
+    """Return owned live/retry scopes, inside ``jiuwenbox_policy_update``."""
+    return await _JiuwenBoxProviderMixin.live_scopes()
+
+
+async def release_jiuwenbox_scope(base_url: str, isolation_key: str) -> list[str]:
+    """Release a final owner's scope without cancelling in-flight delete workers."""
+    if not base_url or not isolation_key:
+        raise ValueError("base_url and isolation_key are required for scope release")
+    task = asyncio.create_task(_JiuwenBoxProviderMixin.release_scope(base_url, isolation_key))
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    return await asyncio.shield(task)
 
 
 async def retire_jiuwenbox_service(base_url: str) -> list[str]:
