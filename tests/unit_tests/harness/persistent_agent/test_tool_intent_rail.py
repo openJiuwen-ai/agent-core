@@ -111,6 +111,25 @@ async def test_read_only_dispatch_emits_completion_without_intent_and_redacts_da
 
 
 @pytest.mark.asyncio
+async def test_interrupted_dispatch_can_finish_later_without_a_false_completion():
+    from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+    from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+
+    binding, commit = _binding()
+    rail = _rail(binding)
+    ctx = _context("remember")
+    await rail.before_tool_call(ctx)
+    ctx.exception = ToolInterruptException(InterruptRequest(message="approve?"))
+    await rail.after_tool_call(ctx)
+    assert [event.event_type for event in commit.events] == [EventType.TOOL_INTENT]
+    ctx.exception = None
+    ctx.inputs.tool_result = {"remembered": "x"}
+    await rail.after_tool_call(ctx)
+    assert [event.event_type for event in commit.events] == [EventType.TOOL_INTENT, EventType.TOOL_COMPLETED]
+    assert commit.events[-1].payload.status == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_write_dispatch_waits_until_intent_is_durably_recorded():
     commit = RecordingCommit(hold_intent=True)
     binding, _ = _binding(commit=commit)

@@ -263,6 +263,144 @@ def test_interruption_round_trip_keeps_request_types_and_fields():
     assert (restored.iteration, restored.original_query) == (1, "please summarize")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["matching", "other_request", "other_spec", "bad_identity", "missing"])
+async def test_discard_confirmation_preserves_results_and_metadata(target):
+    api = import_module(PKG)
+    backend = InMemoryKVStore()
+    scene = interruption(call_id="call-pending")
+    messages = [
+        UserMessage(content="task"),
+        AssistantMessage(tool_calls=[call("call-done"), call("call-pending")]),
+        tool_result("call-done", "REAL-RESULT"),
+    ]
+    scene.ai_message = messages[1]
+    data = record(
+        messages=RECORD.encode_messages(messages), interruption=RECORD.encode_interruption(scene),
+        auto_confirm={"remember": True}, current_window_id="window-1", window_seq=1,
+        ending={"outcome": "awaiting_confirmation", "request_id": "request-1", "execution_id": "execution-1"},
+    )
+    if target == "bad_identity":
+        data["agent_id"] = "another-agent"
+    raw = json.dumps(data)
+    if target != "missing":
+        await backend.set(KEY, raw)
+    await backend.set(STATE.session_key_prefix("agent:1", "session%a") + "archive:1", "untouched-archive")
+    args = dict(agent_id="agent:1", session_id="session%a", request_id="request-1", spec_fingerprint="a" * 64)
+    if target == "other_request":
+        args["request_id"] = "another-request"
+    if target == "other_spec":
+        args["spec_fingerprint"] = "b" * 64
+    if target in {"bad_identity", "other_spec"}:
+        with pytest.raises(BaseError):
+            await api.discard_persistent_confirmation(backend, **args)
+    else:
+        assert await api.discard_persistent_confirmation(backend, **args) is (target == "matching")
+    if target != "matching":
+        assert await backend.get(KEY) == (None if target == "missing" else raw)
+        return
+    updated = await saved(backend)
+    for field in ("auto_confirm", "current_window_id", "window_seq", "last_rollover", "last_group_message_id"):
+        assert updated[field] == data[field]
+    results = [message for message in RECORD.decode_messages(updated["messages"]) if isinstance(message, ToolMessage)]
+    assert [(message.tool_call_id, message.content) for message in results] == [
+        ("call-done", "REAL-RESULT"), ("call-pending", STATE.PLACEHOLDER_TEXT),
+    ]
+    assert updated["interruption"] is None and updated["ending"]["outcome"] == "error"
+    assert await backend.get(STATE.session_key_prefix("agent:1", "session%a") + "archive:1") == "untouched-archive"
+    assert await api.discard_persistent_confirmation(backend, **args) is False
+
+
+def test_carried_answers_round_trip_preserves_native_payloads_and_request_subclasses():
+    from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer
+    from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+
+    scene = interruption()
+    request = AskUserRequest(
+        message="choose", questions=[{"question": "which?"}], interrupt_id="intr-earlier",
+        interrupt_owner="tool-policy", interrupt_kind="confirm",
+    )
+    scene.interrupted_tools["call-1"].carried_answers = {"call-1": {"tool-policy": InterruptAnswer(
+        owner="tool-policy", kind="confirm", value=ConfirmPayload(approved=True), request=request, carried=True,
+    )}}
+    restored = RECORD.decode_interruption(json.loads(json.dumps(RECORD.encode_interruption(scene))))
+    answer = restored.interrupted_tools["call-1"].carried_answers["call-1"]["tool-policy"]
+    assert answer.owner == "tool-policy" and answer.carried is True
+    assert answer.value == {"approved": True, "feedback": "", "auto_confirm": False, "persist_allow": None}
+    assert type(answer.request) is AskUserRequest and answer.request.questions == [{"question": "which?"}]
+
+
+def test_legacy_interruption_json_gets_stable_ids_and_empty_carried_answers():
+    encoded = RECORD.encode_interruption(interruption())
+    entry = encoded["interrupted_tools"]["call-1"]
+    entry.pop("carried_answers", None)
+    encoded["auto_confirm_mapping"] = {"call-1": "remember"}
+    for request in entry["interrupt_requests"].values():
+        for field in ("interrupt_id", "interrupt_owner", "interrupt_kind"):
+            request["data"].pop(field, None)
+    first = RECORD.decode_interruption(encoded).interrupted_tools["call-1"]
+    second = RECORD.decode_interruption(encoded).interrupted_tools["call-1"]
+    assert first.carried_answers == {}
+    assert first.interrupt_requests["call-1-0"].interrupt_id == "intr_call-1-0"
+    assert second.interrupt_requests["call-1-0"].interrupt_id == "intr_call-1-0"
+
+
+def test_carried_answers_keep_legacy_metadata_kind():
+    from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer
+
+    scene = interruption()
+    request = InterruptRequest(interrupt_id="intr-old", interrupt_owner="owner",
+                               metadata={"interrupt_kind": "skill_evolution_approval"})
+    scene.interrupted_tools["call-1"].carried_answers = {"call-1": {"owner": InterruptAnswer(
+        owner="owner", kind="skill_evolution_approval", value={"action": "allow_once"}, request=request, carried=True,
+    )}}
+    restored = RECORD.decode_interruption(RECORD.encode_interruption(scene))
+    assert restored.interrupted_tools["call-1"].carried_answers["call-1"]["owner"].value == {"action": "allow_once"}
+
+
+def test_carried_answers_keep_typed_ask_user_payload_and_reject_unknown_requests():
+    from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer
+    from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
+
+    scene = interruption()
+    request = AskUserRequest(
+        interrupt_id="intr-ask", interrupt_owner="ask-owner", interrupt_kind="ask_user",
+        questions=[{"question": "which?", "options": ["a", "b"]}],
+    )
+    scene.interrupted_tools["call-1"].carried_answers = {"call-1": {"ask-owner": InterruptAnswer(
+        owner="ask-owner", kind="ask_user", value=AskUserPayload(answers={"which?": "b"}),
+        request=request, carried=True,
+    )}}
+    encoded = json.loads(json.dumps(RECORD.encode_interruption(scene)))
+    restored = RECORD.decode_interruption(encoded).interrupted_tools["call-1"].carried_answers["call-1"]["ask-owner"]
+    assert restored.value == {"answers": {"which?": "b"}}
+    assert restored.request.questions == [{"question": "which?", "options": ["a", "b"]}]
+    encoded["interrupted_tools"]["call-1"]["carried_answers"]["call-1"]["ask-owner"]["request"]["type"] = "unknown"
+    with pytest.raises(BaseError) as caught:
+        RECORD.decode_interruption(encoded)
+    assert_invalid(caught)
+
+
+@pytest.mark.parametrize("field", ["owner", "kind", "request_owner"])
+def test_carried_answers_reject_misattributed_saved_approval(field):
+    from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer
+
+    scene = interruption()
+    request = InterruptRequest(interrupt_id="intr-old", interrupt_owner="owner", interrupt_kind="confirm")
+    scene.interrupted_tools["call-1"].carried_answers = {"call-1": {"owner": InterruptAnswer(
+        owner="owner", kind="confirm", value={"approved": True}, request=request, carried=True,
+    )}}
+    encoded = RECORD.encode_interruption(scene)
+    answer = encoded["interrupted_tools"]["call-1"]["carried_answers"]["call-1"]["owner"]
+    if field == "request_owner":
+        answer["request"]["data"]["interrupt_owner"] = "foreign"
+    else:
+        answer[field] = "foreign"
+    with pytest.raises(BaseError) as caught:
+        RECORD.decode_interruption(encoded)
+    assert_invalid(caught)
+
+
 def test_unlisted_interrupt_request_types_are_not_saved():
     class CustomRequest(InterruptRequest):
         extra: str = "would be lost"

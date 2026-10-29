@@ -434,7 +434,7 @@ WindowStore 负责会话状态格式、读写、归档、按 Execution 查询归
 
 **近期读取和历史搜索的范围不同：** `recent_messages` 由 `ExecutionContext.session_id` 定位当前群，不能借此读取其他群；`search_messages` 由可信 `ExecutionContext.agent_id` 确定 Agent，再由宿主读取该 Agent 当前获授权群的范围。没有群过滤条件时搜索全部获授权群；传入群 ID / 群名只缩小范围，按精确值解析。同名群不随机选择，需消歧。当前提问者是否属于目标群不参与群历史授权判断；能与该 Agent 对话的用户可能通过 Agent 查询其获授权群历史，这是明确的产品隐私边界。
 
-**搜索来源与查询方式：** 模型向 `search_group_messages` 提交关键词及可选时间、发送者、群 ID / 群名和分页条件。关键词按字面子串匹配、大小写不敏感，不进行语义扩展；结果按服务端接收时间从新到旧，同一时间按 `group_id`、`message_id` 稳定排序。JiuwenSwarm 从可信 Execution 解析 Agent，在每次查询和分页时校验当前 Agent—群授权，再从宿主持久化的群消息记录 / 检索索引中检索；物理存储和索引实现由服务端决定。返回的命中包含稳定群 ID、群名、消息引用和消息内容 / 状态。结果仅覆盖宿主实际保存且可读取的历史，不能推断未保存时段也已检索。
+**搜索来源与查询方式：** 模型向 `search_group_messages` 提交单值 `query` 或最多 16 项的 `keywords`，以及可选时间、发送者、群 ID / 群名和分页条件。多关键词按 OR 合并命中、大小写不敏感去重，单条消息只出现一次；关键词按字面子串匹配、大小写不敏感，不进行语义扩展。结果按服务端接收时间从新到旧，同一时间按 `group_id`、`message_id` 稳定排序。JiuwenSwarm 从可信 Execution 解析 Agent，在每次查询和分页时校验当前 Agent—群授权，再从宿主持久化的群消息记录 / 检索索引中检索；物理存储和索引实现由服务端决定。返回的命中包含稳定群 ID、群名、消息引用和消息内容 / 状态。结果仅覆盖宿主实际保存且可读取的历史，不能推断未保存时段也已检索。
 
 搜索结果使用独立的 `GroupMessageSearchResult`，不复用近期消息的 `GroupMessagesResult.scanned_through` 表达多群查询完整性：
 

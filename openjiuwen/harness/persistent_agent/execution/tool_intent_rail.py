@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -164,6 +165,9 @@ class PersistentToolIntentRail(DeepAgentRail):
         if state is None:
             return
         if not state["dispatched"] or state["completed"] or emitter is None:
+            return
+        if isinstance(ctx.exception, ToolInterruptException):
+            # An interrupted dispatch has no final outcome or completion receipt.
             return
         state["completed"] = True
 

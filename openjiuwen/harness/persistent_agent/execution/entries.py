@@ -207,10 +207,14 @@ def _chunk_parts(chunk) -> tuple[Any, Any]:
 def _intercepted_call(payload) -> dict:
     """Interaction ID, tool name and redacted arguments of one call awaiting confirmation."""
     request = getattr(payload, "value", None)
+    metadata = getattr(request, "metadata", None)
     return {
         "tool_call_id": str(getattr(payload, "id", "")),
         "tool_name": getattr(request, "tool_name", "") or "unknown_tool",
         "arguments": redact_arguments(getattr(request, "tool_args", None)),
+        "approval_ref": metadata.get("approval_id")
+        if isinstance(metadata, dict) and metadata.get("kind") == "group_share"
+        else None,
     }
 
 
@@ -536,10 +540,20 @@ def _native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, w
         for call_id, request in entry.interrupt_requests.items()
     }
     native = InteractiveInput()
+    answered_calls = set()
     for response in reply.responses:
         request = waiting_requests.get(response.tool_call_id)
+        call_id = response.tool_call_id
+        if request is None:
+            matches = [(key, item) for key, item in waiting_requests.items()
+                       if item.interrupt_id == response.tool_call_id]
+            if len(matches) == 1:
+                call_id, request = matches[0]
         if request is None:
             raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "tool_call_id is not part of the waiting scene")
+        if call_id in answered_calls:
+            raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "duplicate reply to the same interrupted call")
+        answered_calls.add(call_id)
         questions = _question_texts(request)
         if response.kind == "answer":
             if questions is None:
@@ -548,7 +562,11 @@ def _native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, w
                 raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "answer keys must match the asked questions")
         elif questions is not None:
             raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "permission reply sent to a question")
-        native.update(response.tool_call_id, adapter.to_native(response, request))
+        value = adapter.to_native(response, request)
+        if request.interrupt_id:
+            native.answer(request.interrupt_id, value)
+        else:
+            native.update(call_id, value)
     return native
 
 

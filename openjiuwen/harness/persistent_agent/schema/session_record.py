@@ -27,7 +27,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, SystemMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.single_agent.interrupt.state import ToolInterruptEntry, ToolInterruptionState
+from openjiuwen.core.single_agent.interrupt.response import interrupt_kind_of
+from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer, ToolInterruptEntry, ToolInterruptionState
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -312,6 +313,13 @@ def decode_messages(items: list[dict]) -> list:
     return messages
 
 
+def _encode_request(request, tags: dict) -> dict:
+    tag = tags.get(type(request))
+    if tag is None:
+        raise unsavable(f"interrupt request of type {type(request).__name__} is not supported")
+    return {"type": tag, "data": request.model_dump(mode="json")}
+
+
 def encode_interruption(state: Any) -> dict:
     """Encode each request with its type tag so subclass fields such as AskUserRequest.questions survive."""
     # Exact type: another interruption state would be stored with fields this record cannot carry.
@@ -324,11 +332,21 @@ def encode_interruption(state: Any) -> dict:
             raise unsavable("sub-agent interruptions are not supported")
         requests = {}
         for inner_id, request in entry.interrupt_requests.items():
-            tag = tags.get(type(request))
-            if tag is None:
-                raise unsavable(f"interrupt request of type {type(request).__name__} is not supported")
-            requests[inner_id] = {"type": tag, "data": request.model_dump(mode="json")}
-        tools[call_id] = {"tool_call": entry.tool_call.model_dump(mode="json"), "interrupt_requests": requests}
+            requests[inner_id] = _encode_request(request, tags)
+        carried = {}
+        for inner_id, answers in entry.carried_answers.items():
+            carried[inner_id] = {}
+            for owner, answer in answers.items():
+                if owner != answer.owner or answer.request.interrupt_owner != owner:
+                    raise unsavable("carried interrupt answer owner does not match")
+                carried[inner_id][owner] = {
+                    **answer.model_dump(mode="json", exclude={"request"}),
+                    "request": _encode_request(answer.request, tags),
+                }
+        tools[call_id] = {
+            "tool_call": entry.tool_call.model_dump(mode="json"), "interrupt_requests": requests,
+            "carried_answers": carried,
+        }
     return {
         "ai_message": state.ai_message.model_dump(mode="json"),
         "iteration": state.iteration,
@@ -344,11 +362,22 @@ class _EncodedRequest(BaseModel):
     data: dict[StrictStr, Any]
 
 
+class _EncodedAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    owner: StrictStr
+    kind: StrictStr
+    value: Any
+    request: _EncodedRequest
+    carried: StrictBool = False
+
+
 class _EncodedEntry(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     tool_call: dict[StrictStr, Any]
     interrupt_requests: dict[StrictStr, _EncodedRequest]
+    carried_answers: dict[StrictStr, dict[StrictStr, _EncodedAnswer]] = Field(default_factory=dict)
 
 
 class _EncodedInterruption(BaseModel):
@@ -363,6 +392,41 @@ class _EncodedInterruption(BaseModel):
     auto_confirm_mapping: dict[StrictStr, StrictStr] = Field(default_factory=dict)
 
 
+def _decode_request(encoded: _EncodedRequest, types: dict, call_id: str):
+    request_type = types.get(encoded.type)
+    if request_type is None:
+        raise invalid_record("interrupt request has an unknown type")
+    request = request_type.model_validate(encoded.data)
+    # JSON loaders do not run native's pickle-only legacy upgrade hook.
+    if "interrupt_id" not in encoded.data:
+        request.interrupt_id = f"intr_{call_id}"
+    if not request.interrupt_owner and request.metadata.get("kind") == "group_share":
+        from ..tools.group_history import GROUP_SHARE_INTERRUPT_OWNER
+
+        request.interrupt_owner = GROUP_SHARE_INTERRUPT_OWNER
+        request.interrupt_kind = "confirm"
+    elif "interrupt_owner" not in encoded.data:
+        # Restore only recognizable built-in legacy requests. Unknown custom
+        # questions must be asked again, rather than lending an answer to a rail.
+        owner = kind = ""
+        if encoded.type == "ask_user_request":
+            owner = "openjiuwen.harness.rails.interrupt.ask_user_rail.AskUserRail"
+            kind = "ask_user"
+        elif {"ask_category", "ask_title", "ask_summary", "matched_rule"} <= request.metadata.keys():
+            owner = "openjiuwen.harness.rails.security.tool_security_rail.PermissionInterruptRail"
+            kind = "permission"
+        elif request.auto_confirm_key:
+            from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+
+            if request.payload_schema == ConfirmPayload.to_schema():
+                owner = "openjiuwen.harness.rails.interrupt.confirm_rail.ConfirmInterruptRail"
+                kind = "confirm"
+        if owner:
+            request.interrupt_owner = owner
+            request.interrupt_kind = request.interrupt_kind or kind
+    return request
+
+
 def decode_interruption(data: dict) -> ToolInterruptionState:
     """Restore the native state; an unknown request tag is invalid, never downgraded or imported."""
     types = _request_types()
@@ -372,12 +436,23 @@ def decode_interruption(data: dict) -> ToolInterruptionState:
         for call_id, entry in encoded.interrupted_tools.items():
             requests = {}
             for inner_id, request in entry.interrupt_requests.items():
-                request_type = types.get(request.type)
-                if request_type is None:
-                    raise invalid_record("interrupt request has an unknown type")
-                requests[inner_id] = request_type.model_validate(request.data)
+                requests[inner_id] = _decode_request(request, types, inner_id)
+            carried = {}
+            for inner_id, answers in entry.carried_answers.items():
+                carried[inner_id] = {}
+                for owner, answer in answers.items():
+                    request = _decode_request(answer.request, types, inner_id)
+                    if (
+                        owner != answer.owner or request.interrupt_owner != owner
+                        or interrupt_kind_of(request) != answer.kind
+                    ):
+                        raise invalid_record("carried interrupt answer ownership does not match")
+                    carried[inner_id][owner] = InterruptAnswer(
+                        owner=owner, kind=answer.kind, value=answer.value, request=request, carried=answer.carried,
+                    )
             tools[call_id] = ToolInterruptEntry(
-                tool_call=ToolCall.model_validate(entry.tool_call), interrupt_requests=requests
+                tool_call=ToolCall.model_validate(entry.tool_call),
+                interrupt_requests=requests, carried_answers=carried,
             )
         return ToolInterruptionState(
             ai_message=AssistantMessage.model_validate(encoded.ai_message),

@@ -424,6 +424,12 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 
 ### 4.1 特性与交付节点进展
 
+2026-10-28：按已批准跨群分享迁移计划实施 Task 1（Core 范围，Codex）。
+PA-09 / PA-10 / PA-23 的 owner 确认、carried_answers codec、public discard API 与测试已落地，
+组件整包首轮 995 passed / 10 skipped；旧 owner / metadata kind 补充回归及周边宽回归仍在进行。
+当前交付状态保持“进行中”，宿主接入与实际渠道验收由 JiuwenClaw 独立负责；设计和最终证据见
+[F_25](../features/F_25_group-sharing-confirmation.md)。不变更既有特性总数或其他交付节点状态。
+
 | ID | 交付分类 | 状态 | 负责人 | 证据 |
 | --- | --- | --- | --- | --- |
 | PA-01 | 本期 | 已完成 | yan_zj | 契约层完成：执行身份含稳定来源和不进入业务 DTO 的宿主 authority handle；基础端口缺失 / 错形状会在 DeepAgent 构造前失败；事件、提交、控制、预算、窗口与版本化资料结果区分 unknown 和有完整查询依据的 empty / not_found。代码：`openjiuwen/harness/persistent_agent/schema/execution.py:13,19,23`、`openjiuwen/harness/persistent_agent/schema/protocol.py:27,33,43`、`openjiuwen/harness/persistent_agent/schema/context.py:16,37,60,82,109,150,164`、`openjiuwen/harness/persistent_agent/schema/events.py:181,206,225`、`openjiuwen/harness/persistent_agent/schema/port_results.py:18,63,102,129,152`、`openjiuwen/harness/persistent_agent/ports.py:26,36,41,45,50,63,68,73,79,89`；测试：`tests/unit_tests/harness/persistent_agent/test_protocol.py:81,91`、`tests/unit_tests/harness/persistent_agent/test_construction.py:152,167`。真实端口后端、运行时权限核验、超时转换和受控写入属于 PA-05 / PA-10～PA-13，不包含在本项。架构设计影响：架构设计对端口、事件、执行上下文及窗口 / 资料结构的调整由 PA-04 承接（见 [F_04](../features/F_04_contract-convergence.md)），本项完成状态与证据保留。 |

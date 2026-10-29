@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-24 |
+| 最近一次修订日期 | 2026-10-28 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)、[F_24](../features/F_24_permission-confirmation.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
@@ -17,9 +17,9 @@
 
 确认回复 DTO、恢复与控制入口、NativeReplyAdapter 和 PA-10 会话记录均已实现并通过组件测试。NativeReplyAdapter 将已验证的 PermissionResponse / AnswerResponse 映射回原生中断输入；员工身份、审批持久化与渠道路由由宿主按 F_24 接入。真实飞书部署验收尚未完成。崩溃续做与非确认暂停后继续仍按 F_20 的正式入口条件处理。
 
-确认使用既有 PermissionInterruptRail / AskUserRail 与原生中断恢复，不另写确认 Rail，不用 TaskLoop 的活动 follow-up 队列替代宿主业务队列。构造 / 绑定、执行编排、事件可靠性、记录格式及副作用查证条件分别引用 S_07、S_01、S_02、S_03、S_08。
+工具权限与提问使用既有 PermissionInterruptRail / AskUserRail 和原生中断恢复；跨群分享由专用 PersistentGroupShareRail 消费所有者同意，仍走同一原生状态机，不用 TaskLoop follow-up 替代宿主业务队列。构造 / 绑定、执行编排、事件可靠性、记录格式及副作用查证条件分别引用 S_07、S_01、S_02、S_03、S_08。
 
-宿主鉴别发起人、生成确认卡片、保存调度及停止事实。入口的 Request / 交互校验不能代替服务端“只有发起人能回复”的鉴权。
+宿主鉴别普通工具确认的发起人与跨群分享的配置所有者，生成各自的确认卡片并保存调度及停止事实。入口的 Request / 交互校验不代替宿主鉴权；业务同意不能由原提问者或 full_access 替代。
 
 ## 2. 确认输入与等待现场
 
@@ -35,7 +35,7 @@ answered 至少有一个回答；timed_out 不得携带回答。直接构造非�
 
 ## 3. 不变量
 
-1. **I-1 确认归属：** 卡片只从记账成功的 paused(awaiting_confirmation) 生成，只接受原发起人回复；恢复校验同 Request、等待交互及回复类型，不能将无效回复视为授权。
+1. **I-1 确认归属：** 卡片只从记账成功的 paused(awaiting_confirmation) 生成；普通工具只接受原发起人回复，跨群分享只接受宿主鉴别的配置所有者决策。恢复校验同 Request、等待交互及回复类型，不能将无效回复视为授权。
 2. **I-2 现场保留：** 正常确认恢复保留中断现场，不追加执行头、背景或任务消息；回复目标取等待现场，不由新回复任意覆盖。
 3. **I-3 授权边界：** 同意并本会话记住只更新本 Session 的原生确认选择；不提供永久允许或 persist_allow_rule，不改变发布的 Spec。
 4. **I-4 控制单源：** abort 包装入口只请求停止；等待原生退出、保存、结束事件及资源清理由执行入口完成，不产生第二个终态写入者。
@@ -47,7 +47,15 @@ answered 至少有一个回答；timed_out 不得携带回答。直接构造非�
 
 调用方为已鉴权的宿主；须满足 S_01 的模式 / 隔离与 S_07 的新构造上下文要求。取得会话记录和 NativeReplyAdapter 后构造实例、加载现场，再校验 WaitingScene、原生中断、Request 和每项回复的 tool_call_id。answer 只能回复问题调用，其键不得超出原问题集合；permission 不能回复问题调用。
 
-校验通过后，以 tool_call_id 组装原生 InteractiveInput，不重复记 execution.started，不组装新窗口，也不读取新群背景；结束保存沿用原群消息游标。原生恢复执行被拦截工具，写操作仍须经过 S_08 的意图屏障，拒绝结果作为工具反馈交给模型。
+事件保留原 tool_call_id；ConfirmReply 的同名字段兼容该调用 ID，也接受当前 interrupt_id。
+两种地址指向同一调用时不能同时回复；过期 interrupt_id 拒绝。校验通过后按当前 interrupt_id
+组装原生 InteractiveInput.answer，答复只交给对应 owner；缺失 ID 的兼容记录走调用 ID。
+不重复记 execution.started、不组装新窗口、不读取新群背景；结束保存沿用原群消息游标。
+原生恢复执行被拦截工具，写操作仍须经过 S_08 的意图屏障，拒绝结果作为工具反馈交给模型。
+
+跨群分享使用稳定 owner `persistent_agent.group_share`、native kind `confirm` 与业务 metadata.kind
+`group_share`；批准只允许宿主重新鉴权读取，拒绝按调用跳过，不读取候选。普通工具批准不能充当
+分享批准，Session auto_confirm 不授予业务同意。多阶段答复按 S_03 保存，见 [F_25](../features/F_25_group-sharing-confirmation.md)。
 
 | 条件 | 对外结果 / 状态与副作用 |
 | --- | --- |
@@ -66,6 +74,15 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 入口返回只表示控制请求处理，不证明原生调用、在途工具、状态保存或记账已经收敛；它不发事件。cancel 对应 final(cancelled)，stop 对应 paused(stopped)，都由执行入口在收尾时产生。已发生外部效果不因取消自动撤销，补偿需另行授权，不在本接口自动执行。
 
+### 4.3.1 `discard_persistent_confirmation(backend, *, agent_id, session_id, request_id, spec_fingerprint) -> bool`
+
+宿主先持久化该 Request 失败且持有 Session 独占执行权，再调用此 public API；重启后补清理同样遵循
+此顺序。它不调用模型、工具或原生恢复，不决定分享授权。无记录、非等待或属于其他 Request 返回
+false；Agent/Session 身份或同 Request 的 Spec 不匹配、现场损坏抛记录校验错误，后端失败抛运行错误。
+匹配时为缺结果调用补“结果未取得，实际效果需核实”，清除 interruption、将 ending 改为 error，
+一次保存返回 true；真实结果、Session 记住的工具许可、窗口与归档元数据保留。重复调用返回 false。
+宿主成功结清后再消费审批并放行 Session；调用不写宿主失败事实或事件。
+
 ### 4.4 续做调用（组件已实现，正式入口未开放）
 
 崩溃续做及非确认暂停后继续走 execute_persistent_request，沿原 Request 使用新的 execution_id、原输入与 Spec，并以 recovery_ref 指向该任务最近一次待接续的 Execution。继续指示通过 RequestInput.continue_instruction 提供；引用不能取同 Session 其他任务的 Execution。
@@ -80,7 +97,7 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 ### 4.5 NativeReplyAdapter.to_native(response, request) -> Any
 
-该同步适配器把入口已匹配的 PermissionResponse / AnswerResponse 与原生 InterruptRequest 转换为 InteractiveInput.user_inputs[tool_call_id] 对应的值；它不提供另一套鉴权或确认决策。批准仅同意当前调用；本会话记住映射为 auto_confirm=True、persist_allow=False，不写入永久允许规则。拒绝带用户反馈；问答支持部分回答，漏答及超时分别填入明确占位答复。转换失败不能继续进入原生恢复，不返回假同意；native_reply_adapter() 当前返回正式适配器。
+该同步适配器把入口已匹配的 PermissionResponse / AnswerResponse 与原生 InterruptRequest 转换为 InteractiveInput 对应的值，地址由入口校验和选择；它不提供另一套鉴权或确认决策。批准仅同意当前调用；本会话记住映射为 auto_confirm=True、persist_allow=False，不写入永久允许规则。拒绝带用户反馈；问答支持部分回答，漏答及超时分别填入明确占位答复。转换失败不能继续进入原生恢复，不返回假同意；native_reply_adapter() 当前返回正式适配器。
 
 ## 5. 控制、调度与恢复生命周期
 

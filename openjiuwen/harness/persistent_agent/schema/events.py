@@ -185,6 +185,8 @@ class InterceptedToolCall(ProtocolModel):
     arguments: Text
     # The arguments were cut to fit the event; approval still applies to the complete interrupted call.
     arguments_truncated: bool = False
+    # Opaque host correlation; not an authorization token or a candidate preview.
+    approval_ref: Identifier | None = None
 
 
 class PausedPayload(ProtocolModel):
