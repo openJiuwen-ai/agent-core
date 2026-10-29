@@ -255,10 +255,8 @@ class _RunnerImpl(_TeamRunnerMixin):
         for _ in range(_ROOT_TASK_GROUP_ENSURE_RETRIES):
             with self._root_state_lock:
                 current = self._root_state
-                if current is live_state or (
-                    current is not None and _is_live_task_on_running_loop(current.owner)
-                ):
-                    live_state = current if current is not None else live_state
+                if current is not None and _is_live_task_on_running_loop(current.owner):
+                    live_state = current
                     break
                 # current is None or stale again: rebuild once more.
                 if current is not None:
@@ -495,7 +493,16 @@ class _RunnerImpl(_TeamRunnerMixin):
         logger.info("Begin to start runner", event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
         from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
         ReadWriteLockManager.start()
-        await self._ensure_root_task_group()
+        try:
+            await self._ensure_root_task_group()
+        except Exception:
+            # ensure failure runs the same cleanup as a mid-start failure:
+            # stop the lock manager and drop our root task group state.
+            try:
+                await ReadWriteLockManager.stop()
+            finally:
+                await self._close_root_task_group()
+            raise
 
         try:
             with self._root_task_group_scope():
