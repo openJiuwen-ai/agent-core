@@ -1,12 +1,12 @@
 ---
 title: 设计文档索引
-author: MengHan18
-author_email: hanmeng22@huawei.com
+author: 霆龙(吴建宇)
+author_email: wujianyu@xiaohongshu.com
 generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-10-27T22:03+08:00 -->
+<!-- generated-at: 2026-10-28T18:05+08:00 -->
 
 # 设计文档索引 (INDEX)
 

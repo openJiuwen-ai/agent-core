@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: MengHan18
-author_email: hanmeng22@huawei.com
+author: 霆龙(吴建宇)
+author_email: wujianyu@xiaohongshu.com
 generated: true
 ---
 
@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 266 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 269 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -20,7 +20,9 @@ generated: true
 | [agent_teams/workflow](#module-3) | 15 |
 | [extensions/observability](#module-4) | 2 |
 | [harness](#module-5) | 54 |
-| [未分类](#module-6) | 6 |
+| [symphony](#module-6) | 2 |
+| [symphony/flow](#module-7) | 1 |
+| [未分类](#module-8) | 6 |
 
 <a id="module-1"></a>
 
@@ -323,6 +325,23 @@ generated: true
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
 <a id="module-6"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261026_2032_skillpack-members](features/symphony/F_20261026_2032_skillpack-members.md) | F | SkillPack 普通成员约束实施记录 | 霆龙(吴建宇) | openjiuwen/symphony | openjiuwen/symphony/flow/distill.py, openjiuwen/symphony/flow/engine.py, openjiuwen/symphony/flow/packager.py, openjiuwen/symphony/flow/render.py, openjiuwen/symphony/runtime.py, tests/unit_tests/symphony/test_capability_flow.py, tests/unit_tests/symphony/test_capability_flow_observation.py, tests/unit_tests/symphony/test_skillpack_member_types.py | symphony-design-docs:SDD-0013（非本仓或待定位） |
+| [S_01_skillpack-members](specs/symphony/S_01_skillpack-members.md) | S | SkillPack 成员与根文档规约 | 霆龙(吴建宇) | openjiuwen/symphony | openjiuwen/symphony/flow/distill.py, openjiuwen/symphony/flow/engine.py, openjiuwen/symphony/flow/packager.py, openjiuwen/symphony/flow/render.py, openjiuwen/symphony/runtime.py | — |
+
+<a id="module-7"></a>
+
+## symphony/flow
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261028_1727_skillpack-legacy-redistillation](bugfix/symphony/B_20261028_1727_skillpack-legacy-redistillation.md) | B | 升级普通成员校验后，旧配方阻止合格新证据生成候选 | 霆龙(吴建宇) | openjiuwen/symphony/flow | openjiuwen/symphony/flow/engine.py, tests/unit_tests/symphony/test_skillpack_member_types.py | symphony-design-docs:SDD-0013（非本仓或待定位） |
+
+<a id="module-8"></a>
 
 ## 未分类
 

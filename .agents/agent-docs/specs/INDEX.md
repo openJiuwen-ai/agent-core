@@ -1,7 +1,7 @@
 ---
 title: 当前规约 S索引
-author: MengHan18
-author_email: hanmeng22@huawei.com
+author: 霆龙(吴建宇)
+author_email: wujianyu@xiaohongshu.com
 generated: true
 ---
 
@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 50 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 51 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -17,6 +17,7 @@ generated: true
 |---|---|
 | [agent_teams](#module-1) | 31 |
 | [harness](#module-2) | 19 |
+| [symphony](#module-3) | 1 |
 
 <a id="module-1"></a>
 
@@ -81,3 +82,11 @@ generated: true
 | [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | openjiuwen/harness | — | — |
 | [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
+
+<a id="module-3"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_skillpack-members](symphony/S_01_skillpack-members.md) | S | SkillPack 成员与根文档规约 | 霆龙(吴建宇) | openjiuwen/symphony | openjiuwen/symphony/flow/distill.py, openjiuwen/symphony/flow/engine.py, openjiuwen/symphony/flow/packager.py, openjiuwen/symphony/flow/render.py, openjiuwen/symphony/runtime.py | — |

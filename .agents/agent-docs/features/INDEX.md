@@ -1,7 +1,7 @@
 ---
 title: 实施与决策 F索引
-author: MengHan18
-author_email: hanmeng22@huawei.com
+author: 霆龙(吴建宇)
+author_email: wujianyu@xiaohongshu.com
 generated: true
 ---
 
@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 177 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 178 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -17,6 +17,7 @@ generated: true
 |---|---|
 | [agent_teams](#module-1) | 145 |
 | [harness](#module-2) | 32 |
+| [symphony](#module-3) | 1 |
 
 <a id="module-1"></a>
 
@@ -208,3 +209,11 @@ generated: true
 | [F_22_agent-template-card-and-async-loader](harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_22_cli-jiuwen-memory-rail-mount-and-switch](harness/F_22_cli-jiuwen-memory-rail-mount-and-switch.md) | F | F_22 CLI 挂载 JiuwenMemoryRail 与启用开关 | huangyuzhe | openjiuwen/harness | — | 待核实 |
 | [F_23_progressive-tool-discovery-metadata](harness/F_23_progressive-tool-discovery-metadata.md) | F | 渐进式工具发现元数据 | MengHan18 | openjiuwen/harness | openjiuwen/harness/tools/tool_discovery/bm25.py, openjiuwen/harness/rails/progressive_tool_rail.py | 无独立 D：复用现有渐进式工具发现架构，仅增加向后兼容的卡片元数据扩展点 |
+
+<a id="module-3"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261026_2032_skillpack-members](symphony/F_20261026_2032_skillpack-members.md) | F | SkillPack 普通成员约束实施记录 | 霆龙(吴建宇) | openjiuwen/symphony | openjiuwen/symphony/flow/distill.py, openjiuwen/symphony/flow/engine.py, openjiuwen/symphony/flow/packager.py, openjiuwen/symphony/flow/render.py, openjiuwen/symphony/runtime.py, tests/unit_tests/symphony/test_capability_flow.py, tests/unit_tests/symphony/test_capability_flow_observation.py, tests/unit_tests/symphony/test_skillpack_member_types.py | symphony-design-docs:SDD-0013（非本仓或待定位） |

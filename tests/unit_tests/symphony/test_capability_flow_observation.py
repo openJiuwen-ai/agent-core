@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from openjiuwen.symphony import CombinationCandidate, EvolutionSubmitResult, SymphonyRuntime
+from openjiuwen.symphony.flow import SkillPackAdapter, SymphonyFlowEngine
 from openjiuwen.symphony.observation import ObservationReceipt
 
 
@@ -213,6 +214,53 @@ async def test_runtime_accepts_capability_metadata_and_submits_to_flow() -> None
         "outputs": [{"name": "forecast", "type": "object"}],
     }
     flow_engine.submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member_type", ["skill", "swarm_skill", "skillpack", "unknown"])
+async def test_runtime_keeps_host_member_type_for_flow_only(tmp_path, member_type) -> None:
+    receipt = ObservationReceipt(
+        evidence_id="execution-1", graph_scope_id="workspace:test", sequence=1, status="accepted",
+    )
+    graph_engine = SimpleNamespace(submit_observation=Mock(return_value=receipt))
+    flow_engine = SymphonyFlowEngine(tmp_path, skill_adapter=SkillPackAdapter())
+    runtime = _runtime(graph_engine, flow_engine)
+    execution = _execution_graph_with_capability_metadata()
+    for node in execution["graph"]["nodes"].values():
+        node["metadata"]["skill_type"] = member_type
+
+    try:
+        result = await runtime.submit_evolution(
+            _planned_graph(), execution, session_id="session-1", capture_mode="agent",
+        )
+        assert result.graph_receipt is receipt
+        observation = graph_engine.submit_observation.call_args.args[0]
+        assert all("skill_type" not in node.metadata for node in observation.execution_graph.nodes.values())
+        assert all(node["metadata"]["skill_type"] == member_type for node in execution["graph"]["nodes"].values())
+        evidence = flow_engine.store.read_evidence()
+        if member_type == "skill":
+            assert len(evidence) == 1
+            assert all(node["metadata"]["skill_type"] == "skill" for node in evidence[0].graph["nodes"].values())
+        else:
+            assert evidence == []
+    finally:
+        await flow_engine.close()
+
+
+@pytest.mark.asyncio
+async def test_host_member_type_does_not_bypass_other_graph_metadata_validation() -> None:
+    execution = _execution_graph()
+    execution["graph"]["nodes"]["skill:a"]["metadata"].update(skill_type="skill", unsupported="value")
+    graph_engine = SimpleNamespace(submit_observation=Mock())
+    flow_engine = SimpleNamespace(submit=AsyncMock())
+
+    result = await _runtime(graph_engine, flow_engine).submit_evolution(
+        None, execution, session_id="session-1", capture_mode="agent",
+    )
+
+    assert result.graph_receipt is None
+    graph_engine.submit_observation.assert_not_called()
+    flow_engine.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

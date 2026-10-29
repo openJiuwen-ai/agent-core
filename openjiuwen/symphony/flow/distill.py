@@ -76,6 +76,8 @@ def normalize_execution_graph(
                 "outputs": outputs,
             },
         }
+        if "skill_type" in metadata:
+            nodes[node_id]["metadata"]["skill_type"] = str(metadata["skill_type"] or "unknown").strip().lower()
 
     edges: list[dict[str, Any]] = []
     for raw_edge in graph.get("edges") or []:
@@ -472,7 +474,7 @@ def distill_group(
         for node_id, node in (record.graph.get("nodes") or {}).items():
             current = node_metadata.setdefault(node_id, {})
             metadata = node.get("metadata") or {}
-            for key in ("capability_type", "version", "description"):
+            for key in ("capability_type", "skill_type", "version", "description"):
                 value = str(metadata.get(key) or "")
                 if value and not current.get(key):
                     current[key] = value

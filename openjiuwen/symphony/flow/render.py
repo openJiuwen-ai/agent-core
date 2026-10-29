@@ -117,6 +117,19 @@ class SkillPackAdapter:
     """Render a reviewed package as one SDD-0010 SkillPack root document."""
 
     @staticmethod
+    def validate_members(structure: dict[str, Any]) -> None:
+        """Require host-resolved ordinary Skills; unknown legacy types are unsafe."""
+        nodes = structure.get("nodes")
+        if not isinstance(nodes, dict) or len(nodes) < 2:
+            raise SkillPackNotInstallableError("recipe is not a Skill chain")
+        for node_id, node in nodes.items():
+            metadata = node.get("metadata") if isinstance(node, dict) else None
+            if not isinstance(metadata, dict) or metadata.get("capability_type") != "skill":
+                raise SkillPackNotInstallableError(f"capability {node_id!s} is not a Skill")
+            if metadata.get("skill_type") != "skill":
+                raise SkillPackNotInstallableError(f"capability {node_id!s} is not an ordinary Skill")
+
+    @staticmethod
     def render(package: dict[str, Any], artifact_dir: str | Path) -> list[Path]:
         materials = package.get("materials")
         materials = materials if isinstance(materials, dict) else {}
@@ -129,6 +142,8 @@ class SkillPackAdapter:
         members, edges = _skillpack_chain(structure)
 
         name = str(package.get("meta_name") or "symphony-combination").strip()
+        if name in members:
+            name = f"{name[:123]}-pack"
         task_description = _compact_text(
             applicability.get("task_description"),
             fallback="由 Symphony 成功执行生成的组合 Skill",
@@ -211,6 +226,7 @@ class SkillPackAdapter:
 
 
 def _skillpack_chain(structure: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+    SkillPackAdapter.validate_members(structure)
     nodes = structure.get("nodes")
     raw_edges = structure.get("edges")
     if not isinstance(nodes, dict) or len(nodes) < 2 or not isinstance(raw_edges, list):
