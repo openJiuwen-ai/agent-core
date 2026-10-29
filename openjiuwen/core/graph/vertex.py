@@ -693,7 +693,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     self._stream_done,
                     timeout=stream_timeout
                 )
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     raise result
             except asyncio.TimeoutError:
                 raise build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_TIMEOUT, timeout=stream_timeout,
@@ -745,12 +745,25 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             event.set()
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
-                if isinstance(result, Exception):
+                # 用 BaseException 而非 Exception：gather(return_exceptions=True)
+                # 会把被取消的子任务以 CancelledError 实例放进 results，而
+                # CancelledError 自 Python 3.8 起不是 Exception 子类。若沿用
+                # Exception，被取消的子任务会被跳过，error 保持 None，后续打印
+                # “Succeed” 并把 _stream_done 置为 True，节点被误判成功。
+                if isinstance(result, BaseException):
                     raise result
             logger.debug(f"Succeed to call stream-in node [{self._node_id}]",
                          event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
                          **self._log_message)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            # 取消属于异常终止：先把 error 填好，确保即便下方清理阶段的 await 期间
+            # 被二次取消（finally 提前执行），_stream_done 拿到的也是 error 而非
+            # True（误判为“成功完成”）。这是评审指出的二次取消失效问题的根因。
+            error = build_error(
+                StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR,
+                reason="stream-in node call cancelled",
+                node_id=self._node_id,
+            )
             cancelled_tasks = []
             finished_tasks = []
             error_tasks = {}
@@ -772,7 +785,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     pending_tasks.append(task)
 
             if pending_tasks:
-                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                try:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    # 清理阶段被二次取消：忽略，统一在末尾以 exc 重新抛出，
+                    # 此时 error 已在进入本分支时赋值，finally 不会再误判为成功。
+                    pass
 
             logger.warning(
                 f"Cancel to call stream-in node [{self._node_id}]",
@@ -784,6 +802,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 },
                 **self._log_message
             )
+            raise exc
         except Exception as e:
             logger.error(
                 f"Failed to call stream-in node [{self._node_id}]",
@@ -794,6 +813,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             error_callback(e)
             error = e
         finally:
+            # 取消分支已在进入时把 error 置为非 None，故这里 set_result 拿到的是
+            # error 而非 True：下游 StreamActor 看到的是“节点取消/失败”，不会被误判为
+            # 成功完成；trace 发送仍照常执行（已判空保护），不依赖任务是否跑完。
             self._stream_done.set_result(error if error else True)
             await self.__trace_component_stream_input_send__()
 
