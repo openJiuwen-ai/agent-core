@@ -119,6 +119,7 @@ async def _build_member_system_prompt(
     *,
     hitt_enabled: bool,
     ws_cache: Any = None,
+    session_id: Optional[str] = None,
 ) -> str | None:
     """Build the external CLI member's system prompt from team-rail sections.
 
@@ -126,6 +127,11 @@ async def _build_member_system_prompt(
     (role / workflow / lifecycle / ...), built the same way, but excluding the
     other DeepAgent rails (safety, workspace, memory, ...) that do not apply to
     a CLI whose brain is not a local DeepAgent.
+
+    With extension wiring (the leader's spec carries the host bus in its
+    build-context extras) the sections go through the ``team.build_policy``
+    chain first, so handler rewrites reach the CLI member's prompt; without
+    it the default set is assembled right here, as before.
 
     The prompt carries the team's standing policy only. Who the member is and
     what it privately agreed to is team state, delivered as ``<team-context>``
@@ -151,6 +157,7 @@ async def _build_member_system_prompt(
             ``build_team_member_system_prompt`` reads evolved A-class templates
             (teammate_policy, etc.) through the cache-bound loader instead of
             the framework default. ``None`` keeps the framework read-only path.
+        session_id: Session id for the extension build chain, when wired.
 
     Returns:
         The rendered system prompt, or ``None`` when no section had content.
@@ -159,6 +166,41 @@ async def _build_member_system_prompt(
     from openjiuwen.agent_teams.prompts.loader import make_template_loader
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    loader = make_template_loader(ws_cache)
+    sections = None
+    extension_bus = None
+    if spec.build_context is not None:
+        from openjiuwen.agent_teams.extensions.events import build_team_policy_sections
+        from openjiuwen.agent_teams.extensions.models import (
+            TeamPolicyBuildInput,
+            TeamPolicyContext,
+        )
+        from openjiuwen.agent_teams.rails.team_context import get_extension_bus
+
+        extension_bus = get_extension_bus(spec.build_context)
+        if extension_bus is not None:
+            team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+            build_output = await build_team_policy_sections(
+                TeamPolicyBuildInput(
+                    team_name=team_name,
+                    role=ctx.role,
+                    member_name=member_name,
+                    workspace_prompt_variant="external",
+                ),
+                TeamPolicyContext(
+                    language=language,
+                    lifecycle=spec.lifecycle,
+                    team_mode=_resolve_team_mode(spec),
+                    dispatch_mode=spec.dispatch_mode,
+                    teammate_mode=spec.teammate_mode,
+                    hitt_enabled=hitt_enabled,
+                    expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
+                ),
+                loader=loader,
+                bus=extension_bus,
+                session_id=session_id,
+            )
+            sections = build_output.sections
     prompt = build_team_member_system_prompt(
         role=ctx.role,
         member_name=member_name,
@@ -171,7 +213,8 @@ async def _build_member_system_prompt(
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
         mcp_server_name=None if ctx.cli_agent == "codex" else TEAM_MCP_SERVER_NAME,
-        loader=make_template_loader(ws_cache),
+        loader=loader,
+        sections=sections,
     )
     if ctx.team_spec and ctx.team_spec.conversation_mode == "group_chat":
         from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
@@ -443,6 +486,7 @@ async def external_cli_spawn(
         member_name,
         hitt_enabled=hitt_enabled,
         ws_cache=leader_workspace_cache,
+        session_id=session_id,
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.

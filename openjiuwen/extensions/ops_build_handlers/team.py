@@ -26,11 +26,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from openjiuwen.agent_teams.extensions.models import TeamPolicyContext
 from openjiuwen.agent_teams.extensions.ops import (
     MessagePage,
     TaskDependencyInfo,
     TeamReadView,
     TeamResourceResolver,
+    current_policy_context,
     current_team_name,
 )
 from openjiuwen.agent_teams.monitor.models import MemberInfo, MessageInfo, TaskInfo, TeamInfo
@@ -352,6 +354,22 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
             )
         return message_info
 
+    async def policy_context(_ops: EventHandlerOps) -> TeamPolicyContext:
+        """Return the read-only config bound to the current policy build.
+
+        Raises:
+            BaseError: ``AGENT_TEAM_STATE_INVALID`` when queried outside a
+                policy build — the context exists only inside the build
+                entry's scope.
+        """
+        context = current_policy_context()
+        if context is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_STATE_INVALID,
+                reason="policy_context is only available inside a team.build_policy call",
+            )
+        return context
+
     return {
         "info": info,
         "members": members,
@@ -361,6 +379,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         "task_dependencies": task_dependencies,
         "messages": messages,
         "message": message,
+        "policy_context": policy_context,
     }
 
 

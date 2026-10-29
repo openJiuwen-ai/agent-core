@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from openjiuwen.agent_teams.extensions.models import TeamMonitorEventInput
+from openjiuwen.agent_teams.extensions.models import TeamMonitorEventInput, TeamPolicyBuildInput
 from openjiuwen.agent_teams.monitor.models import MonitorEventType
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.events.types import EventInput, MatchPattern
@@ -97,6 +97,27 @@ def match_team_monitor_event(event_input: EventInput, match_pattern: MatchPatter
     )
 
 
+def match_team_build_policy(event_input: EventInput, match_pattern: MatchPattern) -> bool:
+    """Match a ``team.build_policy`` pattern against one build target.
+
+    A build target carries no member id when the policy is role-scoped (a
+    fresh leader prefix, for instance); such builds never match a pattern
+    that specifies ``member_name``.
+    """
+    if not isinstance(event_input, TeamPolicyBuildInput):
+        return False
+    return _match_all_specified(
+        match_pattern,
+        enum_domains={"role": _ROLE_VALUES},
+        input_fields={
+            "role": event_input.role.value if isinstance(event_input.role, TeamRole) else None,
+            "team_name": event_input.team_name,
+            "member_name": event_input.member_name,
+        },
+    )
+
+
 __all__ = [
+    "match_team_build_policy",
     "match_team_monitor_event",
 ]
