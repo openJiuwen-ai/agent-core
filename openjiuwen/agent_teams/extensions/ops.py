@@ -10,12 +10,19 @@ monitor models — or ``None`` when the team is not accessible in that
 session. Binding the real resolver to the runtime pool is host wiring;
 tests supply fakes.
 
-One binding carries a call-scoped fact that Ops methods read instead of
-threading it through arguments: the **current team**, bound by the Team
-business entry for one event call (``team_name=None`` in a query means
-"this team", never "guess the only team in the session").
+Two bindings carry call-scoped facts that Ops methods and the policy CORE
+read instead of threading them through arguments:
 
-It is contextvar-backed: concurrent calls stay isolated, a nested scope
+* the **current team**, bound by the Team business entry for one event
+  call (``team_name=None`` in a query means "this team", never "guess the
+  only team in the session");
+* the **policy build context**, bound by the policy build entry for one
+  build so the CORE and every handler read one identical snapshot;
+* the **policy build loader**, bound alongside the context so the CORE
+  builds from the caller's template loader (the team's workspace cache)
+  instead of whatever was registered at bus-init time.
+
+All are contextvar-backed: concurrent calls stay isolated, a nested scope
 restores the outer binding on exit, and return, exception and cancellation
 all release the inner binding.
 """
@@ -27,9 +34,19 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Iterator, Protocol
 
+from openjiuwen.agent_teams.extensions.models import TeamPolicyContext
 from openjiuwen.agent_teams.monitor.models import MemberInfo, MessageInfo, TaskInfo, TeamInfo
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader
 
 _CURRENT_TEAM: ContextVar[str | None] = ContextVar("team_ops_current_team", default=None)
+_POLICY_CONTEXT: ContextVar[TeamPolicyContext | None] = ContextVar(
+    "team_ops_policy_context",
+    default=None,
+)
+_POLICY_LOADER: ContextVar[TemplateLoader | None] = ContextVar(
+    "team_ops_policy_loader",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +155,70 @@ def current_team_name() -> str | None:
     return _CURRENT_TEAM.get()
 
 
+@contextmanager
+def bind_policy_context_scope(context: TeamPolicyContext) -> Iterator[TeamPolicyContext]:
+    """Bind the policy build context for one build scope.
+
+    The build entry binds the target's effective-config snapshot before
+    triggering ``team.build_policy``; the CORE and every handler read the
+    same value through :func:`current_policy_context`. Concurrent builds
+    stay isolated; a nested build restores the outer binding on exit.
+
+    Args:
+        context: The snapshot to bind for the duration of the block.
+
+    Yields:
+        The bound context.
+    """
+    token = _POLICY_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _POLICY_CONTEXT.reset(token)
+
+
+def current_policy_context() -> TeamPolicyContext | None:
+    """Return the policy context bound to the current build, if any."""
+    return _POLICY_CONTEXT.get()
+
+
+@contextmanager
+def bind_policy_loader_scope(loader: TemplateLoader) -> Iterator[TemplateLoader]:
+    """Bind the policy build's template loader for one build scope.
+
+    Registration-time loaders cannot follow per-team workspace caches (the
+    bus is wired before any team exists), so the build entry binds the
+    caller's loader — rail and tool hand in their cache-bound one — and the
+    CORE reads it through :func:`current_policy_loader` instead of the
+    registration fallback.
+
+    Args:
+        loader: The template loader to bind for the duration of the block.
+
+    Yields:
+        The bound loader.
+    """
+    token = _POLICY_LOADER.set(loader)
+    try:
+        yield loader
+    finally:
+        _POLICY_LOADER.reset(token)
+
+
+def current_policy_loader() -> TemplateLoader | None:
+    """Return the template loader bound to the current build, if any."""
+    return _POLICY_LOADER.get()
+
+
 __all__ = [
     "MessagePage",
     "TaskDependencyInfo",
     "TeamReadView",
     "TeamResourceResolver",
+    "bind_policy_context_scope",
+    "bind_policy_loader_scope",
     "bind_team_scope",
+    "current_policy_context",
+    "current_policy_loader",
     "current_team_name",
 ]

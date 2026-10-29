@@ -139,6 +139,7 @@ def create_team_tools(
     concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
+    extension_bus: Any = None,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -225,6 +226,7 @@ def create_team_tools(
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
             loader=loader,
+            extension_bus=extension_bus,
         ),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per role_type (flat schema, no role branching)

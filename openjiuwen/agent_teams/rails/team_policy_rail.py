@@ -42,14 +42,16 @@ all: it is written into the member's conversation as it appears, driven by
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock
-from openjiuwen.agent_teams.prompts import (
-    build_leader_bootstrap_section,
-    build_team_extra_section,
-    build_team_static_sections,
+from openjiuwen.agent_teams.extensions.events import build_team_policy_sections
+from openjiuwen.agent_teams.extensions.models import TeamPolicyBuildInput, TeamPolicyContext
+from openjiuwen.agent_teams.extensions.policy import (
+    build_default_policy_sections,
+    select_policy_prefix_sections,
 )
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
@@ -67,6 +69,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 # Attachment section holding this member's identity, team metadata and roster.
 TEAM_CONTEXT_ATTACHMENT_SECTION = "team.context"
@@ -133,6 +136,7 @@ class TeamPolicyRail(DeepAgentRail):
         steer_batch_size: int = 2,
         fork_source: str | None = None,
         loader: TemplateLoader = load_template,
+        extension_bus: "ExtensionEventBusProtocol | None" = None,
     ) -> None:
         super().__init__()
         self._language = language
@@ -155,20 +159,50 @@ class TeamPolicyRail(DeepAgentRail):
         # human agent is spawned; the human roster itself rides the state lane
         # (tagged ``[human]``).
         hitt_enabled = team_backend.hitt_enabled() if team_backend is not None else False
-        self._static_sections: list[PromptSection] = self._build_static_sections(
+        # The default section set is assembled by the shared builder; the
+        # rail keeps only the build target and the effective-config
+        # snapshot that drove this build.
+        policy_target = TeamPolicyBuildInput(
+            team_name=team_backend.team_name if team_backend is not None else "",
             role=role,
-            member_prompt=member_prompt,
             member_name=member_name,
-            display_name=display_name,
-            member_workspace_path=member_workspace_path,
+        )
+        policy_context = TeamPolicyContext(
+            language=language,
             lifecycle=lifecycle,
-            teammate_mode=teammate_mode,
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
-            base_prompt=base_prompt,
+            teammate_mode=teammate_mode,
             hitt_enabled=hitt_enabled,
+            base_prompt=base_prompt,
             swarmflow_enabled=swarmflow_enabled,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
         )
+        # Kept for the async policy preparation step: the build target and
+        # effective-config snapshot that this rail's sections were built
+        # from, ready to be re-run through the extension build entry.
+        self._policy_build_input = policy_target
+        self._policy_context = policy_context
+        # Host extension wiring decides when the sections materialize: with a
+        # bus the rail defers to the first model call, where the policy build
+        # extension chain assembles them (a failing build fails the member's
+        # preparation — no silent fallback); without one the default set is
+        # built right here, identical to the no-extension behavior.
+        self._extension_bus = extension_bus
+        self._policy_sections_ready = extension_bus is None
+        self._build_lock: asyncio.Lock | None = asyncio.Lock() if extension_bus is not None else None
+        if extension_bus is None:
+            self._static_sections: list[PromptSection] = list(
+                self._prefix_view(
+                    build_default_policy_sections(
+                        policy_target,
+                        policy_context,
+                        loader=self._loader,
+                    ),
+                ),
+            )
+        else:
+            self._static_sections = []
 
         self._tracker = TeamContextTracker(
             team_backend=team_backend,
@@ -327,11 +361,54 @@ class TeamPolicyRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
+        await self._ensure_sections_built(ctx)
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
                 self.system_prompt_builder.add_section(section)
 
         await self._announce_unattached_state(ctx)
+
+    async def _ensure_sections_built(self, ctx: AgentCallbackContext) -> None:
+        """Run the deferred policy build once, before the first model request.
+
+        Only the bus-wired rail enters here: the sections are assembled by
+        the ``team.build_policy`` extension chain (CORE default plus any
+        registered handlers) using the build target and config snapshot
+        saved at construction. The lock plus the ready flag make this
+        idempotent under concurrent model-call entries; a failing build
+        propagates so the member's preparation fails instead of silently
+        falling back to a default policy.
+
+        Args:
+            ctx: The model-call context carrying the member's session.
+        """
+        if self._policy_sections_ready or self._extension_bus is None or self._build_lock is None:
+            return
+        session = getattr(ctx, "session", None)
+        session_id = session.get_session_id() if session is not None else None
+        async with self._build_lock:
+            if self._policy_sections_ready:
+                return
+            output = await build_team_policy_sections(
+                self._policy_build_input,
+                self._policy_context,
+                bus=self._extension_bus,
+                session_id=session_id,
+                loader=self._loader,
+            )
+            self._static_sections = list(self._prefix_view(output.sections))
+            self._policy_sections_ready = True
+
+    def _prefix_view(self, sections: tuple[PromptSection, ...]) -> tuple[PromptSection, ...]:
+        """Return this rail's prefix share of a full build output.
+
+        Only the leader splits its sections (F_76): the prefix keeps
+        bootstrap + extra, the rest is disclosed through the ``build_team``
+        result. Every other role takes the full set as its prefix.
+        """
+        if self._policy_build_input.role != TeamRole.LEADER:
+            return sections
+        return select_policy_prefix_sections(sections)
 
     async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
         """Register this member's team state as one dynamic attachment section.
@@ -422,81 +499,6 @@ class TeamPolicyRail(DeepAgentRail):
             return
         await context.add_messages(UserMessage(content=text))
         await self._tracker.commit(session)
-
-    def _build_static_sections(
-        self,
-        *,
-        role: TeamRole,
-        member_prompt: str,
-        member_name: str | None,
-        display_name: str,
-        member_workspace_path: str | None,
-        lifecycle: str,
-        teammate_mode: str,
-        team_mode: str,
-        dispatch_mode: str,
-        base_prompt: str | None,
-        hitt_enabled: bool,
-        swarmflow_enabled: bool,
-    ) -> list[PromptSection]:
-        """Construct the never-changing sections once at rail init time.
-
-        The leader takes the progressive-disclosure lane (F_76): its prefix is
-        the bootstrap section plus the user's own extra instructions, and
-        nothing else. Every collaboration convention it needs is disclosed by
-        the ``build_team`` result, which is also the first moment the variant
-        of each one is actually settled. Every other role keeps the full static
-        set — a teammate's conventions are fixed at spawn and it has no
-        ``build_team`` call to hang them off.
-        """
-        if role == TeamRole.LEADER:
-            sections = self._build_leader_sections(
-                base_prompt=base_prompt,
-                swarmflow_enabled=swarmflow_enabled,
-            )
-        else:
-            sections = build_team_static_sections(
-                role=role,
-                member_name=member_name,
-                lifecycle=lifecycle,
-                teammate_mode=teammate_mode,
-                team_mode=team_mode,
-                dispatch_mode=dispatch_mode,
-                base_prompt=base_prompt,
-                language=self._language,
-                hitt_enabled=hitt_enabled,
-                expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
-                loader=self._loader,
-            )
-        team_logger.info(
-            "[{}] TeamPolicyRail static sections: section_names={}",
-            member_name or "?",
-            [s.name for s in sections],
-        )
-        return sections
-
-    def _build_leader_sections(
-        self,
-        *,
-        base_prompt: str | None,
-        swarmflow_enabled: bool,
-    ) -> list[PromptSection]:
-        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
-
-        The extra section stays here rather than moving into the ``build_team``
-        disclosure because it is not team policy: it is what the SDK caller told
-        *this* leader to do, and it has to be in force before the team exists —
-        it may well be the instruction that decides what team to build.
-        """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
-        extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
-        if extra is not None:
-            sections.append(extra)
-        return sections
 
 
 __all__ = ["TeamPolicyRail"]

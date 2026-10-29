@@ -794,6 +794,7 @@ def build_team_member_system_prompt(
     workspace_prompt_variant: Literal["native", "external"] = "native",
     mcp_server_name: str | None = None,
     loader: TemplateLoader = load_template,
+    sections: tuple[PromptSection, ...] | None = None,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -824,26 +825,32 @@ def build_team_member_system_prompt(
         mcp_server_name: The MCP server providing the team's tools, when the
             member reaches them through MCP. ``None`` (an in-process member,
             which calls its tools by the bare name) renders the policy alone.
+        sections: Pre-built sections to render instead of assembling the
+            default set here. The extension-wired external-CLI path passes
+            the ``team.build_policy`` chain output this way, so handler
+            rewrites reach the CLI member's prompt; ``None`` (the default)
+            builds the default set from the remaining args.
 
     Other args mirror :func:`build_team_static_sections`.
 
     Returns:
         The rendered system prompt, or ``""`` when no section produced content.
     """
-    sections = build_team_static_sections(
-        role=role,
-        member_name=member_name,
-        lifecycle=lifecycle,
-        teammate_mode=teammate_mode,
-        team_mode=team_mode,
-        dispatch_mode=dispatch_mode,
-        base_prompt=base_prompt,
-        language=language,
-        hitt_enabled=hitt_enabled,
-        expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-        workspace_prompt_variant=workspace_prompt_variant,
-        loader=loader,
-    )
+    if sections is None:
+        sections = build_team_static_sections(
+            role=role,
+            member_name=member_name,
+            lifecycle=lifecycle,
+            teammate_mode=teammate_mode,
+            team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
+            base_prompt=base_prompt,
+            language=language,
+            hitt_enabled=hitt_enabled,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+            workspace_prompt_variant=workspace_prompt_variant,
+            loader=loader,
+        )
     builder = SystemPromptBuilder(language=language)
     for section in sections:
         builder.add_section(section)

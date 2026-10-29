@@ -42,6 +42,7 @@ from openjiuwen.harness.manifest.builtin_elements import (
     observability_dependency_installed,
 )
 from openjiuwen.agent_teams.rails.team_context import (
+    get_extension_bus,
     get_messager,
     get_reliability_components,
     get_swarmflow_budget,
@@ -127,6 +128,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
         swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
+        extension_bus=get_extension_bus(context),
     )
 
 
@@ -211,6 +213,10 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         # prompt that describes the mechanism and the tool that runs it appear
         # and disappear together.
         swarmflow_enabled=get_swarmflow_model_resolver(context) is not None,
+        # Host extension wiring: a bound bus defers section building to the
+        # first model call (the policy build extension chain); None builds
+        # locally right here.
+        extension_bus=get_extension_bus(context),
     )
 
 

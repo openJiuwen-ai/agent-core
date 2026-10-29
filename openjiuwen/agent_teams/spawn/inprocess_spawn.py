@@ -49,6 +49,11 @@ async def inprocess_spawn(
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
+    # The leader's very spec object: everything the manager seeded into
+    # ``spec.build_context.extras`` (the extension bus among them) reaches
+    # this teammate's rail and tool factories through the configurator's
+    # per-member derive — that is the in-process wiring channel. Rebuilding
+    # a fresh spec here would silently drop it.
     spec = team_agent.spec
 
     agent_spec = spec.agents.get(ctx.role.value) or spec.agents["leader"]
