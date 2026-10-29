@@ -405,7 +405,7 @@ async def test_stop_retires_unstarted_agent_before_default_session_creation(
     create_session.assert_not_called()
 
 
-@pytest.mark.parametrize("blocked_stage", ["pre_run", "prepare", "register"])
+@pytest.mark.parametrize("blocked_stage", ["pre_run", "prepare"])
 @pytest.mark.asyncio
 async def test_stop_waits_for_in_progress_start_setup(
     monkeypatch: pytest.MonkeyPatch,
@@ -430,20 +430,17 @@ async def test_stop_waits_for_in_progress_start_setup(
         if blocked_stage == "prepare":
             await block()
 
-    async def register(_rail):
-        if blocked_stage == "register":
-            await block()
-
+    register = AsyncMock()
     monkeypatch.setattr(deep_agent_module, "create_agent_session", MagicMock(return_value=session))
     monkeypatch.setattr(agent, "prepare_interaction_task_loop", prepare)
     monkeypatch.setattr(agent, "register_rail", register)
     monkeypatch.setattr(agent, "_forward_session_stream", AsyncMock())
     monkeypatch.setattr(agent, "_ensure_supervisor_running", MagicMock())
-    agent._task_completion_rail = None if blocked_stage == "register" else object()  # type: ignore[assignment]
+    agent._task_completion_rail = object()  # type: ignore[assignment]
     start_task = asyncio.create_task(
         agent.start(session=None if blocked_stage == "pre_run" else session)
     )
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), timeout=5)
 
     stop_task = asyncio.create_task(agent.stop())
     await asyncio.sleep(0)
@@ -454,6 +451,7 @@ async def test_stop_waits_for_in_progress_start_setup(
 
     assert agent.interaction_started is False
     assert agent.phase is InteractionPhase.TERMINATED
+    register.assert_not_awaited()
 
 
 @pytest.mark.asyncio

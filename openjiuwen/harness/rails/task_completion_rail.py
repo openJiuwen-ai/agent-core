@@ -232,8 +232,14 @@ class TaskCompletionRail(DeepAgentRail):
             inherited = getattr(agent, "goal_manager", None)
             if inherited is not None:
                 self.set_goal_manager(inherited)
+        self._bind_goal_tools(agent)
+
+    def _bind_goal_tools(self, agent: Any) -> None:
+        """Make goal tools available without running the rail lifecycle."""
         if self._goal_manager is None:
             return
+        if self._goal_report_sink is None:
+            self.set_goal_manager(self._goal_manager)
 
         from openjiuwen.harness.tools.goal import (
             GetCurrentGoalTool,
@@ -245,22 +251,27 @@ class TaskCompletionRail(DeepAgentRail):
             getattr(agent, "system_prompt_builder", None)
         )
         self._goal_language = language
-        tools: List[Tool] = [
-            SubmitGoalReportTool(
-                self._goal_report_sink,
-                language=language,
-                agent_id=agent_id,
-            ),
-            GetCurrentGoalTool(
-                self._goal_manager,
-                language=language,
-                agent_id=agent_id,
-            ),
-        ]
+        if (
+            not self._goal_tools
+            or self._goal_tools[-1]._goal_manager is not self._goal_manager
+            or self._goal_tools[-1]._language != language
+        ):
+            self._goal_tools = [
+                SubmitGoalReportTool(
+                    self._goal_report_sink,
+                    language=language,
+                    agent_id=agent_id,
+                ),
+                GetCurrentGoalTool(
+                    self._goal_manager,
+                    language=language,
+                    agent_id=agent_id,
+                ),
+            ]
         if hasattr(agent, "ability_manager"):
-            for tool in tools:
-                agent.ability_manager.add_ability(tool.card, tool)
-            self._goal_tools = tools
+            for tool in self._goal_tools:
+                if agent.ability_manager.get(tool.card.name) is not tool.card:
+                    agent.ability_manager.add_ability(tool.card, tool)
             logger.info(
                 "TaskCompletionRail: registered submit_goal_report "
                 "and get_current_goal tools"
@@ -273,16 +284,21 @@ class TaskCompletionRail(DeepAgentRail):
 
     def uninit(self, agent: Any) -> None:
         """Remove the goal tools."""
+        self._remove_goal_tools(agent)
+        self.attachment_manager = None
+
+    def _remove_goal_tools(self, agent: Any) -> None:
+        """Remove only tool cards still owned by this rail instance."""
         if not hasattr(agent, "ability_manager"):
             self._goal_tools = []
-            self.attachment_manager = None
             return
         for tool in self._goal_tools:
             name = getattr(tool.card, "name", None)
             if not name:
                 continue
             try:
-                agent.ability_manager.remove_ability(name)
+                if agent.ability_manager.get(name) is tool.card:
+                    agent.ability_manager.remove_ability(name)
             except Exception:
                 logger.debug(
                     "TaskCompletionRail: failed to remove goal tool %s",
@@ -290,7 +306,6 @@ class TaskCompletionRail(DeepAgentRail):
                     exc_info=True,
                 )
         self._goal_tools = []
-        self.attachment_manager = None
 
     # -- lifecycle hooks --
 

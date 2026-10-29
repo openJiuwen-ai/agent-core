@@ -550,6 +550,12 @@ class DeepAgent(BaseAgent):
 
         self._queue_pending_rails(config)
         self._sync_prompt_builder_references()
+        if self._interaction_started:
+            for rail in self._registered_rails:
+                if isinstance(rail, TaskCompletionRail):
+                    self._bind_live_goal_manager(rail)
+                    rail._bind_goal_tools(self)
+            self._refresh_pending_goal_tools()
         # SubagentRail is intentionally retained across partial hot reloads so
         # its task/session tools and running subagents survive. Refresh the
         # model-facing available-agents text after the parent registry and
@@ -582,7 +588,7 @@ class DeepAgent(BaseAgent):
         """
         if config.rails is not None:
             # Partial update: only cycle rails whose type appears in the new list.
-            replacing_types = {type(r) for r in config.rails}
+            replacing_types = {type(r) for r in config.rails if not isinstance(r, TaskCompletionRail)}
             retained = []
             for rail in self._registered_rails:
                 if type(rail) in replacing_types:
@@ -596,9 +602,13 @@ class DeepAgent(BaseAgent):
             ]
         else:
             # Full replacement: all existing rails become stale.
+            for rail in self._pending_rails:
+                self._remove_pending_goal_tools(rail)
             self._stale_rails.extend(self._registered_rails)
             self._registered_rails.clear()
             self._pending_rails.clear()
+            if any(stale is self._task_completion_rail for stale in self._stale_rails):
+                self._task_completion_rail = None
 
     def _hot_reload_model(self, config: DeepAgentConfig) -> None:
         """Apply updated model/iteration config to the live inner ReActAgent.
@@ -816,15 +826,14 @@ class DeepAgent(BaseAgent):
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
         if config.rails is not None:
-            self._pending_rails.extend(config.rails)
+            for rail in config.rails:
+                self.add_rail(rail)
 
         if config.moa is not None:
             from openjiuwen.harness.rails.moa_rail import MoARail
 
             if not any(isinstance(rail, MoARail) for rail in (*self._pending_rails, *self._registered_rails)):
                 self._pending_rails.append(MoARail(config.moa))
-
-        self._task_completion_rail = None
 
         if config.progressive_tool_enabled:
             self._pending_rails.append(
@@ -835,8 +844,11 @@ class DeepAgent(BaseAgent):
         # task loop is enabled.  Users can override it by passing
         # their own TaskCompletionRail via add_rail() or the
         # factory's rails= argument.
-        if config.enable_task_loop:
-            self._pending_rails.append(
+        if (config.enable_task_loop or self._interaction_started) and not any(
+            isinstance(rail, TaskCompletionRail)
+            for rail in (*self._pending_rails, *self._registered_rails)
+        ):
+            self.add_rail(
                 TaskCompletionRail(
                     goal_language=self._goal_prompt_language(config),
                 )
@@ -1397,7 +1409,12 @@ class DeepAgent(BaseAgent):
         # Skip rails that are also in pending (same instance): they will be
         # re-initialized by the pending loop below without needing a full retire.
         for stale_rail in self._stale_rails:
-            if stale_rail not in self._pending_rails:
+            still_pending = (
+                any(pending is stale_rail for pending in self._pending_rails)
+                if isinstance(stale_rail, TaskCompletionRail)
+                else stale_rail in self._pending_rails
+            )
+            if not still_pending:
                 await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
@@ -1426,7 +1443,6 @@ class DeepAgent(BaseAgent):
             for rail_inst in initialized_rails:
                 initializing_rail = rail_inst
                 if isinstance(rail_inst, TaskCompletionRail):
-                    self._task_completion_rail = rail_inst
                     self._bind_live_goal_manager(rail_inst)
                 if isinstance(rail_inst, DeepAgentRail):
                     rail_inst.set_sys_operation(self._deep_config.sys_operation)
@@ -1434,7 +1450,12 @@ class DeepAgent(BaseAgent):
                 rail_init_timings.append(
                     (type(rail_inst).__name__, init_rail(rail_inst, self))
                 )
-                await self._register_rail_selective(rail_inst)
+                if not isinstance(rail_inst, TaskCompletionRail) or not any(
+                    registered is rail_inst for registered in self._registered_rails
+                ):
+                    await self._register_rail_selective(rail_inst)
+                if isinstance(rail_inst, TaskCompletionRail):
+                    self._task_completion_rail = rail_inst
                 initializing_rail = None
             if moa_integration is not None:
                 await moa_integration.finalize(initialized_rails)
@@ -2008,14 +2029,54 @@ class DeepAgent(BaseAgent):
         previously queued one (default or user-provided).
         """
         if isinstance(rail, TaskCompletionRail):
-            # Remove any existing TaskCompletionRail (auto-default
-            # or a previously queued user rail).
+            for pending in self._pending_rails:
+                if isinstance(pending, TaskCompletionRail) and pending is not rail:
+                    self._remove_pending_goal_tools(pending)
             self._pending_rails = [
                 r for r in self._pending_rails
                 if not isinstance(r, TaskCompletionRail)
             ]
+            # Keep the old callbacks and tools together until lazy retirement.
+            for registered in list(self._registered_rails):
+                if isinstance(registered, TaskCompletionRail) and registered is not rail:
+                    self._registered_rails = [active for active in self._registered_rails if active is not registered]
+                    if not any(stale is registered for stale in self._stale_rails):
+                        self._stale_rails.append(registered)
+                    if self._task_completion_rail is registered:
+                        self._task_completion_rail = None
+            if any(stale is rail for stale in self._stale_rails):
+                self._stale_rails = [stale for stale in self._stale_rails if stale is not rail]
+                if not any(active is rail for active in self._registered_rails):
+                    self._registered_rails.append(rail)
+                self._task_completion_rail = rail
+            self._initialized = False
         self._pending_rails.append(rail)
+        if isinstance(rail, TaskCompletionRail):
+            self._refresh_pending_goal_tools()
         return self
+
+    def _remove_pending_goal_tools(self, rail: AgentRail) -> None:
+        """Release early-bound tools without calling an uninitialized rail's uninit."""
+        if isinstance(rail, TaskCompletionRail) and not any(
+            active is rail for active in (*self._registered_rails, *self._stale_rails)
+        ):
+            rail._remove_goal_tools(self)
+
+    def _refresh_pending_goal_tools(self) -> None:
+        """Bind pending goal tools only while no initialized rail is serving them."""
+        if not self._interaction_started or any(
+            isinstance(rail, TaskCompletionRail)
+            and any(
+                self.ability_manager.get(tool.card.name) is tool.card
+                for tool in rail._goal_tools
+            )
+            for rail in (*self._registered_rails, *self._stale_rails)
+        ):
+            return
+        for rail in self._pending_rails:
+            if isinstance(rail, TaskCompletionRail):
+                self._bind_live_goal_manager(rail)
+                rail._bind_goal_tools(self)
 
     def configured_rails(self) -> List[AgentRail]:
         """Return all queued + registered rails (pending first, then registered).
@@ -2061,6 +2122,8 @@ class DeepAgent(BaseAgent):
 
     def remove_pending_rail(self, rail: AgentRail) -> "DeepAgent":
         """Remove a specific rail from the pending queue by object identity."""
+        if any(queued is rail for queued in self._pending_rails):
+            self._remove_pending_goal_tools(rail)
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
         return self
 
@@ -2075,12 +2138,23 @@ class DeepAgent(BaseAgent):
 
         removed = 0
         before = len(self._pending_rails)
+        for rail in self._pending_rails:
+            if isinstance(rail, rail_types):
+                self._remove_pending_goal_tools(rail)
         self._pending_rails = [r for r in self._pending_rails if not isinstance(r, rail_types)]
         removed += before - len(self._pending_rails)
 
         for rail in list(self._registered_rails):
             if isinstance(rail, rail_types):
-                self._stale_rails.append(rail)
+                if not isinstance(rail, TaskCompletionRail) or not any(
+                    stale is rail for stale in self._stale_rails
+                ):
+                    self._stale_rails.append(rail)
+                if isinstance(rail, TaskCompletionRail):
+                    self._registered_rails = [active for active in self._registered_rails if active is not rail]
+                    if self._task_completion_rail is rail:
+                        self._task_completion_rail = None
+                    self._initialized = False
                 removed += 1
 
         return removed
@@ -2114,6 +2188,11 @@ class DeepAgent(BaseAgent):
 
     async def unregister_rail(self, rail: AgentRail) -> "DeepAgent":
         """Unregister a rail from pending/outer/inner."""
+        if isinstance(rail, TaskCompletionRail) and not any(
+            active is rail for active in (*self._registered_rails, *self._stale_rails)
+        ):
+            self.remove_pending_rail(rail)
+            return self
         if self._deep_config is not None and self._deep_config.moa is not None:
             from openjiuwen.harness.moa.integration import MoAIntegration
 
@@ -2122,6 +2201,8 @@ class DeepAgent(BaseAgent):
         # Remove queued instances first so lazy-init does not re-register stale rails.
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
         self._registered_rails = [r for r in self._registered_rails if r is not rail]
+        if isinstance(rail, TaskCompletionRail):
+            self._stale_rails = [stale for stale in self._stale_rails if stale is not rail]
 
         if isinstance(rail, TaskCompletionRail) and self._task_completion_rail is rail:
             self._task_completion_rail = None
@@ -3893,10 +3974,11 @@ class DeepAgent(BaseAgent):
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
             goal_language = self._goal_prompt_language()
-            if self._task_completion_rail is None:
-                await self.register_rail(
-                    TaskCompletionRail(goal_language=goal_language)
-                )
+            pending_rails = self.find_pending_rails_by_type(TaskCompletionRail)
+            rail = pending_rails[-1] if pending_rails else self._task_completion_rail
+            if rail is None:
+                rail = TaskCompletionRail(goal_language=goal_language)
+                self.add_rail(rail)
 
             from openjiuwen.harness.goal.store import SessionGoalStore
 
@@ -3915,11 +3997,13 @@ class DeepAgent(BaseAgent):
                 self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
             )
 
-            rail = self._task_completion_rail
             if isinstance(rail, TaskCompletionRail):
                 self._bind_live_goal_manager(rail)
                 try:
-                    init_rail(rail, self)
+                    if not any(pending is rail for pending in self._pending_rails):
+                        init_rail(rail, self)
+                    else:
+                        rail._bind_goal_tools(self)
                 except Exception:
                     logger.exception("[DeepAgent] Failed to register goal tools")
 

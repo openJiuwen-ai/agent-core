@@ -219,6 +219,7 @@ def test_init_inherits_goal_manager_from_agent() -> None:
         agent_id="agent-1",
         ability_manager=SimpleNamespace(
             add_ability=lambda card, _tool: added.append(card.name),
+            get=lambda name: None,
         ),
     )
     rail = TaskCompletionRail()
@@ -236,6 +237,7 @@ def test_init_without_goal_manager_on_rail_or_agent_skips_tools() -> None:
         goal_manager=None,
         ability_manager=SimpleNamespace(
             add_ability=lambda card, _tool: added.append(card.name),
+            get=lambda name: None,
         ),
     )
     rail = TaskCompletionRail()
