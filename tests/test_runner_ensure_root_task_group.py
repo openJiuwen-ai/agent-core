@@ -40,7 +40,10 @@ def _clear_main_thread_loop_after_test():
     afterwards, so a session-mate that relies on it (or on a deprecation
     warning about the implicit default) is not disturbed.
     """
-    prior_loop = asyncio.get_event_loop_policy().get_event_loop()
+    try:
+        prior_loop = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        prior_loop = None
     yield
     asyncio.set_event_loop(prior_loop)
 
@@ -228,11 +231,17 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     t2 = threading.Thread(target=drive, args=(loop2,), daemon=True)
     t1.start()
     t2.start()
-    t1.join(timeout=30)
-    t2.join(timeout=30)
-
-    assert not t1.is_alive(), "thread 1 still running after join timeout"
-    assert not t2.is_alive(), "thread 2 still running after join timeout"
+    try:
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+        assert not t1.is_alive(), "thread 1 still running after join timeout"
+        assert not t2.is_alive(), "thread 2 still running after join timeout"
+    except BaseException:
+        # Never leave the worker loops half-driven when an assertion fires.
+        for loop in (loop1, loop2):
+            if not loop.is_closed():
+                loop.close()
+        raise
     # A loser may hit the by-design RuntimeError: the retry loop's adoption
     # predicate is loop-local, so two cross-loop rebuilds can only keep
     # replacing each other; the loser fails loudly on the state it can no
@@ -256,12 +265,12 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     assert state.ready is not None
     assert state.stop is not None
     # A loser that failed loudly must have retired its own loser state and
-    # left the winner in the slot: the published owner must be live (or, if
-    # the loser's retirement signal landed late, belong to the winner's
-    # loop) and no half-written state may occupy the slot.
+    # left the winner in the slot: the published state must still be the
+    # one observed above, and its owner must be live - a loser's late
+    # retirement signal must never have torn the winner down.
     if any(isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc) for exc in errors):
-        assert not owner.done() or owner.get_loop() is owner_loop
-        assert state is runner._root_state
+        assert state is runner._root_state, "slot no longer holds the winner's state"
+        assert not owner.done(), "winner owner was torn down by the loser's failure path"
 
     # The runner must remain fully usable on the surviving owner's loop.
     winner_loop = owner_loop

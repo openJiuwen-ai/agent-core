@@ -529,15 +529,13 @@ class _RunnerImpl(_TeamRunnerMixin):
         except Exception:
             # An ensure failure is either our own owner dying (ensure has
             # already retired that state itself) or losing a concurrent
-            # rebuild to another loop's healthy winner. The winner's loop
-            # may still be using the process-wide ReadWriteLockManager -
-            # it owns the cleanup task now - so only revert the lock
-            # manager when its cleanup task is bound to this loop (i.e.
-            # no concurrent winner is running on top of it).
-            from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
-            cleanup_task = ReadWriteLockManager._cleanup_task
-            if cleanup_task is None or cleanup_task.get_loop() is asyncio.get_running_loop():
-                await ReadWriteLockManager.stop()
+            # rebuild to another loop's healthy winner. No global teardown
+            # runs here: ReadWriteLockManager.stop() also closes every
+            # business lock cached in the process, which a concurrent
+            # winner may still hold. The lock manager is self-healing -
+            # its next start() discards a cleanup task bound to a dead
+            # loop - so leaving it running is safe whether this loop
+            # survives or not.
             raise
 
         try:
