@@ -1,13 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import os
+import sys
+import shutil
+import tempfile
 from typing import Dict, List, AsyncIterator
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.sys_operation import OperationMode, SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation import OperationMode, SysOperationCard, SysOperation, LocalWorkConfig
+from openjiuwen.core.sys_operation.local.code_operation import CodeOperation
 from openjiuwen.core.sys_operation.local.utils import StreamEventType
 from openjiuwen.core.sys_operation.result import ExecuteCodeResult, ExecuteCodeStreamResult
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -533,6 +537,7 @@ console.log("stream test for js");
         assert executed_res.message == "Code executed successfully"
         assert executed_res.data.exit_code == 0
 
+
     @pytest.mark.asyncio
     async def test_execute_code_stream_custom_options(self, sys_op: SysOperation):
         """Test execute code with custom options (chunk_size/encoding), expect options to take effect"""
@@ -615,3 +620,107 @@ print(os.getenv("TEST_ENV_VALUE"))
         assert executed_res is not None
         assert executed_res.message == "Code executed successfully"
         assert executed_res.data.exit_code == 0
+
+
+class TestPythonInterpreterResolution:
+    """Test suite for frozen-environment python interpreter resolution"""
+
+    @pytest.fixture
+    def code_op(self):
+        """Create a CodeOperation instance and restore resolver state around each test."""
+        op = CodeOperation(
+            name="code",
+            mode=OperationMode.LOCAL,
+            description="local code operation",
+            run_config=LocalWorkConfig(),
+        )
+        CodeOperation._python_exe_cache = None
+        yield op
+        CodeOperation._python_exe_cache = None
+
+    def test_non_frozen_resolves_sys_executable(self, code_op, monkeypatch):
+        """Non-frozen environments should resolve to the running interpreter."""
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        resolved = CodeOperation._resolve_python_executable()
+        assert resolved == sys.executable
+
+    def test_non_frozen_zero_fallback(self, code_op, monkeypatch):
+        """Non-frozen env uses sys.executable as-is, never a PATH fallback."""
+        real_exe = sys.executable
+        fake_exe = os.path.join(tempfile.gettempdir(), "fake_sys_executable")
+        with open(fake_exe, "w") as f:
+            f.write("not probed in non-frozen mode")
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        monkeypatch.setattr(sys, "executable", fake_exe, raising=False)
+        # Even though PATH could "find" a real interpreter, it must not be used
+        monkeypatch.setattr(shutil, "which", lambda name: real_exe)
+        resolved = CodeOperation._resolve_python_executable()
+        assert resolved == fake_exe
+        os.remove(fake_exe)
+
+    def test_frozen_rejects_sys_executable_fallback(self, code_op, monkeypatch):
+        """Frozen builds must never fall back to sys.executable (the GUI binary)."""
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        resolved = CodeOperation._resolve_python_executable()
+        assert resolved is None
+
+    def test_frozen_path_discovery_finds_real_interpreter(self, code_op, monkeypatch):
+        """Frozen builds should find a real interpreter via PATH discovery."""
+        real_exe = sys.executable
+        fake_gui = os.path.join(tempfile.gettempdir(), "fake_gui_exe")
+        with open(fake_gui, "w") as f:
+            f.write("not a real interpreter")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", fake_gui, raising=False)
+        # PATH "finds" the real interpreter; the fake GUI itself is rejected
+        monkeypatch.setattr(shutil, "which", lambda name: real_exe)
+        resolved = CodeOperation._resolve_python_executable()
+        assert resolved == real_exe
+        os.remove(fake_gui)
+
+    def test_verify_rejects_non_python_binary(self, code_op, monkeypatch):
+        """Candidates that do not print a Python banner must be rejected."""
+        fake_exe = os.path.join(tempfile.gettempdir(), "fake_not_python")
+        if os.name != "nt":
+            with open(fake_exe, "w") as f:
+                f.write("#!/bin/sh\necho not-python\n")
+            os.chmod(fake_exe, 0o755)
+        else:
+            # Windows: an extensionless file cannot be launched as python
+            with open(fake_exe, "w") as f:
+                f.write("dummy")
+        assert CodeOperation._verify_python_candidate(fake_exe) is False
+        os.remove(fake_exe)
+
+    def test_verify_accepts_real_interpreter(self, code_op, monkeypatch):
+        """A real python binary must pass verification."""
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        assert CodeOperation._verify_python_candidate(sys.executable) is True
+
+    @pytest.mark.asyncio
+    async def test_frozen_no_interpreter_fails_fast(self, code_op, monkeypatch):
+        """Frozen env without any interpreter must fail fast with a clear error."""
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr(sys, "executable", r"C:\fake\gui_main.exe", raising=False)
+        result: ExecuteCodeResult = await code_op.execute_code(code="print(1)")
+        assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
+        assert "PATH" in result.message
+
+    @pytest.mark.asyncio
+    async def test_frozen_with_path_python_executes_real_python(self, code_op, monkeypatch):
+        """Frozen env + python found on PATH should execute code in a real interpreter."""
+        real_exe = sys.executable
+        fake_gui = os.path.join(tempfile.gettempdir(), "fake_gui_exe2")
+        with open(fake_gui, "w") as f:
+            f.write("not a real interpreter")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", fake_gui, raising=False)
+        monkeypatch.setattr(shutil, "which", lambda name: real_exe)
+
+        result: ExecuteCodeResult = await code_op.execute_code(code="print('frozen-ok')")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data.exit_code == 0
+        assert "frozen-ok" in result.data.stdout
+        os.remove(fake_gui)

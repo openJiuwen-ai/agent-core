@@ -21,6 +21,21 @@ Code is executed via one of two strategies based on length:
 
 Temp files are created in system temp dir and cleaned up in the finally block, even on timeout.
 
+### Python Interpreter Resolution
+
+Python code never runs with a hardcoded `sys.executable`. `_resolve_python_executable()`
+resolves the interpreter per process (cached) in this order:
+
+1. `sys.executable` — only when the process is **not frozen**
+2. `python3`/`python` discovered via PATH
+
+Every candidate is verified by running `<candidate> --version` and checking for a
+`Python` banner. In frozen builds (`sys.frozen=True`, e.g. PyInstaller desktop apps)
+`sys.executable` points at the GUI executable itself, so it is never used; when no
+interpreter can be resolved, `execute_code`/`execute_code_stream` fail fast with an
+explicit `SYS_OPERATION_CODE_EXECUTION_ERROR` instead of launching the GUI binary
+(which would report exit_code=0 with empty output and fake success).
+
 ### Language Support
 
 Supported languages (extensible via `_SUPPORT_LANGUAGE_CONFIG_DICT`):
