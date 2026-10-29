@@ -306,18 +306,6 @@ def resolve_deep_agent_parts(
 
     resolved_language = resolve_language(language)
     vision_tools_enabled = is_vision_model_config_complete(vision_model_config)
-    if vision_tools_enabled:
-        existing_tool_names = {card.name for card in normalized_tools}
-        for tool in create_vision_tools(
-            language=resolved_language,
-            vision_model_config=vision_model_config,
-            agent_id=card.id,
-        ):
-            if tool.card.name in existing_tool_names:
-                continue
-            tool_instances.append(tool)
-            normalized_tools.append(tool.card)
-            existing_tool_names.add(tool.card.name)
 
     effective_enable_read_image_multimodal = (
         False if vision_tools_enabled else enable_read_image_multimodal
@@ -357,6 +345,23 @@ def resolve_deep_agent_parts(
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
     else:
         sys_operation_obj = sys_operation
+
+    # Vision tools are built after the sys_operation is resolved so the
+    # sandbox read path (operation.fs().read_file) can be attached to them;
+    # PC / SDK callers pass no sandbox and stay on the local Path branch.
+    if vision_tools_enabled:
+        existing_tool_names = {card.name for card in normalized_tools}
+        for tool in create_vision_tools(
+            language=resolved_language,
+            vision_model_config=vision_model_config,
+            agent_id=card.id,
+            operation=sys_operation_obj,
+        ):
+            if tool.card.name in existing_tool_names:
+                continue
+            tool_instances.append(tool)
+            normalized_tools.append(tool.card)
+            existing_tool_names.add(tool.card.name)
 
     # Injected after the workspace / sys_operation are resolved so the
     # general-purpose sub-agent can carry them: a spec without both makes
