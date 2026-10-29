@@ -21,83 +21,61 @@ fetch('https://example.com/x').catch(() => {});
 
 
 
-class _Chunk:
-    def __init__(self, content=None, reasoning=None):
-        delta = type("Delta", (), {"content": content, "reasoning_content": reasoning})()
-        self.choices = [type("Choice", (), {"delta": delta})()]
+class _Answer:
+    def __init__(self, content):
+        self.content = content
 
 
-class _Stream:
-    def __init__(self, parts, stall_after=None):
-        self.parts, self.stall_after, self.closed = list(parts), stall_after, False
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self.stall_after is not None and not self.stall_after:
-            await asyncio.sleep(60)
-        if self.stall_after:
-            self.stall_after -= 1
-        if not self.parts:
-            raise StopAsyncIteration
-        return self.parts.pop(0)
-
-    async def close(self):
-        self.closed = True
-
-
-def _model(streams):
+def _model(answers):
     model = models.Model.__new__(models.Model)
     model.name, model.extra = "m", {}
     calls = []
 
-    async def create(**kwargs):
-        calls.append(kwargs)
-        return streams.pop(0)
+    async def invoke(messages, **kwargs):
+        calls.append((messages, kwargs))
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return _Answer(answer)
 
-    completions = type("C", (), {"create": staticmethod(create)})()
-    model.client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
+    model._model = type("Core", (), {"invoke": staticmethod(invoke)})()
     return model, calls
 
 
 @pytest.mark.asyncio
-async def test_stream_keeps_only_the_answer_and_closes():
-    stream = _Stream([_Chunk(reasoning="thinking..."), _Chunk('{"a"'), _Chunk(": 1}")])
-    model, calls = _model([stream])
+async def test_json_reads_the_core_model_answer():
+    model, calls = _model(['{"a": 1}'])
     assert await model.json("sys", "user") == {"a": 1}
-    assert calls[0]["stream"] is True and stream.closed
-
-
-class _Pausing(_Stream):
-    """A stream that goes quiet for a while between chunks, like a slow model."""
-
-    async def __anext__(self):
-        await asyncio.sleep(0.3)
-        return await super().__anext__()
-
-
-@pytest.mark.asyncio
-async def test_a_slow_stream_is_waited_for_not_cut():
-    slow = _Pausing([_Chunk(reasoning="..."), _Chunk('{"a"'), _Chunk(": 1}")])
-    model, calls = _model([slow])
-    assert await model.json("sys", "user") == {"a": 1}
-    assert len(calls) == 1 and slow.closed
+    assert len(calls) == 1
+    assert calls[0][0][1]["content"] == "user"
 
 
 @pytest.mark.asyncio
 async def test_a_failed_call_is_retried_once_then_its_error_is_raised():
-    model, calls = _model([_Stream([_Chunk("not json")]), _Stream([_Chunk('{"a": 2}')])])
+    model, calls = _model(["not json", '{"a": 2}'])
     assert await model.json("sys", "user") == {"a": 2} and len(calls) == 2
-    model, calls = _model([_Stream([_Chunk("x")]), _Stream([_Chunk("y")])])
+    model, calls = _model(["x", "y"])
     with pytest.raises(ValueError):
         await model.json("sys", "user")
     assert len(calls) == 2
 
 
+def test_the_reward_model_uses_agent_core_for_openai_and_anthropic():
+    from openjiuwen.core.foundation.llm import Model as CoreModel
+
+    for provider in ("OpenAI", "Anthropic"):
+        model = models.Model({"model": "m", "base_url": "http://127.0.0.1:9/v1/chat/completions",
+                              "api_key": "k", "provider": provider})
+        assert isinstance(model._model, CoreModel)
+        assert str(model._model.model_client_config.client_provider) in (provider, f"ProviderType.{provider}")
+
+
 def test_the_reward_model_client_has_no_time_limit():
     model = models.Model({"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "k"})
-    assert model.client.timeout is None and model.client.max_retries == 0
+    client = model._model.model_client_config
+    assert client.timeout == evidence_agent.NO_LIMIT_SECONDS
+    assert client.stream_first_chunk_timeout is None and client.stream_idle_timeout is None
+    assert client.use_shared_llm_http_client is False
     assert not hasattr(model, "quota") and not hasattr(model, "deadline")
 
 

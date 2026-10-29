@@ -242,21 +242,42 @@ def resolve(value):
     return value
 
 
+def _answer_text(response):
+    """The answer text of a core-model response (a string, or text blocks in a list)."""
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text", block.get("content"))
+            else:
+                text = block
+            if text is not None:
+                parts.append(str(text))
+        return "".join(parts)
+    return str(content or "")
+
+
 class Model:
-    """One JSON-answering model, streamed. No time limit: a slow model is waited for, however long it takes; a call
-    that fails (an error, a cut connection, a reply that is not JSON) is tried once more.
+    """One JSON-answering model on agent-core's model client.
+
+    The client is the same one the attribution agent uses: it normalizes OpenAI-compatible
+    endpoints, follows the configured provider (OpenAI, Anthropic, ...), and keeps the
+    no-time-limit policy of Reward. One failed call (an error, a cut connection, or a reply
+    that is not JSON) is tried once more.
     """
 
     def __init__(self, config):
-        from openai import AsyncOpenAI
+        from .evidence_agent import pool_entry
 
-        self.name = config["model"]
-        self.extra = config.get("extra_body") or {}
-        self.vision = config.get("vision")  # True / False, or None to probe once
-        self.base_url = resolve(config["base_url"])
-        # timeout=None: no HTTP time limit (the SDK's default would be 600 s)
-        self.client = AsyncOpenAI(base_url=resolve(config["base_url"]), api_key=resolve(config["api_key"]),
-                                  timeout=None, max_retries=0)
+        entry = pool_entry(config)
+        self.name = entry.model_name
+        self.base_url = entry.api_base_url
+        self.extra = dict(entry.metadata.get("request") or {})
+        self.vision = config.get("vision") if isinstance(config, dict) else None
+        self._model = entry.to_team_model_config().build()
 
     async def json(self, system, user, images=()):
         content = [{"type": "text", "text": user}]
@@ -275,26 +296,9 @@ class Model:
         error = None
         for _ in range(2):  # one retry
             try:
-                text = await self._stream(messages)
+                response = await self._model.invoke(messages, extra_body=self.extra or None)
+                text = _answer_text(response)
                 return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
             except Exception as failure:  # noqa: BLE001 - retry once
                 error = failure
         raise error
-
-    async def _stream(self, messages):
-        """Collect the answer text; reasoning chunks are not part of the answer."""
-        stream = await self.client.chat.completions.create(
-            model=self.name, response_format={"type": "json_object"}, extra_body=self.extra or None,
-            messages=messages, stream=True)
-        parts = []
-        try:
-            async for chunk in stream:
-                for choice in getattr(chunk, "choices", None) or []:
-                    delta = getattr(choice, "delta", None)
-                    if delta is not None and getattr(delta, "content", None):
-                        parts.append(delta.content)
-        finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                await close()
-        return "".join(parts)
