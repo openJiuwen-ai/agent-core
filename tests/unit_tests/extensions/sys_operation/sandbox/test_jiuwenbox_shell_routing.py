@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
 from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
 
 
 @pytest.fixture
 def provider(monkeypatch):
-    instance = object.__new__(jb.JiuwenBoxShellProvider)
+    instance = jb.JiuwenBoxShellProvider(SandboxEndpoint(base_url="http://localhost:8321"))
     instance._launcher_extra_params = Mock(return_value={})
     instance._acquire_sandbox_id = AsyncMock(return_value="sandbox-a")
     client = Mock()

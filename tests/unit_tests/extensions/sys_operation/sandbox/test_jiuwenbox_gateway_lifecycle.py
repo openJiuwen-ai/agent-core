@@ -38,6 +38,8 @@ def remote(monkeypatch):
 
     def respond(request):
         state.requests.append((request.method, str(request.url)))
+        if request.method == "GET" and request.url.path == "/api/v1/sandboxes":
+            return httpx.Response(200, json=[{"id": sid, "phase": "ready"} for sid in state.active])
         if request.method == "POST":
             assert request.url.path == "/api/v1/sandboxes"
             if state.block_create:
@@ -81,6 +83,142 @@ def operation(url="http://localhost:8321", scope="project", policy="old"):
             ),
         ),
     ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_scope", ["other", "project:child"])
+async def test_release_scope_preserves_other_projects_and_invalidates_retained_provider(remote, other_scope):
+    first, other = operation(), operation(scope=other_scope)
+    await first.fs().read_file("/probe")
+    await other.fs().read_file("/probe")
+    key = first.isolation_key_template
+    provider = remote.gateway._provider_cache[f"{key}:fs"]
+
+    assert await jb.release_jiuwenbox_scope("http://localhost:8321", key) == ["sandbox-1"]
+    assert remote.active == {"sandbox-2"}
+    assert await remote.gateway._store.get(key) is None
+    assert f"{key}:fs" not in remote.gateway._provider_cache
+    assert provider._sandbox_id is None
+    assert "sandbox_id" not in first._run_config.config.launcher_config.extra_params
+    assert (await other.fs().read_file("/probe")).data.content == "sandbox-2"
+    assert await jb.release_jiuwenbox_scope("http://localhost:8321", key) == []
+
+
+@pytest.mark.asyncio
+async def test_release_scope_failure_blocks_reuse_until_retry(remote):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    remote.fail_delete = True
+    with pytest.raises(RuntimeError, match="ACL cleanup failed"):
+        await jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template)
+    assert remote.active == {"sandbox-1"}
+    assert jb._JiuwenBoxProviderMixin._pending_deletions
+    assert (await owned.fs().read_file("/probe")).code != 0
+    remote.fail_delete = False
+    assert await jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template) == ["sandbox-1"]
+    assert not remote.active
+    assert not jb._JiuwenBoxProviderMixin._pending_deletions
+
+
+@pytest.mark.asyncio
+async def test_release_scope_drains_creation_before_deleting(remote):
+    remote.block_create = True
+    owned = operation()
+    create = asyncio.create_task(owned.fs().read_file("/probe"))
+    release = None
+    try:
+        assert await asyncio.to_thread(remote.entered.wait, 2)
+        release = asyncio.create_task(jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not release.done()
+        remote.release.set()
+        await create
+        assert await release == ["sandbox-1"]
+        assert not remote.active
+        assert not remote.gateway._provider_cache
+    finally:
+        remote.release.set()
+        await asyncio.gather(*(task for task in (create, release) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_policy_inventory_excludes_reaped_instances_and_unowned_instances(remote):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    remote.active.discard("sandbox-1")  # Server idle reaper does not notify retained cards.
+    remote.active.add("belongs-to-another-server")
+    async with jb.jiuwenbox_policy_update():
+        assert await jb.get_live_jiuwenbox_scopes() == set()
+        denied = await owned.fs().read_file("/probe")
+        assert denied.code != 0 and "policy update is pending" in denied.message
+    assert len(remote.created) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["connection", "missing"])
+async def test_policy_failure_during_exec_never_falls_back_to_host(remote, monkeypatch, failure):
+    monkeypatch.setenv("JIUWENBOX_SANDBOX_RECREATE_RETRIES", "1")
+    monkeypatch.setattr(jb, "_SANDBOX_RECREATE_RETRY_SLEEP_SECONDS", 0)
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    provider = remote.gateway._provider_cache[f"{owned.isolation_key_template}:fs"]
+    local_calls = []
+
+    def sandbox_op(sid):
+        owned._run_config.config.launcher_config.extra_params["_policy_apply_pending"] = True
+        if failure == "connection":
+            raise httpx.ConnectError("service restarting")
+        response = httpx.Response(
+            404, json={"detail": f"Sandbox '{sid}' not found"},
+            request=httpx.Request("POST", "http://localhost:8321/exec"),
+        )
+        response.raise_for_status()
+
+    async def local_op():
+        local_calls.append(True)
+        return {"exit_code": 0}
+
+    with pytest.raises(RuntimeError, match="policy update is pending"):
+        await provider._run_exec_pipeline(
+            sandbox_op=sandbox_op, local_op=local_op, fallback_on_failure=True,
+        )
+    assert not local_calls
+    assert len(remote.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_update_drains_creation_and_allows_only_host_rebuild(remote):
+    remote.block_create = True
+    owned = operation()
+    create = asyncio.create_task(owned.fs().read_file("/probe"))
+    scope = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", owned.isolation_key_template)
+    entered = asyncio.Event()
+
+    async def update():
+        async with jb.jiuwenbox_policy_update():
+            entered.set()
+            assert await jb.get_live_jiuwenbox_scopes() == {scope}
+            with pytest.raises(RuntimeError, match="policy update"):
+                await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=scope)
+            await jb.force_recreate_jiuwenbox_sandbox(
+                "http://localhost:8321", shared_key=scope, reason="policy_changed",
+            )
+
+    task = None
+    try:
+        assert await asyncio.to_thread(remote.entered.wait, 2)
+        task = asyncio.create_task(update())
+        await asyncio.sleep(0)
+        assert not entered.is_set()
+        remote.release.set()
+        await create
+        await task
+        assert remote.active == {"sandbox-2"}
+        assert jb._JiuwenBoxProviderMixin._policy_updates == 0
+    finally:
+        remote.release.set()
+        await asyncio.gather(*(item for item in (create, task) if item is not None), return_exceptions=True)
 
 
 @pytest.mark.asyncio

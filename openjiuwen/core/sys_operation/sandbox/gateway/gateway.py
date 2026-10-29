@@ -141,15 +141,18 @@ class SandboxGateway:
         for k in keys_to_remove:
             del self._provider_cache[k]
 
-    async def invalidate_sandbox_cache(self, sandbox_type: str, base_url: Optional[str] = None) -> list[Any]:
+    async def invalidate_sandbox_cache(
+        self, sandbox_type: str, base_url: Optional[str] = None, *, isolation_key: Optional[str] = None,
+    ) -> list[Any]:
         """Forget matching endpoints/providers without sending remote lifecycle requests.
 
         Return evicted providers so the lifecycle owner can invalidate their
-        derived state too. Other sandbox types and service URLs are untouched.
+        derived state too. Other sandbox types, service URLs and (when supplied)
+        isolation keys are untouched.
         """
         base_url = base_url.rstrip("/") if base_url is not None else None
         for key, record in self._store.items():
-            if record.sandbox_type == sandbox_type and (
+            if (isolation_key is None or key == isolation_key) and record.sandbox_type == sandbox_type and (
                 base_url is None or record.base_url.rstrip("/") == base_url
             ):
                 await self._store.hdel(key)
@@ -157,7 +160,9 @@ class SandboxGateway:
         for key, provider in list(self._provider_cache.items()):
             launcher = getattr(getattr(provider, "config", None), "launcher_config", None)
             endpoint = getattr(provider, "endpoint", None)
-            if getattr(launcher, "sandbox_type", None) == sandbox_type and (
+            if (isolation_key is None or key.rsplit(":", 1)[0] == isolation_key) and (
+                getattr(launcher, "sandbox_type", None) == sandbox_type
+            ) and (
                 base_url is None or str(getattr(endpoint, "base_url", "")).rstrip("/") == base_url
             ):
                 removed.append(self._provider_cache.pop(key))
