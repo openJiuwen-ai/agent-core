@@ -3,9 +3,14 @@
 """
 Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 """
+import asyncio
+import contextlib
 import importlib.util
+import json
 import os
+import threading
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +33,12 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+
+
+# TestIntelliRouterModelClientInvoke.client overwrites _create_router on the
+# class without restoring it; tests that need real router construction must
+# patch it back with this import-time capture.
+_REAL_CREATE_ROUTER = IntelliRouterModelClient._create_router
 
 
 # ---------------------------------------------------------------------------
@@ -1485,3 +1496,151 @@ class TestIntelliRouterIntegrationDashScope:
         assert isinstance(result, AssistantMessage)
         assert len(result.content) > 0
         print(f"[DashScope failover] response: {result.content}")
+
+
+# ---------------------------------------------------------------------------
+# TestCrossEventLoopRouterCache (issue #2044)
+# ---------------------------------------------------------------------------
+
+class _LocalCompletionHandler(BaseHTTPRequestHandler):
+    """Local OpenAI-style chat-completion endpoint that keeps connections alive."""
+
+    protocol_version = "HTTP/1.1"
+    # A keep-alive connection left open by a retired event loop must not pin
+    # its handler thread forever when the owning client is never closed.
+    timeout = 15
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        body = json.dumps({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class TestCrossEventLoopRouterCache:
+    """Cross-event-loop reuse of _router_cache must rebuild, not reuse (issue #2044)."""
+
+    @staticmethod
+    def _fake_router_result(content="hi"):
+        return MagicMock(
+            content=content, tool_calls=None, usage_metadata=None,
+            finish_reason="stop", reasoning_content=None, spec=[],
+        )
+
+    def test_router_rebuilt_when_event_loop_changes(
+        self, model_request_config, intelli_router_client_config
+    ):
+        """A second asyncio.run cycle gets a rebuilt router; the stale one is closed.
+
+        Mirrors the smoke-test pattern (pytest-asyncio runs each case on a
+        fresh event loop): the cached router from cycle 1 would carry dead
+        httpx connections into cycle 2 unless it is rebuilt.
+        """
+        created = []
+
+        def _fake_create(config, cache_key=""):
+            router = MagicMock()
+            router.invoke = AsyncMock(return_value=self._fake_router_result())
+            router.close = AsyncMock()
+            created.append(router)
+            return router
+
+        with patch.object(IntelliRouterModelClient, "_create_router", side_effect=_fake_create):
+            client1 = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+            asyncio.run(client1.invoke("hello"))
+
+            client2 = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+            async def _second_case():
+                await client2.invoke("hello")
+                await client1.invoke("hello")  # stale instance adopts the rebuilt router
+
+            asyncio.run(_second_case())
+
+        assert len(created) == 2                   # rebuilt instead of reused
+        created[0].close.assert_awaited_once()     # stale router was closed
+        assert created[0].invoke.await_count == 1  # only the first loop used it
+        assert created[1].invoke.await_count == 2  # client2 + adopted client1
+        assert client1._router is created[1]
+        assert client2._router is created[1]
+
+    def test_cross_loop_reuse_recovers_with_real_router(self):
+        """End-to-end: a real router against a local keep-alive endpoint.
+
+        Cycle 1 pools its connection on loop 1. Depending on the resolved
+        httpx build, reusing that connection on loop 2 either fails the call
+        without a single real request (the issue #2044 smoke signature, as
+        seen in the smoke environment) or httpx quietly opens a fresh
+        connection (current stack). In both worlds cycle 2 must end up with
+        a rebuilt router and succeed; this pins that end-to-end behavior.
+        """
+        if importlib.util.find_spec("intelli_router") is None:
+            pytest.skip("intelli_router package not installed")
+
+        # One thread per connection: the routers' httpx pools are never closed
+        # in this test (each asyncio.run retires its loop), so keep-alive
+        # connections linger. A single-threaded server would block on them and
+        # hang server.shutdown(); a threading server just keeps accepting.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalCompletionHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        clients = []
+        try:
+            port = server.server_address[1]
+            client_config = ModelClientConfig(
+                client_provider=ProviderType.IntelliRouter,
+                intelli_router=IntelliRouterConfig(
+                    model_group_id="loop-regression",
+                    deployments=[
+                        IntelliRouterDeploymentConfig(
+                            route_id="local-dep1",
+                            model_name="test-model",
+                            api_key="k",
+                            api_base=f"http://127.0.0.1:{port}",
+                            provider="openai",
+                            tpm=100000,
+                            rpm=60,
+                            timeout=5.0,
+                        )
+                    ],
+                    strategy="adaptive",
+                    num_retries=3,
+                    timeout=5.0,
+                ),
+            )
+            request_config = ModelRequestConfig(model="test-model")
+
+            with patch.object(IntelliRouterModelClient, "_create_router", _REAL_CREATE_ROUTER):
+                client1 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client1)
+                result1 = asyncio.run(client1.invoke("hello"))
+
+                client2 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client2)
+                result2 = asyncio.run(client2.invoke("hello"))
+
+            assert result1.content == "hi"
+            assert result2.content == "hi"
+        finally:
+            for client in clients:
+                # Best-effort release of pooled connections; a pool bound to a
+                # retired loop raises on close, which is fine to ignore here.
+                with contextlib.suppress(RuntimeError, OSError):
+                    asyncio.run(client._router.close())
+            server.shutdown()
+            server.server_close()
