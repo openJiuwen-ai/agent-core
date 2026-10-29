@@ -221,8 +221,10 @@ class _RunnerImpl(_TeamRunnerMixin):
         # without the lock, two concurrent rebuilds can interleave so that
         # each thread signals only the state it read, and a just-published
         # loser state is never signalled by anyone — its owner is orphaned.
-        # The critical section is synchronous on purpose: no awaits inside,
-        # so an event loop thread is never blocked by the lock.
+        # The critical section is synchronous and pure in-memory on purpose:
+        # no awaits, no logging, no cross-loop scheduling inside, so an
+        # event loop thread is never blocked on the lock by I/O.
+        stale_to_signal = None
         with self._root_state_lock:
             state = self._root_state
             if state is not None and _is_live_task_on_running_loop(state.owner):
@@ -236,7 +238,12 @@ class _RunnerImpl(_TeamRunnerMixin):
                     # process lifetime. The runner is a process-wide
                     # singleton, so the latest start() wins by definition:
                     # a replaced owner is retired, not kept running.
-                    self._signal_stale_owner_to_stop(state)
+                    # Signalling (logging + cross-loop scheduling) happens
+                    # outside the lock so the critical section stays pure
+                    # in-memory work; the state is already unpublished, and
+                    # stop.set is idempotent, so a late duplicate signal is
+                    # harmless.
+                    stale_to_signal = state
                 # Bind the owner into the state before publishing it: the
                 # publish is the only write other loops observe, so no
                 # observer can ever see a live state whose owner is still
@@ -248,6 +255,8 @@ class _RunnerImpl(_TeamRunnerMixin):
                 state.owner_loop = owner.get_loop()
                 self._root_state = state
                 live_state = state
+        if stale_to_signal is not None:
+            self._signal_stale_owner_to_stop(stale_to_signal)
         # Outside the lock: both paths must observe a ready state — a caller
         # that hit the fast path while the owner coroutine has not run yet
         # would otherwise return with state.group still None.
@@ -258,6 +267,7 @@ class _RunnerImpl(_TeamRunnerMixin):
         # at an owner bound to a different loop (the caller's start() would
         # bind that foreign group into this loop's ContextVar).
         for _ in range(_ROOT_TASK_GROUP_ENSURE_RETRIES):
+            stale_to_signal = None
             with self._root_state_lock:
                 current = self._root_state
                 if current is not None and _is_live_task_on_running_loop(current.owner):
@@ -265,12 +275,17 @@ class _RunnerImpl(_TeamRunnerMixin):
                     break
                 # current is None or stale again: rebuild once more.
                 if current is not None:
-                    self._signal_stale_owner_to_stop(current)
+                    # Signalled outside the lock (see entry path): the
+                    # state is already unpublished and stop.set is
+                    # idempotent, so a late duplicate signal is harmless.
+                    stale_to_signal = current
                 live_state = _RootTaskGroupState()
                 owner = asyncio.create_task(self._root_task_group_owner_loop(live_state))
                 live_state.owner = owner
                 live_state.owner_loop = owner.get_loop()
                 self._root_state = live_state
+            if stale_to_signal is not None:
+                self._signal_stale_owner_to_stop(stale_to_signal)
             await live_state.ready.wait()
         # The winner's state must also be ready before we inspect its group:
         # adopting it at the break without waiting could inspect a state
@@ -514,11 +529,15 @@ class _RunnerImpl(_TeamRunnerMixin):
         except Exception:
             # An ensure failure is either our own owner dying (ensure has
             # already retired that state itself) or losing a concurrent
-            # rebuild to another loop's healthy winner - which must NOT be
-            # torn down by our failure, and whose loop's tasks must not be
-            # hit by a process-wide cancel_all(). Only the lock manager is
-            # reverted here; the root state slot is left to its owner.
-            await ReadWriteLockManager.stop()
+            # rebuild to another loop's healthy winner. The winner's loop
+            # may still be using the process-wide ReadWriteLockManager -
+            # it owns the cleanup task now - so only revert the lock
+            # manager when its cleanup task is bound to this loop (i.e.
+            # no concurrent winner is running on top of it).
+            from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+            cleanup_task = ReadWriteLockManager._cleanup_task
+            if cleanup_task is None or cleanup_task.get_loop() is asyncio.get_running_loop():
+                await ReadWriteLockManager.stop()
             raise
 
         try:

@@ -30,16 +30,19 @@ from openjiuwen.core.runner.runner import (
 
 @pytest.fixture(autouse=True)
 def _clear_main_thread_loop_after_test():
-    """Leave the main thread without a current loop after each test.
+    """Leave the main thread's loop policy state as this test found it.
 
     _new_loop() sets each fresh loop as the main thread's current loop; the
     tests close those loops in their finally blocks. Without this teardown
     the main thread would keep pointing at a closed loop, and a later test
     in the same session calling asyncio.get_event_loop() would receive the
-    closed object.
+    closed object. The loop that was current BEFORE this test is restored
+    afterwards, so a session-mate that relies on it (or on a deprecation
+    warning about the implicit default) is not disturbed.
     """
+    prior_loop = asyncio.get_event_loop_policy().get_event_loop()
     yield
-    asyncio.set_event_loop(None)
+    asyncio.set_event_loop(prior_loop)
 
 
 def _new_loop() -> asyncio.AbstractEventLoop:
@@ -252,12 +255,13 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     assert state.group is not None
     assert state.ready is not None
     assert state.stop is not None
-    # A loser that failed loudly must have retired its own loser state: the
-    # slot is not it. (The by-design failure path unpublishes its own state
-    # under the lock; a live loser would have been signalled to stop and
-    # could not be re-adopted here.)
+    # A loser that failed loudly must have retired its own loser state and
+    # left the winner in the slot: the published owner must be live (or, if
+    # the loser's retirement signal landed late, belong to the winner's
+    # loop) and no half-written state may occupy the slot.
     if any(isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc) for exc in errors):
-        assert state is runner._root_state or runner._root_state is not None
+        assert not owner.done() or owner.get_loop() is owner_loop
+        assert state is runner._root_state
 
     # The runner must remain fully usable on the surviving owner's loop.
     winner_loop = owner_loop
