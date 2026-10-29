@@ -137,6 +137,11 @@ class SymphonyRuntime:
         planned_value = planned_graph.get("graph") if isinstance(planned_graph, dict) else None
         planned_model = EvolutionGraph.model_validate(deepcopy(planned_value)) if planned_value is not None else None
         execution_model = EvolutionGraph.model_validate(deepcopy(graph))
+        # Host-resolved member types belong to Flow's artifact eligibility check.
+        # Keep the canonical graph observation unchanged; retain the annotation
+        # on the original execution graph passed to Flow after this validation.
+        for node in execution_model.nodes.values():
+            node.metadata.pop("skill_type", None)
         return GraphEvolutionInput(
             evidence_id=evidence_id,
             graph_scope_id=self.graph_scope_id,

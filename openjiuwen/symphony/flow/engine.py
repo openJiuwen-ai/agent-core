@@ -36,7 +36,9 @@ from openjiuwen.symphony.flow.models import (
 from openjiuwen.symphony.flow.narrative import distill_texts
 from openjiuwen.symphony.flow.packager import CapabilityPackager
 from openjiuwen.symphony.flow.privacy import sanitize_distilled_text
-from openjiuwen.symphony.flow.render import SkillArtifactAdapter, render_package
+from openjiuwen.symphony.flow.render import (
+    SkillArtifactAdapter, SkillPackAdapter, SkillPackNotInstallableError, render_package,
+)
 from openjiuwen.symphony.flow.review import PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
 from openjiuwen.symphony.orchestration.config import SymphonyFlowConfig
@@ -90,7 +92,18 @@ class SymphonyFlowEngine:
         evidence = normalize_execution_graph(payload)
         if evidence is None:
             return False
+        if not self._members_supported(evidence.graph):
+            return False
         return self.store.append_evidence(evidence)
+
+    def _members_supported(self, structure: dict[str, Any]) -> bool:
+        if not isinstance(self.skill_adapter, SkillPackAdapter):
+            return True
+        try:
+            self.skill_adapter.validate_members(structure)
+        except SkillPackNotInstallableError:
+            return False
+        return True
 
     async def submit(self, payload: dict[str, Any]) -> tuple[CombinationCandidate, ...]:
         """Ingest evidence and coalesce distillation through one async worker."""
@@ -232,7 +245,12 @@ class SymphonyFlowEngine:
         结构出现多少次后才做完整（LLM）蒸馏并开放安装"。
         """
 
-        records = [record for record in self.store.read_evidence() if record.outcome == OUTCOME_SUCCESS]
+        evidence_snapshot = self.store.read_evidence()
+        processed_fingerprint = self.store.evidence_fingerprint(evidence_snapshot)
+        records = [
+            record for record in evidence_snapshot
+            if record.outcome == OUTCOME_SUCCESS and self._members_supported(record.graph)
+        ]
         report = DistillReport(evidence_total=len(records))
         groups = group_by_structure(records)
         report.groups_total = len(groups)
@@ -251,8 +269,10 @@ class SymphonyFlowEngine:
                 min_pack_success_rate=getattr(self.config, "min_pack_success_rate", 0.8),
             )
             existing = self.store.read_recipe(result.recipe_id)
-            if existing is not None and structure_unchanged(
-                existing.combination_structure, result.member_ids, group.edges
+            if (
+                existing is not None
+                and self._members_supported(existing.combination_structure)
+                and structure_unchanged(existing.combination_structure, result.member_ids, group.edges)
             ):
                 unchanged = (
                     (existing.quality or {}).get("execution_count")
@@ -297,8 +317,8 @@ class SymphonyFlowEngine:
                 self.store.update_recipe_current(refreshed)
                 report.recipes_unchanged.append(result.recipe_id)
                 continue
-            # 新结构（同 id 结构变化在确定性分组下按构造不会发生，此分支
-            # 仅兜底哈希碰撞/旧数据）：达到阈值才调 LLM，否则模板草稿。
+            # Rebuild incompatible legacy recipes from eligible evidence only.
+            # The new immutable version must not infer types for old evidence.
             recipe = await self._build_recipe(
                 result,
                 group.records,
@@ -310,7 +330,9 @@ class SymphonyFlowEngine:
                 report.recipes_saved.append(recipe.recipe_id)
             else:
                 report.recipes_unchanged.append(recipe.recipe_id)
-        self.store.save_distillation_fingerprint(self.store.evidence_fingerprint(records))
+        # Mark the complete input snapshot as processed, including filtered
+        # history. Evidence arriving during awaited work remains pending.
+        self.store.save_distillation_fingerprint(processed_fingerprint)
         return report
 
     async def _build_recipe(
@@ -402,6 +424,13 @@ class SymphonyFlowEngine:
                 reasons=[f"stale recipe version: current=v{current.version}, requested=v{recipe_version}"],
             )
         recipe = current
+        if not self._members_supported(recipe.combination_structure):
+            return InstallPreparation(
+                recipe_id=recipe_id,
+                target_kind=target_kind,
+                verdict="rejected",
+                reasons=["SkillPack members must be verified ordinary Skills"],
+            )
         try:
             package = self.packager.build_package(recipe, target_kind=target_kind)
         except Exception as exc:
@@ -519,6 +548,8 @@ class SymphonyFlowEngine:
             self.store.read_recipe(recipe_id, version=version) if version is not None else self.get_recipe(recipe_id)
         )
         if recipe is None or recipe.status != "active" or recipe.grade != "verified":
+            return None
+        if not self._members_supported(recipe.combination_structure):
             return None
         return _candidate_from_recipe(recipe)
 
