@@ -201,6 +201,7 @@ async def test_deleted_file_cannot_be_recreated_by_new_or_rebuild(env):
 @pytest.mark.asyncio
 async def test_create_boundary_and_batch_plan(env):
     c, m, _, session, path = env
+    c.require_explicit_plan_action = True
     await create(c, session)
     c.reset_invoke_marker("session")
     with pytest.raises(FrameworkError, match="active plan"):
@@ -219,6 +220,43 @@ async def test_create_boundary_and_batch_plan(env):
     prepare_todo_batch(ctx)
     bind_todo_batch(ctx)
     await update(m, session, "A", status="completed")
+
+
+@pytest.mark.asyncio
+async def test_active_plan_creation_policy_is_scoped_to_the_tool_instance(env):
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    before = json.loads(path.read_text())
+
+    guarded = TodoCreateTool(SimpleNamespace(fs=lambda: modifier.fs), modifier.workspace)
+    guarded.snapshot_guard = creator.snapshot_guard
+    guarded.require_explicit_plan_action = True
+    with pytest.raises(FrameworkError, match="active plan"):
+        await create(guarded, session)
+    assert json.loads(path.read_text()) == before
+
+    creator.reset_invoke_marker("session")
+    result = await create(creator, session)
+    assert result.todo_snapshot["plan_id"] != before["plan_id"]
+    assert result.todo_snapshot["revision"] == before["revision"] + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_empty_plan_sync_preserves_legacy_behavior(env, versioned):
+    from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
+
+    _, _, reader, session, path = env
+    path.parent.mkdir()
+    path.write_text(json.dumps({"plan_id": "P", "revision": 1, "todos": []} if versioned else []))
+    result = await reader.invoke({}, session=session)
+    state = SimpleNamespace(task_plan=TaskPlan(tasks=[TodoItem(id="old", content="old")]))
+    agent = SimpleNamespace(load_state=lambda _session: state, save_state=lambda *_args: None)
+    rail = TaskPlanningRail()
+    rail.tools = [reader]
+    ctx = SimpleNamespace(session=session, agent=agent, inputs=SimpleNamespace(tool_result=result))
+    await rail._sync_plan_from_todos(ctx)
+    assert (state.task_plan is None) is versioned
 
 
 @pytest.mark.asyncio
@@ -441,10 +479,57 @@ async def test_unsupported_provider_todo_reports_contract_before_write(env, monk
     write = AsyncMock()
     monkeypatch.setattr(provider, "write_file", write)
     tool = getattr(todo, tool_name)(SimpleNamespace(fs=lambda: provider), str(path.parent.parent))
+
+    async def lifecycle(*_args, **_kwargs):
+        pass
+
+    tool.snapshot_guard = lifecycle
     with pytest.raises(FrameworkError, match="does not support snapshot reads.*exists and content_sha256"):
         await tool.invoke({}, session=session)
     write.assert_not_awaited()
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["aio", "yuanrong"])
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_ordinary_reads_on_legacy_provider_do_not_enable_unprotected_writes(
+    env, monkeypatch, provider_name, versioned
+):
+    from unittest.mock import AsyncMock, Mock
+
+    from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+    from openjiuwen.extensions.sys_operation.sandbox.providers.aio import AIOFSProvider
+    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import YuanrongFSProvider
+
+    _, _, _, session, path = env
+    rows = [{"id": "A", "content": "existing", "status": "pending"}]
+    content = json.dumps({"plan_id": "P", "revision": 1, "todos": rows} if versioned else rows)
+    endpoint = SandboxEndpoint(base_url="test://sandbox", sandbox_id="box", isolation_key="session")
+    if provider_name == "aio":
+        provider = AIOFSProvider(endpoint)
+        client = SimpleNamespace(file=SimpleNamespace(read_file=Mock(
+            return_value=SimpleNamespace(data=SimpleNamespace(content=content)))))
+        monkeypatch.setattr(provider, "_get_client", lambda: client)
+    else:
+        provider = YuanrongFSProvider(endpoint)
+        monkeypatch.setattr(provider, "_fs_read_sync", lambda *args, **kwargs: content)
+    write = AsyncMock()
+    monkeypatch.setattr(provider, "write_file", write)
+    operation = SimpleNamespace(fs=lambda: provider)
+    reader = TodoListTool(operation, str(path.parent.parent))
+    getter = TodoGetTool(operation, str(path.parent.parent))
+    modifier = TodoModifyTool(operation, str(path.parent.parent))
+
+    listed = await reader.invoke({}, session=session)
+    assert listed["tasks"][0]["id"] == "A"
+    assert not hasattr(listed, "todo_snapshot")
+    assert (await getter.invoke({"id": "A"}, session=session))["todo"]["id"] == "A"
+    items = await modifier.load_todos("session")
+    assert items[0].id == "A"
+    with pytest.raises(FrameworkError, match="does not support snapshot reads"):
+        await modifier.save_todos("session", items)
+    write.assert_not_awaited()
 
 
 @pytest.mark.parametrize("revision", [True, False, 1.0, "1", -1, 2**53])
