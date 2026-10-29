@@ -23,6 +23,10 @@ from openjiuwen.harness.execution_subject import (
     execution_subject_scope,
 )
 from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.subagent_lifecycle import (
+    cleanup_subagent_task_resources,
+    prepare_subagent_task_resources,
+)
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.subagent.type_aliases import (
@@ -301,6 +305,7 @@ class TaskTool(Tool):
         )
         with execution_subject_scope(subject):
             try:
+                await prepare_subagent_task_resources(subagent)
                 if pending_subagent is None:
                     affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
                 if affinity_enabled:
@@ -347,6 +352,7 @@ class TaskTool(Tool):
                     reason=f"Subagent {subagent_type} execution failed: {e}",
                 ) from e
             finally:
+                await cleanup_subagent_task_resources(subagent)
                 if affinity_enabled:
                     try:
                         await kv_cache_hooks.finish_subagent(

@@ -257,7 +257,7 @@ def _pick_available_port(host: str, preferred_port: int, max_attempts: int = 25)
     raise RuntimeError("No available port for local browser runtime MCP server.")
 
 
-def _wait_port_open(host: str, port: int, timeout_s: float = 20.0) -> None:
+def _wait_port_open(host: str, port: int, timeout_s: float = 30.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
