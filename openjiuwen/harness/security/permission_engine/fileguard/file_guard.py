@@ -509,6 +509,13 @@ def extract_paths_legacy(
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         paths = _extract_paths_from_command(cmd, workdir_resolved)
+        from openjiuwen.harness.security.literal_shell import parse_literal_shell
+
+        feature = (permission_config or {}).get("skill_authorization")
+        if isinstance(feature, dict) and feature.get("enabled") is True and parse_literal_shell(cmd) is not None:
+            from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_shell_path_accesses
+
+            paths.extend(p for p, _ in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=True))
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")
