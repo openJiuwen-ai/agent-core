@@ -247,7 +247,8 @@ class _RunnerImpl(_TeamRunnerMixin):
                 if current is live_state or (
                     current is not None and _is_live_task_on_running_loop(current.owner)
                 ):
-                    return
+                    live_state = current if current is not None else live_state
+                    break
                 # current is None or stale again: rebuild once more.
                 if current is not None:
                     self._signal_stale_owner_to_stop(current)
@@ -257,8 +258,11 @@ class _RunnerImpl(_TeamRunnerMixin):
                 live_state.owner_loop = owner.get_loop()
                 self._root_state = live_state
             await live_state.ready.wait()
-            if live_state.group is None and live_state.owner.done():
-                await live_state.owner
+        # If the owner task died before opening its task group, awaiting it
+        # re-raises its exception into start() - the develop behaviour this
+        # refactor must preserve (a broken runner must not start silently).
+        if live_state.group is None:
+            await live_state.owner
 
     async def _close_root_task_group(self) -> None:
         state = self._root_state

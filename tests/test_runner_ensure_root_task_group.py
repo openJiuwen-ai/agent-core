@@ -446,6 +446,11 @@ def test_stale_owner_exit_does_not_clobber_rebuilt_state() -> None:
         assert fresh.group is sentinel, (
             "stale owner teardown clobbered the rebuilt state's task group"
         )
+        # The stale owner's finally leaves its own (now unreachable) group
+        # slot untouched when it is no longer the published state; only the
+        # published state's slot is load-bearing, which the sentinel oracle
+        # above guards. Without the identity check in the owner's finally,
+        # the assignment would hit fresh.group and the oracle would fail.
 
     try:
         loop.run_until_complete(scenario())
