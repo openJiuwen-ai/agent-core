@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import pytest
 
+from openjiuwen.agent_teams.extensions.models import TeamPolicyContext
 from openjiuwen.agent_teams.extensions.ops import (
     TaskDependencyInfo,
     TeamReadView,
+    bind_policy_context_scope,
     bind_team_scope,
 )
 from openjiuwen.agent_teams.monitor.models import MemberInfo, MessageInfo, TaskInfo, TeamInfo
@@ -164,6 +166,7 @@ async def test_ops_build_adds_team_namespace_with_all_methods() -> None:
         "task_dependencies",
         "messages",
         "message",
+        "policy_context",
     ):
         assert hasattr(team, method)
 
@@ -384,3 +387,17 @@ async def test_message_validates_ownership_and_visibility() -> None:
 
 
 # ---------------------------------------------------------------------------
+# policy_context
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_policy_context_reads_the_build_binding() -> None:
+    """policy_context returns the bound snapshot and errors without one."""
+    resolver = _FakeResolver({})
+    team = await _view_methods(resolver)
+    with pytest.raises(BaseError):
+        await team.policy_context()
+    context = TeamPolicyContext(language="cn")
+    with bind_policy_context_scope(context):
+        assert await team.policy_context() is context
