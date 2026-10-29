@@ -17,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -227,6 +228,8 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     t1.join(timeout=30)
     t2.join(timeout=30)
 
+    assert not t1.is_alive(), "thread 1 still running after join timeout"
+    assert not t2.is_alive(), "thread 2 still running after join timeout"
     assert not errors, f"concurrent rebuild raised: {errors!r}"
     state = runner._root_state
     assert state is not None
@@ -277,6 +280,76 @@ def test_cross_loop_stop_never_touches_the_stale_state() -> None:
         loop2.close()
     # The stale loop's objects were never driven from loop2.
     assert not stale_state.stop.is_set()
+
+
+def test_rebuild_signals_stale_owner_on_live_foreign_loop() -> None:
+    """A rebuild over a live foreign-loop owner must signal that owner to
+    stop on its own loop, so its task group and child tasks do not stay
+    parked for the process lifetime.
+
+    Review feedback on !3490: dropping the reference alone leaves the stale
+    owner awaiting its stop event forever. The rebuild path must set that
+    event on the owner's loop via call_soon_threadsafe.
+    """
+    import threading
+
+    runner = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+    loop1 = _new_loop()
+    loop1.run_until_complete(runner.start())
+    stale = runner._root_state
+    assert stale is not None
+    stale_owner = stale.owner
+    assert stale_owner is not None
+
+    thread = threading.Thread(target=loop1.run_forever, daemon=True)
+    thread.start()
+    loop2 = _new_loop()
+    try:
+        loop2.run_until_complete(runner.start())
+        assert runner._root_state is not stale
+        deadline = time.monotonic() + 5
+        while not stale_owner.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stale.stop.is_set(), "stale owner was never signalled to stop"
+        assert stale_owner.done(), "stale owner on a live foreign loop never terminated"
+    finally:
+        loop2.run_until_complete(runner.stop())
+        loop2.close()
+        loop1.call_soon_threadsafe(loop1.stop)
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        loop1.close()
+
+
+def test_cancel_all_failure_does_not_skip_owner_teardown(monkeypatch) -> None:
+    """A failing task-manager cancel_all must not skip the same-loop owner
+    teardown: the owner must still be stopped and awaited, and the state
+    reference cleared.
+
+    Review feedback on !3490: an exception from cancel_all used to abort the
+    whole close path, leaving a healthy same-loop owner running while the
+    state reference was dropped (fake-success shutdown).
+    """
+    from openjiuwen.core.common.task_manager import manager as manager_module
+
+    runner = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+    loop = _new_loop()
+    loop.run_until_complete(runner.start())
+    state = runner._root_state
+    assert state is not None
+    owner = state.owner
+    assert owner is not None
+
+    def boom():
+        raise RuntimeError("manager down")
+
+    monkeypatch.setattr(manager_module, "get_task_manager", boom)
+    try:
+        loop.run_until_complete(runner._close_root_task_group())
+    finally:
+        loop.close()
+    assert owner.done(), "same-loop owner was not torn down after cancel_all failure"
+    assert runner._root_state is None
 
 
 def test_stale_owner_exit_does_not_clobber_rebuilt_state() -> None:

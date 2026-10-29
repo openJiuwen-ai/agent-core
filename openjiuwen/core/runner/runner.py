@@ -74,6 +74,7 @@ class _RootTaskGroupState:
     """
 
     owner: Optional[asyncio.Task] = field(default=None)
+    owner_loop: Optional[asyncio.AbstractEventLoop] = field(default=None)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     group: Optional["TaskGroup"] = field(default=None)
@@ -188,6 +189,11 @@ class _RunnerImpl(_TeamRunnerMixin):
         state = self._root_state
         if state is not None and _is_live_task_on_running_loop(state.owner):
             return
+        if state is not None:
+            # The state being replaced may still own a live owner on another
+            # running loop; signal it to stop there so its task group and
+            # child tasks are not parked for the process lifetime.
+            self._signal_stale_owner_to_stop(state)
         # Import the manager so lower layers can schedule via manager.create_task().
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
@@ -199,6 +205,7 @@ class _RunnerImpl(_TeamRunnerMixin):
         state = _RootTaskGroupState()
         owner = asyncio.create_task(self._root_task_group_owner_loop(state))
         state.owner = owner
+        state.owner_loop = owner.get_loop()
         self._root_state = state
         await state.ready.wait()
         if state.group is None and owner.done():
@@ -212,9 +219,18 @@ class _RunnerImpl(_TeamRunnerMixin):
 
         owner = state.owner
         try:
-            # Stop must drain manager tasks regardless of owner liveness:
-            # an owner that already died may have left managed tasks behind.
-            await get_task_manager().cancel_all()
+            # Stop must drain manager tasks regardless of owner liveness: an
+            # owner that already died may have left managed tasks behind. A
+            # manager failure must not skip the owner teardown below.
+            try:
+                await get_task_manager().cancel_all()
+            except Exception as e:
+                logger.warning(
+                    "cancel_all failed while closing runner root task group",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                    exception=e,
+                )
             if _is_live_task_on_running_loop(owner):
                 state.stop.set()
                 if state.group is not None:
@@ -228,32 +244,12 @@ class _RunnerImpl(_TeamRunnerMixin):
                             await owner
                     except asyncio.CancelledError:
                         pass
-            elif owner.done():
-                # Owner already finished on its own loop; its finally block
-                # settled its state. Nothing left to cancel or await.
-                logger.info(
-                    "Runner root task group owner already finished; nothing to await",
-                    event_type=LogEventType.RUNNER_STOP,
-                    runner_id=self._runner_id,
-                )
-            elif owner.get_loop().is_closed():
-                # The owner's loop is gone: the task can never run again and
-                # cannot be cancelled or awaited from here. Drop it.
-                logger.warning(
-                    "Dropping runner root task group owner whose event loop is closed",
-                    event_type=LogEventType.RUNNER_STOP,
-                    runner_id=self._runner_id,
-                )
+                self._collect_owner_exception(owner)
             else:
-                # Owner is live on a different, still-running loop: that
-                # loop's own stop() will settle it. Cancelling or awaiting a
-                # foreign-loop task from here would raise RuntimeError, so
-                # this loop only gives up its reference.
-                logger.warning(
-                    "Dropping runner root task group owner live on a different event loop",
-                    event_type=LogEventType.RUNNER_STOP,
-                    runner_id=self._runner_id,
-                )
+                # Owner finished, or lives on another loop: this loop can
+                # neither await nor cancel it. The helper settles it on its
+                # own loop when possible.
+                self._signal_stale_owner_to_stop(state)
         except Exception as e:
             logger.warning(
                 "Failed to close runner root task group",
@@ -265,10 +261,64 @@ class _RunnerImpl(_TeamRunnerMixin):
             if self._root_state is state:
                 self._root_state = None
 
+    @staticmethod
+    def _collect_owner_exception(owner: asyncio.Task) -> None:
+        """Log a finished owner's exception so it is not left unretrieved."""
+        if owner.cancelled():
+            return
+        exc = owner.exception()
+        if exc is not None:
+            logger.warning(
+                "Runner root task group owner exited with an exception",
+                event_type=LogEventType.RUNNER_STOP,
+                exception=exc,
+            )
+
+    def _signal_stale_owner_to_stop(self, state: _RootTaskGroupState) -> None:
+        """Ask a non-current owner to stop on the loop that owns it.
+
+        An owner this loop can neither await nor cancel still owns a live
+        anyio task group; setting its stop event on its own loop makes it
+        cancel the group and exit there, so no task group or child task is
+        parked for the process lifetime. On a closed loop the owner can
+        never run again, so there is nothing to signal; on an idle loop the
+        callback runs the next time that loop executes.
+        """
+        owner = state.owner
+        owner_loop = state.owner_loop
+        if owner is None:
+            return
+        if owner.done():
+            self._collect_owner_exception(owner)
+            return
+        if owner_loop is None or owner_loop.is_closed():
+            logger.warning(
+                "Dropping runner root task group owner whose event loop is closed",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+            )
+            return
+        try:
+            owner_loop.call_soon_threadsafe(state.stop.set)
+        except RuntimeError as e:
+            logger.warning(
+                "Failed to signal runner root task group owner on its own loop",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+                exception=e,
+            )
+            return
+        logger.warning(
+            "Signalled runner root task group owner to stop on its own event loop",
+            event_type=LogEventType.RUNNER_STOP,
+            runner_id=self._runner_id,
+        )
+
     @contextmanager
     def _root_task_group_scope(self):
         state = self._root_state
-        if state is None or state.group is None:
+        group = state.group if state is not None else None
+        if group is None:
             yield
             return
         from openjiuwen.core.common.task_manager.context import get_task_group, reset_task_group, set_task_group
@@ -276,7 +326,7 @@ class _RunnerImpl(_TeamRunnerMixin):
         if get_task_group() is not None:
             yield
             return
-        token = set_task_group(state.group)
+        token = set_task_group(group)
         try:
             yield
         finally:
