@@ -8,6 +8,11 @@ class openjiuwen.core.common.logging.manager.LogManager
 
 `LogManager`类统一管理所有日志器，提供了日志器的注册与获取功能。
 
+默认日志后端将格式化后的完整记录（含上下文字段、异常堆栈及换行）限制为 1 MiB（UTF-8）。
+超限时保留开头，并追加 `[TRUNCATED original_bytes=…]`，其中原始字节数包含平台换行转换，
+不含记录末尾的换行。该限制适用于默认控制台、普通文件和日期文件输出，不影响正常大小的记录；
+它限制写出体积，不限制格式化过程的峰值内存。
+
 ### register_logger
 
 ```python
