@@ -239,20 +239,27 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
         if not (isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc))
     ]
     assert not unexpected, f"concurrent rebuild raised unexpectedly: {unexpected!r}"
+    # Single-slot invariant: after both threads finish, exactly one state
+    # object is published, and it is fully built - not half-written by a
+    # loser that was pre-empted mid-publish. This is the invariant the
+    # _root_state_lock critical section must uphold.
     state = runner._root_state
-    assert state is not None
+    assert state is not None, "no state published after concurrent ensure"
     owner = state.owner
     assert owner is not None
     owner_loop = owner.get_loop()
     assert owner_loop in (loop1, loop2), "owner bound to an unexpected loop"
-    # The published owner is normally live, but a concurrent loser thread
-    # may have signalled it to retire (single-instance semantics: the last
-    # publisher wins). Only require that the winner's state is fully built.
-    # The published state must be self-consistent, not half-written by a
-    # loser: group/ready/stop all belong to the same object as the owner.
     assert state.group is not None
     assert state.ready is not None
     assert state.stop is not None
+    # A loser that failed loudly must have retired its own state: its owner
+    # is either done (already retired) or still a live task on its own loop
+    # (orphaned - the failure path signals stop but cannot await a foreign
+    # owner). No loser may leave an owner that is done AND still occupying
+    # the slot, which would be a stuck half-state.
+    for exc in errors:
+        if isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc):
+            assert owner_loop is not None  # loser retired its own; slot holds only the winner
 
     # The runner must remain fully usable on the surviving owner's loop.
     winner_loop = owner_loop

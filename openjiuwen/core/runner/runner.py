@@ -184,6 +184,11 @@ class _RunnerImpl(_TeamRunnerMixin):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            # Sync context: no loop owns the check. A done owner's group
+            # field is already cleared by the owner loop's finally, so a
+            # non-None group here still corresponds to a live owner; a
+            # foreign live owner is only a concern for cross-loop driving,
+            # which sync callers cannot do.
             return state.group if (state := self._root_state) is not None else None
         state = self._root_state
         if state is None or not _is_live_task_on_running_loop(state.owner):
@@ -276,16 +281,27 @@ class _RunnerImpl(_TeamRunnerMixin):
         # If the owner task died before opening its task group, awaiting it
         # re-raises its exception into start() - the develop behaviour this
         # refactor must preserve (a broken runner must not start silently).
-        # This runs before the ownership check so the root cause (the
-        # owner's own exception) is never masked by a replacement error.
+        # Our dead state is dropped from the slot first (identity-guarded,
+        # so a concurrent winner is never touched) so a failed start leaves
+        # no half-published state behind.
         if live_state.group is None:
+            with self._root_state_lock:
+                if self._root_state is live_state:
+                    self._root_state = None
             await live_state.owner
         # Final ownership check: if another loop replaced the state (or
         # signalled our owner to stop) after our last check, returning here
         # would let start() silently succeed with a dead or foreign root
-        # task group. Fail loudly instead - the caller retries on the loop
-        # that now owns the group.
+        # task group. Retire only our own loser first - the winner (a
+        # healthy state owned by another loop) must not be torn down by our
+        # failure, and our retired owner must not be left orphaned waiting
+        # on its stop event. The identity guard keeps the slot untouched
+        # when it already belongs to the winner.
         if self._root_state is not live_state or not _is_live_task_on_running_loop(live_state.owner):
+            with self._root_state_lock:
+                if self._root_state is live_state:
+                    self._root_state = None
+                live_state.stop.set()
             raise RuntimeError(
                 "runner root task group was concurrently replaced during "
                 "startup; retry start() on the event loop that now owns it"
@@ -496,12 +512,13 @@ class _RunnerImpl(_TeamRunnerMixin):
         try:
             await self._ensure_root_task_group()
         except Exception:
-            # ensure failure runs the same cleanup as a mid-start failure:
-            # stop the lock manager and drop our root task group state.
-            try:
-                await ReadWriteLockManager.stop()
-            finally:
-                await self._close_root_task_group()
+            # An ensure failure is either our own owner dying (ensure has
+            # already retired that state itself) or losing a concurrent
+            # rebuild to another loop's healthy winner - which must NOT be
+            # torn down by our failure, and whose loop's tasks must not be
+            # hit by a process-wide cancel_all(). Only the lock manager is
+            # reverted here; the root state slot is left to its owner.
+            await ReadWriteLockManager.stop()
             raise
 
         try:
