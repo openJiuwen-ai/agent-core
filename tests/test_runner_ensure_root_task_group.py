@@ -318,6 +318,8 @@ def test_rebuild_signals_stale_owner_on_live_foreign_loop() -> None:
         loop1.call_soon_threadsafe(loop1.stop)
         thread.join(timeout=10)
         assert not thread.is_alive()
+        if not loop1.is_closed():
+            loop1.close()
 
 
 def test_cross_loop_stop_on_closed_loop_drops_without_signal() -> None:

@@ -194,34 +194,44 @@ class _RunnerImpl(_TeamRunnerMixin):
         # Import the manager so lower layers can schedule via manager.create_task().
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
+        get_task_manager()
         # The check-signal-rebuild sequence must be atomic across threads:
         # without the lock, two concurrent rebuilds can interleave so that
         # each thread signals only the state it read, and a just-published
         # loser state is never signalled by anyone — its owner is orphaned.
+        # The critical section is synchronous on purpose: no awaits inside,
+        # so an event loop thread is never blocked by the lock.
         with self._root_state_lock:
             state = self._root_state
             if state is not None and _is_live_task_on_running_loop(state.owner):
-                return
-            if state is not None:
-                # The state being replaced may still own a live owner on
-                # another running loop; signal it to stop there so its task
-                # group and child tasks are not parked for the process
-                # lifetime.
-                self._signal_stale_owner_to_stop(state)
-            get_task_manager()
-            # Bind the owner into the state before publishing it: the
-            # publish is the only write other loops observe, so no observer
-            # can ever see a live state whose owner is still None (which a
-            # concurrent loop would misread as stale and rebuild over,
-            # orphaning this owner).
-            state = _RootTaskGroupState()
-            owner = asyncio.create_task(self._root_task_group_owner_loop(state))
-            state.owner = owner
-            state.owner_loop = owner.get_loop()
-            self._root_state = state
-        await state.ready.wait()
-        if state.group is None and owner.done():
-            await owner
+                live_state = state
+            else:
+                live_state = None
+                if state is not None:
+                    # The state being replaced may still own a live owner on
+                    # another running loop; signal it to stop there so its
+                    # task group and child tasks are not parked for the
+                    # process lifetime. The runner is a process-wide
+                    # singleton, so the latest start() wins by definition:
+                    # a replaced owner is retired, not kept running.
+                    self._signal_stale_owner_to_stop(state)
+                # Bind the owner into the state before publishing it: the
+                # publish is the only write other loops observe, so no
+                # observer can ever see a live state whose owner is still
+                # None (which a concurrent loop would misread as stale and
+                # rebuild over, orphaning this owner).
+                state = _RootTaskGroupState()
+                owner = asyncio.create_task(self._root_task_group_owner_loop(state))
+                state.owner = owner
+                state.owner_loop = owner.get_loop()
+                self._root_state = state
+                live_state = state
+        # Outside the lock: both paths must observe a ready state — a caller
+        # that hit the fast path while the owner coroutine has not run yet
+        # would otherwise return with state.group still None.
+        await live_state.ready.wait()
+        if live_state.group is None and live_state.owner.done():
+            await live_state.owner
 
     async def _close_root_task_group(self) -> None:
         state = self._root_state
@@ -232,9 +242,9 @@ class _RunnerImpl(_TeamRunnerMixin):
         owner = state.owner
         try:
             if _is_live_task_on_running_loop(owner):
-                # Stop must drain manager tasks even when the owner already
-                # died and left managed tasks behind; keep the failure
-                # isolated so a manager error cannot skip the owner teardown.
+                # Owner alive on this loop: drain manager tasks, stop and
+                # await it. The drain failure stays isolated so one error
+                # cannot skip the rest of the teardown.
                 try:
                     await get_task_manager().cancel_all()
                 except Exception as e:
@@ -257,11 +267,25 @@ class _RunnerImpl(_TeamRunnerMixin):
                     except asyncio.CancelledError:
                         pass
                 self._collect_owner_exception(owner)
+            elif owner is not None and owner.done() and owner.get_loop() is asyncio.get_running_loop():
+                # Owner already finished on this loop: its own teardown
+                # stopped it, but manager tasks it created may outlive it —
+                # drain them too (develop semantics).
+                try:
+                    await get_task_manager().cancel_all()
+                except Exception as e:
+                    logger.warning(
+                        "cancel_all failed while closing runner root task group",
+                        event_type=LogEventType.RUNNER_STOP,
+                        runner_id=self._runner_id,
+                        exception=e,
+                    )
+                self._collect_owner_exception(owner)
             else:
-                # Owner finished, or lives on another loop: this loop can
-                # neither await nor cancel it. The helper settles it on its
-                # own loop when possible. Manager tasks created on the owner's
-                # loop are drained by that loop's own stop.
+                # Owner lives on another loop: this loop can neither await
+                # nor cancel it. The helper settles it on its own loop when
+                # possible; manager tasks created there are drained by that
+                # loop's own stop.
                 self._signal_stale_owner_to_stop(state)
         except Exception as e:
             logger.warning(
