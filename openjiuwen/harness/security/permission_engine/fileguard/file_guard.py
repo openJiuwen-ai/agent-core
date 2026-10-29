@@ -8,6 +8,8 @@
 配置编译见 :func:`normalize_path_guard_config`（§5.5）；判定入口为
 :class:`FileGuardChecker`。
 """
+# Keep legacy normalization and the native checker together for compatibility.
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.security.permission_engine.fileguard.glob_patterns import validated_glob_patterns
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
 from openjiuwen.harness.security.permission_engine.policy_sources import SOURCE_USER
@@ -31,6 +34,8 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_categories imp
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     _PATH_TOOLS,
     _iter_path_strings,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     strictest as tiered_strictest,
 )
 
@@ -278,6 +283,7 @@ def normalize_path_guard_config(
         return _normalize_native(
             fg, ext=ext, workspace_root=ws, trusted_dirs=trusted,
             source_order=source_order, composed=composed,
+            composition=composition if composed else None,
         )
 
     return _normalize_legacy(
@@ -383,6 +389,7 @@ def _normalize_native(
     trusted_dirs: Sequence[Path],
     source_order: tuple[str, ...] = (),
     composed: bool = False,
+    composition: Mapping[str, Any] | None = None,
 ) -> EffectiveFileGuardConfig:
     raw_defaults = fg.get("defaults") if isinstance(fg.get("defaults"), dict) else {}
     # 若未写 defaults，可从 external_directory["*"] 迁移
@@ -428,7 +435,14 @@ def _normalize_native(
     ws_rule = _compile_workspace_axis_rule(fg.get("workspace"), workspace_root=workspace_root)
     if ws_rule is not None:
         if composed:
-            ws_rule = replace(ws_rule, source=SOURCE_USER, explicit_axes=frozenset({"read", "write", "exec"}))
+            axes = frozenset({"read", "write", "exec"})
+            source = SOURCE_USER
+            if composition and composition.get("schema_version") == 2:
+                source = composition.get("workspace_layer", SOURCE_USER)
+                axes = frozenset(axis for axis in ("read", "write", "exec") if axis in fg["workspace"])
+                if fg["workspace"].get("read") == "deny":
+                    axes |= {"write", "exec"}
+            ws_rule = replace(ws_rule, source=source, explicit_axes=axes)
         rules.append(ws_rule)
 
     # 运行时 trusted_dirs → allow 前缀（与 workspace 独立；项目 cwd / /add-dir 热更新）
@@ -537,7 +551,8 @@ def extract_paths_legacy(
         return [p for p, _action, _source in extract_accesses_native(tool_name, tool_args, workspace)]
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
-            extract_accesses_native, shell_type_for_file_access,
+            extract_accesses_native,
+            shell_type_for_file_access,
         )
 
         workdir = tool_args.get("workdir", "")
@@ -650,6 +665,7 @@ class FileGuardChecker:
         self,
         tool_name: str,
         tool_args: Mapping[str, Any],
+        *, literal_delete_targets: Sequence[Path] = (),
     ) -> PermissionResult | None:
         """评估路径层；无意见或全部 ALLOW 时返回 ``None``（不抬升 Pipeline A）。"""
         if not self._effective.enabled:
@@ -665,6 +681,12 @@ class FileGuardChecker:
                     matched_rule="file_guard:glob_pattern",
                 )
         workspace = self._effective.workspace_root
+        if workspace is None and self._effective.composed and (
+            self._permission_config.get("composition") or {}
+        ).get("schema_version") == 2:
+            # CWD resolves operands only. It is never compiled into a workspace
+            # grant: absolute/static rules and defaults must still be checked.
+            workspace = Path(get_cwd()).expanduser().resolve()
         if workspace is None:
             logger.debug("[file_guard] skip reason=no_workspace")
             return None
@@ -684,6 +706,7 @@ class FileGuardChecker:
             action = _tool_default_action(tool_name, self._permission_config)
             accesses = [(p, action) for p in paths]
 
+        accesses.extend((target, "write") for target in literal_delete_targets)
         if not accesses:
             return None
 
@@ -724,6 +747,20 @@ class FileGuardChecker:
             external_paths=hit_external or None,
         )
 
+    def allows_workspace_delete(self, targets: Sequence[Path]) -> bool:
+        """Require an active v2 workspace write grant and normal path decisions."""
+        cfg = self._permission_config or {}
+        composition = cfg.get("composition") or {}
+        guard = cfg.get("file_guard") or {}
+        workspace = guard.get("workspace") or {}
+        layer = composition.get("workspace_layer", SOURCE_USER)
+        return bool(
+            targets and self._effective.enabled and self._effective.mode == "native"
+            and composition.get("schema_version") == 2
+            and layer in self._effective.source_order and workspace.get("write") == "allow"
+            and all(self._resolve_one(target, "write")[0] == PermissionLevel.ALLOW for target in targets)
+        )
+
     def collect_ask_accesses(
         self,
         tool_name: str,
@@ -736,6 +773,10 @@ class FileGuardChecker:
         if not self._effective.enabled:
             return []
         workspace = self._effective.workspace_root
+        if workspace is None and self._effective.composed and (
+            self._permission_config.get("composition") or {}
+        ).get("schema_version") == 2:
+            workspace = Path(get_cwd()).expanduser().resolve()
         if workspace is None:
             return []
 

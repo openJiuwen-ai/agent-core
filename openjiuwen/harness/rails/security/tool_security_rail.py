@@ -11,8 +11,9 @@ import inspect
 import json
 from copy import deepcopy
 from dataclasses import replace
-
 from typing import Any, Iterable, Optional, cast
+
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
@@ -21,9 +22,16 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
     ConfirmPayload,
 )
-
-from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.patterns import (
+    write_permissions_section_to_agent_config_yaml,
+)
+from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
+    build_operation_grant,
+    build_operation_grants,
+    operation_subject,
+    scope_options,
+)
 from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
     PermissionEvaluationRequest,
@@ -34,16 +42,13 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
-from openjiuwen.harness.security.permission_engine.models import PermissionsSection
-from openjiuwen.harness.security.patterns import (
-    write_permissions_section_to_agent_config_yaml,
-)
-from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
-    build_operation_grant, build_operation_grants, operation_subject, scope_options,
+from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import (
+    LocalDeleteExecution,
+    local_delete_execution,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-
 
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -277,6 +282,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         cfg_dict = cast(dict[str, Any], config)
         self._static_config = cfg_dict
         self._engine.update_config(cfg_dict, soft_delete_enabled=soft_delete_enabled)
+        if (cfg_dict.get("composition") or {}).get("schema_version") == 2 and self._host.resolve_workspace_dir:
+            try:
+                workspace = self._host.resolve_workspace_dir()
+            except Exception:
+                logger.warning("[PermissionEngine] permission.rail.workspace_resolve_failed", exc_info=True)
+                workspace = None
+            self._engine.update_workspace_root(workspace)
         if self._host.tool_permission_checks_active is not None:
             self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
         if tool_names is not None:
@@ -454,6 +466,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                           authorization_scope=payload.authorization_scope)
         return hook(tool_name, tool_args, **kwargs)
 
+    def _permissions_snapshot_required(self) -> bool:
+        required = self._host.permissions_snapshot_required
+        try:
+            return bool(required() if callable(required) else required)
+        except Exception:
+            return True
+
     async def _validate_confirmation(self, payload, tool_name, tool_args, session_id):
         if not payload.approved:
             return payload, None
@@ -504,6 +523,26 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         ):
             return external
         return replace(result, permission=PermissionLevel.ASK, reason="No effective external policy decision")
+
+    async def _verified_shell_execution(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
+    ) -> LocalDeleteExecution | None:
+        """Finish potentially asynchronous verification before binding a snapshot."""
+        hook = self._host.resolve_shell_execution
+        if hook is not None:
+            try:
+                proof = hook(ctx, tool_call, tool_args)
+                proof = await proof if inspect.isawaitable(proof) else proof
+                return proof if isinstance(proof, LocalDeleteExecution) else None
+            except Exception:
+                logger.warning("[PermissionEngine] permission.shell_execution.unavailable", exc_info=True)
+                return None
+        manager = getattr(getattr(ctx, "agent", None), "ability_manager", None)
+        instances = getattr(manager, "_tool_instances", None)
+        name = getattr(tool_call, "name", "")
+        if isinstance(instances, dict) and name in instances:
+            return local_delete_execution(instances[name], tool_args)
+        return None
 
     async def resolve_interrupt(
         self,
@@ -574,6 +613,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     return self.reject(tool_result=msg)
 
         if user_input is None:
+            # No snapshot/root may be held across an asynchronous host verifier:
+            # another session could refresh this rail while the verifier waits.
+            execution = await self._verified_shell_execution(ctx, tool_call, tool_args)
             logger.info(
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
@@ -596,11 +638,28 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if isinstance(fresh, dict):
                 self.update_config(fresh)
             else:
+                if self._permissions_snapshot_required():
+                    return self.reject(tool_result="[PERMISSION_DENIED] Required permission snapshot is unavailable")
                 self._engine.update_config(self._static_config)
             try:
+                execution_kwargs = {}
+                if isinstance(execution, LocalDeleteExecution):
+                    execution_kwargs["workspace_delete_execution"] = execution
+                    composition = self._engine.config.get("composition") or {}
+                    if composition.get("schema_version") == 2 and "workspace_delete_defaults" in composition:
+                        # Parallel tools share a mutable CWD state. Bind the
+                        # inspected directory into the actual call so a later
+                        # cd cannot move the authorized relative operation.
+                        tool_args = {**tool_args, "workdir": str(execution.cwd)}
+                        if tool_call is not None:
+                            tool_call.arguments = json.dumps(tool_args, ensure_ascii=False)
+                        inputs = getattr(ctx, "inputs", None)
+                        if hasattr(inputs, "tool_args"):
+                            inputs.tool_args = dict(tool_args)
                 result = await self._engine.check_permission(
                     tool_name=normalized_name,
                     tool_args=tool_args,
+                    **execution_kwargs,
                 )
             except Exception:
                 logger.error(

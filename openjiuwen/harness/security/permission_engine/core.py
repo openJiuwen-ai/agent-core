@@ -43,10 +43,10 @@ from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths imp
     merge_package_sensitive_paths,
 )
 from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
-from openjiuwen.harness.security.permission_engine.models import PermissionsSection
 from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import (
     NetGuardChecker,
@@ -59,6 +59,7 @@ from openjiuwen.harness.security.permission_engine.netguard.net_urls import (
 from openjiuwen.harness.security.permission_engine.policy_sources import (
     SOURCE_BUILTIN,
     SOURCE_USER,
+    SOURCE_USER_GROUP,
     validate_source_order,
 )
 from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import (
@@ -71,7 +72,15 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import 
     matched_rule_uses_approval_override,
     maybe_escalate_shell_operators,
     strict_tool_command_merge_enabled,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     strictest as tiered_policy_strictest,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import (
+    LocalDeleteExecution,
+    scoped_delete_policy,
+    validate_delete_metadata,
+    workspace_delete_targets,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +88,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 COMPOSITION_SCHEMA_VERSION = 1
+# The legacy marker stays at 1 for older hosts that compare it for equality.
+SUPPORTED_COMPOSITION_SCHEMA_VERSIONS = (1, 2)
 
 
 def _has_builtin_layer(items: Any) -> bool:
@@ -135,9 +146,19 @@ def prepare_permissions_for_engine(
 
     composition = cfg.get("composition")
     if composition is not None:
-        if not isinstance(composition, dict) or composition.get("schema_version") != COMPOSITION_SCHEMA_VERSION:
+        if (
+            not isinstance(composition, dict)
+            or type(composition.get("schema_version")) is not int  # pylint: disable=unidiomatic-typecheck
+            or composition["schema_version"] not in SUPPORTED_COMPOSITION_SCHEMA_VERSIONS
+        ):
             raise ValueError("unsupported permissions.composition schema_version")
-        order = validate_source_order(composition.get("source_order"))
+        version = composition["schema_version"]
+        order = validate_source_order(composition.get("source_order"), schema_version=version)
+        if "workspace_layer" in composition and (
+            version != 2 or composition["workspace_layer"] not in (SOURCE_USER, SOURCE_USER_GROUP)
+        ):
+            raise ValueError("invalid permissions.composition workspace_layer")
+        validate_delete_metadata(cfg)
         # The composed snapshot already contains selected package rules.
         prepared = _fill_legacy_host_rule_actions(deepcopy(cfg))
         if SOURCE_USER not in order:
@@ -246,6 +267,13 @@ class PermissionEngine:
         self._trusted_dirs = trusted_dirs
         self._rebuild_file_guard()
 
+    def update_workspace_root(self, workspace_root: Path | None) -> None:
+        """Bind a runtime root, or clear an unavailable root and its old grants."""
+        root = Path(workspace_root).resolve() if workspace_root is not None else None
+        if root != self._workspace_root:
+            self._workspace_root = root
+            self._rebuild_file_guard()
+
     @property
     def trusted_dirs(self) -> list[Path]:
         """获取当前受信任目录列表."""
@@ -278,12 +306,38 @@ class PermissionEngine:
         """
         return self.evaluate_global_policy_directly(tool_name, tool_args)
 
+    def _workspace_delete_targets(
+        self, tool_args: dict[str, Any], execution: LocalDeleteExecution | None,
+    ) -> tuple[Path, ...] | None:
+        composition = self.config.get("composition") or {}
+        if (
+            execution is None or composition.get("schema_version") != 2
+            or "workspace_delete_defaults" not in composition
+        ):
+            return None
+        return workspace_delete_targets(
+            tool_args.get("command", ""), dialect=execution.dialect,
+            cwd=execution.cwd, workspace_root=self._workspace_root,
+        )
+
+    def _workspace_delete_input(
+        self, tool_name: str, tool_args: dict[str, Any], execution: LocalDeleteExecution | None,
+    ) -> tuple[dict[str, Any], bool, tuple[Path, ...] | None]:
+        """Keep derived command input separate from the shared native snapshot."""
+        targets = self._workspace_delete_targets(tool_args, execution)
+        if targets and self._file_guard is not None and self._file_guard.allows_workspace_delete(targets):
+            candidate = scoped_delete_policy(self.config, tool_name)
+            if candidate is not None:
+                return candidate, True, targets
+        return self.config, False, targets
+
     def evaluate_global_policy_directly(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
         *,
         include_external_directory: bool = True,
+        workspace_delete_execution: LocalDeleteExecution | None = None,
     ) -> tuple[PermissionLevel | None, str | None]:
         """直接评估全局权限，不受 enabled 与宿主「是否校验」短路影响。
 
@@ -298,7 +352,12 @@ class PermissionEngine:
             tool_args = {}
 
         matched_rule: str | None = None
-        permission, matched_rule = evaluate_tiered_policy(self.config, tool_name, tool_args)
+        policy_config, scoped_delete, targets = self._workspace_delete_input(
+            tool_name, tool_args, workspace_delete_execution,
+        )
+        permission, matched_rule = evaluate_tiered_policy(
+            policy_config, tool_name, tool_args, workspace_delete_fallback=scoped_delete,
+        )
         if matched_rule == "tiered_policy:fallback(no_config)":
             permission = None
             matched_rule = None
@@ -306,7 +365,8 @@ class PermissionEngine:
             permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
 
         if include_external_directory and self._file_guard is not None:
-            path_result = self._file_guard.evaluate(tool_name, tool_args)
+            exact_paths = {"literal_delete_targets": targets} if targets else {}
+            path_result = self._file_guard.evaluate(tool_name, tool_args, **exact_paths)
             if path_result is not None:
                 path_rule = path_result.matched_rule or "file_guard"
                 if permission is None:
@@ -335,6 +395,7 @@ class PermissionEngine:
         self,
         tool_name: str,
         tool_args: dict[str, Any],
+        *, workspace_delete_execution: LocalDeleteExecution | None = None,
     ) -> PermissionResult:
         """Return a policy decision, including explicit denial on analysis limits."""
         try:
@@ -403,6 +464,7 @@ class PermissionEngine:
             tool_name,
             tool_args,
             include_external_directory=False,
+            workspace_delete_execution=workspace_delete_execution,
         )
         if permission is None:
             permission = PermissionLevel.ASK
@@ -414,8 +476,13 @@ class PermissionEngine:
         )
 
         # 2. Pipeline B：file_guard（可独立关闭；含 ExternalDirectory Legacy 投影）
+        exact_paths = {}
         if self._file_guard is not None:
-            path_result = self._file_guard.evaluate(tool_name, tool_args)
+            if workspace_delete_execution is not None:
+                targets = self._workspace_delete_targets(tool_args, workspace_delete_execution)
+                if targets:
+                    exact_paths["literal_delete_targets"] = targets
+            path_result = self._file_guard.evaluate(tool_name, tool_args, **exact_paths)
             if path_result is not None:
                 path_rule = path_result.matched_rule or "file_guard"
                 logger.info(
@@ -472,7 +539,10 @@ class PermissionEngine:
         # 4. Pipeline D：删除数量防护（软删除开启 + 删除数量达阈值 → ASK）
         del_reason: str | None = None
         if self._deletion_guard is not None:
-            del_result = self._deletion_guard.evaluate(tool_name, tool_args)
+            delete_args = tool_args
+            if exact_paths.get("literal_delete_targets") and workspace_delete_execution is not None:
+                delete_args = {**tool_args, "workdir": str(workspace_delete_execution.cwd)}
+            del_result = self._deletion_guard.evaluate(tool_name, delete_args)
             if del_result is not None:
                 del_rule = del_result.matched_rule or "del_guard"
                 if isinstance(del_result.reason, str) and del_result.reason.strip():
