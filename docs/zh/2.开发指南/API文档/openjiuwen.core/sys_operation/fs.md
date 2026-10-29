@@ -295,3 +295,13 @@ abstractmethod async search_files(
 **返回**：
 
 **[SearchFilesResult](./result.md#class-searchfilesresult)**，搜索文件结果。
+
+### Todo 快照与条件原子替换
+
+本地 FS 和配套 JiuwenBox 支持以下可选契约，普通读写默认行为不变：
+
+- `read_file(path, options={"snapshot": True, "missing_ok": True})`：读取完整文件，返回同次读取的 `content`、`exists`、原始字节 `content_sha256`；不接受 head/tail/line_range。缺失和空文件分别表示。
+- `write_file(..., prepend_newline=False, options={"atomic_replace": True, "expected_exists": ..., "expected_content_sha256": ...})`：在文件端锁内比较前置条件并原子替换，不支持 append。成功时 `data.atomic_replace=True`；明确冲突时返回非零 code 且 `data.conflict=True`。其他失败不得当成冲突自动重放。
+- 沙箱快照额外返回现有 `backend_id`；条件写通过 `expected_backend_id` 检查读取与提交仍使用同一沙箱，无额外网络查询。
+
+原子替换保持已有文件的写权限、owner/group 和 ACL；取消会等待在途替换收尾。该保证不包括断电持久性。未支持此接口的沙箱不能回退为普通覆盖写。

@@ -38,6 +38,10 @@ class SandboxGatewayClientMixin:
         """Resolve the isolation key template with current session_id from context var."""
         return _resolve_isolation_key_template(self._isolation_key_template)
 
+    def get_resolved_isolation_key(self) -> str:
+        """Return the current isolation identity without creating a sandbox."""
+        return self._get_resolved_isolation_key()
+
     async def _get_gateway_client(self) -> SandboxGatewayClient:
         if not hasattr(self, '_gateway_client'):
             self._gateway_client = SandboxGatewayClient(

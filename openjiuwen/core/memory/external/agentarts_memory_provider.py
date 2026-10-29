@@ -48,6 +48,18 @@ EXTERNAL_MEMORY_SEARCH_SCHEMA = {
                 "type": "number",
                 "description": f"Optional minimum similarity score. (default: {_DEFAULT_MIN_SCORE:g})",
             },
+            "start_time": {
+                "type": "integer",
+                "description": "Optional. Search memories created at or after this Unix timestamp (milliseconds).",
+            },
+            "end_time": {
+                "type": "integer",
+                "description": "Optional. Search memories created before this Unix timestamp (milliseconds).",
+            },
+            "only_actived": {
+                "type": "boolean",
+                "description": "Optional. If true, only return activated memories. (default: false)",
+            },
         },
         "required": ["query"],
     },
@@ -165,6 +177,12 @@ class AgentArtsMemoryProvider(MemoryProvider):
             filter_kwargs["actor_id"] = actor_id
         if args.get("strategy_type") is not None:
             filter_kwargs["strategy_type"] = args["strategy_type"]
+        if args.get("start_time") is not None:
+            filter_kwargs["start_time"] = args["start_time"]
+        if args.get("end_time") is not None:
+            filter_kwargs["end_time"] = args["end_time"]
+        if args.get("only_actived") is not None:
+            filter_kwargs["only_actived"] = args["only_actived"]
         return MemorySearchFilter(**filter_kwargs)
 
     async def _search(self, query: str, args: dict[str, Any]) -> list[dict[str, Any]]:

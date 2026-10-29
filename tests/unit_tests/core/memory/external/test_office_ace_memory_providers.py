@@ -274,7 +274,15 @@ async def test_pc_search_body_passes_through_optional_fields(patch_httpx):
 
     await provider.handle_tool_call(
         "external_memory_search",
-        {"query": "q", "top_k": 5, "strategy_type": "semantic", "min_score": 0.3},
+        {
+            "query": "q",
+            "top_k": 5,
+            "strategy_type": "semantic",
+            "min_score": 0.3,
+            "start_time": 1700000000000,
+            "end_time": 1700086400000,
+            "only_actived": True,
+        },
     )
 
     body = _FakeAsyncClient.last["json"]
@@ -284,7 +292,26 @@ async def test_pc_search_body_passes_through_optional_fields(patch_httpx):
         "top_k": 5,
         "strategy_type": "semantic",
         "min_score": 0.3,
+        "start_time": 1700000000000,
+        "end_time": 1700086400000,
+        "only_actived": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_pc_search_body_omits_time_range_and_activation_when_unset(patch_httpx):
+    provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
+    await provider.initialize(user_id="u", session_id="t")
+
+    await provider.handle_tool_call(
+        "external_memory_search",
+        {"query": "q", "top_k": 5, "strategy_type": "semantic", "min_score": 0.3},
+    )
+
+    body = _FakeAsyncClient.last["json"]
+    assert "start_time" not in body
+    assert "end_time" not in body
+    assert "only_actived" not in body
 
 
 @pytest.mark.asyncio
@@ -398,4 +425,11 @@ def test_pc_tool_schema_and_prompt_block():
     provider = OfficeAceMemoryPcProvider(api_key="k")
     schemas = provider.get_tool_schemas()
     assert schemas[0]["name"] == "external_memory_search"
+    properties = schemas[0]["parameters"]["properties"]
+    assert properties["start_time"]["type"] == "integer"
+    assert "milliseconds" in properties["start_time"]["description"]
+    assert properties["end_time"]["type"] == "integer"
+    assert "milliseconds" in properties["end_time"]["description"]
+    assert properties["only_actived"]["type"] == "boolean"
+    assert "activated" in properties["only_actived"]["description"]
     assert "external_memory_search" in provider.system_prompt_block()
