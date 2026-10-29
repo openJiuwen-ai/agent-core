@@ -19,6 +19,14 @@ def _tool_call(call_id: str, name: str = "search") -> ToolCall:
     return ToolCall(id=call_id, type="function", name=name, arguments="{}")
 
 
+class _FailingAsyncIterator:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise RuntimeError("insufficient_quota")
+
+
 def test_sanitize_keeps_user_message_and_adds_cancel_marker():
     messages = [UserMessage(content="帮我查询热搜前50")]
     kept = ReActAgent._sanitize_cancelled_turn_messages(messages)
@@ -116,6 +124,36 @@ async def test_cancel_saves_cleaned_context_to_external_session():
     # 关键回归断言：即使 need_cleanup=False，取消后也要把清理后的 context
     # 写回 session state，否则下一轮会被旧快照 rebuild 覆盖。
     mock_context_engine.save_contexts.assert_awaited()
+    session.commit.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_model_error_keeps_user_turn_and_commits_external_agent_session():
+    agent = ReActAgent(card=AgentCard(name="error_agent", description="error save test"))
+    agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+    context = MagicMock()
+    context.add_messages = AsyncMock()
+    context.get_context_window = AsyncMock(return_value=MagicMock(get_messages=lambda: [], get_tools=lambda: None))
+    context.get_messages.return_value = [UserMessage(content="查一下热搜")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.create_context = AsyncMock(return_value=context)
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    llm = MockLLMModel()
+    llm.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+
+    with patch.object(agent, "_get_llm", return_value=llm):
+        with pytest.raises(RuntimeError, match="insufficient_quota"):
+            await agent.invoke({"conversation_id": "sess", "query": "查一下热搜"}, session=session)
+
+    kept = context.set_messages.call_args.args[0]
+    assert kept[0].content == "查一下热搜"
+    assert "unexpected error" in kept[-1].content
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -133,6 +171,96 @@ async def test_stream_cancel_saves_context_to_external_session():
             pass
 
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_stream_error_checkpoints_safe_context_and_emits_error():
+    agent = ReActAgent(card=AgentCard(name="stream_error_agent", description="stream error save test"))
+    context = MagicMock()
+    context.get_messages.return_value = [UserMessage(content="查一下热搜")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = False
+    agent.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.write_stream = AsyncMock()
+
+    async for _ in agent._inner_stream(session=session, inputs={"query": "查一下热搜"}, need_cleanup=False):
+        pass
+
+    kept = context.set_messages.call_args.args[0]
+    assert kept[0].content == "查一下热搜"
+    assert "unexpected error" in kept[-1].content
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    error_schema = session.write_stream.call_args.args[0]
+    assert error_schema.payload["result_type"] == "error"
+    assert "insufficient_quota" in error_schema.payload["output"]
+
+
+@pytest.mark.asyncio
+async def test_owned_stream_error_saves_and_commits_once():
+    agent = ReActAgent(card=AgentCard(name="owned_stream_agent", description="stream lifecycle test"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = True
+    agent.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.write_stream = AsyncMock()
+    session.close_stream = AsyncMock()
+    session.commit = AsyncMock()
+
+    async def empty_stream():
+        if False:
+            yield None
+
+    session.stream_iterator.return_value = empty_stream()
+
+    async for _ in agent._inner_stream(session=session, inputs={"query": "查一下热搜"}, need_cleanup=True):
+        pass
+
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    session.close_stream.assert_awaited_once_with()
+    session.commit.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_real_stream_model_error_persists_and_commits_once():
+    agent = ReActAgent(card=AgentCard(name="real_stream_agent", description="real stream lifecycle"))
+    agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+    context = MagicMock()
+    context.add_messages = AsyncMock()
+    context.get_context_window = AsyncMock(return_value=MagicMock(get_messages=lambda: [], get_tools=lambda: None))
+    context.get_messages.return_value = [UserMessage(content="查一下热搜")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.create_context = AsyncMock(return_value=context)
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    llm = MockLLMModel()
+    llm.stream = MagicMock(return_value=_FailingAsyncIterator())
+    session = MagicMock()
+    session.get_session_id.return_value = "sess"
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+    session.close_stream = AsyncMock()
+    session.commit = AsyncMock()
+
+    async def empty_stream():
+        if False:
+            yield None
+
+    session.stream_iterator.return_value = empty_stream()
+    agent.is_agent_session = True
+
+    with patch.object(agent, "_get_llm", return_value=llm):
+        async for _ in agent._inner_stream(
+                session=session, inputs={"query": "查一下热搜"}, need_cleanup=True
+        ):
+            pass
+
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    session.close_stream.assert_awaited_once_with()
+    session.commit.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
