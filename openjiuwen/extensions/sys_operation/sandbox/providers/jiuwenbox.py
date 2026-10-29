@@ -369,17 +369,33 @@ class _JiuwenBoxClient:
         _raise_for_status(response)
 
     def live_sandbox_ids(self) -> set[str]:
-        """List existing instances without touching their activity timestamps."""
+        """List live or unknown-phase instances without touching activity timestamps.
+
+        Only known inactive phases are excluded. Invalid inventory rows reject
+        the snapshot so live_scopes can conservatively retain known owners.
+        """
         response = self._client.get("/api/v1/sandboxes")
         _raise_for_status(response)
         rows = response.json()
         if not isinstance(rows, list):
             raise ValueError("invalid JiuwenBox sandbox inventory")
-        return {
-            row["id"] for row in rows
-            if isinstance(row, dict) and isinstance(row.get("id"), str)
-            and row.get("phase") in {"ready", "provisioning"}
-        }
+        live_ids = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("invalid JiuwenBox sandbox inventory row")
+            sandbox_id = row.get("id")
+            if not isinstance(sandbox_id, str) or not sandbox_id.strip():
+                raise ValueError("invalid JiuwenBox sandbox inventory ID")
+            phase = row.get("phase")
+            if phase in ("stopped", "error", "deleting"):
+                continue
+            if phase not in ("ready", "provisioning"):
+                logger.warning(
+                    "[jiuwenbox] sandbox %s has unknown inventory phase %r; retaining as live",
+                    sandbox_id, phase,
+                )
+            live_ids.add(sandbox_id)
+        return live_ids
 
     def delete_sandbox(self, sandbox_id: str) -> None:
         """DELETE /api/v1/sandboxes/{id}; treat 204 and 404 as success."""

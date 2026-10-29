@@ -33,12 +33,14 @@ def remote(monkeypatch):
     monkeypatch.setattr(SandboxGateway, "_instance", gateway)
     state = SimpleNamespace(
         gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, delete_failures=0, block_create=False,
-        entered=threading.Event(), release=threading.Event(), clients=[], lost=set(),
+        entered=threading.Event(), release=threading.Event(), clients=[], lost=set(), inventory=None,
     )
 
     def respond(request):
         state.requests.append((request.method, str(request.url)))
         if request.method == "GET" and request.url.path == "/api/v1/sandboxes":
+            if state.inventory is not None:
+                return httpx.Response(200, json=state.inventory)
             return httpx.Response(200, json=[{"id": sid, "phase": "ready"} for sid in state.active])
         if request.method == "POST":
             assert request.url.path == "/api/v1/sandboxes"
@@ -153,6 +155,59 @@ async def test_policy_inventory_excludes_reaped_instances_and_unowned_instances(
         denied = await owned.fs().read_file("/probe")
         assert denied.code != 0 and "policy update is pending" in denied.message
     assert len(remote.created) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase_fields", [
+    {}, {"phase": None}, {"phase": "running"}, {"phase": "Ready"},
+    {"phase": ""}, {"phase": []}, {"phase": {}},
+])
+async def test_unknown_inventory_phase_preserves_owned_scope_for_policy_rebuild(remote, caplog, phase_fields):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    remote.inventory = [
+        {"id": "sandbox-1", **phase_fields},
+        {"id": "not-owned", "phase": "ready"},
+    ]
+    scope = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", owned.isolation_key_template)
+    async with jb.jiuwenbox_policy_update():
+        assert await jb.get_live_jiuwenbox_scopes() == {scope}
+        assert "unknown inventory phase" in caplog.text
+        assert "retaining as live" in caplog.text
+        await jb.force_recreate_jiuwenbox_sandbox(
+            "http://localhost:8321", shared_key=scope, reason="policy_changed",
+        )
+    assert remote.active == {"sandbox-2"}
+    assert [method for method, _ in remote.requests if method in {"POST", "DELETE"}] == [
+        "POST", "DELETE", "POST",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase,live", [
+    ("ready", True), ("provisioning", True), ("stopped", False),
+    ("error", False), ("deleting", False),
+])
+async def test_known_inventory_phase_contract(remote, caplog, phase, live):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    remote.inventory = [{"id": "sandbox-1", "phase": phase}]
+    scope = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", owned.isolation_key_template)
+    async with jb.jiuwenbox_policy_update():
+        assert await jb.get_live_jiuwenbox_scopes() == ({scope} if live else set())
+    assert "unknown inventory phase" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_row", [None, "bad-row", {}, {"id": 1}, {"id": ""}, {"id": " "}])
+async def test_malformed_inventory_preserves_known_owners(remote, caplog, invalid_row):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    remote.inventory = [{"id": "not-owned", "phase": "ready"}, invalid_row]
+    scope = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", owned.isolation_key_template)
+    async with jb.jiuwenbox_policy_update():
+        assert await jb.get_live_jiuwenbox_scopes() == {scope}
+    assert "inventory unavailable; retaining known scopes" in caplog.text
 
 
 @pytest.mark.asyncio

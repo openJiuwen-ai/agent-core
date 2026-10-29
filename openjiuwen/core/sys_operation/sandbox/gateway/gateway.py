@@ -152,20 +152,24 @@ class SandboxGateway:
         """
         base_url = base_url.rstrip("/") if base_url is not None else None
         for key, record in self._store.items():
-            if (isolation_key is None or key == isolation_key) and record.sandbox_type == sandbox_type and (
-                base_url is None or record.base_url.rstrip("/") == base_url
-            ):
-                await self._store.hdel(key)
+            if isolation_key is not None and key != isolation_key:
+                continue
+            if record.sandbox_type != sandbox_type:
+                continue
+            if base_url is not None and record.base_url.rstrip("/") != base_url:
+                continue
+            await self._store.hdel(key)
         removed = []
         for key, provider in list(self._provider_cache.items()):
             launcher = getattr(getattr(provider, "config", None), "launcher_config", None)
             endpoint = getattr(provider, "endpoint", None)
-            if (isolation_key is None or key.rsplit(":", 1)[0] == isolation_key) and (
-                getattr(launcher, "sandbox_type", None) == sandbox_type
-            ) and (
-                base_url is None or str(getattr(endpoint, "base_url", "")).rstrip("/") == base_url
-            ):
-                removed.append(self._provider_cache.pop(key))
+            if isolation_key is not None and key.rsplit(":", 1)[0] != isolation_key:
+                continue
+            if getattr(launcher, "sandbox_type", None) != sandbox_type:
+                continue
+            if base_url is not None and str(getattr(endpoint, "base_url", "")).rstrip("/") != base_url:
+                continue
+            removed.append(self._provider_cache.pop(key))
         return removed
 
     # ── Legacy endpoint-only API (kept for backward compatibility) ──
