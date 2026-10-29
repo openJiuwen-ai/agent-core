@@ -258,6 +258,12 @@ class _RunnerImpl(_TeamRunnerMixin):
                 live_state.owner_loop = owner.get_loop()
                 self._root_state = live_state
             await live_state.ready.wait()
+        # The winner's state must also be ready before we inspect its group:
+        # adopting it at the break without waiting could inspect a state
+        # whose owner has not opened its task group yet, and awaiting a
+        # pending owner here would block start() until the group opens -
+        # the same hang the loop's ready waits exist to prevent.
+        await live_state.ready.wait()
         # If the owner task died before opening its task group, awaiting it
         # re-raises its exception into start() - the develop behaviour this
         # refactor must preserve (a broken runner must not start silently).
