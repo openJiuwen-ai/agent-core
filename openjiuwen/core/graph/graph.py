@@ -348,6 +348,11 @@ class CompiledGraph(ExecutableGraph):
                 raise exception
         except asyncio.CancelledError:
             if is_main:
+                # 取消按“正常结束”上报：清理该会话快照，使同一 session 可再次执行。
+                # 若改为把 CancelledError 当 exception 传下去以保留快照，那么后续
+                # 同 (session_id, workflow_id) 的非 InteractiveInput 调用会在
+                # pre_workflow_execute 阶段因“状态已存在且未开强制清理”而报错，
+                # 用户点停止后就再也无法重跑（见 graph.py 评审 High 意见）。
                 await self._checkpointer.post_workflow_execute(session, {}, None)
             raise
 

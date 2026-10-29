@@ -1691,6 +1691,12 @@ async def test_workflow_cancel():
     session_exist = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
     assert session_exist is False
 
+    # 取消后同一 session 必须能再次执行：若取消时保留快照，下一次非 InteractiveInput
+    # 调用会在 pre_workflow_execute 因“状态已存在且未开强制清理”直接报错，
+    # 用户点停止后就再也无法重跑（功能回归）。
+    result = await flow.invoke({"inputs": {"a": 3, "b": 4}}, create_workflow_session(session_id=session_id))
+    assert result.state.value == "COMPLETED"
+
 
 async def test_questioner_context_sharing():
     """Test that two questioner components can share context history."""
