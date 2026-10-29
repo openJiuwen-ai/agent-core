@@ -84,6 +84,7 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.extensions.monitor_event_bridge import TeamMonitorEventBridge
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
     from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
@@ -307,6 +308,7 @@ class TeamRuntimeManager:
                     shutdown_requested,
                     agent.lifecycle,
                 )
+                await self._stop_monitor_event_bridge(entry)
                 await agent.stop_coordination()
                 await self._pool.remove(team_name)
             else:
@@ -934,6 +936,7 @@ class TeamRuntimeManager:
         # and propagate the failure so callers can retry instead of orphaning it.
         token = set_session_id(session_id)
         try:
+            await self._stop_monitor_event_bridge(entry)
             if self._organization_runtime_manager is not None:
                 await self._organization_runtime_manager.release_team(team_id=team_name, session_id=session_id)
             await entry.agent.stop_coordination()
@@ -1329,28 +1332,53 @@ class TeamRuntimeManager:
 
             extras[TeamHandleKey.EXTENSION_BUS] = bus
 
-    def _inject_extension_bus(self, spec: "TeamAgentSpec") -> None:
-        """Seed the extension bus into the spec's build-context extras.
+    async def _start_monitor_event_bridge(
+        self,
+        agent: "TeamAgent",
+        team_name: str,
+        session_id: str,
+    ) -> "TeamMonitorEventBridge | None":
+        """Mount the extension monitor-event bridge for a freshly built entry.
 
-        The cold build paths (create / new-in-session / cold recover) all
-        assemble the leader through the spec's build context, and the
-        per-member derive copies carry extras into the rail factories — so
-        one seed here reaches the policy rail of the freshly built runtime,
-        including its native rebuilds. A spec without a build context (nor
-        a seed to materialize one) stays unwired: its members run with the
-        default policy.
+        No bus wiring means no bridge and no listener — the zero-overhead
+        no-extension path. The listener registers before the consumer task
+        starts so no enqueued notification waits for a task that is not yet
+        draining.
+
+        Lazy imports: the extensions package pulls the prompts chain, which
+        the rest of manager.py keeps out of import time (same convention as
+        the TeamAgent import below).
         """
         bus = self._extension_bus
         if bus is None:
-            return
-        if spec.build_context is None:
-            spec.materialize_build_context()
-        build_context = spec.build_context
-        extras = getattr(build_context, "extras", None)
-        if isinstance(extras, dict):
-            from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+            return None
+        from openjiuwen.agent_teams.extensions.events import build_monitor_event_dispatcher
+        from openjiuwen.agent_teams.extensions.monitor_event_bridge import TeamMonitorEventBridge
 
-            extras[TeamHandleKey.EXTENSION_BUS] = bus
+        bridge = TeamMonitorEventBridge(
+            team_name=team_name,
+            session_id=session_id,
+            dispatcher=build_monitor_event_dispatcher(bus),
+        )
+        agent.add_event_listener(bridge.on_internal_event)
+        await bridge.start()
+        return bridge
+
+    async def _stop_monitor_event_bridge(self, entry: ActiveTeam) -> None:
+        """Dismount the entry's bridge: stop accepting, drain nothing, detach.
+
+        Stop order: the bridge stops accepting and its consumer exits
+        (unprocessed notifications count as dropped, never replayed), then
+        the listener detaches so the soon-to-be-torn-down coordination loop
+        no longer delivers into a closed bridge. A pause keeps the bridge —
+        only the stop paths call this.
+        """
+        bridge = entry.monitor_event_bridge
+        if bridge is None:
+            return
+        entry.monitor_event_bridge = None
+        await bridge.stop()
+        entry.agent.remove_event_listener(bridge.on_internal_event)
 
     async def _apply_action(
         self,
@@ -1433,12 +1461,14 @@ class TeamRuntimeManager:
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
+        monitor_event_bridge = await self._start_monitor_event_bridge(agent, team_name, session_id)
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,
                 agent=agent,
                 current_session_id=session_id,
                 state=RuntimeState.RUNNING,
+                monitor_event_bridge=monitor_event_bridge,
             )
         )
         return TeamRuntimeActivation(agent=agent, session=team_session, action=action)
