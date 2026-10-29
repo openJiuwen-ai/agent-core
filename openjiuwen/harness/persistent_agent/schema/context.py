@@ -46,6 +46,10 @@ class GroupMessageQuery(ProtocolModel):
     """Bounded search over the bound Agent's currently authorized groups."""
 
     query: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    keywords: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")], ...],
+        Field(max_length=16),
+    ] = ()
     since: AwareDatetime | None = None
     until: AwareDatetime | None = None
     sender_id: Identifier | None = None
@@ -56,11 +60,35 @@ class GroupMessageQuery(ProtocolModel):
         tuple[Annotated[str, Field(min_length=1, max_length=512, pattern=r"\S")], ...], Field(max_length=128)
     ] = ()
 
+    @field_validator("keywords")
+    @classmethod
+    def deduplicate_keywords(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Treat the keyword list as an unordered OR set, independent of casing and duplicates."""
+        unique: dict[str, str] = {}
+        for keyword in value:
+            unique.setdefault(keyword.casefold(), keyword)
+        return tuple(keyword for _, keyword in sorted(unique.items()))
+
+    @property
+    def search_terms(self) -> tuple[str, ...]:
+        """Legacy ``query`` and the batch ``keywords`` field share OR semantics."""
+        terms = (() if self.query is None else (self.query,)) + self.keywords
+        unique: dict[str, str] = {}
+        for term in terms:
+            unique.setdefault(term.casefold(), term)
+        return tuple(unique.values())
+
     @model_validator(mode="after")
     def validate_query(self) -> Self:
         """Require at least one criterion and an ordered time range."""
-        if all((self.query is None, self.since is None, self.until is None, self.sender_id is None)):
-            raise PydanticCustomError("persistent_context", "group search requires a query, time range, or sender")
+        has_query_criterion = self.query is not None or bool(self.keywords)
+        has_time_criterion = self.since is not None or self.until is not None
+        has_sender_criterion = self.sender_id is not None
+        if not any((has_query_criterion, has_time_criterion, has_sender_criterion)):
+            raise PydanticCustomError(
+                "persistent_context",
+                "group search requires query, keywords, a time range, or sender",
+            )
         if self.since is not None and self.until is not None and self.since > self.until:
             raise PydanticCustomError("persistent_context", "group search time range is reversed")
         return self

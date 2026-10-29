@@ -115,7 +115,7 @@ class PersistentAgentSpec(DeepAgentSpec):
         parts = super().resolve_parts(context)
         context.binding.parts = parts
         # Permissions belong to this published Spec, never to mutable global
-        # config. Full access explicitly disables confirmation policies.
+        # config. Full access disables tool permission policies, not business consent.
         published_permissions = {"enabled": False} if self.permission_profile == "full_access" else self.permissions
         parts.config.permissions = deepcopy(published_permissions)
         if self.permission_profile == "automatic":
@@ -210,6 +210,7 @@ class PersistentAgentSpec(DeepAgentSpec):
 
         parts.config.stream_task_lifecycle = NativeStreamTaskLifecycle()
         if context.ports.group_chat is not None:
+            from ..execution.group_share_rail import PersistentGroupShareRail
             from ..tools.group_history import SEARCH_TOOL_NAME, PersistentGroupMessageSearchTool
 
             if any(card.name == SEARCH_TOOL_NAME for card in parts.tool_cards):
@@ -221,6 +222,7 @@ class PersistentAgentSpec(DeepAgentSpec):
             parts.tool_instances.append(tool)
             parts.tool_cards.append(tool.card)
             parts.config.tools = list(parts.tool_cards)
+            parts.rails.append(PersistentGroupShareRail())
         from ..execution.session_state import WindowStore
         from ..tools.session_history import SEARCH_TOOL_NAME as SESSION_HISTORY_TOOL_NAME
         from ..tools.session_history import PersistentSessionHistorySearchTool

@@ -16,6 +16,7 @@ __all__ = [
     "PersistentPorts",
     "KnowledgePort",
     "GroupChatPort",
+    "GroupMessageApprovalRequired",
     "ExecutionLinkPort",
     "WorkspaceAccessPort",
     "WorkspaceReadScope",
@@ -25,6 +26,7 @@ __all__ = [
     "execute_persistent_request",
     "resume_persistent_request",
     "abort_persistent_request",
+    "discard_persistent_confirmation",
     "RequestInput",
     "DirectMessageSource",
     "ConfirmReply",
@@ -66,6 +68,7 @@ _MODULES = {
     "ExecutionContext": "schema.execution",
     "PersistentPorts": "ports",
     **dict.fromkeys(("KnowledgePort", "GroupChatPort", "ExecutionLinkPort"), "ports"),
+    "GroupMessageApprovalRequired": "ports",
     **dict.fromkeys(("WorkspaceAccessPort", "WorkspaceReadScope"), "workspace.access"),
     **dict.fromkeys(("WorkspaceWriteAccessPort", "WorkspaceWriteScope"), "workspace.access"),
     "create_persistent_agent": "factory",
@@ -111,6 +114,7 @@ _MODULES = {
     ),
     **dict.fromkeys(("BudgetAdmission", "BudgetReport", "ExecutionLink"), "schema.port_results"),
     "session_key_prefix": "execution.session_state",
+    "discard_persistent_confirmation": "execution.session_state",
 }
 
 

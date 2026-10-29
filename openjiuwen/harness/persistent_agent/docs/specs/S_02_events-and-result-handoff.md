@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / events-and-result-handoff |
 | 关联模块 | [events.py](../../schema/events.py)、[emitter.py](../../execution/emitter.py)、[CommitPort](../../ports.py) |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-10-28 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md) |
 | 设计依据 | [架构设计：事件与确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[结果交接](../designs/persistent-agent-architecture.md#63-完成与结果交接)、[日志读取](../designs/persistent-agent-architecture.md#833-执行日志的读取整理与能力边界) |
 
@@ -43,6 +43,10 @@ AgentEvent 继承 [S_07](S_07_construction-and-binding.md#2-数据结构与事�
 | execution.final | completed / ignored / cancelled / failed、输出与产物引用 | 关键 |
 
 reply.delta 保留非空的空格、换行与制表符片段，空字符串不生成事件；完整正文和进度必须非空白。paused 原因仅 awaiting_confirmation、stopped、budget_denied、context_unfit、error；只有 awaiting_confirmation 携带 1～64 项、不重复 tool_call_id 的拦截调用。拦截调用的 arguments 是脱敏参数摘要，入口按事件容量截断时设 `arguments_truncated=true`，批准仍关联中断状态中的完整调用。paused 的 output_refs 引用本次交出的候选，stopped 必须为空。budget_denied、context_unfit、error 必须有 detail。非 completed 的 final 以及失败 / 未知的工具结果须有原因；所有工具结果须有非空白 result_summary，不能以引用替代摘要。
+
+`InterceptedToolCall.approval_ref` 默认为 null，仅从业务 group_share 中断 metadata.approval_id
+提取不透明关联 ID；它不携带正文、预览或权限。tool_call_id 保留原调用 ID，供宿主关联和旧
+ConfirmReply 回复；native interrupt_id/owner 的内部定址见 S_05。普通工具中断不生成 approval_ref。
 
 ## 3. 不变量
 

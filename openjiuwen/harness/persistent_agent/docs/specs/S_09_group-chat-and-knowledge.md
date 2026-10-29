@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_09 / group-chat-and-knowledge |
 | 关联模块 | [ports.py](../../ports.py)、[schema/context.py](../../schema/context.py)、[GroupMessageReader 接入](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-28 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_07](../features/F_07_group-participation.md)、[F_23](../features/F_23_group-chat-history-retrieval.md)；实际读取接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-13、PA-23 |
 | 设计依据 | PA-23 群聊历史检索以 [F_23](../features/F_23_group-chat-history-retrieval.md) 为依据；[办公空间与知识](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[权限](../designs/persistent-agent-architecture.md#91-身份与权限检查) |
 
@@ -29,7 +29,7 @@
 
 GroupMessage 包含 message_id、sender_id、sender_name、sender_kind(human / agent)、received_at、可选 text、mention_ids、reply_to、attachment_refs、status(normal / edited / recalled / unavailable)、严格布尔 queued_request。时间须带时区并归一化 UTC；recalled 与 unavailable 不得带正文，正文最多 65536 字符，提及与附件各最多 128 项。稳定身份和来源引用不由模型猜造。
 
-`GroupMessageQuery` 至少有 `query` / `since` / `until` / `sender_id` 中一个条件；同时提供起止时间时不得倒置。`cursor` 可选，`limit` 默认 50、严格正整数且最多 500。查询还可选提供 `group_ids` / `group_names` 以缩小跨群搜索范围；两者均按精确值解析，只能匹配 Agent 已获授权的群，不能扩大授权。多个同名群时不随机选择，须返回消歧结果。查询关键词按字面子串匹配，大小写不敏感，不进行语义扩展；结果按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
+`GroupMessageQuery` 至少有 `query`、非空 `keywords`、`since` / `until` 时间范围或 `sender_id` 中一个条件；同时提供起止时间时不得倒置。`query` 保留单关键词兼容形式；`keywords` 最多 16 项、每项 1024 字符，与 `query` 一起按 OR 语义匹配，大小写不敏感的重复项去重。多个关键词在一次工具调用中合并为一个有界结果集，消息不会因命中多个词而重复。关键词按字面子串匹配，不进行语义扩展。`cursor` 可选，`limit` 默认 50、严格正整数且最多 500。查询还可选提供 `group_ids` / `group_names` 以缩小跨群搜索范围；两者均按精确值解析，只能匹配 Agent 已获授权的群，不能扩大授权。多个同名群时不随机选择，须返回消歧结果。结果按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
 
 `GroupMessagesResult` 专用于近期消息读取，`messages` 最多 500 项，另含 `next_cursor`、`scanned_through` 和可选 `reason`。`scanned_through` 是服务端确认已扫描到的位置，与分页及展示范围分开；`empty` 也可携带，进度不可信时为空。
 
@@ -40,6 +40,15 @@ GroupMessage 包含 message_id、sender_id、sender_name、sender_kind(human / a
 MaterialQuery 的 query 必须非空，可按 source_ref、scope_ref 和 cursor 限定，limit 默认 50、最多 500。MaterialSnapshot 包含 material_ref、source_ref、scope_ref、version_ref、content_ref、content_digest、policy_revision、completeness(complete / partial) 和可选 source_cursor；这是版本化来源引用，不是授权凭证。
 
 MaterialReadResult 包含 status、items（最多 500）、next_cursor、query_complete（默认 false）、watermark 和 reason。完整性与水位配对：query_complete 为 true 当且仅当有非负 watermark。字段细节和 Schema 唯一维护于 context.py，不将其用于 WindowStore 会话记录或群消息的替代模型。
+
+### 2.3 跨群分享审批信号
+
+公开异常 `GroupMessageApprovalRequired(message="跨群消息分享需要所有者批准。", *, approval_id=None)`
+只携带不透明审批 ID 与安全提示；宿主不得附加候选正文。搜索工具在通用异常分支之前将其转为
+ToolInterruptException，使用固定安全提示、owner `persistent_agent.group_share`、kind `confirm` 和
+metadata `{kind: group_share, approval_id: ...}`。有 group_chat 端口时 Spec 始终装配业务 rail，
+包括 full_access；原有工具权限守卫仍先执行。批准后仍须宿主重新授权，拒绝不重新搜索。
+候选快照、所有者鉴权和投递复核由 JiuwenClaw 负责；Core 机制与验证见 [F_25](../features/F_25_group-sharing-confirmation.md)。
 
 ## 3. 不变量
 
