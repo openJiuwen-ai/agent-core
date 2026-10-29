@@ -95,7 +95,7 @@ zmq = ["pyzmq>=26.0.0", "tornado>=6.1"]
 sandbox = ["agent-sandbox>=0.0.26"]
 mem0 = ["mem0ai>=1.0.0"]
 jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
-agentarts = ["agentarts-sdk>=0.1.8,<0.2"]
+agentarts = ["agentarts-sdk>=0.1.9,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
 ssh = ["asyncssh>=2.24.0"]
@@ -189,6 +189,14 @@ Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 
 [tool.uv]
 default-groups = ['dev']
+
+[tool.uv.sources]
+agentarts-sdk = { index = "agentarts-pypi" }
+
+[[tool.uv.index]]
+name = "agentarts-pypi"
+url = "https://pypi.org/simple"
+explicit = true
 
 [[tool.uv.index]]
 name = "aliyun"

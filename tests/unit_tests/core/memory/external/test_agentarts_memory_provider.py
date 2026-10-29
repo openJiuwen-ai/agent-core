@@ -43,7 +43,7 @@ class FakeSession:
 
 @dataclass
 class FakeMemorySearchFilter:
-    """Strict provider-contract stub including the requested rerank extension."""
+    """Match the constructor fields and defaults of agentarts-sdk 0.1.9."""
 
     query: str | None = None
     strategy_type: str | None = None
@@ -57,7 +57,7 @@ class FakeMemorySearchFilter:
     top_k: int | None = None
     min_score: float | None = None
     only_actived: bool = False
-    rerank: bool | None = None
+    rerank: bool = True
 
 
 class FakeTextMessage:
@@ -151,7 +151,7 @@ def test_fake_memory_search_filter_defaults_optional_fields():
     assert filters.start_time is None
     assert filters.end_time is None
     assert filters.only_actived is False
-    assert filters.rerank is None
+    assert filters.rerank is True
 
 
 @pytest.mark.parametrize("field_name", ["rerank_enabled", "top_kk", "unknown_filter"])
@@ -269,7 +269,7 @@ async def test_static_service_config_is_read_only_after_construction():
 def test_agentarts_extra_is_declared_in_pyproject():
     project_root = Path(__file__).resolve().parents[5]
     pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'agentarts = ["agentarts-sdk>=0.1.8,<0.2"]' in pyproject
+    assert 'agentarts = ["agentarts-sdk>=0.1.9,<0.2"]' in pyproject
 
 
 def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch):

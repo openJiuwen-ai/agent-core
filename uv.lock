@@ -73,8 +73,8 @@ wheels = [
 
 [[package]]
 name = "agentarts-sdk"
-version = "0.1.8"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "docker" },
@@ -95,9 +95,9 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/5c/b3/19b2598964e71e54cfeb5e0ff949a20bc83b06d9406c4f2ab976fb3bc31f/agentarts_sdk-0.1.8.tar.gz", hash = "sha256:02f41a8b3bb2a06c8d0f99c716248f2673ab38ee0bf9b69e92eccb1a0a7f0afa" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/29/884ae0f4c04e2849fea7d73c0b7e2a6eb38df03e7b2e3a3055183934a62b/agentarts_sdk-0.1.9.tar.gz", hash = "sha256:d555b077ca7853a0c74dacc162f6ef8e5fb1293eb72149039e1d4bce38e3c65d", size = 248557, upload-time = "2026-10-29T02:22:40.4Z" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/1d/38/9d1657077ad7812a896e0479d660e8243b0cdd60b8b89fc0687c293f2f42/agentarts_sdk-0.1.8-py3-none-any.whl", hash = "sha256:7bac2566c041597810fdffcfb88b540a13d428006bca4655d68128410cba6e1a" },
+    { url = "https://files.pythonhosted.org/packages/3f/7a/349445584cf01b671a65bd61db86d47b7830a3225578fd6fd4b697df0b2c/agentarts_sdk-0.1.9-py3-none-any.whl", hash = "sha256:32eefd1b4702844be632cfb8275095678d5b7c0a3651dccadf46176fdb6afaae", size = 311097, upload-time = "2026-10-29T02:22:38.736Z" },
 ]
 
 [[package]]
@@ -3082,7 +3082,7 @@ test = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], marker = "extra == 'all-a2a'", specifier = "==1.0.0" },
     { name = "agent-sandbox", marker = "extra == 'sandbox'", specifier = ">=0.0.26" },
-    { name = "agentarts-sdk", marker = "extra == 'agentarts'", specifier = ">=0.1.8,<0.2" },
+    { name = "agentarts-sdk", marker = "extra == 'agentarts'", specifier = ">=0.1.9,<0.2", index = "https://pypi.org/simple" },
     { name = "aioboto3", marker = "extra == 'obs'", specifier = ">=11.0.0" },
     { name = "aiofiles", specifier = ">=25.1.0" },
     { name = "aiohttp", specifier = ">=3.11.12" },
