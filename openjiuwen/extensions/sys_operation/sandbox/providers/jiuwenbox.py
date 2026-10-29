@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List
 from weakref import WeakValueDictionary
 
 import httpx
+from openjiuwen.core.common.exception.errors import BaseError
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +598,10 @@ class _SandboxLifecyclePendingError(RuntimeError):
     """An intentional lifecycle barrier must never trigger host fallback."""
 
 
+class _SandboxDeletionError(BaseError, _SandboxLifecyclePendingError):
+    """Deletion barrier with a framework status and legacy RuntimeError compatibility."""
+
+
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
@@ -997,6 +1002,9 @@ class _JiuwenBoxProviderMixin:
 
     def _assert_policy_ready(self) -> None:
         with self._shared_lock:
+            # A failed policy apply can retain both barriers. Report the actionable
+            # deletion state instead of hiding it behind a generic policy wait.
+            self._assert_not_deleting_locked(self._shared_scope_key())
             if self._policy_updates or self._launcher_extra_params().get("_policy_apply_pending"):
                 raise _SandboxLifecyclePendingError("jiuwenbox policy update is pending")
             if self._scope_releases.get(self._shared_scope_key()):
@@ -1012,10 +1020,25 @@ class _JiuwenBoxProviderMixin:
         if cls._scope_releases.get(shared_key):
             raise _SandboxLifecyclePendingError("jiuwenbox scope release is pending")
         if cls._bulk_deletions:
-            raise RuntimeError("jiuwenbox sandbox bulk deletion is pending")
+            raise _SandboxDeletionError(
+                StatusCode.SYS_OPERATION_SANDBOX_PROVIDER_ERROR, operation="acquire",
+                error_msg="[SANDBOX_DELETION_PENDING] jiuwenbox sandbox bulk deletion is pending; "
+                "operation was not executed; wait for cleanup to finish",
+            )
         pending = [sid for key, sid in cls._pending_deletions if key == shared_key]
         if pending:
-            raise RuntimeError(f"jiuwenbox sandbox deletion is pending: {', '.join(pending)}")
+            failed = any(
+                (task := cls._delete_tasks.get((shared_key, sid))) is None or task.done()
+                for sid in pending
+            )
+            code = "SANDBOX_DELETION_FAILED" if failed else "SANDBOX_DELETION_PENDING"
+            recovery = "retry sandbox.restart" if failed else "wait for cleanup to finish"
+            raise _SandboxDeletionError(
+                StatusCode.SYS_OPERATION_SANDBOX_PROVIDER_ERROR, operation="acquire",
+                error_msg=f"[{code}] jiuwenbox sandbox deletion is pending: {', '.join(pending)}; "
+                f"operation was not executed; {recovery}",
+                details={"shared_key": shared_key, "sandbox_ids": pending, "deletion_code": code},
+            )
 
     @classmethod
     def ensure_not_deleting(cls, shared_key: str) -> None:
@@ -1293,7 +1316,10 @@ class _JiuwenBoxProviderMixin:
             try:
                 await asyncio.shield(task)
             except _DeleteTransportError as exc:
-                logger.warning("[jiuwenbox] sandbox %s cleanup failed: %s", entry_id, exc)
+                logger.warning(
+                    "[jiuwenbox] cleanup failed shared_key=%s sandbox_id=%s reason=%s: %s",
+                    entry_key, entry_id, reason, exc,
+                )
                 if raise_on_error:
                     failures.append((
                         RuntimeError(f"could not delete sandbox {entry_id}: {exc}"), exc.__cause__,
@@ -1325,6 +1351,10 @@ class _JiuwenBoxProviderMixin:
         service_stopped: bool = False,
     ) -> None:
         identity = (shared_key, sandbox_id)
+        logger.info(
+            "[jiuwenbox] cleanup started shared_key=%s sandbox_id=%s reason=%s service_stopped=%s",
+            shared_key, sandbox_id, reason, service_stopped,
+        )
         try:
             with cls._shared_lock:
                 before_called, _ = cls._pending_deletions[identity]
@@ -1355,9 +1385,11 @@ class _JiuwenBoxProviderMixin:
                                 f"last error: {type(exc).__name__}: {exc}"
                             ) from exc
                         logger.warning(
-                            "[jiuwenbox] sandbox %s cleanup attempt %d/%d failed; retrying in %.1fs: %s",
-                            sandbox_id, attempt, _SANDBOX_DELETE_MAX_ATTEMPTS,
-                            _SANDBOX_DELETE_RETRY_SLEEP_SECONDS, exc,
+                            "[jiuwenbox] cleanup shared_key=%s sandbox_id=%s reason=%s "
+                            "attempt=%d/%d failed; retrying in %.1fs: %s: %s",
+                            shared_key, sandbox_id, reason, attempt,
+                            _SANDBOX_DELETE_MAX_ATTEMPTS,
+                            _SANDBOX_DELETE_RETRY_SLEEP_SECONDS, type(exc).__name__, exc,
                         )
                         await asyncio.sleep(_SANDBOX_DELETE_RETRY_SLEEP_SECONDS)
             with cls._shared_lock:

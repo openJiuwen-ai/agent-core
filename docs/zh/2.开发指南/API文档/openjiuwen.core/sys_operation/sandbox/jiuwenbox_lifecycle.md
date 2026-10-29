@@ -35,4 +35,8 @@ deleted_ids = await release_jiuwenbox_scope(base_url, isolation_key)
 
 删除失败抛出异常并保留待删除身份，宿主必须保留可重试持有状态。调用者取消不取消在途删除任务；不能据取消结果声称资源已释放。成功后才注销持有者的 SysOperation。
 
+工具获取实例时，删除任务仍在执行返回 `[SANDBOX_DELETION_PENDING]`；任务已退出但待删除身份仍保留时返回 `[SANDBOX_DELETION_FAILED]`。两者均表示本次操作未执行，不进入本地兜底。错误兼容 `RuntimeError` 并携带框架 `StatusCode`，文件工具的错误文本保留上述标识。
+
+JiuwenSwarm 将这两类失败工具结果上报为带同名 `code` 的 `chat.error`，每个请求合并重复通知，最终 E2A 状态为 `failed`。普通文件操作错误保持工具级语义。恢复使用现有 `sandbox.restart`：先重试旧实例删除，全部清理成功后再重建；仍失败则保留阻断，不隐式修改 `sandbox.enabled`。
+
 `SandboxGateway.invalidate_sandbox_cache(sandbox_type, base_url=None, *, isolation_key=None)` 新增可选作用域过滤，仅失效缓存并返回被移除的 provider，不单独执行远端删除。未传 `isolation_key` 的现有调用语义不变。
