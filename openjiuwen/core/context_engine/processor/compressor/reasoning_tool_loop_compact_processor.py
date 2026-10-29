@@ -8,9 +8,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.schema.ignored_tool_call import (
+    IgnoredToolCallRule,
+    matches_ignored_tool_call,
+)
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
@@ -100,32 +104,6 @@ _CompactKind = Literal["reasoning_tools", "tool_args"]
 
 
 
-_WRAPPER_TOOL_NAMES = frozenset({"invoke_tool"})
-
-
-class _IgnoredToolCallRule(BaseModel):
-    """Local twin of harness IgnoredToolCallRule (no harness import)."""
-
-    tool_name: str = Field(min_length=1)
-    argument_equals: dict[str, Any] = Field(
-        default_factory=dict,
-        description=(
-            "Top-level argument key/value equals. Empty dict means name-only match. "
-            "Empty equals is forbidden for wrapper tools such as invoke_tool."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _reject_empty_equals_on_wrappers(self) -> "_IgnoredToolCallRule":
-        if not self.argument_equals and self.tool_name in _WRAPPER_TOOL_NAMES:
-            raise ValueError(
-                f"argument_equals cannot be empty for wrapper tool "
-                f"{self.tool_name!r}; name-only exemption would skip all "
-                f"lazy-loaded tools"
-            )
-        return self
-
-
 class ReasoningToolLoopCompactProcessorConfig(BaseModel):
     """Detect and compact consecutive identical reasoning/tool or tool/args rounds."""
 
@@ -191,7 +169,7 @@ class ReasoningToolLoopCompactProcessorConfig(BaseModel):
         ),
     )
 
-    ignored_tool_calls: List[_IgnoredToolCallRule] = Field(
+    ignored_tool_calls: List[IgnoredToolCallRule] = Field(
         default_factory=list,
         description=(
             "Tool call rules excluded from consecutive-loop compaction. "
@@ -554,16 +532,9 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
         if not name:
             return False
         args = _parse_tool_arguments(getattr(tool_call, "arguments", None))
-        for rule in self.config.ignored_tool_calls:
-            if name != rule.tool_name:
-                continue
-            if not rule.argument_equals:
-                return True
-            if not isinstance(args, dict):
-                continue
-            if all(args.get(key) == value for key, value in rule.argument_equals.items()):
-                return True
-        return False
+        if not isinstance(args, dict):
+            args = {}
+        return matches_ignored_tool_call(name, args, self.config.ignored_tool_calls)
 
     def _normalize_reasoning(self, raw: Any) -> Optional[str]:
         if not isinstance(raw, str):

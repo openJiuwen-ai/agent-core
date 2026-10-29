@@ -34,6 +34,9 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperationCard
 from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.core.common.schema.ignored_tool_call import IgnoredToolCallRule
+from openjiuwen.core.context_engine import ReasoningToolLoopCompactProcessorConfig
+from openjiuwen.harness.agent_ras.config import AgentRASConfig, DetectorsConfig, RepeatToolConfig
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 
 
@@ -71,6 +74,7 @@ def _make_agent(
     *,
     enable_reload: bool = False,
     compression_recall_config: CompressionRecallConfig | None = None,
+    agent_ras=None,
 ):
     model = init_model(
         provider="OpenAI",
@@ -79,7 +83,7 @@ def _make_agent(
         api_base="https://example.com/v1",
         verify_ssl=False,
     )
-    agent = create_deep_agent(
+    kwargs = dict(
         model=model,
         card=AgentCard(name="test", description="test"),
         system_prompt="You are a test assistant.",
@@ -92,6 +96,9 @@ def _make_agent(
             compression_recall_config=compression_recall_config or CompressionRecallConfig(),
         ),
     )
+    if agent_ras is not None:
+        kwargs["agent_ras"] = agent_ras
+    agent = create_deep_agent(**kwargs)
     return agent
 
 
@@ -1288,3 +1295,99 @@ async def test_before_invoke_resets_bailout_counter(tmp_path: Path):
             TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
         }
     )
+
+# =============================================================================
+# ContextProcessorRail - inherit RAS ignored_tool_calls into compact
+# =============================================================================
+
+
+def _compact_ignored_rules(agent):
+    processors = dict(agent.react_config.context_processors or [])
+    cfg = processors['ReasoningToolLoopCompactProcessor']
+    return list(cfg.ignored_tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_init_inherits_ras_ignored_tool_calls_when_compact_empty(tmp_path: Path):
+    """Empty compact ignored_tool_calls inherits the RAS repeat_tool list."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+
+    ras_rules = [
+        IgnoredToolCallRule(
+            tool_name="invoke_tool",
+            argument_equals={"tool_name": "image_get_run"},
+        ),
+        IgnoredToolCallRule(tool_name="image_get_run", argument_equals={}),
+    ]
+    agent = _make_agent(
+        sys_operation,
+        workspace,
+        agent_ras=AgentRASConfig(
+            detectors=DetectorsConfig(
+                repeat_tool=RepeatToolConfig(ignored_tool_calls=ras_rules),
+            ),
+        ),
+    )
+    await agent.register_rail(ContextProcessorRail(preset=True))
+    await agent.ensure_initialized()
+
+    inherited = _compact_ignored_rules(agent)
+    assert [r.model_dump() for r in inherited] == [r.model_dump() for r in ras_rules]
+    assert inherited[0] is not ras_rules[0]
+
+
+@pytest.mark.asyncio
+async def test_init_keeps_explicit_compact_ignored_tool_calls(tmp_path: Path):
+    """Non-empty compact ignored_tool_calls is not overwritten by RAS."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+
+    compact_rules = [
+        IgnoredToolCallRule(tool_name="image_get_run", argument_equals={}),
+    ]
+    ras_rules = [
+        IgnoredToolCallRule(
+            tool_name="invoke_tool",
+            argument_equals={"tool_name": "image_get_run"},
+        ),
+    ]
+    agent = _make_agent(
+        sys_operation,
+        workspace,
+        agent_ras=AgentRASConfig(
+            detectors=DetectorsConfig(
+                repeat_tool=RepeatToolConfig(ignored_tool_calls=ras_rules),
+            ),
+        ),
+    )
+    await agent.register_rail(
+        ContextProcessorRail(
+            preset=True,
+            processors=[
+                (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(
+                        ignored_tool_calls=compact_rules,
+                    ),
+                ),
+            ],
+        )
+    )
+    await agent.ensure_initialized()
+
+    kept = _compact_ignored_rules(agent)
+    assert [r.model_dump() for r in kept] == [r.model_dump() for r in compact_rules]
+
+
+@pytest.mark.asyncio
+async def test_init_leaves_compact_ignored_empty_without_ras(tmp_path: Path):
+    """When RAS lists no exemptions, preset compact ignored_tool_calls stays empty."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    await agent.register_rail(ContextProcessorRail(preset=True))
+    await agent.ensure_initialized()
+
+    assert _compact_ignored_rules(agent) == []

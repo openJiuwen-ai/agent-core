@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.schema.ignored_tool_call import matches_ignored_tool_call
 from openjiuwen.harness.agent_ras.config import RepeatToolConfig
 from openjiuwen.harness.agent_ras.models import (
     Anomaly,
@@ -517,13 +518,10 @@ class RepeatToolCallDetector:
         """Ignore calls whose outer tool and specified arguments match a rule."""
         if not isinstance(signal.tool_args, dict):
             return False
-        return any(
-            rule.tool_name == signal.tool_name
-            and all(
-                key in signal.tool_args and signal.tool_args[key] == value
-                for key, value in rule.argument_equals.items()
-            )
-            for rule in self._config.ignored_tool_calls
+        return matches_ignored_tool_call(
+            signal.tool_name,
+            signal.tool_args,
+            self._config.ignored_tool_calls,
         )
 
     async def observe(self, signal: Signal) -> Anomaly | None:

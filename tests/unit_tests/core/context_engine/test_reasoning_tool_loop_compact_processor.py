@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
+    ReasoningToolLoopCompactProcessor,
     ReasoningToolLoopCompactProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
@@ -521,12 +523,10 @@ def _poll_round(
     *,
     run_id: str = "run-abc",
     reasoning: str | None = None,
-    args_as_dict: bool = False,
 ) -> list:
     """One completed image_get_run round (direct call)."""
     tool_id = f"poll-{index}"
-    args_obj = {"run_id": run_id}
-    arguments = args_obj if args_as_dict else json.dumps(args_obj, ensure_ascii=False)
+    arguments = json.dumps({"run_id": run_id}, ensure_ascii=False)
     kwargs = {
         "content": f"poll status round-{index}",
         "tool_calls": [_tool_call(tool_id, "image_get_run", arguments)],
@@ -537,6 +537,37 @@ def _poll_round(
         AssistantMessage(**kwargs),
         ToolMessage(
             content=json.dumps({"status": "running", "run_id": run_id}, ensure_ascii=False),
+            tool_call_id=tool_id,
+        ),
+    ]
+
+
+def _invoke_tool_poll_round(
+    index: int,
+    *,
+    inner_tool_name: str = "image_get_run",
+    run_id: str = "run-abc",
+    reasoning: str | None = None,
+) -> list:
+    """One completed invoke_tool round wrapping an inner poll tool (JSON-string args)."""
+    tool_id = f"invoke-poll-{index}"
+    arguments = json.dumps(
+        {"tool_name": inner_tool_name, "arguments": {"run_id": run_id}},
+        ensure_ascii=False,
+    )
+    kwargs = {
+        "content": f"invoke poll status round-{index}",
+        "tool_calls": [_tool_call(tool_id, "invoke_tool", arguments)],
+    }
+    if reasoning is not None:
+        kwargs["reasoning_content"] = reasoning
+    return [
+        AssistantMessage(**kwargs),
+        ToolMessage(
+            content=json.dumps(
+                {"status": "running", "run_id": run_id, "tool_name": inner_tool_name},
+                ensure_ascii=False,
+            ),
             tool_call_id=tool_id,
         ),
     ]
@@ -667,3 +698,57 @@ class TestIgnoredToolCallsAndExemptWall:
         assert sum(
             1 for msg in messages if isinstance(msg, AssistantMessage) and msg.tool_calls
         ) == 3
+
+    @pytest.mark.asyncio
+    async def test_invoke_tool_image_get_run_x12_does_not_compact_or_bailout(self):
+        """Wrapper path: invoke_tool + tool_name=image_get_run stays exempt end-to-end."""
+        config = _ignored_poll_config()
+        ctx = await _create_context(config)
+        session = _FakeSession()
+        ctx.set_session_ref(session)
+
+        await ctx.add_messages(UserMessage(content="poll creative poster via invoke_tool"))
+        for index in range(1, 13):
+            await ctx.add_messages(_invoke_tool_poll_round(index))
+
+        messages = ctx.get_messages()
+        assert not _tool_args_loop_summary_messages(messages)
+        assert not _loop_summary_messages(messages)
+        assert sum(
+            1 for msg in messages if isinstance(msg, AssistantMessage) and msg.tool_calls
+        ) == 12
+        assert session.get_state(TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+        assert session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_invoke_tool_mismatched_inner_name_still_compacts(self):
+        """Same invoke_tool rule but inner tool_name mismatch must still fold at threshold."""
+        config = _ignored_poll_config()
+        ctx = await _create_context(config)
+
+        await ctx.add_messages(UserMessage(content="poll other tool via invoke_tool"))
+        for index in range(1, 6):
+            await ctx.add_messages(
+                _invoke_tool_poll_round(index, inner_tool_name="image_create_run")
+            )
+
+        messages = ctx.get_messages()
+        assert len(_tool_args_loop_summary_messages(messages)) == 1
+        assert not any(
+            isinstance(msg, AssistantMessage) and msg.tool_calls
+            for msg in messages
+        )
+
+    def test_is_tool_call_exempt_accepts_dict_arguments(self):
+        """_parse_tool_arguments dict branch: exempt match without JSON-string arguments."""
+        processor = ReasoningToolLoopCompactProcessor(_ignored_poll_config())
+        hit = SimpleNamespace(
+            name="invoke_tool",
+            arguments={"tool_name": "image_get_run", "arguments": {"run_id": "run-abc"}},
+        )
+        miss = SimpleNamespace(
+            name="invoke_tool",
+            arguments={"tool_name": "image_create_run", "arguments": {"run_id": "run-abc"}},
+        )
+        assert processor._is_tool_call_exempt(hit) is True
+        assert processor._is_tool_call_exempt(miss) is False
