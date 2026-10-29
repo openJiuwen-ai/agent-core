@@ -96,6 +96,12 @@ def _is_live_task_on_running_loop(task: Optional[asyncio.Task]) -> TypeGuard[asy
         return False
 
 
+# Bounded retries for _ensure_root_task_group under concurrent cross-loop
+# rebuilds: each retry waits for the just-published state to become ready,
+# so in practice one retry settles any two-loop race.
+_ROOT_TASK_GROUP_ENSURE_RETRIES = 3
+
+
 class _RunnerImpl(_TeamRunnerMixin):
     """
     Runner implementation class.
@@ -230,8 +236,29 @@ class _RunnerImpl(_TeamRunnerMixin):
         # that hit the fast path while the owner coroutine has not run yet
         # would otherwise return with state.group still None.
         await live_state.ready.wait()
-        if live_state.group is None and live_state.owner.done():
-            await live_state.owner
+        # A concurrent rebuild on another loop may have replaced the state
+        # while we waited. Re-check under the lock and retry with the
+        # winner's state so this loop never returns while _root_state points
+        # at an owner bound to a different loop (the caller's start() would
+        # bind that foreign group into this loop's ContextVar).
+        for _ in range(_ROOT_TASK_GROUP_ENSURE_RETRIES):
+            with self._root_state_lock:
+                current = self._root_state
+                if current is live_state or (
+                    current is not None and _is_live_task_on_running_loop(current.owner)
+                ):
+                    return
+                # current is None or stale again: rebuild once more.
+                if current is not None:
+                    self._signal_stale_owner_to_stop(current)
+                live_state = _RootTaskGroupState()
+                owner = asyncio.create_task(self._root_task_group_owner_loop(live_state))
+                live_state.owner = owner
+                live_state.owner_loop = owner.get_loop()
+                self._root_state = live_state
+            await live_state.ready.wait()
+            if live_state.group is None and live_state.owner.done():
+                await live_state.owner
 
     async def _close_root_task_group(self) -> None:
         state = self._root_state
@@ -299,8 +326,13 @@ class _RunnerImpl(_TeamRunnerMixin):
                 self._root_state = None
 
     def _collect_owner_exception(self, owner: asyncio.Task) -> None:
-        """Log a finished owner's exception so it is not left unretrieved."""
-        if owner.cancelled():
+        """Log a finished owner's exception so it is not left unretrieved.
+
+        Pending owners are skipped: owner.exception() raises
+        InvalidStateError on an unfinished task, which would only produce a
+        misleading warning when the teardown timed out.
+        """
+        if not owner.done() or owner.cancelled():
             return
         exc = owner.exception()
         if exc is not None:

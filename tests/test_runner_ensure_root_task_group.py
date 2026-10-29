@@ -66,7 +66,7 @@ def test_single_loop_start_stop_is_clean() -> None:
         owner = _owner(runner)
         assert owner is not None
         assert owner.get_loop() is loop  # bound to the live loop
-        loop.run_until_complete(runner.stop())
+        assert loop.run_until_complete(runner.stop()) is True
         assert _owner(runner) is None
     finally:
         loop.close()
@@ -108,7 +108,7 @@ def test_reuse_after_loop_close_rebuilds_on_current_loop() -> None:
             "new owner not bound to the current (live) loop"
         )
         # stop() on the second loop must succeed (no cross-loop await).
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         assert _owner(runner) is None
     finally:
         loop2.close()
@@ -132,7 +132,7 @@ def test_stop_after_loop_close_does_not_raise() -> None:
     try:
         loop2.run_until_complete(runner.start())
         # The user-facing assertion: stop on the second loop must not raise.
-        loop2.run_until_complete(runner.stop())  # would raise pre-fix
+        assert loop2.run_until_complete(runner.stop()) is True  # would raise pre-fix
     finally:
         loop2.close()
 
@@ -149,7 +149,7 @@ def test_repeated_start_stop_on_same_loop_is_idempotent() -> None:
             owner = _owner(runner)
             assert owner is not None
             assert not owner.get_loop().is_closed()
-            loop.run_until_complete(runner.stop())
+            assert loop.run_until_complete(runner.stop()) is True
             assert _owner(runner) is None
     finally:
         loop.close()
@@ -186,7 +186,7 @@ def test_reuse_on_live_foreign_loop_rebuilds_on_current_loop() -> None:
             "new owner not bound to the current running loop"
         )
         # stop() on loop2 must not cross-loop-await anything.
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         assert _owner(runner) is None
     finally:
         loop2.close()
@@ -247,7 +247,7 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     # The runner must remain fully usable on the surviving owner's loop.
     winner_loop = owner_loop
     loser_loop = loop2 if winner_loop is loop1 else loop1
-    winner_loop.run_until_complete(runner.stop())
+    assert winner_loop.run_until_complete(runner.stop()) is True
     assert runner._root_state is None
     loser_loop.close()
     winner_loop.close()
@@ -274,7 +274,7 @@ def test_cross_loop_stop_never_touches_the_stale_state() -> None:
     try:
         loop2.run_until_complete(runner.start())
         assert runner._root_state is not stale_state
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         assert runner._root_state is None
     finally:
         loop2.close()
@@ -313,7 +313,7 @@ def test_rebuild_signals_stale_owner_on_live_foreign_loop() -> None:
         assert stale.stop.is_set(), "stale owner was never signalled to stop"
         assert stale_owner.done(), "stale owner on a live foreign loop never terminated"
     finally:
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         loop2.close()
         loop1.call_soon_threadsafe(loop1.stop)
         thread.join(timeout=10)
@@ -342,7 +342,7 @@ def test_cross_loop_stop_on_closed_loop_drops_without_signal() -> None:
     try:
         # Direct stop on the new loop: no start() rebuild in between, so
         # _close_root_task_group faces the stale state itself.
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         assert runner._root_state is None
     finally:
         loop2.close()
@@ -368,7 +368,7 @@ def test_cross_loop_stop_on_live_foreign_loop_signals_owner() -> None:
     thread.start()
     loop2 = _new_loop()
     try:
-        loop2.run_until_complete(runner.stop())
+        assert loop2.run_until_complete(runner.stop()) is True
         assert runner._root_state is None
         deadline = time.monotonic() + 5
         while not stale_owner.done() and time.monotonic() < deadline:
