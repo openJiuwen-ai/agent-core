@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.harness.security.literal_shell import (
+    LiteralCommand, match_literal_pattern, parse_literal_shell, pattern_binds_command,
+)
+
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
@@ -100,6 +104,7 @@ class _TieredInvocationContext:
     baseline_rule: str | None
     defaults_cfg: dict[str, Any]
     permission_config: Mapping[str, Any]
+    literal_arguments: bool = False
 
 
 def _parse_level(value: str) -> PermissionLevel:
@@ -162,7 +167,7 @@ def _command_text(tool_args: dict[str, Any]) -> str:
     return str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
 
 
-def _shell_pattern_matches(pattern: str, command: str) -> bool:
+def _shell_pattern_matches(pattern: str, command: str, *, literal_arguments: bool = False) -> bool:
     if not pattern or not command:
         return False
     p = pattern.strip()
@@ -199,7 +204,7 @@ def _shell_pattern_matches(pattern: str, command: str) -> bool:
         return False
     glob_chars = frozenset("*?[")
     if any(ch in p for ch in glob_chars):
-        return match_wildcard(command, p)
+        return match_literal_pattern(command, p) if literal_arguments else match_wildcard(command, p)
     return command == p
 
 
@@ -267,6 +272,7 @@ def _collect_param_rule_hits(
         tool_args: dict[str, Any],
         label_ns: str,
         permission_config: Mapping[str, Any] | None = None,
+        *, literal_arguments: bool = False,
 ) -> list[tuple[PermissionLevel, str]]:
     """参数级规则命中列表 (level, label)；``label_ns`` 为 ``builtin`` 或 ``rules``。"""
     hits: list[tuple[PermissionLevel, str]] = []
@@ -301,7 +307,7 @@ def _collect_param_rule_hits(
         if not isinstance(pattern, str) or not pattern.strip():
             continue
         if not tiered_policy_rule_matches(
-                tool_name, pattern, tool_args, r_tools_s, permission_config,
+                tool_name, pattern, tool_args, r_tools_s, permission_config, literal_arguments=literal_arguments,
         ):
             continue
         action = rule.get("action")
@@ -324,6 +330,7 @@ def _collect_approval_override_hits(
         tool_name: str,
         tool_args: dict[str, Any],
         permission_config: Mapping[str, Any] | None = None,
+        *, literal_arguments: bool = False,
 ) -> list[str]:
     """用户审批后持久化的 allow override 命中列表。
 
@@ -372,7 +379,7 @@ def _collect_approval_override_hits(
         if not isinstance(pattern, str) or not pattern.strip():
             continue
         if not tiered_policy_rule_matches(
-                tool_name, pattern, tool_args, r_tools_s, permission_config,
+                tool_name, pattern, tool_args, r_tools_s, permission_config, literal_arguments=literal_arguments,
         ):
             continue
         rid = rule.get("id", "")
@@ -387,13 +394,14 @@ def tiered_policy_rule_matches(
         tool_args: dict[str, Any],
         rule_tools: list[str],
         permission_config: Mapping[str, Any] | None = None,
+        *, literal_arguments: bool = False,
 ) -> bool:
     """单条 rule 是否对本次调用匹配（调用前已确认 tool 命中 rule_tools / category）。"""
     if not rule_tools:
         return False
     cat = _tool_category(rule_tools[0], permission_config)
     if cat == "shell":
-        return _shell_pattern_matches(pattern, _command_text(tool_args))
+        return _shell_pattern_matches(pattern, _command_text(tool_args), literal_arguments=literal_arguments)
     if cat == "path":
         # 路径匹配已迁至 file_guard；A 线不再匹配 path
         return False
@@ -524,6 +532,7 @@ def _evaluate_single_invocation(
         tool_args,
         "builtin",
         ctx.permission_config,
+        literal_arguments=ctx.literal_arguments,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in builtin_hits):
         return _finalize_hits(builtin_hits, "builtin")
@@ -534,12 +543,14 @@ def _evaluate_single_invocation(
         tool_args,
         "rules",
         ctx.permission_config,
+        literal_arguments=ctx.literal_arguments,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in user_hits):
         return _finalize_hits(user_hits, "rules")
 
     override_hits = _collect_approval_override_hits(
         ctx.approval_overrides, tool_name, tool_args, ctx.permission_config,
+        literal_arguments=ctx.literal_arguments,
     )
     if override_hits:
         contributing = sorted(set(override_hits))
@@ -650,6 +661,71 @@ def _aggregate_subcommand_results(
     return final, f"{_MR}:shell_subcommands:" + "+".join(contributing)
 
 
+def _literal_policy_result(permission_config, tool_name, tool_args):
+    """Reuse dev-stable literal-command evidence without replacing current guards."""
+    feature = permission_config.get("skill_authorization")
+    if not isinstance(feature, dict) or feature.get("enabled") is not True:
+        return None
+    shell_type = str(tool_args.get("shell_type") or "auto").lower()
+    if _tool_category(tool_name, permission_config) != "shell" or shell_type not in {"auto", "bash", "sh"}:
+        return None
+    plan = parse_literal_shell(_command_text(tool_args))
+    if plan is None:
+        return None
+    tools = permission_config.get("tools")
+    baseline, baseline_rule = _baseline_level(tools if isinstance(tools, dict) else {}, tool_name)
+    if baseline == PermissionLevel.DENY:
+        return baseline, baseline_rule or f"{_MR}:tools.deny"
+    raw_rules = permission_config.get("rules")
+    rules = [r for r in raw_rules if isinstance(r, dict)] if isinstance(raw_rules, list) else []
+    overrides = permission_config.get("approval_overrides")
+    defaults = permission_config.get("defaults")
+    ctx = _TieredInvocationContext(
+        builtin_rules=[r for r in rules if r.get("layer") == "builtin"],
+        rules=[r for r in rules if r.get("layer") != "builtin"],
+        approval_overrides=[r for r in overrides if isinstance(r, dict)] if isinstance(overrides, list) else [],
+        baseline_level=baseline, baseline_rule=baseline_rule,
+        defaults_cfg=defaults if isinstance(defaults, dict) else {},
+        permission_config=permission_config, literal_arguments=True,
+    )
+    decisions = []
+    # Full-text restrictions, including heredoc body checks, cannot disappear.
+    for rows, namespace in ((ctx.builtin_rules, "builtin"), (ctx.rules, "rules")):
+        hits = _collect_param_rule_hits(rows, tool_name, tool_args, namespace, permission_config)
+        restrictive = [(level, label) for level, label in hits if level != PermissionLevel.ALLOW]
+        if restrictive:
+            decisions.append((_command_text(tool_args), *_finalize_hits(restrictive, namespace)))
+    explicit = not decisions
+    for call in plan.commands:
+        args = _with_shell_command(tool_args, call.text)
+        permission, matched = _evaluate_single_invocation(tool_name, args, ctx)
+        decisions.append((call.text, permission, matched))
+        explicit = explicit and _literal_explicit_allow(ctx, tool_name, args, call)
+    permission, matched = _aggregate_subcommand_results(decisions)
+    # Without explicit evidence retain all existing shell_guard / HITL behavior.
+    return (permission, matched) if permission == PermissionLevel.DENY or explicit else None
+
+
+def _literal_explicit_allow(ctx, tool_name, args, call: LiteralCommand) -> bool:
+    for override in ctx.approval_overrides:
+        pattern = override.get("pattern", "")
+        if (isinstance(pattern, str) and pattern_binds_command(pattern, call)
+                and _collect_approval_override_hits([override], tool_name, args, ctx.permission_config,
+                                                    literal_arguments=True)):
+            return True
+    if _collect_param_rule_hits(ctx.builtin_rules, tool_name, args, "builtin", ctx.permission_config,
+                                literal_arguments=True):
+        return False
+    for rule in ctx.rules:
+        pattern = rule.get("pattern", "")
+        if isinstance(pattern, str) and pattern_binds_command(pattern, call):
+            hits = _collect_param_rule_hits([rule], tool_name, args, "rules", ctx.permission_config,
+                                            literal_arguments=True)
+            if hits and all(level == PermissionLevel.ALLOW for level, _ in hits):
+                return True
+    return False
+
+
 def evaluate_tiered_policy(
         permission_config: Mapping[str, Any],
         tool_name: str,
@@ -665,6 +741,9 @@ def evaluate_tiered_policy(
     - 无参数级命中时：仅有整工具则用整工具；否则仅用默认（整工具存在则忽略默认）。
     - 内置规则必须已内联进 ``rules``（``layer: builtin``）；判定路径不再 load YAML。
     """
+    literal_result = _literal_policy_result(permission_config, tool_name, tool_args)
+    if literal_result is not None:
+        return literal_result
     tools_cfg = permission_config.get("tools") or {}
     if not isinstance(tools_cfg, dict):
         tools_cfg = {}

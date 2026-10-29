@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.harness.security.literal_shell import is_script_interpreter, parse_literal_shell
+
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
     lookup_file_tool_specs,
@@ -333,12 +335,31 @@ def extract_shell_path_accesses(
     workdir: str | Path,
     *,
     include_cd_reads: bool = True,
+    skill_authorization: bool = False,
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
     command = canonicalize_shell_command_for_permission(command)
     base = Path(workdir).resolve()
     results: list[tuple[Path, FileAction]] = []
+
+    literal = parse_literal_shell(command) if skill_authorization else None
+    if literal is not None:
+        for call in literal.commands:
+            executable = _basename_lower(call.argv[0])
+            if executable == "cd":
+                target = Path(call.argv[-1])
+                base = (target if target.is_absolute() else base / target).resolve()
+                if include_cd_reads:
+                    results.append((base, "read"))
+                continue
+            accesses, _ = _path_aware_one_segment(call.text, base)
+            results.extend(accesses)
+            if is_script_interpreter(executable):
+                target = Path(call.argv[1])
+                target = (target if target.is_absolute() else base / target).resolve()
+                results.append((target, "exec"))
+        return results
 
     def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
         tok = tok.strip().strip('"').strip("'")
@@ -442,7 +463,9 @@ def extract_accesses_native(
             except (OSError, RuntimeError):
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved):
+        feature = (permission_config or {}).get("skill_authorization")
+        enabled = isinstance(feature, dict) and feature.get("enabled") is True
+        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=enabled):
             out.append((p, act, "shlex"))
         return out
 
