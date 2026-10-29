@@ -175,9 +175,20 @@ class _RunnerImpl(_TeamRunnerMixin):
         return isinstance(agent_instance, RemoteAgent)
 
     def get_root_task_group(self):
-        """Get the runner-owned root task group, if Runner has been started."""
+        """Get the runner-owned root task group, if Runner has been started.
+
+        Uses the same loop-ownership predicate as the ContextVar bindings:
+        a group whose owner is dead or bound to another loop is not
+        returned to callers on this loop.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return state.group if (state := self._root_state) is not None else None
         state = self._root_state
-        return state.group if state is not None else None
+        if state is None or not _is_live_task_on_running_loop(state.owner):
+            return None
+        return state.group
 
     async def _root_task_group_owner_loop(
         self,
@@ -264,6 +275,13 @@ class _RunnerImpl(_TeamRunnerMixin):
         # pending owner here would block start() until the group opens -
         # the same hang the loop's ready waits exist to prevent.
         await live_state.ready.wait()
+        # If the owner task died before opening its task group, awaiting it
+        # re-raises its exception into start() - the develop behaviour this
+        # refactor must preserve (a broken runner must not start silently).
+        # This runs before the ownership check so the root cause (the
+        # owner's own exception) is never masked by a replacement error.
+        if live_state.group is None:
+            await live_state.owner
         # Final ownership check: if another loop replaced the state (or
         # signalled our owner to stop) after our last check, returning here
         # would let start() silently succeed with a dead or foreign root
@@ -274,11 +292,6 @@ class _RunnerImpl(_TeamRunnerMixin):
                 "runner root task group was concurrently replaced during "
                 "startup; retry start() on the event loop that now owns it"
             )
-        # If the owner task died before opening its task group, awaiting it
-        # re-raises its exception into start() - the develop behaviour this
-        # refactor must preserve (a broken runner must not start silently).
-        if live_state.group is None:
-            await live_state.owner
 
     async def _close_root_task_group(self) -> None:
         state = self._root_state
