@@ -92,6 +92,21 @@ async def test_unregistered_key_fails_closed_with_key_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unregistered_key_aborts_the_actual_callback_chain() -> None:
+    from openjiuwen.core.runner.callback.errors import AbortError
+    from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+
+    rail = PermissionInterruptRail(permission_key=_KEY)
+    ctx = _ctx()
+    ctx.inputs = ToolCallInputs(tool_call=_call("ls"), tool_name="bash")
+    framework = AsyncCallbackFramework(enable_logging=False)
+    await framework.register("before_tool", rail.before_tool_call)
+    with pytest.raises(AbortError):
+        await framework.trigger("before_tool", ctx)
+
+
+@pytest.mark.asyncio
 async def test_inactive_checks_hook_skips_decision() -> None:
     rail = PermissionInterruptRail(
         permission_key=_KEY,

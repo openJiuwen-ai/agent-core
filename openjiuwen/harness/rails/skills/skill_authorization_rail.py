@@ -7,7 +7,7 @@ dev-stable 适配说明（相对 0708 ``jiuwenclaw...deep_agent/rails/skill_auth
 - 基类为 agent-core ``openjiuwen.harness.rails.interrupt.interrupt_base.BaseInterruptRail``；
   ``InterruptRequest`` 无 ``allow_auto_confirm`` 字段，审批请求不再携带该参数；
 - 权限裁决走 ``agent_shield`` 管理器：与 PermissionInterruptRail 共用
-  ``permission_key``；DENY 预判用 ``evaluate_global_policy_directly(key)``
+  ``permission_key``；DENY 预判用 ``check_permission(..., key)``
   （无 channel/session/overlay 参数；引擎本身不感知 Skill overlay）；
 - trust 判定通过调用方注入的可信 Skill 目录完成，core 不感知产品安装账本；
 - file_guard 差分适配 native ``paths`` 条目口径（移植版
@@ -30,6 +30,7 @@ from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.security.models import PermissionLevel
+from openjiuwen.harness.security.permission_checks import fail_closed_permission_callback
 
 from openjiuwen.harness.security.skill_authorization import (
     SKILL_APPROVAL_CARD_EXTENSION_KEY,
@@ -779,27 +780,35 @@ class SkillAuthorizationRail(BaseInterruptRail):
 
     # ---------- 门禁（before_tool_call） ----------
 
+    def set_permission_key_resolver(self, resolver: Callable[[AgentCallbackContext], str]) -> None:
+        """Bind a host selector for the already published session baseline key."""
+        self._permission_key_resolver = resolver
+
     async def _evaluate_skill_tool_deny(
         self,
         tool_args: dict[str, Any],
+        *,
+        ctx: AgentCallbackContext | None = None,
     ) -> str | None | object:
         """按原权限流程裁决 skill_tool；DENY 返回原因，否则返回 ``None``。
 
-        用不含 Skill overlay 的已登记 key 做 ``evaluate_global_policy_directly``。
+        用不含 Skill overlay 的已登记 key 做 ``check_permission``。
         """
         from agent_shield.tool_permission import get_permission_manager
 
         try:
-            level, matched_rule = await get_permission_manager().evaluate_global_policy_directly(
+            resolver = getattr(self, "_permission_key_resolver", None)
+            key = resolver(ctx) if resolver is not None and ctx is not None else self._permission_key
+            result = await get_permission_manager().check_permission(
                 SKILL_TOOL_NAME,
                 tool_args,
-                self._permission_key,
+                key,
             )
         except Exception:  # noqa: BLE001 — 调用方必须走原 Rail 或直接拒绝
             logger.warning("[skill_authorization] gate policy evaluation failed", exc_info=True)
             return _POLICY_EVALUATION_FAILED
-        if level == PermissionLevel.DENY:
-            return str(matched_rule or "tiered_policy")
+        if result.permission == PermissionLevel.DENY:
+            return str(result.matched_rule or "tiered_policy")
         return None
 
     def _resolve_manifest_for_call(
@@ -829,6 +838,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             )
             return None
 
+    @fail_closed_permission_callback
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """门禁模板：主 Agent 与子 Agent 委托版共用裁决骨架，差异走钩子方法。"""
         inputs = getattr(ctx, "inputs", None)
@@ -856,7 +866,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         session_id = scope[0] if scope else _resolve_session_id(ctx)
 
         # 1. 原权限流程裁决：DENY 直接拒载，不弹卡。
-        deny_rule = await self._evaluate_skill_tool_deny(tool_args)
+        deny_rule = await self._evaluate_skill_tool_deny(tool_args, ctx=ctx)
         if deny_rule is _POLICY_EVALUATION_FAILED:
             self._on_policy_evaluation_failed(ctx, tool_call, tool_name)
             return

@@ -44,6 +44,7 @@ from openjiuwen.harness.security.patterns import (
     write_permissions_section_to_agent_config_yaml,
 )
 from openjiuwen.harness.security.permission_key import DEFAULT_KEY
+from openjiuwen.harness.security.permission_checks import fail_closed_permission_callback
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 TOOL_NAME_ALIASES = {
@@ -323,16 +324,31 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_args: dict[str, Any],
         ctx: AgentCallbackContext,
     ) -> PermissionResult:
-        """Decide one tool call via the manager under this rail's key.
+        """Decide via the manager using only the selected published key."""
+        from openjiuwen.harness.security.permission_checks import check_tool_permission
 
-        Subclasses (e.g. skill overlay) may override to pass a one-off
-        ``config=`` without registering a new key.
-        """
-        return await get_permission_manager().check_permission(
-            tool_name,
-            tool_args,
-            self._key,
-        )
+        return await check_tool_permission(tool_name, tool_args, self.permission_key_for(ctx))
+
+    def permission_key_for(self, ctx: AgentCallbackContext) -> str:
+        """Select a published key; hosts may override routing without reading configs."""
+        return self._key
+
+    def permission_baseline_key_for(self, ctx: AgentCallbackContext) -> str:
+        """Default host selector when a rail has no derived session policies."""
+        return self._key
+
+    def projection_config_for(self, ctx: AgentCallbackContext) -> dict[str, Any]:
+        """Return the published local mirror for host routing/projection metadata."""
+        return deepcopy(self._static_config)
+
+    def permission_persist_context(self, ctx: AgentCallbackContext):
+        """Hosts may bind trusted write identity without changing decision calls."""
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def outbound_checks_enabled(self, ctx: AgentCallbackContext) -> bool:
+        return self.enabled and bool(self._static_config.get("net_guard", {}).get("enabled", False))
 
     def _normalize_tool_name(self, tool_name: str) -> str:
         """Normalize tool name using aliases.
@@ -388,6 +404,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         """
         return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
 
+    @fail_closed_permission_callback
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
         tool_call = ctx.inputs.tool_call
@@ -416,6 +433,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         )
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
+        from openjiuwen.core.common.security.outbound import OUTBOUND_PERMISSION_KEY
+
+        # Tool callback contexts can share extra with siblings. Never leak a
+        # selected key into another concurrent call or into an unguarded tool.
+        ctx.extra = dict(ctx.extra)
+        ctx.extra.pop(OUTBOUND_PERMISSION_KEY, None)
+        if self.outbound_checks_enabled(ctx):
+            ctx.extra[OUTBOUND_PERMISSION_KEY] = self.permission_key_for(ctx)
 
     def _registered_config(self) -> dict[str, Any]:
         """Deep copy of the config registered under this rail's key."""
@@ -559,7 +584,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         user_input=user_input,
                         normalized_tool_name=normalized_name,
                         tool_args=tool_args,
-                        permission_key=self._key,
+                        permission_key=self.permission_key_for(ctx),
                     ),
                 )
             except Exception:
@@ -567,7 +592,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     "[PermissionEngine] permission.scene_hook.failed",
                     exc_info=True,
                 )
-                scene_out = None
+                from openjiuwen.core.runner.callback.errors import AbortError
+
+                raise AbortError("Permission scene validation failed; tool execution stopped") from None
             if scene_out is not None:
                 if scene_out[0] == "approve":
                     return self.approve()
@@ -674,7 +701,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     confirm_payload = ext_out
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm and confirm_payload.persist_allow:
-                        persisted = self._persist_allow_always(normalized_name, tool_args)
+                        with self.permission_persist_context(ctx):
+                            persisted = self._persist_allow_always(normalized_name, tool_args)
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s "
                         "confirm_path=hosted persisted=%s persist_allow=%s",
@@ -740,7 +768,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         persisted = False
         if payload.approved and payload.auto_confirm and payload.persist_allow:
-            persisted = self._persist_allow_always(normalized_name, tool_args)
+            with self.permission_persist_context(ctx):
+                persisted = self._persist_allow_always(normalized_name, tool_args)
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s persist_allow=%s",
                 tool_name,

@@ -51,7 +51,7 @@ def _stub_manager_ask():
         matched_rule=None,
         reason="unit-test ASK",
     ))
-    with patch("openjiuwen.harness.rails.security.tool_security_rail.get_permission_manager",
+    with patch("openjiuwen.harness.security.permission_checks.get_permission_manager",
                return_value=manager):
         yield manager
 
