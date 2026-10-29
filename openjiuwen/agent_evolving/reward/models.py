@@ -1,10 +1,11 @@
-"""Model access: a streamed JSON client (no time limits), the answer language, the session's model, and
-whether a model can see images.
+"""Model access: a JSON client on agent-core's model client, the answer language, the session's model,
+and whether a model can see images.
 """
 
 import json
 import os
 import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -242,22 +243,42 @@ def resolve(value):
     return value
 
 
+def _block_text(block):
+    """The text of one content block, or "" for a non-text block."""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, Mapping):
+        for key in ("text", "content"):
+            value = block.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
+    for key in ("text", "content"):
+        value = getattr(block, key, None)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
 def _answer_text(response):
-    """The answer text of a core-model response (a string, or text blocks in a list)."""
+    """The answer text of a core-model response, including typed content blocks."""
     content = getattr(response, "content", None)
     if isinstance(content, str):
         return content
     if isinstance(content, (list, tuple)):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                text = block.get("text", block.get("content"))
-            else:
-                text = block
-            if text is not None:
-                parts.append(str(text))
-        return "".join(parts)
-    return str(content or "")
+        return "".join(_block_text(block) for block in content)
+    return _block_text(content)
+
+
+def _vision_config(config):
+    """The explicit vision declaration of a dict or entry-like model route."""
+    if isinstance(config, Mapping):
+        return config.get("vision")
+    value = getattr(config, "vision", None)
+    if value is not None:
+        return value
+    metadata = getattr(config, "metadata", None)
+    return metadata.get("vision") if isinstance(metadata, Mapping) else None
 
 
 class Model:
@@ -276,7 +297,7 @@ class Model:
         self.name = entry.model_name
         self.base_url = entry.api_base_url
         self.extra = dict(entry.metadata.get("request") or {})
-        self.vision = config.get("vision") if isinstance(config, dict) else None
+        self.vision = _vision_config(config)
         self._model = entry.to_team_model_config().build()
 
     async def json(self, system, user, images=()):
@@ -296,7 +317,11 @@ class Model:
         error = None
         for _ in range(2):  # one retry
             try:
-                response = await self._model.invoke(messages, extra_body=self.extra or None)
+                response = await self._model.invoke(
+                    messages,
+                    extra_body=self.extra or None,
+                    response_format={"type": "json_object"},
+                )
                 text = _answer_text(response)
                 return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
             except Exception as failure:  # noqa: BLE001 - retry once

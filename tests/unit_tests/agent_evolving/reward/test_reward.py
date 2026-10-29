@@ -45,9 +45,23 @@ def _model(answers):
 @pytest.mark.asyncio
 async def test_json_reads_the_core_model_answer():
     model, calls = _model(['{"a": 1}'])
+    model.extra = {"enable_thinking": False}
     assert await model.json("sys", "user") == {"a": 1}
     assert len(calls) == 1
     assert calls[0][0][1]["content"] == "user"
+    assert calls[0][1]["response_format"] == {"type": "json_object"}
+    assert calls[0][1]["extra_body"] == {"enable_thinking": False}
+
+
+@pytest.mark.asyncio
+async def test_json_reads_typed_content_blocks():
+    class Block:
+        text = '{"a": 3}'
+
+    model, _ = _model([[Block()]])
+    assert await model.json("sys", "user") == {"a": 3}
+    model, _ = _model([[{"type": "text", "text": '{"b": 4}'}]])
+    assert await model.json("sys", "user") == {"b": 4}
 
 
 @pytest.mark.asyncio
@@ -68,6 +82,14 @@ def test_the_reward_model_uses_agent_core_for_openai_and_anthropic():
                               "api_key": "k", "provider": provider})
         assert isinstance(model._model, CoreModel)
         assert str(model._model.model_client_config.client_provider) in (provider, f"ProviderType.{provider}")
+
+
+def test_a_non_dict_route_keeps_its_vision_declaration():
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(model_name="m", api_key="k", api_base_url="http://127.0.0.1:9/v1",
+                            vision=False)
+    assert models.Model(route).vision is False
 
 
 def test_the_reward_model_client_has_no_time_limit():
