@@ -264,6 +264,16 @@ class _RunnerImpl(_TeamRunnerMixin):
         # pending owner here would block start() until the group opens -
         # the same hang the loop's ready waits exist to prevent.
         await live_state.ready.wait()
+        # Final ownership check: if another loop replaced the state (or
+        # signalled our owner to stop) after our last check, returning here
+        # would let start() silently succeed with a dead or foreign root
+        # task group. Fail loudly instead - the caller retries on the loop
+        # that now owns the group.
+        if self._root_state is not live_state or not _is_live_task_on_running_loop(live_state.owner):
+            raise RuntimeError(
+                "runner root task group was concurrently replaced during "
+                "startup; retry start() on the event loop that now owns it"
+            )
         # If the owner task died before opening its task group, awaiting it
         # re-raises its exception into start() - the develop behaviour this
         # refactor must preserve (a broken runner must not start silently).
@@ -396,7 +406,10 @@ class _RunnerImpl(_TeamRunnerMixin):
     @contextmanager
     def _root_task_group_scope(self):
         state = self._root_state
-        group = state.group if state is not None else None
+        # Reuse the loop-ownership predicate: a group whose owner is dead or
+        # foreign must not be bound into this loop's ContextVar (running
+        # tasks in it would raise cross-loop errors).
+        group = state.group if state is not None and _is_live_task_on_running_loop(state.owner) else None
         if group is None:
             yield
             return
@@ -421,7 +434,9 @@ class _RunnerImpl(_TeamRunnerMixin):
         context (e.g. A2A streaming on a uvicorn worker thread).
         """
         state = self._root_state
-        group = state.group if state is not None else None
+        # Same predicate as _root_task_group_scope: never bind a group whose
+        # owner is dead or bound to a different loop into this loop.
+        group = state.group if state is not None and _is_live_task_on_running_loop(state.owner) else None
         if group is None:
             return None
         from openjiuwen.core.common.task_manager.context import get_task_group, set_task_group
