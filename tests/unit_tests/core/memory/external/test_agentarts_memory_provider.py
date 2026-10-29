@@ -43,7 +43,7 @@ class FakeSession:
 
 @dataclass
 class FakeMemorySearchFilter:
-    """Match the constructor fields of agentarts-sdk 0.1.2 pinned in uv.lock."""
+    """Strict provider-contract stub including the requested rerank extension."""
 
     query: str | None = None
     strategy_type: str | None = None
@@ -56,6 +56,8 @@ class FakeMemorySearchFilter:
     end_time: int | None = None
     top_k: int | None = None
     min_score: float | None = None
+    only_actived: bool = False
+    rerank: bool | None = None
 
 
 class FakeTextMessage:
@@ -123,7 +125,7 @@ def install_fake_agentarts_config(monkeypatch):
     monkeypatch.setitem(sys.modules, "agentarts.sdk.memory.inner.config", config_module)
 
 
-def test_fake_memory_search_filter_accepts_declared_sdk_fields():
+def test_fake_memory_search_filter_accepts_provider_fields():
     values = {
         "query": "q",
         "strategy_type": "semantic",
@@ -136,13 +138,24 @@ def test_fake_memory_search_filter_accepts_declared_sdk_fields():
         "end_time": 2,
         "top_k": 3,
         "min_score": 0.5,
+        "only_actived": True,
+        "rerank": False,
     }
 
     assert vars(FakeMemorySearchFilter(**values)) == values
 
 
-@pytest.mark.parametrize("field_name", ["rerank", "top_kk", "unknown_filter"])
-def test_fake_memory_search_filter_rejects_undeclared_sdk_fields(field_name):
+def test_fake_memory_search_filter_defaults_optional_fields():
+    filters = FakeMemorySearchFilter(query="q")
+
+    assert filters.start_time is None
+    assert filters.end_time is None
+    assert filters.only_actived is False
+    assert filters.rerank is None
+
+
+@pytest.mark.parametrize("field_name", ["rerank_enabled", "top_kk", "unknown_filter"])
+def test_fake_memory_search_filter_rejects_unknown_fields(field_name):
     with pytest.raises(TypeError, match=f"unexpected keyword argument '{field_name}'"):
         FakeMemorySearchFilter(query="q", **{field_name: False})
 
@@ -339,6 +352,7 @@ async def test_prefetch_searches_agentarts_and_formats_backend_neutral_context()
     assert call["space_id"] == "space"
     filters = call["filters"]
     assert filters.query == "who am I"
+    assert filters.rerank is False
     assert filters.top_k == 3
     assert filters.actor_id == "u1"
     assert filters.assistant_id is None
@@ -425,6 +439,7 @@ async def test_search_tool_returns_json_results_and_filters():
     assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
     filters = fake.search_calls[-1]["filters"]
     assert filters.query == "x"
+    assert filters.rerank is False
     assert filters.top_k == 2
     assert filters.strategy_type == "semantic"
     assert filters.min_score == 0.7
@@ -506,9 +521,10 @@ async def test_search_tool_omits_time_range_and_activation_filters_when_unset():
     await provider.handle_tool_call("external_memory_search", {"query": "x"})
 
     filters = fake.search_calls[-1]["filters"]
-    assert not hasattr(filters, "start_time")
-    assert not hasattr(filters, "end_time")
-    assert not hasattr(filters, "only_actived")
+    assert filters.start_time is None
+    assert filters.end_time is None
+    assert filters.only_actived is False
+    assert filters.rerank is False
 
 
 @pytest.mark.asyncio
