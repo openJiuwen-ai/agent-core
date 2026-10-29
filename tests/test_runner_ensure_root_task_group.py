@@ -456,3 +456,35 @@ def test_stale_owner_exit_does_not_clobber_rebuilt_state() -> None:
         loop.run_until_complete(scenario())
     finally:
         loop.close()
+
+
+def test_concurrent_adoption_of_unready_state_waits_for_ready() -> None:
+    """Two concurrent _ensure_root_task_group() calls on the same loop must
+    never return with an unready state: a caller that adopts a concurrent
+    caller's just-published state must wait for its owner to open the task
+    group, instead of awaiting a pending owner directly (which would block
+    start() until the group opens - the hang the final ready wait prevents).
+
+    Review feedback on !3490 round 8: pins the ready wait on every exit path.
+    """
+    runner = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+    loop = _new_loop()
+
+    async def scenario():
+        # Two ensures racing on one loop: both must settle on one ready,
+        # live state; the loser adopts the winner's state under the lock.
+        await asyncio.gather(
+            runner._ensure_root_task_group(),
+            runner._ensure_root_task_group(),
+        )
+        state = runner._root_state
+        assert state is not None
+        assert state.group is not None, "ensure returned before the task group opened"
+        assert state.ready.is_set()
+        assert state.owner is not None and not state.owner.done()
+
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        assert loop.run_until_complete(runner.stop()) is True
+        loop.close()
