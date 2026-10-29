@@ -9,10 +9,12 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-from tests.unit_tests.fixtures.mock_llm import MockLLMModel
+from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
 
 
 def _tool_call(call_id: str, name: str = "search") -> ToolCall:
@@ -212,6 +214,36 @@ async def test_abort_still_saves_when_context_cleanup_fails():
 
     assert persisted is True
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_real_session_recovers_current_turn_after_model_error():
+    """A failed request keeps its user turn in the state read by the next request."""
+    await Runner.start()
+    try:
+        card = AgentCard(name="abort_recovery_agent", description="abort recovery")
+        agent = ReActAgent(card=card)
+        agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+        session = create_agent_session(session_id="abort_recovery_session", card=card)
+        await session.pre_run(inputs={"query": "查一下热搜"})
+        llm = MockLLMModel()
+        llm.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+
+        with patch.object(agent, "_get_llm", return_value=llm):
+            with pytest.raises(RuntimeError, match="insufficient_quota"):
+                await agent.invoke({"query": "查一下热搜"}, session=session)
+
+        saved = session.get_state("context")
+        assert "查一下热搜" in str(saved)
+        assert "unexpected error" in str(saved)
+
+        llm.invoke = AsyncMock(return_value=create_text_response("已恢复"))
+        with patch.object(agent, "_get_llm", return_value=llm):
+            result = await agent.invoke({"query": "继续"}, session=session)
+        assert result["result_type"] == "answer"
+        assert "已恢复" in result["output"]
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
