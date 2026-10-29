@@ -1341,31 +1341,11 @@ class DeepAgent(BaseAgent):
                 )
 
                 factory_kwargs = dict(spec.factory_kwargs or {})
-                browser_model = create_kwargs["model"]
-                browser_parent_model = getattr(
-                    browser_model,
-                    "_browser_agent_parent_model",
-                    None,
-                )
-                if (
-                    browser_model is self._deep_config.model
-                    or browser_parent_model is self._deep_config.model
-                ):
-                    parent_image_support = getattr(
-                        self._deep_config,
-                        "enable_read_image_multimodal",
-                        None,
-                    )
-                    factory_kwargs.setdefault(
-                        "enable_read_image_multimodal",
-                        parent_image_support is True,
-                    )
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(
                     create_browser_agent(
-                        **create_kwargs,
-                        **factory_kwargs,
+                        **{**create_kwargs, **factory_kwargs},
                     )
                 )
             if normalized_factory == "code_agent":
