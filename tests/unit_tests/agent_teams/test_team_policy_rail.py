@@ -443,6 +443,9 @@ class _FakeTeamBackend:
     ) -> None:
         self._team = team
         self._members: list[_StubMember] = list(members or [])
+        # The team name the real backend exposes; the policy build target
+        # reads it for matching/log attribution.
+        self.team_name = team.team_name if team is not None else ""
         # The member's own row, which ``list_members`` excludes. Defaults to a
         # plain row so tests that do not care about identity still get one; a
         # leader before ``build_team`` passes ``self_row=None`` to model "my row
