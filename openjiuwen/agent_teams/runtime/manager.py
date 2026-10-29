@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 
 @dataclass(slots=True)
@@ -111,11 +112,33 @@ class TeamRuntimeManager:
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
         self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
+        self._extension_bus: "ExtensionEventBusProtocol | None" = None
 
     @property
     def pool(self) -> TeamRuntimePool:
         """Process-local TeamRuntimePool tracking active team runtimes."""
         return self._pool
+
+    @property
+    def extension_bus(self) -> "ExtensionEventBusProtocol | None":
+        """The host-initialized extension bus injected for this Runner, if any.
+
+        None means no extension wiring: teams then run with the default
+        business behavior and no monitor-event bridge is mounted.
+        """
+        return self._extension_bus
+
+    def set_extension_bus(self, bus: "ExtensionEventBusProtocol | None") -> None:
+        """Inject the host-initialized extension bus (before first activate).
+
+        The bus must already have run ``ops.build`` — the team side only
+        triggers events and never registers on it. Passing None drops the
+        wiring; entries activated afterwards mount no bridge.
+
+        Args:
+            bus: A host-initialized bus, or None to unwire.
+        """
+        self._extension_bus = bus
 
     @property
     def organization_runtime_manager(self) -> "OrganizationRuntimeManager":
@@ -1283,6 +1306,52 @@ class TeamRuntimeManager:
         team_in_db = await db.team.team_exists(team_name)
         return team_in_session, team_in_db, team_db_state
 
+    def _inject_extension_bus(self, spec: "TeamAgentSpec") -> None:
+        """Seed the extension bus into the spec's build-context extras.
+
+        The cold build paths (create / new-in-session / cold recover) all
+        assemble the leader through the spec's build context, and the
+        per-member derive copies carry extras into the rail factories — so
+        one seed here reaches the policy rail of the freshly built runtime,
+        including its native rebuilds. A spec without a build context (nor
+        a seed to materialize one) stays unwired: its members run with the
+        default policy.
+        """
+        bus = self._extension_bus
+        if bus is None:
+            return
+        if spec.build_context is None:
+            spec.materialize_build_context()
+        build_context = spec.build_context
+        extras = getattr(build_context, "extras", None)
+        if isinstance(extras, dict):
+            from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+            extras[TeamHandleKey.EXTENSION_BUS] = bus
+
+    def _inject_extension_bus(self, spec: "TeamAgentSpec") -> None:
+        """Seed the extension bus into the spec's build-context extras.
+
+        The cold build paths (create / new-in-session / cold recover) all
+        assemble the leader through the spec's build context, and the
+        per-member derive copies carry extras into the rail factories — so
+        one seed here reaches the policy rail of the freshly built runtime,
+        including its native rebuilds. A spec without a build context (nor
+        a seed to materialize one) stays unwired: its members run with the
+        default policy.
+        """
+        bus = self._extension_bus
+        if bus is None:
+            return
+        if spec.build_context is None:
+            spec.materialize_build_context()
+        build_context = spec.build_context
+        extras = getattr(build_context, "extras", None)
+        if isinstance(extras, dict):
+            from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+            extras[TeamHandleKey.EXTENSION_BUS] = bus
+
     async def _apply_action(
         self,
         action: RunAction,
@@ -1318,6 +1387,7 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
+        self._inject_extension_bus(spec)
         if kind is RunActionKind.COLD_RECOVER:
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.
