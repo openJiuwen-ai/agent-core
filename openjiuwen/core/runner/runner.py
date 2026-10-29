@@ -192,12 +192,14 @@ class _RunnerImpl(_TeamRunnerMixin):
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
         get_task_manager()
-        # Publish the state before spawning the owner: the assignment below is
-        # synchronous, so no coroutine can observe an owner-less live state.
+        # Bind the owner into the state before publishing it: the publish is
+        # the only write other loops observe, so no observer can ever see a
+        # live state whose owner is still None (which a concurrent loop would
+        # misread as stale and rebuild over, orphaning this owner).
         state = _RootTaskGroupState()
-        self._root_state = state
         owner = asyncio.create_task(self._root_task_group_owner_loop(state))
         state.owner = owner
+        self._root_state = state
         await state.ready.wait()
         if state.group is None and owner.done():
             await owner
@@ -210,8 +212,10 @@ class _RunnerImpl(_TeamRunnerMixin):
 
         owner = state.owner
         try:
+            # Stop must drain manager tasks regardless of owner liveness:
+            # an owner that already died may have left managed tasks behind.
+            await get_task_manager().cancel_all()
             if _is_live_task_on_running_loop(owner):
-                await get_task_manager().cancel_all()
                 state.stop.set()
                 if state.group is not None:
                     state.group.cancel_scope.cancel()
@@ -224,13 +228,29 @@ class _RunnerImpl(_TeamRunnerMixin):
                             await owner
                     except asyncio.CancelledError:
                         pass
-            else:
-                # Owner finished here, or died with / belongs to another
-                # loop: cancelling or awaiting it from this loop would raise
-                # RuntimeError. Its own loop's teardown (or its death)
-                # settles it; drop the reference.
+            elif owner.done():
+                # Owner already finished on its own loop; its finally block
+                # settled its state. Nothing left to cancel or await.
+                logger.info(
+                    "Runner root task group owner already finished; nothing to await",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                )
+            elif owner.get_loop().is_closed():
+                # The owner's loop is gone: the task can never run again and
+                # cannot be cancelled or awaited from here. Drop it.
                 logger.warning(
-                    "Dropping runner root task group owner not live on the current event loop",
+                    "Dropping runner root task group owner whose event loop is closed",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                )
+            else:
+                # Owner is live on a different, still-running loop: that
+                # loop's own stop() will settle it. Cancelling or awaiting a
+                # foreign-loop task from here would raise RuntimeError, so
+                # this loop only gives up its reference.
+                logger.warning(
+                    "Dropping runner root task group owner live on a different event loop",
                     event_type=LogEventType.RUNNER_STOP,
                     runner_id=self._runner_id,
                 )
@@ -271,13 +291,15 @@ class _RunnerImpl(_TeamRunnerMixin):
         ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
         context (e.g. A2A streaming on a uvicorn worker thread).
         """
-        if self._root_state is None or self._root_state.group is None:
+        state = self._root_state
+        group = state.group if state is not None else None
+        if group is None:
             return None
         from openjiuwen.core.common.task_manager.context import get_task_group, set_task_group
 
         if get_task_group() is not None:
             return None
-        return set_task_group(self._root_state.group)
+        return set_task_group(group)
 
     def _exit_root_task_group_context(self, token) -> None:
         if token is None:

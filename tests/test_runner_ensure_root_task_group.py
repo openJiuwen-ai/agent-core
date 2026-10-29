@@ -18,11 +18,27 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from openjiuwen.core.runner.runner import (
     DEFAULT_RUNNER_CONFIG,
     _RootTaskGroupState,
     _RunnerImpl,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_main_thread_loop_after_test():
+    """Leave the main thread without a current loop after each test.
+
+    _new_loop() sets each fresh loop as the main thread's current loop; the
+    tests close those loops in their finally blocks. Without this teardown
+    the main thread would keep pointing at a closed loop, and a later test
+    in the same session calling asyncio.get_event_loop() would receive the
+    closed object.
+    """
+    yield
+    asyncio.set_event_loop(None)
 
 
 def _new_loop() -> asyncio.AbstractEventLoop:
