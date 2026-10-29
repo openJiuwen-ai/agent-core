@@ -3425,7 +3425,6 @@ class ReActAgent(BaseAgent):
                 logger.info("Context cleanup was shielded for session %s", session.get_session_id())
             except Exception:
                 logger.warning("Failed to clean context after abort", exc_info=True)
-                return False
         try:
             await asyncio.shield(self.context_engine.save_contexts(session))
         except asyncio.CancelledError:

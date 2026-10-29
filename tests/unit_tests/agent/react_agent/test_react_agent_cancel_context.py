@@ -199,6 +199,22 @@ async def test_stream_error_checkpoints_safe_context_and_emits_error():
 
 
 @pytest.mark.asyncio
+async def test_abort_still_saves_when_context_cleanup_fails():
+    agent = ReActAgent(card=AgentCard(name="cleanup_error_agent", description="abort fallback"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.get_context.side_effect = RuntimeError("context unavailable")
+    agent.context_engine.save_contexts = AsyncMock()
+    session = MagicMock()
+
+    persisted = await agent._persist_context_after_abort(
+        session, "[Request failed with unexpected error]"
+    )
+
+    assert persisted is True
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
 async def test_owned_stream_error_saves_and_commits_once():
     agent = ReActAgent(card=AgentCard(name="owned_stream_agent", description="stream lifecycle test"))
     agent.context_engine = MagicMock()
