@@ -745,6 +745,44 @@ def _check_window(messages: list, ending_outcome: str | None, interruption, erro
         raise error("window has tool calls without results")
 
 
+async def discard_persistent_confirmation(
+    backend: "BaseKVStore", *, agent_id: str, session_id: str, request_id: str, spec_fingerprint: str,
+) -> bool:
+    """Settle a terminal host request's saved confirmation without invoking native execution.
+
+    The host must hold exclusive Session execution ownership and durably end
+    the request first. Mismatched identity/Spec fails closed; other requests
+    and nonwaiting records are unchanged. Real results, archives, window
+    metadata and remembered tool permissions survive. No business grant is made.
+    """
+    store = WindowStore(backend)
+    raw = await store.load_state(agent_id, session_id)
+    if raw is None:
+        return False
+    record = parse_record(raw)
+    if (record.agent_id, record.session_id) != (agent_id, session_id):
+        raise invalid_record("identity does not match this Session")
+    ending = record.ending
+    if ending is None or ending.outcome != WAITING or ending.request_id != request_id:
+        return False
+    if ending.spec_fingerprint != spec_fingerprint:
+        raise invalid_record("waiting Spec does not match the abandoned request")
+    messages = decode_messages(record.messages)
+    interruption = decode_interruption(record.interruption) if record.interruption is not None else None
+    _check_window(messages, ending.outcome, interruption, invalid_record)
+    closed = ExecutionEnding(
+        outcome="error", request_id=request_id, reply_target=ending.reply_target,
+        output_refs=tuple(ending.output_refs), last_group_message_id=record.last_group_message_id,
+    )
+    messages = tidy_window(patch_stopped_calls(messages), closed, ending.execution_id)
+    updated = record.model_copy(update={
+        "messages": encode_messages(messages), "interruption": None,
+        "ending": ending.model_copy(update={"outcome": "error"}),
+    })
+    await store.save_state(agent_id, session_id, dump_record(updated))
+    return True
+
+
 class ExecutionStateStore:
     """The SessionStateStore of one Execution; the entry uses it for one load and one save."""
 

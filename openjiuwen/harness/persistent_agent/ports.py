@@ -78,6 +78,18 @@ class BudgetPort(Protocol):
         ...
 
 
+class GroupMessageApprovalRequired(Exception):
+    """Host-private candidates need owner consent before sharing to this destination.
+
+    ``approval_id`` is opaque correlation, never an authorization token. Do not
+    attach candidates or previews; the host must reauthorize every resumed read.
+    """
+
+    def __init__(self, message: str = "跨群消息分享需要所有者批准。", *, approval_id: str | None = None) -> None:
+        super().__init__(message)
+        self.approval_id = approval_id
+
+
 class GroupChatPort(Protocol):
     """Current-group background and Agent-authorized cross-group search; the host resolves authorization."""
 

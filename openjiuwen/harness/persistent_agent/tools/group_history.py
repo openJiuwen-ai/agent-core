@@ -9,7 +9,11 @@ from pydantic import ValidationError
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.foundation.tool.schema import ToolOutput
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 
+from ..ports import GroupMessageApprovalRequired
 from ..schema.context import GroupMessageQuery, GroupMessageSearchResult
 
 if TYPE_CHECKING:
@@ -17,6 +21,7 @@ if TYPE_CHECKING:
     from ..schema.execution import ExecutionContext
 
 SEARCH_TOOL_NAME = "search_group_messages"
+GROUP_SHARE_INTERRUPT_OWNER = "persistent_agent.group_share"
 RESULT_MAX_CHARS = 32768
 EXCERPT_MAX_CHARS = 2048
 REASON_MAX_CHARS = 1024
@@ -88,7 +93,13 @@ class PersistentGroupMessageSearchTool(Tool):
                 idempotent=True,
                 description=(
                     "搜索本 Agent 当前获授权群的已保存历史，可在私聊或群内跨群查询。"
-                    "query 为不区分大小写的字面子串；也可按时间或发送者查询。group_ids/group_names 精确过滤。"
+                    "单个关键词用 query；多个关键词一次放入 keywords，按 OR 合并命中，避免逐词重复调用。"
+                    "一次搜索可命中多个群；跨群分享按实际命中的来源群分别审批，每张审批只包含一个来源群和一个目标会话。"
+                    "若用户询问指定群在某段时间聊了什么、要求回顾完整对话，必须用 group_names/group_ids 和 "
+                    "since/until 限定范围，并省略 query/keywords；这样会包含范围内的普通成员与 Agent 消息。"
+                    "只有用户查找特定主题或词语时才使用 query/keywords；关键词按不区分大小写的字面子串匹配。"
+                    "用户指定了群时，不要搜索全部授权群。"
+                    "group_ids/group_names 按精确条件过滤。"
                     "未指定群时搜索全部授权群，未指定时间时搜索全部已保存历史。"
                     "按接收时间倒序返回来源与消息引用。cursor 使用同一查询上一页的 next_cursor。"
                     "incomplete/失败不代表没有记录；display_truncated 表示展示有省略，可缩小范围或 limit。"
@@ -104,13 +115,24 @@ class PersistentGroupMessageSearchTool(Tool):
         try:
             query = GroupMessageQuery.model_validate(inputs)
         except ValidationError:
-            return _failure("invalid_arguments", "查询参数无效；至少提供关键词、时间范围或发送者。")
+            return _failure("invalid_arguments", "查询参数无效；请提供 query、keywords、时间范围或发送者。")
         try:
             raw = await self._group_chat.search_messages(self._execution, query)
             result = GroupMessageSearchResult.model_validate(raw)
             result.assert_matches(self._execution)
             if len(result.hits) > query.limit:
                 raise ValueError("host exceeded query limit")
+        except GroupMessageApprovalRequired as exc:
+            # Candidate bodies and arbitrary host hints never enter native state or the model.
+            raise ToolInterruptException(
+                request=InterruptRequest(
+                    message="跨群消息分享需要所有者批准。",
+                    payload_schema=ConfirmPayload.to_schema(),
+                    metadata={"kind": "group_share", "approval_id": exc.approval_id},
+                    interrupt_owner=GROUP_SHARE_INTERRUPT_OWNER,
+                    interrupt_kind=InterruptKind.CONFIRM,
+                )
+            ) from None
         except Exception:
             # Backend exception details can contain credentials, SQL or inaccessible group identities.
             # Cancellation derives from BaseException and deliberately propagates.

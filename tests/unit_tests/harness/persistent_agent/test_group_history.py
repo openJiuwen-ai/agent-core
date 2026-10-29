@@ -78,6 +78,28 @@ def search_tool(execution, host):
     return module.PersistentGroupMessageSearchTool(execution=execution, group_chat=host)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approval_id", [None, "approval-1"])
+async def test_group_share_signal_becomes_owned_native_confirmation(execution, approval_id):
+    from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+    from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+
+    api = import_module(PKG)
+
+    class Host:
+        async def search_messages(self, execution, query):
+            raise api.GroupMessageApprovalRequired("PRIVATE-HOST-HINT", approval_id=approval_id)
+
+    with pytest.raises(ToolInterruptException) as caught:
+        await search_tool(execution, Host()).invoke({"query": "decision"})
+    pending = caught.value.request
+    assert pending.metadata == {"kind": "group_share", "approval_id": approval_id}
+    assert "PRIVATE-HOST-HINT" not in pending.model_dump_json()
+    assert pending.payload_schema == ConfirmPayload.to_schema()
+    assert pending.interrupt_kind == "confirm" and pending.interrupt_owner
+    assert pending.auto_confirm_key == "" and caught.value.__suppress_context__ is True
+
+
 def reader():
     name = f"{PKG}.execution.group_history"
     try:

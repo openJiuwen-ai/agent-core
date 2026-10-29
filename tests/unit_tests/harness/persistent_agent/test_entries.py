@@ -135,6 +135,9 @@ class LocalModel:
             raise PermanentModelError("local model failure")
         if turn == "transient_fail":
             raise RuntimeError("local model failure")
+        if isinstance(turn, list):
+            yield AssistantMessageChunk(content="checking ", tool_calls=turn, usage_metadata=usage(3, 4))
+            return
         if isinstance(turn, tuple):
             name, arguments = turn
             calls = [ToolCall(id=f"call-{self.calls}", type="function", name=name, arguments=arguments)]
@@ -1742,6 +1745,267 @@ def state_key(session_id="session-a"):
 async def saved_record(harness, session_id="session-a"):
     raw = await harness.backend.get(state_key(session_id))
     return None if raw is None else json.loads(raw)
+
+
+class SharingApprovalHost:
+    """Keeps candidates private until host authorization, independent of native replies."""
+
+    candidate = "PRIVATE-CANDIDATE-BODY-7f9c"
+
+    def __init__(self, api):
+        self.api = api
+        self.approved = False
+        self.calls = []
+
+    async def recent_messages(self, execution, cursor=None, limit=20):
+        raise AssertionError("scheduled requests must not read group background")
+
+    async def search_messages(self, execution, query):
+        self.calls.append((execution, query))
+        if not self.approved:
+            raise self.api.GroupMessageApprovalRequired("host hint must not escape", approval_id="approval-1")
+        return self.api.GroupMessageSearchResult(
+            **self.api.InvocationRef.from_execution(execution).model_dump(), status="found", query_complete=True,
+            hits=[dict(group_id="group-b", group_name="source group", message_ref="group-b:m1", message=dict(
+                message_id="m1", sender_id="owner", sender_name="Owner", sender_kind="human",
+                received_at=datetime(2026, 10, 27, tzinfo=timezone.utc), text=self.candidate,
+            ))],
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["default", "automatic", "full_access"])
+@pytest.mark.parametrize("choice", ["approve", "approve_for_session", "reject"])
+async def test_native_group_share_pause_resume(real_state, monkeypatch, profile, choice):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    host = SharingApprovalHost(harness.api)
+    args = '{"query":"decision","group_ids":["group-b"],"limit":1}'
+    spec = harness.spec(permission_profile=profile, tools=[],
+                        permissions={"enabled": True, "mode": "auto"} if profile == "automatic" else None)
+    harness.model.turns = [("search_group_messages", args), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert first[-1].payload.reason == "awaiting_confirmation"
+    assert [(call.tool_call_id, call.approval_ref) for call in first[-1].payload.intercepted] == [
+        ("call-1", "approval-1"),
+    ]
+    record = await saved_record(harness)
+    pending = RECORD.decode_interruption(record["interruption"]).interrupted_tools["call-1"]
+    saved_request = pending.interrupt_requests["call-1"]
+    assert saved_request.interrupt_kind == "confirm" and saved_request.interrupt_owner
+    assert saved_request.auto_confirm_key == "" and saved_request.interrupt_id.startswith("intr_")
+    assert pending.tool_call.arguments == args
+    assert not [event for event in first if str(event.event_type) == "tool.completed"]
+    assert host.candidate not in str(first) + json.dumps(record) + str(harness.model.seen)
+    host.approved = choice != "reject"
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission(choice=choice)))
+    assert resumed[-1].payload.status == "completed" and "execution.started" not in kinds(resumed)
+    assert harness.model.calls == 2
+    tools = [message for message in window_of(await saved_record(harness)) if isinstance(message, ToolMessage)]
+    assert len(tools) == 1 and tools[0].tool_call_id == "call-1"
+    assert len(host.calls) == (1 if choice == "reject" else 2)
+    if choice == "reject":
+        assert "拒绝" in tools[0].content and host.candidate not in str(harness.model.seen)
+    else:
+        assert host.calls[0][1] == host.calls[1][1]
+        assert host.candidate in tools[0].content and host.candidate in str(harness.model.seen[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("legacy_permission", [False, True])
+async def test_native_group_share_two_stage_approval_survives_rebuild(
+    real_state, monkeypatch, typed, legacy_permission,
+):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    spec = harness.spec(tools=[], permissions={
+        "enabled": True, "schema": "tiered_policy", "permission_mode": "normal",
+        "defaults": {"*": "allow"}, "tools": {"search_group_messages": "ask"},
+        "rules": [], "approval_overrides": [],
+    })
+    host = SharingApprovalHost(harness.api)
+    harness.model.turns = [("search_group_messages", '{"query":"decision"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert first[-1].payload.reason == "awaiting_confirmation" and not host.calls
+    if legacy_permission:
+        legacy_record = await saved_record(harness)
+        for pending in legacy_record["interruption"]["interrupted_tools"]["call-1"]["interrupt_requests"].values():
+            for field in ("interrupt_id", "interrupt_owner", "interrupt_kind"):
+                pending["data"].pop(field, None)
+        await harness.backend.set(state_key(), json.dumps(legacy_record))
+    scene = RECORD.decode_interruption((await saved_record(harness))["interruption"])
+    tool_request = scene.interrupted_tools["call-1"].interrupt_requests["call-1"]
+    address = tool_request.interrupt_id if typed else first[-1].payload.intercepted[0].tool_call_id
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    second = await collect(harness.api.resume_persistent_request(spec, ctx, permission(address)))
+    assert second[-1].payload.reason == "awaiting_confirmation" and len(host.calls) == 1
+    assert second[-1].payload.intercepted[0].approval_ref == "approval-1"
+    scene = RECORD.decode_interruption((await saved_record(harness))["interruption"])
+    entry = scene.interrupted_tools["call-1"]
+    share_request = entry.interrupt_requests["call-1"]
+    assert share_request.interrupt_owner != tool_request.interrupt_owner
+    assert share_request.interrupt_id != tool_request.interrupt_id
+    assert entry.carried_answers["call-1"][tool_request.interrupt_owner].carried is True
+    # New interrupt IDs reject stale answers and aliases to the same pending call.
+    raw = await harness.backend.get(state_key())
+    for responses in (
+        permission(tool_request.interrupt_id)["responses"],
+        permission("call-1")["responses"] + permission(share_request.interrupt_id)["responses"],
+    ):
+        invalid_ctx, invalid_host = harness.context(spec, group_chat=host, execution_id="execution-invalid")
+        with pytest.raises(BaseError):
+            await collect(harness.api.resume_persistent_request(spec, invalid_ctx, {"responses": responses}))
+        assert not invalid_host.events and await harness.backend.get(state_key()) == raw
+    host.approved = True
+    address = share_request.interrupt_id if typed else second[-1].payload.intercepted[0].tool_call_id
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-3")
+    final = await collect(harness.api.resume_persistent_request(spec, ctx, permission(address)))
+    assert final[-1].payload.status == "completed"
+    assert harness.model.calls == 2 and len(host.calls) == 2
+    assert host.candidate in str(harness.model.seen[-1])
+
+
+@pytest.mark.asyncio
+async def test_group_share_reply_cannot_grant_host_or_remember_business_consent(real_state, monkeypatch):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    host = SharingApprovalHost(harness.api)
+    spec = harness.spec(permission_profile="full_access", tools=[])
+    harness.model.turns = [("search_group_messages", '{"query":"decision"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    still_waiting = await collect(
+        harness.api.resume_persistent_request(spec, ctx, permission(choice="approve_for_session"))
+    )
+    assert still_waiting[-1].payload.reason == "awaiting_confirmation"
+    assert harness.model.calls == 1 and len(host.calls) == 2
+    record = await saved_record(harness)
+    assert not record["auto_confirm"]
+    assert host.candidate not in str(still_waiting) + json.dumps(record)
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-3")
+    final = await collect(harness.api.resume_persistent_request(spec, ctx, permission(choice="reject")))
+    assert final[-1].payload.status == "completed" and len(host.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_group_share_discard_allows_real_next_request(real_state):
+    harness = real_state
+    spec = harness.spec(permission_profile="full_access", tools=[])
+    host = SharingApprovalHost(harness.api)
+    harness.model.turns = [("search_group_messages", '{"query":"decision"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert first[-1].payload.reason == "awaiting_confirmation"
+    assert await harness.api.discard_persistent_confirmation(
+        harness.backend, agent_id="business-agent", session_id="session-a", request_id="request-1",
+        spec_fingerprint=spec.fingerprint(),
+    ) is True
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-3", request_id="request-3")
+    final = await collect(harness.api.execute_persistent_request(spec, ctx, request(text="a new task")))
+    assert final[-1].payload.status == "completed" and len(host.calls) == 1
+    assert host.candidate not in str(harness.model.seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("duplicate_query", [False, True])
+async def test_native_group_share_parallel_calls_keep_own_decisions(real_state, monkeypatch, partial, duplicate_query):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    tool_type = module("tools.group_history").PersistentGroupMessageSearchTool
+    original_init = tool_type.__init__
+
+    def parallel_tool(self, **kwargs):
+        original_init(self, **kwargs)
+        self.card.parallel_safe = True
+
+    monkeypatch.setattr(tool_type, "__init__", parallel_tool)
+
+    class ParallelHost(SharingApprovalHost):
+        def __init__(self, api):
+            super().__init__(api)
+            self.both_entered = asyncio.Event()
+
+        async def search_messages(self, execution, query):
+            if self.approved:
+                return await super().search_messages(execution, query)
+            self.calls.append((execution, query))
+            if len(self.calls) == 2:
+                self.both_entered.set()
+            await asyncio.wait_for(self.both_entered.wait(), timeout=5)
+            raise self.api.GroupMessageApprovalRequired(approval_id=f"approval-{query.query}")
+
+    host = ParallelHost(harness.api)
+    spec = harness.spec(permission_profile="full_access", tools=[])
+    harness.model.turns = [[ToolCall(id=f"call-{key}", type="function", name="search_group_messages",
+                                   arguments=json.dumps({"query": "shared" if duplicate_query else key}))
+                           for key in ("alpha", "beta")], "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert first[-1].payload.reason == "awaiting_confirmation"
+    assert {call.tool_call_id: call.approval_ref for call in first[-1].payload.intercepted} == {
+        "call-alpha": "approval-shared" if duplicate_query else "approval-alpha",
+        "call-beta": "approval-shared" if duplicate_query else "approval-beta",
+    }
+    assert len(host.calls) == 2
+    host.approved = True
+    responses = permission("call-alpha")["responses"]
+    if not partial:
+        responses += permission("call-beta", "reject")["responses"]
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, {"responses": responses}))
+    if partial:
+        assert resumed[-1].payload.reason == "awaiting_confirmation" and harness.model.calls == 1
+        assert [call.tool_call_id for call in resumed[-1].payload.intercepted] == ["call-beta"]
+        ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-3")
+        resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission("call-beta", "reject")))
+    assert resumed[-1].payload.status == "completed" and len(host.calls) == 3
+    results = {message.tool_call_id: message.content for message in window_of(await saved_record(harness))
+               if isinstance(message, ToolMessage)}
+    assert host.candidate in results["call-alpha"]
+    assert host.candidate not in results["call-beta"] and "拒绝" in results["call-beta"]
+
+
+@pytest.mark.asyncio
+async def test_group_share_preserves_tool_permission_denial(real_state, monkeypatch):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    spec = harness.spec(tools=[], permissions={
+        "enabled": True, "schema": "tiered_policy", "permission_mode": "normal",
+        "defaults": {"*": "allow"}, "tools": {"search_group_messages": "deny"},
+        "rules": [], "approval_overrides": [],
+    })
+    host = SharingApprovalHost(harness.api)
+    harness.model.turns = [("search_group_messages", '{"query":"decision"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.status == "completed" and not host.calls
+
+
+@pytest.mark.asyncio
+async def test_group_share_legacy_json_scene_can_be_rejected(real_state, monkeypatch):
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    spec = harness.spec(permission_profile="full_access", tools=[])
+    host = SharingApprovalHost(harness.api)
+    harness.model.turns = [("search_group_messages", '{"query":"decision"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    record = await saved_record(harness)
+    entry = record["interruption"]["interrupted_tools"]["call-1"]
+    entry.pop("carried_answers", None)
+    for pending in entry["interrupt_requests"].values():
+        for field in ("interrupt_id", "interrupt_owner", "interrupt_kind"):
+            pending["data"].pop(field, None)
+    await harness.backend.set(state_key(), json.dumps(record))
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    events = await collect(harness.api.resume_persistent_request(spec, ctx, permission(choice="reject")))
+    assert events[-1].payload.status == "completed" and len(host.calls) == 1
 
 
 def window_of(record):

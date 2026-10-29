@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_08 / tool-effects-and-intent |
 | 关联模块 | [effect_policy.py](../../tools/effect_policy.py)、[tool_intent_rail.py](../../execution/tool_intent_rail.py)、[Spec 装配](../../schema/spec.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-28 |
 | 关联 feature | [F_15](../features/F_15_tool-intent-before-side-effect.md)；share_file 的分类见 [F_18](../features/F_18_output-handoff.md) D-06 |
 | 设计依据 | [架构设计：写意图及确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[外部操作](../designs/persistent-agent-architecture.md#82-外部操作与重试条件) |
 
@@ -66,6 +66,10 @@ before_tool_call 排在权限 / 中断和模型 Rail 停止检查之后，检查
 ### 4.3 `tool.completed` 的产生与结果
 
 after_tool_call 在工具结果转换之前读取原始结果，仅在 dispatch 标记已设置、尚未完成且有 emitter 时提交一条最终完成事件。只读操作 operation_id 为空，写操作关联前序意图 ID；所有状态均有非空白结果摘要，failed / unknown 另有 reason。结果和参数摘要限长、脱敏，不能由可选结果引用替代可读摘要。
+
+ToolInterruptException 表示等待原生确认，没有最终结果；不设置 completed、不生成 tool.completed
+或写操作完成回执。保留空 state 与未 dispatch / 已完成分支的独立判断；写回执仍须满足
+call_matches 与 digest_matches，不能因暂停迁移放宽调用和参数核验。
 
 | 实际观察 | 状态 |
 | --- | --- |

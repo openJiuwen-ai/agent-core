@@ -9,7 +9,7 @@
 | 方案成熟度 | 跨群范围及授权原则已确认；接口形状、结果细节和宿主适配按本文方案，实施前与 S_09 / JiuwenSwarm 接口核对 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-23 |
 | 负责人 | 闫祉君 |
-| 状态 | agent-core 已实现；宿主适配与跨仓闭环待验证 |
+| 状态 | agent-core 已实现；多关键词批量查询已补充，尚未验证；宿主适配与跨仓闭环待验证 |
 | 设计依据 | [架构设计](../designs/persistent-agent-architecture.md)；[S_09 群聊读取与历史检索](../specs/S_09_group-chat-and-knowledge.md)；PA-04 群消息端口契约；PA-07 参与判断 |
 | 关联 feature | [F_04](F_04_contract-convergence.md)（群消息端口）；[F_07](F_07_group-participation.md)（参与判断）；[F_15](F_15_tool-intent-before-side-effect.md)（工具副作用分类） |
 | 验证摘要 | 已覆盖 DTO、绑定身份、跨群工具调用、分页失败、窗口补读和模式隔离；本地验证与跨仓未覆盖项见第 8、9 节 |
@@ -45,6 +45,7 @@ PA-23 包含三类不同的群消息读取：PA-07 在群消息进入时读取�
 
 - `GroupChatPort` 保留当前群近期读取，搜索入口已使用 Agent 级跨群查询契约；搜索结果带来源群身份和稳定消息引用。
 - `GroupMessageQuery` 已增加群 ID / 群名过滤；`GroupMessagesResult` 只服务于近期读取，搜索使用独立的 `GroupMessageSearchResult`。近期读取的 `scanned_through` 不充当跨群搜索分页游标或全局扫描完整性证明。
+- `GroupMessageQuery.keywords` 支持一次传入最多 16 个关键词，按 OR 合并命中并去重；旧的单值 `query` 保持兼容。批量关键词扩展尚未验证。
 - PA-07 在加载窗口之前直接调用 `GroupChatPort.recent_messages`。这条参与判断链路已经独立于 `group_message_reader`，本方案不合并或替换它。
 - 注入 `GroupChatPort` 的 Persistent Execution 已注册 `search_group_messages`；自动背景读取另受 `request.kind == group_message` 保护，私聊和定时任务不因端口存在自动读取群消息。
 
@@ -77,7 +78,7 @@ flowchart TD
 
 #### 检索步骤与查询方式
 
-1. 模型调用 `search_group_messages`，传入关键词；可选指定群 ID / 群名、时间范围、发送者、分页游标和结果数。关键词按字面子串匹配、大小写不敏感，不按自然语言语义扩展；按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
+1. 模型调用 `search_group_messages`。单个关键词可使用 `query`；多个独立关键词一次放入 `keywords`，按 OR 合并为一个结果集，重复消息只返回一次；可选指定群 ID / 群名、时间范围、发送者、分页游标和结果数。关键词按字面子串匹配、大小写不敏感，不按自然语言语义扩展；按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
 2. agent-core 将查询连同可信 `ExecutionContext` 交给 `GroupChatPort.search_messages`，不从模型参数接收 `agent_id` 或授权列表。
 3. JiuwenSwarm 从执行上下文确定 Agent，并读取该 Agent 当前获授权的群集合。无群过滤条件时查询整个授权集合；指定群 ID / 群名时只在该集合内缩小范围，群名精确解析，同名时要求消歧。
 4. JiuwenSwarm 在其持久化群聊记录 / 检索索引中按查询条件检索，执行有界排序与分页，并在每次调用（包括后续分页）重新校验授权。
@@ -129,7 +130,7 @@ flowchart TD
 
 | 契约 | 建议变化 | 要求 |
 | --- | --- | --- |
-| `GroupMessageQuery` | 增加可选 `group_ids`、`group_names`；保留现有关键词、时间、发送者、游标和 limit 过滤语义 | 查询条件只能缩小宿主确认的授权范围；群过滤采用精确 ID / 名称规则 |
+| `GroupMessageQuery` | 增加 `keywords` 批量关键词，并保留 `query` 单关键词兼容；支持 `group_ids`、`group_names` | 多关键词 OR 合并、大小写不敏感去重；查询条件只能缩小宿主确认的授权范围 |
 | `GroupMessageSearchHit` | 新增跨群搜索命中值，含 `group_id`、`group_name`、稳定 `message_ref`、消息身份 / 时间 / 发送者 / 正文或有界摘录 | 不复用只代表当前会话消息的结构而丢失来源群；不含宿主内部文件路径或未授权字段 |
 | `GroupMessageSearchResult` | 新增搜索专用结果，含状态、命中、可选 `next_cursor`、扫描完整性 / 原因 | 不复用 `GroupMessagesResult.scanned_through` 表示多群搜索完整性；`empty` 只能用于完整扫描 |
 | `GroupChatPort.search_messages` | 扩展为宿主在可信 Execution 上下文中执行 Agent 级多群搜索 | `execution` 为身份来源；端口实现负责授权过滤、搜索及状态准确性 |

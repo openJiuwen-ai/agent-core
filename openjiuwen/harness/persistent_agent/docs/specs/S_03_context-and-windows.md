@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；PA-11 agent-core 组件已接入，真实服务端后端待联调 |
-| 最近一次修订日期 | 2026-10-25 |
+| 最近一次修订日期 | 2026-10-28 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_11](../features/F_11_window-management.md)、[F_12](../features/F_12_session-history-search.md)（PA-12 设计与实现）、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗主动交接容量兜底与状态提交)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
@@ -46,6 +46,16 @@ PA-10 会话状态记录采用 schema_version=1 的唯一最终结构：白名�
 PA-11 在同一条 Session 状态记录中增加 `current_window_id`、`window_seq` 和 `last_rollover`：前两者标识唯一当前窗口及其 Session 内序号，后者记录最近一次已提交切换的旧 / 新窗口标识、`archive_ref`、触发类型和 token 用量。PA-10 在每个完整 ReAct 轮次后提交当前窗口；若该轮触发换窗，先保存与归档源快照一致的当前轮次检查点，再归档和提交新窗口。换窗因而多一次源状态写入，不能只依赖上一轮快照，否则归档成功而新状态失败时无法精确核验恢复。执行中检查点、换窗提交与 Execution 结束保存共用 WindowStore 和状态键；不建立 `replacement_history` 或第二个活动窗口指针。schema_version=1 的唯一最终结构中，活动记录必须恰有非空 `checkpoint`、空 `ending`；终态记录恰有空 `checkpoint`、非空 `ending`。游标保存在记录顶层；不兼容此前组件级旧 V1 结构，也不提供读取映射。未知版本或无效记录不得降级为空状态；真实后端启用前须确认不存在旧结构记录。
 
 键由导出函数 `session_key_prefix(agent_id, session_id)` 派生：两个 ID 分别百分号编码（冒号、百分号均转义）后拼成 `pa:{编码后的 agent_id}:{编码后的 session_id}:`，状态键为前缀加 `state`，归档与索引键为前缀加 `archive:{序号}`、`archive_index`；记录中保留原始 ID，身份按原值精确比较。索引记录序号、execution_id、覆盖的 request_id 和时间；命名空间及跨主体隔离由宿主保障，不从键中包含 ID 推导已授权。
+
+多阶段原生暂停的每个 ToolInterruptEntry 还保存 `carried_answers`，按调用 ID / owner 记录已经
+采用的答复、kind、value、carried 标志及带白名单类型标记的原问题。ConfirmPayload / AskUserPayload
+以 JSON 值保存，原问题子类字段保留。旧记录缺该字段视为空；保留旧 auto_confirm_mapping 的读取
+兼容但不恢复为废弃的 native 字段。JSON 中缺 interrupt_id 时按 `intr_<call_id>` 补稳定 ID；旧
+group_share 问题补固定业务 owner/kind。旧 AskUserRequest、带完整 permission 展示标记的问题、以及
+带 auto_confirm_key 和匹配 ConfirmPayload schema 的问题补各自内置 rail 的 owner/kind；无法确定的
+自定义旧问题保留未知 owner，由 rail 再次询问，不把答复借给其他 rail。kind 校验沿用 native 的
+`interrupt_kind_of`，兼容 metadata 中的旧 kind。未知请求类型或 carried owner/kind 错配拒绝恢复。
+普通工具 ask 批准后分享再暂停、落盘重建不得重新询问已批准工具，见 [F_25](../features/F_25_group-sharing-confirmation.md)。
 
 ## 3. 不变量
 
