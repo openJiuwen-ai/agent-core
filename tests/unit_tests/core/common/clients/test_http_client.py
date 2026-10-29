@@ -62,6 +62,7 @@ class TestHttpSession:
     def mock_session(self):
         session = AsyncMock(spec=ClientSession)
         session.close.return_value = None
+        session.closed = False
         return session
 
     @pytest.fixture
