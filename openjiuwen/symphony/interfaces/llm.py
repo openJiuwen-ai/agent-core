@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol, TypeAlias, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import JsonValue
 
 SymphonyMessage: TypeAlias = dict[str, JsonValue]
 SymphonyMessages: TypeAlias = str | list[SymphonyMessage]
+# Observers receive response, stage, and operation as positional arguments.
+ModelResponseObserver: TypeAlias = Callable[[Any, str, str | None], None | Awaitable[None]]
 
 
 @runtime_checkable

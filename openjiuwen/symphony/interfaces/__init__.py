@@ -3,11 +3,12 @@
 
 from openjiuwen.symphony.interfaces.capability import AtomicCapabilityProvider, CapabilityProvider
 from openjiuwen.symphony.interfaces.graph import SkillGraphUpdater
-from openjiuwen.symphony.interfaces.llm import SymphonyLLM, SymphonyMessage, SymphonyMessages
+from openjiuwen.symphony.interfaces.llm import ModelResponseObserver, SymphonyLLM, SymphonyMessage, SymphonyMessages
 
 __all__ = [
     "AtomicCapabilityProvider",
     "CapabilityProvider",
+    "ModelResponseObserver",
     "SkillGraphUpdater",
     "SymphonyLLM",
     "SymphonyMessage",

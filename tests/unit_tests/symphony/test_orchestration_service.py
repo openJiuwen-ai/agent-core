@@ -11,15 +11,19 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony import (
     ArtifactSpec,
+    CapabilityDescriptor,
     CapabilityFingerprint,
     CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
+    FingerprintService,
+    FingerprintSettings,
     OrchestrationConfig,
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
     ParameterSpec,
+    SourceSnapshot,
     SymphonyRuntime,
 )
 from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
@@ -707,6 +711,54 @@ async def test_early_build_failure_is_delivered_without_started_progress_worker(
 
     assert exc_info.value is error
     assert events == [OrchestrationProgress("build_failed", error=str(error))]
+
+
+@pytest.mark.asyncio
+async def test_truncated_fingerprint_response_preserves_current_graph(tmp_path: Path) -> None:
+    graph_root = tmp_path / "graph"
+    fingerprint_root = tmp_path / "fingerprint"
+    initial = OrchestrationService(
+        graph_artifact_root=graph_root,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+    )
+    built = await initial.build()
+    previous_current = (graph_root / "current.json").read_bytes()
+    previous_graph = built.graph_path.read_bytes()
+
+    class Provider:
+        async def source_snapshot(self):
+            return SourceSnapshot(snapshot_id="changed-source", capability_count=1)
+
+        async def capabilities(self):
+            return [CapabilityDescriptor(capability_id="extract", capability_type="skill", name="Extract")]
+
+    class TruncatedModel:
+        async def invoke(self, messages, **kwargs):
+            return SimpleNamespace(content='{"description": "Incomplete extraction"}', finish_reason="length")
+
+    provider = Provider()
+    service = OrchestrationService(
+        graph_artifact_root=graph_root,
+        capability_provider=provider,
+        model=_PlanLLM(),
+        fingerprint_service=FingerprintService(
+            provider,
+            fingerprint_root,
+            llm=TruncatedModel(),
+            settings=FingerprintSettings(enable_llm_extraction=True),
+        ),
+    )
+    events = []
+    with pytest.raises(BaseError) as exc_info:
+        await service.build(force=True, progress=events.append)
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert [event.event for event in events] == ["build_failed"]
+    assert (graph_root / "current.json").read_bytes() == previous_current
+    assert built.graph_path.read_bytes() == previous_graph
+    assert not (fingerprint_root / "fingerprint.json").exists()
+    assert not (fingerprint_root / ".fingerprint-cache.json").exists()
 
 
 @pytest.mark.asyncio
