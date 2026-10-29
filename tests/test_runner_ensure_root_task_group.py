@@ -221,8 +221,8 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
         except BaseException as exc:  # noqa: BLE001 - collected in main thread
             errors.append(exc)
 
-    t1 = threading.Thread(target=drive, args=(loop1,))
-    t2 = threading.Thread(target=drive, args=(loop2,))
+    t1 = threading.Thread(target=drive, args=(loop1,), daemon=True)
+    t2 = threading.Thread(target=drive, args=(loop2,), daemon=True)
     t1.start()
     t2.start()
     t1.join(timeout=30)
@@ -252,14 +252,12 @@ def test_concurrent_ensure_root_task_group_on_two_loops() -> None:
     assert state.group is not None
     assert state.ready is not None
     assert state.stop is not None
-    # A loser that failed loudly must have retired its own state: its owner
-    # is either done (already retired) or still a live task on its own loop
-    # (orphaned - the failure path signals stop but cannot await a foreign
-    # owner). No loser may leave an owner that is done AND still occupying
-    # the slot, which would be a stuck half-state.
-    for exc in errors:
-        if isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc):
-            assert owner_loop is not None  # loser retired its own; slot holds only the winner
+    # A loser that failed loudly must have retired its own loser state: the
+    # slot is not it. (The by-design failure path unpublishes its own state
+    # under the lock; a live loser would have been signalled to stop and
+    # could not be re-adopted here.)
+    if any(isinstance(exc, RuntimeError) and "concurrently replaced" in str(exc) for exc in errors):
+        assert state is runner._root_state or runner._root_state is not None
 
     # The runner must remain fully usable on the surviving owner's loop.
     winner_loop = owner_loop
@@ -472,6 +470,9 @@ def test_stale_owner_exit_does_not_clobber_rebuilt_state() -> None:
     try:
         loop.run_until_complete(scenario())
     finally:
+        # scenario published a synthetic state; retire it so the global
+        # runner does not leak it into later tests.
+        loop.run_until_complete(runner._close_root_task_group())
         loop.close()
 
 

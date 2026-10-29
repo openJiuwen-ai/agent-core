@@ -598,12 +598,28 @@ class _RunnerImpl(_TeamRunnerMixin):
                            exception=e)
             return False
         finally:
-            await self._resource_manager.release()
+            try:
+                await self._resource_manager.release()
+            except Exception as e:  # noqa: BLE001 - cleanup must not mask the stop result
+                logger.warning(
+                    "Failed to release runner resources during stop",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                    exception=e,
+                )
             try:
                 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
                 await ReadWriteLockManager.stop()
             finally:
-                await self._close_root_task_group()
+                try:
+                    await self._close_root_task_group()
+                except Exception as e:  # noqa: BLE001 - teardown must not mask the stop result
+                    logger.warning(
+                        "Failed to close runner root task group during stop",
+                        event_type=LogEventType.RUNNER_STOP,
+                        runner_id=self._runner_id,
+                        exception=e,
+                    )
 
     async def run_workflow(self,
                            workflow: str | Workflow,
