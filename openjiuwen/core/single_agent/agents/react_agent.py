@@ -25,6 +25,7 @@ from openjiuwen.core.common.constants.constant import RESUME_SIGNAL
 from openjiuwen.core.common.exception.errors import BaseError, Termination
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.errors import AbortError
+from openjiuwen.core.session.interaction.base import AgentInterrupt
 from openjiuwen.core.single_agent.schema.steering import SteeringInput
 
 try:
@@ -3189,7 +3190,9 @@ class ReActAgent(BaseAgent):
                 commit_session=not need_cleanup and self._session_supports_agent_lifecycle(session),
             )
             raise  # Re-raise to propagate cancellation signal
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, (AbortError, AgentInterrupt)):
+                raise
             if not kwargs.get("_stream_lifecycle_owner"):
                 abort_persisted = await self._persist_context_after_abort(
                     session, "[Request failed with unexpected error]",
@@ -3327,6 +3330,8 @@ class ReActAgent(BaseAgent):
                 )
                 raise
             except Exception as e:
+                if isinstance(e, (AbortError, AgentInterrupt)):
+                    raise
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 abort_persisted = await self._persist_context_after_abort(
                     session, "[Request failed with unexpected error]"
@@ -3425,10 +3430,16 @@ class ReActAgent(BaseAgent):
                 logger.info("Context cleanup was shielded for session %s", session.get_session_id())
             except Exception:
                 logger.warning("Failed to clean context after abort", exc_info=True)
+        save_task = asyncio.ensure_future(self.context_engine.save_contexts(session))
         try:
-            await asyncio.shield(self.context_engine.save_contexts(session))
+            while not save_task.done():
+                try:
+                    await asyncio.shield(save_task)
+                except asyncio.CancelledError:
+                    logger.info("Waiting for shielded context save for session %s", session.get_session_id())
+            save_task.result()
         except asyncio.CancelledError:
-            logger.info("Context save was shielded for session %s", session.get_session_id())
+            logger.warning("Context save task was cancelled for session %s", session.get_session_id())
             return False
         except Exception:
             logger.warning("Failed to save context after abort", exc_info=True)
@@ -3451,7 +3462,7 @@ class ReActAgent(BaseAgent):
         )
 
     async def _save_contexts_on_cancel(self, session: Session) -> None:
-        """Persist the cleaned context while the caller propagates cancellation."""
+        """Legacy compatibility helper; production aborts use _persist_context_after_abort."""
         try:
             await asyncio.shield(self.context_engine.save_contexts(session))
         except asyncio.CancelledError:

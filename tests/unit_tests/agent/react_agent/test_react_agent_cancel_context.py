@@ -10,7 +10,9 @@ import pytest
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.session.interaction.base import AgentInterrupt
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -159,6 +161,34 @@ async def test_model_error_keeps_user_turn_and_commits_external_agent_session():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("control_error", [AbortError("approval required"), AgentInterrupt("approval required")])
+async def test_control_flow_interrupt_does_not_mark_context_as_unexpected_error(control_error):
+    agent = ReActAgent(card=AgentCard(name="interrupt_agent", description="control flow test"))
+    agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+    context = MagicMock()
+    context.add_messages = AsyncMock()
+    context.get_context_window = AsyncMock(return_value=MagicMock(get_messages=lambda: [], get_tools=lambda: None))
+    context.get_messages.return_value = [UserMessage(content="需要审批")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.create_context = AsyncMock(return_value=context)
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    llm = MockLLMModel()
+    llm.invoke = AsyncMock(side_effect=control_error)
+    session = MagicMock()
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+
+    with patch.object(agent, "_get_llm", return_value=llm):
+        with pytest.raises(type(control_error)):
+            await agent.invoke({"query": "需要审批"}, session=session)
+
+    context.set_messages.assert_not_called()
+    agent.context_engine.save_contexts.assert_not_awaited()
+    session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_stream_cancel_saves_context_to_external_session():
     """The stream wrapper must also persist context when cancellation escapes invoke."""
     agent = ReActAgent(card=AgentCard(name="stream_cancel_agent", description="stream cancel save test"))
@@ -213,6 +243,76 @@ async def test_abort_still_saves_when_context_cleanup_fails():
     )
 
     assert persisted is True
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_workflow_owned_session_is_not_committed_on_abort():
+    agent = ReActAgent(card=AgentCard(name="workflow_agent", description="workflow ownership"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock()
+    session = MagicMock(spec=["get_session_id", "get_state", "write_stream"])
+
+    assert agent._session_supports_agent_lifecycle(session) is False
+    assert await agent._persist_context_after_abort(
+        session, "[Request failed with unexpected error]",
+        cleanup=False,
+        commit_session=agent._session_supports_agent_lifecycle(session),
+    ) is True
+    assert not hasattr(session, "commit")
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_does_not_hide_original_model_error():
+    agent = ReActAgent(card=AgentCard(name="commit_error_agent", description="commit failure"))
+    agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+    context = MagicMock()
+    context.add_messages = AsyncMock()
+    context.get_context_window = AsyncMock(return_value=MagicMock(get_messages=lambda: [], get_tools=lambda: None))
+    context.get_messages.return_value = [UserMessage(content="查一下热搜")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.create_context = AsyncMock(return_value=context)
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    llm = MockLLMModel()
+    llm.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+    session.commit = AsyncMock(side_effect=RuntimeError("checkpoint unavailable"))
+
+    with patch.object(agent, "_get_llm", return_value=llm):
+        with pytest.raises(RuntimeError, match="insufficient_quota"):
+            await agent.invoke({"query": "查一下热搜"}, session=session)
+
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_waits_for_one_shielded_save():
+    save_started = asyncio.Event()
+    finish_save = asyncio.Event()
+
+    async def save_contexts(_session):
+        save_started.set()
+        await finish_save.wait()
+
+    agent = ReActAgent(card=AgentCard(name="repeat_cancel_agent", description="single save"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock(side_effect=save_contexts)
+    session = MagicMock()
+    persist_task = asyncio.create_task(agent._persist_context_after_abort(
+        session, "[Request cancelled by user]", cleanup=False,
+    ))
+    await save_started.wait()
+    persist_task.cancel()
+    await asyncio.sleep(0)
+    persist_task.cancel()
+    finish_save.set()
+
+    assert await asyncio.wait_for(persist_task, timeout=1) is True
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
 
 
