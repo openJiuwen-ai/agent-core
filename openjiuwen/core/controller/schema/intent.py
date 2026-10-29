@@ -89,7 +89,7 @@ class Intent(BaseModel):
     """
     intent_type: IntentType
     event: "Event"
-    target_task_id: Optional[str]
+    target_task_id: Optional[str] = None
     target_task_description: Optional[str] = None
     depend_task_id: List[str] = None
     supplementary_info: Optional[str] = None
