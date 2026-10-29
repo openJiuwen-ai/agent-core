@@ -32,6 +32,21 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
 - **调用范围绑定**：`bind_team_scope` / `current_team_name`（contextvar，嵌套恢复/异常解除）——事件
   入口为一次调用绑定当前团队，Ops 查询可省略 `team_name`；省略≠猜测（无绑定时明确报错）。
 
+## 已落地能力（team.monitor_event）
+
+- **事件契约**：`TeamMonitorEventInput/Output`——团队标识、可选通知所属成员标识（取自
+  `MonitorEvent.member_name`，不直接传入内部 `EventMessage`）及现有公开事件模型；matcher 对齐框架
+  `MatchPatternFunc = (event_input, pattern) -> bool`，非法形态一律返回 False 不抛（bus 把 matcher
+  异常当注册错误）。Pattern 支持 `monitor_event_type` / `team_name` / `member_name` AND 组合。
+- **事件注册与校验器**：`register_team_event_types(bus)` 注册事件 + 无副作用 CORE；input validator
+  落实类型契约（空 Pattern 不能绕过）；output validator 允许 `TeamMonitorEventOutput | None`。
+- **监控事件桥接**：`TeamMonitorEventBridge`——容量 1024 有界队列、非阻塞入队（coordination 回调
+  不等待）、满丢弃计数、独立消费任务、stop 时 cancel+await+积压计丢弃；stop 自身被取消时经
+  `Task.cancelling()` 区分并传播调用方取消。
+- **桥接生命周期**：`ActiveTeam.monitor_event_bridge` 字段；manager 冷路径挂载（listener 注册先于
+  消费任务启动）、`stop_team` 与 `finalize` stop 分支拆除（pause 保留——pause 不是 stop）；
+  `delete_team` force 路径走 `stop_team` 自动覆盖。
+
 ## 关键决策
 
 1. **bus 放 `TeamRuntimeManager`**：与 `TeamInfra` setter 注入同构、桥接生命周期所有权对齐、多
