@@ -512,26 +512,15 @@ async def test_a_page_the_browser_cannot_open_falls_back_to_its_pictures(tmp_pat
 async def test_pictures_reach_the_model_with_their_own_type():
     seen = []
 
-    class Completions:
-        async def create(self, **kwargs):
-            seen.append(kwargs["messages"][1]["content"])
-
-            class Stream:
-                def __aiter__(self):
-                    return self
-
-                async def __anext__(self):
-                    if getattr(self, "done", False):
-                        raise StopAsyncIteration
-                    self.done = True
-                    delta = type("D", (), {"content": "{}"})()
-                    return type("C", (), {"choices": [type("Ch", (), {"delta": delta})()]})()
-
-            return Stream()
+    class Core:
+        async def invoke(self, messages, **kwargs):
+            del kwargs
+            seen.append(messages[1]["content"])
+            return type("Answer", (), {"content": "{}"})()
 
     model = models.Model.__new__(models.Model)
     model.name, model.extra = "m", {}
-    model.client = type("Client", (), {"chat": type("Chat", (), {"completions": Completions()})()})()
+    model._model = Core()
     png = "iVBORw0KGgoAAAANSUhEUg"
     await model.json("sys", "user", [("page 1", png), ("shot", "/9j/4AAQ")])
     urls = [part["image_url"]["url"] for part in seen[0] if part["type"] == "image_url"]
