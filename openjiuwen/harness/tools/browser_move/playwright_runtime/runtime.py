@@ -2380,11 +2380,26 @@ class BrowserRuntimeRail(AgentRail):
         self,
         agent: Any,
         mcp_cfg: McpServerConfig,
-    ) -> tuple[str, ...]:
-        del mcp_cfg
-        configured = self._runtime.service.allowed_tool_names or CORE_BROWSER_TOOL_NAMES
+    ) -> Optional[tuple[str, ...]]:
+        configured = self._runtime.service.allowed_tool_names
         if self._image_input_supported(agent):
-            return tuple(configured)
+            return configured or CORE_BROWSER_TOOL_NAMES
+
+        if configured is None:
+            try:
+                tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(
+                    server_id=mcp_cfg.server_id,
+                ) or []
+                configured = tuple(
+                    info.name for info in tool_infos if info is not None
+                ) or CORE_BROWSER_TOOL_NAMES
+            except Exception as exc:
+                browser_agent_log_warning(
+                    "[BROWSER_SUBAGENT] failed to enumerate MCP tools while "
+                    "disabling screenshot input: %s",
+                    exc,
+                )
+                configured = CORE_BROWSER_TOOL_NAMES
 
         return tuple(
             tool_name

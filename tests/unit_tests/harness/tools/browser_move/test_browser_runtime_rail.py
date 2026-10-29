@@ -181,6 +181,35 @@ def test_before_invoke_builds_non_multimodal_allowlist_from_core() -> None:
     )
 
 
+def test_before_invoke_builds_non_multimodal_allowlist_from_registered_tools() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime.service = MagicMock()
+    runtime.service.mcp_cfg = _playwright_mcp_config()
+    runtime.service.allowed_tool_names = None
+    rail = BrowserRuntimeRail(runtime)
+    ctx = _make_ctx()
+    ctx.agent.deep_config.enable_read_image_multimodal = False
+    ctx.agent.ability_manager = MagicMock()
+    registered_tools = [
+        ToolInfo(name="browser_click", description="click", parameters={}),
+        ToolInfo(name="browser_take_screenshot", description="image", parameters={}),
+        ToolInfo(name="browser_snapshot", description="dom", parameters={}),
+    ]
+
+    with patch.object(
+        Runner.resource_mgr,
+        "get_mcp_tool_infos",
+        new=AsyncMock(return_value=registered_tools),
+    ):
+        _run(rail.before_invoke(ctx))
+
+    ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        runtime.service.mcp_cfg,
+        ("browser_click", "browser_snapshot"),
+    )
+
+
 def test_pdf_allowlist_filters_active_browser_agent_schemas() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.ensure_runtime_ready = AsyncMock()
