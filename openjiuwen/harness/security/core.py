@@ -11,7 +11,7 @@
 判定管线::
 
     result_A = evaluate_tiered_policy(...)          # 工具权限（始终）
-    result_B = DevStableFileGuard.evaluate(...)     # 路径防护（file_guard.dev_stable）
+    result_B = ReadDenyOnlyFileGuard.evaluate(...)  # 路径防护（file_guard.read_deny_only）
     result_D = DeletionGuard.evaluate(...)          # 批量删除（soft_delete.enabled）
     return strictest(result_A, result_B, result_D)
 """
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from openjiuwen.harness.security.file_guard import (
-    DevStableFileGuard,
+    ReadDenyOnlyFileGuard,
     build_file_guard_checker,
 )
 from openjiuwen.harness.security.models import (
@@ -80,7 +80,7 @@ class PermissionEngine:
         self._model_name = model_name
         self._workspace_root = workspace_root
         self._trusted_dirs = trusted_dirs or []
-        self._file_guard: DevStableFileGuard | None = build_file_guard_checker(
+        self._file_guard: ReadDenyOnlyFileGuard | None = build_file_guard_checker(
             self.config,
             workspace_root=self._workspace_root,
             trusted_dirs=self._trusted_dirs,

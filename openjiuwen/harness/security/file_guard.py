@@ -737,7 +737,7 @@ class FileGuardChecker:
         return defaults.read, "file_guard:defaults"
 
 
-class DevStableFileGuard:
+class ReadDenyOnlyFileGuard:
     """Pipeline B adapter. Judgment comes from agent-shield FileGuardComponent."""
 
     def __init__(self, engine: Any) -> None:
@@ -780,12 +780,12 @@ def build_file_guard_checker(
     *,
     workspace_root: Path | None = None,
     trusted_dirs: Sequence[Path] | None = None,
-) -> DevStableFileGuard | None:
+) -> ReadDenyOnlyFileGuard | None:
     """编译配置；若路径层关闭则返回 ``None``。
 
-    The dev-stable caller builds agent-shield PermissionEngine. FileGuardComponent
-    reads ``file_guard.dev_stable`` plus ``runtime.workspace_root`` and
-    ``runtime.trusted_dirs``. Sensitive paths and immutable roots stay off.
+    FileGuardComponent reads ``file_guard.read_deny_only`` plus
+    ``runtime.workspace_root`` and ``runtime.trusted_dirs``. A read deny stays
+    on read. Sensitive paths and immutable roots stay off.
     """
     from agent_shield.tool_permission.engine import PermissionEngine
 
@@ -793,7 +793,7 @@ def build_file_guard_checker(
     report_legacy_path_rules_at_load(perms)
     raw_file_guard = perms.get("file_guard")
     file_guard = dict(raw_file_guard) if isinstance(raw_file_guard, dict) else {}
-    file_guard["dev_stable"] = True
+    file_guard["read_deny_only"] = True
     perms["file_guard"] = file_guard
     perms.pop("builtin", None)
     perms["package_builtin_rules"] = False
@@ -806,7 +806,7 @@ def build_file_guard_checker(
     engine = PermissionEngine(perms)
     if not engine.component_active("file_guard"):
         return None
-    return DevStableFileGuard(engine)
+    return ReadDenyOnlyFileGuard(engine)
 
 
 _PATH_CLASS_TOOLS = frozenset({
@@ -869,7 +869,7 @@ def report_legacy_path_rules_at_load(permissions: Mapping[str, Any]) -> list[str
 __all__ = [
     "EffectiveFileGuardConfig",
     "FileGuardAxisDefaults",
-    "DevStableFileGuard",
+    "ReadDenyOnlyFileGuard",
     "FileGuardChecker",
     "FileGuardPathRule",
     "build_file_guard_checker",
