@@ -190,14 +190,6 @@ Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 [tool.uv]
 default-groups = ['dev']
 
-[tool.uv.sources]
-agentarts-sdk = { index = "agentarts-pypi" }
-
-[[tool.uv.index]]
-name = "agentarts-pypi"
-url = "https://pypi.org/simple"
-explicit = true
-
 [[tool.uv.index]]
 name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple"
