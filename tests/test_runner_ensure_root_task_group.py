@@ -318,6 +318,66 @@ def test_rebuild_signals_stale_owner_on_live_foreign_loop() -> None:
         loop1.call_soon_threadsafe(loop1.stop)
         thread.join(timeout=10)
         assert not thread.is_alive()
+
+
+def test_cross_loop_stop_on_closed_loop_drops_without_signal() -> None:
+    """stop() called directly on a second loop (no rebuild in between) must
+    drop the stale state without raising and without driving the closed
+    loop's objects.
+
+    Review feedback on !3490: the close path's stale branches had zero
+    coverage; every earlier test rebuilt on the second loop before stopping.
+    """
+    runner = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+
+    loop1 = _new_loop()
+    loop1.run_until_complete(runner.start())
+    stale_state = runner._root_state
+    assert stale_state is not None
+    loop1.close()  # owner left stale, stop event still unset
+
+    loop2 = _new_loop()
+    try:
+        # Direct stop on the new loop: no start() rebuild in between, so
+        # _close_root_task_group faces the stale state itself.
+        loop2.run_until_complete(runner.stop())
+        assert runner._root_state is None
+    finally:
+        loop2.close()
+    assert not stale_state.stop.is_set(), "closed-loop stale owner must not be signalled"
+
+
+def test_cross_loop_stop_on_live_foreign_loop_signals_owner() -> None:
+    """stop() on a second loop while the first loop still runs must signal
+    the foreign owner to stop on its own loop, so its task group is cleaned
+    up instead of staying parked for the process lifetime.
+    """
+    import threading
+
+    runner = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+    loop1 = _new_loop()
+    loop1.run_until_complete(runner.start())
+    stale = runner._root_state
+    assert stale is not None
+    stale_owner = stale.owner
+    assert stale_owner is not None
+
+    thread = threading.Thread(target=loop1.run_forever, daemon=True)
+    thread.start()
+    loop2 = _new_loop()
+    try:
+        loop2.run_until_complete(runner.stop())
+        assert runner._root_state is None
+        deadline = time.monotonic() + 5
+        while not stale_owner.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stale.stop.is_set(), "foreign owner was never signalled to stop"
+        assert stale_owner.done(), "foreign owner never terminated after stop signal"
+    finally:
+        loop2.close()
+        loop1.call_soon_threadsafe(loop1.stop)
+        thread.join(timeout=10)
+        assert not thread.is_alive()
         loop1.close()
 
 
@@ -340,14 +400,21 @@ def test_cancel_all_failure_does_not_skip_owner_teardown(monkeypatch) -> None:
     owner = state.owner
     assert owner is not None
 
+    calls = []
+
     def boom():
+        calls.append(1)
         raise RuntimeError("manager down")
 
+    # runner.py imports get_task_manager inside the function body, so the
+    # call-time import resolves the manager submodule attribute. Count
+    # invocations so a silently ineffective patch turns the test red.
     monkeypatch.setattr(manager_module, "get_task_manager", boom)
     try:
         loop.run_until_complete(runner._close_root_task_group())
     finally:
         loop.close()
+    assert calls, "boom was never called; the patch did not take effect"
     assert owner.done(), "same-loop owner was not torn down after cancel_all failure"
     assert runner._root_state is None
 
