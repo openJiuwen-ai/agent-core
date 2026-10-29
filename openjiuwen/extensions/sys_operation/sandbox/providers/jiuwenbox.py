@@ -1027,10 +1027,12 @@ class _JiuwenBoxProviderMixin:
             )
         pending = [sid for key, sid in cls._pending_deletions if key == shared_key]
         if pending:
-            failed = any(
-                (task := cls._delete_tasks.get((shared_key, sid))) is None or task.done()
-                for sid in pending
-            )
+            failed = False
+            for sid in pending:
+                task = cls._delete_tasks.get((shared_key, sid))
+                if task is None or task.done():
+                    failed = True
+                    break
             code = "SANDBOX_DELETION_FAILED" if failed else "SANDBOX_DELETION_PENDING"
             recovery = "retry sandbox.restart" if failed else "wait for cleanup to finish"
             raise _SandboxDeletionError(
