@@ -3,11 +3,13 @@
 
 import asyncio
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import (
     Any,
     AsyncIterator,
     Optional,
     TYPE_CHECKING,
+    TypeGuard,
     Union,
 )
 
@@ -56,7 +58,40 @@ from openjiuwen.core.workflow import (
 )
 
 if TYPE_CHECKING:
+    from anyio.abc import TaskGroup
+
     from openjiuwen.agent_teams.runtime import TeamRuntimeManager
+
+
+@dataclass
+class _RootTaskGroupState:
+    """Loop-bound lifecycle state of the runner's root anyio task group.
+
+    The four lifecycle objects (owner task, ready/stop events, task group)
+    travel as one reference so a rebuild on a new event loop swaps a single
+    attribute: a stale owner's teardown mutates only its own state object and
+    can never clobber the state a newer loop installed.
+    """
+
+    owner: Optional[asyncio.Task] = field(default=None)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
+    group: Optional["TaskGroup"] = field(default=None)
+
+
+def _is_live_task_on_running_loop(task: Optional[asyncio.Task]) -> TypeGuard[asyncio.Task]:
+    """Whether *task* is unfinished and bound to the currently running loop.
+
+    A single identity check covers every stale class a process-wide singleton
+    can accumulate: owner bound to a closed loop, owner bound to a live but
+    foreign loop, and an owner that already finished on this loop.
+    """
+    if task is None or task.done():
+        return False
+    try:
+        return task.get_loop() is asyncio.get_running_loop()
+    except RuntimeError:
+        return False
 
 
 class _RunnerImpl(_TeamRunnerMixin):
@@ -94,10 +129,7 @@ class _RunnerImpl(_TeamRunnerMixin):
         self.system_reply_sub: ReplyTopicSubscription | None = None
         self._distribute_message_queue = None
         self._callback_framework = AsyncCallbackFramework()
-        self._root_task_group = None
-        self._root_task_group_owner = None
-        self._root_task_group_ready = None
-        self._root_task_group_stop = None
+        self._root_state: Optional[_RootTaskGroupState] = None
         self._team_runtime_manager: Optional["TeamRuntimeManager"] = None
 
     @property
@@ -132,63 +164,76 @@ class _RunnerImpl(_TeamRunnerMixin):
 
     def get_root_task_group(self):
         """Get the runner-owned root task group, if Runner has been started."""
-        return self._root_task_group
+        state = self._root_state
+        return state.group if state is not None else None
 
     async def _root_task_group_owner_loop(
         self,
-        ready: asyncio.Event,
-        stop: asyncio.Event,
+        state: _RootTaskGroupState,
     ) -> None:
         try:
             async with anyio.create_task_group() as task_group:
-                self._root_task_group = task_group
-                ready.set()
-                await stop.wait()
+                state.group = task_group
+                state.ready.set()
+                await state.stop.wait()
                 task_group.cancel_scope.cancel()
         finally:
-            self._root_task_group = None
-            ready.set()
+            # Only clear the group slot while this state is still the live
+            # one; a rebuild on another loop must not see its group vanish.
+            if self._root_state is state:
+                state.group = None
+            state.ready.set()
 
     async def _ensure_root_task_group(self) -> None:
-        if self._root_task_group is not None and self._root_task_group_owner is not None:
+        state = self._root_state
+        if state is not None and _is_live_task_on_running_loop(state.owner):
             return
         # Import the manager so lower layers can schedule via manager.create_task().
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
         get_task_manager()
-        self._root_task_group_ready = asyncio.Event()
-        self._root_task_group_stop = asyncio.Event()
-        self._root_task_group_owner = asyncio.create_task(
-            self._root_task_group_owner_loop(
-                self._root_task_group_ready,
-                self._root_task_group_stop,
-            )
-        )
-        await self._root_task_group_ready.wait()
-        if self._root_task_group is None and self._root_task_group_owner.done():
-            await self._root_task_group_owner
+        # Publish the state before spawning the owner: the assignment below is
+        # synchronous, so no coroutine can observe an owner-less live state.
+        state = _RootTaskGroupState()
+        self._root_state = state
+        owner = asyncio.create_task(self._root_task_group_owner_loop(state))
+        state.owner = owner
+        await state.ready.wait()
+        if state.group is None and owner.done():
+            await owner
 
     async def _close_root_task_group(self) -> None:
-        if self._root_task_group_owner is None:
+        state = self._root_state
+        if state is None:
             return
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
-        owner = self._root_task_group_owner
+        owner = state.owner
         try:
-            await get_task_manager().cancel_all()
-            if self._root_task_group_stop is not None:
-                self._root_task_group_stop.set()
-            if self._root_task_group is not None:
-                self._root_task_group.cancel_scope.cancel()
-            with anyio.move_on_after(5, shield=True):
-                await owner
-            if not owner.done():
-                owner.cancel()
-                try:
-                    with anyio.move_on_after(1, shield=True):
-                        await owner
-                except asyncio.CancelledError:
-                    pass
+            if _is_live_task_on_running_loop(owner):
+                await get_task_manager().cancel_all()
+                state.stop.set()
+                if state.group is not None:
+                    state.group.cancel_scope.cancel()
+                with anyio.move_on_after(5, shield=True):
+                    await owner
+                if not owner.done():
+                    owner.cancel()
+                    try:
+                        with anyio.move_on_after(1, shield=True):
+                            await owner
+                    except asyncio.CancelledError:
+                        pass
+            else:
+                # Owner finished here, or died with / belongs to another
+                # loop: cancelling or awaiting it from this loop would raise
+                # RuntimeError. Its own loop's teardown (or its death)
+                # settles it; drop the reference.
+                logger.warning(
+                    "Dropping runner root task group owner not live on the current event loop",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                )
         except Exception as e:
             logger.warning(
                 "Failed to close runner root task group",
@@ -197,14 +242,13 @@ class _RunnerImpl(_TeamRunnerMixin):
                 exception=e,
             )
         finally:
-            self._root_task_group = None
-            self._root_task_group_owner = None
-            self._root_task_group_ready = None
-            self._root_task_group_stop = None
+            if self._root_state is state:
+                self._root_state = None
 
     @contextmanager
     def _root_task_group_scope(self):
-        if self._root_task_group is None:
+        state = self._root_state
+        if state is None or state.group is None:
             yield
             return
         from openjiuwen.core.common.task_manager.context import get_task_group, reset_task_group, set_task_group
@@ -212,26 +256,28 @@ class _RunnerImpl(_TeamRunnerMixin):
         if get_task_group() is not None:
             yield
             return
-        token = set_task_group(self._root_task_group)
+        token = set_task_group(state.group)
         try:
             yield
         finally:
             reset_task_group(token)
 
     def _enter_root_task_group_context(self):
-        """Bind :attr:`_root_task_group` into ContextVar; return token for :meth:`_exit_root_task_group_context`.
+        """Bind the root task group from :attr:`_root_state` into ContextVar.
 
-        Async generators must use this with ``try``/``finally`` instead of :meth:`_root_task_group_scope`:
-        ``contextlib``'s sync ``yield`` + ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
+        Returns the token for :meth:`_exit_root_task_group_context`. Async
+        generators must use this with ``try``/``finally`` instead of
+        :meth:`_root_task_group_scope`: ``contextlib``'s sync ``yield`` +
+        ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
         context (e.g. A2A streaming on a uvicorn worker thread).
         """
-        if self._root_task_group is None:
+        if self._root_state is None or self._root_state.group is None:
             return None
         from openjiuwen.core.common.task_manager.context import get_task_group, set_task_group
 
         if get_task_group() is not None:
             return None
-        return set_task_group(self._root_task_group)
+        return set_task_group(self._root_state.group)
 
     def _exit_root_task_group_context(self, token) -> None:
         if token is None:
