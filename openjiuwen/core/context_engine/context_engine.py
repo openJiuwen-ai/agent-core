@@ -52,10 +52,14 @@ class ContextEngine:
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
-        # Pre-load the tiktoken vocabulary on a background thread so the
-        # first-use HTTPS download never lands on the event loop.
-        from openjiuwen.core.context_engine.token.tiktoken_counter import start_background_warm_up
-        start_background_warm_up()
+        if self._config.enable_tiktoken_counter:
+            # Pre-load the tiktoken vocabulary on a background thread so the
+            # first-use HTTPS download never lands on the event loop. Keep the
+            # warm-up behind the same switch as the counter itself: disabled
+            # deployments must not load or download tokenizer data.
+            from openjiuwen.core.context_engine.token.tiktoken_counter import start_background_warm_up
+
+            start_background_warm_up()
 
     def register_window_mutator(
             self,
@@ -81,7 +85,10 @@ class ContextEngine:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
-        Token counting: if `token_counter` is None, defaults to `TiktokenCounter`.
+        Token counting: an explicitly provided `token_counter` is always used.
+        When it is omitted, `TiktokenCounter` is created only if
+        `config.enable_tiktoken_counter` is enabled; otherwise the context uses
+        its built-in character-based estimation fallbacks.
 
         Message seeding:
         - if `history_messages` is provided, it is used as-is;
@@ -94,8 +101,11 @@ class ContextEngine:
             session: Session object supplying session_id; if None, a default
                      session ID is used.
             history_messages: Initial message list.
-            token_counter: Strategy for counting tokens; defaults to
-                           TiktokenCounter if not provided.
+            token_counter: Strategy for counting tokens. If omitted,
+                           ``TiktokenCounter`` is used only when
+                           ``enable_tiktoken_counter`` is enabled in the engine
+                           config; otherwise token counting falls back to
+                           character-based estimates.
 
         Returns:
             ModelContext: The newly created or cached context instance.
@@ -115,14 +125,29 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import (
-                TiktokenCounter,
-                start_background_warm_up,
-            )
-            start_background_warm_up()
-            # First use in a process downloads the BPE vocabulary synchronously
-            # (blocking requests.get without timeout); keep it off the event loop.
-            token_counter = await asyncio.to_thread(TiktokenCounter)
+            if self._config.enable_tiktoken_counter:
+                context_engine_logger.info(
+                    "tiktoken counter enabled; initializing default tokenizer, "
+                    "session_id=%s context_id=%s",
+                    session_id,
+                    context_id,
+                )
+                from openjiuwen.core.context_engine.token.tiktoken_counter import (
+                    TiktokenCounter,
+                    start_background_warm_up,
+                )
+
+                start_background_warm_up()
+                # First use can download the BPE vocabulary synchronously;
+                # initialize it away from the event loop.
+                token_counter = await asyncio.to_thread(TiktokenCounter)
+            else:
+                context_engine_logger.info(
+                    "tiktoken counter disabled; using character-based token estimation, "
+                    "session_id=%s context_id=%s",
+                    session_id,
+                    context_id,
+                )
 
         if self._config.enable_openrouter_model_context_window_tokens:
             # Scheduled, not awaited: this is the first-turn critical path and the

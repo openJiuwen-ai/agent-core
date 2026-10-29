@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -658,9 +659,4 @@ def extract_argument_value(parsed_arguments: dict[str, Any], arguments_text: str
 
 def message_to_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
+    return sanitize_content_for_text(content)

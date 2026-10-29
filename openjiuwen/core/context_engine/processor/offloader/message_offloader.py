@@ -109,11 +109,12 @@ class MessageOffloader(ContextProcessor):
             return True
 
         token_counter = context.token_counter()
-        tokens = 0
         if token_counter:
             context_token = token_counter.count_messages(context.get_messages())
             messages_to_add_token = token_counter.count_messages(messages_to_add)
             tokens = messages_to_add_token + context_token
+        else:
+            tokens = sum(ContextUtils.estimate_message_tokens(message) for message in all_messages)
         if tokens > config.tokens_threshold:
             if not self._has_offload_candidate(all_messages, context):
                 return False

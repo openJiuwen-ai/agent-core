@@ -206,6 +206,29 @@ class TestMessageOffloader:
         assert len(offloaded) >= 1
         assert offloaded[0].content[:5] + OMIT_STRING in offloaded[0].content
 
+    @pytest.mark.asyncio
+    async def test_tokens_threshold_uses_estimate_without_token_counter(self):
+        config = MessageOffloaderConfig(
+            messages_threshold=None,
+            tokens_threshold=50,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+        ctx = await create_context_with_offloader(config)
+        assert ctx.token_counter() is None
+
+        await ctx.add_messages([
+            UserMessage(content="u"),
+            ToolMessage(content="x" * 200, tool_call_id="tc-estimate"),
+        ])
+
+        offloaded = [message for message in ctx.get_messages() if isinstance(message, OffloadMixin)]
+        assert len(offloaded) == 1
+        assert_offload_saved(ctx, offloaded[0], "x" * 200)
+
     # ---------- offload_message_type: only offload configured roles ----------
     @pytest.mark.asyncio
     async def test_offload_only_configured_roles(self):

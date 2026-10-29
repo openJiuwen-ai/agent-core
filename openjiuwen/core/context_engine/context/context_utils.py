@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import json
 import threading
 import time
 import uuid
@@ -13,6 +12,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
 
 
@@ -656,12 +656,8 @@ class ContextUtils:
     @staticmethod
     def estimate_tokens(content: Any) -> int:
         """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
-        if isinstance(content, str):
-            return max(len(content) // 3, 1)
-        try:
-            return max(len(json.dumps(content, ensure_ascii=False)) // 3, 1)
-        except (TypeError, ValueError):
-            return max(len(str(content)) // 3, 1)
+        text = sanitize_content_for_text(content)
+        return max(len(text) // 3, 1)
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

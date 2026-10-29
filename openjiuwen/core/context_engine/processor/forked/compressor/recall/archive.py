@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     INTERNAL_USER_PREFIXES,
 )
@@ -412,11 +413,11 @@ def _strip_channel_envelope(text: str) -> str:
 
 
 def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
+    # This text is indexed and later re-rendered into model context; raw
+    # base64 would poison the index and balloon recalled chunks.
     if content is None:
         return ""
-    return json.dumps(content, ensure_ascii=False, default=str)
+    return sanitize_content_for_text(content)
 
 
 def _message_to_json(message: BaseMessage) -> dict[str, Any]:

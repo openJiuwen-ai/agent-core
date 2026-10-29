@@ -26,9 +26,6 @@ from openjiuwen.harness.tools.mobile_gui.rails_factory import (
     resolve_mobile_skill_root,
 )
 from openjiuwen.harness.tools.mobile_gui.runtime_tools import build_mobile_gui_tool_instances
-from openjiuwen.harness.tools.mobile_gui.tiktoken_multimodal_patch import (
-    apply_tiktoken_counter_multimodal_patch,
-)
 from openjiuwen.harness.tools.mobile_gui.vlm_grounding_prompt import (
     build_vlm_grounding_system_prompt,
 )
@@ -132,7 +129,6 @@ def create_mobile_gui_agent(
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create a DeepAgent with Android VLM grounding tools and rails."""
-    apply_tiktoken_counter_multimodal_patch()
     resolved_language = resolve_language(language)
     resolved_settings = _resolve_runtime_settings(model, settings)
 

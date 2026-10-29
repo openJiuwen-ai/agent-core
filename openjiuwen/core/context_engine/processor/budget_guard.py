@@ -9,6 +9,7 @@ from typing import Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import BaseMessage
 
@@ -80,9 +81,7 @@ def count_messages_tokens(context: ModelContext, messages: list[BaseMessage]) ->
 
 
 def _estimate_text_tokens(content: Any) -> int:
-    if isinstance(content, str):
-        return len(content) // 3
-    return len(str(content)) // 3
+    return max(len(sanitize_content_for_text(content)) // 3, 1)
 
 
 def truncate_message_content_to_fixed_head_tail_if_over_token_limit(

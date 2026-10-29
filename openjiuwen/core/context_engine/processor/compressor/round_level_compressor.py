@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
@@ -1229,18 +1230,11 @@ class RoundLevelCompressor(ContextProcessor):
 
     @staticmethod
     def _estimate_content_tokens(content: Any) -> int:
-        if isinstance(content, str):
-            return len(content) // 3
-        try:
-            return len(json.dumps(content, ensure_ascii=False)) // 3
-        except TypeError:
-            return len(str(content)) // 3
+        return max(len(sanitize_content_for_text(content)) // 3, 1)
 
     @staticmethod
     def _to_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        return str(content)
+        return sanitize_content_for_text(content)
 
     def _is_round_level_fallback_block(self, message: BaseMessage) -> bool:
         return isinstance(message, UserMessage) and self._to_text(message.content).startswith(self._compression_marker)

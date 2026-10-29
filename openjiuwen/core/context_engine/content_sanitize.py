@@ -56,6 +56,10 @@ def _sanitize_dict(payload: dict) -> dict:
 def sanitize_value_for_text(value: Any) -> Any:
     """Return a copy of *value* with image/base64 payloads replaced by placeholders."""
     if isinstance(value, str):
+        # Plain text is overwhelmingly the common path. Avoid paying for a
+        # regex scan when the string cannot contain a base64 data URL.
+        if "base64" not in value.lower():
+            return value
         if value.startswith("data:image/") and ";base64," in value:
             return IMAGE_DATA_URL_PLACEHOLDER
         return _DATA_URL_RE.sub(IMAGE_DATA_URL_PLACEHOLDER, value)
