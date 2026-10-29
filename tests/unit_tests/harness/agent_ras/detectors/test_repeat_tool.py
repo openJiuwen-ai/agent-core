@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -1100,3 +1101,45 @@ class TestRecoverableClassification:
         history = list(det._history("main"))
         assert [r.recoverable for r in history] == [True, True, False]
         assert det._get_failing_tool_streaks(history, "edit_file") == (1, 1, 3)
+
+
+
+class TestDirectImageGetRunExemption:
+    """name-only image_get_run exemption for direct calls; reject empty equals on invoke_tool."""
+
+    def test_invoke_tool_with_empty_argument_equals_is_rejected(self):
+        with pytest.raises((ValidationError, ValueError)) as exc_info:
+            RepeatToolConfig.model_validate({
+                "ignored_tool_calls": [
+                    {"tool_name": "invoke_tool", "argument_equals": {}},
+                ],
+            })
+        err = str(exc_info.value).lower()
+        assert "invoke_tool" in err or "wrapper" in err or "argument_equals" in err
+
+    @pytest.mark.asyncio
+    async def test_direct_image_get_run_x12_skips_generic_and_global_breaker(self):
+        config = RepeatToolConfig.model_validate({
+            "warning_threshold": 5,
+            "critical_threshold": 10,
+            "global_breaker_threshold": 10,
+            "ignored_tool_calls": [
+                {"tool_name": "image_get_run", "argument_equals": {}},
+                {
+                    "tool_name": "invoke_tool",
+                    "argument_equals": {"tool_name": "image_get_run"},
+                },
+            ],
+        })
+        detector = RepeatToolCallDetector(config)
+        args = {"run_id": "image-1"}
+        # MCP-shaped result that normalize typically flattens poorly → constant hash
+        result = {"result": '{"status":"running","run_id":"image-1"}'}
+
+        for _ in range(12):
+            anomaly = await detector.observe(
+                _after_tool("image_get_run", args, tool_result=result)
+            )
+            assert anomaly is None
+
+        assert detector._histories == {}
