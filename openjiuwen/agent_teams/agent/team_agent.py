@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
@@ -568,6 +569,19 @@ class TeamAgent(BaseAgent):
             run_context=run_context,
         )
 
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller` — the spawn path
+        reads it off the leader to attach the SAME session-level controller to
+        an in-process teammate after its configure, so every member's
+        swarmflow runs register in one registry. None before any attach (or
+        when no runtime is built yet).
+        """
+        harness = self.harness
+        return harness.background_task_controller if harness is not None else None
+
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
 
@@ -730,7 +744,7 @@ class TeamAgent(BaseAgent):
         *,
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> None:
-        # The leader-only async ``swarmflow`` tool is wired entirely inside the
+        # The async ``swarmflow`` tool is wired entirely inside the
         # NativeHarness async-tool framework (configurator builds the worker-model
         # resolver and gates the tool on it); TeamAgent no longer participates.
         self._configurator.setup_agent(
@@ -1057,6 +1071,27 @@ class TeamAgent(BaseAgent):
         """
         member_name = self._member_name() or "?"
         team_logger.info("[{}] shutdown_self requested (force={})", member_name, force)
+        # Stop this member's swarmflow runs BEFORE the stream unwind. The
+        # unwind path (finalize_round -> harness.stop -> native.stop) bare-
+        # cancels in-flight async tools: the run task dies with no terminal
+        # event and no journal record, and its finally deregisters the
+        # ticket — so the dispose-time stop_by_owner arrives to an empty
+        # registry and the workflow card stays "running" forever. Stopping
+        # through the session-level controller first unwinds each owned run
+        # properly (abort event + terminal progress + journal record) while
+        # the tickets are still live. The controller is the team-level
+        # registry (run -> handle, handle.owner_member), so this does not
+        # depend on the member's own harness at all.
+        controller = self.background_task_controller
+        if controller is not None and member_name != "?":
+            try:
+                await controller.stop_by_owner(member_name, include_paused=True)
+            except Exception:
+                team_logger.warning(
+                    "[{}] pre-unwind stop of owned swarmflow runs failed; continuing",
+                    member_name,
+                    exc_info=True,
+                )
         await self._stream_controller.cooperative_cancel()
         target = await self.resolve_retire_target(force=force)
         self._state.retired_status = target
@@ -1668,6 +1703,31 @@ class TeamAgent(BaseAgent):
         reference instead of building its own.
         """
         self._configurator.workspace_manager = manager
+
+    def share_swarmflow_with(self, other: "TeamAgent") -> None:
+        """Share the team-level swarmflow infrastructure with an in-process teammate.
+
+        The leader constructs the shared swarmflow objects (governor /
+        budget ledger / model resolver / base specs / expert table) once at
+        its setup; in-process teammates reuse the same instance by reference
+        — mirroring ``share_workspace_cache_with`` — so concurrent runs from
+        any member draw down one budget pool under one L1/L3 authority.
+        Must run **before** ``teammate.configure(...)``: afterwards the
+        teammate's setup has already run without it.
+        """
+        own = self._configurator.swarmflow
+        if own is not None:
+            other.attach_swarmflow(own)
+
+    def attach_swarmflow(self, infra: SwarmflowInfra | None) -> None:
+        """Adopt the shared team-level swarmflow infrastructure (in-process member share).
+
+        Called by the leader's ``share_swarmflow_with`` — the
+        teammate's ``setup_agent`` reads the injected instance instead of
+        constructing its own (construction is leader-only; a member without
+        injection keeps every field empty).
+        """
+        self._configurator.swarmflow = infra
 
     def invalidate_workspace_cache(self) -> None:
         """Drop resident evolvable-workspace values so the next run re-reads.

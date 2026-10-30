@@ -69,6 +69,28 @@ def _silent(_message: str) -> None:
     return None
 
 
+async def _await_uncancellable(write: Callable[[], Any]) -> None:
+    """Await a terminal-record write so task cancellation cannot kill it.
+
+    The controller's three-step abort sets ``abort_event`` and then cancels the
+    engine task; when the abort checkpoint raises ``WorkflowAborted`` before the
+    cancel bites, the pending cancellation lands exactly on the seal/pause-write
+    await inside the exception handler (a second teardown cancel can land
+    mid-write too). A cancelled coroutine cannot be resumed, so the write runs
+    in its own shielded task while this side keeps un-cancelling and re-awaiting
+    until the record is on disk. Only then is the cancellation allowed through.
+    """
+    task = asyncio.get_running_loop().create_task(write())
+    while True:
+        try:
+            await asyncio.shield(task)
+            return
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+
+
 async def _write_seal_record(rt, *, terminal_status: str) -> None:
     """Write a run-level seal record to the journal on a terminal exit.
 
@@ -81,10 +103,10 @@ async def _write_seal_record(rt, *, terminal_status: str) -> None:
     """
     if rt.journal is None or rt.journal.wal_path is None:
         return
-    await rt.journal.write_run_record(
+    await _await_uncancellable(lambda: rt.journal.write_run_record(
         rt.run_id or "", "seal",
         {"terminal_status": terminal_status, "final_spent": rt.workflow_budget.spent},
-    )
+    ))
 
 
 async def _write_pause_record(rt, *, pause_reason: str) -> None:
@@ -106,14 +128,14 @@ async def _write_pause_record(rt, *, pause_reason: str) -> None:
             "label": cur.get("label"),
             "tokens": rt.workflow_budget.spent - (cur.get("started_spent") or 0),
         }
-    await rt.journal.write_run_record(
+    await _await_uncancellable(lambda: rt.journal.write_run_record(
         rt.run_id or "", "pause",
         {
             "pause_reason": pause_reason,
             "paused_at": datetime.now(timezone.utc).isoformat(),
             "paused_agent": paused_agent,
         },
-    )
+    ))
 
 
 def _resolve_workflow_budget(
