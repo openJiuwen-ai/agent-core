@@ -295,7 +295,6 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        interrupted = False
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
@@ -341,7 +340,6 @@ class TaskTool(Tool):
                     and result.get("result_type") == "interrupt"
                     and "interrupt_ids" in result
                 ):
-                    interrupted = True
                     self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
                     return result
                 output = result.get("output", "")
