@@ -65,7 +65,12 @@ class CronToolBackend(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
-    async def run_now(self, job_id: str) -> str:
+    async def run_now(
+        self,
+        job_id: str,
+        *,
+        context: CronToolContext | None = None,
+    ) -> str:
         ...
 
     async def status(self) -> dict[str, Any]:
@@ -160,7 +165,7 @@ async def _dispatch_cron_action(
     if action_name == "run":
         if not target_job_id:
             raise ValueError("jobId is required")
-        return {"run_id": await backend.run_now(target_job_id)}
+        return {"run_id": await backend.run_now(target_job_id, context=context)}
     if action_name == "runs":
         if not target_job_id:
             raise ValueError("jobId is required")
