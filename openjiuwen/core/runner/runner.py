@@ -354,7 +354,15 @@ class _RunnerImpl(_TeamRunnerMixin):
                         with anyio.move_on_after(1, shield=True):
                             await owner
                     except asyncio.CancelledError:
-                        pass
+                        # owner.cancel() above makes the shielded drain end in
+                        # CancelledError: that is the expected completion of
+                        # the fallback teardown, recorded rather than
+                        # swallowed silently so the shutdown stays auditable.
+                        logger.debug(
+                            "Runner root task group owner cancelled during fallback teardown",
+                            event_type=LogEventType.RUNNER_STOP,
+                            runner_id=self._runner_id,
+                        )
                 self._collect_owner_exception(owner)
             elif owner is not None and owner.done() and owner.get_loop() is asyncio.get_running_loop():
                 # Owner already finished on this loop: its own teardown

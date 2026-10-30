@@ -55,6 +55,12 @@ rebuild 会交叉写同一批字段，存在半清理状态窗口。
    "owner 属于当前 loop" 分支内；跨 loop 的 stop 走 drop-only 分支并记 warning，与上游
    !2950 对 ReadWriteLockManager 陈旧 cleanup task 的处理惯例一致（closed/foreign loop 上的
    task 不能 cancel，cancel 的调度本身依赖 loop 活着）。
+4. 安全门禁整改（2026-10-31）：兜底 drain 的 `except asyncio.CancelledError: pass`
+   触发仓库 semgrep 规则 `no-except-pass`（`.semgrep/no-silent-except.yml`，ERROR 级），
+   流水线安全扫描阶段因此拒绝本修复的历代版本（!2323、!3490、!3495 同位点）。改为
+   `runner_logger.debug`（RUNNER_STOP 事件、绑定 runner_id），沿用仓库对预期取消的记录
+   惯例（如 `spawn/process_manager.py` 健康检查取消），语义不变——drain 结果不得掩盖
+   stop 结果，也不把预期取消误报为错误。
 
 ## 验证
 
@@ -65,6 +71,11 @@ rebuild 会交叉写同一批字段，存在半清理状态窗口。
 - `test_stale_owner_exit_does_not_clobber_rebuilt_state`：陈旧 owner 退出时不覆盖新 state
   的 group 槽（identity 守卫的回归）。
 - 单 loop 基线与同 loop 幂等启停不受影响。
+- 安全门禁整改后复验（2026-10-31，`uv sync --frozen` 完整环境）：目标测试
+  `tests/test_runner_ensure_root_task_group.py` 13 passed；`tests/unit_tests/core/runner`
+  488 passed / 0 failed / 0 errors（pytest-mock 就位，原基线 4 errors 消除）；
+  mypy `runner.py` 无新增诊断（10 条均在未触碰行段）；semgrep `no-silent-except`
+  对本 PR 两个 Python 文件零命中；ruff 无新增发现（1 条 import 排序为 develop 预存）。
 
 ## 遗留
 
