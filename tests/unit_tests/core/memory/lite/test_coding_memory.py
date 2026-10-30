@@ -72,6 +72,19 @@ type: user
         assert valid is False
         assert "type" in err
 
+    def test_validate_frontmatter_error_states_full_contract(self):
+        """校验失败信息必须自带完整契约，避免被误读为工具信封丢字段."""
+        fm = {"type": "note", "date": "2026-10-30"}
+        valid, err = validate_frontmatter(fm)
+
+        assert valid is False
+        for field in ("name", "description", "type"):
+            assert field in err
+        for valid_type in VALID_TYPES:
+            assert valid_type in err
+        # 错误信息本身要说明是 frontmatter 字段问题，而不是 tool_call 的 name。
+        assert "frontmatter" in err
+
     def test_valid_types_constant(self):
         """测试 VALID_TYPES 包含所有 4 种类型."""
         assert "user" in VALID_TYPES

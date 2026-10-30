@@ -23,6 +23,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections.coding_memory import (
     build_coding_memory_section,
 )
@@ -36,6 +37,14 @@ from openjiuwen.core.memory.lite.coding_memory_tools import (
 from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter, _extract_body
 from openjiuwen.core.memory.lite.manager import MemoryIndexManager
 from openjiuwen.harness.tools.coding_memory import create_coding_memory_tools
+
+
+# This rail owns a section name distinct from ``SectionName.MEMORY``.  Both
+# CodingMemoryRail and the personal MemoryRail can be mounted on the same agent
+# and both re-add their section before every model call, removing the old one
+# first.  Sharing a name would make whichever rail runs later erase the other
+# rail's policy, so each rail must own its own key.
+CODING_MEMORY_SECTION_NAME = "coding_memory"
 
 
 class CodingMemoryRail(DeepAgentRail):
@@ -142,9 +151,9 @@ class CodingMemoryRail(DeepAgentRail):
         self._manager_initialized = False
         self._tool_ctx = None
         
-        # 从 system_prompt_builder 移除 memory section
+        # 只移除本 rail 自己的 section，避免误删个人 MemoryRail 的段落
         if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section("memory")
+            self.system_prompt_builder.remove_section(CODING_MEMORY_SECTION_NAME)
             self.system_prompt_builder = None
         self.attachment_manager = None
     
@@ -299,9 +308,10 @@ class CodingMemoryRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
         
-        # 移除旧的 memory section
-        self.system_prompt_builder.remove_section("memory")
-        
+        # 只移除本 rail 自己的 section；个人 MemoryRail 的同名 remove 不会
+        # 再与本 rail 互相覆盖。
+        self.system_prompt_builder.remove_section(CODING_MEMORY_SECTION_NAME)
+
         lang = self.system_prompt_builder.language
         
         # 检查只读模式
@@ -309,11 +319,19 @@ class CodingMemoryRail(DeepAgentRail):
             ctx.inputs.is_cron() or ctx.inputs.is_heartbeat()
         )
         
-        # 构建基础 section（行为指令）
-        section = build_coding_memory_section(
+        # 构建基础 section（行为指令）。build_coding_memory_section 复用
+        # SectionName.MEMORY，这里换成 rail 专属的名字，否则个人 MemoryRail
+        # 会在同一轮里把它删掉。
+        base_section = build_coding_memory_section(
             language=lang,
             read_only=is_read_only,
             memory_dir=self._coding_memory_dir,
+        )
+        section = PromptSection(
+            name=CODING_MEMORY_SECTION_NAME,
+            content=base_section.content,
+            priority=base_section.priority,
+            category=base_section.category,
         )
         
         # 只读模式: 仅注入 MEMORY.md 索引

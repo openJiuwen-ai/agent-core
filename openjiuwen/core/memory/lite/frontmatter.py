@@ -25,11 +25,28 @@ def parse_frontmatter(content: str) -> Optional[Dict[str, str]]:
 
 
 def validate_frontmatter(fm: Dict[str, str]) -> tuple[bool, str]:
-    for field in ("name", "description", "type"):
-        if not fm.get(field):
-            return (False, f"Missing required field: {field}")
+    """Validate required frontmatter fields.
+
+    Error messages state the whole contract, not just the first missing key:
+    the tool result is fed back to the model, and a bare "missing name" reads
+    like a failure of the tool-call envelope's ``name`` field, which makes the
+    model resend the same payload instead of fixing its frontmatter.
+    """
+    required = ("name", "description", "type")
+    missing = [field for field in required if not fm.get(field)]
+    valid_types = ", ".join(VALID_TYPES)
+    if missing:
+        return (
+            False,
+            f"frontmatter is missing required field(s): {', '.join(missing)}; "
+            f"required frontmatter fields are name, description, type, "
+            f"and type must be one of: {valid_types}",
+        )
     if fm["type"] not in VALID_TYPES:
-        return (False, f"type must be one of: {VALID_TYPES}")
+        return (
+            False,
+            f"frontmatter type must be one of: {valid_types}; got {fm['type']!r}",
+        )
     return (True, "")
 
 
