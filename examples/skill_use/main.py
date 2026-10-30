@@ -63,6 +63,20 @@ async def main():
     cfg.sys_operation_id = sysop_card.id
     agent.configure(cfg)
 
+    # 将 sys_operation 工具挂到 ability_manager，供 skill 使用
+    for operation_name, tool_name in (
+        ("fs", "read_file"),
+        ("code", "execute_code"),
+        ("shell", "execute_cmd"),
+    ):
+        tool_card = Runner.resource_mgr.get_sys_op_tool_cards(
+            sys_operation_id=sysop_card.id,
+            operation_name=operation_name,
+            tool_name=tool_name,
+        )
+        if tool_card is not None:
+            agent.ability_manager.add(tool_card)
+
     # Add skills to the agent
     if skills_dir.exists():
         github_token = os.getenv("GITHUB_TOKEN", "")
