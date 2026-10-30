@@ -4,7 +4,7 @@
 import asyncio
 import threading
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -419,6 +419,60 @@ async def test_failed_delete_blocks_reuse_and_recreation_until_retry(monkeypatch
     assert key not in jb._JiuwenBoxProviderMixin._shared_sandbox_ids
     assert not jb._JiuwenBoxProviderMixin._pending_deletions
     client.create_sandbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deletion_state_reports_active_then_failed_without_executing(monkeypatch):
+    # pylint: disable=protected-access
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    probe = Probe(Mock())
+    cls = jb._JiuwenBoxProviderMixin
+    key = probe._shared_scope_key()
+    cls.register_shared_sandbox_id(key, "old")
+    started, release = threading.Event(), threading.Event()
+
+    def delete(_sid):
+        started.set()
+        assert release.wait(5)
+        raise httpx.ReadTimeout("ACL cleanup timeout")
+
+    client = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+    client.__enter__.return_value = client
+    client.delete_sandbox.side_effect = delete
+    monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
+    cleanup = asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=key))
+    operation = Mock()
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        with pytest.raises(RuntimeError, match="SANDBOX_DELETION_PENDING") as error:
+            await probe._execute_with_sandbox_retry(operation)
+        assert isinstance(error.value, BaseError)
+        assert "old" in str(error.value)
+    finally:
+        release.set()
+        await cleanup
+
+    with pytest.raises(RuntimeError, match="SANDBOX_DELETION_FAILED.*sandbox.restart"):
+        await probe._execute_with_sandbox_retry(operation)
+    local_operation = AsyncMock()
+    with pytest.raises(RuntimeError, match="SANDBOX_DELETION_FAILED"):
+        await probe._run_exec_pipeline(
+            sandbox_op=operation, local_op=local_operation, fallback_on_failure=True,
+        )
+    local_operation.assert_not_awaited()
+    # A retained policy barrier must not mask the actionable deletion failure.
+    monkeypatch.setattr(cls, "_policy_updates", 1)
+    with pytest.raises(RuntimeError, match="SANDBOX_DELETION_FAILED"):
+        probe._assert_policy_ready()
+    operation.assert_not_called()
+    assert (key, "old") in cls._pending_deletions
+    assert not cls._delete_tasks
+    assert client.delete_sandbox.call_count == 3
+
+    client.delete_sandbox.side_effect = None
+    assert await jb.delete_jiuwenbox_sandbox(shared_key=key) == ["old"]
+    assert not cls._pending_deletions
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 from collections.abc import Mapping
+from copy import copy
 from logging.handlers import RotatingFileHandler
 from typing import (
     Any,
@@ -44,6 +45,28 @@ from openjiuwen.core.common.logging.utils import (
     get_session_id,
     normalize_and_validate_log_path,
 )
+
+
+class _BoundedFormatter(logging.Formatter):
+    """Bound a complete UTF-8 record, including the handler's line terminator."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Formatter caches message/asctime/exception text on the record. Keep
+        # those changes local so other handlers still receive the original.
+        rendered = super().format(copy(record))
+        encoded = rendered.encode("utf-8", errors="replace")
+        # FileHandler uses text mode: Windows translates each LF to CRLF.
+        newline_extra = len(os.linesep) - 1
+        original_bytes = len(encoded) + newline_extra * encoded.count(b"\n")
+        budget = 1024 * 1024 - len(os.linesep)
+        if original_bytes <= budget:
+            return rendered
+
+        marker = f" [TRUNCATED original_bytes={original_bytes}]"
+        prefix = encoded[:budget - len(marker)]
+        # Conservatively reserve translation bytes before cutting again.
+        prefix = prefix[:len(prefix) - newline_extra * prefix.count(b"\n")]
+        return prefix.decode("utf-8", errors="ignore") + marker
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -491,7 +514,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             self.config.get("format")
             or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s"
         )
-        return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
+        return _BoundedFormatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
     _LOG_LEVEL_TO_STD: Dict[LogLevel, int] = {
         LogLevel.DEBUG: logging.DEBUG,

@@ -8,6 +8,12 @@ class openjiuwen.core.common.logging.manager.LogManager
 
 The `LogManager` class centrally manages all loggers and provides functionality for registering and retrieving loggers.
 
+The default backend limits each fully formatted UTF-8 record, including context, traceback and line terminator,
+to 1 MiB. Oversized records keep their prefix and end with `[TRUNCATED original_bytes=…]`. The original byte
+count includes platform newline translation but excludes the final line terminator. This applies to the default
+console, regular file and dated file outputs; normal records are unchanged. The limit bounds output size,
+not peak memory during formatting.
+
 ### register_logger
 
 ```python
