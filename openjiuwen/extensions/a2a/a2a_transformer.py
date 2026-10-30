@@ -231,11 +231,33 @@ class A2ATransformer:
     @classmethod
     def _message_to_payload(cls, message: Message) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
+        texts: list[str] = []
+        files: list[dict[str, Any]] = []
         for part in message.parts or []:
             text = getattr(part, "text", None)
-            if text is not None:
-                payload["query"] = str(text)
-                break
+            if text:
+                texts.append(str(text))
+                continue
+
+            file_item = {
+                key: value
+                for key, value in (
+                    ("url", getattr(part, "url", None)),
+                    ("filename", getattr(part, "filename", None)),
+                    ("media_type", getattr(part, "media_type", None)),
+                )
+                if value
+            }
+            if file_item:
+                metadata = cls._from_struct(getattr(part, "metadata", None))
+                if metadata:
+                    file_item["metadata"] = metadata
+                files.append(file_item)
+
+        if texts:
+            payload["query"] = "\n".join(texts)
+        if files:
+            payload["files"] = files
         if message.task_id:
             payload["task_id"] = message.task_id
         if message.context_id:
