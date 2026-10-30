@@ -12,6 +12,7 @@ from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 
 INTERRUPTION_KEY = "__react_agent_interruption__"
 RESUME_USER_INPUT_KEY = "_resume_user_input"
+RESUME_ORIGINAL_TOOL_CALLS_KEY = "_resume_original_tool_calls"
 INTERRUPT_AUTO_CONFIRM_KEY = "__interrupt_auto_confirm__"
 RESUME_START_ITERATION_KEY = "_resume_start_iteration"
 

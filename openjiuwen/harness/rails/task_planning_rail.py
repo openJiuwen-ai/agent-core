@@ -77,6 +77,14 @@ class TaskPlanningRail(DeepAgentRail):
         self._usage_records: Dict[str, ModelUsageRecord] = {}
         self._default_llm: Optional[Model] = None
 
+    def clone_for_subagent(self) -> "TaskPlanningRail":
+        return type(self)(
+            enable_progress_repeat=self.enable_progress_repeat,
+            list_tool_call_interval=self.list_tool_call_interval,
+            model_selection=dict(self._model_selection),
+            inject_prompt=self.inject_prompt,
+        )
+
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
         from openjiuwen.harness.deep_agent import DeepAgent

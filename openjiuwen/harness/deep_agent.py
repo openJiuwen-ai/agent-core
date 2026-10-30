@@ -1277,7 +1277,7 @@ class DeepAgent(BaseAgent):
             "system_prompt": spec.system_prompt,
             "tools": spec.tools,
             "mcps": spec.mcps,
-            "rails": spec.rails,
+            "rails": [rail.clone_for_subagent() for rail in spec.rails] if spec.rails else None,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
                 spec.max_iterations
@@ -1318,6 +1318,26 @@ class DeepAgent(BaseAgent):
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
         }
 
+        if "tool_owner_id" not in (spec.factory_kwargs or {}):
+            create_kwargs["tool_owner_id"] = subsession_id
+
+        def bind_subagent(subagent: "DeepAgent") -> "DeepAgent":
+            subagent = self._bind_inherited_artifact_root(subagent)
+            # Only auto-owned ephemeral runtimes belong to this dispatch.
+            # Explicit factory owners / SysOperations retain their host lifecycle.
+            if isinstance(subagent, DeepAgent) and "tool_owner_id" not in (spec.factory_kwargs or {}):
+                owned_operation = subagent.deep_config.sys_operation if spec.sys_operation is None else None
+                operation_id = f"{subagent.card.name}_{subsession_id}"
+
+                async def cleanup_runtime() -> None:
+                    subagent.ability_manager.teardown_tools()
+                    if (owned_operation is not None
+                            and Runner.resource_mgr.get_sys_operation(operation_id) is owned_operation):
+                        Runner.resource_mgr.remove_sys_operation(operation_id)
+
+                subagent.register_task_resource_cleanup(cleanup_runtime)
+            return subagent
+
         if spec.factory_name:
             normalized_factory = (spec.factory_name or "").strip().lower()
             if normalized_factory in {"browser_agent", "browser_runtime"}:
@@ -1347,7 +1367,7 @@ class DeepAgent(BaseAgent):
                     )
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
-                return self._bind_inherited_artifact_root(
+                return bind_subagent(
                     create_browser_agent(
                         **create_kwargs,
                         **factory_kwargs,
@@ -1358,7 +1378,7 @@ class DeepAgent(BaseAgent):
                     create_code_agent,
                 )
 
-                return self._bind_inherited_artifact_root(
+                return bind_subagent(
                     create_code_agent(
                         **create_kwargs,
                         **dict(spec.factory_kwargs or {}),
@@ -1369,7 +1389,7 @@ class DeepAgent(BaseAgent):
                     create_research_agent,
                 )
 
-                return self._bind_inherited_artifact_root(
+                return bind_subagent(
                     create_research_agent(
                         **create_kwargs,
                         **dict(spec.factory_kwargs or {}),
@@ -1380,7 +1400,7 @@ class DeepAgent(BaseAgent):
                     create_mobile_gui_agent,
                 )
 
-                return self._bind_inherited_artifact_root(
+                return bind_subagent(
                     create_mobile_gui_agent(
                         **create_kwargs,
                         **dict(spec.factory_kwargs or {}),
@@ -1394,7 +1414,7 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return self._bind_inherited_artifact_root(
+        return bind_subagent(
             create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
         )
 
