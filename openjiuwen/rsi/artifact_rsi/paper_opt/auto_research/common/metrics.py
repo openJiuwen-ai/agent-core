@@ -244,6 +244,33 @@ def resolve_metric(metrics: dict[str, Any] | None, name: str) -> MetricResolutio
     return _unique_or_ambiguous(cleaned, leaf_hits)
 
 
+def _drop_item_records(node: Any, *, depth: int = 0) -> Any:
+    if depth > _MAX_RESOLVE_DEPTH:
+        return None
+    if isinstance(node, dict):
+        return {
+            key: _drop_item_records(value, depth=depth + 1)
+            for key, value in node.items()
+            if key not in _ITEM_RECORD_KEYS
+        }
+    if isinstance(node, list):
+        return [_drop_item_records(value, depth=depth + 1) for value in node]
+    return node
+
+
+def numeric_metric_values(metrics: dict[str, Any] | None) -> list[float | int]:
+    """Every numeric leaf of a metrics payload that ``resolve_metric`` can reach.
+
+    Covers root scalars, ``metrics.<name>``, nested summaries and ``{"value": ...}``
+    cells, so a number the host renders from a nested plan metric is also a known
+    number for the reporting lint. Per-item record lists (``_ITEM_RECORD_KEYS``)
+    are skipped: they are raw rows rather than reportable results, and walking them
+    first would spend the ``_MAX_RESOLVE_NODES`` budget before the summary keys.
+    """
+    payload = metrics if isinstance(metrics, dict) else {}
+    return [value for _path, value in _collect_numeric_paths(_drop_item_records(payload))]
+
+
 def resolve_plan_metrics(
     metrics: dict[str, Any] | None,
     names: list[str] | None = None,

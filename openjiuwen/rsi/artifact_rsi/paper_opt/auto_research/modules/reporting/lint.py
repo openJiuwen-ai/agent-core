@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import numeric_metric_values
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import escape_latex
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import SectionSpec
@@ -146,13 +147,16 @@ def known_numbers(result: ExperimentResult) -> set[float]:
     rounding levels rather than also adding ``round(value, 0)`` — rounding
     a fraction metric to a bare integer (0 or 1) would make the check
     accept almost anything in range and defeat its purpose.
+
+    Values are read with ``numeric_metric_values`` (nested summaries and
+    ``metrics.<name>`` included, per-item records excluded), the same reach
+    as ``resolve_metric``: the host renders the results table from
+    ``resolve_metric``, so reading only root scalars here flagged the host's
+    own table values — and prose quoting them — as untraceable.
     """
     raw: list[float] = []
     for variant in result.variants:
-        for value in variant.metrics.values():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            raw.append(float(value))
+        raw.extend(float(value) for value in numeric_metric_values(variant.metrics))
     return expand_known_numbers(raw)
 
 
