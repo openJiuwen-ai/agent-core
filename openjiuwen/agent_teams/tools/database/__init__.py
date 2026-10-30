@@ -214,13 +214,20 @@ class TeamDatabase:
         if self.engine is None:
             return
         await _drop_cur_session_tables(self.engine)
+        # 表已删 → 本库实例上的 bind-DDL 缓存同步失效（否则重建被跳过）
+        if self._sessions is not None:
+            self._sessions.forget_session_tables_ready(get_session_id())
 
     async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
         """Delete all dynamic team tables and clear static team tables."""
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
-        return await _cleanup_all_runtime_state(self.engine)
+        result = await _cleanup_all_runtime_state(self.engine)
+        # 全量删除 → 本库实例的整个 bind-DDL 缓存作废
+        if self._sessions is not None:
+            self._sessions.clear_session_tables_ready()
+        return result
 
     async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
         """Drop dynamic tables for a specific session without active context.
@@ -237,7 +244,10 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return []
-        return await _drop_session_tables_by_id(self.engine, session_id)
+        result = await _drop_session_tables_by_id(self.engine, session_id)
+        if self._sessions is not None:
+            self._sessions.forget_session_tables_ready(session_id)
+        return result
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Delete a team's persisted row and drop current session tables.
@@ -261,6 +271,8 @@ class TeamDatabase:
 
         try:
             await _drop_cur_session_tables(self.engine)
+            if self._sessions is not None:
+                self._sessions.forget_session_tables_ready(session_id)
         except Exception as e:
             team_logger.error(
                 "Failed to drop current session tables for team %s: %s",

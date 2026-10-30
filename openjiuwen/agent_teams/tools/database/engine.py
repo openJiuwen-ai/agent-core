@@ -9,10 +9,10 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple, Optional, TypeVar
 
-from sqlalchemy import event, inspect
-from sqlalchemy.schema import CreateTable
+from sqlalchemy import event, inspect, text
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -100,6 +100,128 @@ class DbSessions:
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+        # Per-session memo of completed bind-time DDL, scoped to THIS
+        # DbSessions instance (i.e. this database): members bind 1+N times per
+        # team spawn/recovery and the snapshot DB-fallback also calls
+        # ``create_cur_session_tables`` — all but the first successful run per
+        # session are pure write-lock overhead. ``_tables_inflight`` collapses
+        # a concurrent first-bind burst onto a single leader run (followers
+        # await its completion Event). Entries are dropped by every
+        # table-drop path (via ``TeamDatabase`` methods); a degraded
+        # (budget-exhausted) run is deliberately NOT memoised so the next
+        # bind retries. Instance-scoped (not module-global) so a second
+        # database in the same process can never inherit a stale "ready".
+        # The memo value is the DB's ``schema_version`` at build time: SQLite
+        # bumps that header cookie on ANY schema change from ANY process, so
+        # a fast-path compare detects tables dropped by a *foreign* process
+        # (the in-process drop hooks cannot see those). On backends without a
+        # cheap schema cookie (PostgreSQL / MySQL) the fast path disables
+        # itself: ``current_schema_version`` returns None and every bind
+        # re-runs the idempotent DDL (pre-memo behaviour).
+        # All access goes through the methods below — module-level helpers in
+        # this file must not touch ``_tables_ready`` / ``_tables_inflight``
+        # directly (protected-member discipline).
+        self._tables_ready: dict[str, int] = {}
+        self._tables_inflight: dict[str, asyncio.Event] = {}
+        self._schema_version_unsupported = False
+        # Drop epoch: bumped by every memo invalidation (forget/clear). The
+        # bind-DDL leader captures it before its DDL run and re-checks before
+        # memoising — a drop that landed mid-DDL (drop paths run on bare
+        # ``engine.begin()``, outside the write lock) must not be overwritten
+        # by a stale memo write, or the cache would record a post-drop
+        # schema_version while the tables are gone and every later bind would
+        # skip re-creation ("no such table" in-band errors). Deliberately one
+        # global counter rather than per-session: a cross-session invalidation
+        # only costs the next bind one idempotent DDL re-run, while a missed
+        # invalidation is a persistent poisoned cache.
+        self._tables_drop_epoch = 0
+
+    async def current_schema_version(self) -> Optional[int]:
+        """Return the DB's ``PRAGMA schema_version`` (read pool, no write lock).
+
+        Sub-millisecond header read; the cross-process invalidation signal
+        for the bind-DDL memo. Returns None when the backend has no such
+        cookie (``PRAGMA`` is SQLite-only; on PostgreSQL / MySQL it is a
+        syntax error) — callers treat None as "unknown" (memo miss), and the
+        probe disables itself after the first detection so those backends
+        never pay a doomed query per bind.
+        """
+        if self._schema_version_unsupported:
+            return None
+        async with self.read() as session:
+            conn = await session.connection()
+            if conn.dialect.name != "sqlite":
+                self._schema_version_unsupported = True
+                team_logger.warning(
+                    "schema_version probe unsupported on dialect %s; bind-DDL "
+                    "memo fast path disabled (idempotent DDL re-runs per bind)",
+                    conn.dialect.name,
+                )
+                return None
+            row = (await session.execute(text("PRAGMA schema_version"))).first()
+            return int(row[0]) if row else 0
+
+    def get_session_tables_ready_version(self, session_id: str) -> Optional[int]:
+        """Return the memoised build-time schema_version, None when not memoised."""
+        return self._tables_ready.get(session_id)
+
+    def memoize_session_tables_ready(self, session_id: str, version: Optional[int]) -> None:
+        """Memoise a successful bind-time DDL run.
+
+        A None version (backend without a schema cookie) is deliberately NOT
+        memoised — the next bind re-runs the idempotent DDL instead of
+        trusting a version it cannot verify.
+        """
+        if version is None:
+            self._tables_ready.pop(session_id, None)
+            return
+        self._tables_ready[session_id] = version
+
+    def begin_session_tables_inflight(self, session_id: str) -> tuple[asyncio.Event, bool]:
+        """Register/join the in-flight bind-DDL run for a session.
+
+        Returns ``(event, is_leader)``: the leader (first caller) runs the
+        DDL; followers await the event, then verify the memo — a leader that
+        finished without memoising (degraded/cancelled) sends followers back
+        here to re-contend for leadership.
+        """
+        inflight = self._tables_inflight.get(session_id)
+        if inflight is not None:
+            return inflight, False
+        inflight = asyncio.Event()
+        self._tables_inflight[session_id] = inflight
+        return inflight, True
+
+    def end_session_tables_inflight(self, session_id: str, inflight_event: asyncio.Event) -> None:
+        """Close the leader's in-flight run and release followers."""
+        self._tables_inflight.pop(session_id, None)
+        inflight_event.set()
+
+    def forget_session_tables_ready(self, session_id: Optional[str]) -> None:
+        """Drop a session's bind-DDL memo after its dynamic tables are dropped.
+
+        Called by ``TeamDatabase`` drop/cleanup methods — the only legitimate
+        writers outside this module. Without it a re-created session would
+        skip table creation entirely (stale "ready") and fail in-band.
+        Bumps the drop epoch so an in-flight bind-DDL leader does not
+        overwrite this invalidation with a stale memo write.
+        """
+        self._tables_drop_epoch += 1
+        if session_id:
+            self._tables_ready.pop(session_id, None)
+
+    def clear_session_tables_ready(self) -> None:
+        """Void the whole bind-DDL memo (all dynamic tables were deleted)."""
+        self._tables_drop_epoch += 1
+        self._tables_ready.clear()
+
+    def tables_drop_epoch(self) -> int:
+        """Current drop epoch; compared by the bind-DDL leader across its run."""
+        return self._tables_drop_epoch
+
+    def is_session_tables_ready(self, session_id: str) -> bool:
+        """Return whether this session's bind-time DDL is memoised as done."""
+        return session_id in self._tables_ready
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -259,6 +381,48 @@ def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
     """
     inspector = inspect(sync_conn)
     return {name for name in table_names if inspector.has_table(name)}
+
+
+def _create_table_with_indexes(sync_conn, table) -> None:
+    """Atomically create one dynamic table *with* its model-declared indexes.
+
+    The raw ``CreateTable`` DDL construct emits ONLY the CREATE TABLE
+    statement — unlike ``Table.create()`` it does NOT emit CREATE INDEX for
+    the table's ``Index`` objects (verified on sqlalchemy 2.0.51). Tables
+    created through this path alone are born index-less, and the migration
+    detector (``_ensure_dynamic_table_indexes``) then misreads them as
+    legacy on the next bind — plus ``team_review_vote_*`` is not a migration
+    candidate at all, so its ``task_round`` index would never appear.
+
+    Running the index ensure on EVERY call (not just fresh creates) also
+    heals tables born during the no-index window: ``CREATE INDEX IF NOT
+    EXISTS`` is a sub-millisecond no-op when the index already exists.
+    """
+    sync_conn.execute(CreateTable(table, if_not_exists=True))
+    if sync_conn.dialect.name == "mysql":
+        # MySQL has no CREATE INDEX IF NOT EXISTS (MariaDB-only syntax; MySQL
+        # 8.x rejects it with error 1064) — probe the live schema instead and
+        # emit a plain CREATE INDEX only for indexes that are missing. The
+        # table was just ensured above, so the reflection target exists.
+        existing = {
+            idx["name"] for idx in inspect(sync_conn).get_indexes(table.name)
+        }
+        for index in table.indexes:
+            if index.name not in existing:
+                try:
+                    sync_conn.execute(CreateIndex(index))
+                except Exception as exc:
+                    # 并发首绑竞态：另一会话已建同名索引（MySQL 1061
+                    # "Duplicate key name"）——幂等语义下同义成功，容忍；
+                    # 其余错误原样上抛。SQLite 无此问题（单写者串行 +
+                    # IF NOT EXISTS），仅 mysql 分支需要。
+                    orig = getattr(exc, "orig", None)
+                    errno = orig.args[0] if orig is not None and orig.args else None
+                    if errno != 1061:
+                        raise
+        return
+    for index in table.indexes:
+        sync_conn.execute(CreateIndex(index, if_not_exists=True))
 
 
 def _drop_table(sync_conn, table_name: str) -> None:
@@ -779,7 +943,6 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
         read_engine = write_engine
     else:
         raise NotImplementedError(f"Database type {config.db_type} not yet implemented")
-
     write_session_local = async_sessionmaker(
         bind=write_engine,
         class_=AsyncSession,
@@ -825,9 +988,9 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
         # 原子建表：checkfirst=True 是"先查再建"两步，并发/多进程下有窗口
         # （成员惰性拉起并发初始化同会话动态表时炸 already exists）；
         # CREATE TABLE IF NOT EXISTS 由 SQLite 单写者锁保证原子性。
-        await conn.run_sync(
-            lambda c, t=model.__table__: c.execute(CreateTable(t, if_not_exists=True))
-        )
+        # 注意必须走 _create_table_with_indexes：裸 CreateTable 不建索引
+        # （Table.create 才带），漏建会让迁移检测把新表误读成 legacy。
+        await conn.run_sync(_create_table_with_indexes, model.__table__)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
     await conn.run_sync(
@@ -847,6 +1010,13 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
 
     The session_id is obtained from context via get_session_id().
 
+    Per-session memoisation: a session whose tables have been built once in
+    this process is skipped outright (members bind 1+N times per team spawn /
+    recovery, and the snapshot DB-fallback calls this too — all but the first
+    are pure write-lock overhead). Concurrent first binds collapse onto one
+    leader run via an in-flight Event. The memo is dropped on every
+    table-drop path and never set by a degraded (budget-exhausted) run.
+
     Retries on transient errors: SQLite write contention
     (``OperationalError``) and pool-exhaustion (``SATimeoutError``) as
     ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
@@ -863,6 +1033,76 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
         team_logger.warning("No session_id in context, cannot create session tables")
         return
 
+    # Per-session memo (scoped to this DbSessions = this database). The cached
+    # value is the schema_version at build time; compare it against the live
+    # header cookie so a schema change by a *foreign* process (drop/create
+    # outside our drop-path hooks) invalidates the entry and re-runs the DDL.
+    # A version read failure is treated as a miss — re-running idempotent DDL
+    # is safe, wrongly skipping it is not.
+    cached_version = sessions.get_session_tables_ready_version(session_id)
+    if cached_version is not None:
+        try:
+            live_version = await sessions.current_schema_version()
+        except Exception as exc:
+            # A version read failure is treated as a miss — re-running
+            # idempotent DDL is safe, wrongly skipping it is not. The failure
+            # itself must stay visible: swallowing it silently would leave a
+            # permanently-failing memo probe indistinguishable from a healthy
+            # cache in the logs.
+            team_logger.warning(
+                "schema_version read failed for session %s; treating bind-DDL "
+                "memo as miss: %s",
+                session_id,
+                exc,
+            )
+            live_version = None
+        if live_version is not None and live_version == cached_version:
+            return
+        sessions.forget_session_tables_ready(session_id)
+    # Concurrent first-bind burst (members spawn in parallel): followers await
+    # the leader's completion instead of each paying a write-lock DDL run.
+    # A follower MUST verify the outcome after the wait: a degraded
+    # (budget-exhausted) or cancelled leader releases the Event WITHOUT
+    # memoising — returning unconditionally would be a silent fake success
+    # (bind looks done, tables may not exist). Not-ready followers re-contend
+    # for leadership and pay their own retry budget; the burst stays collapsed
+    # in the healthy case (leader memoises → followers return on the first
+    # post-wait check).
+    while True:
+        inflight, is_leader = sessions.begin_session_tables_inflight(session_id)
+        if is_leader:
+            try:
+                await _create_cur_session_tables_locked(sessions, session_id)
+            finally:
+                sessions.end_session_tables_inflight(session_id, inflight)
+            return
+        await inflight.wait()
+        if sessions.is_session_tables_ready(session_id):
+            return
+        team_logger.warning(
+            "Bind-DDL leader run for session %s ended without memoising "
+            "(degraded or cancelled); follower re-contending as leader",
+            session_id,
+        )
+
+
+async def _create_cur_session_tables_locked(sessions: DbSessions, session_id: str) -> None:
+    """Retry-loop body of ``create_cur_session_tables`` (single leader run).
+
+    Retries on transient errors: SQLite write contention
+    (``OperationalError``) and pool-exhaustion (``SATimeoutError``) as
+    ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
+    ``TimeoutError`` raised by ``DbSessions.write()`` when the driver thread
+    is wedged. A failed retry budget does not raise:
+    ``create_cur_session_tables`` returns ``None`` on success-or-give-up and
+    ``bind_session`` does not inspect the return, so a bind-time DDL hiccup
+    degrades to a logged error rather than crashing the member — the
+    session's tables either got created/migrated on a retry, or the next DAO
+    write surfaces the real error in-band. Only a genuinely successful run
+    memoises the session (with the post-build schema_version) into
+    ``_tables_ready``.
+    """
+
     async def _ddl_once() -> None:
         async with sessions.write() as session:
             await _ensure_session_tables(session)
@@ -872,6 +1112,11 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     # slow run stalls every DAO write of the instance. Always log the elapsed
     # time; flag runs slow enough to matter (DDL 耗时打点).
     started_at = time.monotonic()
+    # Drop epoch captured before the DDL run: a drop path that landed mid-run
+    # (drop goes through bare ``engine.begin()``, not the write lock) already
+    # invalidated the memo via forget/clear — re-checking at memoise time
+    # keeps this leader from overwriting that invalidation with a stale write.
+    drop_epoch_at_start = sessions.tables_drop_epoch()
     last_err: BaseException | None = None
     for attempt in range(_DB_RETRY_ATTEMPTS):
         try:
@@ -889,6 +1134,40 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
                     session_id,
                     elapsed_ms,
                 )
+            # Record the post-build schema_version — must be read AFTER
+            # our own DDL (which itself bumps the cookie), or the next
+            # bind would instantly miss. A None version (backend without
+            # a schema cookie) is not memoised — the next bind re-runs
+            # the idempotent DDL.
+            try:
+                version = await sessions.current_schema_version()
+            except Exception as exc:
+                # Version read failed → do not memoise; the next bind re-runs
+                # the idempotent DDL. Never let memo bookkeeping mask success,
+                # and never hide the read failure itself.
+                team_logger.warning(
+                    "schema_version read after bind DDL failed for session %s; "
+                    "not memoising: %s",
+                    session_id,
+                    exc,
+                )
+                sessions.forget_session_tables_ready(session_id)
+                return
+            if sessions.tables_drop_epoch() != drop_epoch_at_start:
+                # 表在 DDL 或版本读取期间被 drop 路径删过（forget/clear 已递增
+                # 代数）——此刻读到的 schema_version 是删除后的版本，写回 memo
+                # 就是「版本齐但表不在」的脏缓存（后续 bind 全部跳过建表）。
+                # 不写，让下一次 bind 重跑幂等 DDL。
+                team_logger.warning(
+                    "Session tables dropped concurrently with bind DDL for "
+                    "session %s; not memoising bind-DDL cache",
+                    session_id,
+                )
+                sessions.forget_session_tables_ready(session_id)
+                return
+            # 复检与写回之间不得有任何 await——asyncio 单线程不抢占，同步
+            # 区段内 drop 路径插不进来，竞态窗口在此闭合。
+            sessions.memoize_session_tables_ready(session_id, version)
             return
         except (OperationalError, SATimeoutError, TimeoutError) as e:
             last_err = e

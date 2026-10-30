@@ -162,7 +162,12 @@ def test_mount_into_workspace_falls_back_to_copy_when_junction_fails(monkeypatch
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0
-def test_mount_into_workspace_reraises_non_1314_symlink_error(monkeypatch, tmp_path):
+def test_mount_into_workspace_non_1314_symlink_error_also_falls_back_to_junction(monkeypatch, tmp_path):
+    """Windows 上任意 symlink OSError（不只 1314，
+    例如软删除 DLL 改造后的 winerror=5）都先落 junction，由
+    create_windows_junction 的 reparse 兜底承接——原"非 1314 直接重抛"
+    用例随宽闸废弃；本用例钉住宽闸行为，防止回退。（环境敏感：仅当
+    mklink 可用的机器上旧用例才表现为失败，属存量遗留。）"""
     manager = _make_manager(tmp_path)
     workspace_root = tmp_path / "agent-workspace"
     workspace_root.mkdir()
@@ -172,11 +177,23 @@ def test_mount_into_workspace_reraises_non_1314_symlink_error(monkeypatch, tmp_p
         error.winerror = 5
         raise error
 
+    junction_calls = []
+
+    def fake_create_junction(target_path, link_path):
+        junction_calls.append((target_path, link_path))
+        os.mkdir(link_path)
+
     monkeypatch.setattr(os, "symlink", fake_symlink)
     monkeypatch.setattr(os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.manager.create_windows_junction",
+        fake_create_junction,
+    )
 
-    with pytest.raises(OSError, match="unexpected failure"):
-        manager.mount_into_workspace(str(workspace_root))
+    manager.mount_into_workspace(str(workspace_root))
+
+    assert len(junction_calls) == 1
+    assert (workspace_root / ".team" / "team-alpha").is_dir()
 
 
 @pytest.mark.level0
