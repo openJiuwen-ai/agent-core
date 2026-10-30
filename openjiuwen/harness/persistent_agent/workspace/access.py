@@ -96,8 +96,8 @@ def validate_read_scope(
         )
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace access scope mismatch")
-    if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (
-        permission_profile == "full_access"
+    if permission_profile not in {"default", "automatic", "full_access"} or (
+        scope.host_wide and permission_profile != "full_access"
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace access profile mismatch")
     return scope
@@ -198,8 +198,8 @@ def validate_write_scope(
         )
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace write scope mismatch")
-    if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (
-        permission_profile == "full_access"
+    if permission_profile not in {"default", "automatic", "full_access"} or (
+        scope.host_wide and permission_profile != "full_access"
     ):
         raise build_error(
             StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,

@@ -101,3 +101,9 @@ For the built-in YAML writer, **`_resolve_agent_config_yaml_path`** uses **only*
 | `openjiuwen/harness/security/patterns.py` | Matching + YAML **`persist_*`** |
 | `openjiuwen/harness/deep_agent.py` | Queues permission rail when enabled |
 | `examples/permissions/permission_demo.py` | Demo script |
+
+## 7. Shell command decisions
+
+Package rules distinguish an ordinary inline Python `subprocess` call from a reverse or bind shell. Using `subprocess` alone retains the dynamic-execution `ask` rule; socket and PTY patterns remain `deny`. Host-specific cross-group sharing checks are independent of these package rules.
+
+The local shell allowlist recognizes quoted executable paths. On Windows it treats executable names case-insensitively and recognizes `.exe` variants of allowed names, including paths with spaces. An explicit executable path in the allowlist remains path-scoped; unrelated executables are not allowed by this normalization.

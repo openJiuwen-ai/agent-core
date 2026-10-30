@@ -60,7 +60,8 @@ rules:
     description: "反向 shell、绑定 shell 或可疑网络执行通道"
     tools: [shell]
     match_type: command
-    pattern: 're:(?i)(/dev/(tcp|udp)/|(^|[\s;&|()])(nc|ncat)\b[^;&|]*\s(-e|--exec)\s|\bsocat\b[^;&|]*(EXEC:|SYSTEM:|PTY)|\bbash\s+-i\b[^;&|]*/dev/tcp/|\bpython3?\s+-[ce]\b[^;&|]*(socket|pty\.spawn|subprocess)|\bperl\s+-[ce]\b[^;&|]*Socket)'
+    pattern: >-
+      re:(?i)(/dev/(tcp|udp)/|(^|[\s;&|()])(nc|ncat)\b[^;&|]*\s(-e|--exec)\s|\bsocat\b[^;&|]*(EXEC:|SYSTEM:|PTY)|\bbash\s+-i\b[^;&|]*/dev/tcp/|\bpython3?\s+-[ce](?:\s+|(?=\$?["']))(?:\$?"[^"\r\n]*(?:\bsocket\b|pty\.spawn)|\$?'[^'\r\n]*(?:\bsocket\b|pty\.spawn)|[^"';&|\r\n]*(?:\bsocket\b|pty\.spawn))|\bperl\s+-[ce]\b[^;&|]*Socket)
     severity: CRITICAL
     action: deny
 

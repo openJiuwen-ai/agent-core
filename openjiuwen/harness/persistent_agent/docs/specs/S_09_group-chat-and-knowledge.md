@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_09 / group-chat-and-knowledge |
 | 关联模块 | [ports.py](../../ports.py)、[schema/context.py](../../schema/context.py)、[GroupMessageReader 接入](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-28 |
+| 最近一次修订日期 | 2026-10-30 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_07](../features/F_07_group-participation.md)、[F_23](../features/F_23_group-chat-history-retrieval.md)；实际读取接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-13、PA-23 |
 | 设计依据 | PA-23 群聊历史检索以 [F_23](../features/F_23_group-chat-history-retrieval.md) 为依据；[办公空间与知识](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[权限](../designs/persistent-agent-architecture.md#91-身份与权限检查) |
 
@@ -29,7 +29,7 @@
 
 GroupMessage 包含 message_id、sender_id、sender_name、sender_kind(human / agent)、received_at、可选 text、mention_ids、reply_to、attachment_refs、status(normal / edited / recalled / unavailable)、严格布尔 queued_request。时间须带时区并归一化 UTC；recalled 与 unavailable 不得带正文，正文最多 65536 字符，提及与附件各最多 128 项。稳定身份和来源引用不由模型猜造。
 
-`GroupMessageQuery` 至少有 `query`、非空 `keywords`、`since` / `until` 时间范围或 `sender_id` 中一个条件；同时提供起止时间时不得倒置。`query` 保留单关键词兼容形式；`keywords` 最多 16 项、每项 1024 字符，与 `query` 一起按 OR 语义匹配，大小写不敏感的重复项去重。多个关键词在一次工具调用中合并为一个有界结果集，消息不会因命中多个词而重复。关键词按字面子串匹配，不进行语义扩展。`cursor` 可选，`limit` 默认 50、严格正整数且最多 500。查询还可选提供 `group_ids` / `group_names` 以缩小跨群搜索范围；两者均按精确值解析，只能匹配 Agent 已获授权的群，不能扩大授权。多个同名群时不随机选择，须返回消歧结果。结果按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
+`GroupMessageQuery` 至少有 `group_ids`／`group_names`、`query`、非空 `keywords`、`since` / `until` 时间范围或 `sender_id` 中一个条件；同时提供起止时间时不得倒置。`query` 保留单关键词兼容形式；`keywords` 最多 16 项、每项 1024 字符，与 `query` 一起按 OR 语义匹配，大小写不敏感的重复项去重。多个关键词在一次工具调用中合并为一个有界结果集，消息不会因命中多个词而重复。关键词按字面子串匹配，不进行语义扩展。`cursor` 可选，`limit` 默认 50、严格正整数且最多 500。查询还可选提供 `group_ids` / `group_names` 以缩小跨群搜索范围；两者均按精确值解析，只能匹配 Agent 已获授权的群，不能扩大授权。多个同名群时不随机选择，须返回消歧结果。结果按服务端接收时间从新到旧排序，同一时间按 `group_id`、`message_id` 稳定排序。
 
 `GroupMessagesResult` 专用于近期消息读取，`messages` 最多 500 项，另含 `next_cursor`、`scanned_through` 和可选 `reason`。`scanned_through` 是服务端确认已扫描到的位置，与分页及展示范围分开；`empty` 也可携带，进度不可信时为空。
 
@@ -67,6 +67,7 @@ metadata `{kind: group_share, approval_id: ...}`。有 group_chat 端口时 Spec
 ```text
 recent_messages(execution, cursor=None, limit=20) -> GroupMessagesResult
 search_messages(execution, query: GroupMessageQuery) -> GroupMessageSearchResult
+search_content(execution, query: GroupMessageQuery) -> GroupMessageSearchResult
 ```
 
 方法均为 async。`recent_messages` 按 Session 定位当前群，宿主依据该群访问策略、Agent 入群时间和消息状态过滤，不返回撤回正文。recent 的 limit 默认值是端口默认，参与判断使用的 8 条限制由 S_01 定义，不能混同。
@@ -125,6 +126,21 @@ read(execution, material_ref, version_ref) -> MaterialReadResult
 
 同进程端口失败直接抛异常；status=unknown 是资料查询不确定，不引入预算 / 记账调用的跨进程“结果未知”协议。对外错误展示仍需脱敏，不能凭错误差异向无权主体暴露资源存在性。
 
+### 4.3 消息与 Session 最终产物的统一检索
+
+2026-10-29 将统一检索契约迁入实际依赖的 `agent-core_3.24`。`search_group_messages` 名称不变，优先调用宿主的 `search_content`，消息、文件与在线文档仍经过同一个逐来源群审批服务。
+
+- `GroupMessageQuery.content_types` 接受非空、无重复的 `messages`、`files`、`online_docs`，默认同时搜索三类。`sender_id` 仅可用于包含消息的查询；原有 `query`、多关键词 OR、群名精确过滤、时间与分页语义保留。
+- `GroupArtifactSearchHit` 描述最终文件或在线文档。`GroupMessageSearchResult` 新增 `artifacts`，公开别名为 `GroupContentSearchResult`；`limit` 约束消息与产物合计数量，`found` 至少包含一条消息或一个产物，失败状态不允许夹带任意候选。
+- 文件来源必须是 `sessions/<source_session_id>/output/<file_name>`，携带大小与 SHA-256。宿主负责索引、核验来源、批准后复核及复制；Core 校验返回值及 Execution 归属。跨 Session 批准后文件放入当前 Session 的 `imports/`，同 Session 文件可以保留匹配的 `output/` 路径。返回其他 Session 的导入路径一律拒绝。
+- 模型可见结果移除 `source_file_path`、`source_session_id`、`file_digest` 等宿主定位信息，保留批准后当前 Session 的 `imported_path`；展示长度限制同时覆盖产物摘录。在线文档批准只释放链接，不授予平台访问权。
+- 新增公开域异常 `GroupContentApprovalRequired`，原 `GroupMessageApprovalRequired` 保留为兼容子类。统一入口捕获该信号后仍生成带 `persistent_agent.group_share` owner 的原生确认中断；既有批准恢复、拒绝处理及并行回复路由保留。候选审批前不得进入模型窗口。
+- 一次批准只释放本次冻结候选；长期授权由宿主按来源群、目标会话及内容类型保存，旧授权只覆盖消息。Core 不维护授权表，也不把工具完全访问当成跨群业务批准。
+- 同一业务确认 rail 支持宿主原 `bash` 读取调用：只接收 owner=`persistent_agent.group_share`、kind=`group_share` 的原生中断。批准后继续原工具向宿主复核；拒绝通常跳过调用，唯宿主明确标记 `origin=cli_group_read` 的 Bash 仍重入冻结释放路径，以保留当前群命中并排除被拒绝的外群内容，不执行原 shell。不替宿主决定授权、不改成普通 Bash 批准、不在 Core 中解析或执行 CLI 预览。
+- 消息-only 旧宿主没有 `search_content` 时，未显式选择类型的旧调用及显式 `messages` 仍走 `search_messages`；显式请求文件或在线文档则返回不可用，不伪装为空结果。
+
+本次迁移的 Core 定向回归为 190 passed、1 skipped，覆盖查询兼容、内容审批中断、结果路径、消息分享恢复及工作空间边界；入口为 `test_group_artifacts.py`、`test_group_history.py`、`test_group_sharing.py`、`test_workspace_access.py`、`test_workspace_path_policy.py`、`test_protocol.py`。真实飞书审批、CLI 直读约束及无沙箱 Bash 的边界不由这组组件测试证明。
+
 ## 5. 使用与版本生命周期
 
 当前群消息 Execution 开始时将近期背景放入临时块；知识导航仍待 PA-13。群历史搜索由 Persistent Agent 显式调用 `search_group_messages`，按需读取该 Agent 获授权的一个或多个群记录，不自动注入其他群历史。工具结果按正常工具返回进入当前执行上下文，随既有工具消息保存规则保留，而不是临时背景。Execution 结束时临时块删除，下次读取当前版本重新注入，实际窗口规则只在 S_03 维护。
@@ -144,3 +160,14 @@ S_07 校验端口形状与共同归属；S_01 消费参与判断背景；S_03 �
 - 群消息、查询、材料状态与归属：[test_protocol.py](../../../../../tests/unit_tests/harness/persistent_agent/test_protocol.py)。
 - 群背景排除触发消息、incomplete 不当空、判断预算与事件：[test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)。
 - PA-23 组件验证：`tests/unit_tests/harness/persistent_agent/test_group_history.py`、`test_construction.py`、`test_window_assembly.py`。当前授权过滤与真实群历史检索须由 JiuwenSwarm 联调验证；PA-13 授权知识与失效传播仍待建立验证入口，证据在关联 feature / 唯一开发计划维护。
+
+## 8. 宿主文件来源 preflight（2026-10-30）
+
+GroupChatPort 可选提供 `prepare_tool_call(execution, tool_name, arguments)`。PersistentGroupShareRail 在注册文件读取、登记和 Bash 的工具调用前交给宿主核对来源；返回 None 继续原工具，返回 ToolOutput 则以宿主已批准的结果替代原执行。GroupContentApprovalRequired 通过原生 `_raise_interrupt` 记录稳定 owner、kind 和审批引用；不能从回调裸抛后让框架继续工具。拒绝后仍由宿主的已决记录阻断，不把普通工具完全访问当成来源授权。未实现该可选钩子的宿主维持已有行为。文件所属会话、当前群已共享副本的可见性和具体审批表由 JiuwenSwarm 维护；当前群已共享副本不追溯最早来源重复审批。
+
+
+## 9. 平台过滤与来源兼容（2026-10-30）
+
+`GroupMessageQuery.platforms` 为最多 16 项的平台标识元组，每项满足 `^[a-z][a-z0-9_]*$` 且最多 64 字符；默认 `()` 表示不额外限制平台。平台范围也是合法查询条件，但不能扩大 Agent 的来源授权。端口 Provider 必须在解析群名、外部 ID 和搜索候选时应用该条件，跨平台同名或相同外部 ID 不得合并。
+
+`GroupMessageSearchHit`、`GroupArtifactSearchHit` 可选携带 `platform`、`platform_chat_id`，缺省为 None，兼容历史保存结果。来源平台的事实由宿主提供，Core 不推断平台应用、租户或用户身份。工具呈现保留平台信息，同时继续隐藏宿主私有文件定位符。审批与授权按具体宿主处理，平台字段本身不是授权凭证。

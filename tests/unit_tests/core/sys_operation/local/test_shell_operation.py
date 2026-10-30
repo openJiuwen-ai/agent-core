@@ -509,6 +509,41 @@ def _make_shell_op(restrict: bool, roots: list[str] | None = None) -> ShellOpera
     return op
 
 
+@pytest.mark.parametrize("command", [
+    '"C:\\Program Files\\nodejs\\node.exe" --version',
+    '"/c/Program Files/nodejs/node.exe" --version',
+    '"$APPDATA/npm/node_modules/@larksuite/cli/bin/lark-cli.exe" docs +create --title example',
+    'lark-cli.exe calendar +agenda',
+    "& 'C:\\Program Files\\nodejs\\node.exe' --version",
+])
+def test_windows_allowlist_recognizes_quoted_executable_paths(monkeypatch, command):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = ["node", "lark-cli"]
+    assert op._check_allowlist(command)
+
+
+@pytest.mark.parametrize("command", [
+    '"C:\\Program Files\\unlisted.exe" --version',
+    'lark-cli-helper.exe --version',
+    '"node"-unlisted.exe --version',
+    '"C:\\Program Files\\node.exe --version',
+])
+def test_windows_allowlist_still_rejects_unlisted_or_malformed_executables(monkeypatch, command):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = ["node", "lark-cli"]
+    assert not op._check_allowlist(command)
+
+
+def test_allowlist_preserves_explicit_executable_path_scope(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    op = _make_shell_op(restrict=False)
+    op._run_config.shell_allowlist = [r"C:\trusted\node.exe"]
+    assert op._check_allowlist(r'"C:\trusted\node.exe" --version')
+    assert not op._check_allowlist(r'"C:\untrusted\node.exe" --version')
+
+
 def test_get_sandbox_roots_disabled():
     op = _make_shell_op(restrict=False)
     assert op._get_sandbox_roots() is None

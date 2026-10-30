@@ -1738,6 +1738,16 @@ def real_state(harness, monkeypatch):
     return harness
 
 
+@pytest.fixture
+def active_window_switch(monkeypatch):
+    for module_name in (
+        "openjiuwen.harness.persistent_agent.schema.spec",
+        "openjiuwen.harness.persistent_agent.factory",
+        "openjiuwen.harness.persistent_agent.execution.entries",
+    ):
+        monkeypatch.setattr(import_module(module_name), "ACTIVE_WINDOW_SWITCH_ENABLED", True)
+
+
 def state_key(session_id="session-a"):
     return STATE.WindowStore.state_key("business-agent", session_id)
 
@@ -1811,6 +1821,52 @@ async def test_native_group_share_pause_resume(real_state, monkeypatch, profile,
     else:
         assert host.calls[0][1] == host.calls[1][1]
         assert host.candidate in tools[0].content and host.candidate in str(harness.model.seen[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["approve", "reject"])
+@pytest.mark.parametrize("host_release", [False, True])
+async def test_original_bash_group_share_resumes_with_owned_business_decision(real_state, monkeypatch, choice, host_release):
+    from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+    from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
+    from openjiuwen.harness.persistent_agent.tools.group_history import GROUP_SHARE_INTERRUPT_OWNER
+
+    harness = real_state
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    calls = []
+    approved = {"value": False}
+    resolved = {"value": False}
+
+    class CliRead(Remember):
+        async def invoke(self, inputs, **kwargs):
+            calls.append(inputs)
+            if not resolved["value"] or not approved["value"] and not host_release:
+                raise ToolInterruptException(request=InterruptRequest(
+                    message="CLI owner approval", payload_schema=ConfirmPayload.to_schema(),
+                    metadata={"kind": "group_share", "approval_id": "cli-approval",
+                              **({"origin": "cli_group_read"} if host_release else {})},
+                    interrupt_owner=GROUP_SHARE_INTERRUPT_OWNER, interrupt_kind=InterruptKind.CONFIRM,
+                ))
+            return {"content": "FROZEN-CLI-SECRET" if approved["value"] else "CURRENT-GROUP-ONLY"}
+
+    monkeypatch.setitem(_TOOL_PROVIDER_REGISTRY, "test.entries.cli-sharing",
+                        lambda params, context: CliRead([], {}, name="bash"))
+    spec = harness.spec(permission_profile="full_access", tools=[BuiltinToolSpec(type="test.entries.cli-sharing")])
+    host = SharingApprovalHost(harness.api)
+    harness.model.turns = [("bash", '{"value":"CLI read"}'), "answer"]
+    ctx, _ = harness.context(spec, group_chat=host)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert first[-1].payload.reason == "awaiting_confirmation"
+    assert first[-1].payload.intercepted[0].approval_ref == "cli-approval"
+    assert "FROZEN-CLI-SECRET" not in str(harness.model.seen)
+    approved["value"] = choice == "approve"
+    resolved["value"] = True
+    ctx, _ = harness.context(spec, group_chat=host, execution_id="execution-2")
+    result = await collect(harness.api.resume_persistent_request(spec, ctx, permission(choice=choice)))
+    assert result[-1].payload.status == "completed"
+    assert len(calls) == (2 if choice == "approve" or host_release else 1)
+    assert ("FROZEN-CLI-SECRET" in str(harness.model.seen)) is (choice == "approve")
+    assert ("CURRENT-GROUP-ONLY" in str(harness.model.seen)) is (host_release and choice == "reject")
 
 
 @pytest.mark.asyncio
@@ -2307,7 +2363,9 @@ async def test_persistent_construction_turns_on_tool_fact_retention(harness):
 
 
 @pytest.mark.asyncio
-async def test_new_context_switches_only_after_the_tool_result_and_commits_archive_before_answer(real_state):
+async def test_new_context_switches_only_after_the_tool_result_and_commits_archive_before_answer(
+    real_state, active_window_switch,
+):
     harness = real_state
     spec = harness.spec(
         enabled_features=frozenset({"construction", "window_management"}),
@@ -2341,7 +2399,9 @@ async def test_new_context_switches_only_after_the_tool_result_and_commits_archi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["switch", "continue"])
-async def test_new_user_request_judges_once_before_business_without_tool_iteration(real_state, decision):
+async def test_new_user_request_judges_once_before_business_without_tool_iteration(
+    real_state, active_window_switch, decision,
+):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2377,7 +2437,7 @@ async def test_new_user_request_judges_once_before_business_without_tool_iterati
 
 
 @pytest.mark.asyncio
-async def test_bad_window_judgment_continues_existing_window_once(real_state):
+async def test_bad_window_judgment_continues_existing_window_once(real_state, active_window_switch):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2409,7 +2469,7 @@ async def test_group_ignore_does_not_load_private_history_or_judge_window(real_s
 
 
 @pytest.mark.asyncio
-async def test_accepted_group_judges_window_once_even_with_multiple_business_calls(real_state):
+async def test_accepted_group_judges_window_once_even_with_multiple_business_calls(real_state, active_window_switch):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2439,7 +2499,23 @@ async def test_window_decision_skips_disabled_feature_and_schedules(real_state, 
 
 
 @pytest.mark.asyncio
-async def test_entry_archive_failure_stops_before_business_call(real_state, monkeypatch):
+async def test_new_request_skips_proactive_window_judgment_by_default(real_state, monkeypatch):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+
+    async def unexpected_judgment(*_args, **_kwargs):
+        raise AssertionError("proactive window judgment must be disabled by default")
+
+    monkeypatch.setattr(module("execution.entries"), "judge_window", unexpected_judgment)
+    for index in range(2):
+        ctx, _ = harness.context(spec, execution_id=f"execution-{index}", request_id=f"request-{index}")
+        events = await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+        assert events[-1].payload.status == "completed"
+    assert harness.model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_entry_archive_failure_stops_before_business_call(real_state, monkeypatch, active_window_switch):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2488,7 +2564,9 @@ async def test_agent_originated_group_request_skips_user_entry_judgment(real_sta
 
 
 @pytest.mark.asyncio
-async def test_entry_switch_keeps_current_group_background_in_the_first_business_call(real_state):
+async def test_entry_switch_keeps_current_group_background_in_the_first_business_call(
+    real_state, active_window_switch,
+):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2504,7 +2582,7 @@ async def test_entry_switch_keeps_current_group_background_in_the_first_business
 
 
 @pytest.mark.asyncio
-async def test_entry_handoff_survives_completion_and_reaches_the_next_followup(real_state):
+async def test_entry_handoff_survives_completion_and_reaches_the_next_followup(real_state, active_window_switch):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2523,7 +2601,9 @@ async def test_entry_handoff_survives_completion_and_reaches_the_next_followup(r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry_switch", [True, False])
-async def test_native_entry_archive_recovers_after_new_state_commit_failure(real_state, monkeypatch, entry_switch):
+async def test_native_entry_archive_recovers_after_new_state_commit_failure(
+    real_state, monkeypatch, active_window_switch, entry_switch,
+):
     harness = real_state
     spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
     ctx, _ = harness.context(spec)
@@ -2560,7 +2640,7 @@ async def test_native_entry_archive_recovers_after_new_state_commit_failure(real
 
 @pytest.mark.asyncio
 async def test_native_rollover_archives_successful_write_results_and_keeps_only_bounded_handoff(
-    real_state, monkeypatch,
+    real_state, monkeypatch, active_window_switch,
 ):
     from openjiuwen.core.foundation.tool.schema import ToolOutput
 
