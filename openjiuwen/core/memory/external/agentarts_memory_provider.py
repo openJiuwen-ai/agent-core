@@ -171,6 +171,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
             "query": query,
             "top_k": min(int(top_k), _MAX_TOP_K),
             "min_score": _DEFAULT_MIN_SCORE if args.get("min_score") is None else args["min_score"],
+            "rerank": False,
         }
         if actor_id:
             filter_kwargs["actor_id"] = actor_id

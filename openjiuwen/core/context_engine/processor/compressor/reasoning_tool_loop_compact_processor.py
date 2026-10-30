@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.schema.ignored_tool_call import (
+    IgnoredToolCallRule,
+    matches_ignored_tool_call,
+)
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
@@ -99,6 +103,7 @@ TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY = "tool_call_args_loop_compact_count"
 _CompactKind = Literal["reasoning_tools", "tool_args"]
 
 
+
 class ReasoningToolLoopCompactProcessorConfig(BaseModel):
     """Detect and compact consecutive identical reasoning/tool or tool/args rounds."""
 
@@ -164,6 +169,16 @@ class ReasoningToolLoopCompactProcessorConfig(BaseModel):
         ),
     )
 
+    ignored_tool_calls: List[IgnoredToolCallRule] = Field(
+        default_factory=list,
+        description=(
+            "Tool call rules excluded from consecutive-loop compaction. "
+            "An exempt round acts as a wall (break), not a skip."
+        ),
+    )
+
+
+
 
 @dataclass(frozen=True)
 class _ToolRound:
@@ -175,6 +190,8 @@ class _ToolRound:
     args_fingerprint: Tuple[Tuple[str, str], ...]
     reasoning: str
     tool_names: Tuple[str, ...]
+    # True when every tool_call in the round matches an ignored_tool_calls rule.
+    exempt: bool = False
 
 
 @ContextEngine.register_processor()
@@ -331,9 +348,12 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
         if threshold < 2 or len(rounds) < threshold:
             return None
 
-        # Walk from the end; skip rounds whose fingerprint for this rule is None.
+        # Walk from the end. Exempt rounds are a wall (break), not a skip.
+        # Check exempt before fingerprint-is-None so reasoning walls stay opaque.
         eligible: List[_ToolRound] = []
         for round_info in reversed(rounds):
+            if round_info.exempt:
+                break
             fingerprint = getattr(round_info, fingerprint_attr)
             if fingerprint is None:
                 if eligible:
@@ -417,6 +437,9 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
                 index += 1
                 continue
 
+            exempt = bool(tool_calls) and all(
+                self._is_tool_call_exempt(tool_call) for tool_call in tool_calls
+            )
             rounds.append(
                 _ToolRound(
                     start=index,
@@ -425,6 +448,7 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
                     args_fingerprint=tuple(sorted(call_fps)),
                     reasoning=reasoning or "",
                     tool_names=tool_names,
+                    exempt=exempt,
                 )
             )
             index = cursor
@@ -500,6 +524,17 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
             tool_results=tool_results,
             reasoning_preview=preview,
         ).strip()
+
+
+    def _is_tool_call_exempt(self, tool_call: Any) -> bool:
+        """Return True when tool_call matches an ignored_tool_calls rule."""
+        name = str(getattr(tool_call, "name", "") or "").strip()
+        if not name:
+            return False
+        args = _parse_tool_arguments(getattr(tool_call, "arguments", None))
+        if not isinstance(args, dict):
+            args = {}
+        return matches_ignored_tool_call(name, args, self.config.ignored_tool_calls)
 
     def _normalize_reasoning(self, raw: Any) -> Optional[str]:
         if not isinstance(raw, str):

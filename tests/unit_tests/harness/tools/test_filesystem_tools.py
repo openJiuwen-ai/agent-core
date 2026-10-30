@@ -8,7 +8,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +17,7 @@ from PIL import Image
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation import cwd as cwd_state
 from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd, set_workspace
 from openjiuwen.harness.prompts.tools.filesystem import (
     get_glob_input_params,
@@ -1125,6 +1126,85 @@ async def test_read_pdf_truncation_on_token_budget(sys_op, temp_dir, monkeypatch
 # ── history path construction ─────────────────────────────────
 
 
+def test_history_snapshot_is_written_in_private_directory(tmp_path):
+    history_path = tmp_path / ".agent_history" / "file_ops_test.json"
+
+    filesystem_module._write_history_json(str(history_path), {"file.txt": [{"action": "write"}]})
+    filesystem_module._append_op_history_sync(
+        str(history_path), "file.txt", {"action": "edit", "new_content": "updated"}
+    )
+
+    assert [entry["action"] for entry in json.loads(history_path.read_text(encoding="utf-8"))["file.txt"]] == [
+        "write", "edit"
+    ]
+    if os.name != "nt":
+        assert history_path.parent.stat().st_mode & 0o777 == 0o700
+        assert history_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_write_history_path_stays_inside_restricted_sandbox(monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    workspace = sandbox / "agent-workspace"
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "host-data"))
+    token = cwd_state._cwd_state.set(None)
+    try:
+        cwd_state.init_cwd(str(sandbox), workspace=str(workspace))
+        operation = SimpleNamespace(
+            mode="local",
+            _run_config=LocalWorkConfig(restrict_to_sandbox=True, sandbox_root=[str(sandbox)]),
+        )
+        session = MagicMock()
+        session.agent_id.return_value = "agent"
+        session.get_session_id.return_value = "session"
+
+        history_path = WriteFileTool(operation)._build_history_path(session)
+
+        assert os.path.commonpath((history_path, str(sandbox))) == str(sandbox)
+        assert history_path.startswith(str(workspace))
+    finally:
+        cwd_state._cwd_state.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_restricted_file_history_stays_inside_sandbox(sys_op, monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    workspace = sandbox / "agent-workspace"
+    workspace.mkdir(parents=True)
+    host_data = tmp_path / "host-data"
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(host_data))
+    sys_op._run_config.restrict_to_sandbox = True
+    sys_op._run_config.sandbox_root = [str(sandbox)]
+    session = MagicMock()
+    session.agent_id.return_value = "agent"
+    session.get_session_id.return_value = "session"
+    monkeypatch.setattr(filesystem_module, "get_current_session", lambda: session)
+    token = cwd_state._cwd_state.set(None)
+    try:
+        cwd_state.init_cwd(str(sandbox), workspace=str(workspace))
+        target = sandbox / "document.txt"
+
+        result = await WriteFileTool(sys_op).invoke({"file_path": str(target), "content": "history proof"})
+
+        assert result.success is True
+        assert target.read_text(encoding="utf-8") == "history proof"
+        read_result = await ReadFileTool(sys_op).invoke({"file_path": str(target)})
+        assert read_result.success is True
+        edit_result = await EditFileTool(sys_op).invoke({
+            "file_path": str(target), "old_string": "proof", "new_string": "verified"
+        })
+        assert edit_result.success is True
+        history_path = workspace / ".agent_history" / "file_ops_agent_session.json"
+        await filesystem_module._record_rm_targets_before_deletion(str(history_path), [str(target)], sys_op)
+        entries = json.loads(history_path.read_text(encoding="utf-8"))[str(target)]
+        assert [entry["action"] for entry in entries] == ["write", "edit", "delete"]
+        assert entries[0]["new_content"] == "history proof"
+        assert entries[1]["new_content"] == "history verified"
+        assert entries[2]["old_content"] == "history verified"
+        assert not host_data.exists()
+    finally:
+        cwd_state._cwd_state.reset(token)
+
+
 class TestWriteFileToolHistoryPath(unittest.TestCase):
     """Unit tests for WriteFileTool._build_history_path — no Runner required."""
 
@@ -1150,18 +1230,22 @@ class TestWriteFileToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         assert "default" in path
 
-    def test_workspace_path_is_base_dir(self):
-        """Workspace ContextVar is used as the base directory."""
+    def test_jiuwenswarm_data_dir_is_base_dir(self):
+        """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1", agent_id="a")
-        workspace = tempfile.mkdtemp()
+        data_dir = tempfile.mkdtemp()
+        workspace = os.path.join(data_dir, "workspace")
+        os.makedirs(workspace)
         try:
             set_workspace(workspace)
-            tool = WriteFileTool(MagicMock())
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = WriteFileTool(MagicMock())
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):
         """Filename follows file_ops_{agent_id}_{session_id}.json pattern."""
@@ -1197,18 +1281,22 @@ class TestEditFileToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         assert "default" in path
 
-    def test_workspace_path_is_base_dir(self):
-        """Workspace ContextVar is used as the base directory."""
+    def test_jiuwenswarm_data_dir_is_base_dir(self):
+        """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1", agent_id="a")
-        workspace = tempfile.mkdtemp()
+        data_dir = tempfile.mkdtemp()
+        workspace = os.path.join(data_dir, "workspace")
+        os.makedirs(workspace)
         try:
             set_workspace(workspace)
-            tool = EditFileTool(MagicMock())
-            path = tool._build_history_path(session)
-            assert path.startswith(os.path.realpath(workspace))
-            assert ".agent_history" in path
+            with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
+                tool = EditFileTool(MagicMock())
+                path = tool._build_history_path(session)
+                assert path.startswith(os.path.realpath(data_dir))
+                assert not path.startswith(os.path.realpath(workspace))
+                assert ".agent_history" in path
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):
         """Filename follows file_ops_{agent_id}_{session_id}.json pattern."""

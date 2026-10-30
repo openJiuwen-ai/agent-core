@@ -42,6 +42,7 @@ import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -159,6 +160,53 @@ def get_team_workspace() -> str | None:
 def set_team_workspace(path: str) -> None:
     """Set the team shared workspace root.  Called when joining a team."""
     _state().team_workspace = _resolve(path)
+
+
+# ---- Agent history root: cross-project, per-host artifact root ------------
+
+def get_agent_history_root(operation: Any = None) -> str:
+    """Root directory for cross-session agent artifacts (e.g. ``.agent_history/``).
+
+    A host can select a cross-project root through ``JIUWENSWARM_DATA_DIR``,
+    ``JIUWENCLAW_DATA_DIR``, or ``JIUWENSWARM_HOME``. Without those host
+    settings, preserve the SDK's workspace (or CWD) based history location.
+    A workspace outside the host root also stays isolated in that workspace.
+    Restricted operations always use a root within their sandbox boundary.
+    """
+    data_dir = (os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or "").strip()
+    home = os.getenv("JIUWENSWARM_HOME")
+    workspace = get_workspace()
+    if data_dir or home:
+        try:
+            root = (Path(data_dir) if data_dir else Path(home) / ".jiuwenswarm").expanduser().resolve()
+        except RuntimeError:
+            root = Path(workspace or get_cwd()).resolve()
+        if workspace:
+            workspace_path = Path(workspace).resolve()
+            if not workspace_path.is_relative_to(root):
+                root = workspace_path
+    else:
+        root = Path(workspace or get_cwd()).resolve()
+
+    config = getattr(operation, "_run_config", None)
+    mode = getattr(operation, "mode", None)
+    sandboxed = getattr(mode, "value", mode) == "sandbox"
+    if getattr(config, "restrict_to_sandbox", False) is not True and not sandboxed:
+        return str(root)
+
+    configured = getattr(config, "sandbox_root", None)
+    roots = configured or [get_workspace(), get_project_root(), get_cwd()]
+    allowed = [Path(path).expanduser().resolve() for path in roots if isinstance(path, str) and path]
+    if any(root == path or root.is_relative_to(path) for path in allowed):
+        return str(root)
+
+    # Keep a restricted agent's history inside the same boundary as its fs tool.
+    for candidate in (get_workspace(), get_project_root(), get_cwd()):
+        if candidate:
+            path = Path(candidate).resolve()
+            if any(path == allowed_root or path.is_relative_to(allowed_root) for allowed_root in allowed):
+                return str(path)
+    return str(allowed[0]) if allowed else str(root)
 
 
 # ---- Bulk initialization ---------------------------------------------------

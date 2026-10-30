@@ -8,7 +8,9 @@ import json
 import sys
 import types
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -39,9 +41,23 @@ class FakeSession:
         self.id = session_id
 
 
+@dataclass
 class FakeMemorySearchFilter:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
+    """Match the constructor fields and defaults of agentarts-sdk 0.1.9."""
+
+    query: str | None = None
+    strategy_type: str | None = None
+    strategy_id: str | None = None
+    actor_id: str | None = None
+    assistant_id: str | None = None
+    session_id: str | None = None
+    memory_type: Literal["memory", "episode", "reflection"] | None = None
+    start_time: int | None = None
+    end_time: int | None = None
+    top_k: int | None = None
+    min_score: float | None = None
+    only_actived: bool = False
+    rerank: bool = True
 
 
 class FakeTextMessage:
@@ -107,6 +123,41 @@ def install_fake_agentarts_config(monkeypatch):
     setattr(config_module, "MemorySearchFilter", FakeMemorySearchFilter)
     setattr(config_module, "TextMessage", FakeTextMessage)
     monkeypatch.setitem(sys.modules, "agentarts.sdk.memory.inner.config", config_module)
+
+
+def test_fake_memory_search_filter_accepts_provider_fields():
+    values = {
+        "query": "q",
+        "strategy_type": "semantic",
+        "strategy_id": "strategy",
+        "actor_id": "user",
+        "assistant_id": "assistant",
+        "session_id": "session",
+        "memory_type": "memory",
+        "start_time": 1,
+        "end_time": 2,
+        "top_k": 3,
+        "min_score": 0.5,
+        "only_actived": True,
+        "rerank": False,
+    }
+
+    assert vars(FakeMemorySearchFilter(**values)) == values
+
+
+def test_fake_memory_search_filter_defaults_optional_fields():
+    filters = FakeMemorySearchFilter(query="q")
+
+    assert filters.start_time is None
+    assert filters.end_time is None
+    assert filters.only_actived is False
+    assert filters.rerank is True
+
+
+@pytest.mark.parametrize("field_name", ["rerank_enabled", "top_kk", "unknown_filter"])
+def test_fake_memory_search_filter_rejects_unknown_fields(field_name):
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{field_name}'"):
+        FakeMemorySearchFilter(query="q", **{field_name: False})
 
 
 def test_exported_provider_imports_without_sdk():
@@ -218,7 +269,7 @@ async def test_static_service_config_is_read_only_after_construction():
 def test_agentarts_extra_is_declared_in_pyproject():
     project_root = Path(__file__).resolve().parents[5]
     pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'agentarts = ["agentarts-sdk>=0.1.8,<0.2"]' in pyproject
+    assert 'agentarts = ["agentarts-sdk>=0.1.9,<0.2"]' in pyproject
 
 
 def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch):
@@ -301,9 +352,10 @@ async def test_prefetch_searches_agentarts_and_formats_backend_neutral_context()
     assert call["space_id"] == "space"
     filters = call["filters"]
     assert filters.query == "who am I"
+    assert filters.rerank is False
     assert filters.top_k == 3
     assert filters.actor_id == "u1"
-    assert not hasattr(filters, "assistant_id")
+    assert filters.assistant_id is None
     assert "AgentArts" not in result
     assert "agentarts" not in result
 
@@ -324,7 +376,7 @@ async def test_prefetch_uses_call_runtime_scope_over_initialized_scope():
 
     filters = fake.search_calls[-1]["filters"]
     assert filters.actor_id == "call-user"
-    assert not hasattr(filters, "assistant_id")
+    assert filters.assistant_id is None
 
 
 @pytest.mark.asyncio
@@ -337,7 +389,7 @@ async def test_assistant_id_precedence_prefers_call_then_initialize_then_constru
     await provider.prefetch("who am I", assistant_id="call-assistant")
 
     assert fake.session_call["assistant_id"] == "init-assistant"
-    assert not hasattr(fake.search_calls[-1]["filters"], "assistant_id")
+    assert fake.search_calls[-1]["filters"].assistant_id is None
 
     provider = AgentArtsMemoryProvider(api_key="k", space_id="space", assistant_id="default-assistant")
     fake = FakeAgentArtsClient()
@@ -347,7 +399,7 @@ async def test_assistant_id_precedence_prefers_call_then_initialize_then_constru
     await provider.prefetch("who am I")
 
     assert fake.session_call["assistant_id"] == "default-assistant"
-    assert not hasattr(fake.search_calls[-1]["filters"], "assistant_id")
+    assert fake.search_calls[-1]["filters"].assistant_id is None
 
 
 @pytest.mark.asyncio
@@ -387,6 +439,7 @@ async def test_search_tool_returns_json_results_and_filters():
     assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
     filters = fake.search_calls[-1]["filters"]
     assert filters.query == "x"
+    assert filters.rerank is False
     assert filters.top_k == 2
     assert filters.strategy_type == "semantic"
     assert filters.min_score == 0.7
@@ -468,9 +521,10 @@ async def test_search_tool_omits_time_range_and_activation_filters_when_unset():
     await provider.handle_tool_call("external_memory_search", {"query": "x"})
 
     filters = fake.search_calls[-1]["filters"]
-    assert not hasattr(filters, "start_time")
-    assert not hasattr(filters, "end_time")
-    assert not hasattr(filters, "only_actived")
+    assert filters.start_time is None
+    assert filters.end_time is None
+    assert filters.only_actived is False
+    assert filters.rerank is False
 
 
 @pytest.mark.asyncio
@@ -494,7 +548,7 @@ async def test_search_tool_uses_call_runtime_scope_over_initialized_scope():
     assert data["count"] == 1
     filters = fake.search_calls[-1]["filters"]
     assert filters.actor_id == "call-user"
-    assert not hasattr(filters, "assistant_id")
+    assert filters.assistant_id is None
 
 
 @pytest.mark.asyncio

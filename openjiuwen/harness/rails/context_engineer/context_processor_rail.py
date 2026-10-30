@@ -230,6 +230,56 @@ class ContextProcessorRail(DeepAgentRail):
         ]
         return presets
 
+
+    def _maybe_inherit_ras_ignored_tool_calls(
+        self,
+        agent,
+        all_processors: List[Tuple[str, BaseModel]],
+    ) -> None:
+        """Copy RAS repeat_tool ignored_tool_calls into compact when compact list is empty.
+
+        Compact keeps an explicit non-empty list. Missing AgentRASRail or an empty
+        RAS list is a no-op. Does not union the two lists.
+        """
+        compact_key = "ReasoningToolLoopCompactProcessor"
+        for index, (key, cfg) in enumerate(all_processors):
+            if key != compact_key:
+                continue
+            existing = getattr(cfg, "ignored_tool_calls", None) or []
+            if existing:
+                return
+
+            from openjiuwen.harness.rails.agent_ras_rail import AgentRASRail
+
+            find = getattr(agent, "find_rails_by_type", None)
+            if not callable(find):
+                return
+            ras_rails = find((AgentRASRail,))
+            if not ras_rails:
+                return
+
+            # Prefer the first RAS rail that actually lists exemptions. A default
+            # AgentRASRail may already be pending with an empty list when the
+            # caller also registers a configured rail.
+            ras_rules = []
+            for ras_rail in ras_rails:
+                ras_config = getattr(ras_rail, "_config", None)
+                detectors = getattr(ras_config, "detectors", None)
+                repeat_tool = getattr(detectors, "repeat_tool", None)
+                candidate = getattr(repeat_tool, "ignored_tool_calls", None) or []
+                if candidate:
+                    ras_rules = candidate
+                    break
+            if not ras_rules:
+                return
+
+            inherited = [rule.model_copy(deep=True) for rule in ras_rules]
+            all_processors[index] = (
+                key,
+                cfg.model_copy(update={"ignored_tool_calls": inherited}),
+            )
+            return
+
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
@@ -267,6 +317,7 @@ class ContextProcessorRail(DeepAgentRail):
             )
 
         self._maybe_setup_session_memory_manager(all_processors, model_config, model_client_config)
+        self._maybe_inherit_ras_ignored_tool_calls(agent, all_processors)
 
         config.context_processors = all_processors
         processor_paths = ", ".join(

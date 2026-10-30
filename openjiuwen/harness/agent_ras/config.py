@@ -3,24 +3,14 @@
 """Per-agent Agent RAS configuration (single-Agent)."""
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openjiuwen.core.common.schema.ignored_tool_call import IgnoredToolCallRule
 from openjiuwen.harness.agent_ras.models import AnomalyKind, Severity
 from openjiuwen.harness.agent_ras.recovery.engine import (
     DEFAULT_SEVERITY_ACTIONS,
     RecoveryAction,
 )
-
-
-class IgnoredToolCallRule(BaseModel):
-    """Match an outer tool and selected top-level argument values exactly."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    tool_name: str = Field(min_length=1)
-    argument_equals: dict[str, Any] = Field(min_length=1)
 
 
 class RepeatToolConfig(BaseModel):

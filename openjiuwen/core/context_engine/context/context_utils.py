@@ -29,6 +29,7 @@ _OPENROUTER_PREFETCH_THREAD: Optional[threading.Thread] = None
 MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # GLM
     "glm-5.3": 1048576,  # official 1,048,576 context; glm-5.2 and earlier stay at 198Ki
+    "glm-5.3-flash": 1048576,
     "glm-5.2": 202752,
     "glm-5.1": 202752,
     "glm-5": 202752,
@@ -77,6 +78,7 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # DeepSeek
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
+    "deepseek-v4.1-flash-1017": 1048576,
     "deepseek-v4.1-flash": 1048576,
     "deepseek-v3.2": 163840,
     "deepseek-v3.1-terminus": 163840,
