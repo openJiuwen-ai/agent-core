@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
 DEFAULT_BROWSER_AGENT_TEMPERATURE = 0.4
-DEFAULT_BROWSER_AGENT_MAX_ITERATIONS = 100
+DEFAULT_BROWSER_AGENT_MAX_ITERATIONS = 25
 _BROWSER_MODEL_TEMPERATURE_MARKER = "_browser_agent_temperature"
 _BROWSER_PARENT_MODEL_MARKER = "_browser_agent_parent_model"
 
@@ -231,8 +231,10 @@ def _resolve_runtime_settings(
     return build_runtime_settings(instance)
 
 
-def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
-    """Copy a parent model descriptor and override sampling for browser work."""
+def _browser_model_with_temperature(model: Model, temperature: float | None) -> Model:
+    """Override browser sampling, or preserve the parent model when unset."""
+    if temperature is None:
+        return model
     resolved_temperature = max(0.0, min(float(temperature), 2.0))
     if getattr(model, _BROWSER_MODEL_TEMPERATURE_MARKER, None) == resolved_temperature:
         return model
@@ -280,7 +282,7 @@ def build_browser_agent_config(
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     max_iterations: int = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-    temperature: float = DEFAULT_BROWSER_AGENT_TEMPERATURE,
+    temperature: float | None = DEFAULT_BROWSER_AGENT_TEMPERATURE,
     workspace: Optional[str | "Workspace"] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -291,7 +293,10 @@ def build_browser_agent_config(
     browser_key: Optional[str] = None,
     browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
 ) -> SubAgentConfig:
-    """Build a SubAgentConfig that materializes as create_browser_agent()."""
+    """Build a SubAgentConfig that materializes as create_browser_agent().
+
+    Pass ``temperature=None`` to inherit the parent model's sampling config.
+    """
     resolved_language = resolve_language(language)
     instance = _coerce_browser_instance(browser_instance, browser_key)
     browser_model = _browser_model_with_temperature(model, temperature)
@@ -338,7 +343,7 @@ def create_browser_agent(
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     max_iterations: int = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-    temperature: float = DEFAULT_BROWSER_AGENT_TEMPERATURE,
+    temperature: float | None = DEFAULT_BROWSER_AGENT_TEMPERATURE,
     workspace: Optional[str | "Workspace"] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -359,6 +364,8 @@ def create_browser_agent(
     PDF, network, storage, or coordinate tools must explicitly request
     ``advanced_code``/``unsafe_dev``, ``pdf``, ``network``, ``storage``, or
     ``vision`` respectively.
+
+    Pass ``temperature=None`` to inherit the parent model's sampling config.
     """
     if browser_capabilities is not None and (
         not isinstance(browser_capabilities, list)

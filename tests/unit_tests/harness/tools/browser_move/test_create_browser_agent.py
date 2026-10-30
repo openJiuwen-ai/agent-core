@@ -115,7 +115,7 @@ def test_browser_agent_registers_runtime_task_cleanup() -> None:
     )
 
 
-def test_browser_agent_uses_independent_sampling_config_and_large_budget() -> None:
+def test_browser_agent_uses_independent_sampling_config_and_default_budget() -> None:
     parent_model = SimpleNamespace(
         model_client_config=SimpleNamespace(),
         model_config=ModelRequestConfig(
@@ -133,7 +133,30 @@ def test_browser_agent_uses_independent_sampling_config_and_large_budget() -> No
     assert spec.model is not parent_model
     assert spec.model.model_config.temperature == DEFAULT_BROWSER_AGENT_TEMPERATURE
     assert parent_model.model_config.temperature == 0.95
-    assert spec.max_iterations == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    assert spec.max_iterations == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS == 25
+
+
+def test_browser_agent_can_inherit_parent_sampling_config() -> None:
+    parent_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(),
+        model_config=ModelRequestConfig(model="test-model", temperature=0.95),
+    )
+
+    spec = build_browser_agent_config(
+        parent_model,
+        temperature=None,
+        settings=_fake_settings(),
+    )
+
+    assert spec.model is parent_model
+    assert spec.model.model_config.temperature == 0.95
+
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(parent_model, temperature=None, settings=_fake_settings())
+
+    assert calls[0]["model"] is parent_model
+    assert parent_model.model_config.temperature == 0.95
 
 
 def test_browser_agent_uses_independent_client_with_lower_temperature() -> None:
