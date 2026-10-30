@@ -23,6 +23,10 @@ from openjiuwen.harness.execution_subject import (
     execution_subject_scope,
 )
 from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.subagent_lifecycle import (
+    cleanup_subagent_task_resources,
+    prepare_subagent_task_resources,
+)
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.subagent.type_aliases import (
@@ -286,7 +290,6 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        interrupted = False
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
@@ -301,6 +304,7 @@ class TaskTool(Tool):
         )
         with execution_subject_scope(subject):
             try:
+                await prepare_subagent_task_resources(subagent)
                 if pending_subagent is None:
                     affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
                 if affinity_enabled:
@@ -331,7 +335,6 @@ class TaskTool(Tool):
                     and result.get("result_type") == "interrupt"
                     and "interrupt_ids" in result
                 ):
-                    interrupted = True
                     self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
                     return result
                 output = result.get("output", "")
@@ -347,6 +350,7 @@ class TaskTool(Tool):
                     reason=f"Subagent {subagent_type} execution failed: {e}",
                 ) from e
             finally:
+                await cleanup_subagent_task_resources(subagent)
                 if affinity_enabled:
                     try:
                         await kv_cache_hooks.finish_subagent(

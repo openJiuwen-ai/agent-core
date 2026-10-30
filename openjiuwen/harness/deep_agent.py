@@ -16,6 +16,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -253,11 +254,36 @@ class DeepAgent(BaseAgent):
         self._interaction_started = False
         self._agent_ras_setting: Any = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
+        self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
+        self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def register_task_resource_cleanup(
+        self,
+        cleanup: Callable[[], Awaitable[None]],
+        *,
+        prepare: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
+        """Register task-scoped browser resource acquisition and cleanup."""
+        if prepare is not None and prepare not in self._task_resource_prepares:
+            self._task_resource_prepares.append(prepare)
+        if cleanup not in self._task_resource_cleanups:
+            self._task_resource_cleanups.append(cleanup)
+
+    async def prepare_task_resources(self) -> None:
+        for prepare in self._task_resource_prepares:
+            await prepare()
+
+    async def cleanup_task_resources(self) -> None:
+        for cleanup in reversed(self._task_resource_cleanups):
+            try:
+                await cleanup()
+            except Exception:
+                logger.exception("[DeepAgent] task resource cleanup failed")
 
     def set_agent_ras_setting(self, value: Any) -> None:
         """Set the raw ``agent_ras`` value for sub-agent passthrough.
@@ -1319,8 +1345,7 @@ class DeepAgent(BaseAgent):
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(
                     create_browser_agent(
-                        **create_kwargs,
-                        **factory_kwargs,
+                        **{**create_kwargs, **factory_kwargs},
                     )
                 )
             if normalized_factory == "code_agent":

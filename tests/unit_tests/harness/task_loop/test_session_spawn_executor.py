@@ -27,6 +27,8 @@ async def test_executor_forwards_browser_capabilities_to_subagent_creation() -> 
     )
     subagent = MagicMock()
     subagent.invoke = AsyncMock(return_value={"output": "done"})
+    subagent.prepare_task_resources = AsyncMock()
+    subagent.cleanup_task_resources = AsyncMock()
     deep_agent = MagicMock()
     deep_agent.create_subagent.return_value = subagent
     dependencies = SimpleNamespace(
@@ -46,3 +48,5 @@ async def test_executor_forwards_browser_capabilities_to_subagent_creation() -> 
         "browser-session",
         browser_capabilities=["pdf"],
     )
+    subagent.prepare_task_resources.assert_awaited_once()
+    subagent.cleanup_task_resources.assert_awaited_once()

@@ -22,6 +22,10 @@ from openjiuwen.core.controller.schema.dataframe import (
 from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.subagent_lifecycle import (
+    cleanup_subagent_task_resources,
+    prepare_subagent_task_resources,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
@@ -82,6 +86,7 @@ class SessionSpawnExecutor(TaskExecutor):
             f"subagent_type={subagent_type}, sub_session_id={cid}"
         )
 
+        subagent = None
         try:
             from openjiuwen.harness.tools.subagent.task_tool import resolve_task_tool_model
 
@@ -108,6 +113,7 @@ class SessionSpawnExecutor(TaskExecutor):
                     cid,
                     **create_kwargs,
                 )
+            await prepare_subagent_task_resources(subagent)
             subagent_inputs = {
                 "query": query,
                 "conversation_id": cid,
@@ -140,6 +146,8 @@ class SessionSpawnExecutor(TaskExecutor):
             )
             yield self._build_error_chunk(task_id, str(exc))
         finally:
+            if subagent is not None:
+                await cleanup_subagent_task_resources(subagent)
             if affinity_enabled:
                 await kv_cache_hooks.evict_subagent(
                     self._deep_agent,

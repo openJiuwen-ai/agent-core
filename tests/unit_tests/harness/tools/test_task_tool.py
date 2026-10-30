@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import unittest
 import asyncio
+import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 import re
@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -42,6 +43,8 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_task_tool_invoke_success(self) -> None:
         called_inputs: dict[str, str] = {}
+        prepare_calls = 0
+        cleanup_calls = 0
 
         class FakeSubAgent:
             def __init__(self):
@@ -50,6 +53,14 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}
+
+            async def prepare_task_resources(self) -> None:
+                nonlocal prepare_calls
+                prepare_calls += 1
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
 
         # Match production: subagent_type must correspond to a SubAgentConfig.agent_card.name
         code_spec = SubAgentConfig(
@@ -82,6 +93,8 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
+        self.assertEqual(prepare_calls, 1)
+        self.assertEqual(cleanup_calls, 1)
         # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
         self.assertIsNotNone(
             re.fullmatch(
@@ -312,6 +325,14 @@ class TestTaskToolSync(unittest.TestCase):
 
         self.assertEqual(len(tools), 1)
         self.assertIsInstance(tools[0], TaskTool)
+        self.assertEqual(
+            tools[0].card.properties["resilience"]["timeout_s"],
+            None,
+        )
+        self.assertEqual(
+            AbilityManager._resolve_call_timeout(tools[0].card),
+            None,
+        )
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]
