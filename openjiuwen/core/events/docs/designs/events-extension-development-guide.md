@@ -183,6 +183,8 @@ result = await bus.trigger(
 
 平台预置 Handler 放在 `builtins/event_handlers/`，由 Bootstrap 自动调用 `register(bus)`。个人扩展不写入预置目录，由扩展运行时调用公共注册接口。
 
+Handler 需要读取所属包信息时，参见 [F_06 的使用说明](../features/F_06_ops-package.md#5-使用方式与实现)。
+
 ### 4.2 注意事项
 
 Handler 有五种常用控制方式：
@@ -501,3 +503,8 @@ def create_call_tool(bus: ExtensionEventBus) -> OpsMethod:
     return call_tool
 ```
 
+### 5.4 内置 package 能力
+
+Handler 可使用预置的 `ops.package` 能力读取所属包的根目录和包 ID。
+方法说明、调用前提、Handler 示例及登记流程见
+[F_06 包信息读取能力](../features/F_06_ops-package.md#5-使用方式与实现)。

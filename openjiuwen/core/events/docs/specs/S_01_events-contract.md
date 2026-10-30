@@ -7,11 +7,11 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-10-28 |
-| 关联 feature | [F_01 EV-08 公共契约](../features/F_01_ev08-public-contract.md)；进度见[开发计划 EV-08](../designs/events-development-plan.md#ev-08-公共契约与接口基线可供外部并行开发) |
+| 最近一次修订日期 | 2026-10-30 |
+| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)；进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
-本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。当前 Events 已有实现、公开导出和专项测试；本次增量为 handler_ids 限定派发，设计与验证见 [F_06](../features/F_06_handler-selection.md)。原阶段验证和差异以各关联 feature 为准。
+本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。
 
 ## 1. 范围、术语与责任
 
@@ -52,9 +52,10 @@
 ### 2.1 类型与值对象
 
 ```python
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Final, Protocol, TypeAlias
 
 EventType: TypeAlias = str
@@ -87,6 +88,7 @@ class SessionContext:
 class PackageMetadata:
     package_id: str
     package_version: str | None = None
+    root: Path | None = None
 
 
 MatchPattern: TypeAlias = Mapping[str, object]
@@ -116,7 +118,7 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 ### 2.2 标识与只读值
 
 - EventType 必须匹配 `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`。`ops.` 前缀由 Core 保留，调用方不得登记、覆盖或注销该前缀下的事件。
-- HandlerId 是所属 Bus 实例内唯一的不透明字符串，用于注销和可选的派发候选白名单，不构成授权。
+- HandlerId 是所属 Bus 实例内唯一的不透明字符串，只用于注销注册记录。
 - `PackageMetadata.package_id` 和 `SessionContext.session_id` 必须非空；缺失字段不得从 EventInput 推断。
 - `SessionContext.metadata` 和 MatchPattern 只允许 `None`、`bool`、`int`、`float`、`str`，以及由这些值递归组成的映射和序列。Bus 在边界复制并转成只读形态。
 - MatchPatternFunc 与 EventType 可选 Validator 必须同步、无阻塞、无业务副作用，并且返回严格的 `bool`。
@@ -140,7 +142,7 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 5. **Build 一次成功：** Bus 构造和普通业务调用都不触发 Build；宿主可以在首次成功前重试 `trigger(ops.build)`；第一次成功后 Bus 保存 Builder，同一 Bus 不再执行第二次 Build。
 6. **业务调用依赖 Builder：** Bus 尚未保存 Builder 时，普通业务 `trigger()` 必须失败；普通业务调用不执行 `ops.build`。
 7. **逐 Handler 构建 Ops：** 每个实际进入的普通 Handler 构建一次独立 Ops；被跳过的 Handler 不构建 Ops。
-8. **包身份来自注册记录：** USER / BUILTIN 的 PackageMetadata 只来自其注册记录，CORE 使用 `None`；EventBus 不从 EventInput 或 SessionContext 推断 PackageMetadata。Handler 只能通过 `ops.package_metadata` 读取。
+8. **包身份来自注册记录：** USER / BUILTIN 的 PackageMetadata 只来自其注册记录，CORE 使用 `None`；EventBus 不从 EventInput 或 SessionContext 推断 PackageMetadata。Handler 可直接读取 `ops.package_metadata`，也可使用第 4.6.1 节的 `ops.package` 方法。
 9. **无隐式重试：** 匹配、构建、Handler、能力或取消失败不得自动补跑 CORE、重试 Handler 或转换为正常 `None`。
 10. **注销不打断在途调用：** 注销只更新注册表；已经取得旧快照的调用继续执行到返回、异常或取消。
 
@@ -178,8 +180,6 @@ class ExtensionEventBusProtocol(Protocol):
         self,
         event: Event,
         session: "Session | SessionContext | None" = None,
-        *,
-        handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None: ...
 ```
 
@@ -237,14 +237,6 @@ Bus 按以下顺序处理普通调用：
 
 Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。
 
-#### handler_ids 可选候选白名单
-
-普通 trigger 可传仅关键字参数 handler_ids：Sequence[HandlerId] | None，默认 None 完整保留原行为。序列在首次 await 前复制并去重，只对其中仍注册且属于当前事件的 USER/BUILTIN 执行 matcher；未列入的 Handler 不执行 matcher/用户代码，也不构建 Ops。空序列只保留 CORE，未知/已注销或其他事件 ID 忽略，不按参数顺序重排。
-
-字符串整体、bytes/bytearray、非 Sequence 或含空字符串/非 str 元素报 EVENTS_PAYLOAD_INVALID。ops.build 对任何非 None 白名单报同码，不能部分装配。CORE、正常短路、EventNext 跳层、输入输出校验、异常和取消沿原规则；当前白名单不会被跳层或故障恢复扩大。调用方之后修改名单或注册表不影响已捕获调用。
-
-本参数是宿主筛选机制，不认证包身份或代次，不保证一个包只初始化一次。宿主可用 Runtime.published_handlers 的公开 ID，但激活/并发/重试由宿主负责。验证见 tests/unit_tests/core/events/test_event_handler_selection.py。
-
 ### 4.5 EventNext
 
 | 当前 Handler | `next(event)` | `to(event, BUILTIN)` | `to(event, CORE)` |
@@ -299,8 +291,26 @@ class EventHandlerOps:
 - Builder 只保存能力函数定义。每次 `build(...)` 返回新的 Ops，不修改共享能力目录，也不保存可变的“当前包”或“当前会话”。
 - `package_metadata` 入参必须保留。EventBus 调用时传入当前 Handler 注册记录中的值。
 - Builder 没有冻结状态：`ops.build` 成功返回即代表能力目录构建完成，此后不再修改；add 与 build 不设先后状态检查。
+- 宿主若短路 `ops.build` 并返回自己的 Builder，应自行保留所需能力；Bus 不自动补齐被跳过的能力。
 - Handler 通过 `ops.<namespace>.<method>(...)` 访问能力。未知 namespace 或未知 method 必须拒绝。
 - 名词能力直接执行；动词能力可携带当前 SessionContext 发起新的业务事件。动词完成不自动推进原链。
+
+### 4.6.1 package 包信息能力
+
+按预置构建链完成 `ops.build` 后，普通 Handler 的 Ops 包含 `package` 命名空间。
+两个方法均为无参数的异步调用。
+
+| 完整调用 | 返回类型 | 返回规则 |
+| --- | --- | --- |
+| `await ops.package.root()` | `Path \| None` | 无包信息时返回 `None`，否则返回 `package_metadata.root`；该字段也允许为 `None` |
+| `await ops.package.name()` | `str \| None` | 无包信息时返回 `None`，否则返回 `package_metadata.package_id`，不使用展示名称 |
+
+- 两个方法直接读取当前 Handler 的注册信息，不触发事件、不推进当前链、不访问文件，也不改写上下文。
+- 返回值不依赖 Session 或 EventInput。平台预置的 BUILTIN Handler 未绑定包信息时，两个方法均允许返回 `None`；CORE 也返回 `None`。
+- USER 和 BUILTIN 都可以绑定扩展包信息。只要已绑定，就按上述规则返回字段，不按层级改写包身份。
+- 方法不补齐或重新解析路径，也不提供包认证或文件访问授权。扩展加载时如何提供包信息，见
+  [Extension S_02](../../../extension/docs/specs/S_02_registry-and-bus.md#4-bus-发布)。
+- 方法调用的错误与取消遵循[第 4.7 节](#47-错误码与取消)；没有包信息是合法结果，不视为异常。
 
 ### 4.7 错误码与取消
 

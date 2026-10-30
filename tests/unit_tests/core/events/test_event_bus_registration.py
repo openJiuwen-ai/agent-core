@@ -165,6 +165,7 @@ async def test_core_handler_result_must_be_awaitable() -> None:
 @pytest.mark.asyncio
 async def test_handler_registration_freezes_pattern_and_unregisters_exact_record() -> None:
     bus = ExtensionEventBus()
+    initial_handlers = dict(bus._handlers)
     pattern: dict[str, object] = {"kind": "match", "nested": {"version": 1}}
 
     async def handler(current: Event, ops: object | None, event_next: EventNext) -> object:
@@ -190,7 +191,8 @@ async def test_handler_registration_freezes_pattern_and_unregisters_exact_record
     bus.unregister_event_handler("unknown-handler")
 
     assert first_id not in bus._handlers
-    assert {second_id, builtin_id} == set(bus._handlers)
+    assert set(bus._handlers) == set(initial_handlers) | {second_id, builtin_id}
+    assert {hid: bus._handlers[hid] for hid in initial_handlers} == initial_handlers
     assert [callback["priority"] for callback in bus._framework.list_callbacks(registry_key)] == [200, 100]
 
 
@@ -229,17 +231,19 @@ def test_handler_registration_rejects_invalid_input_without_state(
 ) -> None:
     bus = ExtensionEventBus()
     bus.register_event_type("demo.handlers", _matches, _core_handler)
+    initial_handlers = dict(bus._handlers)
 
     with pytest.raises(ValidationError) as invalid:
         bus.register_event_handler(event_type, handler, pattern, level, **options)
     assert invalid.value.status is expected_status
-    assert bus._handlers == {}
+    assert bus._handlers == initial_handlers
     assert bus._framework.list_callbacks(_wrap_registry_key("demo.handlers")) == []
 
 
 @pytest.mark.asyncio
 async def test_event_type_unregistration_cascades_handlers_and_allows_clean_reregistration() -> None:
     bus = ExtensionEventBus()
+    initial_handlers = dict(bus._handlers)
     trace: list[str] = []
 
     async def handler(event: Event, ops: object | None, event_next: EventNext) -> object:
@@ -263,7 +267,7 @@ async def test_event_type_unregistration_cascades_handlers_and_allows_clean_rere
     bus.unregister_event_handler(builtin_id)
 
     assert "demo.cascade" not in bus._events
-    assert bus._handlers == {}
+    assert bus._handlers == initial_handlers
     assert bus._framework.list_callbacks(registry_key) == []
 
     bus.register_event_type("demo.cascade", _matches, core)
