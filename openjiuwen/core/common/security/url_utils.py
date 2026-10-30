@@ -27,8 +27,6 @@ class UrlUtils:
             ip_address = socket.gethostbyname(hostname)
         except socket.error as e:
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="resolving IP address failed") from e
-        if UrlUtils._is_inner_ipaddress(ip_address):
-            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="illegal ip address")
 
     @staticmethod
     def get_global_proxy_url(url: str) -> Optional[str]:
@@ -57,21 +55,6 @@ class UrlUtils:
                 "https": global_proxy_url,
             }
         return None
-
-    @staticmethod
-    def _is_inner_ipaddress(ip):
-        """judge inner ip"""
-        if os.getenv("SSRF_PROTECT_ENABLED", "true").lower() == "false":
-            # only if set SSRF_PROTECT_ENABLED to false, then allow inner ip
-            return False
-
-        ip_long = UrlUtils._ip_to_long(ip)
-        is_inner_ip = UrlUtils._ip_to_long("10.0.0.0") <= ip_long <= UrlUtils._ip_to_long("10.255.255.255") or \
-                      UrlUtils._ip_to_long("172.16.0.0") <= ip_long <= UrlUtils._ip_to_long("172.31.255.255") or \
-                      UrlUtils._ip_to_long("192.168.0.0") <= ip_long <= UrlUtils._ip_to_long("192.168.255.255") or \
-                      UrlUtils._ip_to_long("127.0.0.0") <= ip_long <= UrlUtils._ip_to_long("127.255.255.255") or \
-                      ip_long == UrlUtils._ip_to_long("0.0.0.0")
-        return is_inner_ip
 
     @staticmethod
     def _ip_to_long(ip_addr):
