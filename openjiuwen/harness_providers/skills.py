@@ -42,8 +42,8 @@ class SkillSource:
 
 def normalize_skills(values: Any, conflict: str) -> tuple[SkillSource, ...]:
     """Freeze provider config without accessing source files at construction."""
-    if conflict not in {"skip", "replace"}:
-        raise ValueError("skill_conflict must be skip or replace")
+    if conflict not in {"skip", "replace", "append"}:
+        raise ValueError("skill_conflict must be skip, replace or append")
     if not isinstance(values, (list, tuple)):
         raise TypeError("skills must be an array")
     result = []
@@ -117,20 +117,57 @@ def _matches(scan: Path, name: str) -> list[Path]:
     return matches
 
 
+def _next_copy_name(scan: Path, name: str) -> str:
+    index = 2
+    while True:
+        suffix = f"-{index}"
+        candidate = f"{name[:128 - len(suffix)]}{suffix}"
+        if not _matches(scan, candidate):
+            return candidate
+        index += 1
+
+
+def _rename_copied_skill(bundle: Path, name: str) -> None:
+    document = bundle / "SKILL.md"
+    content = document.read_text(encoding="utf-8-sig")
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return  # Without front matter, the directory name is the skill name.
+    end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    metadata = yaml.safe_load("".join(lines[1:end])) or {}
+    metadata["name"] = name
+    document.write_text(
+        "---\n" + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False)
+        + "---\n" + "".join(lines[end + 1:]),
+        encoding="utf-8",
+    )
+
+
 def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
-                   cwd: str | None, conflict: str = "skip") -> tuple[Path, ...]:
+                   cwd: str | None, conflict: str = "skip", scan_dir: str | None = None) -> tuple[Path, ...]:
     """Copy complete bundles before runtime startup, preserving project skills.
 
     Replacement is staged outside the discovery directory and rolls back a
     failed rename. Copies remain in the project after harness stop. Internal
     symlinks are materialized; escaping/cyclic links are rejected before copy.
+
+    Args:
+        sources: Skill bundles or libraries to copy.
+        provider: Provider name; selects a built-in discovery directory.
+        cwd: Project directory; defaults to the process working directory.
+        conflict: ``skip`` / ``replace`` / ``append`` for existing skills.
+        scan_dir: Project-relative discovery directory of the CLI. Required
+            for third-party providers, which have no built-in entry.
     """
     if not sources:
         return ()
-    if conflict not in {"skip", "replace"}:
-        raise ValueError("skill_conflict must be skip or replace")
+    if conflict not in {"skip", "replace", "append"}:
+        raise ValueError("skill_conflict must be skip, replace or append")
+    relative = scan_dir or _SCAN_DIRS.get(provider)
+    if not relative:
+        raise ValueError(f"provider {provider!r} declares no skill discovery directory")
     project = Path(cwd or os.getcwd()).expanduser().resolve(strict=True)
-    scan = project / _SCAN_DIRS[provider]
+    scan = project / relative
     planned = []
     for source in sources:
         root = Path(source.dir).expanduser().resolve(strict=True)
@@ -153,9 +190,10 @@ def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
             matches = _matches(scan, name)
             if matches and conflict == "skip":
                 continue
-            if len(matches) > 1:
+            if len(matches) > 1 and conflict == "replace":
                 raise ValueError(f"multiple existing directories declare skill {name!r}")
-            destination = matches[0] if matches else scan / name
+            copy_name = _next_copy_name(scan, name) if matches and conflict == "append" else name
+            destination = matches[0] if matches and conflict == "replace" else scan / copy_name
             target_location = destination.parent.resolve() / destination.name
             if source.resolve() == target_location:
                 continue
@@ -166,7 +204,11 @@ def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
                 stage = Path(temporary)
                 copied, backup = stage / "new", stage / "previous"
                 shutil.copytree(source, copied)
+                if copy_name != name:
+                    _rename_copied_skill(copied, copy_name)
                 existed = destination.exists() or destination.is_symlink()
+                if existed and conflict == "append":
+                    raise FileExistsError(f"skill destination appeared during copy: {destination}")
                 if existed:
                     destination.rename(backup)
                 try:

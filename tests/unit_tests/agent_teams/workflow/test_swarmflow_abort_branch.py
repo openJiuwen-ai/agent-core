@@ -328,6 +328,7 @@ def _make_tool(messager=None) -> SwarmflowTool:
     tool._human_base_spec = None
     tool._budget = None
     tool._governor = None  # skips the finally governor release
+    tool._team_backend = None  # set by __init__; the new run_swarmflow arg reads it
     return tool
 
 

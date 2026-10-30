@@ -1,0 +1,139 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Locate the __DISPLAY__ CLI bundled inside this package's platform wheel.
+
+Platform wheels carry the vendor CLI the way ``claude-agent-sdk`` and
+``openai-codex-cli-bin`` do::
+
+    __PKG__/_bundled/
+        runtime.json        # layout: entrypoint, cli version, platform
+        bin/__BINARY__      # the CLI (``__BINARY__.exe`` on Windows) and its helper executables
+
+Bundling is optional. The CLI on ``PATH`` always wins; the bundled copy is
+the last resort, for hosts (a frozen desktop app) whose users may not have
+installed the CLI. A source checkout or a wheel built without a CLI has no
+``_bundled`` directory.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+from __PKG__.process import CliLaunchError
+
+RUNTIME_METADATA = "runtime.json"
+LAYOUT_VERSION = 1
+# Tests point this at a scratch directory; production code never rebinds it.
+BUNDLED_ROOT = Path(__file__).resolve().parent / "_bundled"
+
+
+@dataclass(frozen=True, slots=True)
+class BundledRuntime:
+    """The CLI shipped inside this package.
+
+    Attributes:
+        executable: Absolute path of the CLI entrypoint.
+        path_dir: Directory prepended to the child ``PATH`` so the CLI finds
+            the helper executables shipped next to it.
+        cli_version: Vendor CLI version recorded at build time.
+        platform: Runtime platform key the wheel was built for.
+    """
+
+    executable: str
+    path_dir: str
+    cli_version: str
+    platform: str
+
+
+def bundled_runtime() -> BundledRuntime | None:
+    """Return the bundled CLI, or ``None`` when this install carries none.
+
+    Raises:
+        CliLaunchError: When ``runtime.json`` exists but is malformed or names an
+            entrypoint that is missing: a broken bundle must not silently
+            fall back to whatever CLI happens to be on ``PATH``.
+    """
+    metadata_path = BUNDLED_ROOT / RUNTIME_METADATA
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CliLaunchError(f"unreadable bundled __DISPLAY__ runtime metadata: {exc}") from exc
+    if not isinstance(metadata, dict) or metadata.get("layoutVersion") != LAYOUT_VERSION:
+        raise CliLaunchError("unsupported bundled __DISPLAY__ runtime layout")
+    entrypoint = metadata.get("entrypoint")
+    if not isinstance(entrypoint, str) or not entrypoint:
+        raise CliLaunchError("bundled __DISPLAY__ runtime names no entrypoint")
+    if os.name == "nt" and not entrypoint.endswith(".exe"):
+        entrypoint += ".exe"
+    executable = (BUNDLED_ROOT / entrypoint).resolve()
+    if not executable.is_file():
+        raise CliLaunchError(f"bundled __DISPLAY__ CLI is missing: {executable}")
+    return BundledRuntime(
+        executable=str(executable),
+        path_dir=str(executable.parent),
+        cli_version=str(metadata.get("cliVersion") or ""),
+        platform=str(metadata.get("platform") or ""),
+    )
+
+
+def select_executable(cli_path: str | None, default: str, env: dict[str, str]) -> str:
+    """Choose the CLI to launch: ``cli_path``, then ``default`` on ``PATH``, then the bundled copy.
+
+    When the bundled copy is chosen its directory is put first on ``env``'s
+    ``PATH``, so the CLI finds the helper executables shipped next to it.
+
+    Args:
+        cli_path: Explicitly configured executable, if any.
+        default: The configured command's executable (a name or a path).
+        env: The child environment; updated in place for a bundled CLI.
+
+    Returns:
+        The executable to launch. When nothing is found this is ``default``,
+        and launching it reports the CLI as missing.
+
+    Raises:
+        CliLaunchError: When the CLI is not on ``PATH`` and the bundle that
+            would replace it is broken.
+    """
+    if cli_path:
+        return cli_path
+    if os.path.dirname(default) and os.path.isfile(default):
+        return default
+    if shutil.which(default, path=env.get(_path_key(env))) is not None:
+        return default
+    bundled = bundled_runtime()
+    if bundled is None:
+        return default
+    with_path_dir(env, bundled.path_dir)
+    return bundled.executable
+
+
+def with_path_dir(env: dict[str, str], path_dir: str) -> dict[str, str]:
+    """Return ``env`` with ``path_dir`` first on ``PATH``."""
+    key = _path_key(env)
+    current = env.get(key, "")
+    env[key] = path_dir + (os.pathsep + current if current else "")
+    return env
+
+
+def _path_key(env: dict[str, str]) -> str:
+    # Windows environments may spell it "Path".
+    return next((name for name in env if name.upper() == "PATH"), "PATH")
+
+
+__all__ = [
+    "BUNDLED_ROOT",
+    "LAYOUT_VERSION",
+    "RUNTIME_METADATA",
+    "BundledRuntime",
+    "bundled_runtime",
+    "select_executable",
+    "with_path_dir",
+]

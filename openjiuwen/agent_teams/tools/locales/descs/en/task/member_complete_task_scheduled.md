@@ -8,7 +8,10 @@ Mark a task assigned to you as complete.
 ## Input
 
 - `task_id` (required): ID of the task to complete.
-- `note` (optional): Completion note — artifact paths, key decisions, or anything the team should know.
+- `summary` (always fill it under scheduled dispatch): a one-sentence completion summary — what you delivered and where the main artifact is. The Leader's terminal digest and the upstream list in your downstream's start notice show only this.
+- `note` (optional): the full completion detail — artifact paths, key decisions, or anything the team should know; reviewers and `view_task(action='note')` read it in full.
+
+`summary` and `note` are your completion handoff — do **not** report completion via `send_message` after submitting.
 
 ## Boundaries With Other Tools
 

@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """
 Callback Framework Preset Events
@@ -152,23 +152,31 @@ class LLMCallEvents(EventBase):
         LLM_CALL_STARTED: LLM call initiated
         LLM_CALL_ERROR: LLM call failed with an error
         LLM_RESPONSE_RECEIVED: LLM response received (streaming)
+        LLM_RESPONSE_STARTED: Fired once per streaming request when the
+            provider's response headers arrive, before any body chunk. Carries
+            ``retry_count`` (transport-level retries the SDK made before this
+            response, or None when unknown) and marks time to first byte.
         LLM_INVOKE_INPUT: Fired before BaseModelClient.invoke with call arguments
         LLM_INVOKE_OUTPUT: Fired after BaseModelClient.invoke with the result
         LLM_STREAM_INPUT: Fired before BaseModelClient.stream with call arguments
         LLM_STREAM_OUTPUT: Fired for each item yielded by BaseModelClient.stream
         LLM_STREAM_COMPLETED: Fired once after Model.stream naturally exhausts,
             carrying the fully accumulated AssistantMessage
+        LLM_ROUTE: Fired when a model-group router selects a final route or
+            exhausts all routes. Carries frontend-safe route metadata.
         LLM_INPUT: Fired before LLM request with messages/tools input data
         LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
     LLM_CALL_STARTED = EventBase.get_event("llm_call_started")
     LLM_CALL_ERROR = EventBase.get_event("llm_call_error")
     LLM_RESPONSE_RECEIVED = EventBase.get_event("llm_response_received")
+    LLM_RESPONSE_STARTED = EventBase.get_event("llm_response_started")
     LLM_INVOKE_INPUT = EventBase.get_event("llm_invoke_input")
     LLM_INVOKE_OUTPUT = EventBase.get_event("llm_invoke_output")
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")
     LLM_STREAM_OUTPUT = EventBase.get_event("llm_stream_output")
     LLM_STREAM_COMPLETED = EventBase.get_event("llm_stream_completed")
+    LLM_ROUTE = EventBase.get_event("llm_route")
     LLM_INPUT = EventBase.get_event("llm_input")
     LLM_OUTPUT = EventBase.get_event("llm_output")
 

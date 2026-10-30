@@ -57,6 +57,15 @@ class ReportingInput(BaseModel):
     # a manager slip-up in populating that field must not silently turn a
     # retry into an accidental full wipe or vice versa.
     attempt: int = 1
+    # True when the manager has no reporting retries left after this one
+    # (ReportingAdapter computes this from state.task_state.limits — see
+    # pipeline/subagents.py). A compiled-PDF failure on this attempt must
+    # not lose a node that already has a complete, non-hallucinated
+    # main.tex: there is no further attempt left to fix it, so
+    # _verify_and_build_output ships the tex as the final artifact instead
+    # of failing the node over a rendering-only problem it already knows
+    # it cannot retry its way out of.
+    is_final_attempt: bool = False
     # Manager SubtaskContract inlined by the host (goal, acceptance
     # criteria, constraints). Empty when the caller is not the manager.
     contract_brief: str = ""

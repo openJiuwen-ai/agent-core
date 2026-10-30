@@ -1,0 +1,37 @@
+[
+  {
+    "trace": "T8/tool3",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 2500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-openjiuwen-target-id=\"t_g1_945\"]').first()\u001b[22m\n\u001b[2m    - locator resolved to <button data-v-019bb25f=\"\" data-openjiuwen-target-id=\"t_g1_945\">\u2026</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  },
+  {
+    "trace": "T8/tool5",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 2500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > button:nth-of-type(2)').first()\u001b[22m\n\u001b[2m    - locator resolved to <button data-v-6d5c78b6=\"\" class=\"vui_button vui_button--tab mr_sm\">\u6700\u591a\u64ad\u653e</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  },
+  {
+    "trace": "T8/tool6",
+    "mode": "primitive",
+    "error": "### Error\nTimeoutError: browserBackend.callTool: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > button:nth-of-type(2)')\u001b[22m\n\u001b[2m    - locator resolved to <button data-v-6d5c78b6=\"\" class=\"vui_button vui_button--tab mr_sm\">\u6700\u591a\u64ad\u653e</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m"
+  },
+  {
+    "trace": "T16/tool5",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 2500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-openjiuwen-target-id=\"t_g1_839\"]').first()\u001b[22m\n\u001b[2m    - locator resolved to <input id=\"q\" name=\"q\" value=\"\" tabindex=\"0\" type=\"search\" placeholder=\"Search in Lazada\" class=\"search-box__input--O34g\" data-openjiuwen-target-id=\"t_g1_839\"/>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  },
+  {
+    "trace": "T16/tool12",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 2500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('div.ant-col.ant-col-20:nth-of-type(1) > div._17mcb:nth-of-type(2) > div.Bm3ON:nth-of-type(4) > div.Ms6aG.MefHh:nth-of-type(1) > div.qmXQo:nth-of-type(1) > div.buTCk:nth-of-type(2) > div.RfADt:nth-of-type(2) > a:nth-of-type(1)').first()\u001b[22m\n\u001b[2m    - locator resolved to <a age=\"0\" href=\"//www.lazada.sg/products/pdp-i2255548348.html\" title=\"UGREEN Wireless Mouse, 6 Silent Buttons, Bluetooth 5.0 and 2.4G Wireless with USB Mini Receiver, 5 Level DPI Setting 4000DPI, Ambidextrous PC / Mac /Linux Laptop\">\u2026</a>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  },
+  {
+    "trace": "T16/tool27",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 2500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('div:nth-of-type(3) > button:nth-of-type(2)').first()\u001b[22m\n\u001b[2m    - locator resolved to <button type=\"button\" class=\"iweb-button iweb-button-primary iweb-button-block order-total-btn order-total-btn\">\u2026</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  },
+  {
+    "trace": "T16/tool40",
+    "mode": "compact_rpc",
+    "error": "locator.click: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-openjiuwen-target-id=\"t_g9_5307\"]').first()\u001b[22m\n\u001b[2m    - locator resolved to <input id=\"q\" name=\"q\" value=\"\" tabindex=\"0\" type=\"search\" placeholder=\"Search in Lazada\" class=\"search-box__input--O34g\" data-openjiuwen-target-id=\"t_g9_5307\"/>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n"
+  }
+]

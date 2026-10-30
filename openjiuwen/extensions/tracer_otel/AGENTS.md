@@ -12,10 +12,19 @@ registry); nothing inside `openjiuwen` imports this package.
 - `handler.py`: `OtelAgentHandler` / `OtelWorkflowHandler`. Every callback is
   try/except-guarded — OTel failures must never propagate into the business
   flow.
+- `otel_rail.py`: `OtelRail`, the agent-rail emitter that turns AgentRail
+  callbacks into `tracer.trigger` events. Callbacks carry the same
+  try/except guarantee — the rail dispatch layer would otherwise treat a
+  raising callback as a business failure (recorded in retry history).
 - `span_manager.py`: agent-span lifecycle bookkeeping for the handlers.
 - `setup.py`: builds a private `TracerProvider` from `OtelTracerConfig`. It
-  deliberately never calls `trace.set_tracer_provider()`, so it cannot clash
-  with the global provider owned by `agent_teams.observability`.
+  deliberately never calls `trace.set_tracer_provider()` itself, so it cannot
+  clash with the global provider owned by `agent_teams.observability`. Sole
+  exception: when `OtelTracerConfig.global_instrument_enable` (or the
+  `OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE` env override) is on, it delegates
+  HTTP instrumentation to `extensions.observability.instrumentation` with a
+  provider factory pointing at the same collector — global-state ownership
+  stays on the observability side.
 - `config.py`: immutable `OtelTracerConfig`.
 - `redaction.py`: prompt/completion redaction local to this extension.
 - `semconv.py`: this package's own attribute keys (below).
@@ -28,8 +37,17 @@ facts with different wire formats, and that is intentional:
 
 - GenAI keys (`gen_ai.input.messages`, `gen_ai.operation.name`, ...) are
   re-exported from `extensions.observability.semconv` so there is exactly one
-  authoritative definition per standard key. These six are the only shared
-  symbols; do not grow this list casually.
+  authoritative definition per standard key. Only standard keys carried by the
+  pinned registry in `observability/gen_ai_semconv.py` may be re-exported this
+  way; facts the registry does not model are defined here as this package's own
+  `openjiuwen.*` extensions (`openjiuwen.gen_ai.usage.*_cost`,
+  `openjiuwen.llm.prev_message_count`, `openjiuwen.gen_ai.user.id`,
+  `openjiuwen.gen_ai.metadata`, `openjiuwen.trace.name`,
+  `openjiuwen.gen_ai.response.inter_token_latency_ms`,
+  `openjiuwen.gen_ai.reasoning.duration_ms`) — project extensions never ride
+  the `gen_ai.*` prefix. Do not grow the re-export list casually.
+  `gen_ai.provider.name` (`"openjiuwen"`) is set on every span; the
+  non-standard `gen_ai.system` key is deliberately absent on this stack.
 - Project keys (`openjiuwen.workflow.*`, `openjiuwen.agent.*`,
   `openjiuwen.invoke_id`, `openjiuwen.session_id` — note the underscore — and
   the base-span block `OJ_INVOKE_ID` … `OJ_META_DATA`) are this package's own
@@ -49,11 +67,15 @@ wire-format break for downstream readers and update them in the same change.
 
 1. Handlers must stay side-effect-free for the business flow: swallow and log
    all exceptions in callbacks.
-2. Never touch the global OTel state (tracer provider, propagators). All
-   providers/tracers are created and bound locally.
+2. Never touch the global OTel state directly (tracer provider, propagators).
+   All providers/tracers are created and bound locally. The only sanctioned
+   global-state path is the `global_instrument_enable` delegation in
+   `setup.py` (see Scope), which hands a provider factory to
+   `extensions.observability.instrumentation` instead of calling
+   `trace.set_tracer_provider()` here.
 3. Keep the dependency on `extensions.observability` limited to re-exporting
-   standard GenAI key constants — no runtime imports from its handlers,
-   processors, or exporters.
+   standard GenAI key constants plus the `instrumentation` switch helpers —
+   no runtime imports from its handlers, processors, or exporters.
 4. Redaction applies before any prompt/completion value reaches a span
    attribute, in both streaming and non-streaming paths.
 

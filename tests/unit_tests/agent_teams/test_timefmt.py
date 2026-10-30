@@ -8,7 +8,7 @@ import re
 import pytest
 
 from openjiuwen.agent_teams.i18n import get_language, set_language
-from openjiuwen.agent_teams.timefmt import _relative_key_and_value, format_time_context
+from openjiuwen.agent_teams.timefmt import _relative_key_and_value, format_absolute_time, format_time_context
 
 # Fixed anchor (2023-11-14 22:13:20 UTC) so absolute-time assertions are stable.
 _NOW_MS = 1_700_000_000_000
@@ -93,3 +93,23 @@ def test_format_time_context_absolute_has_offset(restore_language):
     # local offsets keep it on 2023-11-14 or 2023-11-15).
     assert "2023-11-1" in out
     assert re.search(r"[+-]\d{2}:\d{2}", out) is not None
+
+
+@pytest.mark.level0
+def test_format_absolute_time_has_no_relative_part(restore_language):
+    """Text that stays in the history carries the absolute time alone."""
+    for language in ("cn", "en"):
+        set_language(language)
+        out = format_absolute_time(_NOW_MS - 3 * _MINUTE)
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( [+-]\d{2}:\d{2})?", out)
+        # Same absolute prefix as the relative variant, minus the diff.
+        assert format_time_context(_NOW_MS - 3 * _MINUTE, _NOW_MS).startswith(f"{out} (")
+
+
+@pytest.mark.level1
+def test_format_absolute_time_none_is_unknown(restore_language):
+    """A missing timestamp renders the localized unknown marker."""
+    set_language("en")
+    assert format_absolute_time(None) == "unknown time"
+    set_language("cn")
+    assert format_absolute_time(None) == "时间未知"

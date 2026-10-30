@@ -15,6 +15,13 @@ from urllib.parse import urlsplit, urlunsplit
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.model_usage import (
+    add_model_usage,
+    load_model_usage,
+    new_model_usage,
+    store_model_usage,
+    summarize_model_usage,
+)
 
 _STATUS_KEY = "_browser_subagent_status_logging"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -189,6 +196,8 @@ class BrowserSubagentStatusLogger:
             }
         )
         self._remember_key(ctx, key)
+        state["usage_meter"] = new_model_usage()
+        store_model_usage(getattr(ctx, "session", None), state["usage_meter"])
         inputs = getattr(ctx, "inputs", None)
         query = _mapping_get(inputs, "query", "")
         conversation_id = _mapping_get(inputs, "conversation_id", "")
@@ -196,6 +205,7 @@ class BrowserSubagentStatusLogger:
             "task_start",
             ctx,
             {
+                "invocation_id": state["usage_meter"]["run_id"],
                 "conversation_id": _safe_str(conversation_id, 160),
                 "query_summary": self._summarize_query(query),
             },
@@ -203,6 +213,8 @@ class BrowserSubagentStatusLogger:
 
     def after_invoke(self, ctx: Any) -> None:
         state = self._state(ctx)
+        if "model_started_at" in state:
+            self._close_interrupted_model(ctx, "task_ended")
         inputs = getattr(ctx, "inputs", None)
         result = _mapping_get(inputs, "result", None)
         elapsed_ms = self._elapsed_ms(state.get("started_at"))
@@ -217,6 +229,7 @@ class BrowserSubagentStatusLogger:
             {
                 "elapsed_ms": elapsed_ms,
                 "model_calls": state.get("model_calls", 0),
+                "model_usage": summarize_model_usage(self._usage_meter(ctx, state)),
                 "tool_calls": state.get("tool_calls", 0),
                 "tool_counts": tool_counts_payload,
                 "browser_batch_calls": state.get("batch_calls", 0),
@@ -224,6 +237,7 @@ class BrowserSubagentStatusLogger:
                 "browser_batch_steps_ok": state.get("batch_steps_ok", 0),
                 "browser_batch_steps_failed": state.get("batch_steps_failed", 0),
                 "fallback_count": state.get("fallback_count", 0),
+                "decision_summary": self._decision_summary(ctx),
                 "total_model_elapsed_ms": state.get("total_model_elapsed_ms", 0),
                 "total_tool_elapsed_ms": state.get("total_tool_elapsed_ms", 0),
                 "recent_tools": list(state.get("history") or [])[-_TOOL_HISTORY_LIMIT:],
@@ -231,10 +245,22 @@ class BrowserSubagentStatusLogger:
             },
         )
 
+    @staticmethod
+    def _decision_summary(ctx: Any) -> dict[str, Any]:
+        session = getattr(ctx, "session", None)
+        getter = getattr(session, "get_state", None)
+        phase = getter("__browser_phase_budget_state__") if callable(getter) else None
+        if not isinstance(phase, dict):
+            return {}
+        policy = phase.get("decision_policy") or {}
+        return {"scope": "task_cumulative", "evaluations": policy.get("decisions", 0),
+                "fallback_scope": policy.get("fallback_scope", ""), **policy.get("counters", {})}
+
     def before_model_call(self, ctx: Any) -> None:
         state = self._state(ctx)
         state["model_calls"] = int(state.get("model_calls", 0)) + 1
         state["model_started_at"] = time.monotonic()
+        state["model_policy_windows"] = self._usage_meter(ctx, state)["policy_windows"]
         inputs = getattr(ctx, "inputs", None)
         messages = _mapping_get(inputs, "messages", []) or []
         tools = _mapping_get(inputs, "tools", []) or []
@@ -252,24 +278,33 @@ class BrowserSubagentStatusLogger:
         state = self._state(ctx)
         inputs = getattr(ctx, "inputs", None)
         response = _mapping_get(inputs, "response", None)
-        elapsed_ms = self._elapsed_ms(state.get("model_started_at"))
-        if elapsed_ms is not None:
-            state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
+        elapsed_ms = self._finish_model_window(ctx, response=response)
+        metadata = _mapping_get(response, "metadata", {}) or {}
         self._emit(
             "model_end",
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
                 "elapsed_ms": elapsed_ms,
+                "model_source": metadata.get("browser_policy", {}).get("route", "llm"),
+                "browser_policy": metadata.get("browser_policy"),
                 "response_summary": self._summarize_model_response(response),
             },
         )
 
+    def _close_interrupted_model(self, ctx: Any, reason: str) -> int | None:
+        state = self._state(ctx)
+        cancelled = reason == "task_ended" or type(getattr(ctx, "exception", None)).__name__ == "CancelledError"
+        elapsed_ms = self._finish_model_window(ctx, status="cancelled" if cancelled else "failed")
+        if elapsed_ms is None:
+            return None
+        self._emit("model_end", ctx, {"iteration": state.get("model_calls", 0), "elapsed_ms": elapsed_ms,
+                                      "outcome": reason, "model_source": "unknown", "response_summary": None})
+        return elapsed_ms
+
     def on_model_exception(self, ctx: Any) -> None:
         state = self._state(ctx)
-        elapsed_ms = self._elapsed_ms(state.get("model_started_at"))
-        if elapsed_ms is not None:
-            state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
+        elapsed_ms = self._close_interrupted_model(ctx, "exception")
         exc = getattr(ctx, "exception", None)
         self._emit(
             "model_exception",
@@ -281,6 +316,31 @@ class BrowserSubagentStatusLogger:
                 "error": _safe_str(exc, 300) if exc is not None else "",
             },
         )
+
+    @staticmethod
+    def _usage_meter(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
+        meter = load_model_usage(getattr(ctx, "session", None))
+        if meter is None:
+            meter = state.get("usage_meter") or new_model_usage()
+        state["usage_meter"] = meter
+        return meter
+
+    def _finish_model_window(self, ctx: Any, response: Any = None, *, status: str = "succeeded") -> int | None:
+        state = self._state(ctx)
+        elapsed_ms = self._elapsed_ms(state.pop("model_started_at", None))
+        if elapsed_ms is None:
+            return None
+        state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
+        meter = self._usage_meter(ctx, state)
+        baseline = state.pop("model_policy_windows", meter["policy_windows"])
+        if meter["policy_windows"] == baseline:
+            # Unwrapped LLM or no policy context. Wrapped calls account at the
+            # client boundary, including preflight windows that dispatched nothing.
+            policy = (_mapping_get(response, "metadata", {}) or {}).get("browser_policy", {})
+            source = "jev" if policy.get("route") == "jev" else "llm"
+            add_model_usage(meter, source, _mapping_get(response, "usage_metadata", None), elapsed_ms, status=status)
+            store_model_usage(getattr(ctx, "session", None), meter)
+        return elapsed_ms
 
     def before_tool_call(self, ctx: Any) -> None:
         state = self._state(ctx)
@@ -314,6 +374,8 @@ class BrowserSubagentStatusLogger:
             {
                 "iteration": state.get("model_calls", 0),
                 "tool_index": state.get("tool_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "args_summary": self.summarize_args(str(tool_name), tool_args),
             },
@@ -340,6 +402,8 @@ class BrowserSubagentStatusLogger:
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "elapsed_ms": elapsed_ms,
                 "result_summary": result_summary,
@@ -362,6 +426,8 @@ class BrowserSubagentStatusLogger:
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "elapsed_ms": elapsed_ms,
                 "error_type": type(exc).__name__ if exc is not None else "",

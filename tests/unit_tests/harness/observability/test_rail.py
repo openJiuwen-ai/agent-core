@@ -63,8 +63,10 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
+    OJ_TURN_NUMBER,
 )
 from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
+from openjiuwen.extensions.observability.trajectory_events import emit_native_trajectory_event
 from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
     AgentSpanDecoration,
@@ -1183,3 +1185,156 @@ async def test_opening_a_step_publishes_the_identity_a_resume_reads(tracing):
         "step_id": f"{step_span.context.span_id:016x}",
         "step_number": 4,
     }
+
+
+def _member_turn_decoration(turn_id: str, turn_number: int) -> AgentSpanDecoration:
+    """The turn identity the Team layer contributes to a member's round span."""
+    return AgentSpanDecoration(attributes={OJ_TURN_ID: turn_id, OJ_TURN_NUMBER: turn_number})
+
+
+async def _run_one_step_with_model_tool_and_event(
+    tracing,
+    rail: AgentObservabilityRail,
+    agent,
+    *,
+    iteration_ctx: AgentCallbackContext,
+    call_id: str,
+) -> None:
+    """Drive one Step the way production does: its own model-call context."""
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, max_attributes=40),
+        tracer=tracing.tracer,
+    )
+    await rail.before_task_iteration(iteration_ctx)
+    model_ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(react_iteration=1))
+    await rail.before_model_call(model_ctx)
+    request = handler._open_llm_span({
+        "messages": [{"role": "user", "content": "go"}],
+        "model": "fake",
+    })
+    assert request is not None
+    emit_native_trajectory_event(
+        tracer=tracing.tracer,
+        parent_span=request.otel_llm_state.span,
+        event_kind="context.window.commit",
+        payload={"window_id": f"window-{call_id}"},
+    )
+    handler._close_llm_span(
+        request.otel_llm_state,
+        SimpleNamespace(
+            content="done",
+            reasoning_content="",
+            finish_reason="stop",
+            tool_calls=None,
+            usage_metadata=None,
+        ),
+    )
+    tool_ctx = _resume_tool_ctx(agent, call_id=call_id, react_iteration=1)
+    await rail.before_tool_call(tool_ctx)
+    tool_ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(tool_ctx)
+    await rail.after_react_iteration(model_ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+
+def _turn_of(span) -> tuple[str | None, int | None]:
+    return span.attributes.get(OJ_TURN_ID), span.attributes.get(OJ_TURN_NUMBER)
+
+
+@pytest.mark.asyncio
+async def test_member_turns_split_one_team_trace(tracing):
+    """A Team root states no turn; each member round's children carry its own.
+
+    Step, model, tool and v2 event records all inherit the turn from the member
+    span they run under, so two rounds in one trace stay two turns.
+    """
+    team_root = tracing.tracer.start_span("team.research")
+    team_root.set_attribute(GEN_AI_CONVERSATION_ID, "conversation")
+    shared_span_context.set_root_span(team_root)
+    card = ToolCard(id="resource-search", name="search", description="Search documents")
+    agent = _agent("researcher")
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+
+    for iteration, turn_id, call_id in ((1, "member-turn-a", "call-a"), (2, "member-turn-b", "call-b")):
+        iteration_ctx = _iteration_ctx(agent, iteration=iteration)
+        _member_turn_decoration(turn_id, iteration).park(iteration_ctx)
+        await _run_one_step_with_model_tool_and_event(
+            tracing,
+            rail,
+            agent,
+            iteration_ctx=iteration_ctx,
+            call_id=call_id,
+        )
+    team_root.end()
+
+    finished = tracing.exporter.get_finished_spans()
+    records = [
+        span for span in finished
+        if span.attributes.get(OJ_TRAJECTORY_RECORD_KIND) in {"agent", "step", "tool", "event"}
+        or span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+    ]
+    by_turn: dict[tuple[str | None, int | None], set[str]] = {}
+    for span in records:
+        kind = str(span.attributes.get(OJ_TRAJECTORY_RECORD_KIND) or "inference")
+        by_turn.setdefault(_turn_of(span), set()).add(kind)
+    assert _turn_of(_finished(tracing.exporter, "team.research")[0]) == (None, None)
+    assert set(by_turn) == {("member-turn-a", 1), ("member-turn-b", 2)}
+    for kinds in by_turn.values():
+        assert kinds >= {"agent", "step", "tool", "event", "inference"}
+
+
+@pytest.mark.asyncio
+async def test_single_agent_children_still_carry_the_root_turn(tracing):
+    """Inheriting from the scope parent changes nothing when the root states the turn."""
+    tracing.root.set_attribute(OJ_TURN_ID, "root-turn")
+    tracing.root.set_attribute(OJ_TURN_NUMBER, 5)
+    card = ToolCard(id="resource-search", name="search", description="Search documents")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+
+    await _run_one_step_with_model_tool_and_event(
+        tracing,
+        rail,
+        agent,
+        iteration_ctx=_iteration_ctx(agent),
+        call_id="call-solo",
+    )
+
+    records = [
+        span for span in tracing.exporter.get_finished_spans()
+        if span.attributes.get(OJ_TRAJECTORY_RECORD_KIND) in {"agent", "step", "tool", "event"}
+        or span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+    ]
+    assert len(records) == 5
+    assert {_turn_of(span) for span in records} == {("root-turn", 5)}
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_dispatched_by_a_member_joins_the_member_turn(tracing):
+    team_root = tracing.tracer.start_span("team.research")
+    shared_span_context.set_root_span(team_root)
+    member_rail = AgentObservabilityRail(tracer=tracing.tracer)
+    member_ctx = _iteration_ctx(_agent("researcher"))
+    _member_turn_decoration("member-turn-a", 3).park(member_ctx)
+    await member_rail.before_task_iteration(member_ctx)
+
+    subagent_rail = AgentObservabilityRail(tracer=tracing.tracer)
+    subagent_ctx = AgentCallbackContext(
+        agent=_agent("explore_agent", enable_task_loop=False),
+        inputs=SimpleNamespace(query="look", result=None),
+    )
+    await subagent_rail.before_invoke(subagent_ctx)
+    model_ctx = AgentCallbackContext(
+        agent=subagent_ctx.agent,
+        inputs=ModelCallInputs(react_iteration=1),
+    )
+    await subagent_rail.before_model_call(model_ctx)
+    await subagent_rail.after_react_iteration(model_ctx)
+    await subagent_rail.after_invoke(subagent_ctx)
+    await member_rail.after_task_iteration(member_ctx)
+    team_root.end()
+
+    assert _turn_of(_finished(tracing.exporter, "agent.explore_agent.invoke")[0]) == ("member-turn-a", 3)
+    assert _turn_of(_finished(tracing.exporter, "agent.explore_agent.react_iteration.1")[0]) == ("member-turn-a", 3)

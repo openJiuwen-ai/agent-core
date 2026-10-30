@@ -1,0 +1,100 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""End-to-end protocol conformance of the __DISPLAY__ harness against the local runtime.
+
+Skipped automatically when the runtime is not installed. The runtime's own
+default model and login are used; nothing here installs or configures one.
+Set ``__UPPER___E2E_MODEL`` to pick another model.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+from pathlib import Path
+from typing import Any
+
+import pytest
+from contract import (
+    make_context,
+    run_abort_turn,
+    run_follow_up_turns,
+    run_resume_turns,
+    run_text_turn,
+    run_tool_turn,
+)
+
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+from openjiuwen.harness_protocol import HarnessCapability, HarnessProtocol
+from openjiuwen.harness_providers import available_providers, build_harness_context, create_harness
+from __PKG__ import __CLASS__Harness, __CLASS__HarnessConfig
+
+_MODE = "__MODE__"
+_MODEL = os.environ.get("__UPPER___E2E_MODEL")
+
+
+def _available() -> bool:
+    if _MODE == "sdk":
+        return importlib.util.find_spec("__SDK_MODULE__") is not None
+    return shutil.which("__BINARY__") is not None
+
+
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.skipif(not _available(), reason="__DISPLAY__ runtime is not installed"),
+]
+_CARD = __CLASS__Harness.card
+
+
+def _config_values(workdir: Path) -> dict[str, Any]:
+    values: dict[str, Any] = {"cwd": str(workdir)}
+    if _MODEL:
+        values["model"] = _MODEL
+    return values
+
+
+def _harness(workdir: Path) -> __CLASS__Harness:
+    harness = __CLASS__Harness(__CLASS__HarnessConfig(**_config_values(workdir)))
+    assert isinstance(harness, HarnessProtocol)
+    return harness
+
+
+async def test_text_turn(workdir: Path) -> None:
+    await run_text_turn(_harness(workdir), make_context(cwd=str(workdir)))
+
+
+async def test_tool_turn_reads_a_file(workdir: Path) -> None:
+    await run_tool_turn(_harness(workdir), make_context(cwd=str(workdir)), workdir)
+
+
+async def test_follow_up_turns_share_one_stream(workdir: Path) -> None:
+    await run_follow_up_turns(_harness(workdir), make_context(cwd=str(workdir)))
+
+
+@pytest.mark.skipif(
+    not (_CARD.supports(HarnessCapability.GRACEFUL_ABORT) or _CARD.supports(HarnessCapability.FORCE_ABORT)),
+    reason="the card declares no abort capability",
+)
+async def test_abort_terminates_the_active_turn(workdir: Path) -> None:
+    await run_abort_turn(_harness(workdir), make_context(cwd=str(workdir)))
+
+
+@pytest.mark.skipif(not _CARD.supports(HarnessCapability.CHECKPOINT), reason="the card does not declare CHECKPOINT")
+async def test_checkpoint_resumes_the_session(workdir: Path) -> None:
+    await run_resume_turns(lambda: _harness(workdir), {"cwd": str(workdir)})
+
+
+async def test_installed_entry_point_drives_the_manifest_factory(workdir: Path) -> None:
+    # Fails until the package is installed (``pip install -e .``): openjiuwen
+    # finds third-party providers only through their entry point.
+    assert "__PROVIDER__" in available_providers()
+    manifest = AgentTemplateSpec(
+        agent_card=AgentCard(id="__PROVIDER__-agent", name="__PROVIDER__-agent", description="__DISPLAY__ agent."),
+    )
+    harness = create_harness(manifest, provider="__PROVIDER__", config=_config_values(workdir))
+    assert isinstance(harness, __CLASS__Harness)
+    context = build_harness_context(manifest, provider="__PROVIDER__", host_session_id="e2e-manifest", cwd=str(workdir))
+    await run_text_turn(harness, context)

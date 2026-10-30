@@ -13,8 +13,9 @@ from openjiuwen.core.foundation.llm.utils.responses_utils import (
     OpenAIAccountResponsesError,
     build_request_body,
     iter_sse_events,
+    ResponsesStreamParser,
+    message_from_stream_chunk,
     parse_response,
-    parse_stream_event,
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, SystemMessage, ToolMessage, UserMessage
@@ -188,7 +189,7 @@ def test_parse_response_preserves_explicit_zero_total_tokens():
     assert message.usage_metadata.total_tokens == 0
 
 
-def test_iter_sse_events_and_parse_stream_event():
+def test_iter_sse_events_and_stream_parser():
     lines = [
         "event: response.output_text.delta",
         'data: {"delta":"Hel"}',
@@ -202,7 +203,8 @@ def test_iter_sse_events_and_parse_stream_event():
     ]
 
     events = list(iter_sse_events(lines))
-    chunks = [parse_stream_event(event, model_name="gpt-5.4-mini") for event in events]
+    parser = ResponsesStreamParser(model_name="gpt-5.4-mini")
+    chunks = [parser.parse(event) for event in events]
 
     assert chunks[0].content == "Hel"
     assert chunks[0].finish_reason == "null"
@@ -212,9 +214,105 @@ def test_iter_sse_events_and_parse_stream_event():
     assert chunks[2].finish_reason == "stop"
 
 
-def test_parse_stream_event_raises_on_error_event():
+def test_stream_parser_raises_on_error_event():
     with pytest.raises(OpenAIAccountResponsesError, match="bad request"):
-        parse_stream_event({"type": "error", "error": {"message": "bad request"}})
+        ResponsesStreamParser().parse({"type": "error", "error": {"message": "bad request"}})
+
+
+def _function_call_item(item_id: str, call_id: str, name: str, arguments: str) -> dict:
+    return {"type": "function_call", "id": item_id, "call_id": call_id, "name": name, "arguments": arguments}
+
+
+def _accumulate(chunks: list) -> AssistantMessage:
+    final_chunk = None
+    for chunk in chunks:
+        if chunk is not None:
+            final_chunk = final_chunk + chunk if final_chunk else chunk
+    return message_from_stream_chunk(final_chunk)
+
+
+def test_stream_parser_streams_function_call_arguments_without_duplication():
+    parser = ResponsesStreamParser()
+    events = [
+        {"type": "response.output_item.added", "item": _function_call_item("fc_1", "call_1", "write", "")},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"path":'},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '"a.txt"}'},
+        {"type": "response.output_item.done", "item": _function_call_item("fc_1", "call_1", "write", '{"path":"a.txt"}')},
+    ]
+
+    chunks = [parser.parse(event) for event in events]
+
+    assert all(chunk.carries_output_token() for chunk in chunks[:3])
+    assert chunks[0].tool_calls[0].name == "write"
+    assert chunks[1].tool_calls[0].arguments == '{"path":'
+    assert chunks[3].tool_calls[0].arguments == ""
+    assert chunks[3].finish_reason == "tool_calls"
+    message = _accumulate(chunks)
+    assert len(message.tool_calls) == 1
+    assert message.tool_calls[0].id == "call_1"
+    assert message.tool_calls[0].name == "write"
+    assert message.tool_calls[0].arguments == '{"path":"a.txt"}'
+
+
+def test_stream_parser_done_contributes_only_unstreamed_suffix():
+    parser = ResponsesStreamParser()
+    events = [
+        {"type": "response.output_item.added", "item": _function_call_item("fc_1", "call_1", "write", "")},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"path":'},
+        {"type": "response.output_item.done", "item": _function_call_item("fc_1", "call_1", "write", '{"path":"a"}')},
+    ]
+
+    message = _accumulate([parser.parse(event) for event in events])
+
+    assert message.tool_calls[0].arguments == '{"path":"a"}'
+
+
+def test_stream_parser_done_without_deltas_yields_full_call():
+    parser = ResponsesStreamParser()
+    chunk = parser.parse(
+        {"type": "response.output_item.done", "item": _function_call_item("fc_1", "call_1", "search", '{"q":"x"}')},
+    )
+
+    assert chunk.tool_calls[0].name == "search"
+    assert chunk.tool_calls[0].arguments == '{"q":"x"}'
+
+
+def test_stream_parser_keeps_streamed_arguments_when_done_diverges():
+    parser = ResponsesStreamParser()
+    events = [
+        {"type": "response.output_item.added", "item": _function_call_item("fc_1", "call_1", "write", "")},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"a":1}'},
+        {"type": "response.output_item.done", "item": _function_call_item("fc_1", "call_1", "write", '{"b":2}')},
+    ]
+
+    message = _accumulate([parser.parse(event) for event in events])
+
+    assert message.tool_calls[0].arguments == '{"a":1}'
+
+
+def test_stream_parser_keeps_sequential_function_calls_apart():
+    parser = ResponsesStreamParser()
+    events = [
+        {"type": "response.output_item.added", "item": _function_call_item("fc_1", "call_1", "read", "")},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"p":1}'},
+        {"type": "response.output_item.done", "item": _function_call_item("fc_1", "call_1", "read", '{"p":1}')},
+        {"type": "response.output_item.added", "item": _function_call_item("fc_2", "call_2", "write", "")},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_2", "delta": '{"p":2}'},
+        {"type": "response.output_item.done", "item": _function_call_item("fc_2", "call_2", "write", '{"p":2}')},
+    ]
+
+    message = _accumulate([parser.parse(event) for event in events])
+
+    assert [(call.id, call.name, call.arguments) for call in message.tool_calls] == [
+        ("call_1", "read", '{"p":1}'),
+        ("call_2", "write", '{"p":2}'),
+    ]
+
+
+def test_stream_parser_ignores_deltas_for_unknown_items():
+    parser = ResponsesStreamParser()
+
+    assert parser.parse({"type": "response.function_call_arguments.delta", "item_id": "fc_x", "delta": "{"}) is None
 
 
 @pytest.mark.asyncio

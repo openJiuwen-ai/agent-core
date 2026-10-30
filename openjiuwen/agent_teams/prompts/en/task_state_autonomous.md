@@ -15,4 +15,4 @@ Core transitions:
 
 - completed and cancelled are terminal — no further transitions
 
-Quality control rests on two things: acceptance criteria written into the task `content`, and your own review of what a member reports back — asking for rework via `send_message` when it falls short.
+Quality control rests on two things: acceptance criteria written into the task `content`, and your own review of each completion summary in the "just completed" entry of your board nudge — read the full detail with `view_task(action='note')` when needed, and ask for rework via `send_message` when it falls short.

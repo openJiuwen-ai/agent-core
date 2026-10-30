@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -67,11 +69,14 @@ class InboxMessage:
             resume; the supervisor starts a single-round resume for it.
         immediate: When True, inject into the active round's steering channel;
             when False, buffer until the active round finishes.
+        run_context: Request-local invocation context that must remain isolated
+            from messages belonging to other model rounds.
     """
 
     seq: int
     content: "str | InteractiveInput"
     immediate: bool
+    run_context: RunContext | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +104,13 @@ class ActiveRound:
         task: The asyncio.Task running ``NativeHarness._run_round``.
         steering_queue: Pushed by ``send(immediate=True)``; reaches the inner
             ReAct loop via the round's ``submit_round`` steering wiring.
+        turn: The trajectory turn this round works on. A round started from
+            idle or by draining follow-ups opens a turn; a resume, an
+            interrupt answer, a failure retry and a task-plan continuation keep
+            the latest one. Stamped on the round's agent spans so one Team
+            trace splits into per-member turns.
+        turn_opened: Whether this round opened ``turn`` (advancing the
+            member's persisted turn counter) rather than continuing it.
         graceful_abort: When True, the round is finishing under a graceful
             abort; ``_on_round_done`` must not auto-start a next round.
         failure_retry: When True, this round is the one-shot retry of a round
@@ -138,6 +150,9 @@ class ActiveRound:
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
+    turn: "MemberTurn"
+    run_context: RunContext | None = None
+    turn_opened: bool = False
     graceful_abort: bool = False
     failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None

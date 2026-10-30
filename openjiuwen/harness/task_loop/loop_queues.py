@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026.
 # All rights reserved.
 """Dual-queue buffer for steer/follow_up messages.
 
@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import List
+
+from openjiuwen.core.single_agent.rail.base import SteeringInput
 
 
 @dataclass
@@ -35,7 +37,7 @@ class LoopQueues:
         default_factory=asyncio.Queue
     )
 
-    def push_steer(self, msg: str) -> None:
+    def push_steer(self, msg: str | SteeringInput) -> None:
         """Push a steering message.
 
         Args:
@@ -55,13 +57,13 @@ class LoopQueues:
         """Return whether follow-up messages are pending."""
         return not self.follow_up.empty()
 
-    def drain_steering(self) -> List[str]:
+    def drain_steering(self) -> List[str | SteeringInput]:
         """Drain all pending steering messages.
 
         Returns:
             List of steering message strings.
         """
-        msgs: List[str] = []
+        msgs: List[str | SteeringInput] = []
         while not self.steering.empty():
             try:
                 msgs.append(self.steering.get_nowait())

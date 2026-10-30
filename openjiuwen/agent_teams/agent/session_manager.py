@@ -16,6 +16,8 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
@@ -90,6 +92,10 @@ class SessionManager:
         Rebinding to a different session resets the prior Token first
         so the contextvar stack stays consistent.
         """
+        team_backend = self._configurator.team_backend
+        if team_backend and hasattr(team_backend, "bind_group_session"):
+            team_backend.bind_group_session(session.get_session_id())
+
         # Reset any previously held token before overwriting; otherwise the
         # release path would only ever clear the first bind, leaving every
         # subsequent rebind permanently on the stack.
@@ -98,9 +104,18 @@ class SessionManager:
         self._session_id_token = set_session_id(session.get_session_id())
         self._state.team_session = session if isinstance(session, AgentTeamSession) else None
 
-        team_backend = self._configurator.team_backend
         if team_backend:
-            await team_backend.db.create_cur_session_tables()
+            try:
+                tables_ready = await team_backend.db.create_cur_session_tables()
+                if tables_ready is False:
+                    raise build_error(
+                        StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                        error_msg="team session database initialization failed",
+                    )
+            except BaseException:
+                self._reset_session_id_token()
+                self._state.team_session = None
+                raise
 
         spec = self._configurator.spec
         if spec and self._configurator.role == TeamRole.LEADER:
@@ -111,9 +126,9 @@ class SessionManager:
 
         Resets the contextvar Token from ``bind_session`` and drops the
         live ``AgentTeamSession`` so it cannot be mutated after the round
-        ends. Single tear-down path: pause / stop / no-session startup
-        all converge here — there is nothing left to "preserve across
-        the gap" now that session_id lives only in the contextvar.
+        ends. Pause / stop / no-session startup all converge here.
+        Group chat keeps its routing scope on the backend;
+        that identity does not preserve a writable live session.
         """
         self._reset_session_id_token()
         self._state.team_session = None

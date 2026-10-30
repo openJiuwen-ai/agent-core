@@ -13,21 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import fields
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from openjiuwen.agent_teams.agent.coordination.handlers.workflow import WorkflowHandler
+from openjiuwen.agent_teams.i18n import set_language
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
-    TeamEvent,
     WorkflowProgressTeamEvent,
 )
-from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.i18n import set_language
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor, ConcurrencyLimits
+from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
 
@@ -90,6 +90,53 @@ def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
     host = _FakeRound()
     handler = WorkflowHandler(host, _FakeBlueprint(role), infra=None, poll_ctrl=None)
     return handler, host
+
+
+def test_progress_model_fallback_is_native_started_only():
+    """The base-spec model fallback applies to a native agent_started with no
+    hint and nothing else.
+
+    A third-party node with no hint runs on the CLI's own default model: naming
+    the leader's model there showed a model the CLI never ran until the real
+    report arrived. Terminal events never fall back, or a model-less
+    completion would overwrite what the node already shows.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.workflow.tool_swarmflow import resolve_progress_model
+
+    def ev(kind, model=None, agent_type=None):
+        return SimpleNamespace(kind=kind, model=model, agent_type=agent_type)
+
+    assert resolve_progress_model(ev("agent_started"), "deepseek-flash") == "deepseek-flash"
+    assert resolve_progress_model(ev("agent_started", agent_type="claude"), "deepseek-flash") is None
+    assert resolve_progress_model(ev("agent_started", model="glm-5", agent_type="claude"), "deepseek-flash") == "glm-5"
+    assert resolve_progress_model(ev("agent_completed"), "deepseek-flash") is None
+    assert resolve_progress_model(ev("agent_completed", model="GLM-5.3"), "deepseek-flash") == "GLM-5.3"
+
+
+def test_team_event_schema_carries_activity_fields():
+    """AGENT_ACTIVITY's four structured fields must survive the engine -> team-event hop.
+
+    The builder threads them by name; a schema gap here silently degrades every
+    activity row to an id-less, name-less 'tool_call' default on the consumer
+    side (the pairing and the member-call-list mirror both collapse).
+    """
+    from openjiuwen.agent_teams.schema.events import WorkflowProgressTeamEvent
+    from openjiuwen.agent_teams.workflow.engine.progress import WorkflowProgressEvent
+
+    for field in ("activity_type", "tool_call_id", "tool_name", "content"):
+        assert field in {f.name for f in fields(WorkflowProgressEvent)}
+        assert field in WorkflowProgressTeamEvent.model_fields
+    ev = WorkflowProgressTeamEvent(
+        team_name="t", kind="agent_activity", activity_type="tool_result",
+        tool_call_id="tc_1", tool_name="bash", content="ls -la",
+    )
+    dumped = ev.model_dump()
+    assert dumped["activity_type"] == "tool_result"
+    assert dumped["tool_call_id"] == "tc_1"
+    assert dumped["tool_name"] == "bash"
+    assert dumped["content"] == "ls -la"
 
 
 def _event(kind: str, *, phase: str | None = None, name: str | None = None,
@@ -596,3 +643,14 @@ def test_agent_failed_not_narrated_by_handler():
     handler, host = _handler(TeamRole.LEADER)
     asyncio.run(handler.on_workflow_progress(_event("agent_failed", phase="Search", label="agent-1", text="failed")))
     assert host.delivered == []
+
+
+def test_agent_started_payload_carries_agent_type():
+    """agent_type rides the cross-process team event; absent means native."""
+    ext = EventMessage.from_event(
+        WorkflowProgressTeamEvent(team_name="t", kind="agent_started", label="ext", agent_type="codex")
+    ).get_payload()
+    native = _event("agent_started", label="native").get_payload()
+    assert ext.agent_type == "codex"
+    assert native.agent_type is None
+

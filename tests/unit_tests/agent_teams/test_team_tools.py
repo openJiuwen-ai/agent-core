@@ -3,7 +3,7 @@
 
 """Unit tests for team_tools module"""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -19,17 +19,16 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
-from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
+from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.member_options import get_member_fallback_model_ref
-from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
+from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -47,8 +46,11 @@ from openjiuwen.agent_teams.tools.team_tools import (
     UpdateTaskTool,
     ViewTaskToolV2,
 )
+from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness_protocol import HarnessCapability, HarnessCard, ModelChoice
+from openjiuwen.harness_providers import register_harness_provider, unregister_harness_provider
 
 
 @pytest.fixture
@@ -390,6 +392,18 @@ class TestCleanTeamTool:
         assert result.success is False
         assert "shutdown_member" in result.error
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_blocks_when_organization_check_fails(self, agent_team, t):
+        manager = MagicMock()
+        manager.get_organization = AsyncMock(side_effect=RuntimeError("db down"))
+        agent_team.org_task_manager = manager
+
+        result = await CleanTeamTool(agent_team, t).invoke({})
+
+        assert result.success is False
+        assert "Could not verify organization ownership" in result.error
+
 
 class TestCleanTeamLifecycleGate:
     """clean_team is wired only when lifecycle == 'temporary'."""
@@ -461,9 +475,7 @@ class TestSpawnTools:
             return None
 
         tool = SpawnTeammateTool(agent_team, t, model_config_allocator=allocator)
-        result = await tool.invoke(
-            {"member_name": "member-m", "display_name": "M", "desc": "d", "model_name": "gpt-4"}
-        )
+        result = await tool.invoke({"member_name": "member-m", "display_name": "M", "desc": "d", "model_name": "gpt-4"})
         assert result.success is True, result.error
         assert seen == ["gpt-4"]
 
@@ -604,10 +616,10 @@ class TestSpawnTools:
         assert await team.is_external_cli_agent("claude-1")
 
 
-def test_external_cli_schema_requires_fallback_and_restricts_model_override(agent_team, t):
-    """The tool requires fallback and forbids inferred model overrides."""
+def test_external_cli_schema_keeps_fallback_optional_and_restricts_model_override(agent_team, t):
+    """Omitting the fallback means none, and inferred model overrides are forbidden."""
     tool = SpawnExternalCliTool(agent_team, t)
-    assert "fallback_model_name" in tool.card.input_params["required"]
+    assert "fallback_model_name" not in tool.card.input_params["required"]
     fallback_schema = tool.card.input_params["properties"]["fallback_model_name"]
     assert fallback_schema["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
     assert "model_name" not in tool.card.input_params["required"]
@@ -616,11 +628,11 @@ def test_external_cli_schema_requires_fallback_and_restricts_model_override(agen
     assert "你不得自行选择、推断或补全" in model_description
     assert "必须省略" in model_description
     fallback_description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
-    assert "必须从团队模型池中选择" in fallback_description
-    assert "支持的模型调用协议选择兼容模型" in fallback_description
+    assert "从团队模型池中按该第三方 Agent 支持的模型调用协议选择兼容模型" in fallback_description
+    assert "该 cli_agent 存在兼容模型时必须填写" in fallback_description
     assert "该第三方 Agent" in fallback_description
     assert "运行时明确报告的认证失败" in fallback_description
-    assert "没有兼容模型时允许为 null" in fallback_description
+    assert "没有认证回退，必须省略本字段" in fallback_description
     assert "当前模型在模型池中且协议兼容时，优先选择" in fallback_description
     assert "当前模型不在模型池中或协议不兼容时，再选择其他兼容模型" in fallback_description
     assert "当前模型在模型池中且协议兼容时优先选择当前模型" in tool.card.description
@@ -815,6 +827,151 @@ async def test_external_cli_native_mode_allows_null_without_compatible_fallback(
     assert get_member_fallback_model_ref(member) is None
 
 
+class _NoFallbackProvider:
+    """A third-party provider running pool models but with no auth fallback."""
+
+    @property
+    def card(self) -> HarnessCard:
+        return HarnessCard(
+            name="nofallback",
+            implementation_version="0.1.0",
+            capabilities=frozenset({HarnessCapability.ENDPOINT_MODELS}),
+        )
+
+    @staticmethod
+    def create(config: dict) -> object:
+        return config
+
+    @staticmethod
+    def model_config(choice: ModelChoice, *, fallback: ModelChoice | None = None) -> dict:
+        _ = fallback
+        return {"model": choice.model}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [None, "", "null", "pool-model"])
+async def test_external_cli_without_auth_fallback_only_accepts_an_omitted_fallback(db, message_bus, t, fallback):
+    """A CLI with no auth fallback is spawned without one; naming one is refused with a hint."""
+    team_name = f"ext_cli_no_fallback_{len(fallback or '')}"
+    await db.team.create_team(team_name=team_name, display_name="No Fallback", leader_member_name="leader1")
+    entry = ModelPoolEntry(
+        model_name="pool-model",
+        api_key="secret",
+        api_base_url="https://pool.example/v1",
+        api_provider="OpenAI",
+    )
+    register_harness_provider("nofallback", _NoFallbackProvider)
+    try:
+        team = TeamBackend(
+            team_name=team_name,
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            model_pool_provider=lambda: [entry],
+            external_cli_agents=[ExternalCliAgentSpec(cli_agent="nofallback")],
+        )
+        tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+        assert "nofallback" not in tool.card.input_params["properties"]["fallback_model_name"]["description"]
+        inputs = {"member_name": "worker-1", "display_name": "Worker", "prompt": "work", "cli_agent": "nofallback"}
+        if fallback is not None:
+            inputs["fallback_model_name"] = fallback
+
+        result = await tool.invoke(inputs)
+    finally:
+        unregister_harness_provider("nofallback")
+
+    if fallback in (None, ""):
+        assert result.success is True, result.error
+    else:
+        assert result.success is False
+        assert "omit 'fallback_model_name'" in (result.error or "")
+
+
+async def _model_group_codex_tool(db, message_bus, t):
+    """A leader on a model group (current model is the logical "*") spawning Codex."""
+    from openjiuwen.agent_teams.models.allocator import IntelliRouterAllocator
+    from openjiuwen.agent_teams.models.pool import IntelliRouterConfig, IntelliRouterDeployment
+
+    await db.team.create_team(
+        team_name="ext_cli_model_group_team",
+        display_name="Ext Model Group",
+        leader_member_name="leader1",
+    )
+    pool = IntelliRouterConfig(
+        deployments=[
+            IntelliRouterDeployment(
+                model_name="glm-flash", api_key="secret", api_base="https://glm.example", provider="openai",
+            ),
+            IntelliRouterDeployment(
+                model_name="deepseek-flash", api_key="secret", api_base="https://ds.example", provider="openai",
+            ),
+        ],
+    ).to_pool_entries()
+    team = TeamBackend(
+        team_name="ext_cli_model_group_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: pool,
+        current_model_name="*",
+        current_model_provider="intelli_router",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    team.update_model_allocator(IntelliRouterAllocator(pool))
+    return team, SpawnExternalCliTool(team, t, model_config_allocator=team.allocate_model)
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, message_bus, t):
+    """The logical "*" current model must not be forced as an external CLI fallback."""
+    team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-group",
+            "display_name": "Codex Group",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "deepseek-flash",
+        }
+    )
+
+    assert result.success is True, result.error
+    fallback_ref = get_member_fallback_model_ref(await team.get_member("codex-group"))
+    assert fallback_ref is not None
+    assert fallback_ref.model_name == "deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_still_rejects_the_logical_entry(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-star",
+            "display_name": "Codex Star",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "*",
+        }
+    )
+
+    assert result.success is False
+    assert "logical entry" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_catalog_hides_the_logical_current_model(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+
+    assert '"current_model": null' in description
+    assert '"deepseek-flash"' in description and '"glm-flash"' in description
+
+
 @pytest.mark.asyncio
 async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, message_bus, t):
     """Null cannot bypass an available protocol-compatible fallback."""
@@ -884,7 +1041,7 @@ async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t
     )
 
     assert result.success is False
-    assert "use null" in (result.error or "")
+    assert "omit 'fallback_model_name' only when" in (result.error or "")
 
 
 class TestSpawnToolCapabilityGate:
@@ -1539,8 +1696,7 @@ class TestUpdateTaskTool:
         revoked = [
             call.kwargs["message"]
             for call in agent_team.messager.publish.call_args_list
-            if call.kwargs.get("message") is not None
-            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+            if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
         ]
         assert len(revoked) == 1
         assert revoked[0].payload["member_name"] == "dev-1"
@@ -2260,6 +2416,30 @@ class TestSendMessageTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_invoke_rejects_both_fields_when_targets_extends_to(self, agent_team, t):
+        """Targets that add members beyond 'to' stay ambiguous and are rejected."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_folds_targets_repeating_to_into_unicast(self, agent_team, t):
+        """A one-element 'targets' equal to 'to' is sent as a unicast with a corrective note."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": [" m1 "], "content": "Hi"})
+
+        assert result.success is True
+        assert result.data["type"] == "message"
+        assert result.data["to"] == "m1"
+        text = tool.render_for_llm(result)
+        assert "Success" in text
+        assert "only 'to'" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_requires_one_recipient_field(self, agent_team, t):
         """One separated recipient field must be present."""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -2602,10 +2782,10 @@ async def test_reliability_factory_reuses_injected_components_across_cycles(agen
     """The reliability factory builds a fresh rail per cycle but wraps the same
     injected (stateful) components, so detector windows survive native rebuilds.
     """
-    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
-    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
     from openjiuwen.agent_teams.rails.elements import build_team_reliability_rail
     from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
+    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
 
     cfg = ReliabilityConfig()
     components = build_reliability_components(
@@ -2710,6 +2890,29 @@ async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_
         if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
     ]
     assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_completed_task_explains_why(agent_team, t, sample_agent_card, db):
+    """Cancelling a completed task says it is already done instead of a bare failure."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    await db.task.complete_task(task.task_id)
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is False
+    assert "already completed" in result.error
+    assert (await agent_team.task_manager.get(task.task_id)).status == TaskStatus.COMPLETED.value
 
 
 @pytest.mark.asyncio

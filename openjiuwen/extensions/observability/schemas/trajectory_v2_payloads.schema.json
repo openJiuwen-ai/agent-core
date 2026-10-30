@@ -100,7 +100,20 @@
         "input_window_id": {"type": ["string", "null"]},
         "output_window_id": {"type": "string"},
         "summary": {"type": "string"},
-        "compact_summary": {"type": "string"}
+        "compact_summary": {"type": "string"},
+        "modified_messages": {"type": "array", "items": {"$ref": "#/$defs/compactionModifiedMessage"}}
+      }
+    },
+    "compactionModifiedMessage": {
+      "description": "A message the compaction rewrote in place. message_id is the context_message_id window commits use; offload_handle restores the original content and is null when nothing was offloaded.",
+      "type": "object",
+      "required": ["message_id"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"type": "string"},
+        "tool_call_id": {"type": ["string", "null"]},
+        "offload_handle": {"type": ["string", "null"]},
+        "offload_type": {"type": ["string", "null"]}
       }
     },
     "askUserRequested": {

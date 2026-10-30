@@ -31,14 +31,19 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.harness.native_harness import NativeHarness
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
-from openjiuwen.agent_teams.harness.native_harness import NativeHarness
-from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    match_answers,
+    pending_interrupts,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -72,6 +77,10 @@ class TeamHarness:
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
+        # Runtime features such as Team Organization mount tools after the
+        # harness has been built. Keep those instances so a later native
+        # rebuild does not silently lose their LLM-visible abilities.
+        self._dynamic_tools: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Construction
@@ -130,6 +139,7 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._remount_dynamic_tools()
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
@@ -179,6 +189,7 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._remount_dynamic_tools()
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
@@ -283,14 +294,26 @@ class TeamHarness:
             )
         return self._native.outputs()
 
-    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+    async def send(
+        self,
+        content: Any,
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+    ) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:
             raise_error(
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg="TeamHarness.send() before start().",
             )
-        return await self._native.send(content, immediate=immediate)
+        if run_context is None:
+            return await self._native.send(content, immediate=immediate)
+        return await self._native.send(
+            content,
+            immediate=immediate,
+            run_context=run_context,
+        )
 
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).
@@ -366,18 +389,9 @@ class TeamHarness:
         session = self._interrupt_session()
         if session is None:
             return False
-        state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids: set = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(user_input.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+        # Any answer to something no longer pending makes the input stale.
+        matched = match_answers(user_input, pending_interrupts(session.get_state(INTERRUPTION_KEY)))
+        return bool(matched.answers) and not matched.unmatched
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:
@@ -449,13 +463,27 @@ class TeamHarness:
         schema is requested. The ability manager re-qualifies the id per owner, so
         concurrent sessions never collide; pair with :meth:`remove_tool` at turn end.
         """
-        if self._native is not None:
-            self._native.ability_manager.add_ability(tool.card, tool)
+        tool_name = getattr(getattr(tool, "card", None), "name", None)
+        if not tool_name:
+            raise ValueError("dynamically registered tools must define card.name")
+        self._dynamic_tools[tool_name] = tool
+        self._mount_dynamic_tool(tool)
 
     def remove_tool(self, name: str) -> None:
         """Drop a previously :meth:`add_tool`-ed tool by its (unqualified) name."""
+        self._dynamic_tools.pop(name, None)
         if self._native is not None:
             self._native.ability_manager.remove_ability(name)
+
+    def _remount_dynamic_tools(self) -> None:
+        """Restore tools mounted after construction onto a rebuilt native."""
+
+        for tool in self._dynamic_tools.values():
+            self._mount_dynamic_tool(tool)
+
+    def _mount_dynamic_tool(self, tool: Any) -> None:
+        if self._native is not None:
+            self._native.ability_manager.add_ability(tool.card, tool)
 
     def add_rail(self, rail: Any) -> None:
         """Queue an extra rail on the native brain (registered on next invoke/start).

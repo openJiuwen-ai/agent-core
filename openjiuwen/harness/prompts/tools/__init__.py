@@ -92,6 +92,9 @@ from openjiuwen.harness.prompts.tools.memory import (
     ReadMemoryMetadataProvider,
     WriteMemoryMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.moa import (
+    ConsultReferenceModelsMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.powershell import (
     PowerShellMetadataProvider,
 )
@@ -207,6 +210,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     ExitWorktreeMetadataProvider(),
     SubmitGoalReportMetadataProvider(),
     GetCurrentGoalMetadataProvider(),
+    ConsultReferenceModelsMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}

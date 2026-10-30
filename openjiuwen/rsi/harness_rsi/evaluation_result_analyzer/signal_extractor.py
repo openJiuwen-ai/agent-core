@@ -212,7 +212,10 @@ class RewardSignalExtractor:
                 zero_reward_cases.append(case.case_id)
 
             response_text = str(case.response)
-            if "Max iterations reached without completion" in response_text:
+            if (
+                case.termination_reason == "max_iterations"
+                or "Max iterations reached without completion" in response_text
+            ):
                 max_iteration_cases.append(case.case_id)
 
             if case.case_id in zero_reward_cases or case.case_id in max_iteration_cases:

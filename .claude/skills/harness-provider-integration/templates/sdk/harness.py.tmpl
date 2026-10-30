@@ -1,0 +1,318 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""HarnessProtocol implementation backed by the __DISPLAY__ Python SDK (``__SDK_MODULE__``).
+
+A harness cycle opens one SDK client and one vendor session; each external
+Turn is one streamed run of that session, mapped record by record.
+
+Every call into the SDK lives in the ``_sdk_*`` methods at the bottom of the
+class. SCAFFOLD(sdk-calls): the scaffold wrote them against an assumed
+async SDK shape (``Client(...).start()``, ``client.new_session(...)``,
+``session.run(text)`` as an async iterator, ``session.cancel()``,
+``client.close()``); rewrite them against the vendor's real API.  For a
+synchronous SDK that reports through callbacks on a worker thread, see the
+thread bridge in the skill's SDK guide instead of ``asyncio.to_thread`` per
+call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib
+import os
+from typing import Any, AsyncIterator
+
+from openjiuwen.harness_protocol import (
+    PROTOCOL_VERSION,
+    AbortMode,
+    CheckpointReason,
+    HarnessCapability,
+    HarnessCard,
+    HarnessContext,
+    HarnessError,
+    HarnessProtocolError,
+    HostCapability,
+    McpTransport,
+    ResumePolicy,
+    TurnEventKind,
+    TurnResult,
+    UnsupportedHarnessCapabilityError,
+)
+from openjiuwen.harness_providers.base import (
+    PendingTurn,
+    ProviderStartupError,
+    SerializedTurnHarness,
+    TurnTiming,
+)
+from openjiuwen.harness_providers.inputs import harness_input_text
+from openjiuwen.harness_providers.jsonsafe import to_json_object
+from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_naming_preamble
+from openjiuwen.harness_providers.skills import install_skills
+from __PKG__.config import __CLASS__HarnessConfig
+from __PKG__.failure_classifier import classify_exception, turn_error
+from __PKG__.mapping import PROVIDER_NAME, MappedEvent, __CLASS__TurnAccumulator
+
+ADAPTER_VERSION = "0.1.0"
+SDK_MODULE = "__SDK_MODULE__"
+SDK_DISTRIBUTION = "__SDK_DIST__"
+# SCAFFOLD(skills-dir): the project-relative directory this CLI discovers
+# skills in (e.g. ".opencode/skills"); ``None`` when it has none, in which
+# case configured skills are rejected instead of silently ignored.
+SKILLS_SCAN_DIR: str | None = None
+# SCAFFOLD(mcp-naming): how this vendor names an MCP server's tools to the
+# model, with ``{server}`` and ``{tool}``, e.g. "mcp__{server}__{tool}". Read
+# it from a real tool record of a mounted server; ``None`` only if the vendor
+# shows bare tool names.
+MCP_TOOL_NAME_PATTERN: str | None = None
+
+
+def load_sdk() -> Any:
+    """Import the optional vendor SDK, failing with an install hint."""
+    try:
+        return importlib.import_module(SDK_MODULE)
+    except ImportError as exc:
+        raise HarnessError(
+            f"{SDK_DISTRIBUTION} is required for the __DISPLAY__ harness; install it before start()"
+        ) from exc
+
+
+class __CLASS__Harness(SerializedTurnHarness):
+    """Adapt one __DISPLAY__ SDK session to protocol v1."""
+
+    card = HarnessCard(
+        name=PROVIDER_NAME,
+        implementation_version=ADAPTER_VERSION,
+        protocol_version=PROTOCOL_VERSION,
+        compatible_protocol_versions=frozenset({PROTOCOL_VERSION}),
+        # SCAFFOLD(capabilities): declare only what a real run proved end to
+        # end. Hooks already wired: GRACEFUL_ABORT (_sdk_cancel), CHECKPOINT +
+        # PERSISTENT_SESSION (_sdk_resume_session), MCP_TOOLS (_sdk_new_session's
+        # mcp_servers). STEER needs a ``_steer`` override first.
+        # ENDPOINT_MODELS: the config takes ``api_base`` / ``api_key``, so a
+        # host may run this agent on its own model endpoint.
+        capabilities=frozenset({HarnessCapability.ENDPOINT_MODELS}),
+        optional_host_capabilities=frozenset({HostCapability.CHECKPOINT_SINK, HostCapability.MCP_SERVERS}),
+    )
+
+    def __init__(self, config: __CLASS__HarnessConfig | None = None) -> None:
+        """Bind the provider configuration; the SDK starts on ``start``.
+
+        Args:
+            config: Provider-owned options.
+        """
+        self._config = config or __CLASS__HarnessConfig()
+        super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
+        self._sdk: Any = None
+        self._client: Any = None
+        self._vendor_session: Any = None
+
+    # ------------------------------------------------------------------
+    # Provider hooks
+    # ------------------------------------------------------------------
+
+    def _validate_context(self, context: HarnessContext) -> None:
+        super()._validate_context(context)
+        resumes = context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None
+        if resumes and not self.card.supports(HarnessCapability.CHECKPOINT):
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot restore protocol checkpoints")
+        if context.mcp_servers and not self.card.supports(HarnessCapability.MCP_TOOLS):
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot mount host MCP servers")
+        if self._config.skills and SKILLS_SCAN_DIR is None:
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ has no skill discovery directory for portable skills")
+        if any(server.transport is McpTransport.IN_PROCESS for server in context.mcp_servers):
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot mount in-process MCP servers")
+
+    async def _open_session(self, context: HarnessContext) -> str | None:
+        cwd = context.cwd or self._config.cwd
+        if self._config.skills:
+            await asyncio.to_thread(
+                install_skills,
+                self._config.skills,
+                provider=PROVIDER_NAME,
+                cwd=cwd,
+                conflict=self._config.skill_conflict,
+                scan_dir=SKILLS_SCAN_DIR,
+            )
+        # Resolve the optional SDK before anything starts: a missing SDK must
+        # not leave a half-started session behind.
+        self._sdk = load_sdk()
+        restored = self._restored_checkpoint_data(context)
+        restored_id = restored.get("session_id") if restored else None
+        if not isinstance(restored_id, str) or not restored_id:
+            restored_id = None
+        if context.resume_policy is ResumePolicy.REQUIRE_RESUME and restored_id is None:
+            raise HarnessProtocolError("__DISPLAY__ checkpoint does not carry a session id to resume")
+        resume = restored_id if context.resume_policy is not ResumePolicy.NEW else None
+        try:
+            self._client = await self._sdk_connect(context)
+            if resume is not None:
+                session_id = await self._sdk_resume_session(context, resume)
+            else:
+                session_id = await self._sdk_new_session(context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = classify_exception(exc)
+            raise ProviderStartupError(f"__DISPLAY__ startup failed: {type(exc).__name__}", error=error) from exc
+        if self.card.supports(HarnessCapability.CHECKPOINT):
+            await self._publish_checkpoint(
+                {"session_id": session_id, "resumed": resume is not None},
+                reason=CheckpointReason.SESSION_ACTIVATED,
+            )
+        return session_id
+
+    async def _close_session(self) -> None:
+        client = self._client
+        self._client = None
+        self._vendor_session = None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await self._sdk_close(client)
+
+    async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        timing = TurnTiming()
+        accumulator = __CLASS__TurnAccumulator(turn_id=turn.turn_id)
+        if turn.abort_requested:
+            return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
+        if self._vendor_session is None:
+            raise HarnessProtocolError("__DISPLAY__ session disappeared during an active cycle")
+        records = self._sdk_run(harness_input_text(turn.content)).__aiter__()
+        try:
+            while not accumulator.ended:
+                try:
+                    record = await asyncio.wait_for(anext(records), self._config.turn_idle_timeout_s)
+                except StopAsyncIteration:
+                    accumulator.close_stream()
+                    break
+                await self._emit_mapped(turn, accumulator.consume(to_json_object(record)))
+        except asyncio.TimeoutError:
+            await self._sdk_cancel()
+            await self._emit_mapped(turn, accumulator.finish())
+            error = turn_error(
+                f"__DISPLAY__ produced no record for {self._config.turn_idle_timeout_s:g}s",
+                category="network_timeout",
+                code="__UPPER___TURN_IDLE_TIMEOUT",
+            )
+            return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._emit_mapped(turn, accumulator.finish())
+            if turn.abort_requested:
+                return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
+            return TurnEventKind.FAILED, accumulator.build_failed_result(classify_exception(exc), timing=timing)
+        finally:
+            aclose = getattr(records, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+        await self._emit_mapped(turn, accumulator.finish())
+        await self._adopt_session_id(accumulator.session_id)
+        return accumulator.build_terminal_result(turn=turn, timing=timing)
+
+    async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
+        _ = turn, mode
+        await self._sdk_cancel()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _emit_mapped(self, turn: PendingTurn, mapped: list[MappedEvent]) -> None:
+        for event in mapped:
+            await self._emit(event.payload, turn=turn, item_id=event.item_id)
+
+    async def _adopt_session_id(self, session_id: str | None) -> None:
+        """Follow a session id the vendor (re)assigned during the turn."""
+        if session_id is None or session_id == self._session_id:
+            return
+        self._session_id = session_id
+        if self.card.supports(HarnessCapability.CHECKPOINT):
+            await self._publish_checkpoint(
+                {"session_id": session_id, "resumed": False},
+                reason=CheckpointReason.STATE_CHANGED,
+            )
+
+    def _client_env(self, context: HarnessContext) -> dict[str, str]:
+        env: dict[str, str] = dict(os.environ) if self._config.inherit_process_env else {}
+        env.update(self._config.env)
+        env.update(context.env)
+        return env
+
+    @staticmethod
+    def _system_prompt(context: HarnessContext) -> str:
+        """The host prompt, led by how the vendor names the host's MCP tools."""
+        naming = ""
+        if MCP_TOOL_NAME_PATTERN is not None and context.mcp_servers:
+            naming = mcp_tool_naming_preamble(
+                {
+                    server.name: MCP_TOOL_NAME_PATTERN.format(server=server.name, tool=TOOL_PLACEHOLDER)
+                    for server in context.mcp_servers
+                }
+            )
+        return "\n\n".join(part for part in (naming, context.system_prompt) if part)
+
+    @staticmethod
+    def _mcp_servers(context: HarnessContext) -> list[dict[str, Any]]:
+        # SCAFFOLD(mcp-config): render the SDK's own MCP server option shape.
+        servers: list[dict[str, Any]] = []
+        for server in context.mcp_servers:
+            if server.transport is McpTransport.STDIO:
+                servers.append(
+                    {"name": server.name, "command": list(server.command), "env": dict(server.env)}
+                )
+            else:
+                servers.append({"name": server.name, "url": server.url, "headers": dict(server.headers)})
+        return servers
+
+    # ------------------------------------------------------------------
+    # Vendor SDK calls (the only code that touches the SDK)
+    # ------------------------------------------------------------------
+
+    async def _sdk_connect(self, context: HarnessContext) -> Any:
+        # SCAFFOLD(sdk-calls): construct and start the vendor client.
+        client = self._sdk.Client(
+            cwd=context.cwd or self._config.cwd,
+            env=self._client_env(context),
+            model=self._config.model,
+            api_base=self._config.api_base,
+            api_key=self._config.api_key,
+        )
+        await client.start()
+        return client
+
+    async def _sdk_new_session(self, context: HarnessContext) -> str:
+        # SCAFFOLD(sdk-calls): open a fresh vendor session carrying the host
+        # system prompt (``system_prompt_mode`` decides append vs replace).
+        self._vendor_session = await self._client.new_session(
+            system_prompt=self._system_prompt(context),
+            system_prompt_mode=self._config.system_prompt_mode,
+            mcp_servers=self._mcp_servers(context),
+        )
+        return str(self._vendor_session.id)
+
+    async def _sdk_resume_session(self, context: HarnessContext, session_id: str) -> str:
+        # SCAFFOLD(sdk-calls): reopen a persisted vendor session by id.
+        self._vendor_session = await self._client.resume_session(session_id, mcp_servers=self._mcp_servers(context))
+        return str(self._vendor_session.id)
+
+    def _sdk_run(self, text: str) -> AsyncIterator[Any]:
+        # SCAFFOLD(sdk-calls): stream one input to its terminal record.
+        return self._vendor_session.run(text)
+
+    async def _sdk_cancel(self) -> None:
+        # SCAFFOLD(sdk-calls): ask the vendor to stop the running input.
+        session = self._vendor_session
+        if session is not None:
+            with contextlib.suppress(Exception):
+                await session.cancel()
+
+    @staticmethod
+    async def _sdk_close(client: Any) -> None:
+        # SCAFFOLD(sdk-calls): release the client and any process it owns.
+        await client.close()
+
+
+__all__ = ["ADAPTER_VERSION", "SDK_MODULE", "__CLASS__Harness", "load_sdk"]

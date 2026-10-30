@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.rsi.harness_rsi.feedback import OutputRepairConfig
+
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     create_role_attribution_agent,
 )
@@ -146,9 +148,11 @@ class RoleAttributorAgent:
         attribution_retry_limit: int = 2,
         workspace: str | Path | None = None,
         agent_skills_dirs: list[str] | None = None,
+        output_repair: OutputRepairConfig | None = None,
     ) -> None:
         self._model_config_ref = model_config_ref
         self._retry_limit = attribution_retry_limit
+        self._output_repair = output_repair or OutputRepairConfig()
         self._workspace = Path(workspace).expanduser().resolve() if workspace else None
         self._agent_skills_dirs = list(agent_skills_dirs or [])
 
@@ -180,6 +184,7 @@ class RoleAttributorAgent:
             user_message=user_message,
             session_id=f"role_attr_{issue_data.get('issue_id', 'unknown')}",
             retry_limit=self._retry_limit,
+            output_repair=self._output_repair,
             parse_response=parse_json_object_response,
             validate_response=lambda raw: _validate_role_attribution_output(
                 raw,
@@ -381,7 +386,9 @@ class RoleAttributor:
         self,
         role_attributor_agent: RoleAttributorAgent | None = None,
         max_concurrent_issues: int = 4,
+        output_repair: OutputRepairConfig | None = None,
     ) -> None:
+        self._output_repair = output_repair or OutputRepairConfig()
         self._agent = role_attributor_agent
         self._semaphore = asyncio.Semaphore(max_concurrent_issues)
 
@@ -399,6 +406,7 @@ class RoleAttributor:
             attribution_retry_limit=attribution_retry_limit,
             workspace=agent_workspace,
             agent_skills_dirs=agent_skills_dirs,
+            output_repair=self._output_repair,
         )
 
     async def attribute(  # pylint: disable=huawei-too-many-arguments

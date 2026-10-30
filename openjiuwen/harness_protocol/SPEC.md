@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_protocol` |
 | 协议版本 | `1.0` |
-| 最近一次修订日期 | 2026-08-20 |
-| 关联 feature | `F_94_external-harness-protocol.md` |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | `F_94_external-harness-protocol.md`、`F_113_external-harness-builtin-model-selection.md` |
 
 ## 范围与边界
 
@@ -78,6 +78,32 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `pause()` / `resume()` | warm/cold paused-turn continuation；能力 gated |
 | `export_checkpoint()` | 返回最新 `HarnessCheckpoint` 快照；不替代主动保存 |
 
+### HarnessModelControl（可选）
+
+模型控制是与 `HarnessProtocol` 并列的独立可选 Protocol，不是它的成员——往 runtime_checkable
+Protocol 加必需方法会让既有三方实现不再结构一致。宿主先查 `card.supports(...)` 再调用；未声明对应
+capability 的实现抛 `UnsupportedHarnessCapabilityError`。
+
+| 成员 | capability | 语义 |
+|---|---|---|
+| `list_models()` | `MODEL_DISCOVERY` | 返回 `tuple[ModelOption, ...]`。已启动读活会话；未启动按 provider 配置做一次临时握手。不发模型请求 |
+| `set_model(selection)` | `MODEL_SELECTION` | 切换后续 Turn 的模型和/或推理强度。IDLE 时立即应用；有 Turn 运行时暂存（多次调用按字段合并），在下一个 Turn 开始前应用；**运行中的 Turn 不换模型**；本 cycle 内 provider 重连后保持。未启动或已停止时抛 `HarnessStateError` |
+
+- `ModelSelection(model, effort)`：`None` 表示该字段保持不变，至少设一个。
+- 创建前的模型由宿主以 `ModelChoice(model, effort, endpoint)` 表达：`endpoint is None` 是内置模型（厂商
+  运行时自身登录 / 配置提供的模型），否则是宿主提供的 `ModelEndpoint(api_base, api_key, provider)`。
+  provider 实现可选 SPI `ModelConfigProvider.model_config(choice, *, fallback=None) -> JsonObject`，
+  返回并入 `create(config)` 的配置片段，不能跑的组合抛 `ValueError`；接收端点模型须在 card 声明
+  `ENDPOINT_MODELS`。`fallback` 是认证失败时切换的备选模型，只交给声明 `AUTH_FALLBACK` 的 provider：
+  回合以 `auth_required` 失败时，harness 在回退模型上恢复同一会话，先发 `ProviderInteractionRequest`
+  （`request_type = AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"`）请宿主确认（落库），确认后发
+  `ProviderEvent(event_type = AUTH_FALLBACK_EVENT_TYPE = "auth_fallback_activated")` 并重放本回合；
+  宿主拒绝则回到主模型、回合保持失败。
+- `ModelOption(model_id, display_name, description, efforts, default_effort, is_default, extensions)`：
+  `efforts` 为空表示不可调；`default_effort` 必须属于 `efforts`；`extensions` 保留厂商目录字段。
+- effort 是 provider 词汇（字符串），协议层不枚举。延后应用失败时，实现应发 WARNING
+  `DiagnosticEvent`，而不是静默丢弃。
+
 ### Delivery
 
 - AUTO：IDLE 时开启新 Turn；RUNNING 时排到 follow-up。
@@ -98,6 +124,12 @@ provider `provider_session_id`、`turn_id`、`item_id`、`correlation_id` 和 `c
 - `ItemLifecycleEvent`：`item_type="step"` 表示一次 Agent Loop 控制循环；工具调用、命令、文件变更、
   子 Agent 等使用各自 item type，仅作为 provider item 观测；
 - `UsageUpdatedEvent`：标准化 token usage，显式区分 DELTA/CUMULATIVE；
+- `ModelRequestEvent`：一次物理模型请求（请求消息、system instructions、工具定义、采样参数、回复、
+  response id / finish reasons / time_to_first_chunk、本次 usage；usage 按 GenAI 约定，`input_tokens` 是整个 prompt，缓存命中
+  是其中的细分），
+  仅在宿主声明 `HostCapability.MODEL_REQUEST_OBSERVATION` 时发出；同一 Turn 内先于它引发的 item 与
+  terminal event，被引发的 item 在 `causation_ids` 中列出其 `request_id`；无法观测请求本身时仍须
+  以回复侧降级发出（`input_observed=False`），`input_messages` 的 `message_id` 在消息留在对话中时稳定；
 - `StateChangedEvent` 和 `TurnLifecycleEvent`；
 - `HookObservedEvent` 和 `DiagnosticEvent`；
 - `ProviderEvent`：带 provider、event type、schema version 的 JSON 扩展。

@@ -56,9 +56,9 @@ async def test_model_stream_raises_first_chunk_timeout():
     message = str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, TimeoutError)
     assert "LLM stream timeout" in message
-    assert "stage=first_chunk" in message
+    assert "stage=first_token" in message
     assert "chunk_count=0" in message
-    assert "first_chunk_elapsed=" in message
+    assert "first_token_elapsed=" in message
     assert "total_elapsed=" in message
     assert "model=mock-model" in message
 
@@ -87,7 +87,7 @@ async def test_model_stream_raises_idle_timeout_on_third_frame():
     assert received == ["frame-1", "frame-2"]
     assert isinstance(exc_info.value.__cause__, TimeoutError)
     assert "LLM stream timeout" in message
-    assert "stage=idle_chunk" in message
+    assert "stage=idle_token" in message
     assert "chunk_count=2" in message
     assert "idle_elapsed=" in message
     assert "total_elapsed=" in message
@@ -138,6 +138,93 @@ async def test_model_stream_timeout_carries_error_message_into_callback():
     error_message = event_kwargs.get("error_message")
     assert isinstance(error_message, str)
     assert "LLM stream timeout" in error_message
-    assert "stage=first_chunk" in error_message
+    assert "stage=first_token" in error_message
     assert "chunk_count=0" in error_message
     assert "model=mock-model" in error_message
+
+
+@pytest.mark.asyncio
+async def test_model_stream_role_only_delta_does_not_satisfy_first_token_timeout():
+    async def role_delta_then_stall_stream(**kwargs):
+        yield AssistantMessageChunk(content="")
+        await asyncio.sleep(0.2)
+        yield AssistantMessageChunk(content="late-token")
+
+    model = _build_model_with_stream(
+        role_delta_then_stall_stream,
+        first_timeout=0.05,
+        idle_timeout=1.0,
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        async for _ in model.stream(messages=[]):
+            pass
+
+    message = str(exc_info.value)
+    assert "stage=first_token" in message
+    assert "chunk_count=1" in message
+    assert "token_chunk_count=0" in message
+
+
+@pytest.mark.asyncio
+async def test_model_stream_heartbeat_deltas_do_not_reset_idle_timeout():
+    async def heartbeat_stream(**kwargs):
+        yield AssistantMessageChunk(content="token")
+        for _ in range(10):
+            await asyncio.sleep(0.03)
+            yield AssistantMessageChunk(content="")
+        yield AssistantMessageChunk(content="never")
+
+    model = _build_model_with_stream(
+        heartbeat_stream,
+        first_timeout=1.0,
+        idle_timeout=0.1,
+    )
+    received = []
+
+    with pytest.raises(BaseError) as exc_info:
+        async for chunk in model.stream(messages=[]):
+            received.append(chunk.content)
+
+    message = str(exc_info.value)
+    assert "never" not in received
+    assert "stage=idle_token" in message
+    assert "token_chunk_count=1" in message
+
+
+@pytest.mark.asyncio
+async def test_model_stream_token_chunks_reset_idle_budget():
+    async def steady_stream(**kwargs):
+        for index in range(5):
+            await asyncio.sleep(0.03)
+            yield AssistantMessageChunk(reasoning_content=f"r{index}")
+
+    model = _build_model_with_stream(
+        steady_stream,
+        first_timeout=1.0,
+        idle_timeout=0.1,
+    )
+
+    received = [chunk.reasoning_content async for chunk in model.stream(messages=[])]
+
+    assert received == ["r0", "r1", "r2", "r3", "r4"]
+
+
+@pytest.mark.asyncio
+async def test_model_stream_consumer_time_does_not_count_against_idle_budget():
+    async def two_token_stream(**kwargs):
+        yield AssistantMessageChunk(content="a")
+        yield AssistantMessageChunk(content="b")
+
+    model = _build_model_with_stream(
+        two_token_stream,
+        first_timeout=1.0,
+        idle_timeout=0.05,
+    )
+    received = []
+
+    async for chunk in model.stream(messages=[]):
+        received.append(chunk.content)
+        await asyncio.sleep(0.1)
+
+    assert received == ["a", "b"]

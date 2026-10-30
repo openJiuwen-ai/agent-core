@@ -20,6 +20,7 @@ from .compressors.json_array_compressor import JsonArrayCompressor
 from .compressors.log_compressor import LogCompressor
 from .compressors.plain_text_compressor import PlainTextCompressor
 from .compressors.search_results_compressor import SearchResultsCompressor
+from .compressors.source_file_compressor import SourceFileCompressor
 
 __all__ = [
     "ContentRouter",
@@ -37,4 +38,5 @@ __all__ = [
     "RuleCompressionResult",
     "RuleContext",
     "SearchResultsCompressor",
+    "SourceFileCompressor",
 ]

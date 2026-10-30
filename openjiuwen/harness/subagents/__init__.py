@@ -8,6 +8,14 @@ from openjiuwen.harness.subagents.code_agent import (
     build_code_agent_config,
     create_code_agent,
 )
+from openjiuwen.harness.subagents.cua_agent import (
+    build_cua_agent_config,
+    create_cua_agent,
+)
+from openjiuwen.harness.subagents.mobile_gui_agent import (
+    build_mobile_gui_agent_config,
+    create_mobile_gui_agent,
+)
 from openjiuwen.harness.subagents.research_agent import (
     build_research_agent_config,
     create_research_agent,
@@ -15,10 +23,6 @@ from openjiuwen.harness.subagents.research_agent import (
 from openjiuwen.harness.subagents.verification_agent import (
     build_verification_agent_config,
     create_verification_agent,
-)
-from openjiuwen.harness.subagents.mobile_gui_agent import (
-    build_mobile_gui_agent_config,
-    create_mobile_gui_agent,
 )
 
 __all__ = [
@@ -32,4 +36,6 @@ __all__ = [
     "create_verification_agent",
     "build_mobile_gui_agent_config",
     "create_mobile_gui_agent",
+    "build_cua_agent_config",
+    "create_cua_agent",
 ]

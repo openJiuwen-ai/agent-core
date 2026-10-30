@@ -1,0 +1,175 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Provider-owned configuration for the __DISPLAY__ ACP harness.
+
+Validating this config never resolves or launches the CLI, so a host can
+check provider settings on a machine where ``__BINARY__`` is not installed.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
+
+from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
+
+_DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class __CLASS__ModelConfig:
+    """A model served by a host endpoint instead of the CLI's own login.
+
+    Attributes:
+        model: Model id the endpoint serves.
+        api_base: Endpoint base URL.
+        api_key: Endpoint credential; never logged.
+        provider: Wire protocol label of the endpoint (e.g. ``openai`` /
+            ``anthropic``), when the host knows it.
+    """
+
+    model: str
+    api_base: str
+    api_key: str | None = field(default=None, repr=False)
+    provider: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("model", "api_base", "api_key", "provider"):
+            value = getattr(self, name)
+            optional = name in ("api_key", "provider")
+            if value is None and optional:
+                continue
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"__DISPLAY__ endpoint model {name} must be a non-empty string")
+
+    @classmethod
+    def from_mapping(cls, config: Any) -> "__CLASS__ModelConfig | None":
+        """Build from a JSON mapping; ``None`` passes through."""
+        if config is None or isinstance(config, cls):
+            return config
+        if not isinstance(config, Mapping):
+            raise TypeError("__DISPLAY__ endpoint model must be an object")
+        unknown = sorted(set(config) - {item.name for item in fields(cls)})
+        if unknown:
+            raise ValueError(f"unknown __DISPLAY__ endpoint model fields: {', '.join(unknown)}")
+        return cls(**dict(config))
+
+
+@dataclass(frozen=True, slots=True)
+class __CLASS__HarnessConfig:
+    """Configuration for one __DISPLAY__ ACP agent process.
+
+    Attributes:
+        command: Argv that starts the CLI as an ACP agent over stdio.
+        cli_path: Explicit CLI executable replacing ``command[0]``. Without it
+            ``command[0]`` is looked up on ``PATH``, and the CLI bundled in
+            this package's platform wheel (when built with one) is the last
+            resort.
+        extra_args: Arguments appended after ``command`` (and the model
+            arguments), e.g. a vendor profile flag.
+        cwd: Default working directory; ``HarnessContext.cwd`` wins.
+        env: Extra child environment, layered over the inherited one.
+        inherit_process_env: Start the child from the host environment.
+        model: Built-in model the CLI selects on its own login; ``None`` keeps
+            the CLI default.
+        endpoint_model: Model the session runs on through a host endpoint
+            instead of the CLI's own login; exclusive with ``model``.
+        fallback_model: Host endpoint model the session switches to once when
+            the primary model fails authentication.
+        auto_approve: Answer ``session/request_permission`` with an allow
+            option when the host does not route tool approvals.
+        system_prompt_delivery: ``first_prompt`` prepends the host system
+            prompt to the first prompt of a fresh session (ACP carries no
+            system prompt field); ``none`` rejects a context that has one.
+        skills: Portable skill bundles copied before startup.
+        skill_conflict: ``skip`` / ``replace`` / ``append`` for existing skills.
+        initialize_timeout_s: Bound on ``initialize`` / ``session/new``.
+        turn_timeout_s: Bound on one ``session/prompt``; ``None`` waits.
+        shutdown_timeout_s: Grace period before the child is terminated.
+        max_line_bytes: Largest stdout line accepted from the agent.
+        event_buffer_capacity: Bounded protocol event buffer size.
+    """
+
+    command: tuple[str, ...] = __COMMAND__
+    extra_args: tuple[str, ...] = ()
+    cli_path: str | None = None
+    cwd: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    inherit_process_env: bool = True
+    model: str | None = None
+    endpoint_model: __CLASS__ModelConfig | None = None
+    fallback_model: __CLASS__ModelConfig | None = None
+    auto_approve: bool = True
+    system_prompt_delivery: Literal["first_prompt", "none"] = "first_prompt"
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
+    initialize_timeout_s: float = 60.0
+    turn_timeout_s: float | None = None
+    shutdown_timeout_s: float = 5.0
+    max_line_bytes: int = _DEFAULT_MAX_LINE_BYTES
+    event_buffer_capacity: int = 1024
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        for name in ("command", "extra_args"):
+            values = getattr(self, name)
+            if not isinstance(values, (list, tuple)) or any(not isinstance(item, str) or not item for item in values):
+                raise TypeError(f"__DISPLAY__ {name} must be an array of non-empty strings")
+            object.__setattr__(self, name, tuple(values))
+        if not self.command:
+            raise ValueError("__DISPLAY__ command must not be empty")
+        for name in ("cwd", "model", "cli_path"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise TypeError(f"__DISPLAY__ {name} must be a non-empty string when provided")
+        for name in ("endpoint_model", "fallback_model"):
+            object.__setattr__(self, name, __CLASS__ModelConfig.from_mapping(getattr(self, name)))
+        if self.model is not None and self.endpoint_model is not None:
+            raise ValueError("__DISPLAY__ model and endpoint_model are exclusive")
+        if self.system_prompt_delivery not in ("first_prompt", "none"):
+            raise ValueError("__DISPLAY__ system_prompt_delivery must be 'first_prompt' or 'none'")
+        if not isinstance(self.env, Mapping):
+            raise TypeError("__DISPLAY__ env must be an object")
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
+            raise TypeError("__DISPLAY__ env must map strings to strings")
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        for name in ("initialize_timeout_s", "turn_timeout_s", "shutdown_timeout_s"):
+            _check_positive_number(name, getattr(self, name), optional=name == "turn_timeout_s")
+        for name in ("max_line_bytes", "event_buffer_capacity"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"__DISPLAY__ {name} must be a positive integer")
+
+    @classmethod
+    def from_mapping(cls, config: JsonObject) -> "__CLASS__HarnessConfig":
+        """Validate a provider SPI mapping without touching the CLI."""
+        values: dict[str, Any] = dict(config)
+        known = {item.name for item in fields(cls)}
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise ValueError(f"unknown __DISPLAY__ configuration fields: {', '.join(unknown)}")
+        for name in ("command", "extra_args"):
+            items = values.get(name)
+            if items is not None:
+                if not isinstance(items, (list, tuple)):
+                    raise TypeError(f"__DISPLAY__ {name} must be an array")
+                values[name] = tuple(items)
+        env = values.get("env")
+        if env is not None:
+            if not isinstance(env, Mapping):
+                raise TypeError("__DISPLAY__ env must be an object")
+            values["env"] = dict(env)
+        return cls(**values)
+
+
+def _check_positive_number(name: str, value: Any, *, optional: bool) -> None:
+    if value is None and optional:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"__DISPLAY__ {name} must be a positive number")
+
+
+__all__ = ["__CLASS__HarnessConfig", "__CLASS__ModelConfig"]

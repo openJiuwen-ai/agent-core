@@ -434,3 +434,30 @@ ReActAgent 最终输出结果：
 
 建议外出时携带雨具，注意防雨防滑。需要其他天气信息可以随时告诉我哦~
 ```
+
+## 迭代次数耗尽后的处理
+
+`ReActAgentConfig.on_max_iterations` 控制工具循环耗尽 `max_iterations` 时的行为：
+
+| 配置 | 行为 |
+|---|---|
+| `"error"`（默认） | 保留原有错误输出，不额外调用模型。 |
+| `"return_observations"` | 在 `observations` 中返回当前轮可用的工具消息、工具名和调用 ID；任务尚未完成，`result_type` 仍为 `error`。 |
+| `"final_answer"` | 基于已有上下文再调用一次模型，不提供工具。非空且不包含工具调用的响应作为 `answer` 返回；空白响应、再次请求工具、模型输出截断/过滤或模型失败则返回 `error`，保留 `observations` 和 `finalization_error`。 |
+
+```python
+config = ReActAgentConfig(max_iterations=3, on_max_iterations="final_answer")
+# 按前文示例配置模型、提示词和工具。
+```
+
+耗尽结果增加 `termination_reason="max_iterations"`、`iterations_used` 和
+`truncated_by_max_iterations=True`。即使 `result_type="answer"`，也应检查截断标记：
+尽力作答不等于任务完整完成。收尾调用不占工具迭代预算（模型客户端或上下文恢复机制仍可能重试），
+不会再执行工具。流式路径使用同一策略，并在结束时返回结构化结果。流式文本可能先于截断标记到达，
+调用方必须检查最终结果，不能仅凭已输出文本判断收尾成功。rail 要求继续模型步骤或收尾期间有新用户输入时，
+也会回退到保留证据的错误结果，不突破工具迭代上限。
+
+中断或 continuation 恢复时，从持久化上下文提取当前轮仍可用的工具证据，不包含更早用户轮次。
+已被上下文压缩或保留策略删除的证据无法重建。`iterations_used` 沿用现有 ReAct 循环计数，
+Harness continuation 的预算语义保持不变。取消仍向外传播，rail 显式结束或中断的结果优先。
+这些配置针对 ReActAgent，不改变 DeepAgent 外层任务循环配置。

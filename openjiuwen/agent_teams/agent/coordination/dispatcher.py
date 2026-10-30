@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Event dispatcher for TeamAgent coordination events.
 
 Trigger rules (coarse filters: agent_ready, inner-vs-transport, role
@@ -45,10 +45,12 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     WorkflowHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
+from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
 
 
@@ -96,11 +98,22 @@ class AgentRoundController(Protocol):
         """Cancel the running agent task."""
         ...
 
-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+    async def deliver_input(
+        self,
+        content: Any,
+        *,
+        use_steer: bool = True,
+        run_context: RunContext | None = None,
+    ) -> None:
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
-    async def resume_interrupt(self, user_input: Any) -> None:
+    async def resume_interrupt(
+        self,
+        user_input: Any,
+        *,
+        run_context: RunContext | None = None,
+    ) -> None:
         """Resume a pending HITL interrupt with structured input."""
         ...
 
@@ -119,8 +132,12 @@ class TeamLifecycleController(Protocol):
     controller.
     """
 
-    async def shutdown_self(self) -> None:
-        """Force-shutdown this agent in response to team dissolution."""
+    async def auto_start_member(self, member_name: str) -> bool:
+        """Start or recover a named member with queued mailbox input."""
+        ...
+
+    async def shutdown_self(self, *, force: bool = False) -> None:
+        """Settle this agent's retire request (SHUTDOWN, or DORMANT per its lifetime; ``force`` is always SHUTDOWN)."""
         ...
 
     async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
@@ -214,6 +231,7 @@ class EventDispatcher:
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+        self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -289,7 +307,16 @@ class EventDispatcher:
 
         for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
+                if handler is self.message:
+                    callback = self._dispatch_mailbox
                 self._framework.register_sync(event_key, callback)
+
+    async def _dispatch_mailbox(self, event) -> None:
+        if event.event_type == InnerEventType.POLL_MAILBOX:
+            await self.group_message.start_mentioned_members()
+        handler = self.group_message if await self.group_message.handles(event) else self.message
+        method_name = MessageHandler.EVENT_METHOD_MAP[event.event_type]
+        await getattr(handler, method_name)(event)
 
     @property
     def dispatch_mode(self) -> str:

@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import jsonschema
+import pytest
+
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -49,6 +52,37 @@ def test_invoke_captures_arguments():
     assert out.success is True
     assert tool.called is True
     assert tool.captured == {"answer": "42"}
+
+
+def test_invoke_raises_on_schema_violation():
+    """A schema-violating submission raises instead of being acknowledged.
+
+    The failed call leaves ``captured``/``called`` unset, so a corrected
+    resubmission within the same turn is captured normally.
+    """
+    schema = {
+        "type": "object",
+        "required": ["answers"],
+        "properties": {
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["q_id", "answer"],
+                    "properties": {"q_id": {"type": "string"}, "answer": {"type": "string"}},
+                },
+            },
+        },
+    }
+    tool = StructuredOutputTool(schema)
+    with pytest.raises(jsonschema.ValidationError, match="q_id"):
+        asyncio.run(tool.invoke({"answers": [{"answer": "missing q_id"}]}))
+    assert tool.called is False
+    assert tool.captured is None
+    out = asyncio.run(tool.invoke({"answers": [{"q_id": "q1", "answer": "ok"}]}))
+    assert out.success is True
+    assert tool.called is True
+    assert tool.captured == {"answers": [{"q_id": "q1", "answer": "ok"}]}
 
 
 def test_default_schema_when_none():
@@ -98,3 +132,32 @@ def test_finish_rail_skips_force_finish_on_tool_exception():
     ctx.exception = ValueError("Invalid tool arguments JSON")
     asyncio.run(rail.after_tool_call(ctx))
     assert ctx.has_force_finish_request is False
+
+
+def test_card_declares_direct_exposure():
+    """The submit tool must stay visible under progressive tool exposure.
+
+    The exposure policy defers every tool whose card did not declare ``exposure``
+    and whose name is not in the default-direct set; a deferred submit tool
+    would make schema calls fail with "did not submit a structured result".
+    """
+    from openjiuwen.core.foundation.tool import ToolExposure
+
+    tool = StructuredOutputTool(None)
+
+    assert tool.card.exposure is ToolExposure.DIRECT
+    assert "exposure" in tool.card.model_fields_set
+
+
+def test_submit_tool_stays_direct_under_progressive_policy():
+    """Under progressive exposure the policy must resolve the submit tool DIRECT
+    (not DEFERRED) because the card declared it — the declared marker short-circuits
+    the default-direct-name lookup."""
+    from openjiuwen.core.foundation.tool import ToolExposure
+    from openjiuwen.core.single_agent.ability_manager import AbilityManager
+
+    manager = AbilityManager(owner_id="progressive-submit-test")
+    manager.set_tool_exposure_policy(True, direct_tool_names=frozenset())
+    tool = StructuredOutputTool(None)
+    manager.add(tool.card)
+    assert tool.card.exposure is ToolExposure.DIRECT

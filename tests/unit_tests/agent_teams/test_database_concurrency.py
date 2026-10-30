@@ -560,8 +560,9 @@ async def test_existing_session_tables_run_migration(file_db: TeamDatabase, monk
     column) to stand in for a table left behind by older code, then binds the
     same session and asserts the migration rebuilt it to the current scheme.
     """
-    import openjiuwen.agent_teams.tools.database.engine as engine_module
     from sqlalchemy import inspect
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
 
     token = set_session_id("oldbind_session")
     try:
@@ -617,6 +618,130 @@ async def test_existing_session_tables_run_migration(file_db: TeamDatabase, monk
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_message_migrations_only_probe_current_session_table(file_db: TeamDatabase, monkeypatch) -> None:
+    """Binding one session must not inspect another session's message table."""
+    from sqlalchemy import inspect as sa_inspect
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    other_table = "team_message_other_session"
+    async with file_db.engine.begin() as conn:
+        await conn.execute(text(f'CREATE TABLE "{other_table}" (message_id TEXT PRIMARY KEY)'))
+
+    token = set_session_id("message_migration_current")
+    try:
+        observed: list[str] = []
+
+        class InspectorSpy:
+            def __init__(self, connection):
+                self._inspector = sa_inspect(connection)
+
+            def __getattr__(self, name):
+                return getattr(self._inspector, name)
+
+            def get_columns(self, table_name, *args, **kwargs):
+                observed.append(table_name)
+                return self._inspector.get_columns(table_name, *args, **kwargs)
+
+        monkeypatch.setattr(engine_module, "inspect", InspectorSpy)
+        assert await file_db.create_cur_session_tables()
+        current_table = next(
+            name for name in engine_module._current_session_migration_tables()
+            if name.startswith("team_message_")
+        )
+        assert current_table in observed
+        assert other_table not in observed
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_current_session_legacy_message_columns_are_backfilled(file_db: TeamDatabase) -> None:
+    """Legacy protocol/meta columns are still migrated for their own session."""
+    from sqlalchemy import inspect
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    token = set_session_id("legacy_message_current")
+    try:
+        assert await file_db.create_cur_session_tables()
+        table_name = next(
+            name for name in engine_module._current_session_migration_tables()
+            if name.startswith("team_message_")
+        )
+        async with file_db.engine.begin() as conn:
+            await conn.execute(text(f'ALTER TABLE "{table_name}" DROP COLUMN protocol'))
+            await conn.execute(text(f'ALTER TABLE "{table_name}" DROP COLUMN meta'))
+
+        assert await file_db.create_cur_session_tables()
+        async with file_db.read_session_local() as session:
+            conn = await session.connection()
+            columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in inspect(sync_conn).get_columns(table_name)}
+            )
+        assert {"protocol", "meta"}.issubset(columns)
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_message_migration_skips_table_disappearing_during_column_probe(
+    file_db: TeamDatabase,
+    monkeypatch,
+) -> None:
+    """A concurrent DROP between has_table and get_columns is tolerated."""
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import NoSuchTableError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    token = set_session_id("message_migration_disappears")
+    real_inspect = engine_module.inspect
+    try:
+        class InspectorRace:
+            def __init__(self, connection):
+                self._inspector = sa_inspect(connection)
+
+            def __getattr__(self, name):
+                return getattr(self._inspector, name)
+
+            def get_columns(self, table_name, *args, **kwargs):
+                current_table = next(
+                    name for name in engine_module._current_session_migration_tables()
+                    if name.startswith("team_message_")
+                )
+                if table_name == current_table:
+                    raise NoSuchTableError(table_name)
+                return self._inspector.get_columns(table_name, *args, **kwargs)
+
+        monkeypatch.setattr(engine_module, "inspect", InspectorRace)
+        assert await file_db.create_cur_session_tables()
+    finally:
+        monkeypatch.setattr(engine_module, "inspect", real_inspect)
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_cur_session_tables_returns_false_after_retry_exhaustion(
+    file_db: TeamDatabase,
+    monkeypatch,
+) -> None:
+    """Exhausted transient DDL retries are visible to the session binder."""
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    async def _timeout(_session):
+        raise TimeoutError("watchdog")
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(engine_module, "_ensure_session_tables", _timeout)
+    assert await file_db.create_cur_session_tables() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_create_cur_session_tables_retries_on_watchdog_timeout(file_db: TeamDatabase, monkeypatch) -> None:
     """``create_cur_session_tables`` retries a ``TimeoutError`` raised by the
     write-lock watchdog instead of crashing the member on the first hit.
@@ -627,8 +752,9 @@ async def test_create_cur_session_tables_retries_on_watchdog_timeout(file_db: Te
     """
     from contextlib import asynccontextmanager
 
-    import openjiuwen.agent_teams.tools.database.engine as engine_module
     from sqlalchemy import inspect
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
 
     real_write = engine_module.DbSessions.write
     attempts = {"n": 0}
@@ -645,7 +771,7 @@ async def test_create_cur_session_tables_retries_on_watchdog_timeout(file_db: Te
     # Speed up the retry back-off so the test stays fast.
     monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
 
-    await file_db.create_cur_session_tables()  # must not raise
+    assert await file_db.create_cur_session_tables()  # must not raise
 
     assert attempts["n"] == 2
     # The session tables were created on the successful retry.

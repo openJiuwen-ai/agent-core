@@ -2,9 +2,17 @@
 
 {{task.reviewer_instruction}}
 
+{{task.previous_feedback}}
+
 ## Goal and acceptance criteria
 
 {{task.content}}
+
+The above is the task's current, complete content.
+
+{{task.upstream_section}}
+
+{{task.submission_note}}
 
 ## How to review
 

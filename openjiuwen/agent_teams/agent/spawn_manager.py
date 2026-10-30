@@ -15,12 +15,14 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliModelConfig,
     TeamRole,
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_builtin_model,
     get_member_fallback_model_ref,
     get_member_model_ref,
 )
@@ -271,6 +273,20 @@ class SpawnManager:
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         await self.cleanup_teammate(member_name)
 
+        # After cleanup, the previous execution context is gone. Reset
+        # execution_status back to IDLE so the new lifecycle starts from a
+        # known state and we avoid illegal transitions such as
+        # RUNNING -> STARTING on the next spawn (issue #4318).
+        team_backend = self._configurator.team_backend
+        team_name = self._configurator.team_name
+        db = getattr(team_backend, "db", None) if team_backend is not None else None
+        if db is not None and team_name is not None:
+            await db.member.reset_member_execution_status(
+                member_name,
+                team_name,
+                ExecutionStatus.IDLE.value,
+            )
+
         ctx = await self.build_context_from_db(member_name)
         if ctx is None:
             team_logger.error("Cannot recover spawn config for {}", member_name)
@@ -319,18 +335,34 @@ class SpawnManager:
         team_name = self._configurator.team_name
         if team_backend and team_name:
             member = await team_backend.db.member.get_member(member_name, team_name)
+            status = MemberStatus.ERROR
             if member is not None:
                 try:
                     status = MemberStatus(member.status)
                 except ValueError:
                     status = MemberStatus.ERROR
-                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+                # A retired member's runtime exiting is the expected shape of
+                # its retirement, not a failure: DORMANT wakes only when named
+                # (F_118), never from the health monitor.
+                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN, MemberStatus.DORMANT}:
                     team_logger.info(
                         "Teammate {} is {}; skip unhealthy restart",
                         member_name,
                         status.value,
                     )
                     return
+            # READY/BUSY/UNSTARTED 等 active 状态不能直接迁移到 RESTARTING，需先经
+            # ERROR 归一化（与 recovery_manager 的 session-switch 路径一致），否则
+            # 会报 "Invalid state transition: ready -> restarting"（issue #4318）。
+            if status not in {
+                MemberStatus.PAUSED,
+                MemberStatus.STOPPED,
+                MemberStatus.ERROR,
+                MemberStatus.SHUTDOWN,
+            }:
+                await team_backend.db.member.update_member_status(
+                    member_name, team_name, MemberStatus.ERROR.value,
+                )
             await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,
@@ -355,8 +387,8 @@ class SpawnManager:
         fallback_model_ref = get_member_fallback_model_ref(teammate)
         member_model = None
         fallback_member_model = None
+        team_spec = self._configurator.team_spec
         if model_ref is not None:
-            team_spec = self._configurator.team_spec
             if team_spec is not None:
                 member_model = resolve_member_model(
                     team_spec,
@@ -364,13 +396,44 @@ class SpawnManager:
                     model_index=model_ref.model_index,
                 )
         if fallback_model_ref is not None:
-            team_spec = self._configurator.team_spec
             if team_spec is not None:
                 fallback_member_model = resolve_member_model(
                     team_spec,
                     model_name=fallback_model_ref.model_name,
                     model_index=fallback_model_ref.model_index,
                 )
+
+        persisted_model_missing = model_ref is not None and member_model is None
+        has_model_pool = team_spec is not None and bool(team_spec.model_pool)
+        if has_model_pool and persisted_model_missing:
+            first_entry = team_spec.model_pool[0]
+            member_model = resolve_member_model(
+                team_spec,
+                model_name=first_entry.model_name,
+                model_index=0,
+            )
+            team_logger.warning(
+                "[{}] persisted model for member {!r} is unavailable; "
+                "falling back to pool model {!r}",
+                team_spec.team_name,
+                member_name,
+                first_entry.model_name,
+            )
+        fallback_model_missing = fallback_model_ref is not None and fallback_member_model is None
+        if has_model_pool and fallback_model_missing:
+            first_entry = team_spec.model_pool[0]
+            fallback_member_model = resolve_member_model(
+                team_spec,
+                model_name=first_entry.model_name,
+                model_index=0,
+            )
+            team_logger.warning(
+                "[{}] persisted fallback model for member {!r} is unavailable; "
+                "falling back to pool model {!r}",
+                team_spec.team_name,
+                member_name,
+                first_entry.model_name,
+            )
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
@@ -390,8 +453,61 @@ class SpawnManager:
         # External-CLI members carry no DeepAgent: the backend registry says
         # which CLI adapter drives them, routing spawn to external_cli_spawn.
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
+        model_group_pool = (
+            team_backend.is_model_group_pool()
+            if hasattr(team_backend, "is_model_group_pool")
+            else False
+        )
+
+        # A member row created by the legacy by-model-name strategy stores a
+        # physical model name.  After the session switches to a compiler-driven
+        # model group, ordinary Team members must use the group's sole logical
+        # wildcard instead of falling through to their old per-agent model.
+        # Keep physical deployment restoration exclusive to external CLI
+        # members below.
+        if model_group_pool and not cli_agent and team_spec is not None:
+            member_model = resolve_member_model(
+                team_spec,
+                model_name="*",
+                model_index=0,
+                route_tag=model_ref.route_tag if model_ref is not None else None,
+            )
+            fallback_member_model = None
+
+        # Compiler-driven model groups keep a single logical ``*`` pool entry.
+        # External CLI members persist the real deployment model name, so cold
+        # recovery must resolve that name against the current deployment
+        # catalog instead of converting the logical IntelliRouter config into
+        # CLI credentials.
+        if cli_agent and model_group_pool and team_spec is not None:
+            from openjiuwen.agent_teams.tools.tool_member import _provider_filter_for_cli
+
+            provider_filter = _provider_filter_for_cli(cli_agent)
+            if model_ref is not None and model_ref.model_name != "*":
+                candidates = team_backend.resolve_cli_models(model_ref.model_name, provider_filter=provider_filter)
+                if not candidates:
+                    raise ValueError(
+                        f"model group deployment '{model_ref.model_name}' is unavailable or incompatible "
+                        f"with cli_agent '{cli_agent}' during recovery"
+                    )
+                member_model = candidates[0].to_team_model_config()
+            if fallback_model_ref is not None and fallback_model_ref.model_name != "*":
+                candidates = team_backend.resolve_cli_models(
+                    fallback_model_ref.model_name,
+                    provider_filter=provider_filter,
+                )
+                if not candidates:
+                    raise ValueError(
+                        f"fallback deployment '{fallback_model_ref.model_name}' is unavailable or incompatible "
+                        f"with cli_agent '{cli_agent}' during recovery"
+                    )
+                fallback_member_model = candidates[0].to_team_model_config()
 
         permissions_override = get_member_permissions_override(teammate)
+        builtin = get_member_builtin_model(teammate)
+        builtin_model = (
+            ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
+        )
 
         # Team-level B-class values come from ``team_info``: they are
         # written to the DB when ``build_team`` succeeds and are carried
@@ -415,6 +531,7 @@ class SpawnManager:
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
             fallback_member_model=fallback_member_model,
+            builtin_model=builtin_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,

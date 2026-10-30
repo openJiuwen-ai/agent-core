@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,10 @@ from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
+from openjiuwen.agent_teams.rails.team_context import (
+    get_swarmflow_expert_specs,
+    get_swarmflow_external_cli_agents,
+)
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -53,6 +58,53 @@ _OBSERVER_CTX_KEY = "observer"
 def new_swarmflow_run_id() -> str:
     """Mint a unique workflow run id: ``wf_{12hex}``."""
     return f"wf_{uuid.uuid4().hex[:12]}"
+
+
+def resolve_progress_model(progress: Any, parent_model: str | None) -> str | None:
+    """The model a progress event names for its node, with the base-spec fallback.
+
+    A native ``agent_started`` with no model hint inherits the base spec (the
+    leader's model), so it shows that. A third-party node with no hint runs on
+    the CLI's own default — the leader's model would be a wrong name until the
+    CLI reports the real one, so it stays unset. Terminal events carry no
+    ``agent_type`` and never fall back: a model-less completion must not
+    overwrite what the node already shows.
+    """
+    if progress.model is not None:
+        return progress.model
+    if progress.kind == "agent_started" and not getattr(progress, "agent_type", None):
+        return parent_model
+    return None
+
+
+def _builtin_model_catalog(team_backend: Any) -> str | None:
+    """Render the built-in models each CLI kind declares, or None when none do.
+
+    Mirror of ``tools.tool_member._builtin_model_catalog`` with a lazy twist:
+    the blob is appended to the tool description only when at least one kind
+    declares built-in models, so the ``builtin_model`` option's catalog is
+    visible exactly when the option is usable (``None`` keeps the description
+    free of a dangling reference).
+    """
+    if team_backend is None:
+        return None
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for cli_agent in sorted(team_backend.external_cli_kinds()):
+        config = team_backend.external_cli_config(cli_agent)
+        if config is None or not config.builtin_models:
+            continue
+        catalog[cli_agent] = [
+            {
+                "name": model.name,
+                "description": model.description,
+                "efforts": model.efforts,
+                "default_effort": model.default_effort,
+            }
+            for model in config.builtin_models
+        ]
+    if not catalog:
+        return None
+    return f"<builtin_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</builtin_model_catalog>"
 
 
 @dataclass
@@ -88,6 +140,7 @@ class SwarmflowTool(AsyncTool):
         budget: BudgetLedger | None = None,
         t: Translator | None = None,
         language: str = "cn",
+        team_backend: Any = None,
     ) -> None:
         lang = language if language in ("cn", "en") else "cn"
         translator = t if t is not None else make_translator(lang)
@@ -103,10 +156,17 @@ class SwarmflowTool(AsyncTool):
         self._messager = messager
         self._team_name = team_name or "swarmflow"
         self._model_resolver = model_resolver
+        self._team_backend = team_backend
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._governor = concurrency_governor
         self._budget = budget
+        # Append the built-in model catalog when any CLI kind declares one, so
+        # the ``builtin_model`` option's pickable names ride the description
+        # exactly when the option is usable (see ``_builtin_model_catalog``).
+        catalog = _builtin_model_catalog(team_backend)
+        if catalog is not None:
+            self.card.description = f"{self.card.description}\n\n{catalog}"
         # Each leader NativeHarness build creates a fresh SwarmflowTool (the
         # team tool rail is per-harness). Register as the controller's relaunch
         # host so paused runs resume on THIS cycle's harness, not the one that
@@ -592,9 +652,7 @@ class SwarmflowTool(AsyncTool):
             if progress.kind == "workflow_started":
                 name_box["name"] = progress.name
                 name_box["description"] = progress.description
-            # When the engine's progress.model is None (no model hint on
-            # agent_started), fall back to the parent agent's own model.
-            resolved_model = progress.model if progress.model is not None else self._parent_agent.model
+            resolved_model = resolve_progress_model(progress, self._parent_agent.model)
             team_event = WorkflowProgressTeamEvent(
                 team_name=team_name,
                 kind=progress.kind,
@@ -607,6 +665,9 @@ class SwarmflowTool(AsyncTool):
                 label=progress.label,
                 prompt=progress.prompt,
                 model=resolved_model,
+                agent_type=progress.agent_type,
+                agent_template=getattr(progress, "agent_template", None),
+                display_name=getattr(progress, "display_name", None),
                 outcome=progress.outcome,
                 text=progress.message,
                 phases=progress.phases,
@@ -621,6 +682,22 @@ class SwarmflowTool(AsyncTool):
                 phase_type=progress.phase_type,
                 nested_phase=progress.nested_phase,
                 parent_phase=progress.parent_phase,
+                parent_session_id=progress.parent_session_id,
+                member_name=progress.member_name,
+                verify_reviewers=progress.verify_reviewers,
+                verify_verdict=progress.verify_verdict,
+                verify_threshold=progress.verify_threshold,
+                verify_votes=progress.verify_votes,
+                verify_reviewer_labels=progress.verify_reviewer_labels,
+                verify_reviewer_roles=progress.verify_reviewer_roles,
+                verify_id=progress.verify_id,
+                cache_tokens=progress.cache_tokens,
+                token_input=progress.token_input,
+                token_output=progress.token_output,
+                activity_type=progress.activity_type,
+                tool_call_id=progress.tool_call_id,
+                tool_name=progress.tool_name,
+                content=progress.content,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,
@@ -676,6 +753,13 @@ class SwarmflowTool(AsyncTool):
                 run_id=run_id,
                 agent_gate=agent_gate,
                 budget=self._budget,
+                external_cli_agents=get_swarmflow_external_cli_agents(
+                    getattr(self._parent_agent, "build_context", None)
+                ),
+                expert_specs=get_swarmflow_expert_specs(
+                    getattr(self._parent_agent, "build_context", None)
+                ),
+                team_backend=self._team_backend,
             )
         # BudgetExhausted is a BaseException: no ``except`` here on purpose —
         # wrapping it would discard its structured fields, and the async-tool

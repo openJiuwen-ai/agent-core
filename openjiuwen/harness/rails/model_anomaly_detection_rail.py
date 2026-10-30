@@ -165,11 +165,41 @@ def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
     return max(0.0, delay)
 
 
+def _client_retry_decision(chain: List[BaseException]) -> Optional[_TransientDecision]:
+    """Return the retry decision a model client attached to the error, if any.
+
+    A model client that knows more than the provider response (for example a
+    model-group client that knows whether another deployment is still usable)
+    sets ``details["should_retry"]`` and, optionally,
+    ``details["retry_after_seconds"]``. They mean the same as the
+    ``x-should-retry`` / ``retry-after`` headers and take precedence over text
+    markers and status codes.
+    """
+    for item in chain:
+        details = getattr(item, "details", None)
+        if not isinstance(details, dict) or not isinstance(details.get("should_retry"), bool):
+            continue
+        retry_after = details.get("retry_after_seconds")
+        try:
+            retry_after_seconds = max(0.0, float(retry_after)) if retry_after is not None else None
+        except (TypeError, ValueError):
+            retry_after_seconds = None
+        return _TransientDecision(
+            retryable=details["should_retry"],
+            status_code=_coerce_status_code(details.get("status_code")),
+            retry_after_seconds=retry_after_seconds,
+        )
+    return None
+
+
 def _classify_transient_failure(exc: Optional[BaseException]) -> _TransientDecision:
     """Classify a provider failure that is neither a repeat nor a stream timeout."""
     if exc is None:
         return _TransientDecision(retryable=False)
     chain = _exception_chain(exc)
+    client_decision = _client_retry_decision(chain)
+    if client_decision is not None:
+        return client_decision
     message = " ".join(str(item) for item in chain).lower()
     if any(marker in message for marker in _NON_RETRYABLE_TEXT_MARKERS):
         return _TransientDecision(retryable=False)
@@ -712,6 +742,12 @@ def _find_tool_loop_compact_range(
             eligible.append(round_info)
             continue
         if eligible[-1].fingerprint != round_info.fingerprint:
+            break
+        # Only back-to-back rounds form a loop: any message between two rounds
+        # (a new user input, a plain assistant reply) means the model was given
+        # something new and chose the same call again — a legitimate re-check,
+        # not a loop. Folding across it would also delete that input.
+        if round_info.end != eligible[-1].start:
             break
         eligible.append(round_info)
 

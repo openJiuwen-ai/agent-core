@@ -15,6 +15,9 @@
 - 理解任务的依赖关系（blocked_by: 被什么阻塞，blocks: 阻塞了什么）
 - 成员汇报进度后核实任务状态
 
+### action=note（需要 task_id）
+- 读取某个任务完整的完成摘要（summary）与完成详情（note）——看板摘要、上游列表里的完成摘要只是截断的一行
+
 ### action=claimable
 - 快速获取所有可认领的 pending 任务
 - 完成当前任务后寻找下一个可执行任务
@@ -26,7 +29,10 @@
 不含 content — 需要详情请用 action=get 查看单个任务。
 
 ### get
-单个任务完整详情：含 content, blocked_by（前置依赖）, blocks（下游依赖）。
+单个任务完整详情：含 content, summary / note（完成摘要与详情）, blocked_by（前置依赖）, blocks（下游依赖）。
+
+### note
+单个任务的完成摘要（summary）与完整完成详情（note），不截断。
 
 ## Tips
 

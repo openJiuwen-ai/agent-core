@@ -14,6 +14,10 @@ its load-bearing wording.
 
 from __future__ import annotations
 
+import re
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
@@ -55,8 +59,6 @@ def _make_handler() -> MessageHandler:
     return object.__new__(MessageHandler)
 
 
-_NOW_MS = 1_700_000_100_000
-
 
 @pytest.mark.level0
 def test_format_message_direct_for_teammate():
@@ -66,7 +68,7 @@ def test_format_message_direct_for_teammate():
         from_member_name="leader1",
         message_id="m-1",
     )
-    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False, now_ms=_NOW_MS)
+    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False)
 
     assert "<team-inbound" in out
     assert 'type="direct"' in out
@@ -90,7 +92,7 @@ def test_format_message_broadcast_type():
         message_id="m-2",
         broadcast=True,
     )
-    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False, now_ms=_NOW_MS)
+    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False)
     assert 'type="broadcast"' in out
     assert "standup in 5" in out
 
@@ -108,7 +110,7 @@ def test_format_message_template_message_drops_reply_hint():
     msg = _FakeMessage(content="", from_member_name="team_leader", message_id="m-4")
     expanded = ExpandedMessage(body="[Task Started] Task [a] ...", is_template=True)
 
-    out = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=_NOW_MS)
+    out = handler._format_message(msg, expanded=expanded, is_human_agent=False)
 
     assert "<team-inbound" in out
     assert 'from="team_leader"' in out
@@ -137,7 +139,7 @@ def test_format_message_hitt_silence_regression():
     previous = get_language()
     set_language("cn")
     try:
-        out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=True, now_ms=_NOW_MS)
+        out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=True)
     finally:
         set_language(previous)
 
@@ -150,3 +152,53 @@ def test_format_message_hitt_silence_regression():
     # The original message body is still surfaced inside the inbound element.
     assert "ping the avatar" in out
     logger.info("hitt silence inbound: %s", out)
+
+
+@pytest.mark.level0
+def test_format_message_time_is_absolute_only():
+    """The send time carries no relative diff.
+
+    The rendered block is written into the member's history and read again in
+    later rounds; a "just now" rendered at delivery would still say "just now"
+    an hour later. Recency is judged against the ``<team-clock>`` anchor.
+    """
+    handler = _make_handler()
+    msg = _FakeMessage(content="hi", from_member_name="user", message_id="m-5")
+    for language in ("cn", "en"):
+        previous = get_language()
+        set_language(language)
+        try:
+            out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False)
+        finally:
+            set_language(previous)
+        assert re.search(r'time="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( [+-]\d{2}:\d{2})?"', out)
+        assert "刚刚" not in out
+        assert "just now" not in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_read_all_unread_is_oldest_first():
+    """Unread direct and broadcast messages merge in send order, oldest first.
+
+    Regression: a dormant member woken by a fresh direct message was handed
+    that message first, and the broadcast sent half a minute earlier only
+    afterwards as a steering input -- the member read its mailbox backwards.
+    """
+    handler = _make_handler()
+    direct = [
+        _FakeMessage(content="hello", from_member_name="user", message_id="dm", timestamp=3_500),
+    ]
+    broadcasts = [
+        _FakeMessage(content="standby", from_member_name="leader", message_id="b1", broadcast=True, timestamp=1_000),
+        _FakeMessage(content="update", from_member_name="leader", message_id="b2", broadcast=True, timestamp=4_000),
+    ]
+    message_manager = SimpleNamespace(
+        get_messages=AsyncMock(return_value=direct),
+        get_broadcast_messages=AsyncMock(return_value=broadcasts),
+    )
+    handler._infra = SimpleNamespace(message_manager=message_manager)
+
+    unread = await handler._read_all_unread("r2-writer-5")
+
+    assert [m.message_id for m in unread] == ["b1", "dm", "b2"]

@@ -32,6 +32,14 @@ from openjiuwen.agent_teams.messager import (
     PyZmqMessager,
     create_messager,
 )
+from openjiuwen.agent_teams.models import ModelPoolEntry
+from openjiuwen.agent_teams.reliability import ReliabilityConfig
+from openjiuwen.agent_teams.runtime import (
+    RunAction,
+    RunActionKind,
+    TeamRuntimeActivation,
+    TeamRuntimeManager,
+)
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -42,21 +50,14 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
-from openjiuwen.agent_teams.models import ModelPoolEntry
-from openjiuwen.agent_teams.runtime import (
-    RunAction,
-    RunActionKind,
-    TeamRuntimeActivation,
-    TeamRuntimeManager,
-)
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliMemberSpec,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.reliability import ReliabilityConfig
 from openjiuwen.agent_teams.spawn import InProcessSpawnHandle
 from openjiuwen.agent_teams.tiny_agent import (
     TinyAgent,
@@ -96,6 +97,7 @@ __all__ = [
     "TeamAgent",
     "TeamEvent",
     "TeamLifecycle",
+    "ExternalCliMemberSpec",
     "TeamMemberSpec",
     "TeamOutputSchema",
     "TeamRole",

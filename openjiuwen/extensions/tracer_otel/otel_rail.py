@@ -3,8 +3,9 @@
 """OtelRail — OTel trace span lifecycle management via AgentRail callbacks.
 
 Leverages ReActAgent's existing BEFORE_INVOKE / AFTER_INVOKE /
-BEFORE_MODEL_CALL / AFTER_MODEL_CALL / ON_MODEL_EXCEPTION callback points
-to create and finalize agent root span and LLM child spans.
+BEFORE_MODEL_CALL / AFTER_MODEL_CALL / ON_MODEL_EXCEPTION /
+BEFORE_TOOL_CALL / AFTER_TOOL_CALL / ON_TOOL_EXCEPTION callback points
+to create and finalize agent root span, LLM child spans, and tool child spans.
 
 Usage (opt-in)::
 
@@ -14,6 +15,10 @@ Usage (opt-in)::
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from openjiuwen.core.common.logging import session_logger
 from openjiuwen.core.session.tracer.data import InvokeType
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.single_agent.rail.base import (
@@ -30,6 +35,12 @@ class OtelRail(AgentRail):
     via the tracer infrastructure. Designed as an opt-in rail — only
     registered when OTel tracing is desired.
 
+    Every callback is try/except-guarded, mirroring the handlers'
+    invariant: OTel failures never propagate into the business flow.
+    This matters here specifically — the rail dispatch layer treats a
+    raising before-callback as a business failure (recorded in retry
+    history), so an OTel bug must not escape this class.
+
     priority=0 (lowest) ensures it runs LAST among callbacks of the same
     event: span creation in before hooks does not block other rails,
     and span finalization in after hooks occurs after all other rails
@@ -38,97 +49,158 @@ class OtelRail(AgentRail):
 
     priority: int = 0
 
+    # Tool spans are stored on the per-call callback context (isolated per
+    # tool call by AbilityManager.execute) instead of a rail-instance stack:
+    # parallel calls to the same tool must never pop each other's span, and
+    # @rail reuses one ctx across retry attempts so before/on_exception stay
+    # balanced per attempt. LLM calls are strictly sequential within one
+    # agent loop, so the LLM span stack stays as-is.
+    #
+    # The slot key is suffixed with the tool-call id (see
+    # _pending_tool_span_key): release branches that share one ``extra``
+    # dict across parallel tool contexts (0.1.17_hotfix) would otherwise let
+    # call B's before hook clobber call A's pending span, leaving A's span
+    # open forever and unexported.
+    _TOOL_SPAN_EXTRA_KEY = "_otel_rail_tool_span"
+
     def __init__(self) -> None:
         self._llm_spans: list = []
+
+    # ------------------------------------------------------------------
+    # Common info shared by root / LLM / tool spans
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_common_info(ctx: AgentCallbackContext) -> dict[str, Any]:
+        """Identity + conversation fields forwarded on every tracer event.
+
+        Source of truth for the GenAI identity attributes
+        (``gen_ai.agent.id`` / ``gen_ai.agent.name`` /
+        ``gen_ai.agent.description`` / ``gen_ai.conversation.id``) and
+        the session-carried project extensions
+        (``openjiuwen.gen_ai.user.id`` / ``openjiuwen.gen_ai.metadata``).
+        ``agent_name`` also feeds the trace display name
+        (``openjiuwen.trace.name``); ``session_id`` mirrors the
+        conversation id. Shared by the root, LLM, and tool span builders
+        so the three stay in sync.
+        """
+        source_metadata = getattr(ctx.session, "_source_metadata", None) or {}
+        card = getattr(ctx.agent, "card", None)
+        session_id = ctx.session.get_session_id() if ctx.session is not None else ""
+        return {
+            "agent_id": getattr(card, "id", None),
+            "agent_name": str(getattr(card, "name", "") or ""),
+            "user_id": source_metadata.get("user_id", ""),
+            "metadata": source_metadata,
+            # Conversation id and agent description follow metadata.
+            "conversation_id": session_id,
+            "session_id": session_id,
+            "agent_description": str(getattr(card, "description", "") or ""),
+        }
 
     # ------------------------------------------------------------------
     # Root span (BEFORE_INVOKE / AFTER_INVOKE)
     # ------------------------------------------------------------------
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        session = ctx.session
-        if session is None:
-            return
+        try:
+            session = ctx.session
+            if session is None:
+                return
 
-        tracer = session.tracer()
-        root_span = tracer.tracer_agent_span_manager.create_agent_span()
-        instance_info = {"class_name": ctx.agent.card.name, "type": "agent"}
+            tracer = session.tracer()
+            root_span = tracer.tracer_agent_span_manager.create_agent_span()
+            instance_info = {
+                **self._build_common_info(ctx),
+                "class_name": ctx.agent.card.name,
+                "type": "agent",
+            }
 
-        inputs_dict = {"query": ctx.inputs.query} if isinstance(ctx.inputs, InvokeInputs) else {}
+            inputs_dict = {"query": ctx.inputs.query} if isinstance(ctx.inputs, InvokeInputs) else {}
 
-        await tracer.trigger(
-            TracerHandlerName.TRACE_AGENT.value,
-            "on_chain_start",
-            span=root_span,
-            inputs=inputs_dict,
-            instance_info=instance_info,
-        )
-        session.agent_span = root_span
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_chain_start",
+                span=root_span,
+                inputs=inputs_dict,
+                instance_info=instance_info,
+            )
+            session.agent_span = root_span
+        except Exception as exc:
+            session_logger.warning("otel rail: before_invoke failed: %s", exc)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        session = ctx.session
-        if session is None:
-            return
+        try:
+            session = ctx.session
+            if session is None:
+                return
 
-        tracer = session.tracer()
-        root_span = session.agent_span
+            tracer = session.tracer()
+            root_span = session.agent_span
 
-        if root_span is None:
-            return
+            if root_span is None:
+                return
 
-        if ctx.exception is not None:
-            await tracer.trigger(
-                TracerHandlerName.TRACE_AGENT.value,
-                "on_chain_error",
-                span=root_span,
-                error=ctx.exception,
-            )
-        else:
-            result = ctx.inputs.result if isinstance(ctx.inputs, InvokeInputs) else None
-            await tracer.trigger(
-                TracerHandlerName.TRACE_AGENT.value,
-                "on_chain_end",
-                span=root_span,
-                outputs={"outputs": result},
-            )
+            if ctx.exception is not None:
+                await tracer.trigger(
+                    TracerHandlerName.TRACE_AGENT.value,
+                    "on_chain_error",
+                    span=root_span,
+                    error=ctx.exception,
+                )
+            else:
+                result = ctx.inputs.result if isinstance(ctx.inputs, InvokeInputs) else None
+                await tracer.trigger(
+                    TracerHandlerName.TRACE_AGENT.value,
+                    "on_chain_end",
+                    span=root_span,
+                    outputs={"outputs": result},
+                )
+        except Exception as exc:
+            session_logger.warning("otel rail: after_invoke failed: %s", exc)
 
     # ------------------------------------------------------------------
     # LLM child spans (BEFORE_MODEL_CALL / AFTER_MODEL_CALL / ON_MODEL_EXCEPTION)
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        session = ctx.session
-        if session is None:
-            return
+        try:
+            session = ctx.session
+            if session is None:
+                return
 
-        tracer = session.tracer()
-        parent_span = session.agent_span
-        llm_span = tracer.tracer_agent_span_manager.create_agent_span(parent_span)
-        self._llm_spans.append(llm_span)
+            tracer = session.tracer()
+            parent_span = session.agent_span
+            llm_span = tracer.tracer_agent_span_manager.create_agent_span(parent_span)
+            self._llm_spans.append(llm_span)
 
-        # Build instance_info — prefer model name from agent config
-        model_name = "LLM"
-        agent_config = ctx.agent.config
-        if agent_config is not None:
-            config_model_name = ""
-            if hasattr(agent_config, "model_config_obj"):
-                config_model_name = getattr(agent_config.model_config_obj, "model_name", "")
-            if not config_model_name:
-                config_model_name = getattr(agent_config, "model_name", "")
-            model_name = config_model_name or model_name
-        instance_info = {"class_name": model_name, "type": InvokeType.LLM.value}
+            # Build instance_info — model name comes from the request config the
+            # call will actually use (see _resolve_model_config).
+            model_config = self._resolve_model_config(ctx.agent)
+            model_name = str(getattr(model_config, "model_name", "") or "") or "LLM"
+            instance_info = {
+                **self._build_common_info(ctx),
+                "class_name": model_name,
+                "type": InvokeType.LLM.value,
+            }
+            request_params = self._extract_request_params(model_config)
+            if request_params:
+                instance_info["request_params"] = request_params
 
-        inputs_dict = {}
-        if hasattr(ctx.inputs, "messages") and ctx.inputs.messages is not None:
-            inputs_dict = {"messages": ctx.inputs.messages}
+            inputs_dict = {}
+            if hasattr(ctx.inputs, "messages") and ctx.inputs.messages is not None:
+                inputs_dict = {"messages": ctx.inputs.messages}
+                instance_info["message_count"] = len(ctx.inputs.messages)
 
-        await tracer.trigger(
-            TracerHandlerName.TRACE_AGENT.value,
-            "on_llm_start",
-            span=llm_span,
-            inputs=inputs_dict,
-            instance_info=instance_info,
-        )
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_llm_start",
+                span=llm_span,
+                inputs=inputs_dict,
+                instance_info=instance_info,
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: before_model_call failed: %s", exc)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Finalize the LLM span on success.
@@ -136,42 +208,227 @@ class OtelRail(AgentRail):
         When ctx.exception is set, the error path (on_model_exception)
         has already consumed the span — skip here.
         """
-        if ctx.exception is not None:
-            return
-        if not self._llm_spans:
-            return
+        try:
+            if ctx.exception is not None:
+                return
+            if not self._llm_spans:
+                return
 
-        llm_span = self._llm_spans.pop()
-        session = ctx.session
-        if session is None:
-            return
+            llm_span = self._llm_spans.pop()
+            session = ctx.session
+            if session is None:
+                return
 
-        tracer = session.tracer()
-        outputs_dict = {}
-        if hasattr(ctx.inputs, "response") and ctx.inputs.response is not None:
-            outputs_dict = {"outputs": ctx.inputs.response}
+            tracer = session.tracer()
+            outputs_dict = {}
+            if hasattr(ctx.inputs, "response") and ctx.inputs.response is not None:
+                outputs_dict = {"outputs": ctx.inputs.response}
 
-        await tracer.trigger(
-            TracerHandlerName.TRACE_AGENT.value,
-            "on_llm_end",
-            span=llm_span,
-            outputs=outputs_dict,
-        )
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_llm_end",
+                span=llm_span,
+                outputs=outputs_dict,
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: after_model_call failed: %s", exc)
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Handle LLM call error — pop and mark the span as error."""
-        if not self._llm_spans:
-            return
+        try:
+            if not self._llm_spans:
+                return
 
-        llm_span = self._llm_spans.pop()
-        session = ctx.session
-        if session is None:
-            return
+            llm_span = self._llm_spans.pop()
+            session = ctx.session
+            if session is None:
+                return
 
-        tracer = session.tracer()
-        await tracer.trigger(
-            TracerHandlerName.TRACE_AGENT.value,
-            "on_llm_error",
-            span=llm_span,
-            error=ctx.exception,
-        )
+            tracer = session.tracer()
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_llm_error",
+                span=llm_span,
+                error=ctx.exception,
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: on_model_exception failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Tool child spans (BEFORE_TOOL_CALL / AFTER_TOOL_CALL / ON_TOOL_EXCEPTION)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_model_config(agent: Any) -> Any:
+        """Return the ``ModelRequestConfig`` the next model call will use.
+
+        The agent's live LLM object is authoritative — it covers agents wired
+        via ``set_llm`` whose config carries no ``model_config_obj``, and any
+        params the ``Model`` was built with. Fall back to the config object
+        while the LLM has not been constructed yet (lazy agents). ``getattr``
+        keeps this defensive: the rail must never break the model call.
+        """
+        model_config = getattr(getattr(agent, "_llm", None), "model_config", None)
+        if model_config is None:
+            model_config = getattr(getattr(agent, "config", None), "model_config_obj", None)
+        return model_config
+
+    @staticmethod
+    def _extract_request_params(model_config: Any) -> dict[str, Any]:
+        """Normalize a ``ModelRequestConfig`` into GenAI request parameters.
+
+        ``top_k`` is not a declared field — it rides in as an extra field
+        (``extra="allow"``), so ``getattr`` covers both cases. ``stop`` is a
+        single string in the config but the semconv attribute is a sequence;
+        ``reasoning.effort`` maps to the reasoning level.
+        """
+        params: dict[str, Any] = {}
+        if model_config is None:
+            return params
+        for key in ("temperature", "top_p", "top_k", "max_tokens"):
+            value = getattr(model_config, key, None)
+            if value is not None:
+                params[key] = value
+        stop = getattr(model_config, "stop", None)
+        if stop:
+            stops = stop if isinstance(stop, (list, tuple)) else [stop]
+            params["stop_sequences"] = [str(s) for s in stops]
+        reasoning = getattr(model_config, "reasoning", None)
+        effort = getattr(reasoning, "effort", None)
+        if not effort and isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+        if effort:
+            params["reasoning_level"] = str(effort)
+        return params
+
+    @staticmethod
+    def _parse_tool_arguments(raw_args: Any) -> Any:
+        """Best-effort parse of raw tool arguments for the span payload.
+
+        At BEFORE_TOOL_CALL time ``tool_call.arguments`` is still the raw
+        model-emitted JSON string — argument parsing/repair happens inside
+        the tool-call body, after the before event. The legacy session-tracer
+        decorator records the parsed dict it passes to ``tool.invoke``; parse
+        here so the rail span carries the same payload shape (bug #2046).
+        Unparseable values pass through unchanged — this must never raise.
+        """
+        if isinstance(raw_args, str):
+            if not raw_args:
+                return {}
+            try:
+                return json.loads(raw_args)
+            except (TypeError, ValueError):
+                return raw_args
+        return raw_args
+
+    def _pending_tool_span_key(self, ctx: AgentCallbackContext) -> str:
+        """Extra-dict slot for this tool call's pending span.
+
+        Keyed by tool-call id so concurrent same-name calls never overwrite
+        each other's slot — ``ctx.inputs`` is per-call even on branches
+        whose AbilityManager shares one ``extra`` dict across parallel tool
+        contexts (0.1.17_hotfix), so both hooks derive the same key.
+        Id-less calls fall back to the bare key (the single-call shape).
+        """
+        tool_call = getattr(ctx.inputs, "tool_call", None)
+        call_id = str(getattr(tool_call, "id", "") or "") if tool_call is not None else ""
+        return f"{self._TOOL_SPAN_EXTRA_KEY}:{call_id}" if call_id else self._TOOL_SPAN_EXTRA_KEY
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        try:
+            session = ctx.session
+            if session is None:
+                return
+
+            # The pending-span slot lives in ctx.extra; when extra is not a
+            # dict there is nowhere to record it and the span would dangle
+            # open forever — while its dedupe still suppressed the legacy
+            # decorator's twin event. Skip emission entirely instead.
+            if not isinstance(ctx.extra, dict):
+                return
+
+            tracer = session.tracer()
+            tool_span = tracer.tracer_agent_span_manager.create_agent_span(session.agent_span)
+            ctx.extra[self._pending_tool_span_key(ctx)] = tool_span
+
+            tool_call = getattr(ctx.inputs, "tool_call", None)
+            tool_name = getattr(ctx.inputs, "tool_name", "") or (getattr(tool_call, "name", "") if tool_call else "")
+            instance_info = {
+                **self._build_common_info(ctx),
+                "class_name": tool_name,
+                "type": InvokeType.PLUGIN.value,
+                "tool_type": str(getattr(tool_call, "type", "") or "function") if tool_call else "function",
+                "agent_name": getattr(ctx.agent.card, "name", ""),
+                # Handler reads the tool-call id from here (OtelRail is its source).
+                "tool_call_id": str(getattr(tool_call, "id", "") or ""),
+            }
+
+            # Payload shape follows the pre-existing decorator contract —
+            # {"inputs": <parsed arguments>} — plus the tool-call identity
+            # keys, so the surviving span is a superset of both emitters.
+            inputs_dict: dict = {}
+            if tool_call is not None:
+                inputs_dict["id"] = str(getattr(tool_call, "id", "") or "")
+                inputs_dict["name"] = str(getattr(tool_call, "name", "") or "")
+                inputs_dict["type"] = str(getattr(tool_call, "type", "") or "")
+            raw_args = getattr(tool_call, "arguments", None) if tool_call is not None else None
+            if raw_args is None:
+                raw_args = getattr(ctx.inputs, "tool_args", None)
+            if raw_args is not None:
+                inputs_dict["inputs"] = self._parse_tool_arguments(raw_args)
+
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_plugin_start",
+                span=tool_span,
+                inputs=inputs_dict,
+                instance_info=instance_info,
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: before_tool_call failed: %s", exc)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        try:
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
+            if tool_span is None:
+                return
+            session = ctx.session
+            if session is None:
+                return
+
+            tracer = session.tracer()
+            # Wrap like the decorator contract ({"outputs": result}) so the
+            # span payload shape is identical whichever emitter survives.
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_plugin_end",
+                span=tool_span,
+                outputs={"outputs": getattr(ctx.inputs, "tool_result", None)},
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: after_tool_call failed: %s", exc)
+
+    async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
+        try:
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
+            if tool_span is None:
+                return
+            session = ctx.session
+            if session is None:
+                return
+
+            tracer = session.tracer()
+            await tracer.trigger(
+                TracerHandlerName.TRACE_AGENT.value,
+                "on_plugin_error",
+                span=tool_span,
+                error=ctx.exception,
+            )
+        except Exception as exc:
+            session_logger.warning("otel rail: on_tool_exception failed: %s", exc)

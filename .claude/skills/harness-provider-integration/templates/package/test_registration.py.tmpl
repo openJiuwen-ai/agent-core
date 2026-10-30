@@ -1,0 +1,67 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""openjiuwen finds this provider through its installed entry point."""
+
+from __future__ import annotations
+
+import pytest
+
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
+from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+from openjiuwen.harness_protocol import HarnessCapability, HarnessState, ModelChoice, ModelEndpoint
+from openjiuwen.harness_providers import available_providers, create_harness, provider_model_config, resolve_provider
+from __PKG__ import __CLASS__Harness, __CLASS__HarnessProvider
+
+
+def test_installed_package_is_a_resolvable_provider() -> None:
+    # Requires ``pip install -e .``: the entry point is package metadata.
+    assert "__PROVIDER__" in available_providers()
+    provider = resolve_provider("__PROVIDER__")
+    assert provider.card == __CLASS__HarnessProvider().card
+
+
+def test_manifest_factory_builds_an_unstarted_harness_with_the_manifest_model() -> None:
+    manifest = AgentTemplateSpec(
+        agent_card=AgentCard(id="expert", name="expert", description="An expert agent"),
+        model=ModelSpec(
+            model_client_config=ModelClientConfig(client_provider="openai", api_key="k", api_base="https://llm"),
+            model_request_config=ModelRequestConfig(model="vendor-model"),
+        ),
+    )
+    if not __CLASS__HarnessProvider().card.supports(HarnessCapability.ENDPOINT_MODELS):
+        # A manifest model always names its endpoint; this agent only runs
+        # the models its CLI offers, so the factory refuses instead of guessing.
+        with pytest.raises(ValueError, match="does not take endpoint models"):
+            create_harness(manifest, provider="__PROVIDER__")
+        manifest = manifest.model_copy(update={"model": None})
+    # Constructing a harness never launches the runtime; a configured model the
+    # CLI cannot select is rejected at start(), not here.
+    harness = create_harness(manifest, provider="__PROVIDER__")
+    assert isinstance(harness, __CLASS__Harness)
+    assert harness.state is HarnessState.TERMINATED
+
+
+def test_model_config_maps_what_the_card_declares() -> None:
+    provider = __CLASS__HarnessProvider()
+    card = provider.card
+    assert provider.model_config(ModelChoice(model="vendor-model"))["model"] == "vendor-model"
+    endpoint = ModelEndpoint(api_base="https://llm", api_key="k")
+    on_endpoint = ModelChoice(model="vendor-model", endpoint=endpoint)
+    if card.supports(HarnessCapability.ENDPOINT_MODELS):
+        mapped = provider_model_config("__PROVIDER__", on_endpoint)
+        assert "https://llm" in str(mapped)
+        resolve_provider("__PROVIDER__").create(mapped)
+    else:
+        with pytest.raises(ValueError, match="does not take endpoint models"):
+            provider_model_config("__PROVIDER__", on_endpoint)
+    fallback = ModelChoice(model="pool-model", endpoint=endpoint)
+    if card.supports(HarnessCapability.AUTH_FALLBACK):
+        mapped = provider_model_config("__PROVIDER__", ModelChoice(model=None), fallback=fallback)
+        assert mapped["fallback_model"]["model"] == "pool-model"
+        resolve_provider("__PROVIDER__").create(mapped)
+    else:
+        with pytest.raises(ValueError, match="no authentication fallback"):
+            provider_model_config("__PROVIDER__", ModelChoice(model="a"), fallback=fallback)

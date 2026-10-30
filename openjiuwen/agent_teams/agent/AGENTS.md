@@ -36,7 +36,7 @@
 
 ## scheduling/ — 调度模式决策引擎（F_62）
 
-leader 侧的调度分发 runtime，与 coordination 平齐：coordination 只唤醒不决策，本包只决策（开工 `start_task`、验票判定 `settle_review`、轮数/停摆升级）且从不直接触碰其他成员的 round——所有成员交接都是 **leader 身份的邮箱消息**（投递即经 `auto_start_member` 幂等拉起离线成员）。仅当 `spec.dispatch_mode == "scheduled"`（静态配置）时 `CoordinationKernel.setup(role=LEADER)` 构造（休眠），团队物化（build_team 成功 / start 读到已有 team 行）时激活；wake 路径由 kernel 组合为 "coordination dispatch → scheduler.on_event"，leader 自发事件经 `SCHEDULER_SCAN` inner 回声可见。详见 [`scheduling/AGENTS.md`](scheduling/AGENTS.md) 与 `docs/specs/S_22_scheduling-runtime.md`。
+leader 侧的调度分发 runtime，与 coordination 平齐：coordination 只唤醒不决策，本包只决策（开工 `start_task`、改派后补发交接、验票判定 `settle_review`、轮数/停摆升级、退场请求）且从不直接触碰其他成员的 round——所有成员交接都是 **leader 身份的邮箱消息**（投递即经 `auto_start_member` 幂等拉起离线成员）。仅当 `spec.dispatch_mode == "scheduled"`（静态配置）时 `CoordinationKernel.setup(role=LEADER)` 构造（休眠），团队物化（build_team 成功 / start 读到已有 team 行）时激活；wake 路径由 kernel 组合为 "coordination dispatch → scheduler.on_event"，leader 自发事件经 `SCHEDULER_SCAN` inner 回声可见。详见 [`scheduling/AGENTS.md`](scheduling/AGENTS.md) 与 `docs/specs/S_22_scheduling-runtime.md`。
 
 ## 跨文件协作的几个关键点
 

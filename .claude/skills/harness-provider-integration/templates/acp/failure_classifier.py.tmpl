@@ -1,0 +1,146 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Failure classification for the __DISPLAY__ ACP harness.
+
+Turns JSON-RPC errors, a vanished agent process and launch failures into a
+provider-neutral :class:`TurnError` carrying one of the shared failure
+categories, so hosts (and the team reliability layer) classify without
+parsing message text.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import TurnError
+from __PKG__.process import CliLaunchError, CliProtocolError
+from __PKG__.rpc import JsonRpcConnectionClosed, JsonRpcError
+
+# The shared vocabulary; the team reliability layer maps it one to one.
+FAILURE_CATEGORIES = frozenset(
+    {
+        "auth_required",
+        "quota_exceeded",
+        "rate_limited",
+        "request_rejected",
+        "server_unavailable",
+        "network_timeout",
+        "process_start_failed",
+        "sdk_error",
+        "unknown",
+    }
+)
+_RETRYABLE = frozenset({"rate_limited", "server_unavailable", "network_timeout"})
+_HTTP_STATUS_CATEGORY: dict[int, str] = {
+    400: "request_rejected",
+    401: "auth_required",
+    403: "auth_required",
+    408: "network_timeout",
+    429: "rate_limited",
+    500: "server_unavailable",
+    502: "server_unavailable",
+    503: "server_unavailable",
+    504: "network_timeout",
+    529: "server_unavailable",
+}
+# ACP reserves -32000 for "authentication required"; the JSON-RPC parameter
+# errors mean the agent rejected what the client asked for (an unknown model,
+# an invalid session).
+_RPC_CODE_CATEGORY: dict[int, str] = {
+    -32000: "auth_required",
+    -32600: "request_rejected",
+    -32602: "request_rejected",
+}
+# SCAFFOLD(failure-codes): add the vendor's own stable JSON-RPC error codes,
+# read from real error responses, never from guessed message text.
+_VENDOR_RPC_CODE_CATEGORY: dict[int, str] = {}
+_MAX_MESSAGE_CHARS = 2000
+
+
+def turn_error(
+    message: str,
+    *,
+    category: str,
+    code: str | None = None,
+    sdk_error_type: str | None = None,
+    http_status: int | None = None,
+    provider_data: Mapping[str, Any] | None = None,
+) -> TurnError:
+    """Build a :class:`TurnError` in the shared vocabulary."""
+    if category not in FAILURE_CATEGORIES:
+        category = "unknown"
+    data: dict[str, Any] = dict(provider_data or {})
+    if sdk_error_type:
+        data["sdk_error_type"] = sdk_error_type
+    if http_status is not None:
+        data["http_status"] = http_status
+    return TurnError(
+        message=(message or category)[:_MAX_MESSAGE_CHARS],
+        code=code or None,
+        category=category,
+        retryable=category in _RETRYABLE,
+        provider_data=data,
+    )
+
+
+def classify_rpc_error(exc: JsonRpcError) -> TurnError:
+    """Classify a JSON-RPC error answered by the agent."""
+    http_status = _http_status(exc.data)
+    category = _VENDOR_RPC_CODE_CATEGORY.get(exc.code or 0) or _RPC_CODE_CATEGORY.get(exc.code or 0, "sdk_error")
+    if http_status in _HTTP_STATUS_CATEGORY:
+        category = _HTTP_STATUS_CATEGORY[http_status]
+    return turn_error(
+        exc.rpc_message,
+        category=category,
+        code=str(exc.code) if exc.code is not None else None,
+        sdk_error_type="JsonRpcError",
+        http_status=http_status,
+        provider_data={"method": exc.method},
+    )
+
+
+def classify_exception(exc: BaseException) -> TurnError:
+    """Classify an exception raised while starting or driving the agent.
+
+    Only the exception type and its first line reach the error: process
+    output is never copied into a turn error.
+    """
+    if isinstance(exc, JsonRpcError):
+        return classify_rpc_error(exc)
+    if isinstance(exc, JsonRpcConnectionClosed):
+        return turn_error(
+            f"__DISPLAY__ agent process exited (code {exc.exit_code})",
+            category="sdk_error",
+            code="__UPPER___CLI_EXITED",
+            sdk_error_type=type(exc).__name__,
+            provider_data={"exit_code": exc.exit_code},
+        )
+    name = type(exc).__name__
+    if isinstance(exc, CliLaunchError):
+        return turn_error(str(exc), category="process_start_failed", sdk_error_type=name)
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return turn_error(_first_line(exc), category="network_timeout", sdk_error_type=name)
+    if isinstance(exc, CliProtocolError):
+        return turn_error(str(exc), category="sdk_error", code="__UPPER___PROTOCOL", sdk_error_type=name)
+    return turn_error(_first_line(exc), category="sdk_error", sdk_error_type=name)
+
+
+def _http_status(data: Any) -> int | None:
+    if not isinstance(data, Mapping):
+        return None
+    for key in ("httpStatus", "statusCode", "status", "http_status"):
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    first = text.splitlines()[0][:200] if text else ""
+    return f"{type(exc).__name__}: {first}" if first else type(exc).__name__
+
+
+__all__ = ["FAILURE_CATEGORIES", "classify_exception", "classify_rpc_error", "turn_error"]

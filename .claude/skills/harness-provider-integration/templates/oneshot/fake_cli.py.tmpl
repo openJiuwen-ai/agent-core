@@ -1,0 +1,91 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""A scripted one-shot CLI used by the __DISPLAY__ unit tests.
+
+Each invocation reads the prompt from the last argv element, prints one
+JSON record per line in the scaffold's *reference* shape, and exits.  The
+JSON file named by ``FAKE_CLI_STATE`` records every invocation's argv and
+remembers per-session state, so a later invocation can continue a session.
+
+SCAFFOLD(fixtures): once the vendor's real records are captured, print
+those shapes instead, so these tests pin what the vendor actually sends.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+STATE_PATH = Path(os.environ["FAKE_CLI_STATE"])
+
+
+def _emit(record: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(record) + "\n")
+    sys.stdout.flush()
+
+
+def _option(args: list[str], flag: str) -> str | None:
+    if flag in args:
+        index = args.index(flag)
+        if index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    prompt = args[-1] if args else ""
+    state: dict[str, Any] = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.exists() else {}
+    state.setdefault("invocations", []).append(args)
+    state["path_head"] = os.environ.get("PATH", "").split(os.pathsep)[0]
+    sessions = state.setdefault("sessions", {})
+    session_id = _option(args, "--session") or "ses_" + uuid.uuid4().hex[:12]
+    session = sessions.setdefault(session_id, {"memory": None})
+    STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    last_line = prompt.strip().splitlines()[-1] if prompt.strip() else ""
+    _emit({"type": "session", "session_id": session_id})
+    print("a banner line that is not JSON", flush=True)
+    if "CRASH" in prompt:
+        return 3
+    if "SLOW" in prompt:
+        for index in range(400):
+            _emit({"type": "text_delta", "text": f"{index}\n"})
+            time.sleep(0.02)
+        _emit({"type": "turn_end", "status": "completed"})
+        return 0
+    if "FAILREC" in prompt:
+        _emit({"type": "error", "code": "rate_limit", "http_status": 429, "message": "slow down"})
+        _emit({"type": "turn_end", "status": "failed"})
+        return 1
+    if "RETRY" in prompt:
+        _emit({"type": "error", "will_retry": True, "http_status": 503, "message": "overloaded"})
+    if "TOOL" in prompt:
+        _emit({"type": "tool_call", "id": "call_1", "name": "read", "arguments": {"path": "secret.txt"}})
+        _emit({"type": "tool_result", "id": "call_1", "result": "TOKEN-1"})
+        reply = "TOKEN-1"
+    elif "REMEMBER" in prompt:
+        session["memory"] = last_line.split()[-1]
+        reply = "OK"
+    elif "RECALL" in prompt:
+        reply = f"recall: {session['memory']}"
+    else:
+        reply = f"echo: {last_line}"
+    STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    _emit({"type": "reasoning_delta", "text": "thinking"})
+    half = len(reply) // 2
+    _emit({"type": "text_delta", "text": reply[:half]})
+    _emit({"type": "text_delta", "text": reply[half:]})
+    _emit({"type": "message", "text": reply})
+    _emit({"type": "usage", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
+    _emit({"type": "turn_end", "status": "completed"})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

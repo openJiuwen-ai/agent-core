@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-09-16 |
+| 最近一次修订日期 | 2026-10-15 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md` |
 
 ## 范围 / 边界
@@ -124,6 +124,23 @@
     `_render_block(tag, attrs, body, note="")`，无 note 时拼进空串，**不存在「有没有 note」
     的分支**。`inbound_tags.md`（cn/en）必须与此逐字一致：正文边界写作「除 `<team-note>`
     子元素外」，并明确「看嵌在哪个标签里，不要按前后位置猜」。
+
+28a. **`<team-inbound>` 的 `time` 只写绝对发送时间，"现在"由 `<team-clock>` 锚点给出（[[B_04]]）**：
+    入站块写进成员的对话历史后会被反复重读，渲染那一刻算出的相对差（「刚刚」「3 分钟前」）
+    到下一轮就是错的，所以 `time` 只用 `timefmt.format_absolute_time` 渲染。成员靠
+    `inbound_render.render_clock(now=...)` 渲染的自闭合 `<team-clock now="..."/>` 知道当前时间，
+    用最近一个锚点减去 `time` 自己算间隔。四条硬约束：
+    - **每次被消费的输入都带一个锚点**：进程内成员由 `TeamPolicyRail.on_user_message` 在
+      剔除被覆盖快照（不变量 13a）**之后**、折入团队状态**之前** `insert(0, ...)`，新一轮
+      query / follow-up / steering / resume 一视同仁；外部 CLI 成员在 `CliRuntimeBase.send`、
+      三方 harness 成员在 `ExternalHarnessMemberRuntime.send` 前置同一个锚点；operator 的
+      `read_inbox` 结果以锚点开头。三条接入路径必须对齐，少一条就有成员只剩绝对时间可读。
+    - **锚点只写不刷新**：旧锚点是"那条输入送达时"的事实，与不变量 13 的"只插入，不重写"同源。
+    - **`<team-clock>` 与 `<team-inbound>` / `<team-event>` / `<team-context>` 平级，不是快照事件**：
+      `snapshot_kind_of` 对它返回 `None`，13a 的剔除永远不会动它。
+    - `inbound_tags.md`（cn/en）必须列出 `<team-clock>` 并说明 `time` 是绝对发送时间。
+    任务看板、`view_task` 等**工具结果 / 事件正文**仍用 `format_time_context`（绝对 + 相对）——
+    它们描述的是"截至这次调用"的快照，下次会重新渲染一份新的，不在本条范围内。
 
 ### 输入批次配额
 

@@ -10,7 +10,7 @@ create_harness(manifest, provider="codex", config={"system_prompt_mode": "append
 create_harness(manifest, provider="dsh", config={"system_prompt_mode": "append", "dsh_home": "/path/to/home"})
 ```
 
-两者默认 `replace`，兼容此前调用。Claude 已有相同配置，默认仍为 `append`。
+DSH 默认 `replace`。**Codex 默认 `append`**（2026-09-21 起，原为 `replace`）：宿主提示词加在 CLI 既有 `developer_instructions` 之上，与 Claude 的 preset append 语义一致——代价是每次连接多一次 `config/read`，且该读取失败即启动失败。Claude 默认仍为 `append`。
 `ExternalCliAgentSpec.system_prompt_mode` 可将模式传到团队 Claude/Codex provider；未指定则保留各自默认值。
 
 ## Codex

@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from abc import ABC
-from typing import AsyncIterator, TypeVar
+from typing import AsyncIterator, Optional, TypeVar
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, workflow_logger as logger
@@ -120,6 +120,19 @@ class ComponentExecutable(Executable):
 
         async for value in self.transform(inputs, Session(session, True), kwargs.get("context")):
             yield value
+
+    def trace_metadata(self) -> Optional[dict]:
+        """Static facts this component wants on its workflow trace span.
+
+        Called once per execution when the component span opens; the returned
+        mapping is merged into the component metadata passed to tracer
+        extension handlers.  Values must be primitives or lists of primitives
+        (they become OTel span attributes).  ``None`` (default) adds nothing.
+
+        Retrieval components override this to export top_k / data source ids /
+        the agentic model id; see KnowledgeRetrievalExecutable.
+        """
+        return None
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """

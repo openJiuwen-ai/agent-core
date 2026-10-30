@@ -14,6 +14,7 @@ harness/
 ├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
 ├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
 ├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
+├── turn.py            # MemberTurn + resolve_member_turn：成员轨迹 turn 身份（持久化在 session state，无 OTel 依赖）
 ├── outputs.py         # _OutputIterator / _END 输出迭代
 ├── snapshot_rail.py   # PhaseSnapshotRail：inner-loop 阶段追踪 + iteration/round 边界快照 + cooperative stop
 └── async_tools.py     # 异步后台工具框架（AsyncTool / AsyncToolRuntime / render_result_text）
@@ -24,7 +25,8 @@ harness/
 两条队列，同一个语义——**攒住的东西整批喂给下一次模型调用**：
 
 - `send(immediate=True)` 推进当前 round 的 steering 队列，inner loop 在下一次 model call
-  之前 drain；
+  之前 drain；每条即时输入携带自己的 `run_context`，不同上下文的连续消息分属不同 model
+  boundary，消费时才切换 callback context，不能因为上下文不同而降级成 follow-up；
 - `send(immediate=False)` 进 follow-up 队列，round 结束时**整批** drain 出来驱动下一轮
   （[[F_71]]）。曾经是 `pop(0)` 一条一轮——两条队列本该同义却不同义，代价是每条排队输入
   各烧一个完整 round，而且成员对最旧那条动手时看不见后面还排着什么。
@@ -56,6 +58,22 @@ user turn）。
 该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
 TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
 与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
+
+## 轨迹 turn（`turn.py`）
+
+一次 Team 运行周期所有成员共用一个 `team.<name>` trace，trace 分不出成员的一轮轮工作，所以每个
+round 自带 turn 身份：`_start_round` 调 `resolve_member_turn` 把 `MemberTurn` 挂到 `ActiveRound.turn`。
+
+- **开新 turn**：IDLE 起 round、drain follow-up 批次起 round；
+- **沿用当前 turn**：steer（不起 round）、`resume_continuation`（warm/cold resume、PAUSED 时 send）、
+  `InteractiveInput` 回答、failure retry、task-plan 续跑（`continues_turn=True`）。
+
+计数器存 session state 的 `trajectory_member_turn` 键——**不在** `deepagent` blob 里，因为 pause/abort
+回滚 `DeepAgentState` 会把编号倒回去。harness 每个周期重建，编号从 session 读出继续递增；开新 turn 的
+round 在跑之前 `session.commit()` 一次，进程中途死掉也不会复用编号。`TeamObservabilityRail` 把
+`active_round.turn` 作为 `openjiuwen.turn.id/number` 放进 agent span decoration，Step / LLM / tool /
+v2 event 再从 span 父链继承。外部 CLI 成员（`external/member_runtime.py`）每个 provider turn 开一个
+新 turn，经 `start_turn(turn=...)` 交给 claude/codex bridge 打到 turn span 及其子 span 上。
 
 ## 异步工具框架（`async_tools.py`）
 
@@ -114,6 +132,8 @@ swarmflow→`w`、未注册→`t`）；`id_generator.py` 在 agent_teams 顶层�
 
 1. **框架不牵扯 TeamAgent。** 只依赖 NativeHarness 公共表面（`send` / `launch_async_tool` /
    `model`）。`TeamAgent.deliver_input` 只是 `harness.send` 的薄包装；要注入直接用 harness。
+   `send(..., run_context=...)` 的上下文按模型轮次隔离：延迟输入遵守全局 FIFO，只批量合并
+   连续且 `run_context` 相同的字符串输入，绝不能跨上下文合并或重排。
 2. **没有异步 tool_result。** 启动段与完成段是两个独立回合；完成结果绝不回到原 `tool_use_id`。
 3. **不收编 sessions_spawn / 不走 TaskScheduler 的 SESSION_SPAWN。** 避免结果写进 DeepAgent
    `pending_follow_ups`（进 session checkpoint 的 user-bound 语义）污染恢复。

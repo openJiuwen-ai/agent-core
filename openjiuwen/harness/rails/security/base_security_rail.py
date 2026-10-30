@@ -12,14 +12,11 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
-from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import (
-    INTERRUPT_AUTO_CONFIRM_KEY,
-    RESUME_USER_INPUT_KEY,
-)
+from openjiuwen.core.single_agent.interrupt.ownership import InterruptOwnerMixin
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import (
     EVENT_METHOD_MAP,
     AgentCallbackContext,
@@ -102,15 +99,21 @@ class SecurityAlert(SecurityDecision):
     display_mode: str = "popup"
 
 
-class BaseSecurityRail(AgentRail):
+class BaseSecurityRail(InterruptOwnerMixin, AgentRail):
     """Base rail for security checks.
 
     Subclasses implement ``run_security_check`` and return a SecurityDecision.
     This base class handles hook registration, resume input extraction, session
     auto-confirm state lookup, and applying decisions for supported events.
+
+    Interrupts raised by a security rail are approvals (``interrupt_kind``
+    ``"confirm"`` by default) owned by the rail (``interrupt_owner``); on
+    resume of a tool call the rail receives only answers to its own
+    interrupts.
     """
 
     priority: int = 90
+    interrupt_kind: str = InterruptKind.CONFIRM
     supported_events: Set[AgentCallbackEvent] = set()
 
     def __init__(self, tool_names: Optional[Iterable[str]] = None) -> None:
@@ -278,26 +281,8 @@ class BaseSecurityRail(AgentRail):
         ctx: AgentCallbackContext,
         subject_id: str,
     ) -> Optional[Any]:
-        raw_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
-        logger.info(
-            "[BaseSecurityRail] get_user_input subject_id=%r raw_input_type=%s",
-            subject_id,
-            type(raw_input).__name__ if raw_input is not None else "None",
-        )
-        if raw_input is None:
-            return None
-
-        if isinstance(raw_input, InteractiveInput):
-            if subject_id in raw_input.user_inputs:
-                return raw_input.user_inputs[subject_id]
-            return None
-
-        if isinstance(raw_input, dict):
-            if subject_id in raw_input:
-                return raw_input[subject_id]
-            return raw_input
-
-        return raw_input
+        answer = self.find_own_answer(ctx.extra, subject_id)
+        return answer.value if answer is not None else None
 
     async def apply_security_decision(
         self,
@@ -480,9 +465,11 @@ class BaseSecurityRail(AgentRail):
         tool_call: Optional[ToolCall],
         request: InterruptRequest,
     ) -> None:
+        self.stamp_interrupt(request)
         raise AbortError(
             reason=f"Tool execution interrupted: {tool_name}",
             cause=ToolInterruptException(request=request, tool_call=tool_call),
+            is_error=False,
         )
 
     def _skip_tool(

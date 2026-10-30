@@ -11,9 +11,7 @@ response and force-finishing the round that crosses the ceiling.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -27,14 +25,14 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
-from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
+from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.agent_teams.workflow.engine.journal import Journal
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
-from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.single_agent.rail.base import ModelCallInputs
@@ -627,6 +625,20 @@ async def test_emit_agent_completed_carries_tokens_and_budget():
 
 
 @pytest.mark.asyncio
+async def test_emit_agent_completed_carries_reported_model():
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    rt.progress_sink = sink
+    _p._emit_agent_completed(
+        rt, {"phase": "review", "label": "analyst"}, "ok",
+        agent_id="k1", model="GLM-5.3",
+    )
+    ev = sink.events[-1]
+    assert ev.kind == ProgressKind.AGENT_COMPLETED
+    assert ev.model == "GLM-5.3"
+
+
+@pytest.mark.asyncio
 async def test_emit_agent_failed_carries_tokens_and_budget():
     sink = _Sink()
     rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=100, spent=100))
@@ -655,8 +667,11 @@ async def test_attempt_calls_threads_tokens_on_success():
         text = "hello"
         structured = None
         tokens = 4321
+        cache_tokens = None
+        input_tokens = None
+        output_tokens = None
 
-    async def make_call():
+    async def make_call(feedback=None):
         return _Res()
 
     rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
@@ -667,14 +682,36 @@ async def test_attempt_calls_threads_tokens_on_success():
 
 
 @pytest.mark.asyncio
+async def test_attempt_calls_threads_model_on_success():
+    class _Res:
+        skipped = False
+        text = "hello"
+        structured = None
+        tokens = 4321
+        cache_tokens = None
+        input_tokens = None
+        output_tokens = None
+        model = "GLM-5.3"
+
+    async def make_call(feedback=None):
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is True
+    assert out.model == "GLM-5.3"
+
+
+@pytest.mark.asyncio
 async def test_attempt_calls_skipped_branch_keeps_tokens_none():
     class _Res:
         skipped = True
         text = ""
         structured = None
         tokens = 0  # not meaningful on a skip
+        cache_tokens = None
 
-    async def make_call():
+    async def make_call(feedback=None):
         return _Res()
 
     rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
@@ -692,9 +729,10 @@ async def test_attempt_calls_skipped_branch_keeps_tokens_none():
 class _BackendErr(Exception):
     """Backend error carrying tokens, mirroring BackendError.tokens."""
 
-    def __init__(self, msg: str, tokens: int = 0) -> None:
+    def __init__(self, msg: str, tokens: int = 0, model: str | None = None) -> None:
         super().__init__(msg)
         self.tokens = tokens
+        self.model = model
 
 
 @pytest.mark.asyncio
@@ -709,7 +747,7 @@ async def test_attempt_calls_fail_fast_on_workflow_budget_exhaustion():
     """
     calls = 0
 
-    async def make_call():
+    async def make_call(feedback=None):
         nonlocal calls
         calls += 1
         raise _BackendErr("model failed", tokens=40)
@@ -730,7 +768,7 @@ async def test_attempt_calls_fail_fast_on_session_budget_exhaustion():
     """Session ledger dry -> same fail-fast, session-scoped message wins."""
     calls = 0
 
-    async def make_call():
+    async def make_call(feedback=None):
         nonlocal calls
         calls += 1
         raise _BackendErr("boom", tokens=5)
@@ -755,7 +793,7 @@ async def test_attempt_calls_retries_when_budget_still_has_headroom():
     """
     calls = 0
 
-    async def make_call():
+    async def make_call(feedback=None):
         nonlocal calls
         calls += 1
         raise _BackendErr(f"try {calls}")
@@ -767,6 +805,46 @@ async def test_attempt_calls_retries_when_budget_still_has_headroom():
     assert out.succeeded is False
     assert out.attempts == 3
     assert out.error_detail == "try 3"  # last attempt's error, not a budget msg
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_feeds_validation_error_to_next_attempt():
+    """A schema-validation failure is retried with the error, not blind.
+
+    The next attempt's prompt must carry the validator's error so a model that
+    misread the schema (e.g. missing required 'q_id' inside array items) can
+    self-correct instead of repeating the same submission until attempts run
+    out.
+    """
+    seen: list[str | None] = []
+
+    async def make_call(feedback=None):
+        seen.append(feedback)
+        if len(seen) == 1:
+            return AgentResult(text="t", structured={"answers": [{"answer": "x"}]})
+        return AgentResult(text="t", structured={"answers": [{"q_id": "q1", "answer": "x"}]})
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=10_000))
+    schema = {
+        "type": "object",
+        "required": ["answers"],
+        "properties": {
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["q_id", "answer"],
+                    "properties": {"q_id": {"type": "string"}, "answer": {"type": "string"}},
+                },
+            }
+        },
+    }
+    out = await _p._attempt_calls(rt, {"label": "t"}, schema, None, make_call)
+
+    assert out.succeeded is True
+    assert out.result == {"answers": [{"q_id": "q1", "answer": "x"}]}
+    assert seen[0] is None
+    assert "q_id" in (seen[1] or "")
 
 
 # ---------------------------------------------------------------------------
@@ -798,3 +876,38 @@ def test_failure_message_counts_real_attempts_when_retried():
     """Retries-then-fail surfaces the real count: 'failed after 2 attempts: <detail>'."""
     r = _p._BackendCallResult(succeeded=False, error_detail="always fails", attempts=2)
     assert _failure_message("x", r) == "agent 'x' failed after 2 attempts: always fails"
+
+
+def test_budget_rail_bill_credits_both_ledgers_after_the_fact():
+    """External members report usage at turn end; bill() must reach the same two ledgers."""
+    from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+    from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+    session = BudgetLedger(total=1000)
+    workflow = BudgetLedger(total=500)
+    rail = SwarmflowBudgetRail(session, workflow_budget=workflow)
+
+    rail.bill(300)
+    rail.bill(0)
+    rail.bill(-5)
+
+    assert rail.call_tokens == 300
+    assert session.spent == 300
+    assert workflow.spent == 300
+
+
+def test_budget_rail_bill_carries_the_usage_split():
+    """The input/output/cache split rides along so external turns report it too."""
+    from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+    from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+    rail = SwarmflowBudgetRail(BudgetLedger(total=1_000_000))
+
+    rail.bill(11571, input_tokens=10970, output_tokens=601, cache_tokens=10624)
+    rail.bill(50)  # totals-only report (unreported split) leaves the counters intact
+
+    assert rail.call_tokens == 11621
+    assert rail.call_input_tokens == 10970
+    assert rail.call_output_tokens == 601
+    assert rail.call_cache_tokens == 10624
+

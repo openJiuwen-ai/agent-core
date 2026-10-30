@@ -25,10 +25,14 @@ from typing import Any, Mapping
 
 from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness_protocol import (
+    AUTH_FALLBACK_EVENT_TYPE,
+    AUTH_FALLBACK_REQUEST_TYPE,
     AbortMode,
     CheckpointConflictError,
     CheckpointReason,
     DeliveryMode,
+    DiagnosticEvent,
+    DiagnosticLevel,
     EventBufferConfig,
     EventOverflowPolicy,
     HarnessCapability,
@@ -48,6 +52,9 @@ from openjiuwen.harness_protocol import (
     InteractionCancelReason,
     InteractionResponseStatus,
     JsonObject,
+    ModelOption,
+    ModelSelection,
+    ProviderEvent,
     ProviderInteractionRequest,
     SendReceipt,
     StateChangedEvent,
@@ -140,10 +147,20 @@ class SerializedTurnHarness(ABC):
         self._latest_checkpoint: HarnessCheckpoint | None = None
         self._checkpoint_sequence = 0
         self._checkpoint_storage_revision: str | None = None
+        # A model switch accepted while a turn runs; applied before the next turn.
+        self._pending_model_selection: ModelSelection | None = None
+        # The authentication fallback serves the session once per cycle; the
+        # supervisor tries it at most once per turn.
+        self._fallback_activated = False
 
     # ------------------------------------------------------------------
     # Read-only surface
     # ------------------------------------------------------------------
+
+    @property
+    def fallback_activated(self) -> bool:
+        """Return whether the authentication fallback model serves the session."""
+        return self._fallback_activated
 
     @property
     def state(self) -> HarnessState:
@@ -190,15 +207,62 @@ class SerializedTurnHarness(ABC):
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         """Run one accepted input to its terminal result, emitting observations."""
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        """Inject ``content`` into the active turn when STEER is declared."""
-        _ = turn, content
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        """Inject ``content`` into the active turn when STEER is declared.
+
+        ``message_id`` is the id the receipt reports back to the host, so a
+        provider that can label its outbound message keeps one identity from
+        the receipt through to its own transport.
+        """
+        _ = turn, content, message_id
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support steering")
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         """Ask the provider to stop the active turn when abort is declared."""
         _ = turn, mode
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support turn abort")
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the provider catalog when MODEL_DISCOVERY is declared."""
+        raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model discovery")
+
+    def _auth_fallback_payload(self) -> JsonObject | None:
+        """Describe the configured authentication fallback model.
+
+        Providers declaring ``AUTH_FALLBACK`` override this together with
+        ``_reconnect_for_auth``. The payload is what the host ratifies and what
+        the activation event carries; it never includes a credential.
+
+        Returns:
+            ``None`` when no fallback model is configured.
+        """
+        return None
+
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
+        """Reconnect the vendor runtime on the fallback or the primary model.
+
+        Resumes the same vendor session so the replayed turn keeps its context.
+        Only connects; state and events follow in ``_on_auth_endpoint_changed``
+        once the switch is final.
+
+        Raises:
+            Exception: Any failure; the caller logs it and keeps the turn result.
+        """
+        _ = fallback
+        raise HarnessProtocolError(f"{self.card.name} has no authentication fallback")
+
+    async def _on_auth_endpoint_changed(self, *, fallback: bool) -> None:
+        """Record that the session now runs on the fallback (or primary) model."""
+        _ = fallback
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        """Switch the live session to ``selection`` when MODEL_SELECTION is declared.
+
+        Called between turns only; the base class serializes it with turn
+        execution. Implementations must keep the selection across reconnects.
+        """
+        _ = selection
+        raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model selection")
 
     # ------------------------------------------------------------------
     # HarnessProtocol: lifecycle
@@ -223,6 +287,8 @@ class SerializedTurnHarness(ABC):
             self._latest_checkpoint = None
             self._checkpoint_sequence = 0
             self._checkpoint_storage_revision = None
+            self._pending_model_selection = None
+            self._fallback_activated = False
             try:
                 self._session_id = await self._open_session(context)
             except BaseException:
@@ -322,9 +388,12 @@ class SerializedTurnHarness(ABC):
                 active = self._active_turn
                 if active is None or self._state is not HarnessState.RUNNING:
                     raise HarnessStateError("there is no active turn to steer")
-            await self._steer(active, content)
+            # The id is minted before the hook runs: a provider that labels its
+            # outbound message needs the very id the receipt will report.
+            message_id = f"message-{uuid.uuid4().hex}"
+            await self._steer(active, content, message_id=message_id)
             return SendReceipt(
-                message_id=f"message-{uuid.uuid4().hex}",
+                message_id=message_id,
                 turn_id=active.turn_id,
                 accepted_mode=DeliveryMode.STEER,
             )
@@ -383,6 +452,35 @@ class SerializedTurnHarness(ABC):
         return self._latest_checkpoint
 
     # ------------------------------------------------------------------
+    # HarnessModelControl
+    # ------------------------------------------------------------------
+
+    async def list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the models the provider offers; works started or not."""
+
+        if not self.card.supports(HarnessCapability.MODEL_DISCOVERY):
+            raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model discovery")
+        return await self._list_models()
+
+    async def set_model(self, selection: ModelSelection) -> None:
+        """Switch model / effort now when idle, otherwise before the next turn."""
+
+        if not self.card.supports(HarnessCapability.MODEL_SELECTION):
+            raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model selection")
+        async with self._command_lock:
+            self._require_accepting()
+            merged = merge_model_selection(self._pending_model_selection, selection)
+            if self._active_turn is not None or self._pending:
+                self._pending_model_selection = merged
+                return
+            # A switch left pending by a turn that had no successor folds in
+            # here; otherwise the next turn would re-apply it over this one.
+            self._pending_model_selection = None
+            # Holding the lock keeps the supervisor from starting a turn
+            # halfway through the switch.
+            await self._apply_model_selection(merged)
+
+    # ------------------------------------------------------------------
     # Supervisor
     # ------------------------------------------------------------------
 
@@ -399,6 +497,8 @@ class SerializedTurnHarness(ABC):
                     active = self._pending.popleft()
                     queued = ()
                     self._active_turn = active
+                selection = self._pending_model_selection
+                self._pending_model_selection = None
 
             if active is None:
                 await self._abort_queued_turns(queued)
@@ -406,11 +506,11 @@ class SerializedTurnHarness(ABC):
 
             await self._transition(HarnessState.RUNNING)
             await self._emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), turn=active)
-            try:
-                terminal_kind, result = await self._execute_turn(active)
-            except Exception as exc:
-                logger.exception("[%s] turn %s crashed inside the provider", self.card.name, active.turn_id)
-                terminal_kind, result = self._crash_result(active, exc)
+            if selection is not None:
+                await self._apply_deferred_model_selection(selection, active)
+            terminal_kind, result = await self._run_provider_turn(active)
+            if terminal_kind is TurnEventKind.FAILED and await self._try_auth_fallback(result.error, active):
+                terminal_kind, result = await self._run_provider_turn(active)
             await self._emit(TurnLifecycleEvent(kind=terminal_kind, result=result), turn=active)
 
             async with self._command_lock:
@@ -429,6 +529,107 @@ class SerializedTurnHarness(ABC):
                 return
             if self._stopping:
                 return
+
+    async def _run_provider_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        try:
+            return await self._execute_turn(turn)
+        except Exception as exc:
+            logger.exception("[%s] turn %s crashed inside the provider", self.card.name, turn.turn_id)
+            return self._crash_result(turn, exc)
+
+    async def _try_auth_fallback(self, error: TurnError | None, turn: PendingTurn) -> bool:
+        """Run the fallback without ever escaping the supervisor.
+
+        Every turn must reach its terminal event; a fallback that breaks for
+        any reason keeps the original failure instead.
+        """
+        try:
+            return await self._activate_auth_fallback(error, turn)
+        except Exception:
+            logger.exception("[%s] authentication fallback broke; the turn keeps its failure", self.card.name)
+            return False
+
+    async def _activate_auth_fallback(self, error: TurnError | None, turn: PendingTurn) -> bool:
+        """Switch the session to the fallback model once when its login fails.
+
+        The ``auth_required`` category is the gate: the request never reached
+        the model, so replaying the turn on the fallback cannot duplicate work
+        (a mid-turn token expiry may have emitted partial output; a replay is
+        still preferred over failing the turn). The host ratifies the switch
+        first; when it declines, the session goes back to the primary model so
+        the member never runs on an unrecorded one.
+
+        Returns:
+            True when the fallback is active and the turn should be replayed.
+        """
+        if error is None or error.category != "auth_required":
+            return False
+        if self._fallback_activated or turn.abort_requested:
+            return False
+        payload = self._auth_fallback_payload()
+        if payload is None:
+            return False
+        try:
+            await self._reconnect_for_auth(fallback=True)
+        except Exception as exc:
+            logger.warning("[%s] authentication fallback activation failed: %s", self.card.name, exc)
+            return False
+        try:
+            ratified = await self._confirm_provider_extension(AUTH_FALLBACK_REQUEST_TYPE, payload)
+        except Exception as exc:
+            # A handler that raises (or answers out of protocol) has not
+            # persisted the switch: treat it as a decline.
+            logger.warning("[%s] host failed to ratify the authentication fallback: %s", self.card.name, exc)
+            ratified = False
+        if not ratified:
+            logger.warning(
+                "[%s] host declined the authentication fallback; restoring the primary model",
+                self.card.name,
+            )
+            try:
+                await self._reconnect_for_auth(fallback=False)
+            except Exception as exc:
+                logger.warning("[%s] restoring the primary model failed: %s", self.card.name, exc)
+                return False
+            await self._on_auth_endpoint_changed(fallback=False)
+            return False
+        self._fallback_activated = True
+        try:
+            await self._on_auth_endpoint_changed(fallback=True)
+        except Exception as exc:
+            # The host persisted the switch and the session already runs on
+            # the fallback; a bookkeeping failure must not cost the replay.
+            logger.warning("[%s] recording the authentication fallback failed: %s", self.card.name, exc)
+        await self._emit(
+            ProviderEvent(
+                provider=self.card.name,
+                event_type=AUTH_FALLBACK_EVENT_TYPE,
+                schema_version="1",
+                payload=payload,
+            ),
+            turn=turn,
+        )
+        return True
+
+    async def _apply_deferred_model_selection(self, selection: ModelSelection, turn: PendingTurn) -> None:
+        """Apply a switch accepted mid-turn; a failure is reported, not fatal.
+
+        The caller's ``set_model`` already returned, so a failure cannot be
+        raised to it. The turn still runs on the previous model and the host
+        sees a WARNING diagnostic instead of a silent no-op.
+        """
+        try:
+            await self._apply_model_selection(selection)
+        except Exception as exc:
+            logger.warning("[%s] deferred model selection failed: %s", self.card.name, exc)
+            await self._emit(
+                DiagnosticEvent(
+                    level=DiagnosticLevel.WARNING,
+                    message=f"{self.card.name} could not switch model: {type(exc).__name__}",
+                    data={"model": selection.model, "effort": selection.effort},
+                ),
+                turn=turn,
+            )
 
     def _crash_result(self, turn: PendingTurn, exc: BaseException) -> tuple[TurnEventKind, TurnResult]:
         if turn.abort_requested:
@@ -476,16 +677,33 @@ class SerializedTurnHarness(ABC):
         turn: PendingTurn | None = None,
         item_id: str | None = None,
         provider_session_id: str | None = None,
+        causation_ids: tuple[str, ...] = (),
+        timestamp: float | None = None,
     ) -> None:
+        """Put one event on the observation stream.
+
+        Args:
+            payload: The protocol event payload.
+            turn: The turn the event belongs to, when any.
+            item_id: Provider item the event is about, when any.
+            provider_session_id: Override for the envelope provider session.
+            causation_ids: Extra causes beyond the turn's input message, such
+                as the model request that produced a tool item.
+            timestamp: When the event was observed, for an event the provider
+                held back to keep causal order; defaults to now.
+        """
         context = self._context
         buffer = self._event_buffer
         if context is None or buffer is None:
             raise HarnessProtocolError(f"cannot emit a {self.card.name} event outside an active cycle")
         self._sequence += 1
+        causes = ((turn.message_id,) if turn else ()) + tuple(
+            cause for cause in causation_ids if not turn or cause != turn.message_id
+        )
         await buffer.put(
             HarnessEvent(
                 sequence=self._sequence,
-                timestamp=time.time(),
+                timestamp=time.time() if timestamp is None else timestamp,
                 event=payload,
                 host_session_id=context.host_session_id,
                 agent_id=context.agent_id,
@@ -493,7 +711,7 @@ class SerializedTurnHarness(ABC):
                 turn_id=turn.turn_id if turn else None,
                 item_id=item_id,
                 correlation_id=turn.message_id if turn else None,
-                causation_ids=(turn.message_id,) if turn else (),
+                causation_ids=causes,
             )
         )
 
@@ -663,6 +881,16 @@ def interrupted_result(
     )
 
 
+def merge_model_selection(current: ModelSelection | None, update: ModelSelection) -> ModelSelection:
+    """Overlay ``update`` on ``current``; fields ``update`` leaves unset are kept."""
+    if current is None:
+        return update
+    return ModelSelection(
+        model=update.model if update.model is not None else current.model,
+        effort=update.effort if update.effort is not None else current.effort,
+    )
+
+
 __all__ = [
     "PendingTurn",
     "ProviderStartupError",
@@ -670,4 +898,5 @@ __all__ = [
     "TurnTiming",
     "build_queued_stop_result",
     "interrupted_result",
+    "merge_model_selection",
 ]

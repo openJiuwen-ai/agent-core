@@ -1,7 +1,8 @@
 # coding: utf-8
 from __future__ import annotations
+
 import asyncio
-import pytest
+
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 
 

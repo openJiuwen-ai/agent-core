@@ -44,6 +44,24 @@ class MemberOpResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MemberModelSwitchResult:
+    """Outcome of switching an external-CLI member's built-in model.
+
+    ``applied_live`` tells whether the running member switched now; when
+    False the persisted selection takes effect at the member's next start.
+    """
+
+    ok: bool
+    reason: str = ""
+    model: str | None = None
+    effort: str | None = None
+    applied_live: bool = False
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+@dataclass(frozen=True, slots=True)
 class TeamCompletionSnapshot:
     """Counts captured the moment a team satisfies all completion conditions.
 
@@ -278,6 +296,37 @@ class ExternalCliModelConfig(BaseModel):
     api_key: str | None = Field(default=None, min_length=1)
     """API key injected into the target CLI subprocess environment."""
 
+    effort: str | None = Field(default=None, min_length=1)
+    """Reasoning effort passed to the target CLI runtime (e.g. ``"low"`` / ``"high"``)."""
+
+
+class ExternalCliBuiltinModel(BaseModel):
+    """One model the CLI offers on its own login (e.g. a subscription).
+
+    Declared on ``ExternalCliAgentSpec.builtin_models``; the leader may only
+    pick models and efforts listed here. ``HarnessModelControl.list_models``
+    of the matching provider reports what a login actually offers and can be
+    used to author this catalog.
+    """
+
+    name: str = Field(min_length=1)
+    """Model id or alias the CLI accepts (``"sonnet"``, ``"gpt-5.5"``)."""
+
+    description: str = ""
+    """When the leader should pick this model; shown in the tool catalog."""
+
+    efforts: list[str] = Field(default_factory=list)
+    """Selectable reasoning efforts; empty when the model has none."""
+
+    default_effort: str | None = None
+    """Effort used when the leader picks the model without one; ``None`` keeps the CLI default."""
+
+    @model_validator(mode="after")
+    def _validate_default_effort(self) -> "ExternalCliBuiltinModel":
+        if self.default_effort is not None and self.default_effort not in self.efforts:
+            raise ValueError(f"builtin model '{self.name}' default_effort must be one of its efforts")
+        return self
+
 
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
@@ -293,15 +342,17 @@ class ExternalCliAgentSpec(BaseModel):
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
-    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend,
-    ``"codex"`` the Codex Python SDK backend, and other values built-in adapters.
-    This is passed to ``spawn_member(cli_agent=...)``. See
-    ``agent_teams/external/cli_agent``."""
+    ``"openclaw"`` / ``"hermes"`` / a third-party harness provider name).
+    ``"claude"`` selects the SDK backend, ``"codex"`` the Codex Python SDK
+    backend, built-in adapter names their subprocess adapters, and any other
+    value a third-party harness provider installed through the
+    ``openjiuwen.harness_providers`` entry point group. This is passed to
+    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
 
     skills: list[str | dict[str, Any]] = Field(default_factory=list)
     """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
-    skill_conflict: Literal["skip", "replace"] = "skip"
-    """Keep or replace project skills with the same name."""
+    skill_conflict: Literal["skip", "replace", "append"] = "skip"
+    """Keep, replace, or add a uniquely named copy of an existing project skill."""
 
     system_prompt_mode: Literal["append", "replace"] | None = None
     """Prompt policy for Claude/Codex; None keeps each provider's default."""
@@ -314,11 +365,12 @@ class ExternalCliAgentSpec(BaseModel):
     """
 
     cli_path: str | None = Field(default=None, min_length=1)
-    """Optional executable path for SDK-backed CLI agents.
+    """Optional executable path for SDK- and provider-backed CLI agents.
 
     For Claude this is passed to ``ClaudeAgentOptions.cli_path``. For Codex it
-    maps to ``CodexConfig.codex_bin``. Adapter-backed CLIs should continue to
-    use :attr:`command` when overriding the full launch argv.
+    maps to ``CodexConfig.codex_bin``. A third-party harness provider receives
+    it as its ``cli_path`` configuration key. Adapter-backed CLIs should
+    continue to use :attr:`command` when overriding the full launch argv.
     """
 
     codex_bin: str | None = Field(default=None, min_length=1)
@@ -412,6 +464,16 @@ class ExternalCliAgentSpec(BaseModel):
     ``model_config`` setting.
     """
 
+    builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
+    """Models the CLI offers on its own login that the leader may pick.
+
+    Non-empty enables ``spawn_external_cli(builtin_model=..., effort=...)`` and
+    the ``set_member_model`` tool for members of this kind; empty keeps the
+    member on ``model_config`` / the pool / the CLI default. Valid for Claude,
+    Codex and third-party harness providers (whose card must declare
+    ``MODEL_SELECTION`` for a member to run one); not for adapter-backed CLIs.
+    """
+
     ssh_transport: SshTransportConfig | None = None
     """Optional ssh endpoint used to launch this CLI on a remote host.
 
@@ -433,8 +495,12 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError(
                 "Codex SDK config does not support command; use cli_path to select a custom executable",
             )
-        if self.cli_agent not in {"claude", "codex"} and self.cli_path is not None:
-            raise ValueError("cli_path is only valid when cli_agent is 'claude' or 'codex'")
+        # Imported here: the adapter registry lives in the external package,
+        # which imports this schema module.
+        from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
+
+        if self.cli_path is not None and self.cli_agent in available_adapters():
+            raise ValueError("cli_path is not valid for adapter-backed CLI agents; use command instead")
         if self.cli_agent != "codex" and self.codex_bin is not None:
             raise ValueError("codex_bin is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
@@ -451,11 +517,33 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
         if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
             raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
+        # Check the value rather than ``model_fields_set``: a ``model_dump()``
+        # round-trip (spawn payload / checkpoint) sets every field explicitly,
+        # including ``None``, and must still validate for non-Claude members.
         if self.cli_agent != "claude" and self.claude_max_buffer_size is not None:
             raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
-        if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
-            raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
+        adapter_backed = self.cli_agent in available_adapters()
+        if adapter_backed and self.external_model_config is not None:
+            raise ValueError("model_config is not valid for adapter-backed CLI agents")
+        if adapter_backed and self.builtin_models:
+            raise ValueError("builtin_models is not valid for adapter-backed CLI agents")
+        names = [model.name for model in self.builtin_models]
+        if len(names) != len(set(names)):
+            raise ValueError("builtin_models names must be unique")
         return self
+
+    def find_builtin_model(self, name: str) -> ExternalCliBuiltinModel | None:
+        """Return the declared built-in model called ``name``, if any."""
+        return next((model for model in self.builtin_models if model.name == name), None)
+
+
+class ExternalCliMemberSpec(TeamMemberSpec):
+    """Predefined teammate backed by one existing external CLI config."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    role_type: Literal[TeamRole.EXTERNAL_CLI] = TeamRole.EXTERNAL_CLI
+    external_cli: ExternalCliAgentSpec
 
 
 class TeamSpec(BaseModel):
@@ -465,6 +553,8 @@ class TeamSpec(BaseModel):
 
     team_name: str
     display_name: str
+    conversation_mode: Literal["team", "group_chat"] = "team"
+    """Fixed runtime mode, inherited by members and persisted with their context."""
     leader_member_name: Optional[str] = None
     language: Optional[str] = None
     dispatch_mode: str = "autonomous"
@@ -576,6 +666,12 @@ class TeamRuntimeContext(BaseModel):
     """TeamModelConfig assigned to this member by the allocator."""
     fallback_member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig reserved for native external-CLI authentication fallback."""
+    builtin_model: Optional[ExternalCliModelConfig] = None
+    """Built-in model (and effort) an external-CLI member runs on its own login.
+
+    Set from ``TeamMember.options.builtin_model``; carries no endpoint, and
+    takes precedence over the pool allocation and the static ``model_config``.
+    """
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     fork_source: Optional[str] = None
@@ -610,6 +706,7 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliMemberSpec",
     "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",

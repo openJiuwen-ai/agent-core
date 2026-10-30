@@ -36,13 +36,13 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 from openjiuwen.harness.manifest.builtin_elements import (
     OBSERVABILITY,
     observability_dependency_installed,
 )
 from openjiuwen.agent_teams.rails.team_context import (
     get_messager,
-    get_model_allocator,
     get_reliability_components,
     get_swarmflow_budget,
     get_swarmflow_concurrency_governor,
@@ -106,8 +106,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     from openjiuwen.agent_teams.rails.team_tool_rail import TeamToolRail
 
     inp = TeamToolInput.resolve(params, context)
-    allocator = get_model_allocator(context)
-    model_config_allocator = allocator.allocate if allocator is not None else None
     return TeamToolRail(
         team_backend=backend,
         role=inp.role,
@@ -116,7 +114,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         lifecycle=inp.lifecycle,
         team_mode=inp.team_mode,
         language=inp.language,
-        model_config_allocator=model_config_allocator,
+        model_config_allocator=backend.allocate_model,
         exclude_tools=set(inp.exclude_tools) or None,
         workspace_manager=get_workspace_manager(context),
         qualify_ids=inp.qualify_ids,
@@ -476,6 +474,23 @@ def build_team_observability_rail(params: dict[str, Any], context: Any) -> Any:
     return maybe_team_observability_rail()
 
 
+def observability_rail_specs() -> list[RailSpec]:
+    """Return the observability rail pair every team-built agent mounts.
+
+    ``core.observability`` owns the agent span itself (harness-level,
+    team-agnostic) and ``core.team.observability`` layers the team identity
+    onto it, so the two are always mounted together. Each provider checks
+    ``is_initialized()`` and is a no-op when tracing is off.
+
+    Returns:
+        A fresh list of the two rail specs, safe for the caller to extend.
+    """
+    return [
+        RailSpec(type=TEAM_OBSERVABILITY),
+        RailSpec(type=OBSERVABILITY),
+    ]
+
+
 __all__ = [
     "TEAM_TOOL",
     "TEAM_POLICY",
@@ -487,4 +502,5 @@ __all__ = [
     "TEAM_OBSERVABILITY",
     "OBSERVABILITY",
     "observability_dependency_installed",
+    "observability_rail_specs",
 ]

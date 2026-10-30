@@ -39,6 +39,7 @@ class DeepAgentRail(AgentRail): ...
 | `TeamSkillEvolutionRail` | 使用聚合 team trajectory 演进已有 team skill，并通过审批治理经验记录 |
 | `TeamSkillRail` | `TeamSkillEvolutionRail` 的兼容 alias，使用聚合 team trajectory 演进已有 team skill，并通过审批治理经验记录 |
 | `TrajectoryRail` | 为每次完成的 Agent invoke 归档一条 canonical trajectory |
+| `MultimodalContextSummarizerRail` | 多模态截图归档护栏，把较早截图消息中的图像替换为固定占位文本（`ARCHIVED_SCREEN_PLACEHOLDER`），保留最近 `screenshots_to_keep` 条（默认 3）；`name` 属于 `protected_user_message_names` 的消息不替换。桌面子智能体使用 |
 
 ---
 

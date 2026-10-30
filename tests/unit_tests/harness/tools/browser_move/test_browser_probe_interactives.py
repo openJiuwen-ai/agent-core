@@ -285,7 +285,7 @@ def test_runtime_unwrap_mcp_text_result() -> None:
         ]
     }
 
-    assert runtime._unwrap_mcp_text_result(raw) == '{"ok": true, "elements": []}'
+    assert runtime.unwrap_mcp_text_result(raw) == '{"ok": true, "elements": []}'
 
 
 def test_probe_query_uses_exact_match_before_bounded_alias_widening() -> None:
@@ -340,7 +340,7 @@ def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatc
         fake_get_mcp_tool,
     )
 
-    result = _run(runtime._call_playwright_run_code_unsafe("async (page) => ({ok: true})"))
+    result = _run(runtime.call_playwright_run_code_unsafe("async (page) => ({ok: true})"))
 
     assert fake_tool.inputs == {"code": "async (page) => ({ok: true})"}
     assert result["__browser_compact_rpc__"] is True

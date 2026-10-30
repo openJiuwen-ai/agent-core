@@ -84,6 +84,9 @@ def test_package_shell_rules_include_powershell_tool() -> None:
     assert rules
     for rule in rules:
         tools = rule.get("tools") or []
+        if rule.get("match_type") != "command":
+            # Non-shell categories (e.g. os_control) don't apply to shell tools.
+            continue
         assert "shell" in tools or "powershell" in tools, rule.get("id")
 
 
@@ -173,6 +176,30 @@ def test_redirect_no_longer_asks_on_pipeline_a() -> None:
     )
     assert level == PermissionLevel.ALLOW
     assert "structure_guard" not in matched
+
+
+def test_extract_semicolon_chain_does_not_keep_separator_on_path(tmp_path: Path) -> None:
+    cmd = (
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1; "
+        "rm -rf ~/Desktop/a4p_scratch444.txt; "
+        'echo "rm exit code: $?"; '
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1"
+    )
+    accesses = extract_shell_path_accesses(cmd, tmp_path)
+    pairs = {(path.name, action) for path, action in accesses}
+    assert ("a4p_scratch444.txt", "read") in pairs
+    assert ("a4p_scratch444.txt", "write") in pairs
+    assert all(";" not in path.name and not path.name.endswith("&") for path, _ in accesses)
+    assert all(path.name != "1" for path, _ in accesses)
+
+
+def test_extract_does_not_split_semicolon_inside_quotes(tmp_path: Path) -> None:
+    accesses = extract_shell_path_accesses(
+        "echo 'keep;together' && ls ~/Desktop/a4p_scratch444.txt",
+        tmp_path,
+    )
+    assert any(path.name == "a4p_scratch444.txt" and action == "read" for path, action in accesses)
+    assert all(path.name != "together" for path, _ in accesses)
 
 
 def test_extract_bare_redirect_target(tmp_path: Path) -> None:

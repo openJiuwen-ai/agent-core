@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """Loguru-backed logger adapter."""
 
@@ -507,7 +507,13 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
             if key not in payload:
                 payload[key] = value
 
-        if not had_status and self._record_is_failure(record):
+        # 失败事件（log_level >= ERROR 或携带异常）的 status 必须是 failure。
+        # 不能仅凭 had_status 判断：事件 schema 的 status 默认值是 success，
+        # 序列化后 payload 总是带 status，导致 had_status 恒为 True，错误事件
+        # 被误标为 success，遥测/告警误判（issue #4320）。
+        if self._record_is_failure(record) and (
+            not had_status or payload.get("status") == EventStatus.SUCCESS.value
+        ):
             payload["status"] = EventStatus.FAILURE.value
 
     def _build_event_payload(self, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -532,12 +538,19 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         return self._LOG_LEVEL_TO_NO[log_level] >= self._effective_level_no
 
     def _emit(self, level: str, log_level: LogLevel, msg: str, args: tuple[Any, ...], **kwargs: Any) -> None:
+        self._capture_invocation_log(log_level, msg, args, kwargs)
         if not self._should_emit(log_level):
             return
 
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
+        # ``exc_info`` is the stdlib logging contract for attaching a traceback
+        # (True for the in-flight exception, or an exception instance / exc_info
+        # tuple). Loguru spells it ``opt(exception=...)``; without this mapping
+        # the keyword was swallowed and every ``error(..., exc_info=True)``
+        # silently lost its stack.
+        exc_info = kwargs.pop("exc_info", None) or None
 
         formatted_msg = self._auto_format_message(msg, args)
         sanitized_msg = self._sanitize_message(formatted_msg)
@@ -550,7 +563,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
             event_text=event_text,
             rendered_message=rendered_message,
         )
-        bound_logger.opt(depth=stacklevel).log(level, sanitized_msg)
+        bound_logger.opt(exception=exc_info, depth=stacklevel).log(level, sanitized_msg)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._emit("DEBUG", LogLevel.DEBUG, msg, args, **kwargs)
@@ -568,6 +581,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         self._emit("CRITICAL", LogLevel.CRITICAL, msg, args, **kwargs)
 
     def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._capture_invocation_log(LogLevel.ERROR, msg, args, kwargs, exception=True)
         if not self._should_emit(LogLevel.ERROR):
             return
 

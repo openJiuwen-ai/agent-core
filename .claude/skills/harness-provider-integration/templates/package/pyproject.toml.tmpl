@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "__DIST__"
+version = "0.1.0"
+description = "__DISPLAY__ harness provider for openjiuwen"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "__OPENJIUWEN_REQUIREMENT__",
+__SDK_DEPENDENCY__]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+# openjiuwen resolves create_harness(..., provider="__PROVIDER__") through this entry point.
+[project.entry-points."openjiuwen.harness_providers"]
+__PROVIDER__ = "__PKG__.provider:__CLASS__HarnessProvider"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Platform wheels carry the vendor CLI under _bundled/ (see the skill's build_runtime.py).
+[tool.setuptools.package-data]
+"__PKG__" = ["_bundled/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

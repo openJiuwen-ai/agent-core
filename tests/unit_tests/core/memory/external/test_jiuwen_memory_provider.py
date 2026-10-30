@@ -20,8 +20,13 @@ Coverage:
 - construction / metadata (name, availability, schemas, system prompt)
 - initialize (client creation, optional healthz, api_key → Authorization header,
   health failure is non-fatal)
-- write path (add payload: content / tags / metadata.infer / tenant+scope)
-- read path (search payload: query / k / tenant+scope; prefetch formatting)
+- scope shaping (five-segment scope object; identity axes from
+  identity_org/identity_user defaults or explicit config; tenant/user map onto
+  the agent/session axes; per-call user_id/scope_id override)
+- write path (add payload: content / tags / system_metadata.infer / scope object;
+  top-level unit array response; segments joined back into content)
+- read path (search payload: query / context.scope / top_k / disclosure;
+  items+unit_id response parsing; prefetch formatting)
 - sync_turn (default: user only; ``save_assistant=True`` also stores assistant)
 - handle_tool_call (search / add result shapes; missing-arg / unknown-tool
   errors)
@@ -33,6 +38,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -45,8 +51,8 @@ from openjiuwen.core.memory.external import JiuwenMemoryProvider
 # ---------------------------------------------------------------------------
 
 
-def _mock_response(payload: dict, status_code: int = 200):
-    """An httpx.Response stand-in carrying a JSON payload."""
+def _mock_response(payload: Any, status_code: int = 200):
+    """An httpx.Response stand-in carrying a JSON payload (object or array)."""
     resp = MagicMock()
     resp.status_code = status_code
     resp.json.return_value = payload
@@ -189,8 +195,11 @@ async def test_add_posts_to_v1_add_with_full_payload():
     provider = await _init(
         JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
     )
+    # Server contract: add returns a TOP-LEVEL ARRAY of serialized units.
     fake.post = AsyncMock(
-        return_value=_mock_response({"ok": True, "item_id": "id-1", "item": {}})
+        return_value=_mock_response(
+            [{"id": "id-1", "segments": [{"content": "a fact"}], "tier": "semantic"}]
+        )
     )
     await provider.handle_tool_call(
         "mem2_add", {"content": "a fact", "infer": True, "tags": ["x", "y"]}
@@ -202,23 +211,60 @@ async def test_add_posts_to_v1_add_with_full_payload():
     body = kwargs["json"]
     assert body["content"] == "a fact"
     assert body["tags"] == ["x", "y"]
-    assert body["metadata"] == {"infer": "true"}  # infer flag translated to metadata
-    assert body["tenant_id"] == "org1"
-    assert body["scope"] == "alice"
+    assert body["system_metadata"] == {"infer": "true"}  # infer rides in system_metadata
+    # five-segment scope object: identity axes (org/user) carry the server-side
+    # authenticated identity; tenant/user isolate onto the agent/session axes.
+    assert body["scope"] == {
+        "org": "local",       # identity_org default (dev authenticator)
+        "space": "",
+        "user": "developer",  # identity_user default (dev authenticator)
+        "agent": "org1",      # tenant_id
+        "session": "alice",   # user_id
+    }
     # writes use the larger write timeout
     assert kwargs["timeout"] >= 60.0
 
 
 @pytest.mark.asyncio
-async def test_add_without_infer_omits_infer_metadata():
+async def test_add_identity_axes_honored_when_configured():
+    """identity_org/identity_user override the dev defaults (production auth)."""
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(
+            identity_org="acme", identity_user="bob",
+            tenant_id="org1", user_id="alice",
+        ),
+        fake,
+    )
+    fake.post = AsyncMock(return_value=_mock_response([]))
+    await provider.handle_tool_call("mem2_add", {"content": "x", "infer": False})
+    scope = fake.post.call_args.kwargs["json"]["scope"]
+    assert scope["org"] == "acme" and scope["user"] == "bob"
+    assert scope["agent"] == "org1" and scope["session"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_per_call_user_id_overrides_session_axis():
+    """Rail-style per-call user_id (prefetch/sync_turn forward it) overrides
+    the constructor's user_id on the session axis; user_id wins over scope_id."""
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t", user_id="ctor"), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"items": []}))
+    await provider.prefetch("query", user_id="percall", scope_id="scope-x")
+    scope = fake.post.call_args.kwargs["json"]["context"]["scope"]
+    assert scope["session"] == "percall"  # user_id wins over scope_id
+
+
+@pytest.mark.asyncio
+async def test_add_without_infer_omits_system_metadata():
     fake = _fake_http()
     provider = await _init(
         JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
     )
-    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "id-1"}))
+    fake.post = AsyncMock(return_value=_mock_response([{"id": "id-1", "segments": []}]))
     await provider.handle_tool_call("mem2_add", {"content": "raw text", "infer": False})
     body = fake.post.call_args.kwargs["json"]
-    assert body["metadata"] == {}  # no infer flag when infer=False
+    assert body["system_metadata"] is None  # no infer flag when infer=False
 
 
 @pytest.mark.asyncio
@@ -239,33 +285,40 @@ async def test_add_returns_error_when_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_search_posts_to_v1_search_with_query_k_and_scope():
+async def test_search_posts_to_v1_search_with_query_top_k_and_scope():
     fake = _fake_http()
     provider = await _init(
         JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
     )
+    # Server contract: search returns {"items": [RetrievedItem...], ...} with
+    # unit_id (not item_id) identifying each hit.
     fake.post = AsyncMock(
         return_value=_mock_response(
-            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+            {"items": [{"unit_id": "h1", "content": "c1", "score": 0.9}]}
         )
     )
     out = await provider.handle_tool_call("mem2_search", {"query": "Python", "top_k": 5})
     data = json.loads(out)
     assert data["count"] == 1
     assert data["results"][0]["content"] == "c1"
+    assert data["results"][0]["item_id"] == "h1"  # unit_id → item_id
     body = fake.post.call_args.kwargs["json"]
     assert body["query"] == "Python"
-    assert body["k"] == 5
-    assert body["tenant_id"] == "org1" and body["scope"] == "alice"
+    assert body["top_k"] == 5
+    assert body["disclosure"] == "l2"  # full-content parity with the SDK backend
+    assert body["context"]["scope"] == {
+        "org": "local", "space": "", "user": "developer",
+        "agent": "org1", "session": "alice",
+    }
 
 
 @pytest.mark.asyncio
 async def test_search_top_k_capped_to_max():
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(), fake)
-    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    fake.post = AsyncMock(return_value=_mock_response({"items": []}))
     await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": 9999})
-    assert fake.post.call_args.kwargs["json"]["k"] == 50  # server-side cap
+    assert fake.post.call_args.kwargs["json"]["top_k"] == 50  # server-side cap
 
 
 @pytest.mark.asyncio
@@ -274,11 +327,11 @@ async def test_search_top_k_none_falls_back_to_default():
     ``int(None)``. It should fall back to the default and still POST."""
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(), fake)
-    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    fake.post = AsyncMock(return_value=_mock_response({"items": []}))
     out = await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": None})
     data = json.loads(out)
     assert "error" not in data
-    assert fake.post.call_args.kwargs["json"]["k"] == 10  # falls back to default
+    assert fake.post.call_args.kwargs["json"]["top_k"] == 10  # falls back to default
 
 
 @pytest.mark.asyncio
@@ -298,7 +351,7 @@ async def test_prefetch_formats_marked_block():
     provider = await _init(JiuwenMemoryProvider(), fake)
     fake.post = AsyncMock(
         return_value=_mock_response(
-            {"hits": [{"content": "likes Python", "score": 0.8}]}
+            {"items": [{"unit_id": "u1", "content": "likes Python", "score": 0.8}]}
         )
     )
     block = await provider.prefetch("Python")
@@ -307,10 +360,10 @@ async def test_prefetch_formats_marked_block():
 
 
 @pytest.mark.asyncio
-async def test_prefetch_empty_hits_returns_empty_string():
+async def test_prefetch_empty_items_returns_empty_string():
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(), fake)
-    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    fake.post = AsyncMock(return_value=_mock_response({"items": []}))
     assert await provider.prefetch("Python") == ""
 
 
@@ -319,9 +372,9 @@ async def test_prefetch_pops_top_k_before_delegating_to_search():
     """Regression: prefetch used to pass top_k twice (in kwargs + explicit)."""
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(), fake)
-    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    fake.post = AsyncMock(return_value=_mock_response({"items": []}))
     await provider.prefetch("q", top_k=3)
-    assert fake.post.call_args.kwargs["json"]["k"] == 3
+    assert fake.post.call_args.kwargs["json"]["top_k"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -336,14 +389,16 @@ async def test_sync_turn_stores_only_user_by_default():
         JiuwenMemoryProvider(tenant_id="org1", user_id="alice", infer_turns=False),
         fake,
     )
-    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    fake.post = AsyncMock(
+        return_value=_mock_response([{"id": "i", "segments": []}])
+    )
     await provider.sync_turn("user says", "assistant says")
 
     # Exactly one POST — only the user turn.
     assert fake.post.await_count == 1
     body = fake.post.call_args.kwargs["json"]
     assert body["content"] == "user says"
-    assert "user" in body["tags"]
+    assert body["tags"] == ["conversation", "user"]
 
 
 @pytest.mark.asyncio
@@ -358,14 +413,16 @@ async def test_sync_turn_saves_assistant_when_enabled():
         ),
         fake,
     )
-    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    fake.post = AsyncMock(
+        return_value=_mock_response([{"id": "i", "segments": []}])
+    )
     await provider.sync_turn("user says", "assistant says")
 
     assert fake.post.await_count == 2
     bodies = [c.kwargs["json"] for c in fake.post.call_args_list]
     assert bodies[0]["content"] == "user says"
     assert bodies[1]["content"] == "assistant says"
-    assert "assistant" in bodies[1]["tags"]
+    assert bodies[1]["tags"] == ["conversation", "assistant"]
 
 
 @pytest.mark.asyncio
@@ -375,9 +432,11 @@ async def test_sync_turn_infer_flag_respected():
         JiuwenMemoryProvider(tenant_id="org1", user_id="alice", infer_turns=False),
         fake,
     )
-    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    fake.post = AsyncMock(
+        return_value=_mock_response([{"id": "i", "segments": []}])
+    )
     await provider.sync_turn("user says", "assistant says", infer=True)
-    assert fake.post.call_args.kwargs["json"]["metadata"] == {"infer": "true"}
+    assert fake.post.call_args.kwargs["json"]["system_metadata"] == {"infer": "true"}
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +450,7 @@ async def test_handle_tool_call_search_returns_results():
     provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
     fake.post = AsyncMock(
         return_value=_mock_response(
-            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+            {"items": [{"unit_id": "h1", "content": "c1", "score": 0.9}]}
         )
     )
     out = await provider.handle_tool_call("mem2_search", {"query": "Python", "top_k": 3})
@@ -404,9 +463,17 @@ async def test_handle_tool_call_search_returns_results():
 async def test_handle_tool_call_add_returns_stored():
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    # Serialized units carry no top-level content — it must be rebuilt from
+    # segments (newline-joined), the same way the kernel's MemoryUnit does.
     fake.post = AsyncMock(
         return_value=_mock_response(
-            {"item_id": "id-1", "item": {"content": "a fact", "tier": "semantic"}}
+            [
+                {
+                    "id": "id-1",
+                    "segments": [{"content": "line 1"}, {"content": "line 2"}],
+                    "tier": "semantic",
+                }
+            ]
         )
     )
     out = await provider.handle_tool_call(
@@ -416,16 +483,19 @@ async def test_handle_tool_call_add_returns_stored():
     assert data["result"] == "stored"
     assert data["item_id"] == "id-1"
     assert data["tier"] == "semantic"
+    assert data["content"] == "line 1\nline 2"  # segments joined back
 
 
 @pytest.mark.asyncio
-async def test_handle_tool_call_add_deduped_when_no_item_id():
+async def test_handle_tool_call_add_deduped_when_units_empty():
+    """infer=true may legally dedupe every derived memory → empty unit array."""
     fake = _fake_http()
     provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
-    fake.post = AsyncMock(return_value=_mock_response({"item_id": None}))
+    fake.post = AsyncMock(return_value=_mock_response([]))
     out = await provider.handle_tool_call("mem2_add", {"content": "dup"})
     data = json.loads(out)
     assert data["result"] == "deduped"
+    assert data["item_id"] is None
 
 
 @pytest.mark.asyncio
@@ -495,7 +565,7 @@ async def test_breaker_success_resets_counter():
 
     # Two failures (below threshold) then a success.
     fake.post = AsyncMock(
-        side_effect=[Exception("x"), Exception("x"), _mock_response({"hits": []})]
+        side_effect=[Exception("x"), Exception("x"), _mock_response({"items": []})]
     )
     await provider.handle_tool_call("mem2_search", {"query": "q"})  # fail
     await provider.handle_tool_call("mem2_search", {"query": "q"})  # fail
@@ -506,7 +576,7 @@ async def test_breaker_success_resets_counter():
     # and returns its payload — proving we did not short-circuit.
     fake.post = AsyncMock(
         return_value=_mock_response(
-            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+            {"items": [{"unit_id": "h1", "content": "c1", "score": 0.9}]}
         )
     )
     out = await provider.handle_tool_call("mem2_search", {"query": "q"})

@@ -23,8 +23,8 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-19 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_83_session-ddl-under-write-lock.md` |
+| 最近一次修订日期 | 2026-10-26 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_83_session-ddl-under-write-lock.md`、`B_07_team-interrupt-resume-entry-and-leader-ready.md` |
 
 ## 范围 / 边界
 
@@ -114,6 +114,11 @@ reset** contextvar——故意为之：
 `SessionManager` 自身不缓存"已建表"标记，幂等性由 backend 实现保证。
 DDL 在 `DbSessions` 进程级写锁内执行、与 DAO 写同锁串行——不允许经
 `engine.begin()` 直连绕过锁（并发 bind 耗尽写池的修复，见 F_83）。
+`create_cur_session_tables()` 返回 `True` 表示当前 session 的动态表已就绪，
+返回 `False` 表示无 session 上下文或重试耗尽；`bind_session` 必须检查结果。
+失败时清除本次 session contextvar token 与 live `team_session`，并抛出带
+稳定状态码的统一框架错误。Streaming 与非流式入口均沿现有框架异常路径传播，
+不在 Runner 中为 DB bind 失败单独构造聊天事件。
 
 ### I-6 Checkpoint 写入只走 namespace 入口
 
@@ -176,6 +181,32 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
 前 `stop_team` 拆掉 stale entry，下一轮走 cold-build 路径重新构造。这消除了"in-memory
 状态（contextvars / 客户端缓存）跨 session 漂移"的边界条件。
 
+### I-9 中断恢复流（interrupt resume，B_07）
+
+中断（ask-user / 审批类）关闭流之后，恢复不新增 session 状态机路径，而是组合
+既有路径并补一个**就绪门**；Core 只提供无输入启动流，恢复编排归宿主：
+
+1. **runtime 启动流**：宿主调 `Runner.start_agent_team_streaming`——与
+   `run_agent_team_streaming` 共享 leader 生命周期，但驱动
+   `TeamAgent.stream_runtime`：不投首轮用户输入、不写记忆 query，只绑定
+   session、恢复状态、启动 coordination 并执行 mailbox / task poll（dispatch
+   照常选 `COLD_RECOVER` / `RESUME_FROM_PAUSE` / `CREATE`）。
+2. **leader 就绪门**：就绪信号是流上的 `team.recovered` 标记帧——
+   `kernel.start()` 尾部（`resume_paused_round` 之后，事件总线 / harness 全活）
+   leader-only 经 `StreamController.emit_team_recovered` 入队。消费者读到该帧
+   即可安全 interact；`is_team_recovered_marker`（`schema/stream.py`）是专用判定，
+   `is_team_event_marker` 将其归入框架标记（非流式 `invoke` 自动跳过）。
+3. **投递（宿主编排）**：宿主在流消费层读到标记后经 `interact_agent_team`
+   提交 `InteractiveInput`——`manager.interact` 仅对该类型走
+   `agent.resume_interrupt` 分支；裸 `str` 会被 god-view 路由当普通 steer，
+   中断保持 pending。恢复等待的帧间 / 总计超时与失败映射同样归宿主
+   （jiuwenswarm 在 producer 层实现；等待帧时禁用 `asyncio.wait_for` 包
+   `__anext__`——其临时 Task 会拆散 execution-subject contextvar 作用域）。
+
+约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；恢复
+超时由宿主映射为前端错误事件；失败路径关闭启动流，run cycle 经正常 `finalize`
+收敛。
+
 ## 接口契约
 
 ### `openjiuwen.agent_teams.agent.session_manager.SessionManager`
@@ -217,8 +248,10 @@ class SessionManager:
   2. `set_session_id(state.session_id)` 写当前协程 contextvar
   3. `state.team_session = session if isinstance(session, AgentTeamSession) else None`
      （I-2）
-  4. `team_backend` 存在 → `await team_backend.db.create_cur_session_tables()`
-  5. role==LEADER 且 spec 存在 → `recovery_manager.persist_leader_config(session)`
+  4. `team_backend` 存在 → await `create_cur_session_tables()`；返回 `False` 时
+     回滚本次 contextvar/live session 绑定并抛统一框架错误
+  5. 初始化成功且 role==LEADER 且 spec 存在 →
+     `recovery_manager.persist_leader_config(session)`
   传 None 是调用方 bug；语义不再"None 表示解绑"，那条路径走 `unbind_session`。
 
 - **`release_session()`**

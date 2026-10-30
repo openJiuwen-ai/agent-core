@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import sys
 from types import SimpleNamespace
 
@@ -20,15 +21,52 @@ def _root_span(name: str = "agent.run.test"):
     return TracerProvider().get_tracer("run-root-test").start_span(name)
 
 
-def test_fallback_returns_the_single_run_in_flight() -> None:
-    """No session id in reach: one live run is unambiguous and answers."""
+def test_an_unscoped_lookup_never_adopts_the_single_run_in_flight() -> None:
+    """No session id in reach: the only live run is still another session's."""
     agent_span_context.install_root_span_fallback()
     agent_span_context.reset_run_root_spans()
     shared_span_context.reset_state()
     span = _root_span()
     agent_span_context.register_run_root_span(span, session_id="sess-A")
     try:
-        assert shared_span_context.get_root_span() is span
+        assert contextvars.Context().run(shared_span_context.get_root_span) is None
+        assert contextvars.Context().run(agent_span_context.resolve_run_root_span) is None
+    finally:
+        agent_span_context.reset_run_root_spans()
+
+
+def test_a_run_without_a_session_is_found_without_one() -> None:
+    """A sessionless run is keyed by the empty id, which an unscoped lookup states."""
+    agent_span_context.reset_run_root_spans()
+    span = _root_span()
+    agent_span_context.register_run_root_span(span)
+    agent_span_context.register_run_root_span(_root_span("other"), session_id="sess-A")
+    try:
+        assert contextvars.Context().run(agent_span_context.resolve_run_root_span) is span
+    finally:
+        agent_span_context.reset_run_root_spans()
+
+
+def test_a_task_with_the_session_bound_finds_its_run_among_several() -> None:
+    """The supervisor carries its session, so it resolves its own run exactly.
+
+    ``DeepAgent.start`` binds the observability session before spawning the
+    loop's tasks; those tasks never see the request's root ContextVar, yet
+    with two runs in flight each still finds its own root.
+    """
+    agent_span_context.install_root_span_fallback()
+    agent_span_context.reset_run_root_spans()
+    shared_span_context.reset_state()
+    mine = _root_span("mine")
+    agent_span_context.register_run_root_span(_root_span("other"), session_id="sess-A")
+    agent_span_context.register_run_root_span(mine, session_id="sess-B")
+
+    def supervisor() -> object:
+        shared_span_context.set_current_session_id("sess-B")
+        return shared_span_context.get_root_span()
+
+    try:
+        assert contextvars.Context().run(supervisor) is mine
     finally:
         agent_span_context.reset_run_root_spans()
 
@@ -105,7 +143,8 @@ def test_one_session_closing_does_not_blind_another_still_running() -> None:
     agent_span_context.register_run_root_span(finished, session_id="sess-B")
     try:
         agent_span_context.unregister_run_root_span(finished, session_id="sess-B")
-        assert agent_span_context.resolve_run_root_span() is running
+        assert agent_span_context.resolve_run_root_span(session_id="sess-A") is running
+        assert agent_span_context.resolve_run_root_span(session_id="sess-B") is None
     finally:
         agent_span_context.reset_run_root_spans()
 
@@ -118,7 +157,7 @@ def test_unregister_leaves_a_replacement_registered_under_the_same_session() -> 
     agent_span_context.register_run_root_span(current, session_id="sess-A")
     try:
         agent_span_context.unregister_run_root_span(stale, session_id="sess-A")
-        assert agent_span_context.resolve_run_root_span() is current
+        assert agent_span_context.resolve_run_root_span(session_id="sess-A") is current
     finally:
         agent_span_context.reset_run_root_spans()
 
@@ -197,9 +236,15 @@ def test_llm_span_lookup_falls_back_to_the_run_root() -> None:
     previous_tracker = shared_span_context.get_active_span_tracker()
     shared_span_context.set_active_span_tracker(tracker)
     agent_span_context.register_run_root_span(root_span, session_id="sess-1")
+
+    def supervisor() -> tuple[object, object]:
+        # The supervisor task never sees the request's root ContextVar, only
+        # the session DeepAgent.start bound before spawning it.
+        shared_span_context.set_current_session_id("sess-1")
+        return shared_span_context.get_current_llm_span(), shared_span_context.pop_current_llm_span()
+
     try:
-        assert shared_span_context.get_current_llm_span() is llm_span
-        assert shared_span_context.pop_current_llm_span() is llm_span
+        assert contextvars.Context().run(supervisor) == (llm_span, llm_span)
     finally:
         agent_span_context.reset_run_root_spans()
         shared_span_context.set_active_span_tracker(previous_tracker)

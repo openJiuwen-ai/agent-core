@@ -74,6 +74,8 @@ def test_probe_targets_and_compact_page_state_share_one_contract() -> None:
     assert payload["elements"][0]["generation_id"] == "g0"
     assert state.export() == {
         "page_id": "page-test",
+        "interaction_revision": 0,
+        "cards_observed": False,
         "generation_id": "g0",
         "url": "https://example.test/search",
         "title": "Search",
@@ -83,6 +85,7 @@ def test_probe_targets_and_compact_page_state_share_one_contract() -> None:
                 "generation_id": "g0",
                 "role": "button",
                 "text": "Search",
+                "label": "Search",
                 "match_count": 1,
                 "visible": True,
                 "enabled": True,
@@ -301,12 +304,12 @@ def test_runtime_refreshes_stale_batch_target_id_without_accepting_stale_ref() -
     runtime = _make_bare_runtime()
     old = _interactive("#sort-price", "Price")
     old.update({"kind": "sort_tab", "region": "main"})
-    runtime._ensure_page_state().register_interactives({"elements": [old]})
+    runtime.ensure_page_state().register_interactives({"elements": [old]})
 
-    runtime._ensure_page_state().advance(url="https://example.test/results?sort=price")
+    runtime.ensure_page_state().advance(url="https://example.test/results?sort=price")
     current = _interactive("#sort-price", "Price")
     current.update({"kind": "sort_tab", "region": "main"})
-    runtime._ensure_page_state().register_interactives({"elements": [current]})
+    runtime.ensure_page_state().register_interactives({"elements": [current]})
 
     refreshed, recovered_from = _run(
         runtime._refresh_stale_batch_targets(
@@ -328,7 +331,7 @@ def test_runtime_refreshes_stale_batch_target_id_without_accepting_stale_ref() -
 
 def test_stale_generation_condition_waits_refresh_without_reusing_action_selector() -> None:
     runtime = _make_bare_runtime()
-    runtime._ensure_page_state().advance(url="https://example.test/results")
+    runtime.ensure_page_state().advance(url="https://example.test/results")
 
     refreshed, recovered_from = _run(
         runtime._refresh_stale_batch_targets(
@@ -355,10 +358,10 @@ def test_stale_generation_condition_waits_refresh_without_reusing_action_selecto
 def test_runtime_rebinds_stale_probe_target_when_dom_identity_is_still_unique() -> None:
     runtime = _make_bare_runtime()
     old = _interactive("#sort-price", "Price")
-    runtime._ensure_page_state().register_interactives({"elements": [old]})
-    runtime._ensure_page_state().advance(url="https://example.test/results")
+    runtime.ensure_page_state().register_interactives({"elements": [old]})
+    runtime.ensure_page_state().advance(url="https://example.test/results")
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value=('{"ok":true,"match_count":1,"visible":true,"enabled":true,"actionable":true}')
     )
 
@@ -372,7 +375,7 @@ def test_runtime_rebinds_stale_probe_target_when_dom_identity_is_still_unique() 
     refreshed_id = refreshed[0]["target_id"]
     assert recovered_from == "g0"
     assert refreshed_id != old["target_id"]
-    rebound = runtime._ensure_page_state().resolve_target(
+    rebound = runtime.ensure_page_state().resolve_target(
         generation_id="g1",
         target_id=refreshed_id,
     )
@@ -397,10 +400,10 @@ def test_compact_page_state_never_exposes_probe_local_id_or_ax_ref() -> None:
 def test_failed_stale_target_refresh_returns_current_generation_and_candidates() -> None:
     runtime = _make_bare_runtime()
     old = _interactive("#sort-price", "Price")
-    runtime._ensure_page_state().register_interactives({"elements": [old]})
-    runtime._ensure_page_state().advance(url="https://example.test/results")
+    runtime.ensure_page_state().register_interactives({"elements": [old]})
+    runtime.ensure_page_state().advance(url="https://example.test/results")
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value=('{"ok":true,"match_count":2,"visible":true,"enabled":true,"actionable":true}')
     )
 
@@ -453,7 +456,7 @@ def test_runtime_resolves_probe_target_without_model_generated_css() -> None:
             _interactive("[role=option]:nth-of-type(2)", "Shanghai (SHA)"),
         ]
     }
-    runtime._ensure_page_state().register_interactives(payload)
+    runtime.ensure_page_state().register_interactives(payload)
 
     resolved = _run(
         runtime._resolve_batch_steps(
@@ -516,7 +519,7 @@ def test_runtime_rewrites_single_target_click_to_official_primitive() -> None:
         "title": "Search",
         "elements": [_interactive("#search", "Search")],
     }
-    runtime._ensure_page_state().register_interactives(payload)
+    runtime.ensure_page_state().register_interactives(payload)
     click_tool = SimpleNamespace(
         invoke=AsyncMock(
             return_value=SimpleNamespace(
@@ -570,7 +573,7 @@ def test_runtime_rewrites_single_card_click_to_direct_navigation() -> None:
             }
         ]
     }
-    runtime._ensure_page_state().register_cards(payload)
+    runtime.ensure_page_state().register_cards(payload)
     navigate_tool = SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None, data={})))
     runtime._get_playwright_mcp_tool = AsyncMock(return_value=navigate_tool)
 
@@ -599,7 +602,7 @@ def test_single_step_uses_compact_rpc_fallback_when_primitive_is_unavailable() -
 
 def test_runtime_materializes_native_ax_ref_inside_runtime() -> None:
     runtime = _make_bare_runtime()
-    runtime._ensure_page_state().register_ax_snapshot('- tab "Sales" [ref=f1e174]')
+    runtime.ensure_page_state().register_ax_snapshot('- tab "Sales" [ref=f1e174]')
     evaluate_tool = SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None)))
     runtime._get_playwright_mcp_tool = AsyncMock(return_value=evaluate_tool)
 
@@ -636,7 +639,7 @@ def test_card_primary_link_remains_clickable_in_a_multi_step_batch() -> None:
             }
         ]
     }
-    runtime._ensure_page_state().register_cards(payload)
+    runtime.ensure_page_state().register_cards(payload)
 
     steps = _run(runtime._resolve_batch_steps(
         [{"op": "click", "target_id": payload["cards"][0]["target_id"]}, {"op": "press", "key": "Enter"}],
@@ -650,7 +653,7 @@ def test_runtime_reset_invalidates_current_page_state() -> None:
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(reset=AsyncMock())
     payload = {"elements": [_interactive("#query", "Search")]}
-    runtime._ensure_page_state().register_interactives(payload)
+    runtime.ensure_page_state().register_interactives(payload)
     target_id = payload["elements"][0]["target_id"]
 
     _run(runtime.reset())
@@ -658,7 +661,7 @@ def test_runtime_reset_invalidates_current_page_state() -> None:
     runtime._service.reset.assert_awaited_once()
     assert runtime.generation_id == "g1"
     with pytest.raises(ValueError, match="Stale target_id"):
-        runtime._ensure_page_state().resolve_target(
+        runtime.ensure_page_state().resolve_target(
             generation_id="g1",
             target_id=target_id,
         )

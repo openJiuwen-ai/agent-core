@@ -1,5 +1,11 @@
 # Team Tools Contract
 
+## Organization 工具
+
+Organization 工具复用 TeamTool、现有工厂和 Leader 权限装配，使用独立的组织工具命名空间。
+普通成员不能通过创建组织获得 Leader 管理权限；完整组织约定见 [S_29](S_29_team-organization.md)，
+工具用途、角色限制及使用顺序见中英文 Team Organization 指南，不另生成 API 文档。
+
 ## `TeamBackend` lifecycle callbacks
 
 `TeamBackend.__init__` accepts `on_team_built` and `on_team_cleaned`
@@ -19,8 +25,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-09-16 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md |
 
 ## 范围 / 边界
 
@@ -135,6 +141,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
     客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
     要拒在写成员行之前。
+    `spawn_external_cli` 的 `builtin_model` / `effort` 是同一模式（F_113）：
+    信号是 `builtin_models_enabled()`（某个声明的 CLI kind 带
+    `builtin_models` 目录），同时门控这两个属性、描述槽
+    `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 与 leader 工具
+    `set_member_model` 的注册。`builtin_model` 与 `model_name` 互斥（前者跑
+    CLI 自身登录，后者跑 pool 端点），`effort` 必须伴随 `builtin_model`，名字与
+    强度只接受目录中声明的值。`set_member_model` 先落库再推活成员，返回的
+    `applied_live` 告诉 leader 是下一 turn 生效还是下次启动生效；`model_ref`
+    非空的成员（pool 端点或已持久化的认证 fallback）一律拒绝。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`
@@ -177,8 +192,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 17. **取消 / 编辑执行中任务用任务级信号，不取消成员**：cancel 一个执行中任务、或改其
     标题 / 内容，都**不再** `cancel_member`。cancel 发 `TASK_CANCELLED`（带 `member_name`）
     让该成员经 `on_task_cancelled` 停手；编辑**保持任务 IN_PROGRESS**（DAO 放开 PLANNING /
-    IN_PROGRESS 可编辑，仅 IN_REVIEW 锁——验证期内容冻结），发 `TASK_UPDATED`（带 `member_name`）
-    让该成员经 `on_task_updated` 重看后继续。**仍在团队中的**人类成员持有的任务对 cancel /
+    IN_PROGRESS 可编辑，仅 IN_REVIEW 锁——验证期内容冻结），发 `TASK_UPDATED`（带 `member_name`
+    与写事务内读回的 `status`，见 B_03）让该成员经 `on_task_updated` 重看后继续。**仍在团队中的**人类成员持有的任务对 cancel /
     reassign / **改标题·内容**三者都 leader-immutable（HITT 锁，key 在
     `TeamBackend.is_live_human_agent` / `live_human_agent_names`，**不是**裸 role——见
     `S_07` 运行约束 3），故这些信号的 `member_name` 永不指向一个**在队**的 human avatar。
@@ -216,7 +231,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。
 19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
-    形态的 `assignee` **必填**（scheduled 成员不自主认领，未指定 assignee 的 scheduled 任务不会被调度），随 `TaskGraphSpec` →
+    形态**每个任务必须有承担者**（scheduled 成员不自主认领，无主任务不会被调度）：`assignee`
+    指向已存在成员，或 `member` 对象随任务**内联创建**一个（F_118，见不变量 25），二者在
+    `invoke` 里二选一校验（schema 无 `anyOf`，故 `required` 不再列 `assignee`；唯一宽容：
+    `assignee` 恰等于同节点 `member.member_name` 时视为冗余而非冲突，照常创建并在结果里附提醒，
+    指向他人才报冲突）；随 `TaskGraphSpec` →
     `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
     （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
     refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed
@@ -232,8 +251,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     （见 `S_22`），或上述 human-agent 后端编排路径。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
     上限，须伴随 `reviewer`，亦可经 `update_task` 事后设置）。
 20. **verify 闸：reviewer 由 leader 指派，裁决策略按生效分发模式二分**（F_59 / F_62）。任务的
-    `reviewer` 列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，
-    须是真实成员且 ≠ `assignee`（不可自审）。author 经 `member_complete_task` /
+    `reviewer` 列（JSON 结构化对象列表 `[{type, reviewer_id, instruction}]`，F_73）经 `create_task` /
+    `update_task` 由 leader 指派，可多个；reviewer **不是名册成员**——调度器按 `type` 为每个
+    reviewer 拉一次性 harness 投票（`S_22`），工具边界只守 `reviewer_id ≠ assignee`（不可自审）。author 经 `member_complete_task` /
     `claim_task(completed)` 完成时，`complete()` 按有无 reviewer 分流：有 → `IN_PROGRESS →
     IN_REVIEW`（发 `TASK_SUBMITTED_FOR_REVIEW`，不解依赖、author 不释放，同一 UPDATE 里
     `review_round += 1` 开新轮）；无 → 直接 `COMPLETED`。`verify_task` 守卫两种模式相同：任务须
@@ -324,10 +344,14 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     成功**之后**拉起——任务已经在板上，才谈得上有人来领）。该方法持有构造期注入的
     `on_member_started` 回调并自带 leader 门与回调门，**调用方不再各自捎带 spawn 回调**；
     幂等由下层 `startup_member` 的 CAS 保证。
-    单播/多播的具体收件人若是 `ERROR`，这次定向投递本身构成显式恢复请求：写库前经
-    `recover_member` 的 `ERROR→RESTARTING` CAS 重建 runtime；广播不批量恢复 ERROR，避免
-    一条泛化消息触发全队 restart storm。ERROR runtime 已经退出时，`shutdown_member` 则直接
-    CAS 到 `SHUTDOWN` 并清理 stale handle，不发送一个永远不会被消费的 shutdown event。
+    单播/多播的具体收件人若是 `ERROR` 或 `DORMANT`（F_118），这次定向投递本身构成显式恢复 /
+    唤醒请求：写库前经 `recover_member` 的 `{ERROR, DORMANT}→RESTARTING` CAS 重建 runtime
+    （失败回滚到被认领时的原状态）；广播不批量恢复，避免一条泛化消息触发全队 restart storm，
+    也**永远不唤醒休眠成员**。ERROR / DORMANT runtime 已经退出时，`shutdown_member` 则直接
+    CAS 到 `SHUTDOWN` 并清理 stale handle，不发送一个永远不会被消费的 shutdown event
+    （DORMANT 仍发布 `MemberShutdownEvent` 供名册刷新，`target_status="shut_down"`）。
+    走 `SHUTDOWN_REQUESTED` 正常路径时，事件的 `target_status` 取 `retire_target(lifetime, force)`，
+    休眠退场为 `"dormant"`，观察者据此保留该成员。
     两点边界：**scheduled 的 `create_task` 不拉人**（交接归 `TeamScheduler`，工具再插一手
     就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
     模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
@@ -336,11 +360,58 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `SendMessageTool` 的 `to` 固定为 `string`，只承载单个 member_name、`"user"` 或 `"*"`；
     `targets` 固定为 `array<string>`，只承载多播成员列表。两者运行时必须二选一：同时提供、
     同时省略、向 `to` 偷传数组或向 `targets` 偷传字符串都在写消息前拒绝，并返回可执行的字段
-    修正提示。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
+    修正提示。唯一宽容：`targets` 恰为单元素数组且（strip 后）等于 `to` 时，意图无歧义，按 `to`
+    单播投递，成功结果附一条提醒（`data["note"]`，`render_for_llm` 追加），引导下次只填 `to`；
+    多出任何成员仍属歧义、照旧拒绝。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
     这样宿主 LLM 不再需要在 `anyOf(string, array)` 中选择序列化分支，也不会把数组二次 JSON
     编码后塞进字符串。`ReportToLeaderTool` 仍只有 `to: enum ["leader", "user"]`，
     schema 不暴露 `targets`，invoke 对 MCP 偷传同样拒绝。多播的全员拒绝、去重、部分失败等
     既有语义全部留在 `_multicast`，只改变入口字段，不改变消息落库和事件投递。
+
+25. **任务内联成员只属调度形态；退场策略是成员属性，退场由调度器请求、成员自落**（F_118）。
+    `ScheduledTaskCreateTool` 的任务节点可带 `member` 对象（`member_name` / `display_name` /
+    `desc` / `prompt` / `model_name` 与 `spawn_teammate` 逐字相同 + 必填 `lifetime ∈
+    {shutdown, dormant}`），与 `assignee` 二选一（同名 `assignee` 宽容放行 + 结果附提醒，见不变量 19）。
+    `invoke` 顺序：批内纯校验（承担者冲突、命名模式、
+    批内不重名、非 leader、lifetime 合法）→ 把 `member_name` 绑为 spec 的 `assignee` → 既有
+    review / reviewer / assignee 校验 → `spawn_member(..., lifetime=)` 落 `UNSTARTED` 行 →
+    `add_graph`；图写入失败经 `TeamBackend.delete_unstarted_member`（仓库唯一删成员路径，
+    `status == UNSTARTED` 守卫）补偿：删行，并在可演进工作区开启时释放 `spawn_member` 准备的
+    成员工作区（`MemberWorkspaceBinder.release` + `delete_if_zero`）、清掉它预热的 cache 字段——
+    与 `spawn_member` 互为精确逆操作。两条注册路径共用 `tool_member.register_teammate`
+    （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
+    拉起（`S_05` 不变量 1）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
+    `team_mode != "predefined"` 一起出现 / 消失（同 `spawn_teammate` 被摘掉的门），偷传在写库前
+    拒掉。`TaskCreateTool`（autonomous）**不暴露也不接受 `member`**：schema 里没有该属性，
+    `invoke` 在批次纯校验之后、任何 DB 访问之前把带 `member` 的任务报错拒掉（指引先
+    `spawn_teammate` 再 `assignee`），而不是静默丢弃——与 `update_task` 对偷传 `reviewer` 的处置
+    同一原则（B_04）。形态差异仍由类吸收，不进共享纯函数 `_validate_assignees`。
+    **讲内联成员的文案只在 scheduled 形态出现**：`assignee` 的参数描述按形态分命名空间
+    （`create_task.task.assignee` 只讲 autonomous；`create_task_scheduled.task.{assignee,member,member.lifetime}`
+    讲 scheduled），`shutdown_member` 描述里的 lifetime / DORMANT 一段是 capability 槽
+    `{{shutdown_member_lifetime}}`，gate `dispatch_mode == "scheduled"`。
+    退场：`shutdown_member` 的终态由成员行 `options.lifetime` 决定（`retire_target`，`S_12`）——
+    常规成员落 `SHUTDOWN`，`lifetime=dormant` 落 `DORMANT`，`force=True` 一律 `SHUTDOWN`；终态为
+    `DORMANT` 的请求**不发告别通知**（见 `S_22` 不变量 17）；对已 `DORMANT` 的成员再调一次即
+    直落 `SHUTDOWN`。`clean_team` 的全员 SHUTDOWN 前置不放宽。
+26. **`member_complete_task(note=...)` 落盘，`view_task` 按 dispatch 分 desc_key**（F_118 / D7）。
+    `note` 不再只回显给调用者：经 `complete(note=)` / `_submit_for_review(note=)` 写进任务行
+    `note` 列，`view_task(get)` 以 `Note:` 行渲染，调度交接模板经 `task.upstream_brief` 交给下游。
+    `view_task` 行为不分模式，描述分两份（`_VIEW_TASK_DESC_KEY`：`view_task` /
+    `view_task_scheduled`）——调度版不讲 `claim_task` 认领循环与 `claimable` 场景（调度成员没有
+    这条路，系统提示词又明令不轮询找活），改为"看别人的任务与 note"。
+27. **完成说明拆为 `summary` + `note`，`view_task` 新增 `note` 动作**（F_119）。
+    `member_complete_task` 新增可选 `summary`（一句话摘要），与 `note`（完整详情）一并经
+    `complete(summary=, note=)` 落行，结果不回显两者；调度模式下结果附"调度器会把结果和摘要转告
+    leader，不要另发完成汇报"（判定经 `TeamTaskManager.dispatch_mode`），自主模式与真人分身路径
+    不附。`view_task(action='note', task_id=)` 返回 `{view: "note", task_id, title, status, assignee,
+    summary, note}`（不含 `content`，独立渲染分支），不截断——是 leader 摘要、上游列表里截断摘要背后
+    的全文入口；`view_task(get)` 同时显示 `Summary:` 与 `Note:`。
+28. **`claim_task` 完成时写 `summary` / `note`，认领时附直接上游摘要**（F_120）。schema 新增可选
+    `summary` / `note`，只在 `status=completed` 时经 `complete(summary=, note=)` 落行；`claimed` 时传入
+    则忽略并在结果里提示。认领成功后结果列出本任务**直接上游**（一跳依赖）的完成摘要
+    （`message_template.upstream_lines`，与调度模式开工通知同格式）与 `view_task(action='note')` 提示；
+    `view_task(get)` 同样附"Upstream deliveries"小节。两种模式下成员都不再用 `send_message` 汇报完成。
 
 ## 接口契约
 

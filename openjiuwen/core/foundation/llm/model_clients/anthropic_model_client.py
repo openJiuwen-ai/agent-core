@@ -101,6 +101,36 @@ _IMAGE_DATA_URL_PATTERN = re.compile(
 )
 
 
+# Anthropic requires max_tokens and rejects a value above that model's maximum
+# output. Claude 3 and 3.5 are below the default used for later families.
+# Match family substrings so gateway prefixes and dated snapshots still hit
+# (``anthropic/claude-3.5-sonnet``, ``claude-3-haiku-20240307-v1:0``). Do not
+# shorten these to ``claude-3``: Claude 3.7 and later allow far more output.
+_LOW_OUTPUT_TOKEN_CAPS: tuple[tuple[str, int], ...] = (
+    ("claude-3-5", 8192),
+    ("claude-3.5", 8192),
+    ("claude-3-opus", 4096),
+    ("claude-3-sonnet", 4096),
+    ("claude-3-haiku", 4096),
+)
+_DEFAULT_MAX_TOKENS = 32768
+
+
+def default_max_tokens(model: Optional[str]) -> int:
+    """Return the max_tokens to send when the caller did not set one.
+
+    An explicit request or ``model_config.max_tokens`` wins before this runs.
+    Recognized low-cap families stay inside the official output limit; every
+    other id, including unrecognized ones, keeps the higher default.
+    """
+
+    name = str(model or "").strip().lower()
+    for family, cap in _LOW_OUTPUT_TOKEN_CAPS:
+        if family in name:
+            return cap
+    return _DEFAULT_MAX_TOKENS
+
+
 def _to_plain_data(value: Any) -> Any:
     """Convert Anthropic SDK models into JSON-compatible data."""
     if hasattr(value, "model_dump"):
@@ -847,8 +877,11 @@ class AnthropicModelClient(BaseModelClient):
             anthropic_messages,
             exclude_tail=_last_input_is_transient(messages),
         )
-        # Anthropic API requires max_tokens; default to a sane upper bound.
-        effective_max_tokens = openai_params.get("max_tokens") or 8192
+        # Anthropic API requires max_tokens. Honor an explicit value, otherwise
+        # stay inside the output cap of older Claude families.
+        effective_max_tokens = (
+            openai_params.get("max_tokens") or default_max_tokens(openai_params.get("model"))
+        )
 
         params: dict = {
             "model": openai_params["model"],
@@ -1147,6 +1180,13 @@ class AnthropicModelClient(BaseModelClient):
             accumulated_for_parser = ""
 
             async with async_client.messages.stream(**params) as response_stream:
+                # Entering the stream context returns once the response headers arrive.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
+                )
                 async for event in response_stream:
                     chunk = self._event_to_chunk(event, tool_use_acc)
                     if chunk is None:

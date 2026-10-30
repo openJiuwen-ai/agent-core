@@ -50,7 +50,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 | 事件 | 策略 |
 |---|---|
-| `USER_INPUT`（inner） | 直接 `deliver_input`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
+| `USER_INPUT`（inner） | 直接 `deliver_input`，并原样透传 payload 中的 request-local `run_context`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
 | `STANDBY` | `pause_polls()`，仅此 |
 | `CLEANED` | 非 leader → `shutdown_self()`。**leader 分支恒 no-op**：persistent leader 必须活过 `clean_team` 去接下一次交互；temporary leader 的收尾由 `StreamController._on_idle_settled` 查 `state.team_cleaned` 这个 latch 驱动，走总线事件会跟 round-end 抢跑 |
 | `TOOL_APPROVAL_RESULT` | 目标是自己才 `resume_interrupt`，把审批结果包成 `InteractiveInput` 灌回被中断的工具调用 |
@@ -106,12 +106,18 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   伪成员标记已读（它没有 agent 进程去 poll 自己的邮箱），`_notify_human_agent_inbound` 通知
   SDK 侧回调。收件人按**可达**筛选 = status ∉ {`SHUTDOWN`}——`SHUTDOWN_REQUESTED` 必须留在
   可达集里，否则"你已被移出团队"这条通知恰好送不到该收它的人。
+- **群聊收件人启动**：`GroupMessageHandler.start_mentioned_members` 在群聊广播和 Leader 邮箱轮询时扫描未消费 mentions，通过既有 `auto_start_member` 启动 `UNSTARTED` / `ERROR` 成员。普通 `MessageHandler` 只消费本成员邮箱，不扫描其他成员；普通消息启动仍由发送工具和交互入口负责。
+- **未读按发送时间升序投递**（`_read_all_unread`，[[B_04]]）：单播与广播两次查询各自有序，
+  合并后必须再按 `timestamp` 升序排。投递顺序就是成员读到的顺序——第一条开启这一轮、其余
+  steer 进去，倒序会让被新消息唤醒的成员先读到最新那条、再以 `[STEERING]` 读到更早的。
 - **投递前先 `_expand`**（`message_template.expand_message`，F_63）：普通消息原样过；框架
   模板消息（`content` 空 + `meta`）在**投递这一刻**按当前任务行渲染正文，所以排队很久的交接
   不会投出过期简报。**四个消费点都必须展开**：`_format_message`、`_notify_human_agent_inbound`
   （HITT 人类成员可能是 assignee/reviewer）、`_bridge_deliverable_for`（relay 给无 DB 的远程
   执行者的必须是展开后的文本）、以及 external 侧的 `read_inbox`。
-- **渲染**（`_format_message` → `inbound_render.render_inbound`）：human-agent 加
+- **渲染**（`_format_message` → `inbound_render.render_inbound`）：`time` 只写绝对发送时间
+  （`format_absolute_time`，入站块会留在历史里被重读，相对差会过期；"现在"由
+  `TeamPolicyRail` 附的 `<team-clock>` 给出，见 S_09 不变量 28a）；human-agent 加
   `for="controller"` + `hitt-silence` note；普通消息带 `reply-hint` note，正文经
   `i18n.reply_hint_for(sender)` 按发件人分化（`user` 取无条件版，其余取条件版）——**选哪条
   文案的逻辑收在 i18n 一处**，`external/format.py` 复用同一函数。**模板消息不带 reply-hint**：
@@ -139,14 +145,18 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 
 **C. 看板巡视** —— `on_task_board_event` → `_nudge_idle_agent`，角色分化最关键的一处：
 
-- **leader 收每个 board 事件都巡视全部未完成任务**（它owns 看板级决策，必须看见每次跃迁）
+- **leader 只在可能需要它决策的 board 事件上巡视全部未完成任务**（F_121）：`_LEADER_QUIET_EVENTS`（他人认领 / 指派生效的 `TASK_CLAIMED` 兜底、`TASK_STARTED`、验收往返 `TASK_SUBMITTED_FOR_REVIEW` / `TASK_REVISION_REQUESTED` 兜底）与**已有 assignee** 的 `TASK_UNBLOCKED` 只续轮询、不唤醒——纯进度变化，下次唤醒看到的仍是完整看板，卡住的任务由停滞检测兜底；完成、新建、释放、取消 / 改内容、plan 请求、无主任务解锁照常唤醒；由 `TASK_COMPLETED` / `TASK_VERIFIED` 触发时，看板（或全部完成的收尾提示）之前先列"刚完成"的那个任务及其完成摘要，按需附 `view_task(action='note')` 提示——看板只列未完成任务，否则刚完成的结果会丢（F_120）。成员不再另发完成汇报
 - **teammate 只被 `_TEAMMATE_NUDGE_EVENTS` 唤醒** = `TASK_CREATED` / `TASK_UNBLOCKED` /
   `TASK_RELEASED`，即**只有会扩大可处理池的三类**。其余跃迁要么缩小池（`CLAIMED`）、要么
   移除任务（`COMPLETED` / `CANCELLED`）、要么不改变可处理集（`UPDATED` / `STARTED`），
   唤醒 teammate 只会白烧一轮去重扫没变的板。
-- `_nudge_idle_agent` 给 teammate 只渲染 **claimable（pending 且无 assignee）+ assignee ==
-  自己的未完成任务**；别人 in-flight 的活不喂给 teammate——唤醒它是为了让它接活，不是让它
-  围观别人干活。
+- leader 看板每任务一行**不带 `content`**（`render_task_line(with_content=False)`，附 `[blocked by #…]`，数据来自 `list_tasks_with_deps`）——任务正文是 leader 自己写的，已在其上下文里，每次唤醒重贴只是重复；要看全文用 `view_task(get)`。teammate 看板保留 `content`（它靠正文匹配专长决定认领）
+- `_nudge_idle_agent` 给 teammate 只渲染**现在就能开始的任务**：claimable（pending 且无 assignee）
+  + assignee == 自己的 **pending** 任务；自己 blocked / 在手的任务、别人 in-flight 的活都不喂——
+  唤醒它是为了让它接活，不是让它围观。blocked 的任务解锁时 `TASK_UNBLOCKED` 会再唤醒它；筛完为空
+  不唤醒。看板标题直接让它 `claim_task(status=claimed)`，不再指去 `view_task`（行里已附正文）。
+- `on_task_claimed` 的 teammate 自身分支（被指派）：通知正文带任务标题与 `content`、直接让它认领；
+  任务不是 `pending`（仍 blocked 或已删）时不通知，交给解锁后的看板唤醒。
 - **`resume_polls()` 对每个事件都触发**：上面的过滤只砍 nudge，不停 poll。
 - **板子一律 `use_steer=False`**（维度 3）：巡视只是提醒，从不说"你手上的活作废了"，
   没有理由打断成员的推理。它因此进 follow-up 队列，这一轮结束才读到。**同一批排队的板子
@@ -244,7 +254,8 @@ run_id**——人工交互靠 `correlation_id` 路由，设计如此）。`deliv
   全部路由到 `on_task_board_event`，而后者被重写成 **resume_polls-only**（交接是调度器的
   leader 身份邮箱消息，再自反应就是双投递；leader 的感知走调度器的摘要/升级）。
   `on_initial_task_poll` 覆写为 no-op（同理：调度器的 handoff 是邮箱里的持久行，首启邮箱
-  sweep 会 drain 它）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` / `UPDATED` 的定向
+  sweep 会 drain 它；改派到手的活跃任务也不例外——调度器的交接补发扫描会给没有开工行的
+  新 owner 补一封，B_06）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` / `UPDATED` 的定向
   steer——`update_task` 在两个模式下同义。
 - `ScheduledStaleTaskHandler`：`on_poll_task` 只扫自己的 stale 活跃任务（漏投递的兜底），
   **不做 leader stale-pending 自催**（调度模式下排队中的 `PENDING(assignee)` 是常态，调度器

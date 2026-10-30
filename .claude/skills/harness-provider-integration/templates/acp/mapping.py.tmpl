@@ -1,0 +1,491 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Translate Agent Client Protocol ``session/update`` notifications into protocol v1 events.
+
+One accumulator lives for one external Turn (one ``session/prompt``).  ACP
+streams message and thought chunks keyed by ``messageId``, tool calls as a
+``tool_call`` followed by ``tool_call_update``s, and reports the turn's end
+(and, for agents that extend it, token usage) on the prompt *response*.
+
+Shapes handled here come from real ACP exchanges, not from the spec alone:
+
+* a ``tool_call`` may arrive ``pending`` with an empty ``rawInput``; the
+  arguments only show up on the ``in_progress`` update, so the tool item is
+  started on the first update that carries input (or settles the call);
+* a call's ``title`` is a display string that may change (a tool name first,
+  a file path later), so the name is taken from the first one seen;
+* ``rawOutput`` is the structured result, while ``content`` holds what the
+  agent rendered for the model.
+
+ACP states no model request, so when the host observes requests the
+accumulator derives them from the stream: a run of thought / message output
+and the tool calls that follow it is one request, and output after a tool
+settled (or a tool call with none in between) opens the next. Each derived
+``ModelRequestEvent`` carries the output side only (``input_observed=False``),
+is emitted before the tool items it caused, and those items cite it in
+``causation_ids``. A provider that can read the vendor's own request records
+completes the event in ``_observe_request`` on the harness.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import (
+    ContentBlock,
+    ItemEventKind,
+    ItemLifecycleEvent,
+    MessageRole,
+    ModelRequestEvent,
+    ModelRequestStatus,
+    OutputChannel,
+    OutputEvent,
+    OutputKind,
+    OutputOperation,
+    ProviderEvent,
+    TurnError,
+    TurnEventKind,
+    TurnMessage,
+    TurnResult,
+    TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
+    TurnUsage,
+    UsageUpdatedEvent,
+    UsageUpdateMode,
+)
+from openjiuwen.harness_providers.base import PendingTurn, TurnTiming, interrupted_result
+from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
+
+PROVIDER_NAME = "__CARD__"
+SCHEMA_VERSION = "1"
+
+_CHUNK_CHANNELS = {
+    "agent_message_chunk": OutputChannel.ANSWER,
+    "agent_thought_chunk": OutputChannel.REASONING,
+}
+_SETTLED_TOOL_STATUSES = frozenset({"completed", "failed"})
+
+
+@dataclass(frozen=True, slots=True)
+class MappedEvent:
+    """One protocol payload plus the provider item it is about."""
+
+    payload: Any
+    item_id: str | None = None
+    causation_ids: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class _OpenOutput:
+    output_id: str
+    channel: OutputChannel
+    message_key: str | None
+    parts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _ToolCall:
+    name: str
+    kind: str | None
+    raw_input: Any = None
+    started: bool = False
+
+
+@dataclass(slots=True)
+class _OpenRequest:
+    """A model request derived from the stream, still producing output."""
+
+    request_id: str
+    started_at: float
+    first_output_at: float | None = None
+    blocks: list[ContentBlock] = field(default_factory=list)
+
+
+class __CLASS__TurnAccumulator:
+    """State needed to normalize the updates of one ``session/prompt``."""
+
+    def __init__(self, *, turn_id: str, observe_requests: bool = False, model: str | None = None) -> None:
+        """Start the state of one turn.
+
+        Args:
+            turn_id: The protocol turn the updates belong to.
+            observe_requests: Derive ``ModelRequestEvent``s from the stream
+                (the host declared ``MODEL_REQUEST_OBSERVATION``).
+            model: The model the session runs on, when known.
+        """
+        self.turn_id = turn_id
+        self.messages: list[TurnMessage] = []
+        self.last_text_output = ""
+        self.updates_seen = 0
+        self.usage: TurnUsage | None = None
+        self._open: dict[OutputChannel, _OpenOutput] = {}
+        self._output_seq = 0
+        self._tools: dict[str, _ToolCall] = {}
+        self._observe_requests = observe_requests
+        self._model = model
+        self._request: _OpenRequest | None = None
+        self._request_seq = 0
+        # When the model was last asked: the turn start, then each settled tool.
+        self._asked_at = time.time()
+        # The closed request whose tool calls may still be arriving; output or
+        # a settled tool ends that window.
+        self._calling_request: str | None = None
+
+    @property
+    def emitted_output(self) -> bool:
+        """Return whether any answer text was produced in this turn."""
+        return bool(self.last_text_output) or OutputChannel.ANSWER in self._open
+
+    def consume(self, update: Mapping[str, Any]) -> list[MappedEvent]:
+        """Map one ``session/update`` ``update`` object."""
+        self.updates_seen += 1
+        kind = str(update.get("sessionUpdate") or "unknown")
+        channel = _CHUNK_CHANNELS.get(kind)
+        if channel is not None:
+            return self._chunk(channel, update)
+        if kind == "tool_call":
+            return self._tool_call(update)
+        if kind == "tool_call_update":
+            return self._tool_call_update(update)
+        return [_provider_event(kind, update)]
+
+    def finish(self, request_status: ModelRequestStatus = ModelRequestStatus.COMPLETED) -> list[MappedEvent]:
+        """Finalize every open output and request; call before building the terminal result.
+
+        Args:
+            request_status: How the request still producing output ended.
+        """
+        return [*self._finalize_outputs(), *self._close_request(request_status)]
+
+    def usage_event(self, response: Mapping[str, Any]) -> list[MappedEvent]:
+        """Read the turn usage some agents attach to the prompt response."""
+        usage = _usage(response.get("usage"))
+        if usage is None:
+            return []
+        self.usage = usage
+        return [MappedEvent(UsageUpdatedEvent(usage=usage, mode=UsageUpdateMode.CUMULATIVE))]
+
+    def build_terminal_result(
+        self,
+        response: Mapping[str, Any],
+        *,
+        turn: PendingTurn,
+        timing: TurnTiming,
+    ) -> tuple[TurnEventKind, TurnResult]:
+        """Map the ``session/prompt`` response's ``stopReason`` to the terminal event."""
+        stop_reason = str(response.get("stopReason") or "")
+        if turn.abort_requested:
+            return TurnEventKind.ABORTED, self.build_interrupted_result(turn, timing=timing)
+        common = self._common(timing, stop_reason or None)
+        if stop_reason in {"end_turn", "max_tokens", "max_turn_requests"}:
+            return TurnEventKind.FINISHED, TurnResult(status=TurnStatus.COMPLETED, **common)
+        if stop_reason in {"cancelled", "refusal"}:
+            kind = TurnTerminationKind.POLICY if stop_reason == "refusal" else TurnTerminationKind.PROVIDER
+            return TurnEventKind.ABORTED, TurnResult(
+                status=TurnStatus.INTERRUPTED,
+                termination=TurnTermination(kind=kind, message=f"__DISPLAY__ ended the turn: {stop_reason}"),
+                **common,
+            )
+        error = TurnError(
+            message=f"__DISPLAY__ returned an unknown stop reason {stop_reason!r}",
+            code="__UPPER___UNKNOWN_STOP_REASON",
+            category="sdk_error",
+        )
+        return TurnEventKind.FAILED, TurnResult(status=TurnStatus.FAILED, error=error, **common)
+
+    def build_failed_result(self, error: TurnError, *, timing: TurnTiming) -> TurnResult:
+        """Build a FAILED result for an error raised while driving the turn."""
+        return TurnResult(status=TurnStatus.FAILED, error=error, **self._common(timing, None))
+
+    def build_interrupted_result(self, turn: PendingTurn, *, timing: TurnTiming) -> TurnResult:
+        """Build the INTERRUPTED result matching how ``turn`` was stopped."""
+        return interrupted_result(
+            turn,
+            provider_name=PROVIDER_NAME,
+            timing=timing,
+            messages=tuple(self.messages),
+            final_output=self.last_text_output,
+            usage=self.usage,
+        )
+
+    # ------------------------------------------------------------------
+    # Output chunks
+    # ------------------------------------------------------------------
+
+    def _chunk(self, channel: OutputChannel, update: Mapping[str, Any]) -> list[MappedEvent]:
+        content = update.get("content")
+        if not isinstance(content, Mapping) or content.get("type") != "text":
+            return [_provider_event(str(update.get("sessionUpdate")), update)]
+        text = content.get("text")
+        if not isinstance(text, str):
+            return []
+        message_key = _string(update.get("messageId"))
+        mapped: list[MappedEvent] = []
+        current = self._open.get(channel)
+        if current is not None and message_key is not None and current.message_key != message_key:
+            mapped.extend(self._finalize(channel))
+            current = None
+        if current is None:
+            self._output_seq += 1
+            current = _OpenOutput(
+                output_id=f"{self.turn_id}:{channel.value}:{self._output_seq}",
+                channel=channel,
+                message_key=message_key,
+            )
+            self._open[channel] = current
+        current.parts.append(text)
+        self._note_output()
+        mapped.append(
+            MappedEvent(
+                OutputEvent(
+                    output_id=current.output_id,
+                    kind=OutputKind.TEXT,
+                    content=text,
+                    operation=OutputOperation.DELTA,
+                    channel=channel,
+                )
+            )
+        )
+        return mapped
+
+    def _finalize(self, channel: OutputChannel) -> list[MappedEvent]:
+        current = self._open.pop(channel, None)
+        if current is None:
+            return []
+        text = "".join(current.parts)
+        if channel is OutputChannel.ANSWER:
+            self.last_text_output = text
+        message_id = current.message_key or current.output_id
+        block_kind = "text" if channel is OutputChannel.ANSWER else "reasoning"
+        block = ContentBlock(block_id=current.output_id, kind=block_kind, content=text)
+        self.messages.append(
+            TurnMessage(message_id=f"{message_id}:{block_kind}", role=MessageRole.ASSISTANT, content=(block,))
+        )
+        if self._request is not None:
+            self._request.blocks.append(block)
+        return [
+            MappedEvent(
+                OutputEvent(
+                    output_id=current.output_id,
+                    kind=OutputKind.TEXT,
+                    content=text,
+                    operation=OutputOperation.FINAL,
+                    channel=channel,
+                )
+            )
+        ]
+
+    # ------------------------------------------------------------------
+    # Tool calls
+    # ------------------------------------------------------------------
+
+    def _tool_call(self, update: Mapping[str, Any]) -> list[MappedEvent]:
+        call_id = _string(update.get("toolCallId")) or f"{self.turn_id}:tool:{len(self._tools) + 1}"
+        if call_id not in self._tools:
+            self._tools[call_id] = _ToolCall(
+                name=_string(update.get("title")) or _string(update.get("kind")) or "tool",
+                kind=_string(update.get("kind")),
+            )
+        # Text written before the call belongs to the reply that made it.
+        return [*self._finalize_outputs(), *self._tool_call_update(update)]
+
+    def _tool_call_update(self, update: Mapping[str, Any]) -> list[MappedEvent]:
+        call_id = _string(update.get("toolCallId"))
+        if call_id is None:
+            return [_provider_event("tool_call_update", update)]
+        call = self._tools.setdefault(
+            call_id,
+            _ToolCall(name=_string(update.get("title")) or _string(update.get("kind")) or "tool", kind=None),
+        )
+        raw_input = update.get("rawInput")
+        if _has_value(raw_input):
+            call.raw_input = raw_input
+        status = _string(update.get("status")) or "pending"
+        mapped: list[MappedEvent] = []
+        # Start once the arguments are known; an in_progress update without
+        # them (Kimi Code sends several) is not enough. A call that settles
+        # without ever showing arguments still starts before it completes.
+        ready = _has_value(call.raw_input) or status in _SETTLED_TOOL_STATUSES
+        if not call.started and ready:
+            call.started = True
+            arguments = to_json_safe(call.raw_input or {})
+            requests, causes = self._request_calling(call_id, call.name, arguments)
+            mapped.extend(requests)
+            mapped.append(
+                MappedEvent(
+                    ItemLifecycleEvent(
+                        kind=ItemEventKind.STARTED,
+                        item_type="tool",
+                        data={"name": call.name, "arguments": arguments, "kind": call.kind},
+                    ),
+                    item_id=call_id,
+                    causation_ids=causes,
+                )
+            )
+        if status in _SETTLED_TOOL_STATUSES:
+            rendered = _rendered_content(update.get("content"))
+            raw_output = update.get("rawOutput")
+            data: dict[str, Any] = {
+                "tool_name": call.name,
+                "result": to_json_safe(raw_output) if raw_output is not None else rendered,
+                "is_error": status == "failed",
+            }
+            if rendered is not None:
+                data["rendered_result"] = rendered
+            mapped.append(
+                MappedEvent(
+                    ItemLifecycleEvent(kind=ItemEventKind.COMPLETED, item_type="tool", data=data),
+                    item_id=call_id,
+                )
+            )
+            # The tool result goes back to the model, which is asked again.
+            self._asked_at = time.time()
+            self._calling_request = None
+        return mapped
+
+    # ------------------------------------------------------------------
+    # Derived model requests
+    # ------------------------------------------------------------------
+
+    def _finalize_outputs(self) -> list[MappedEvent]:
+        mapped: list[MappedEvent] = []
+        for channel in (OutputChannel.REASONING, OutputChannel.ANSWER):
+            mapped.extend(self._finalize(channel))
+        return mapped
+
+    def _note_output(self) -> None:
+        """Record model output, opening a request when none is producing it."""
+        if not self._observe_requests:
+            return
+        self._calling_request = None
+        if self._request is None:
+            self._request = self._new_request()
+        if self._request.first_output_at is None:
+            self._request.first_output_at = time.time()
+
+    def _new_request(self) -> _OpenRequest:
+        self._request_seq += 1
+        return _OpenRequest(request_id=f"{self.turn_id}:request:{self._request_seq}", started_at=self._asked_at)
+
+    def _request_calling(self, call_id: str, name: str, arguments: Any) -> tuple[list[MappedEvent], tuple[str, ...]]:
+        """Return the request events to emit before a tool starts, and the tool's causes.
+
+        A tool call ends the request producing output. Calls arriving right
+        after it (parallel calls) belong to the same request; a call with no
+        output since the last settled tool is a request of its own.
+        """
+        if not self._observe_requests:
+            return [], ()
+        if self._request is None and self._calling_request is not None:
+            return [], (self._calling_request,)
+        if self._request is None:
+            self._request = self._new_request()
+        request = self._request
+        request.blocks.append(
+            ContentBlock(
+                block_id=f"{request.request_id}:{call_id}",
+                kind="tool_call",
+                content={"name": name, "arguments": arguments},
+                data={"call_id": call_id},
+            )
+        )
+        mapped = self._close_request(ModelRequestStatus.COMPLETED)
+        self._calling_request = request.request_id
+        return mapped, (request.request_id,)
+
+    def _close_request(self, status: ModelRequestStatus) -> list[MappedEvent]:
+        request = self._request
+        self._request = None
+        if request is None:
+            return []
+        ended_at = max(time.time(), request.started_at)
+        first_chunk = request.first_output_at
+        output = (
+            TurnMessage(message_id=request.request_id, role=MessageRole.ASSISTANT, content=tuple(request.blocks))
+            if request.blocks
+            else None
+        )
+        return [
+            MappedEvent(
+                ModelRequestEvent(
+                    request_id=request.request_id,
+                    status=status,
+                    started_at=request.started_at,
+                    ended_at=ended_at,
+                    model=self._model,
+                    output_message=output,
+                    time_to_first_chunk=max(first_chunk - request.started_at, 0.0) if first_chunk else None,
+                    data={PROVIDER_NAME: {"observation": "acp_stream"}},
+                )
+            )
+        ]
+
+    def _common(self, timing: TurnTiming, stop_reason: str | None) -> dict[str, Any]:
+        return {
+            "messages": tuple(self.messages),
+            "final_output": self.last_text_output,
+            "stop_reason": stop_reason,
+            "usage": self.usage,
+            "started_at": timing.started_at,
+            "completed_at": timing.completed_at(),
+            "duration_ms": timing.duration_ms(),
+            "provider_data": {"updates_seen": self.updates_seen},
+        }
+
+
+def _provider_event(event_type: str, payload: Mapping[str, Any]) -> MappedEvent:
+    return MappedEvent(
+        ProviderEvent(
+            provider=PROVIDER_NAME,
+            event_type=event_type,
+            schema_version=SCHEMA_VERSION,
+            payload=to_json_object(payload),
+        )
+    )
+
+
+def _rendered_content(content: Any) -> str | None:
+    """Join the text the agent rendered for a tool call, if any."""
+    if not isinstance(content, list):
+        return None
+    texts: list[str] = []
+    for item in content:
+        if not isinstance(item, Mapping):
+            continue
+        inner = item.get("content")
+        if item.get("type") == "content" and isinstance(inner, Mapping) and isinstance(inner.get("text"), str):
+            texts.append(inner["text"])
+    return "\n".join(texts) if texts else None
+
+
+def _usage(raw: Any) -> TurnUsage | None:
+    if not isinstance(raw, Mapping):
+        return None
+    cache_write = _int(raw.get("cachedWriteTokens"))
+    return TurnUsage(
+        input_tokens=_int(raw.get("inputTokens")),
+        output_tokens=_int(raw.get("outputTokens")),
+        cached_input_tokens=_int(raw.get("cachedReadTokens")),
+        reasoning_output_tokens=_int(raw.get("thoughtTokens")),
+        total_tokens=_int(raw.get("totalTokens")),
+        provider_data={"cached_write_tokens": cache_write} if cache_write is not None else {},
+    )
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and value != {} and value != []
+
+
+def _string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+__all__ = ["PROVIDER_NAME", "SCHEMA_VERSION", "MappedEvent", "__CLASS__TurnAccumulator"]

@@ -58,18 +58,21 @@ class TracerWorkflowUtils:
                              need_send=True)
 
     @staticmethod
-    async def trace_component_begin(session, source_ids: list = None):
+    async def trace_component_begin(session, source_ids: list = None, extra_metadata: dict = None):
         tracer = session.tracer()
         if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
+        metadata = TracerWorkflowUtils._get_component_metadata(session)
+        if extra_metadata:
+            metadata.update({k: v for k, v in extra_metadata.items() if v is not None})
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_start",
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
                              source_ids=source_ids,
                              session_id=session.session_id(),
-                             metadata=TracerWorkflowUtils._get_component_metadata(session))
+                             metadata=metadata)
 
     @staticmethod
     async def trace_component_inputs(session, inputs: Optional[dict], send: bool = True):

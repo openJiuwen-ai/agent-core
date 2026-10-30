@@ -19,6 +19,7 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
+| `org_root_aggregation.md` | Organization Leader | `organization/runtime.py` / `organization/tools.py` | Shared aggregation selection policy (cn/en) |
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
 | `leader_bootstrap.md` | `role == LEADER`，**常驻系统提示词** | `build_leader_bootstrap_section` | Leader 在系统提示词里唯一的团队内容（[[F_76]]）：身份定位 + `{{collaboration_mechanism}}` 槽 + 「先调 `build_team`，完整协同准则随它的返回结果下发」。**建队之前唯一成立的内容**，因此也只有它留在前缀 |
 | `leader_policy.md` | `role == LEADER`，**经 `build_team` 的 ToolResult 下发** | `build_team_role_section` → `build_leader_policy_disclosure` | Leader 的核心理念、职责、成果交接（通道由内容形态决定：短内容直接进消息正文，成型产物落盘、消息只传路径）、决策原则（禁止自执行 / 背景不清先建调研成员 / 无人认领时指派或 spawn / 整合总结交独立汇总成员）、响应节奏。**「任务状态流转」一节已移出**到下面按模式拆分的 `task_state_*.md`（[[F_76]]）——它是模式相关的，留在这份全模式共用的模板里必然要么写死一种模式、要么每行加 caveat。**纯静态无占位符**——分流规则已归 `leader_bootstrap.md` 独占，此处不再留槽（留着的槽早晚会被再填一次，两个消费者就重新长出来） |
@@ -30,10 +31,11 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
 | `task_state_autonomous.md` · `task_state_scheduled.md` | `role == LEADER`，按 `dispatch_mode` 挑版 | `build_team_task_state_section` | 任务状态机（状态集 + 核心转换边 + 终态）。**按模式拆两份而不是一份带 caveat**（[[F_76]]）：`pending → in_progress` 由谁驱动、以及**有没有验证闸**，两模式根本不同。**autonomous 版对验证闸一字不提**（连"本模式没有验证闸"这样的警告也不写——点名一个不存在的能力正是让模型去够它的原因，同编辑规则 2）：状态集无 `in_review`、转换表无验证边、正文不出现 `reviewer` / `验证` 字样，只给出该模式真正可用的质量把关方式。门控的理由（无 `TeamScheduler` 唤起验证者、硬配会让任务永久占住活跃名额）写在 [[F_76]] 与代码注释里，不写进提示词。scheduled 版保留完整验证闸，reviewer 的类型/数量/instruction 细则指向《任务下发与获取》不重复 |
 | `dispatch_autonomous_leader.md` · `dispatch_autonomous_teammate.md` | `dispatch_mode="autonomous"`（默认），按角色挑版 | `build_team_dispatch_section` | 任务经公共看板自主认领，也可在 `create_task` 时预指派给已存在的非 leader 成员；Leader 用 `send_message(to="*")` 广播启动；Teammate 用 `claim_task` 领取 / 启动指派给自己的任务 / 完成。`human_agent` 无 `claim_task`、需 Leader 显式指派的说明也在 leader 版里 |
-| `dispatch_scheduled_leader.md` · `dispatch_scheduled_teammate.md` | `dispatch_mode="scheduled"`，按角色挑版 | `build_team_dispatch_section` | 任务由 Leader 直接指派：`create_task` 必带 assignee（已存在且非 leader）、成员先于任务存在、**不广播启动**（调度框架自动通知并拉起）；Teammate 不自主认领，用 `member_complete_task` 完成 |
+| `dispatch_scheduled_leader.md` · `dispatch_scheduled_teammate.md` | `dispatch_mode="scheduled"`，按角色挑版 | `build_team_dispatch_section` | 任务由 Leader 直接指派：`create_task` 必带承担者——`assignee`（已存在且非 leader）或 `member` 内联创建（带 `lifetime`，F_118）、**不广播启动**（调度框架自动通知并拉起）、「休眠与唤醒」一节（点名即醒、广播不醒、休眠成员需 `shutdown_member` 后才能 `clean_team`）；Teammate 不自主认领，用 `member_complete_task(note=...)` 完成，开工通知自带上下游简述、只为看**别人**的任务才 `view_task(get)` |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `build_team_lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
 | `inbound_tags.md` | 常驻（每个成员，含外部 CLI） | `build_team_inbound_tags_section` | 入站消息与团队状态的 XML 标签体系（`<team-inbound>` / `<team-note>` / `<team-event>` / `<team-context>`、**`<team-note>` 嵌在被修饰块内部**见 [[F_72]]、`for="controller"` / `from="controller"`、名册的 `kind="roster"` 全量 + `kind="roster-change"` 增量**累积**语义，见 [[F_70]]）+ **`from="user"` 与 `from="controller"` 的角色定义**（两者都是团队外部真人、都不在名册、**但不是同一个人**：user 委托整个团队，controller 只操作某个 avatar）。身份是角色中立事实故放这里一处覆盖全角色；**怎么答复由各自角色契约管**（teammate 必须 `send_message(to="user")`，leader 纯文本直达 user，avatar 纯文本直达 controller），此处不写。进程内成员与外部 CLI（`read_inbox`）都渲染这套 XML |
+| `tool_namespace.md` | 外部 CLI 成员（`build_team_member_system_prompt(mcp_server_name=...)`） | `<team-policy tools="...">` 的首个子元素 `<team-note kind="tool-namespace">` | **裸工具名归谁**：本策略区域与所有 `team-*` 消息块里的 `send_message` / `view_task` / ... 都是该 MCP server 的工具，CLI 自带的同名近名工具不属于这个通道。进程内成员不渲染（它就是裸名调用）。只说 server 名，**不说全限定形式**——那是 provider 的事（Claude `mcp__<server>__<tool>`、Codex `mcp__<server>.<tool>`），见 [[F_114]] |
 | `hitt_leader.md` / `hitt_teammate.md` / `hitt_teammate_anonymous.md` / `hitt_human_agent.md` | `hitt_enabled` 且角色命中 | `build_team_hitt_section`（→ system prompt builder，静态） | HITT **静态协作契约**（规则），按角色分四版（`_hitt_template_name` 挑版），roster-agnostic 不列名字——人类成员在名册消息里标 `[human]`；仅 `hitt_human_agent` 用 `{{self_line}}` 注入自身名字行。gate 用 `hitt_enabled`（capability flag），HITT 一开启即 present、无需先 spawn 人类。**`hitt_human_agent` 只管一件事**：对 `for="controller"` 通知的静默约束；avatar 的通道说明归 `human_agent_policy`，两处不要各写一份。见 [[F_52]] |
 | `bridge_agent.md` | `role == BRIDGE_AGENT`（bridge avatar 本人） | `build_team_bridge_section` | Bridge avatar **自契约**（调度语义）。bridge 成员在别人眼里就是普通 teammate（名册消息里不加标记，无 peer 向说明段），只有 avatar 本人拿这段；`{{self_line}}` 注入自身名字行。见 [[F_52]] |
 
@@ -53,6 +55,16 @@ Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEAD
 6. **排版风格** — 顶层用 `##`（因为外层 Rail 已经提供 `#` 级标题），列表/代码块保持紧凑。避免使用 emoji 装饰。
 
 ## Runtime Assembly 路径
+
+Organization 的共享聚合规则使用 `org_root_aggregation.md`（cn/en 成对），由组织运行时的协作与认领后提示词、组织更新工具说明通过 `load_template` 读取；它不单独创建新的 Team section，也不进入未启用组织的普通 Team 提示词。
+
+Organization 的单次汇总收尾补偿使用 `org_summary_closeout.md`（cn/en 成对），由
+`OrganizationRuntimeManager` 在自然暂停且汇总尚未提交时投递到对话，动态字段为
+`{{summary_task_id}}`、`{{execution_id}}`、`{{workspace_path}}`。它不参与常驻系统提示词装配。
+
+Summary 成员错误经宿主转发到 `org_summary_member_failure.md`（cn/en），使用已有内部消息
+直接唤醒 Summary Leader，不等待任务板收敛。同一错误帧去重，最多一次恢复通知，再失败
+通知根任务 Leader 报告阻塞；不自动重放成员任务。
 
 唯一装配入口是 `sections.build_team_*_section`：每个模板独立产出一个 `PromptSection`，由 `agent_teams/rails/team_policy_rail.py` 的 `TeamPolicyRail` 按优先级合并进 `SystemPromptBuilder`（外部 CLI 成员则经 `build_team_member_system_prompt` 渲染成独立字符串）。各 builder 直接 `load_template` 读对应 `.md`（如 `build_team_role_section` 读 `leader_policy` / `teammate_policy`）。
 

@@ -4,6 +4,13 @@
 
 {{task.content}}
 
+## Upstream and downstream
+
+- Upstream (completed, yours to build on):
+{{task.upstream_brief}}
+- Downstream (waiting on your delivery):
+{{task.downstream_brief}}
+
 ## How to deliver
 
 - Submit your execution plan via `submit_plan`; do not start executing yet.

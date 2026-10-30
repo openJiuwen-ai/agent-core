@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import json
@@ -9,6 +12,9 @@ from typing import Callable
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
+    extract_file_path_argument,
+)
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.query_terms import extract_query_terms
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.router import RuleContentRouter
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
@@ -75,6 +81,7 @@ class RuleCompressionPipeline:
             count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
             query_terms=query_terms,
             tool_name=tool_name,
+            file_path=extract_file_path_argument(tool_arguments),
         )
         result = self._router.compress(original, rule_ctx)
         content = result.content

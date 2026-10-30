@@ -56,7 +56,7 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 def test_build_browser_runtime_tools_returns_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 3
+    assert len(tools) == 4
 
 
 def test_each_tool_is_tool_subclass() -> None:
@@ -75,14 +75,16 @@ def test_default_helper_tool_names() -> None:
         "browser_probe_interactives",
         "browser_probe_cards",
         "browser_batch_interact",
+        "browser_phase",
     ]
 
 
 def test_helper_tool_classes() -> None:
-    probe_interactives, probe_cards, batch_interact = build_browser_runtime_tools(_make_runtime())
+    probe_interactives, probe_cards, batch_interact, phase = build_browser_runtime_tools(_make_runtime())
     assert isinstance(probe_interactives, BrowserProbeInteractivesTool)
     assert isinstance(probe_cards, BrowserProbeCardsTool)
     assert isinstance(batch_interact, BrowserBatchInteractTool)
+    assert phase.card.name == "browser_phase"
 
 
 def test_language_en_uses_non_empty_descriptions() -> None:
@@ -421,11 +423,11 @@ def test_batch_interact_schema_supports_single_action_and_exposes_condition_wait
     assert "ref" in steps_schema["items"]["properties"]
     assert "option_target_id" in steps_schema["items"]["properties"]
     assert "wait_for_url" in operations
-    assert "wait_for_first_card_title" in operations
+    assert "wait_for_first_card_title" not in operations
     assert "wait_for_sort_state" in operations
-    assert "wait_for_result_count" in operations
-    assert "wait_for_dom_text_change" in operations
-    assert "wait_for_stable" in operations
+    assert "wait_for_result_count" not in operations
+    assert "wait_for_dom_text_change" not in operations
+    assert "wait_for_stable" not in operations
     assert "wait_for_tab" in operations
     assert "sleep" not in operations
     step_properties = steps_schema["items"]["properties"]

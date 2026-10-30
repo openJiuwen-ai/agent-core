@@ -10,6 +10,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import APIEmbedding, EmbeddingConfig
+from openjiuwen.core.session.tracer.handler import TraceExtAgentHandler
 
 
 @pytest.fixture
@@ -280,7 +281,7 @@ class TestAPIEmbedding:
             model = APIEmbedding(config=embedding_config, max_batch_size=2)
             texts = ["text 1", "text 2", "text 3"]
             # Even if batch_size=5 is specified, it should be limited to max_batch_size=2
-            embeddings = await model.embed_documents(texts, batch_size=5)
+            await model.embed_documents(texts, batch_size=5)
             # Should process in 2 batches (2 + 1)
             assert mock_to_thread.call_count == 2
 
@@ -320,3 +321,200 @@ class TestAPIEmbedding:
             await model.embed_query("test")
             # Dimension should have been retrieved from response
             assert model.dimension == 768
+
+
+class _RecordingAgentHandler(TraceExtAgentHandler):
+    """Minimal tracer agent handler recording on_embedding_* events.
+
+    The remaining abstract event methods are no-op stubs — these tests only
+    observe the embedding trio fired by APIEmbedding.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    async def on_embedding_start(self, span, inputs, instance_info, **kwargs):
+        self.events.append(("start", dict(inputs), dict(instance_info)))
+
+    async def on_embedding_end(self, span, outputs, **kwargs):
+        self.events.append(("end", dict(outputs)))
+
+    async def on_embedding_error(self, span, error, **kwargs):
+        self.events.append(("error", type(error).__name__))
+
+    async def on_llm_start(self, **kw):
+        pass
+
+    async def on_llm_request(self, **kw):
+        pass
+
+    async def on_llm_end(self, **kw):
+        pass
+
+    async def on_llm_error(self, **kw):
+        pass
+
+    async def on_plugin_start(self, **kw):
+        pass
+
+    async def on_plugin_end(self, **kw):
+        pass
+
+    async def on_plugin_error(self, **kw):
+        pass
+
+    async def on_prompt_start(self, **kw):
+        pass
+
+    async def on_prompt_end(self, **kw):
+        pass
+
+    async def on_prompt_error(self, **kw):
+        pass
+
+    async def on_chain_start(self, **kw):
+        pass
+
+    async def on_chain_end(self, **kw):
+        pass
+
+    async def on_chain_error(self, **kw):
+        pass
+
+    async def on_retriever_start(self, **kw):
+        pass
+
+    async def on_retriever_end(self, **kw):
+        pass
+
+    async def on_retriever_error(self, **kw):
+        pass
+
+    async def on_evaluator_start(self, **kw):
+        pass
+
+    async def on_evaluator_end(self, **kw):
+        pass
+
+    async def on_evaluator_error(self, **kw):
+        pass
+
+    async def on_workflow_start(self, **kw):
+        pass
+
+    async def on_workflow_end(self, **kw):
+        pass
+
+    async def on_workflow_error(self, **kw):
+        pass
+
+
+class TestAPIEmbeddingTraceEvents:
+    """Embedding calls fire on_embedding_* tracer events under a traced session."""
+
+    @pytest.fixture
+    def traced_env(self, monkeypatch):
+        """Wire a real Tracer + recording handler into the session contextvar."""
+        from types import SimpleNamespace
+
+        from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
+
+        recorder = _RecordingAgentHandler()
+        saved_agent = TracerHandlerRegistry.get_agent_handlers()
+        saved_workflow = TracerHandlerRegistry.get_workflow_handlers()
+        TracerHandlerRegistry.register_handler("embed_recorder", recorder)
+        tracer = Tracer(session_id="embed-trace-test")
+        tracer.init()
+        stub_session = SimpleNamespace(tracer=lambda: tracer)
+        monkeypatch.setattr(
+            "openjiuwen.core.retrieval.embedding.api_embedding.get_current_session",
+            lambda: stub_session,
+        )
+        try:
+            yield recorder
+        finally:
+            # Restore the pre-test global registry instead of leaving it empty:
+            # clearing in teardown would drop handlers registered by other
+            # test modules and couple this suite to execution order.
+            TracerHandlerRegistry.clear()
+            for name, saved in saved_agent.items():
+                TracerHandlerRegistry.register_handler(name, saved)
+            for name, saved in saved_workflow.items():
+                TracerHandlerRegistry.register_handler(name, saved)
+
+    @pytest.mark.asyncio
+    async def test_embed_query_fires_start_and_end(self, embedding_config, traced_env):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            "model": "test-model-20260101",
+            "usage": {"prompt_tokens": 5},
+        }
+        mock_response.raise_for_status = Mock()
+
+        with patch(
+            "openjiuwen.core.retrieval.embedding.api_embedding.requests.post",
+            return_value=mock_response,
+        ):
+            model = APIEmbedding(config=embedding_config)
+            vector = await model.embed_query("hello")
+
+        assert vector == [0.1, 0.2, 0.3]
+        events = traced_env.events
+        assert [e[0] for e in events] == ["start", "end"]
+        assert events[0][1]["text"] == "hello"
+        assert events[0][2]["model_name"] == "test-model"
+        assert events[0][2]["class_name"] == "APIEmbedding"
+        end_outputs = events[1][1]
+        assert end_outputs["vector_count"] == 1
+        assert end_outputs["dimension"] == 3
+        assert end_outputs["response_model"] == "test-model-20260101"
+        assert end_outputs["usage_input_tokens"] == 5
+
+    @pytest.mark.asyncio
+    async def test_no_session_skips_events(self, embedding_config, monkeypatch):
+        from openjiuwen.core.session.tracer.tracer import Tracer
+
+        fired = []
+
+        async def _spy_trigger(*args, **kwargs):
+            fired.append((args, kwargs))
+
+        monkeypatch.setattr(Tracer, "trigger", _spy_trigger)
+        monkeypatch.setattr(
+            "openjiuwen.core.retrieval.embedding.api_embedding.get_current_session",
+            lambda: None,
+        )
+        mock_response = Mock()
+        mock_response.json.return_value = {"embedding": [0.1, 0.2]}
+        mock_response.raise_for_status = Mock()
+
+        with patch(
+            "openjiuwen.core.retrieval.embedding.api_embedding.requests.post",
+            return_value=mock_response,
+        ):
+            model = APIEmbedding(config=embedding_config)
+            assert await model.embed_query("hello") == [0.1, 0.2]
+        # "Skips events" is observable, not just "did not crash": no tracer
+        # event may fire anywhere along the call path.
+        assert fired == []
+
+    @pytest.mark.asyncio
+    async def test_embed_failure_fires_error(self, embedding_config, traced_env):
+        import requests as requests_mod
+
+        def _raise(*args, **kwargs):
+            raise requests_mod.exceptions.ConnectionError("down")
+
+        with patch(
+            "openjiuwen.core.retrieval.embedding.api_embedding.requests.post",
+            side_effect=_raise,
+        ):
+            model = APIEmbedding(config=embedding_config, max_retries=1)
+            with pytest.raises(BaseError):
+                await model.embed_query("hello")
+
+        assert [e[0] for e in traced_env.events] == ["start", "error"]
+        # build_error(RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED) maps to FrameworkError
+        assert traced_env.events[-1][1] == "FrameworkError"

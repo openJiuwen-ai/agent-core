@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_DIRECT,
     SNAPSHOT_EVENT_KINDS,
     drop_superseded_snapshots,
+    render_clock,
     render_controller_input,
     render_event,
     render_inbound,
@@ -338,3 +339,18 @@ def test_team_context_with_identity_info_sibling_when_present_only():
     without_info = render_team_context_with_identity(identity_body="id")
     assert "info" in with_info
     assert "info" not in without_info
+
+
+@pytest.mark.level0
+def test_render_clock_is_a_self_closing_anchor():
+    """The current-time anchor is one attribute on a self-closing element."""
+    out = render_clock(now="2026-10-15 15:07:36 +08:00")
+    assert out == '<team-clock now="2026-10-15 15:07:36 +08:00"/>'
+    # It is not a snapshot event, so batch pruning never drops it.
+    assert snapshot_kind_of(out) is None
+
+
+@pytest.mark.level1
+def test_render_clock_escapes_the_attribute():
+    out = render_clock(now='a"<b>')
+    assert out == '<team-clock now="a&quot;&lt;b&gt;"/>'

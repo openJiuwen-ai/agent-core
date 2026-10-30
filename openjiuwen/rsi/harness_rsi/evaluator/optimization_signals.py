@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Dataset-neutral continuous signals used only to rank Harness experiments."""
+"""Dataset-neutral diagnostics alongside the evaluator's authoritative case score."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ def optimization_signals_contract(
 ) -> dict[str, Any]:
     """Build a versioned, dataset-neutral search-signal contract.
 
-    These signals may rank equally passing candidates or select a repair parent.
-    They never replace the evaluator's strict promotion score.
+    These signals may select a repair parent. Promotion always uses case.score;
+    the continuous protocol writes its trusted rubric score there directly.
     """
     score = _finite_float(continuous_score)
     normalized_dimensions: dict[str, dict[str, Any]] = {}

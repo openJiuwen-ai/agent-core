@@ -106,3 +106,87 @@ class TestAttachWorkspaceCacheCreatesEmptyCache:
         assert ws_mgr.workspace_cache is shared_cache
         ws_mgr.attach_workspace_cache.assert_not_called()
         backend.attach_workspace_manager.assert_called_once_with(ws_mgr)
+
+
+# --- swarmflow worker base spec: team-level progressive tool opt-in ---------
+
+
+def _swarmflow_team(**overrides):
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    agents = overrides.pop("agents", {"leader": DeepAgentSpec()})
+    return TeamAgentSpec(agents=agents, team_name="wf_team", enable_swarmflow=True, **overrides)
+
+
+def test_worker_base_spec_gets_progressive_tool_when_team_opts_in():
+    """progressive_tool=True on the team spec lands on the worker base spec as an enabled ProgressiveToolSpec."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import ProgressiveToolSpec
+
+    base = _derive_swarmflow_worker_base_spec(_swarmflow_team(progressive_tool=True), [])
+
+    assert base.progressive_tool == ProgressiveToolSpec(enabled=True)
+
+
+def test_worker_base_spec_untouched_when_team_key_off():
+    """Default (False) leaves the base spec's progressive_tool exactly as configured — byte-compatible."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+
+    spec = _swarmflow_team()
+    base = _derive_swarmflow_worker_base_spec(spec, [])
+
+    assert spec.progressive_tool is False
+    assert base.progressive_tool is None
+    assert spec.agents["leader"].progressive_tool is None
+
+
+def test_worker_base_spec_prefers_teammate_over_leader():
+    """The worker derives from the teammate spec when one exists, keeping its capabilities."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    spec = _swarmflow_team(
+        agents={"leader": DeepAgentSpec(), "teammate": DeepAgentSpec(enable_task_planning=True)},
+        progressive_tool=True,
+    )
+    base = _derive_swarmflow_worker_base_spec(spec, [])
+
+    assert base.enable_task_planning is True
+    assert base.progressive_tool is not None
+    assert spec.agents["teammate"].progressive_tool is None
+
+
+def test_expert_specs_handle_round_trips_through_build_context():
+    """The expert table rides BuildContext.extras under its own key; absent → {}."""
+    from openjiuwen.agent_teams.rails.team_context import (
+        TeamHandleKey,
+        get_swarmflow_expert_specs,
+        inject_team_handles,
+    )
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+
+    ctx = BuildContext()
+    assert get_swarmflow_expert_specs(ctx) == {}
+    inject_team_handles(ctx.extras, swarmflow_expert_specs={"clip": object()})
+    assert set(get_swarmflow_expert_specs(ctx)) == {"clip"}
+    assert TeamHandleKey.SWARMFLOW_EXPERT_SPECS == "team.swarmflow_expert_specs"
+
+
+# --- swarmflow external CLI allowlist: read from the blueprint, not the runtime spec ---
+
+
+def test_external_cli_allowlist_comes_from_the_blueprint_spec():
+    """The allowlist is declared on ``TeamAgentSpec.external_cli_agents``; the runtime
+    ``TeamSpec`` carries no such field, so deriving it from ``ctx.team_spec`` raises
+    ``AttributeError`` on every swarmflow leader setup."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_external_cli_agents
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamSpec
+
+    spec = _swarmflow_team(external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")])
+
+    entries = _derive_swarmflow_external_cli_agents(spec)
+
+    assert isinstance(entries, tuple)
+    assert [e.cli_agent for e in entries] == ["claude"]
+    assert "external_cli_agents" not in TeamSpec.model_fields

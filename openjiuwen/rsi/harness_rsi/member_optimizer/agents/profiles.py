@@ -15,7 +15,7 @@ class MemberOptimizerAgentProfile:
     agent_name: str
     description: str
     prompt_file: str
-    max_iterations: int = 3
+    max_iterations: int = 300
     enabled_skills: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -24,6 +24,7 @@ ROLE_ATTRIBUTION = MemberOptimizerAgentProfile(
     agent_name="member_role_attributor",
     description="Attributes Team issues to member Expert Harness roles.",
     prompt_file="role_attribution.md",
+    max_iterations=300,
 )
 
 MECHANISM_ATTRIBUTION = MemberOptimizerAgentProfile(
@@ -31,6 +32,7 @@ MECHANISM_ATTRIBUTION = MemberOptimizerAgentProfile(
     agent_name="member_mechanism_attributor",
     description="Diagnoses role-internal Expert Harness failure mechanisms.",
     prompt_file="mechanism_attribution.md",
+    max_iterations=300,
 )
 
 ACTION_PLANNING = MemberOptimizerAgentProfile(
@@ -38,7 +40,7 @@ ACTION_PLANNING = MemberOptimizerAgentProfile(
     agent_name="member_action_planner",
     description="Plans constrained member Expert Harness changes.",
     prompt_file="action_planning.md",
-    max_iterations=15,
+    max_iterations=300,
 )
 
 ACTION_EXECUTION = MemberOptimizerAgentProfile(
@@ -46,7 +48,7 @@ ACTION_EXECUTION = MemberOptimizerAgentProfile(
     agent_name="member_action_executor",
     description="Executes one constrained Expert Harness package action.",
     prompt_file="action_execution.md",
-    max_iterations=8,
+    max_iterations=300,
 )
 
 VERIFICATION_REPAIR = MemberOptimizerAgentProfile(
@@ -54,7 +56,7 @@ VERIFICATION_REPAIR = MemberOptimizerAgentProfile(
     agent_name="member_harness_verifier_repair",
     description="Repairs deterministic verification failures in one role package.",
     prompt_file="verification_repair.md",
-    max_iterations=8,
+    max_iterations=300,
 )
 
 _AGENT_PROFILES = (

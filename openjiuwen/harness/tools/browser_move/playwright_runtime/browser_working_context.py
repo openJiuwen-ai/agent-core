@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
-from .evidence import merge_evidence_slot, same_page_url, task_observation_allowed
+from .evidence import merge_evidence_slot, same_page_url, source_observations, task_observation_allowed
 
 BROWSER_WORKING_CONTEXT_STATE_KEY = "__browser_subagent_working_context__"
 BROWSER_TASK_STATE_KEY = "__browser_phase_budget_state__"
@@ -30,14 +30,14 @@ _ERROR_PREFIXES = (
 )
 _WORKING_CONTEXT_INSTRUCTIONS = {
     "en": (
-        "Runtime-owned execution context. Inferred fields are extraction hints, not extra user requirements. "
+        "Shared execution context and source observations. Business completion is your judgment. "
         "Use source observations to answer ordinary page questions even when field mapping is incomplete. "
         "Never invent missing values, substitute shop ratings for product ratings, or merge comparison variants. "
         "Respect actual blockers and terminal status; stop when the user's question is answered; "
         "do not echo this context or maintain a second progress object."
     ),
     "cn": (
-        "这是 runtime 维护的执行上下文。推断字段是提取提示，不是额外用户要求。"
+        "这是共享执行上下文和来源观察。业务完成由你结合原始用户目标判断。"
         "普通页面问答可根据有来源的已读原文作答，不必为字段映射不完整反复验证。"
         "不得编造缺失值、用店铺评分替代商品评分或混合对比项；遵守实际阻断和终态，回答充分即可结束。"
         "不要复述上下文或维护第二份进度对象。"
@@ -427,7 +427,7 @@ class BrowserWorkingContextStore:
                 "kind": request_kind,
                 "text": _bounded_text(request_text, 1_000),
             },
-            "task": self._project_task_state(task_state),
+            "task": self.project_task_state(task_state),
             "runtime_directive": self._runtime_directive(task_state),
             "recent_actions": list(task_state.get("recent_actions") or [])[-self.config.max_recent_steps:],
         }
@@ -580,8 +580,7 @@ class BrowserWorkingContextStore:
             return False
         progress_name = str(progress.get("progress") or "unknown")
         recovered = bool(
-            state.get("replan_trial_pending")
-            and (progress.get("observable_progress") is True or progress_name == "progress")
+            progress.get("observable_progress") is True or progress_name == "progress"
         )
         recent = state.get("recent_actions") or []
         if recent and recent[-1].get("semantic_delta") == "evidence_added":
@@ -633,7 +632,9 @@ class BrowserWorkingContextStore:
             return
         if not task_observation_allowed(state, str(semantic_state.get("url") or "")):
             return
-        required_fields = {str(field) for field in state.get("required_fields") or []}
+        required_fields = (
+            set(state.get("required_fields") or []) if state.get("requirements_source") == "explicit" else set()
+        )
         selected_filters = semantic_state.get("selected_filters")
         selected_filters = selected_filters if isinstance(selected_filters, list) else []
         if "sort_state" in required_fields:
@@ -670,12 +671,8 @@ class BrowserWorkingContextStore:
                         selector=selector,
                     )
 
-        goal = str(state.get("goal") or state.get("task") or "").lower()
-        commerce_requested = any(
-            token in goal for token in ("cart", "basket", "add to cart", "购物车", "加购", "加入购物车")
-        )
         feedback = semantic_state.get("action_feedback") or semantic_state.get("commerce_state")
-        if commerce_requested and isinstance(feedback, list) and feedback:
+        if isinstance(feedback, list) and feedback:
             value = "; ".join(
                 str(item.get("value") or "")
                 for item in feedback[:4]
@@ -684,7 +681,7 @@ class BrowserWorkingContextStore:
             if value:
                 BrowserWorkingContextStore._append_semantic_evidence(
                     state,
-                    field_name="action_confirmation",
+                    field_name="action_feedback",
                     value=value,
                     semantic_state=semantic_state,
                 )
@@ -733,14 +730,15 @@ class BrowserWorkingContextStore:
         if signature not in known:
             evidence.append(record)
             del evidence[:-20]
-        BrowserWorkingContextStore._append_required_evidence_slot(
-            state,
-            field_name=field_name,
-            value=value,
-            source=source,
-            generation=generation,
-        )
-        BrowserWorkingContextStore.refresh_field_coverage(state)
+        if state.get("requirements_source") == "explicit":
+            BrowserWorkingContextStore._append_required_evidence_slot(
+                state,
+                field_name=field_name,
+                value=value,
+                source=source,
+                generation=generation,
+            )
+            BrowserWorkingContextStore.refresh_field_coverage(state)
 
     @staticmethod
     def _append_required_evidence_slot(
@@ -874,7 +872,17 @@ class BrowserWorkingContextStore:
         outcome_status = str(action.get("outcome_status") or "")
         if outcome_status not in {"success", "ambiguous"}:
             return False
-        if outcome_status == "ambiguous":
+        journal = next(
+            (e for e in state.get("execution_journal", []) if e.get("call_id") == action.get("call_id")), None
+        )
+        if journal is not None:
+            action["execution_state"] = journal.get("execution_state")
+            if journal.get("requires_verification") or (
+                journal.get("execution_state") == "dispatched_unknown"
+                and journal.get("impact", "unknown") != "local_ui"
+            ):
+                return False
+        if outcome_status == "ambiguous" and journal is None:
             action["outcome_status"] = "success_after_observation"
             action["outcome"] = "success_after_observation"
         action["semantic_delta"] = "progress"
@@ -985,11 +993,18 @@ class BrowserWorkingContextStore:
         state["blocked_strategy"] = ""
         state["trial_strategy"] = ""
         state["replan_denial_count"] = 0
+        state["replan_count"] = 0
+        state["failed_strategies"] = []
+        state["read_only_recovery_counts"] = {}
         state["status"] = "in_progress"
         state["next_action_class"] = ""
 
     @staticmethod
-    def _project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    def project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
+        from .evidence import explicit_acceptance
+        from .execution_journal import project
+        from .phase_contract import project_phase
+
         phases = state.get("phases") if isinstance(state.get("phases"), dict) else {}
         current_phase = str(state.get("current_phase") or "")
         current_phase_state = phases.get(current_phase) if isinstance(phases.get(current_phase), dict) else {}
@@ -1004,20 +1019,21 @@ class BrowserWorkingContextStore:
             for key in semantic_keys:
                 if key in semantic_progress:
                     compact_semantic[key] = semantic_progress.get(key)
+        contract = state if state.get("requirements_source") == "explicit" else {}
         required_slots = [
             BrowserWorkingContextStore._project_evidence_slot(slot, include_value=False)
-            for slot in (state.get("required_evidence_slots") or [])[:16]
+            for slot in (contract.get("required_evidence_slots") or [])[:16]
             if isinstance(slot, dict)
         ]
         if not required_slots:
             required_slots = [
                 {"entity": "task", "variant": "default", "field": str(field_name)[:80]}
-                for field_name in (state.get("required_fields") or [])[:16]
+                for field_name in (contract.get("required_fields") or [])[:16]
                 if str(field_name).strip()
             ]
         evidence_slots = [
             BrowserWorkingContextStore._project_evidence_slot(slot, include_value=True)
-            for slot in (state.get("evidence_slots") or [])[-16:]
+            for slot in (contract.get("evidence_slots") or [])[-16:]
             if isinstance(slot, dict)
         ]
         if not evidence_slots:
@@ -1029,7 +1045,7 @@ class BrowserWorkingContextStore:
                     "status": "present",
                     "source": "legacy_runtime_state",
                 }
-                for field_name in (state.get("field_coverage") or [])[:16]
+                for field_name in (contract.get("field_coverage") or [])[:16]
                 if str(field_name).strip()
             ]
         covered_keys = {
@@ -1049,16 +1065,20 @@ class BrowserWorkingContextStore:
             if slot.get("observation_status") != "not_observed":
                 unavailable_slots.append(slot)
         return {
+            "phase_contract": project_phase(state),
+            "execution": project(state),
+            "acceptance": explicit_acceptance(state) if contract else [],
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
             "status": state.get("status", "in_progress"),
             "current_phase": current_phase,
             "phase_budget": {
+                "enforcement": "advisory",
                 "attempts": int(current_phase_state.get("attempts") or 0),
                 "limit": int(current_phase_state.get("budget") or 0),
             },
             "requirements": {
-                "source": state.get("requirements_source", "explicit"),
+                "source": "explicit" if contract else "observations",
                 "requested": required_slots,
                 "missing": missing_slots,
                 "unavailable": unavailable_slots,
@@ -1067,8 +1087,7 @@ class BrowserWorkingContextStore:
             "observations": [
                 {"source": item.get("source"), "generation_id": item.get("generation_id"),
                  "raw_text": _bounded_text(item.get("raw_text"), 1_500)}
-                for item in state.get("structured_evidence") or []
-                if isinstance(item, dict) and item.get("kind") == "page_observation"
+                for item in source_observations(state)
             ][-2:],
             "blockers": list(state.get("blockers") or [])[:8],
             "replan_required": bool(state.get("replan_required")),
@@ -1157,7 +1176,7 @@ class BrowserWorkingContextStore:
         if status in {"blocked", "partial"}:
             return "return_partial_or_blocked"
         if state.get("replan_required"):
-            return "replan_before_browser_action"
+            return "consider_different_strategy"
         if state.get("next_action_class") == "may_finish":
             return "may_finish_if_user_goal_met"
         return "continue"

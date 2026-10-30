@@ -43,27 +43,71 @@ _MAX_CONTENT_CHARS = 2_000_000
 _MAX_TEXT_FIELD_CHARS = 4_096
 _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = "openjiuwen-personal-context/1.0"
+_ARTICLE_ERROR_SCOPE = "article"
+_SESSION_ERROR_SCOPE = "session"
 
 
 def _validated_article_candidate(candidate: Mapping[str, object]) -> tuple[dict[str, object], str]:
+    if not isinstance(candidate, Mapping):
+        raise _article_error("Zhihu candidate is invalid")
     for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
         value = candidate.get(field_name)
         if not isinstance(value, str) or not value.strip():
-            raise _fetch_error("Zhihu candidate is invalid")
+            raise _article_error("Zhihu candidate is invalid")
     raw_article = candidate.get("article")
     if not isinstance(raw_article, Mapping):
-        raise _fetch_error("Zhihu candidate has no article metadata")
+        raise _article_error("Zhihu candidate has no article metadata")
     article = dict(raw_article)
     article_id = _article_id(article)
     if not article_id or article_id != candidate["stable_id"] or len(article_id) > 256:
-        raise _fetch_error("Zhihu candidate has no stable ID")
+        raise _article_error("Zhihu candidate has no stable ID")
     return article, article_id
 
 
-def _article_failure(offset: int, article_id: str) -> dict[str, object]:
+def _candidate_item_ref(candidate: object, *, offset: int) -> str:
+    if isinstance(candidate, Mapping):
+        for key in ("stable_id", "locator"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:256]
+    return f"zhihu-candidate-{offset}"
+
+
+def _scoped_error(message: str, *, scope: str, cause: BaseException | None = None) -> BaseError:
+    return build_error(
+        StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR,
+        error_msg=message,
+        details={"scope": scope},
+        cause=cause,
+    )
+
+
+def _article_error(message: str, cause: BaseException | None = None) -> BaseError:
+    return _scoped_error(message, scope=_ARTICLE_ERROR_SCOPE, cause=cause)
+
+
+def _session_error(message: str, cause: BaseException | None = None) -> BaseError:
+    return _scoped_error(message, scope=_SESSION_ERROR_SCOPE, cause=cause)
+
+
+def _error_scope(exc: BaseError) -> object:
+    details = getattr(exc, "details", None)
+    return details.get("scope") if isinstance(details, Mapping) else None
+
+
+def _is_isolatable_article_error(exc: BaseError) -> bool:
+    """Keep session-wide failures fatal while isolating one article's own errors."""
+
+    scope = _error_scope(exc)
+    if scope == _SESSION_ERROR_SCOPE:
+        return False
+    return scope == _ARTICLE_ERROR_SCOPE or is_candidate_read_error(exc)
+
+
+def _article_failure(offset: int, item_ref: str) -> dict[str, object]:
     return {
         "offset": offset,
-        "item_ref": article_id,
+        "item_ref": item_ref,
         "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
         "message": "条目读取或解析失败",
     }
@@ -154,8 +198,9 @@ class ZhihuReaderFetchService(ContextFetchService):
                     end = index + _BATCH_SIZE
                     chunk = candidates[index:end]
                     for offset, candidate in enumerate(chunk):
-                        article, article_id = _validated_article_candidate(candidate)
+                        item_ref = _candidate_item_ref(candidate, offset=offset)
                         try:
+                            article, article_id = _validated_article_candidate(candidate)
                             article_body, raw_snapshot, updated_value, content_truncated = await _fetch_article_body(
                                 session, article
                             )
@@ -172,12 +217,12 @@ class ZhihuReaderFetchService(ContextFetchService):
                                 )
                             )
                         except BaseError as exc:
-                            if not is_candidate_read_error(exc):
+                            if not _is_isolatable_article_error(exc):
                                 raise
-                            failures.append(_article_failure(offset, article_id))
+                            failures.append(_article_failure(offset, item_ref))
                             continue
                         except (TypeError, ValueError):
-                            failures.append(_article_failure(offset, article_id))
+                            failures.append(_article_failure(offset, item_ref))
                             continue
                         success_offsets.append(offset)
                     yield FetchBatch(
@@ -303,7 +348,7 @@ async def _fetch_article_body(
     record = _unwrap_record(payload)
     content = _content_value(record)
     if not content:
-        raise _fetch_error("Zhihu article body is unavailable")
+        raise _article_error("Zhihu article body is unavailable")
     bounded, truncated = _bounded_content(content)
     return (
         bounded,
@@ -359,7 +404,7 @@ def _unwrap_record(payload: object) -> dict[str, Any]:
         if isinstance(data, Mapping):
             return dict(data)
         return dict(payload)
-    raise _fetch_error("Zhihu article body response is invalid")
+    raise _session_error("Zhihu article body response is invalid")
 
 
 def _content_value(record: Mapping[str, object]) -> str:
@@ -373,7 +418,7 @@ def _content_value(record: Mapping[str, object]) -> str:
 def _bounded_content(value: str) -> tuple[str, bool]:
     text = _html_to_text(value)
     if not text:
-        raise _fetch_error("Zhihu article body is empty")
+        raise _article_error("Zhihu article body is empty")
     return text[:_MAX_CONTENT_CHARS], len(text) > _MAX_CONTENT_CHARS
 
 

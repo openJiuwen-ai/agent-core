@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.context import (
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
+    MemberExecutionUpdateResult,
     TeamDatabase,
 )
 from openjiuwen.agent_teams.agent.member import TeamMember
@@ -425,6 +426,66 @@ class TestStatusTransitionsComplex:
 
         assert await team_member.execution_status() == ExecutionStatus.IDLE
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_restart_resets_execution_status_to_idle(self, team_member):
+        """Restarting a member forces execution_status back to IDLE so the new lifecycle can start cleanly (issue #4318)."""
+        # Simulate a previously aborted execution
+        assert await team_member.update_execution_status(ExecutionStatus.STARTING)
+        assert await team_member.update_execution_status(ExecutionStatus.RUNNING)
+
+        # Recovery/restart resets execution status to IDLE
+        assert await team_member.db.member.reset_member_execution_status(
+            team_member.member_name,
+            team_member.team_name,
+            ExecutionStatus.IDLE.value,
+        )
+        assert await team_member.execution_status() == ExecutionStatus.IDLE
+
+        # A fresh spawn can now proceed IDLE -> STARTING -> RUNNING without
+        # ever seeing the illegal RUNNING -> STARTING transition.
+        assert await team_member.update_execution_status(ExecutionStatus.STARTING)
+        assert await team_member.update_execution_status(ExecutionStatus.RUNNING)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_late_starting_on_running_publishes_no_event(self, team_member, message_bus):
+        """Real transitions publish exactly one event each; duplicates never do.
+
+        A late duplicate round-start STARTING on a RUNNING member is reported
+        as success without touching the row — and must not emit a
+        MemberExecutionChangedEvent for a write that never landed.
+        """
+        with patch.object(message_bus, "publish", new_callable=AsyncMock) as publish:
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            assert await team_member.update_execution_status(ExecutionStatus.RUNNING) is True
+            assert publish.await_count == 2
+
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            assert publish.await_count == 2
+
+        assert await team_member.execution_status() == ExecutionStatus.RUNNING
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_dao_skipped_duplicate_publishes_no_event(self, team_member, db, message_bus):
+        """The millisecond-race variant: the DAO reports SKIPPED, no event follows.
+
+        The caller read IDLE before a concurrent sequence completed
+        STARTING+RUNNING, so its late STARTING fails the CAS guard and the
+        DAO classifies it as a benign duplicate. update_execution_status
+        still returns True, but publishes nothing.
+        """
+        with patch.object(
+            db.member,
+            "update_member_execution_status",
+            new_callable=AsyncMock,
+            return_value=MemberExecutionUpdateResult.SKIPPED,
+        ), patch.object(message_bus, "publish", new_callable=AsyncMock) as publish:
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            publish.assert_not_called()
+        assert await team_member.execution_status() == ExecutionStatus.IDLE
+
 
 @pytest.mark.asyncio
 @pytest.mark.level1
@@ -503,3 +564,54 @@ async def test_leader_member_status_persists_after_build_team(db, agent_card, me
         assert await handle.status() == MemberStatus.BUSY
     finally:
         reset_session_id(token)
+
+
+# ---------------------------------------------------------------------------
+# F_118: DORMANT status — placement in the transition table and status sets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_dormant_transitions_and_retire_target():
+    """DORMANT is reached only through a retire request and left only by a wake or a shutdown."""
+    from openjiuwen.agent_teams.schema.status import (
+        MEMBER_DEPARTED_STATUSES,
+        MEMBER_QUIESCENT_STATUSES,
+        MEMBER_SETTLED_STATUSES,
+        MEMBER_TRANSITIONS,
+        MEMBER_UNREACHABLE_STATUSES,
+        MemberStatus,
+        is_valid_transition,
+        retire_target,
+    )
+
+    assert is_valid_transition(MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.DORMANT, MEMBER_TRANSITIONS)
+    assert is_valid_transition(MemberStatus.DORMANT, MemberStatus.RESTARTING, MEMBER_TRANSITIONS)
+    assert is_valid_transition(MemberStatus.DORMANT, MemberStatus.SHUTDOWN, MEMBER_TRANSITIONS)
+    # No direct edge in: the member settles itself out of a request.
+    assert not is_valid_transition(MemberStatus.READY, MemberStatus.DORMANT, MEMBER_TRANSITIONS)
+    assert not is_valid_transition(MemberStatus.DORMANT, MemberStatus.READY, MEMBER_TRANSITIONS)
+
+    # Settled (done) and quiescent (not moving), but neither departed nor unreachable:
+    # a dormant member still belongs to the team and its mailbox still receives.
+    assert MemberStatus.DORMANT.value in MEMBER_SETTLED_STATUSES
+    assert MemberStatus.DORMANT in MEMBER_QUIESCENT_STATUSES
+    assert MemberStatus.DORMANT not in MEMBER_DEPARTED_STATUSES
+    assert MemberStatus.DORMANT not in MEMBER_UNREACHABLE_STATUSES
+
+    assert retire_target(None) is MemberStatus.SHUTDOWN
+    assert retire_target("shutdown") is MemberStatus.SHUTDOWN
+    assert retire_target("dormant") is MemberStatus.DORMANT
+    assert retire_target("dormant", force=True) is MemberStatus.SHUTDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_settles_request_into_dormant(team_member):
+    """SHUTDOWN_REQUESTED -> DORMANT is a legal member write (the dormant retire settle)."""
+    await team_member.update_status(MemberStatus.READY)
+    await team_member.update_status(MemberStatus.SHUTDOWN_REQUESTED)
+    assert await team_member.update_status(MemberStatus.DORMANT)
+    assert await team_member.status() == MemberStatus.DORMANT
+    assert await team_member.update_status(MemberStatus.RESTARTING)
+    assert await team_member.update_status(MemberStatus.READY)

@@ -23,61 +23,37 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 def test_static_sections_teammate_has_role_and_identity():
     sections = build_team_static_sections(
         role=TeamRole.TEAMMATE,
-        member_prompt="follow the backend conventions",
         member_name="dev-1",
         language="en",
-        include_member_specific=True,
     )
     names = {section.name for section in sections}
     assert TeamSectionName.ROLE in names
-    # identity carries both the member_name and the private working agreement.
-    assert TeamSectionName.IDENTITY in names
     # workflow / lifecycle are leader-only and absent for a teammate.
     assert TeamSectionName.WORKFLOW not in names
     assert TeamSectionName.LIFECYCLE not in names
 
 
 @pytest.mark.level0
-def test_static_sections_omit_member_specific_by_default():
-    # In-process members get the identity section (member_name + private
-    # working agreement) as a prompt attachment, so the shared system-prompt
-    # prefix stays identical across the team.
-    sections = build_team_static_sections(
-        role=TeamRole.TEAMMATE,
-        member_prompt="follow the backend conventions",
-        member_name="dev-1",
-        language="en",
-    )
-    names = {section.name for section in sections}
-    assert TeamSectionName.IDENTITY not in names
-
-
-@pytest.mark.level0
 def test_static_sections_leader_includes_workflow_and_lifecycle():
     sections = build_team_static_sections(
         role=TeamRole.LEADER,
-        member_prompt="",
         member_name="leader",
         lifecycle="temporary",
         language="en",
-        include_member_specific=True,
     )
     names = {section.name for section in sections}
     assert TeamSectionName.ROLE in names
     assert TeamSectionName.WORKFLOW in names
     assert TeamSectionName.LIFECYCLE in names
-    # A leader has a member_name but no private prompt, so identity is present
-    # and carries the name alone.
-    assert TeamSectionName.IDENTITY in names
 
 
 @pytest.mark.level0
 def test_static_sections_exclude_team_state():
-    # Team metadata and the roster depend on live DB state and are not sections
-    # at all — they are delivered into the member's conversation as they appear.
+    # The member's own identity, the team metadata and the roster all depend on
+    # live DB state and are not sections at all — they are delivered into the
+    # member's conversation as they appear.
     sections = build_team_static_sections(
         role=TeamRole.LEADER,
-        member_prompt="x",
         member_name="leader",
         language="en",
     )
@@ -87,24 +63,23 @@ def test_static_sections_exclude_team_state():
 
 
 @pytest.mark.level0
-def test_member_system_prompt_renders_private_prompt_and_member_name():
+def test_member_system_prompt_omits_who_the_member_is():
+    # The standing policy is shared by every teammate; the member's own name
+    # and private working agreement arrive as <team-context> instead.
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
-        member_prompt="stay focused on backend work",
         member_name="dev-1",
         language="en",
     )
     assert prompt.strip()
-    assert "stay focused on backend work" in prompt
-    assert "dev-1" in prompt
+    assert "dev-1" not in prompt
 
 
 @pytest.mark.level0
-def test_member_system_prompt_nonempty_without_private_prompt():
-    # Even with no private prompt, the role section alone yields a usable prompt.
+def test_member_system_prompt_is_nonempty():
+    # The role section alone yields a usable prompt.
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
-        member_prompt="",
         member_name="dev-1",
         language="en",
     )
@@ -118,7 +93,6 @@ def test_member_system_prompt_documents_the_team_state_tags():
     # has to be there.
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
-        member_prompt="",
         member_name="dev-1",
         language="en",
     )
@@ -131,7 +105,6 @@ def test_member_system_prompt_documents_the_team_state_tags():
 def test_member_system_prompt_uses_native_workspace_policy_by_default():
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
-        member_prompt="",
         member_name="dev-1",
         language="en",
     )
@@ -143,7 +116,6 @@ def test_member_system_prompt_uses_native_workspace_policy_by_default():
 def test_member_system_prompt_uses_external_workspace_policy():
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
-        member_prompt="",
         member_name="dev-1",
         language="en",
         workspace_prompt_variant="external",
@@ -151,3 +123,53 @@ def test_member_system_prompt_uses_external_workspace_policy():
     assert "shared team deliverables directory" not in prompt
     assert "given in the team info (`<team-context>`)" in prompt
     assert "workspace_meta" in prompt
+
+
+@pytest.mark.level0
+def test_member_system_prompt_declares_the_server_its_bare_tool_names_belong_to():
+    # A CLI member reaches the team's tools through MCP, under a namespace,
+    # and may have a built-in tool named like one of them. Naming the server
+    # once says which reading of every bare name in the policy is the right
+    # one — without the policy having to spell any tool out.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+        workspace_prompt_variant="external",
+        mcp_server_name="openjiuwen-team",
+    )
+    assert prompt.startswith('<team-policy tools="openjiuwen-team">')
+    assert prompt.endswith("</team-policy>")
+    assert '<team-note kind="tool-namespace">' in prompt
+    assert "the MCP server `openjiuwen-team` provides" in prompt
+    # How that server's tools are actually addressed is the provider's to say.
+    assert "mcp__" not in prompt
+
+
+@pytest.mark.level0
+def test_the_declaration_covers_the_message_blocks_too():
+    # The policy is not the only place a tool is named by its bare name: the
+    # reply hints and task notices a member receives do it as well. They are
+    # the same family of blocks, so one declaration reaches all of them.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+        workspace_prompt_variant="external",
+        mcp_server_name="openjiuwen-team",
+    )
+    declaration = prompt.split("</team-note>")[0]
+    for block in ("team-inbound", "team-event", "team-context", "team-note"):
+        assert block in declaration
+
+
+@pytest.mark.level0
+def test_an_in_process_member_reads_the_policy_unwrapped():
+    # Its tools are called by the bare name, so there is nothing to declare.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+    )
+    assert "<team-policy" not in prompt
+    assert "tool-namespace" not in prompt

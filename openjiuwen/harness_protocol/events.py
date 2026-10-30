@@ -16,7 +16,15 @@ from openjiuwen.harness_protocol.models import (
     freeze_json_object,
     freeze_json_value,
 )
-from openjiuwen.harness_protocol.results import TurnResult, TurnStatus, TurnUsage
+from openjiuwen.harness_protocol.results import (
+    ContentBlock,
+    MonetaryAmount,
+    TurnError,
+    TurnMessage,
+    TurnResult,
+    TurnStatus,
+    TurnUsage,
+)
 from openjiuwen.harness_protocol.state import HarnessState
 
 
@@ -122,6 +130,14 @@ class DiagnosticLevel(str, Enum):
     ERROR = "error"
 
 
+class ModelRequestStatus(str, Enum):
+    """Terminal status of one physical model request made inside a turn."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 @dataclass(frozen=True, slots=True)
 class OutputEvent:
     """Provider-neutral update for one stable output content block."""
@@ -164,6 +180,94 @@ class UsageUpdatedEvent:
 
     usage: TurnUsage
     mode: UsageUpdateMode = UsageUpdateMode.CUMULATIVE
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestEvent:
+    """One completed physical model request observed inside a turn.
+
+    A provider emits it only when the host declared
+    ``HostCapability.MODEL_REQUEST_OBSERVATION``. The event is emitted once,
+    after the request ended, and always before any item the request caused
+    and before the turn's terminal event; items caused by the request list
+    ``request_id`` in their envelope ``causation_ids``.
+
+    ``input_messages`` is the conversation the model actually received.
+    ``message_id`` values must stay stable while a message remains in the
+    conversation, so a host can state the context window as a delta. When the
+    provider could not observe the request itself, ``input_observed`` is
+    ``False`` and only the output side is meaningful.
+
+    Attributes:
+        request_id: Provider-stable identity of the request within the session.
+        status: Terminal status of the request.
+        started_at: Unix timestamp in seconds when the request was sent.
+        ended_at: Unix timestamp in seconds when the response completed.
+        model: Model that served the request, when known.
+        provider_name: Model vendor that served the request, when known.
+        system_instructions: Instructions supplied apart from the conversation.
+        input_messages: Conversation sent with the request, in order.
+        input_observed: Whether ``system_instructions`` / ``input_messages``
+            were observed from the request itself.
+        output_message: The assistant message the request produced.
+        tool_definitions: Tools offered to the model, each ``{"name",
+            "description", "parameters"}`` with a JSON-Schema ``parameters``.
+        request_parameters: Sampling parameters the request carried, under the
+            GenAI names (``temperature``, ``top_p``, ``top_k``, ``max_tokens``,
+            ``stop_sequences``, ``seed``, ``choice_count``,
+            ``presence_penalty``, ``frequency_penalty``, ``reasoning_level``,
+            ``stream``); anything else is provider data.
+        response_id: Provider id of the response, when it states one.
+        time_to_first_chunk: Seconds from sending the request to its first
+            streamed chunk, when the provider measures it.
+        finish_reasons: Why generation stopped, in the provider's words.
+        cost: What this request cost, when the provider states it.
+        usage: Token usage of this request alone. Counters follow the GenAI
+            conventions: ``input_tokens`` is the whole prompt, and cached
+            input is a breakdown inside it, not a separate amount.
+        error: Normalized failure when ``status`` is not completed.
+        data: Namespaced provider diagnostics (timing, attempts, upstream ids).
+    """
+
+    request_id: str
+    status: ModelRequestStatus
+    started_at: float
+    ended_at: float
+    model: str | None = None
+    provider_name: str | None = None
+    system_instructions: tuple[ContentBlock, ...] = ()
+    input_messages: tuple[TurnMessage, ...] = ()
+    input_observed: bool = False
+    output_message: TurnMessage | None = None
+    tool_definitions: JsonValue = None
+    request_parameters: JsonObject = field(default_factory=dict)
+    response_id: str | None = None
+    time_to_first_chunk: float | None = None
+    finish_reasons: tuple[str, ...] = ()
+    usage: TurnUsage | None = None
+    cost: MonetaryAmount | None = None
+    error: TurnError | None = None
+    data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.request_id:
+            raise ValueError("model request_id must not be empty")
+        for field_name, timestamp in (("started_at", self.started_at), ("ended_at", self.ended_at)):
+            if not math.isfinite(timestamp) or timestamp < 0:
+                raise ValueError(f"model request {field_name} must be a finite Unix timestamp")
+        if self.ended_at < self.started_at:
+            raise ValueError("model request ended_at must not precede started_at")
+        if self.status is ModelRequestStatus.COMPLETED and self.error is not None:
+            raise ValueError("completed model request must not contain error")
+        if self.time_to_first_chunk is not None:
+            if not math.isfinite(self.time_to_first_chunk) or self.time_to_first_chunk < 0:
+                raise ValueError("model request time_to_first_chunk must be a non-negative duration")
+        object.__setattr__(self, "system_instructions", tuple(self.system_instructions))
+        object.__setattr__(self, "input_messages", tuple(self.input_messages))
+        object.__setattr__(self, "tool_definitions", freeze_json_value(self.tool_definitions))
+        object.__setattr__(self, "request_parameters", freeze_json_object(self.request_parameters))
+        object.__setattr__(self, "finish_reasons", tuple(self.finish_reasons))
+        object.__setattr__(self, "data", freeze_json_object(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +365,7 @@ HarnessEventPayload: TypeAlias = (
     OutputEvent
     | ItemLifecycleEvent
     | UsageUpdatedEvent
+    | ModelRequestEvent
     | StateChangedEvent
     | TurnLifecycleEvent
     | HookObservedEvent
@@ -317,6 +422,8 @@ class HarnessEvent:
         object.__setattr__(self, "causation_ids", causation_ids)
         if isinstance(self.event, TurnLifecycleEvent) and self.turn_id is None:
             raise ValueError("turn lifecycle event requires turn_id")
+        if isinstance(self.event, ModelRequestEvent) and self.turn_id is None:
+            raise ValueError("model request event requires turn_id")
 
 
 __all__ = [
@@ -331,6 +438,8 @@ __all__ = [
     "HookObservedEvent",
     "ItemEventKind",
     "ItemLifecycleEvent",
+    "ModelRequestEvent",
+    "ModelRequestStatus",
     "OutputEvent",
     "OutputChannel",
     "OutputKind",

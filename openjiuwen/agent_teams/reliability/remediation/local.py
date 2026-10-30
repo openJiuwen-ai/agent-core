@@ -9,10 +9,14 @@ import time
 from typing import Callable
 
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.reliability.anomaly import Anomaly
+from openjiuwen.agent_teams.reliability.anomaly import Anomaly, AnomalyKind
 from openjiuwen.agent_teams.reliability.remediation.action import RemediationAction
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
 from openjiuwen.agent_teams.reliability.window import SlidingWindowCounter
+
+# Model-group verdicts: the member's model is unavailable or was already
+# switched by the router, so a self-correction nudge cannot help.
+_NO_STEER_KINDS = frozenset({AnomalyKind.MODEL_UNAVAILABLE, AnomalyKind.MODEL_ROUTE_NOTICE})
 
 
 class LocalAutoRemediator:
@@ -42,6 +46,8 @@ class LocalAutoRemediator:
 
     def steer_message(self, anomaly: Anomaly) -> str | None:
         """Return a self-correction steer message, or None if not allowed / over budget."""
+        if anomaly.kind in _NO_STEER_KINDS:
+            return None
         if RemediationAction.LOCAL_STEER not in self._policy.actions_for(anomaly.severity):
             return None
         used = self._window.add(self._now())

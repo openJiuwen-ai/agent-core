@@ -286,7 +286,7 @@ def build_verification_agent_config(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 40,
+    max_iterations: int = 50,
 ) -> SubAgentConfig:
     """Build a SubAgentConfig for the built-in Verification subagent."""
     resolved_language = resolve_language(language)
@@ -325,7 +325,7 @@ def create_verification_agent(
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 40,
+    max_iterations: int = 50,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,

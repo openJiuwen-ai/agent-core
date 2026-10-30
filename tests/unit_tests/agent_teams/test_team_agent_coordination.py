@@ -27,7 +27,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -43,12 +43,12 @@ from openjiuwen.agent_teams.schema.events import (
     MessageEvent,
     TaskCancelledEvent,
     TaskClaimedEvent,
-    TaskRevokedEvent,
-    TaskRevisionRequestedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
     TaskReleasedEvent,
+    TaskRevisionRequestedEvent,
+    TaskRevokedEvent,
     TaskSubmittedForReviewEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
@@ -59,7 +59,6 @@ from openjiuwen.agent_teams.schema.events import (
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
-from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
     MemberRosterEntry,
     TeamCompletionSnapshot,
@@ -68,6 +67,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import (
@@ -249,6 +249,36 @@ async def test_start_stop_coordination():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_leader_start_emits_team_recovered_marker():
+    """kernel.start() tail enqueues the team.recovered marker (leader only)."""
+    from openjiuwen.agent_teams.schema.stream import (
+        is_team_event_marker,
+        is_team_recovered_marker,
+    )
+
+    agent = _make_leader()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    await agent._start_coordination(session=None)
+    marker = agent._stream_controller.stream_queue.get_nowait()
+    assert marker.payload["event_type"] == "team.recovered"
+    assert is_team_recovered_marker(marker)
+    assert is_team_event_marker(marker)
+    await agent._stop_coordination()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_start_does_not_emit_team_recovered_marker():
+    """Non-leader kernels never publish the recovered-team marker."""
+    agent = _make_teammate()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    await agent._start_coordination(session=None)
+    assert agent._stream_controller.stream_queue.empty()
+    await agent._stop_coordination()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""
@@ -261,6 +291,7 @@ async def test_wake_feeds_messages_to_agent():
     fake_msg.timestamp = 1000
     agent._configurator.message_manager = MagicMock()
     agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
+    agent._configurator.message_manager.get_broadcast_messages = AsyncMock(return_value=[])
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[[fake_msg], []],
     )
@@ -1119,11 +1150,11 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
         msg.content = f"direct {msg_id}"
         return msg
 
-    # Newest-first ordering (as _read_all_unread returns). Two directs and
+    # Oldest-first ordering (as _read_all_unread returns). Two directs and
     # three broadcasts — the handler forwards all five untouched.
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[
-            [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
+            [_bc("b1", 1000), _dm("dm-1", 1500), _bc("b2", 2000), _dm("dm-2", 2500), _bc("b3", 3000)],
             [],
         ]
     )
@@ -1375,8 +1406,8 @@ async def test_task_claimed_for_self_uses_teammate_template():
 
     Regression guard for the role-aware branch in ``on_task_claimed``:
     when ``is_human_agent(member_name)`` is False, the assignee sees the
-    existing ``[任务指派]`` text that urges them to call ``view_task`` and
-    work on the task autonomously.
+    ``[任务指派]`` text carrying the task title and body, telling it to
+    claim the task directly — no view_task round-trip.
     """
     agent = _make_leader()
     # Make sure the leader is NOT registered as a human-agent member —
@@ -1385,7 +1416,9 @@ async def test_task_claimed_for_self_uses_teammate_template():
     assert "leader-1" not in await agent.team_backend.human_agent_names()
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get = AsyncMock(return_value=MagicMock(title="Fix bug"))
+    agent._configurator.task_manager.get = AsyncMock(
+        return_value=MagicMock(task_id="task-42", title="Fix bug", content="reproduce and fix", status="pending")
+    )
     agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
@@ -1402,10 +1435,33 @@ async def test_task_claimed_for_self_uses_teammate_template():
     content = agent.deliver_input.await_args.args[0]
     assert "[任务指派]" in content
     assert "task-42" in content
-    # Teammate prompt steers toward autonomous execution via view_task.
-    assert "view_task" in content
+    # The notice carries the task itself and steers straight to claiming it.
+    assert "Fix bug" in content
+    assert "reproduce and fix" in content
+    assert "claim_task(status=claimed)" in content
+    assert "view_task" not in content
     # Must not pick the controller-facing HITT variant.
     assert "控制者" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_claimed_for_self_is_not_announced_while_blocked():
+    """A blocked assignment is left to the board, which wakes the member once it unblocks."""
+    agent = _make_leader()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get = AsyncMock(
+        return_value=MagicMock(task_id="task-42", title="Fix bug", content="c", status="blocked")
+    )
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1639,7 +1695,7 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.timestamp = 1_700_000_000_000
 
     expanded = ExpandedMessage(body=msg.content, is_template=False)
-    text = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=1_700_000_000_000)
+    text = handler._format_message(msg, expanded=expanded, is_human_agent=False)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -1668,9 +1724,7 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.timestamp = 1_700_000_000_000
 
     direct_expanded = ExpandedMessage(body=direct.content, is_template=False)
-    direct_text = handler._format_message(
-        direct, expanded=direct_expanded, is_human_agent=True, now_ms=1_700_000_000_000
-    )
+    direct_text = handler._format_message(direct, expanded=direct_expanded, is_human_agent=True)
     assert 'type="direct"' in direct_text
     assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
@@ -1691,9 +1745,7 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.timestamp = 1_700_000_000_000
 
     bcast_expanded = ExpandedMessage(body=bcast.content, is_template=False)
-    bcast_text = handler._format_message(
-        bcast, expanded=bcast_expanded, is_human_agent=True, now_ms=1_700_000_000_000
-    )
+    bcast_text = handler._format_message(bcast, expanded=bcast_expanded, is_human_agent=True)
     assert 'type="broadcast"' in bcast_text
     assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text
@@ -2741,6 +2793,31 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
     assert cancel_calls == [None], "shutdown must drive the cooperative cancel path"
     sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_shutdown_self_settles_dormant_member_from_backend_lifetime():
+    """A dormant-lifetime member retires to DORMANT, read off the team backend.
+
+    Regression: ``resolve_retire_target`` once read a non-existent ``_infra``
+    attribute, so every ``shutdown_self`` / ``finalize_member`` raised before
+    writing the terminal status, leaving the member stuck in
+    SHUTDOWN_REQUESTED with a live coordination loop and a dead runtime.
+    """
+    agent = _make_teammate()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    agent._stream_controller.cooperative_cancel = AsyncMock()
+    agent.team_backend.get_member_lifetime = AsyncMock(return_value="dormant")
+    team_member = SimpleNamespace(update_status=AsyncMock(return_value=True))
+    agent._state.team_member = team_member
+
+    await agent.shutdown_self()
+
+    team_member.update_status.assert_awaited_once_with(MemberStatus.DORMANT)
+    assert agent.retired_status is MemberStatus.DORMANT
+    assert await agent._stream_controller.stream_queue.get() is None
+    assert await agent.resolve_retire_target(force=True) is MemberStatus.SHUTDOWN
 
 
 @pytest.mark.asyncio

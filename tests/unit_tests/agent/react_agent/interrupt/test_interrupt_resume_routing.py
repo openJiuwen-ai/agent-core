@@ -20,7 +20,9 @@ from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptionState,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
-from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EVOLUTION_RESUME_USER_INPUT_KEY
+
+# The resume input slot a host's own rail names in its requests' metadata.
+HOST_RESUME_USER_INPUT_KEY = "_host_resume_user_input"
 
 
 def _tool_call(call_id: str = "call_001", name: str = "demo_tool") -> ToolCall:
@@ -100,18 +102,18 @@ async def _handle_resume_and_capture_extra(
                 _interrupted_tool(
                     _request(
                         "Approve evolution?",
-                        resume_user_input_key=EVOLUTION_RESUME_USER_INPUT_KEY,
+                        resume_user_input_key=HOST_RESUME_USER_INPUT_KEY,
                     )
                 )
             ),
-            EVOLUTION_RESUME_USER_INPUT_KEY,
+            HOST_RESUME_USER_INPUT_KEY,
             RESUME_USER_INPUT_KEY,
         ),
         (
             {"approved": True, "auto_confirm": True},
             _state(_interrupted_tool(_request())),
             RESUME_USER_INPUT_KEY,
-            EVOLUTION_RESUME_USER_INPUT_KEY,
+            HOST_RESUME_USER_INPUT_KEY,
         ),
     ],
 )
@@ -137,7 +139,7 @@ async def test_mixed_resume_input_exposes_generic_and_dedicated_keys():
         _interrupted_tool(
             _request(
                 "Approve evolution?",
-                resume_user_input_key=EVOLUTION_RESUME_USER_INPUT_KEY,
+                resume_user_input_key=HOST_RESUME_USER_INPUT_KEY,
             ),
             call_id="call_001",
             name="evolve_skill_experiences",
@@ -148,9 +150,9 @@ async def test_mixed_resume_input_exposes_generic_and_dedicated_keys():
     seen_extra, final_extra = await _handle_resume_and_capture_extra(state, user_input)
 
     assert seen_extra[RESUME_USER_INPUT_KEY] == user_input
-    assert seen_extra[EVOLUTION_RESUME_USER_INPUT_KEY] == user_input
+    assert seen_extra[HOST_RESUME_USER_INPUT_KEY] == user_input
     assert RESUME_USER_INPUT_KEY not in final_extra
-    assert EVOLUTION_RESUME_USER_INPUT_KEY not in final_extra
+    assert HOST_RESUME_USER_INPUT_KEY not in final_extra
 
 
 def test_wrapped_interrupt_stores_outer_call_and_keeps_inner_request_id():

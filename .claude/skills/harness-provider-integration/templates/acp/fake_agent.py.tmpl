@@ -1,0 +1,269 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""A scripted Agent Client Protocol agent used by the __DISPLAY__ unit tests.
+
+It speaks JSON-RPC 2.0 over stdio like a real ACP agent and shapes its
+records after a real exchange (``tool_call`` pending with empty
+``rawInput``, ``tool_call_update`` carrying the input, then ``completed``
+with ``content`` and ``rawOutput``).  Behaviour is chosen by a keyword in
+the prompt text; everything the client sent is recorded into the JSON file
+named by ``FAKE_ACP_STATE`` so tests can assert on the wire.
+
+SCAFFOLD(fixtures): once the vendor's real records are captured, reshape
+the records below to match them, so these tests pin what the vendor sends.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import threading
+import uuid
+from pathlib import Path
+from typing import Any
+
+STATE_PATH = Path(os.environ["FAKE_ACP_STATE"])
+_write_lock = threading.Lock()
+
+
+def _load_state() -> dict[str, Any]:
+    if STATE_PATH.exists():
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    return {
+        "argv": [],
+        "prompts": [],
+        "session_new": [],
+        "session_load": [],
+        "set_config_option": [],
+        "permission": [],
+        "sessions": {},
+    }
+
+
+STATE = _load_state()
+STATE["argv"] = sys.argv[1:]
+STATE["path_head"] = os.environ.get("PATH", "").split(os.pathsep)[0]
+# The host endpoint this process was launched on; ``None`` is the CLI login.
+STATE["endpoint"] = os.environ.get("FAKE_ACP_ENDPOINT")
+
+
+def _save() -> None:
+    STATE_PATH.write_text(json.dumps(STATE), encoding="utf-8")
+
+
+def _send(message: dict[str, Any]) -> None:
+    with _write_lock:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
+
+
+def _notify(session_id: str, update: dict[str, Any]) -> None:
+    _send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}})
+
+
+# The model selector id the adapter switches (``MODEL_CONFIG_ID``) and the
+# models offered; "vendor/sticky" is offered but never applied.
+MODEL_CONFIG_ID = os.environ.get("FAKE_ACP_MODEL_CONFIG_ID", "model")
+MODELS = ("vendor/default", "vendor/model-x", "vendor/sticky")
+
+
+def _config_options(model: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "select",
+            "id": MODEL_CONFIG_ID,
+            "name": "Model",
+            "category": "model",
+            "currentValue": model,
+            "options": [{"value": value, "name": value} for value in MODELS],
+        }
+    ]
+
+
+def _chunk(session_id: str, kind: str, message_id: str, text: str) -> None:
+    _notify(session_id, {"sessionUpdate": kind, "messageId": message_id, "content": {"type": "text", "text": text}})
+
+
+class Agent:
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.cancelled: set[str] = set()
+        self.waiting: dict[Any, asyncio.Future[Any]] = {}
+        self.next_request_id = 1000
+
+    async def handle(self, message: dict[str, Any]) -> None:
+        method = message.get("method")
+        if method is None:
+            future = self.waiting.pop(message.get("id"), None)
+            if future is not None and not future.done():
+                future.set_result(message.get("result"))
+            return
+        params = message.get("params") or {}
+        if method == "session/cancel":
+            self.cancelled.add(params.get("sessionId"))
+            return
+        handler = getattr(self, "rpc_" + method.replace("/", "_"), None)
+        if handler is None:
+            _send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": method}})
+            return
+        try:
+            result = await handler(params)
+        except RpcFailure as failure:
+            _send({"jsonrpc": "2.0", "id": message["id"], "error": failure.error})
+            return
+        _send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    async def rpc_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        STATE["initialize"] = params
+        _save()
+        return {
+            "protocolVersion": 1,
+            "agentCapabilities": {"loadSession": True, "mcpCapabilities": {"http": False, "sse": False}},
+            "authMethods": [],
+            "agentInfo": {"name": "fake", "version": "1"},
+        }
+
+    async def rpc_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = "ses_" + uuid.uuid4().hex[:12]
+        STATE["session_new"].append(params)
+        STATE["sessions"][session_id] = {"memory": None, "history": [], "model": MODELS[0]}
+        _save()
+        # Agents chat between prompts; this must never surface as a turn event.
+        _notify(session_id, {"sessionUpdate": "available_commands_update", "availableCommands": []})
+        return {"sessionId": session_id, "configOptions": _config_options(MODELS[0])}
+
+    async def rpc_session_set_config_option(self, params: dict[str, Any]) -> dict[str, Any]:
+        STATE["set_config_option"].append(params)
+        session = STATE["sessions"][params["sessionId"]]
+        if params.get("value") != "vendor/sticky":
+            session["model"] = params.get("value")
+        _save()
+        return {"configOptions": _config_options(session["model"])}
+
+    async def rpc_session_load(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = params["sessionId"]
+        STATE["session_load"].append(session_id)
+        _save()
+        session = STATE["sessions"].get(session_id, {})
+        for role, text in session.get("history", []):
+            kind = "user_message_chunk" if role == "user" else "agent_message_chunk"
+            _chunk(session_id, kind, "replay", text)
+        return {"configOptions": _config_options(session.get("model", MODELS[0]))}
+
+    async def rpc_session_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = params["sessionId"]
+        self.cancelled.discard(session_id)
+        text = "".join(block.get("text", "") for block in params.get("prompt", []))
+        STATE["prompts"].append(text)
+        session = STATE["sessions"].setdefault(session_id, {"memory": None, "history": []})
+        session["history"].append(["user", text])
+        _save()
+        last_line = text.strip().splitlines()[-1] if text.strip() else ""
+        if "CRASH" in text:
+            os._exit(3)
+        # The CLI login is rejected; a host endpoint authenticates.
+        if "FAILAUTH" in text and not os.environ.get("FAKE_ACP_ENDPOINT"):
+            raise RpcFailure({"code": -32000, "message": "Authentication required"})
+        if "SLOW" in text:
+            return await self.slow(session_id)
+        if "TOOL" in text:
+            await self.tool(session_id)
+            reply = "TOKEN-1"
+        elif "ASK" in text:
+            reply = "permission: " + await self.ask(session_id)
+        elif "REMEMBER" in text:
+            session["memory"] = last_line.split()[-1]
+            reply = "OK"
+        elif "RECALL" in text:
+            reply = f"recall: {session['memory']}"
+        else:
+            reply = f"echo: {last_line}"
+        _chunk(session_id, "agent_thought_chunk", "msg_thought", "thinking")
+        message_id = "msg_" + uuid.uuid4().hex[:8]
+        half = len(reply) // 2
+        _chunk(session_id, "agent_message_chunk", message_id, reply[:half])
+        _chunk(session_id, "agent_message_chunk", message_id, reply[half:])
+        session["history"].append(["agent", reply])
+        _save()
+        return {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 17, "cachedReadTokens": 2},
+        }
+
+    async def slow(self, session_id: str) -> dict[str, Any]:
+        message_id = "msg_slow"
+        for index in range(400):
+            if session_id in self.cancelled:
+                return {"stopReason": "cancelled"}
+            _chunk(session_id, "agent_message_chunk", message_id, f"{index}\n")
+            await asyncio.sleep(0.02)
+        return {"stopReason": "end_turn"}
+
+    async def tool(self, session_id: str) -> None:
+        call_id = "call_" + uuid.uuid4().hex[:8]
+        _chunk(session_id, "agent_thought_chunk", "msg_plan", "read the file first")
+        _notify(session_id, {"sessionUpdate": "tool_call", "toolCallId": call_id, "title": "read",
+                             "kind": "read", "status": "pending", "locations": [], "rawInput": {}})
+        _notify(session_id, {"sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": "in_progress",
+                             "kind": "read", "title": "read", "rawInput": {"filePath": "secret.txt"}})
+        _notify(session_id, {"sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": "completed",
+                             "title": "secret.txt",
+                             "content": [{"type": "content", "content": {"type": "text", "text": "TOKEN-1"}}],
+                             "rawOutput": {"output": "1: TOKEN-1", "metadata": {"truncated": False}}})
+
+    async def ask(self, session_id: str) -> str:
+        self.next_request_id += 1
+        request_id = self.next_request_id
+        future: asyncio.Future[Any] = self.loop.create_future()
+        self.waiting[request_id] = future
+        _send({"jsonrpc": "2.0", "id": request_id, "method": "session/request_permission", "params": {
+            "sessionId": session_id,
+            "toolCall": {"toolCallId": "call_perm", "title": "write", "kind": "edit", "rawInput": {"path": "a.txt"}},
+            "options": [
+                {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+            ],
+        }})
+        result = await future
+        outcome = (result or {}).get("outcome", {})
+        STATE["permission"].append(outcome)
+        _save()
+        return outcome.get("optionId") or outcome.get("outcome", "none")
+
+
+class RpcFailure(Exception):
+    def __init__(self, error: dict[str, Any]) -> None:
+        super().__init__(error.get("message"))
+        self.error = error
+
+
+def _stdin_lines(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[str | None]) -> None:
+    # A thread keeps this portable: Windows cannot attach stdin pipes to the loop.
+    for line in sys.stdin:
+        loop.call_soon_threadsafe(queue.put_nowait, line)
+    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+
+async def main() -> None:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    threading.Thread(target=_stdin_lines, args=(loop, queue), daemon=True).start()
+    agent = Agent(loop)
+    tasks: set[asyncio.Task[None]] = set()
+    while True:
+        line = await queue.get()
+        if line is None:
+            break
+        if not line.strip():
+            continue
+        task = asyncio.create_task(agent.handle(json.loads(line)))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

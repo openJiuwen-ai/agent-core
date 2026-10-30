@@ -27,11 +27,15 @@ from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
 )
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -107,6 +111,7 @@ class FakeTeamAgent:
         self.team_name = team_name
         self.stream_label = stream_label
         self.spec = spec
+        self.runtime_context = SimpleNamespace(team_spec=spec)
         self.resume_calls: list[str] = []
         self.pause_calls = 0
         self.cancel_calls = 0
@@ -214,6 +219,7 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
                 agent_team=spec,
                 inputs={"query": "hello"},
                 session=session_id,
+                run_context={"chain_id": "chain-1"},
             )
         ]
 
@@ -223,6 +229,9 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
     assert chunks[0].payload["team_name"] == "spec_team"
     assert chunks[0].payload["session_id"] == session_id
     assert chunks[1].payload["event_type"] == "team.chunk"
+    assert agent.stream_inputs[0]["run_context"] == RunContext(
+        extra={"chain_id": "chain-1"},
+    )
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -288,6 +297,44 @@ async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_ch
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_stream_propagates_session_bind_failure(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_bind_error_{uuid.uuid4().hex}"
+    spec = _runtime_spec("bind_error_team")
+    agent = FakeTeamAgent("bind_error_team", stream_label="unused")
+
+    async def _failed_stream(inputs, session=None):
+        _ = inputs, session
+        raise build_error(
+            StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+            error_msg="team session database initialization failed",
+        )
+        yield
+
+    agent.stream = _failed_stream
+    try:
+        with patch.object(TeamAgentSpec, "build", return_value=agent):
+            stream = Runner.run_agent_team_streaming(
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
+            )
+            ready_chunk = await stream.__anext__()
+            assert ready_chunk.payload["event_type"] == "team.runtime_ready"
+            with pytest.raises(BaseError) as raised:
+                await stream.__anext__()
+
+        assert raised.value.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
 
 
 @pytest.mark.asyncio
@@ -586,6 +633,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
     reset_execution = AsyncMock(return_value=1)
     agent.team_backend = SimpleNamespace(
+        conversation_mode="team",
         db=SimpleNamespace(
             initialize=AsyncMock(),
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
@@ -1466,7 +1514,13 @@ class TestTeamRuntimeManagerInteract:
         class _Agent:
             team_backend = None
 
-            async def deliver_input(self, content):
+            async def deliver_input(
+                self,
+                content: str,
+                *,
+                run_context: RunContext | None = None,
+            ) -> None:
+                del run_context
                 delivered.append(content)
 
         await _activate_pool_entry(manager, team_name, session_id, _Agent())
@@ -1507,8 +1561,13 @@ class TestTeamRuntimeManagerInteract:
         class _Agent:
             team_backend = None
 
-            async def deliver_input(self, content):
-                pass
+            async def deliver_input(
+                self,
+                content: str,
+                *,
+                run_context: RunContext | None = None,
+            ) -> None:
+                del content, run_context
 
         await _activate_pool_entry(manager, team_name, session_id, _Agent())
         entry = await manager.pool.get(team_name)
@@ -1572,7 +1631,13 @@ class TestTeamRuntimeManagerInteract:
             class _Agent:
                 team_backend = None
 
-                async def deliver_input(self, content):
+                async def deliver_input(
+                    self,
+                    content: str,
+                    *,
+                    run_context: RunContext | None = None,
+                ) -> None:
+                    del run_context
                     delivered.append(content)
                     seen_context.append(get_session_id())
 
@@ -1587,6 +1652,55 @@ class TestTeamRuntimeManagerInteract:
             assert result.ok is True
             assert delivered == ["follow"]
             assert seen_context == [session_id]
+        finally:
+            await Runner.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_runner_normalizes_mapping_run_context(self):
+        """Runner converts public mapping input before Team dispatch."""
+        from openjiuwen.core.runner.team_runner import _global_runner
+
+        await Runner.start()
+        try:
+            manager = _global_runner()._get_team_runtime_manager()
+            team_name = "runner_typed_context_team"
+            session_id = f"runner_typed_context_{uuid.uuid4().hex}"
+            seen_context: list[RunContext | None] = []
+
+            class _Agent:
+                team_backend = None
+
+                async def deliver_input(
+                    self,
+                    content: str,
+                    *,
+                    run_context: RunContext | None = None,
+                ) -> None:
+                    del content
+                    seen_context.append(run_context)
+
+            await _activate_pool_entry(manager, team_name, session_id, _Agent())
+
+            result = await Runner.interact_agent_team(
+                "follow",
+                team_name=team_name,
+                session_id=session_id,
+                run_context={
+                    "extra": {"message_id": "message-1"},
+                    "chain_id": "chain-1",
+                },
+            )
+
+            assert result.ok is True
+            assert seen_context == [
+                RunContext(
+                    extra={
+                        "message_id": "message-1",
+                        "chain_id": "chain-1",
+                    }
+                )
+            ]
         finally:
             await Runner.stop()
 
@@ -2366,3 +2480,116 @@ async def test_run_agent_team_base_true_resolves_team_id_via_resource_mgr(isolat
         assert result["resolved"] is True
     finally:
         await Runner.resource_mgr.remove_agent_team(team_id=team.card.id)
+
+
+@pytest.fixture(autouse=True)
+def mock_group_history_cleanup(monkeypatch):
+    # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
+    )
+
+
+class _RuntimeStreamAgent(FakeTeamAgent):
+    """FakeTeamAgent whose ``stream_runtime`` emits the recovered marker.
+
+    The no-input start entry must drive ``stream_runtime`` (never
+    ``stream``) and forward its frames in order.
+    """
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+        self.runtime_stream_calls = 0
+        self.runtime_stream_sessions: list[Any] = []
+
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
+        self.runtime_stream_calls += 1
+        self.runtime_stream_sessions.append(session)
+        yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.recovered"})
+        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
+        yield OutputSchema(type="message", index=2, payload={"event_type": "leader.chunk.2"})
+
+
+class _FailingRuntimeStreamAgent(FakeTeamAgent):
+    """Agent whose ``stream_runtime`` fails after one chunk."""
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
+        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
+        raise ValueError("runtime stream exploded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_start_agent_team_streaming_uses_runtime_stream(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_start_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_team")
+    agent = _RuntimeStreamAgent("start_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        chunks = [
+            chunk
+            async for chunk in Runner.start_agent_team_streaming(
+                agent_team=spec,
+                session=session_id,
+            )
+        ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "team.runtime_ready",
+        "team.recovered",
+        "leader.chunk.1",
+        "leader.chunk.2",
+    ]
+    # The no-input entry drives stream_runtime only; the input-carrying
+    # stream must not run and no first-round user input may be enqueued.
+    assert agent.runtime_stream_calls == 1
+    assert agent.stream_calls == 0
+    assert agent.stream_inputs == []
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_start_rejects_missing_session() -> None:
+    await Runner.start()
+    agen = Runner.start_agent_team_streaming(
+        agent_team=_runtime_spec("start_team"),
+        session=None,
+    )
+    with pytest.raises(BaseError) as excinfo:
+        await agen.__anext__()
+    assert excinfo.value.status is StatusCode.AGENT_TEAM_CONFIG_INVALID
+    await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_start_propagates_runtime_stream_failure(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_start_fail_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_fail_team")
+    agent = _FailingRuntimeStreamAgent("start_fail_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        agen = Runner.start_agent_team_streaming(
+            agent_team=spec,
+            session=session_id,
+        )
+        with pytest.raises(ValueError, match="runtime stream exploded"):
+            async for _ in agen:
+                pass
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)

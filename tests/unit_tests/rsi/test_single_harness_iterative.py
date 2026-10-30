@@ -20,6 +20,7 @@ from openjiuwen.rsi.harness_rsi.config import (
     DataLoaderConfig,
     EvaluatorConfig,
     MemberOptimizerConfig,
+    PromotionConfig,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import RSISkillUseRail
@@ -79,6 +80,7 @@ def test_cancelled_run_stops_evaluator_and_persists_terminated_artifacts(tmp_pat
         )
         orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
             AutoCoordinatingHarnessConfig(
+                promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
                 max_epochs=1,
                 evaluator=EvaluatorConfig(backend="single_harness"),
                 data_loader=DataLoaderConfig(batch_size=1),
@@ -151,6 +153,7 @@ def test_cancelled_evaluator_task_marks_run_terminated(tmp_path: Path) -> None:
         evaluator = Evaluator()
         orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
             AutoCoordinatingHarnessConfig(
+                promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
                 max_epochs=1,
                 evaluator=EvaluatorConfig(backend="single_harness"),
                 data_loader=DataLoaderConfig(batch_size=1),
@@ -236,6 +239,7 @@ def test_run_emits_stage_usage_and_resume_does_not_recharge_cached_work(tmp_path
     _write_yaml(refs, {"harness_refs": {"solver": "baseline"}})
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -296,6 +300,7 @@ def test_full_evaluation_failure_persists_failed_status_and_can_resume(tmp_path:
     evaluator = Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
         ),
@@ -445,6 +450,7 @@ def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
     evaluator = Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -551,6 +557,7 @@ def test_no_candidate_cannot_turn_stochastic_replay_into_best_score(tmp_path: Pa
     _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -626,6 +633,7 @@ def test_uninitialized_best_still_runs_epoch_full_to_seed_baseline(tmp_path: Pat
     evaluator = _Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -670,6 +678,7 @@ def test_generated_candidate_rejected_by_member_gate_skips_parent_full_eval(
     evaluator = _Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -745,7 +754,9 @@ class _Evaluator:
             case_dir.mkdir(parents=True, exist_ok=True)
             result_path = case_dir / "result.json"
             trace_path = case_dir / "trace.json"
-            result_path.write_text("{}", encoding="utf-8")
+            result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
             trace_path.write_text("{}", encoding="utf-8")
             case_refs.append(
                 {
@@ -875,8 +886,6 @@ class _Analyzer:
 def test_missing_acceptance_stops_before_optimizer_and_candidate_evaluation(tmp_path):
     from unittest.mock import AsyncMock
 
-    from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError
-
     class IncompleteAnalyzer(_Analyzer):
         async def analyze(self, *args, **kwargs):
             path = await super().analyze(*args, **kwargs)
@@ -893,18 +902,22 @@ def test_missing_acceptance_stops_before_optimizer_and_candidate_evaluation(tmp_
     optimizer = SimpleNamespace(optimize=AsyncMock())
     run_dir = tmp_path / "run"
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
-        AutoCoordinatingHarnessConfig(max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness"),
-                                     data_loader=DataLoaderConfig(batch_size=1)),
+        AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
         evaluator=_Evaluator(), analyzer=IncompleteAnalyzer(), member_optimizer=optimizer,
     )
-    with pytest.raises(AnalysisUnavailableError, match="acceptance_observable"):
-        asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(
-            dataset_files=[str(dataset)], harness_refs_path=str(refs), output_dir=str(run_dir),
-        )))
+    asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(
+        dataset_files=[str(dataset)], harness_refs_path=str(refs), output_dir=str(run_dir),
+    )))
     optimizer.optimize.assert_not_awaited()
     state = yaml.safe_load((run_dir / "single_harness_state.yaml").read_text(encoding="utf-8"))
-    assert state["status"] == "failed"
+    assert state["status"] == "completed"
     assert not state["candidate_gates"]
+    assert state["analysis_failures"]
     assert list(run_dir.rglob("eval_ref.yaml"))
 
 
@@ -978,6 +991,7 @@ def test_strict_causal_analysis_without_issue_stops_before_candidate_generation(
     optimizer = MustNotRunOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -1021,6 +1035,7 @@ def test_candidate_generation_error_is_recorded_and_propagated(tmp_path: Path) -
     _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -1095,6 +1110,7 @@ def test_max_iteration_counts_epochs_not_cases(
     refs = tmp_path / "harness_refs.yaml"
     _write_yaml(refs, {"harness_refs": {"solver": "baseline"}})
     config = AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         **({"max_epochs": configured} if configured is not None else {}),
         evaluator=EvaluatorConfig(backend="single_harness"),
         data_loader=DataLoaderConfig(batch_size=2),
@@ -1172,6 +1188,7 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     harness_refs = tmp_path / "harness_refs.yaml"
     _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
     config = AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         max_epochs=1,
         evaluator=EvaluatorConfig(backend="single_harness"),
         data_loader=DataLoaderConfig(batch_size=1),
@@ -1217,12 +1234,14 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
         "skill",
         "tool",
         "rail",
+        "config",
     ]
     assert orchestrator.config.member_optimizer.action_group_configs == [
         "prompt",
         "skill",
         "tool",
         "rail",
+        "config",
     ]
     assert orchestrator.config.member_optimizer.allowed_prompt_surfaces == ["prompt_section"]
     assert orchestrator.config.member_optimizer.max_roles_per_run == 1
@@ -1371,6 +1390,7 @@ def test_frozen_baseline_keeps_epoch_optimization_batch_sequential(tmp_path: Pat
         },
     )
     config = AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         max_epochs=1,
         evaluator=EvaluatorConfig(backend="single_harness"),
         data_loader=DataLoaderConfig(batch_size=1),
@@ -1425,6 +1445,7 @@ def test_single_harness_rejects_improver_evolution_mode() -> None:
     with pytest.raises(ValueError, match="one candidate"):
         SingleHarnessIterativeOptimizationOrchestrator(
             AutoCoordinatingHarnessConfig(
+                promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
                 evaluator=EvaluatorConfig(backend="single_harness"),
                 member_optimizer=MemberOptimizerConfig(sibling_candidate_count=3),
             )
@@ -1481,6 +1502,7 @@ def test_all_dataset_cases_enter_batches_without_internal_holdout(
     monkeypatch.setattr(iterative_module, "_persist_promotion", record_promotion)
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=2),
@@ -1588,6 +1610,7 @@ def test_verified_passes_are_protected_from_later_epoch_optimization(
     evaluator = MixedOutcomeEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=2,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=2),
@@ -1783,6 +1806,7 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
     optimizer = SerialIssueOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=2),
@@ -1821,6 +1845,7 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
 def test_single_harness_respects_explicit_action_and_repair_limits() -> None:
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(
@@ -1971,6 +1996,7 @@ def test_partial_candidate_is_reanalyzed_before_case_is_retained(tmp_path: Path)
     optimizer = ProgressiveOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=2),
@@ -2034,6 +2060,7 @@ def test_operational_repair_reuses_issue_within_existing_budget(tmp_path: Path) 
     _write_yaml(refs, {"harness_refs": {"solver": "baseline"}})
     analyzer, optimizer = Analyzer(), Optimizer()
     runner = Orchestrator(AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness"),
         member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=2)),
         evaluator=_Evaluator(), analyzer=analyzer, member_optimizer=optimizer)
@@ -2148,6 +2175,7 @@ def test_residual_repair_stops_when_analyzer_repeats_same_issue(tmp_path: Path) 
     optimizer = OneCandidateOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=3),
@@ -2345,6 +2373,7 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
     optimizer = RepairOptimizer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=2),
@@ -2467,6 +2496,7 @@ def test_native_signal_improvement_cannot_pass_candidate_gate(tmp_path: Path) ->
     analyzer = FeedbackAnalyzer()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -2546,6 +2576,7 @@ def test_batch_winner_is_rolled_back_when_clean_full_checkpoint_does_not_improve
     _write_yaml(harness_refs, {"harness_refs": {"solver": str(baseline)}})
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -2621,6 +2652,7 @@ def test_unpredicted_full_checkpoint_regression_blocks_promotion(
     _write_yaml(harness_refs, {"harness_refs": {"solver": str(baseline)}})
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=2),
@@ -2866,6 +2898,7 @@ def test_epoch_checkpoint_keeps_effective_capability_and_prunes_failed_skill_onc
     evaluator = SelectiveReplayEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),
@@ -3799,6 +3832,7 @@ def test_candidate_gate_rejects_generated_skill_that_was_not_invoked(tmp_path: P
         encoding="utf-8",
     )
     config = AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         max_epochs=1,
         evaluator=EvaluatorConfig(backend="single_harness"),
         member_optimizer=MemberOptimizerConfig(candidate_min_score_delta=0.0),
@@ -3883,6 +3917,7 @@ def test_candidate_gate_reports_evaluation_error_before_missing_skill(
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
         ),
@@ -3939,7 +3974,11 @@ def test_candidate_gate_propagates_evaluator_exception(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
-        AutoCoordinatingHarnessConfig(max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness")),
+        AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+        ),
         evaluator=RaisingEvaluator(),
         analyzer=_Analyzer(),
         member_optimizer=_MemberOptimizer(),
@@ -4039,7 +4078,11 @@ def test_candidate_gate_requires_every_skill_and_tool_in_multi_action_plan(tmp_p
         encoding="utf-8",
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
-        AutoCoordinatingHarnessConfig(max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness")),
+        AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+        ),
         evaluator=MultiCapabilityEvaluator(),
         analyzer=_Analyzer(),
         member_optimizer=_MemberOptimizer(),
@@ -4141,7 +4184,9 @@ def test_candidate_gate_rejects_capability_first_used_after_workspace_edit(
                 encoding="utf-8",
             )
             result_path = case_dir / "result.json"
-            result_path.write_text("{}", encoding="utf-8")
+            result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
             eval_ref = output_dir / "eval_ref.yaml"
             _write_yaml(
                 eval_ref,
@@ -4174,6 +4219,7 @@ def test_candidate_gate_rejects_capability_first_used_after_workspace_edit(
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4303,6 +4349,7 @@ def test_candidate_gate_accepts_naturally_used_skill_after_investigation(
     )
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4432,6 +4479,7 @@ def test_candidate_gate_credits_skill_used_before_workspace_edit(tmp_path: Path)
     evaluator = PreEditSkillEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4519,6 +4567,7 @@ def test_candidate_gate_requires_each_failing_target_case_to_improve(
     dataset_path.write_text(json.dumps({"cases": cases}), encoding="utf-8")
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4699,6 +4748,7 @@ def test_candidate_gate_keeps_privileged_task_contract_out_of_evaluation_input(
     evaluator = ContractSolvesWithoutCandidateEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4786,6 +4836,7 @@ def test_candidate_gate_uses_the_natural_primary_trial_without_duplicate_confirm
     dataset_path.write_text(json.dumps({"cases": cases}), encoding="utf-8")
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
@@ -4881,6 +4932,7 @@ def test_candidate_gate_rejects_inconclusive_source_without_evaluating_candidate
     evaluator = _Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
         ),
@@ -4951,7 +5003,11 @@ def test_candidate_gate_keeps_source_errors_inconclusive(tmp_path: Path) -> None
     dataset_path.write_text(json.dumps({"cases": cases}), encoding="utf-8")
     evaluator = TargetEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
-        AutoCoordinatingHarnessConfig(max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness")),
+        AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+        ),
         evaluator=evaluator,
         analyzer=_Analyzer(),
         member_optimizer=_MemberOptimizer(),
@@ -5032,6 +5088,7 @@ def test_candidate_gate_evaluates_only_the_attributed_target(tmp_path: Path) -> 
     evaluator = TargetOnlyEvaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             member_optimizer=MemberOptimizerConfig(
@@ -5137,7 +5194,9 @@ def test_candidate_gate_does_not_evaluate_unrelated_case_for_attribution(
                     encoding="utf-8",
                 )
                 result_path = case_dir / "result.json"
-                result_path.write_text("{}", encoding="utf-8")
+                result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
                 case_refs.append(
                     {
                         "case_id": case_id,
@@ -5165,6 +5224,7 @@ def test_candidate_gate_does_not_evaluate_unrelated_case_for_attribution(
     dataset_path.parent.mkdir()
     dataset_path.write_text(json.dumps({"cases": []}), encoding="utf-8")
     config = AutoCoordinatingHarnessConfig(
+        promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
         max_epochs=1,
         evaluator=EvaluatorConfig(backend="single_harness"),
         member_optimizer=MemberOptimizerConfig(candidate_min_score_delta=0.0),
@@ -5362,6 +5422,7 @@ def _run_filtered_epoch_scenario(
     evaluator = _PlannedReplayEvaluator(plan)
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=max_epochs,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=batch_size),

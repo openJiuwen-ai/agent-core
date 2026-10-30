@@ -122,3 +122,32 @@ async def test_recover_team_restarts_only_members_claimed_from_ready_or_busy() -
         ("busy_member", "team", MemberStatus.BUSY),
     ]
     spawn_manager.restart_teammate.assert_awaited_once_with("ready_member")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_recover_team_leaves_dormant_members_asleep() -> None:
+    """A retired (DORMANT) member wakes only when addressed, never from a cold recovery sweep (F_118)."""
+    member_dao = SimpleNamespace(claim_member_restart=AsyncMock(return_value=True))
+    backend = SimpleNamespace(
+        restore_external_cli_specs_from_db=AsyncMock(),
+        list_member_roster=AsyncMock(
+            return_value=[
+                _member("leader", MemberStatus.READY),
+                _member("failed", MemberStatus.ERROR),
+                _member("sleepy", MemberStatus.DORMANT),
+            ]
+        ),
+        is_passive_human=AsyncMock(return_value=False),
+        db=SimpleNamespace(member=member_dao),
+    )
+    spawn_manager = MagicMock()
+    spawn_manager.has_live_handle.return_value = False
+    spawn_manager.cleanup_teammate = AsyncMock()
+    spawn_manager.restart_teammate = AsyncMock(return_value=True)
+    configurator = SimpleNamespace(team_backend=backend, member_name="leader", team_name="team")
+
+    restarted = await RecoveryManager(configurator, spawn_manager).recover_team()
+
+    assert restarted == ["failed"]
+    spawn_manager.restart_teammate.assert_awaited_once_with("failed")

@@ -436,3 +436,32 @@ Current weather conditions in Hangzhou:
 
 It is recommended to bring rain gear when going out, pay attention to rain and slip prevention. If you need other weather information, feel free to tell me~
 ```
+
+## Handling the iteration limit
+
+`ReActAgentConfig.on_max_iterations` controls the result when the tool loop exhausts `max_iterations`:
+
+| Value | Behavior |
+|---|---|
+| `"error"` (default) | Preserve the existing error output; do not call the model again. |
+| `"return_observations"` | Return available tool messages from the current turn in `observations`, including tool name and call ID. The result remains `error` because the task is incomplete. |
+| `"final_answer"` | Make a final model call with no tools and the evidence already in context. A non-empty tool-free response is returned as `answer`; an empty/blank response, attempted tool call, truncated/filtered response, or model failure falls back to `error` with `observations` and `finalization_error`. |
+
+```python
+config = ReActAgentConfig(max_iterations=3, on_max_iterations="final_answer")
+# Configure the model, prompt, and tools as in the examples above.
+```
+
+Exhausted results carry `termination_reason="max_iterations"`, `iterations_used`, and
+`truncated_by_max_iterations=True`. Check these fields even when `result_type` is `answer`:
+a best-effort answer does not mean the original task completed. The final call is outside
+the iteration budget (normal provider/context recovery may retry it); it never executes another tool.
+Streaming uses the same policy and emits the structured result at the end. Streamed text is provisional: a provider can report truncation after emitting text, so consumers must inspect the final result.
+A rail requesting another model step or user input arriving during finalization also causes a fallback; the iteration limit does not permit further tool work.
+
+Available evidence is recovered from persisted context on interrupt/continuation resume,
+without including earlier user turns. Evidence removed by a context compactor or retention
+policy cannot be reconstructed. `iterations_used` follows the existing ReAct loop counter;
+Harness continuation invocations retain their existing budget semantics. Cancellation propagates,
+and a rail's explicit finish/interrupt result takes precedence. These options apply to ReActAgent;
+DeepAgent's outer task-loop configuration is unchanged.

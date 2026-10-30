@@ -214,7 +214,7 @@ class MonitorEvent(BaseModel):
     Member event fields:
         MEMBER_RESTARTED: reason, restart_count
         MEMBER_STATUS_CHANGED / MEMBER_EXECUTION_CHANGED: old_status, new_status
-        MEMBER_SHUTDOWN: force
+        MEMBER_SHUTDOWN: force, target_status
 
     Task event fields:
         All TASK_*: task_id
@@ -245,6 +245,8 @@ class MonitorEvent(BaseModel):
     reason: str | None = None
     restart_count: int | None = None
     force: bool | None = None
+    # Settled status a MEMBER_SHUTDOWN leads to: "shut_down" or "dormant".
+    target_status: str | None = None
 
     # -- Task fields --
     task_id: str | None = None

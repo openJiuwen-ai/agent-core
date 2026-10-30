@@ -5,11 +5,14 @@
 Tests for AbortError functionality in callback framework.
 """
 
+import logging
+
 import pytest
 
 from openjiuwen.core.runner.callback import (
     AsyncCallbackFramework,
     AbortError,
+    HookType,
 )
 
 
@@ -151,3 +154,62 @@ async def test_abort_error_triggers_circuit_breaker_failure(framework):
     results = await framework.trigger("process")
     assert results == []
     assert call_count == 1
+
+
+# === Section: expected aborts (is_error=False) are control flow, not failures ===
+
+
+@pytest.mark.asyncio
+async def test_expected_abort_is_not_counted_as_a_failure(caplog):
+    """An interrupt aborts the chain and re-raises its cause, but is no error."""
+    framework = AsyncCallbackFramework(enable_metrics=True, enable_logging=True)
+    error_hooks = []
+
+    async def on_error(*args, **kwargs):
+        error_hooks.append(args)
+
+    framework.add_hook("process", HookType.ERROR, on_error)
+    later = []
+
+    @framework.on("process", priority=10)
+    async def callback():
+        raise AbortError("waiting for the user", cause=ValueError("interrupt"), is_error=False)
+
+    @framework.on("process", priority=1)
+    async def after():
+        later.append(True)
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ValueError, match="interrupt"):
+            await framework.trigger("process")
+
+    assert later == [], "an expected abort still stops the chain"
+    metrics = framework.get_metrics()["process:callback"]
+    assert (metrics["call_count"], metrics["error_count"]) == (1, 0)
+    assert error_hooks == []
+    aborts = [r for r in caplog.records if "waiting for the user" in r.getMessage()]
+    assert aborts and all(r.levelno == logging.INFO for r in aborts)
+
+
+@pytest.mark.asyncio
+async def test_abort_is_an_error_by_default(caplog):
+    """Without is_error=False an abort stays a failure: ERROR log and ERROR hooks."""
+    framework = AsyncCallbackFramework(enable_metrics=True, enable_logging=True)
+    error_hooks = []
+
+    async def on_error(*args, **kwargs):
+        error_hooks.append(args)
+
+    framework.add_hook("process", HookType.ERROR, on_error)
+
+    @framework.on("process")
+    async def callback():
+        raise AbortError("access denied")
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(AbortError):
+            await framework.trigger("process")
+
+    assert framework.get_metrics()["process:callback"]["error_count"] == 1
+    assert len(error_hooks) == 1
+    assert any(r.levelno == logging.ERROR and "access denied" in r.getMessage() for r in caplog.records)

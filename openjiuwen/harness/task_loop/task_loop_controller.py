@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """TaskLoopController — Controller subclass for round-based loops.
 
 Encapsulates round management (prepare/wait/complete),
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.session.agent import Session
@@ -49,9 +50,10 @@ class TaskLoopController(Controller):
         query: str,
         is_follow_up: bool = False,
         run_kind: Any = None,
-        run_context: Any = None,
+        run_context: RunContext | None = None,
         *,
         task_id: Optional[str] = None,
+        turn_number: Optional[int] = None,
         resume_continuation: bool = False,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
@@ -71,6 +73,9 @@ class TaskLoopController(Controller):
                 the scheduler task id, letting the caller later target it via
                 ``task_scheduler.cancel_task``. When None the handler derives
                 a task id as before.
+            turn_number: 1-based number of the user turn that owns this round.
+                It is transported explicitly because the scheduler executes
+                the task in a different async context from the submitter.
             resume_continuation: When True this round continues the existing
                 conversation context without appending a new user turn (used by
                 ``NativeHarness.resume`` to pick a paused round back up in
@@ -83,6 +88,12 @@ class TaskLoopController(Controller):
         event = InputEvent.from_user_input(query)
         event.metadata = event.metadata or {}
         event.metadata["_handler_round_id"] = round_id
+        from openjiuwen.harness.moa.state import active_moa_input_origin, active_moa_work_binding
+
+        moa_binding = active_moa_work_binding.get()
+        if moa_binding is not None:
+            event.metadata["_moa_work_binding"] = moa_binding
+            event.metadata["_moa_input_origin"] = active_moa_input_origin.get()
         if is_follow_up:
             event.metadata["is_follow_up"] = True
         if run_kind is not None:
@@ -91,6 +102,8 @@ class TaskLoopController(Controller):
             event.metadata["run_context"] = run_context
         if task_id is not None:
             event.metadata["task_id"] = task_id
+        if turn_number is not None:
+            event.metadata["_turn_number"] = turn_number
         if resume_continuation:
             event.metadata["_resume_continuation"] = True
 

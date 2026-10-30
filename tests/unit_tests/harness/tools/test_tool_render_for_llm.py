@@ -258,9 +258,9 @@ def test_discovery_tools_render_text() -> None:
 @pytest.mark.level1
 def test_dict_returning_tools_render_text() -> None:
     assert TodoCreateTool(_OP, language="en").render_for_llm({"message": "Created 1 task"}) == "Created 1 task"
-    tasks = {"tasks": [{"id": "t1", "content": "Write", "status": "pending", "depends_on": ["t0"]}]}
+    tasks = {"todos": [{"id": "t1", "content": "Write", "status": "pending", "depends_on": ["t0"]}]}
     assert TodoListTool(_OP, language="en").render_for_llm(tasks) == "- [pending] t1: Write (depends on: t0)"
-    assert TodoListTool(_OP, language="en").render_for_llm({"tasks": []}) == "No active tasks."
+    assert TodoListTool(_OP, language="en").render_for_llm({"todos": []}) == "No active tasks."
     assert TodoGetTool(_OP, language="en").render_for_llm({"todo": {"id": "t1", "description": None}}) == "id: t1"
 
     assert SubmitGoalReportTool(None, language="en").render_for_llm(

@@ -41,9 +41,9 @@ from openjiuwen.harness.rails.task_planning_rail import (
 from openjiuwen.harness.rails.heartbeat_rail import (
     HeartbeatRail,
 )
+from openjiuwen.core.common.run_context import HeartbeatReason
 from openjiuwen.core.single_agent.rail.base import (
     RunKind,
-    HeartbeatReason,
 )
 from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
@@ -407,7 +407,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         mock_llm.set_responses([
             create_tool_call_response(
                 "todo_create",
-                '{"tasks": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
+                '{"todos": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
             ),
             create_tool_call_response(
                 "todo_list",
@@ -447,7 +447,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         mock_llm.set_responses([
             create_tool_call_response(
                 "todo_create",
-                '{"tasks": "任务1;任务2;任务3;任务4;任务5"}'
+                '{"todos": "任务1;任务2;任务3;任务4;任务5"}'
             ),
             create_tool_call_response(
                 "todo_modify",

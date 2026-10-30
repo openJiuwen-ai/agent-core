@@ -40,6 +40,8 @@ _POWERSHELL_TOKENS = (
 )
 
 _PS_VARIABLE_PATTERN = re.compile(r"(^|[\s;(])\$[A-Za-z_][A-Za-z0-9_]*")
+# `$name = ...` assignments are PowerShell-only; bash assigns without the `$` sigil.
+_PS_ASSIGNMENT_PATTERN = re.compile(r"(^|[\s;(])\$[A-Za-z_][A-Za-z0-9_]*\s*[-+*/]?=(?!=)")
 _POWERSHELL_EXECUTABLE_PATTERN = re.compile(r"^\s*(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b", re.IGNORECASE)
 _POWERSHELL_COMMAND_ARG_PATTERN = re.compile(r"(?is)(?:^|\s)-(?:command|c)\s+(?P<script>.+)\s*$")
 _POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
@@ -48,6 +50,20 @@ _POSIX_COMMANDS = frozenset({
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
     "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir",
 })
+_BASH_CONTROL_FLOW_PATTERNS = (
+    re.compile(
+        r"(?is)(?:^|[;\r\n])\s*for\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+in\b|\(\().*?"
+        r"(?:;|[\r\n])\s*do\b.*?(?:;|[\r\n])\s*done\b"
+    ),
+    re.compile(
+        r"(?is)(?:^|[;\r\n])\s*(?:while|until)\b.*?"
+        r"(?:;|[\r\n])\s*do\b.*?(?:;|[\r\n])\s*done\b"
+    ),
+    re.compile(
+        r"(?is)(?:^|[;\r\n])\s*if\b.*?"
+        r"(?:;|[\r\n])\s*then\b.*?(?:;|[\r\n])\s*fi\b"
+    ),
+)
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
 # Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
@@ -75,7 +91,7 @@ def _looks_like_powershell(command: str) -> bool:
         return True
     if "@'" in command or '@"' in command:
         return True
-    if _PS_VARIABLE_PATTERN.search(command):
+    if _PS_ASSIGNMENT_PATTERN.search(command):
         return True
     return False
 
@@ -224,7 +240,10 @@ def _segment_base_command(segment: str) -> str:
 
 
 def _looks_like_posix(command: str) -> bool:
-    return any(_segment_base_command(segment) in _POSIX_COMMANDS for segment in _split_shell_segments(command or ""))
+    command = command or ""
+    if any(pattern.search(command) for pattern in _BASH_CONTROL_FLOW_PATTERNS):
+        return True
+    return any(_segment_base_command(segment) in _POSIX_COMMANDS for segment in _split_shell_segments(command))
 
 
 def _normalize_windows_paths_for_bash(command: str) -> str:
@@ -290,6 +309,10 @@ class ShellOperation(BaseShellOperation):
                     exe = _available_bash(allow_wsl=False)
                     if exe:
                         return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
+                # A bare `$name` is shared by bash and PowerShell, so only use it after POSIX detection.
+                if _PS_VARIABLE_PATTERN.search(command):
+                    exe = _available_powershell()
+                    return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
@@ -347,7 +370,7 @@ class ShellOperation(BaseShellOperation):
             cwd: Working directory.
             env: Environment variables.
             shell_type: Shell selection (auto/cmd/powershell/bash/sh).
-            background: If True, redirect all I/O to DEVNULL (no output capture).
+            background: If True, discard stdout and retain bounded stderr diagnostics.
             stream: If True, apply OS-specific buffering wrapper for
                 real-time line output (e.g. ``script`` on macOS).  Only
                 meaningful for streaming execution; one-shot
@@ -370,7 +393,10 @@ class ShellOperation(BaseShellOperation):
 
         if background:
             stdout = asyncio.subprocess.DEVNULL
-            stderr = asyncio.subprocess.DEVNULL
+            # Keep stderr readable during early-failure detection. AsyncProcessHandler
+            # drains it after the grace period too, so verbose long-running processes
+            # cannot block on a full pipe.
+            stderr = asyncio.subprocess.PIPE
             stdin = asyncio.subprocess.DEVNULL
         else:
             stdout = asyncio.subprocess.PIPE

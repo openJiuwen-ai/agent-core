@@ -88,7 +88,7 @@ class TestFormatToolArgs:
 
     def test_todo_no_args(self) -> None:
         """todo tools show empty args."""
-        result = format_tool_args("todo_create", {"tasks": "a;b"})
+        result = format_tool_args("todo_create", {"todos": "a;b"})
         assert result == ""
 
     def test_string_args_parsed(self) -> None:

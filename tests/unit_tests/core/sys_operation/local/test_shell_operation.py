@@ -128,6 +128,66 @@ def test_windows_auto_routes_posix_ls_grep_pipeline_to_git_bash(monkeypatch):
     assert args == [exe, "-lc", 'ls -la "C:/tmp/artifacts" | grep -i "分镜"']
 
 
+@pytest.mark.parametrize("command", [
+    "for i in $(seq 1 300); do echo $i; sleep 1; done",
+    "for i in 1 2 3; do echo hi; done",
+    "i=0\nwhile true; do\n  echo $i\ndone",
+])
+def test_windows_auto_routes_bash_loops_to_git_bash(monkeypatch, command):
+    """Bash loops using `$var` must not be mistaken for PowerShell in Windows auto mode."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Program Files\Git\bin\bash.exe"
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "bash"
+    assert args == [exe, "-lc", command]
+
+
+@pytest.mark.parametrize("command", [
+    "$files = Get-Item *; ls",
+    "$i = 0; ls",
+    "Write-Output $name",
+])
+def test_windows_auto_keeps_powershell_variables_on_powershell(monkeypatch, command):
+    """PowerShell assignments and bare `$var` without POSIX signals still route to PowerShell."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_powershell", lambda: exe)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: "bash.exe")
+
+    _, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "powershell"
+
+
+def test_windows_auto_does_not_treat_powershell_do_loop_as_bash(monkeypatch):
+    """PowerShell do/while syntax must not be treated as a Bash control-flow marker."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    command = "do { echo $i } while ($i)"
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_powershell", lambda: exe)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: "bash.exe")
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "powershell"
+    assert args == [exe, "-NoProfile", "-NonInteractive", "-Command", command]
+
+
 @pytest.mark.asyncio
 async def test_shell_basic_execution(sys_op):
     """Test basic shell commands across platforms."""

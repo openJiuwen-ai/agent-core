@@ -33,6 +33,9 @@ must not become runtime rules on ANY surface.
 Each action binds exactly one issue. At most three necessary connected actions
 may implement the same intervention across surfaces; retain the same role and
 issue and connect them with depends_on. Do not bundle independent improvements.
+The structured attributed_issue_ids field defines the issue being repaired.
+Prose may compare or explicitly exclude other issues without adding them to
+that field. Such references do not authorize changes for those other issues.
 Use constraints.surface_choice_reason to explain the missing operation and why
 these components are necessary. expected_effect states a checkable behavior,
 not a promised score. A past score rise is not proof of that mechanism.
@@ -85,3 +88,15 @@ depends_on, run_if (dependency_succeeded | dependency_failed | always),
 allowed_skills, allowed_tools, candidate_query, install_ref, expected_effect,
 risk_notes, constraints (including surface_choice_reason).
 Return an empty actions list if evidence does not support an executable intervention.
+
+## Restricted runtime configuration
+
+When config is offered, a budget/termination defect can target runtime.yaml.
+Only max_iterations and on_max_iterations are editable. Inspect the effective
+runtime evidence and host ceiling before choosing a finite value. The host
+ceiling, models, credentials, dataset, and graders are immutable. Treat budget
+exhaustion as a recorded mechanism; distinguish normal progress, repeated
+failures, and absent finalization before proposing more iterations. Adding a
+runtime.yaml to an old package is config/add; modifying an existing one is
+config/modify. Declare only runtime.yaml. A config change is evaluated with its
+actual runtime cost and must survive the ordinary full regression gates.

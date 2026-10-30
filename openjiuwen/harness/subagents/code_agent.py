@@ -113,7 +113,7 @@ def _inject_builtin_plan_agents(
             build_explore_agent_config(
                 model=model,
                 language=resolved_language,
-                max_iterations=25,
+                max_iterations=50,
                 workspace=workspace,
                 sys_operation=sys_operation,
             )
@@ -123,7 +123,7 @@ def _inject_builtin_plan_agents(
             build_plan_agent_config(
                 model=model,
                 language=resolved_language,
-                max_iterations=25,
+                max_iterations=50,
                 workspace=workspace,
                 sys_operation=sys_operation,
             )
@@ -152,7 +152,7 @@ def build_code_agent_config(
     mcps: Optional[List[McpServerConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -205,7 +205,7 @@ def create_code_agent(
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,

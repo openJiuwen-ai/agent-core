@@ -146,6 +146,22 @@ required/optional host capability 和 compatible protocol versions，并在 `sta
 
 `FORCE` abort 只要求尽快停止，不承诺回滚已经发生的命令、文件或外部系统副作用。
 
+### 模型探测与切换（可选）
+
+实现 `HarnessModelControl` 并在 Card 声明 `MODEL_DISCOVERY` / `MODEL_SELECTION`：
+
+```python
+from openjiuwen.harness_protocol import HarnessCapability, HarnessModelControl, ModelSelection
+
+if isinstance(harness, HarnessModelControl) and harness.card.supports(HarnessCapability.MODEL_DISCOVERY):
+    options = await harness.list_models()          # 启动前后都可调，只握手不请求模型
+if harness.card.supports(HarnessCapability.MODEL_SELECTION):
+    await harness.set_model(ModelSelection(model="sonnet", effort="low"))  # 下一个 Turn 生效
+```
+
+`set_model` 不改变正在运行的 Turn；多次调用按字段合并；重连后保持。继承 `SerializedTurnHarness`
+的实现只需覆写 `_list_models` / `_apply_model_selection`，排队、合并与失败诊断由基类负责。
+
 ## 4. 区分 events、interactions 和 hooks
 
 三者方向和阻塞语义不同：
@@ -235,6 +251,7 @@ message/turn ID 在 agent + host session 内唯一，item/call ID 在 Turn 内�
 | `OutputEvent` | 稳定 block ID/index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM channel，DELTA/SNAPSHOT/FINAL operation |
 | `ItemLifecycleEvent` | `item_type="step"` 表示 Agent Loop 控制循环；tool、command、subagent 等是普通 provider item |
 | `UsageUpdatedEvent` | 标准化 token usage |
+| `ModelRequestEvent` | 一次物理模型请求：请求消息、回复与本次 usage；仅当宿主声明 `MODEL_REQUEST_OBSERVATION` 时发出，先于其引发的 item 与 terminal |
 | `StateChangedEvent` | Harness state 转换 |
 | `TurnLifecycleEvent` | Turn start、pause/resume 和唯一 terminal |
 | `HookObservedEvent` | hook 执行观测，不参与授权 |
@@ -867,6 +884,8 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 | MCP/dynamic request | control/MCP message | server request/tool call |
 | abort | `interrupt()` + cancel pending request | turn interrupt + cancel pending request |
 | checkpoint | session id/state 主动 save | thread id/state 主动 save |
+| `list_models` | `initialize` 响应的 `models` | `model/list` |
+| `set_model` | `set_model()` + `apply_flag_settings {"effortLevel"}` | 下一次 `thread.turn(model=, effort=)`（粘性） |
 
 表中是 adapter 内部映射，不是公共协议的一部分。Provider 原始对象只允许先转成 JSON-safe
 `provider_data`/`ProviderEvent`；不能把 SDK class 暴露给公共消费者。

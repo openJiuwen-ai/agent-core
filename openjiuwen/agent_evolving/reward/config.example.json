@@ -1,0 +1,9 @@
+{
+  "producer": {
+    "model": "session"
+  },
+  "judge": {
+    "model": "session"
+  },
+  "criteria_budget": 3
+}

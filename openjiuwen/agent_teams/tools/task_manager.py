@@ -63,6 +63,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
+from openjiuwen.agent_teams.tools.models import TeamTaskReviewVoteBase
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
 
@@ -132,7 +133,9 @@ class TeamTaskManager:
                 omitted.
             dispatch_mode: The team's dispatch mode ("autonomous" /
                 "scheduled"), static from ``TeamAgentSpec.dispatch_mode``
-                (F_62). ``verify_task`` selects its verdict policy by it.
+                (F_62). ``verify_task`` selects its verdict policy by it,
+                and human-assigned tasks are only eager-started outside
+                scheduled dispatch.
         """
         self.db = db
         self.team_name = team_name
@@ -142,6 +145,11 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+
+    @property
+    def dispatch_mode(self) -> str:
+        """The team's dispatch mode ("autonomous" / "scheduled")."""
+        return self._dispatch_mode
 
     def configure_plan_storage(
         self,
@@ -377,6 +385,8 @@ class TeamTaskManager:
             reviewer=task.reviewers(),
             review_round=task.review_round,
             max_review_rounds=task.max_review_rounds,
+            summary=task.summary,
+            note=task.note,
             blocked_by=blocked_by,
             blocks=blocks,
             updated_at=task.updated_at,
@@ -599,7 +609,13 @@ class TeamTaskManager:
 
         return TaskOpResult.success()
 
-    async def complete(self, task_id: str) -> TaskOpResult:
+    async def complete(
+        self,
+        task_id: str,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> TaskOpResult:
         """Complete a task.
 
         Updates task status to 'completed' and unblocks dependent tasks.
@@ -607,6 +623,13 @@ class TeamTaskManager:
 
         Args:
             task_id: Task identifier.
+            summary: Author's one-line completion summary (what was delivered
+                and where), rendered in leader digests and upstream briefs
+                (F_119). Stored in full; ``None`` keeps the stored value.
+            note: Author's full completion detail (artifact paths, key
+                decisions). Persisted on the task row — read by reviewers and
+                ``view_task``, never carried by events (F_118). ``None`` keeps
+                the stored value.
 
         Returns:
             ``TaskOpResult`` describing the outcome.
@@ -628,7 +651,7 @@ class TeamTaskManager:
         # review is driven by the task's reviewer list, not the member.
         gated = await self.db.task.get_task(task_id)
         if gated is not None and gated.reviewers():
-            return await self._submit_for_review(gated)
+            return await self._submit_for_review(gated, summary=summary, note=note)
 
         # No plan-mode-specific gate is needed: the transition table forbids
         # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
@@ -637,7 +660,7 @@ class TeamTaskManager:
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
-        result = await self.db.task.complete_task(task_id)
+        result = await self.db.task.complete_task(task_id, summary=summary, note=note)
         if not result:
             current = await self.db.task.get_task(task_id)
             if current is None:
@@ -680,7 +703,13 @@ class TeamTaskManager:
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
-    async def _submit_for_review(self, task) -> TaskOpResult:
+    async def _submit_for_review(
+        self,
+        task,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> TaskOpResult:
         """Route a completed-by-author task into the verify gate (IN_REVIEW).
 
         Called from ``complete`` when the task carries reviewers. Plain
@@ -689,7 +718,7 @@ class TeamTaskManager:
         ``TASK_SUBMITTED_FOR_REVIEW`` carrying the reviewer list for the
         framework to dispatch/notify.
         """
-        submitted = await self.db.task.submit_for_review(task.task_id)
+        submitted = await self.db.task.submit_for_review(task.task_id, summary=summary, note=note)
         if not submitted:
             return TaskOpResult.fail(
                 f"Task {task.task_id} cannot be submitted for review from status "
@@ -822,6 +851,29 @@ class TeamTaskManager:
             if detail.get("reviewer_id") == reviewer_name:
                 return detail.get("type", "verifier")
         return "verifier"
+
+    async def get_previous_round_vote(self, task, reviewer: str) -> TeamTaskReviewVoteBase | None:
+        """Return one reviewer's latest vote in the round before the current one.
+
+        A temp reviewer runs with a fresh context every round, so this vote is
+        the only memory it gets of what it asked the assignee to rework.
+
+        Args:
+            task: The task row whose ``review_round`` names the current round.
+            reviewer: Reviewer whose vote to look up.
+
+        Returns:
+            The reviewer's latest vote of round ``review_round - 1``, or None
+            on the first round or when the reviewer did not vote then.
+        """
+        if task.review_round <= 1:
+            return None
+        votes = await self.db.task.get_review_votes(task.task_id, task.review_round - 1)
+        latest = None
+        for vote in votes:
+            if vote.reviewer == reviewer:
+                latest = vote
+        return latest
 
     async def get_review_tally(self, task) -> dict[str, Any]:
         """Snapshot the current-round vote tally of one IN_REVIEW task.
@@ -1349,7 +1401,16 @@ class TeamTaskManager:
             team_logger.error(f"Failed to publish {error_label}: {e}")
 
     async def _start_human_assigned_task_if_ready(self, task: TeamTaskBase) -> bool:
-        """Start a ready task already assigned to a live human member."""
+        """Start a ready task already assigned to a live human member.
+
+        Skipped under scheduled dispatch: the scheduler owns every start there
+        and pairs it with the templated handoff message that reaches the human
+        member's inbound callback. Starting the task here would win the CAS
+        race against the scheduler, leaving the task IN_PROGRESS with no
+        handoff ever sent, so the human controller would never be notified.
+        """
+        if self._dispatch_mode == "scheduled":
+            return False
         if task.status != TaskStatus.PENDING.value or not task.assignee:
             return False
         if not await self.db.member.is_live_human_agent(self.team_name, task.assignee):
@@ -1439,6 +1500,10 @@ class TeamTaskManager:
         """
         return await self.list_tasks(status=TaskStatus.PENDING.value)
 
+    async def open_task_counts_by_assignee(self) -> dict[str, int]:
+        """Non-terminal task count per assignee (absent = none open). See F_118."""
+        return await self.db.task.open_task_counts_by_assignee(self.team_name)
+
     async def get_tasks_by_assignee(self, member_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member
 
@@ -1459,9 +1524,10 @@ class TeamTaskManager:
     ) -> TaskOpResult:
         """Update task title / content.
 
-        Publishes ``TASK_UPDATED`` on success. Does not bump the task's
-        ``updated_at`` column — that timestamp tracks status transitions
-        only.
+        Publishes ``TASK_UPDATED`` on success, carrying the post-write
+        status so a consumer whose view missed a transition can resync
+        from the event itself. Does not bump the task's ``updated_at``
+        column — that timestamp tracks status transitions only.
 
         Args:
             task_id: Task identifier.
@@ -1475,8 +1541,8 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        success = await self.db.task.update_task(task_id, title=title, content=content)
-        if not success:
+        updated = await self.db.task.update_task(task_id, title=title, content=content)
+        if updated is None:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
                 f"content updates are allowed on pending / blocked / planning / in-progress tasks "
@@ -1487,12 +1553,19 @@ class TeamTaskManager:
 
         # A claimed task stays claimed on edit; carry the assignee so its
         # dispatcher tells it to re-read the revised content (on_task_updated)
-        # instead of the old reset-to-pending + cancel_member.
+        # instead of the old reset-to-pending + cancel_member. The status rides
+        # the post-write row read inside the DAO's write transaction, so it is
+        # the committed state at update time rather than a re-query.
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(
-                    TaskUpdatedEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee)
+                    TaskUpdatedEvent(
+                        team_name=self.team_name,
+                        task_id=task_id,
+                        member_name=updated.assignee,
+                        status=updated.status,
+                    )
                 ),
             )
             team_logger.debug(f"Task updated event published: {task_id}")

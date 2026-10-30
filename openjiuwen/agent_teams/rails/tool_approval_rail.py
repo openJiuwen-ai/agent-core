@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
@@ -58,6 +59,8 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
         4. 中断等待 leader 的审批响应
         5. Leader 通过 ToolApprove 工具回复 -> resume -> 批准/拒绝
     """
+
+    interrupt_kind: str = InterruptKind.TEAM_TOOL_APPROVAL
 
     def __init__(
         self,

@@ -33,14 +33,13 @@ from openjiuwen.agent_teams.inbound_render import (
     render_event,
     render_inbound,
 )
-from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
+from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message, task_links
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.timefmt import format_time_context
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -132,12 +131,20 @@ class MessageHandler(BaseCoordinationHandler):
         Every path in this handler that feeds the local harness passes through
         here first. Three outcomes, keyed on the member's persisted status:
 
-        * ``SHUTDOWN`` — the member is gone. Never feed a dead harness; drop the
-          delivery.
+        * ``SHUTDOWN`` / ``DORMANT`` — the member has no runtime. Never feed a
+          dead harness; drop the delivery (a DORMANT member's unread rows stay
+          unread and are drained by the runtime its wake rebuilds, F_118).
         * ``SHUTDOWN_REQUESTED`` with no round in flight — the member is on its
           way out with nothing running to ride. Waking the harness for one last
           round, only to hand it a "you are being shut down" notice, burns an
-          LLM round to say goodbye. Settle straight to SHUTDOWN instead.
+          LLM round to say goodbye. Settle straight to the retire target
+          (SHUTDOWN, or DORMANT per the member's lifetime policy) instead.
+          **Dormant exception**: a dormant retirement sends no notice, so any
+          unread row is real input that arrived between the request and this
+          sweep; settling now would strand it (a message to a
+          SHUTDOWN_REQUESTED member wakes nobody). Let the delivery through —
+          the round it starts ends with ``_on_idle_settled`` closing the
+          stream, and finalize settles DORMANT after the input was read.
         * ``SHUTDOWN_REQUESTED`` with a round in flight — let the delivery
           through. It steers into the running round, whose end closes the stream
           (the teardown teammates have always ridden).
@@ -163,19 +170,35 @@ class MessageHandler(BaseCoordinationHandler):
             return False
 
         status = await backend.get_member_status(member_name)
-        if status == MemberStatus.SHUTDOWN.value:
-            team_logger.debug("[{}] harness input dropped: member is already SHUTDOWN", member_name)
+        if status in (MemberStatus.SHUTDOWN.value, MemberStatus.DORMANT.value):
+            team_logger.debug("[{}] harness input dropped: member is {}", member_name, status)
             return True
         if status != MemberStatus.SHUTDOWN_REQUESTED.value:
             return False
         if self._round.has_in_flight_round():
             return False
+        if await self._dormant_settle_deferred(member_name):
+            return False
 
         team_logger.info(
-            "[{}] shutdown requested with no round in flight; settling to SHUTDOWN without a final round",
+            "[{}] shutdown requested with no round in flight; settling without a final round",
             member_name,
         )
         await self._lifecycle.shutdown_self()
+        return True
+
+    async def _dormant_settle_deferred(self, member_name: str) -> bool:
+        """Whether a dormant-bound member must read its mailbox before settling (F_118)."""
+        backend = self._infra.team_backend
+        message_manager = self._infra.message_manager
+        if backend is None or message_manager is None:
+            return False
+        lifetime = await backend.get_member_lifetime(member_name)
+        if retire_target(lifetime) is not MemberStatus.DORMANT:
+            return False
+        if member_name not in await message_manager.members_with_unread([member_name]):
+            return False
+        team_logger.info("[{}] dormant retirement deferred: unread input is delivered first", member_name)
         return True
 
     async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
@@ -266,7 +289,6 @@ class MessageHandler(BaseCoordinationHandler):
                             msg,
                             expanded=expanded,
                             is_human_agent=is_human_agent,
-                            now_ms=get_current_time(),
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
@@ -317,12 +339,16 @@ class MessageHandler(BaseCoordinationHandler):
         async def _get_member(name: str) -> Any:
             return await db.member.get_member(name, backend.team_name) if db is not None else None
 
+        async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
+            return await task_links(db, task_id) if db is not None else ([], [])
+
         return await expand_message(
             msg,
             task_getter=_get_task,
             member_getter=_get_member,
             language=self._language(),
             loader=self._template_loader,
+            task_links_getter=_get_links,
         )
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:
@@ -363,7 +389,6 @@ class MessageHandler(BaseCoordinationHandler):
                 msg,
                 expanded=expanded,
                 is_human_agent=False,
-                now_ms=get_current_time(),
             )
 
         language = self._language()
@@ -398,7 +423,7 @@ class MessageHandler(BaseCoordinationHandler):
             original_body=expanded.body,
             remote_reply=remote_reply,
             language=language,
-            time_info=format_time_context(msg.timestamp, get_current_time()),
+            time_info=format_absolute_time(msg.timestamp),
         )
 
     async def _lookup_display_name(self, member_name: str) -> Any:
@@ -572,16 +597,20 @@ class MessageHandler(BaseCoordinationHandler):
     async def _read_all_unread(self, member_name: str) -> list[Any]:
         """Read all unread messages (direct + broadcast).
 
-        Returns merged list sorted by timestamp descending (newest first).
+        Returns the merged list sorted by timestamp ascending (oldest first),
+        which is the order they are delivered in. Delivery order is the order
+        the member reads them: the first one starts the round and the rest
+        steer into it, so newest-first would hand a member woken by a fresh
+        message that message before the older ones it should be read after.
         """
         mm = self._infra.message_manager
         direct = await mm.get_messages(to_member_name=member_name, unread_only=True)
         broadcasts = await mm.get_broadcast_messages(member_name=member_name, unread_only=True)
         merged = list(direct) + list(broadcasts)
-        merged.sort(key=lambda m: m.timestamp, reverse=True)
+        merged.sort(key=lambda m: m.timestamp)
         return merged
 
-    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool, now_ms: int) -> str:
+    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool) -> str:
         """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
         The message body goes verbatim inside the ``<team-inbound>`` element
@@ -589,11 +618,14 @@ class MessageHandler(BaseCoordinationHandler):
         framework-added hint goes in a separate ``<team-note>`` — so the LLM
         sees a clean boundary between the message and what the runtime
         appended. ``message_id`` is carried so the agent can call
-        ``mark_message_read``; the send time is rendered as ``<absolute local
-        time> (<relative diff>)`` so the agent can judge recency (mailbox
-        delivery is often delayed). The envelope is uniform across every team
-        message — a framework template message differs only in where its body
-        came from (rendered at delivery, see ``_expand``), not in its shape.
+        ``mark_message_read``; the send time is rendered as absolute local time
+        only. The block stays in the member's history and is read again in
+        later rounds, where a relative diff rendered now would be stale; the
+        member judges recency (mailbox delivery is often delayed) against the
+        ``<team-clock>`` anchor that rides each admitted input. The envelope is
+        uniform across every team message — a framework template message
+        differs only in where its body came from (rendered at delivery, see
+        ``_expand``), not in its shape.
 
         Rendering is role-aware. A teammate / leader gets a ``reply-hint``
         note — except on a framework template message, which is answered with
@@ -609,10 +641,9 @@ class MessageHandler(BaseCoordinationHandler):
             expanded: The delivery-time body plus whether it came from a
                 framework template.
             is_human_agent: Whether the recipient is a human-agent avatar.
-            now_ms: Current millisecond UTC epoch, the relative-time anchor.
         """
         msg_type = INBOUND_TYPE_BROADCAST if msg.broadcast else INBOUND_TYPE_DIRECT
-        time_info = format_time_context(msg.timestamp, now_ms)
+        time_info = format_absolute_time(msg.timestamp)
         if is_human_agent:
             return render_inbound(
                 content=expanded.body,

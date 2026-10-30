@@ -120,6 +120,8 @@ class TaskDetail(BaseModel):
     reviewer: list[str] = Field(default_factory=list)
     review_round: int = 0
     max_review_rounds: Optional[int] = None
+    summary: Optional[str] = None
+    note: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
     updated_at: Optional[int] = None

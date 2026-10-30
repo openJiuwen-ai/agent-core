@@ -6,7 +6,7 @@ Create team tasks (Leader only).
 ## Task Fields
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
-- **content**: Goals, acceptance criteria, and constraints — not specific operations
+- **content**: Goals, acceptance criteria, and constraints — not specific operations. Do **not** ask the member to `send_message` you a report or progress update on completion: the completion summary it writes (`summary` / `note`) reaches you with the board nudge, and an extra report only repeats it and wakes you once more. There is also **no need** to write "before starting, read the upstream tasks' notes with view_task": the claim result already lists the completion summaries of the task's direct upstream, and the member calls `view_task(action='note')` itself when it needs the full text
 - **assignee** (optional): Existing non-leader member who should carry this task. Omit it to put the task in the shared claim pool
 - **task_id** (required): Custom ID for dependency reference
 - **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start; may reference in-batch or existing tasks. Veirfy that the task_id is correct before filling in this field.

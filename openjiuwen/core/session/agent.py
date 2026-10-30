@@ -288,6 +288,10 @@ class Session:
         """Persist the current session state without closing the stream."""
         await self._inner.checkpointer().post_agent_execute(self._inner)
 
+    async def commit_interrupt(self):
+        """Persist an interrupt checkpoint without closing the stream."""
+        await self._inner.checkpointer().interrupt_agent_execute(self._inner)
+
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self._inner, session_id=self.get_session_id())
 

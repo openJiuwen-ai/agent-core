@@ -12,6 +12,7 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt import interrupt_answer
 from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
@@ -37,13 +38,26 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
+    ToolApprovalResponse,
     ToolDefinition,
     ToolExecutionResult,
     ToolInvocation,
+    TurnError,
+    TurnEventKind,
+    TurnLifecycleEvent,
+    TurnResult,
+    TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
 )
-from openjiuwen.harness_providers.io_adapter import INTERACTIVE_INPUT_KIND, HarnessIOAdapter
+from openjiuwen.harness_providers.io_adapter import (
+    INTERACTIVE_INPUT_KIND,
+    TURN_LIFECYCLE,
+    HarnessIOAdapter,
+    _response_for,
+)
 from tests.test_logger import logger
 
 
@@ -194,9 +208,7 @@ async def test_dynamic_tool_call_routes_to_context_tool_gateway() -> None:
     assert response.status is InteractionResponseStatus.COMPLETED
     assert response.result == {"ok": True}
     assert response.is_error is False
-    assert gateway.invocations == [
-        ToolInvocation(call_id="call-1", name="view_task", arguments={"task_id": "task-1"})
-    ]
+    assert gateway.invocations == [ToolInvocation(call_id="call-1", name="view_task", arguments={"task_id": "task-1"})]
     await adapter.stop()
 
 
@@ -206,14 +218,22 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
     adapter = HarnessIOAdapter(harness)
     await adapter.start(_context())
     await harness.emit(OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hel", operation=OutputOperation.DELTA))
-    await harness.emit(OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hello", operation=OutputOperation.FINAL))
+    await harness.emit(
+        OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hello", operation=OutputOperation.FINAL)
+    )
     await harness.emit(
         OutputEvent(
-            output_id="r", kind=OutputKind.TEXT, content="think", operation=OutputOperation.FINAL, channel=OutputChannel.REASONING
+            output_id="r",
+            kind=OutputKind.TEXT,
+            content="think",
+            operation=OutputOperation.FINAL,
+            channel=OutputChannel.REASONING,
         )
     )
     await harness.emit(
-        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"name": "shell", "arguments": {"cmd": "ls"}}),
+        ItemLifecycleEvent(
+            kind=ItemEventKind.STARTED, item_type="tool", data={"name": "shell", "arguments": {"cmd": "ls"}}
+        ),
         item_id="call-1",
     )
     await harness.emit(
@@ -236,6 +256,114 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
     started = harness.contexts[0]
     assert HostCapability.USER_INPUT in started.host_capabilities
     assert started.interactions is adapter
+
+
+@pytest.mark.asyncio
+async def test_turn_lifecycle_projection_is_disabled_by_default() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED))
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="done"),
+        )
+    )
+
+    await adapter.stop()
+
+    assert await _drain(adapter) == []
+
+
+@pytest.mark.asyncio
+async def test_turn_lifecycle_projection_preserves_output_order_and_ignores_pause_resume() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED))
+    await harness.emit(
+        OutputEvent(
+            output_id="answer",
+            kind=OutputKind.TEXT,
+            content="hello",
+            operation=OutputOperation.DELTA,
+        )
+    )
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.PAUSED))
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.RESUMED))
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="complete"),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert [(chunk.type, chunk.index) for chunk in chunks] == [
+        (TURN_LIFECYCLE, 0),
+        ("llm_output", 1),
+        (TURN_LIFECYCLE, 2),
+    ]
+    assert chunks[0].payload == {"turn_id": "turn-1", "kind": "started"}
+    assert chunks[2].payload == {
+        "turn_id": "turn-1",
+        "kind": "finished",
+        "final_output": "complete",
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_lifecycle_marker_keeps_error_details() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FAILED,
+            result=TurnResult(
+                status=TurnStatus.FAILED,
+                error=TurnError(message="provider failed", code="provider_error"),
+            ),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert chunks[0].payload == {
+        "turn_id": "turn-1",
+        "kind": "failed",
+        "error_message": "provider failed",
+        "error_code": "provider_error",
+    }
+
+
+@pytest.mark.asyncio
+async def test_aborted_turn_lifecycle_marker_keeps_termination_kind() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.ABORTED,
+            result=TurnResult(
+                status=TurnStatus.INTERRUPTED,
+                termination=TurnTermination(kind=TurnTerminationKind.USER_ABORT),
+            ),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert chunks[0].payload == {
+        "turn_id": "turn-1",
+        "kind": "aborted",
+        "termination_kind": "user_abort",
+    }
 
 
 @pytest.mark.asyncio
@@ -289,6 +417,26 @@ async def test_user_input_request_round_trips_through_interactive_input() -> Non
 
 
 @pytest.mark.asyncio
+async def test_pending_interaction_can_be_answered_by_its_interrupt_id() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    request = UserInputRequest(request_id="ask-2", prompt="favorite color?")
+    pending = asyncio.create_task(adapter.handle(request))
+    await asyncio.sleep(0.01)
+    interactive = InteractiveInput()
+    interactive.answer("ask-2", {"answers": {"favorite color?": "red"}})
+    assert adapter.is_pending_interrupt_resume_valid(interactive)
+    assert await adapter.send(interactive) is None
+    response = await pending
+    assert response.content["answers"]["favorite color?"] == "red"
+    assert harness.sends == []
+    await adapter.stop()
+    chunks = await _drain(adapter)
+    assert chunks[0].payload.value["interrupt_id"] == "ask-2"
+
+
+@pytest.mark.asyncio
 async def test_unmatched_interactive_input_is_forwarded_to_the_provider() -> None:
     harness = _FakeHarness()
     adapter = HarnessIOAdapter(harness)
@@ -325,6 +473,57 @@ async def test_tool_approval_is_auto_allowed_by_default_and_asked_when_disabled(
     assert denied.decision is ToolApprovalDecision.DENY
     assert denied.reason == "not now"
     await strict.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_approval_is_asked_even_when_tools_are_auto_approved() -> None:
+    adapter = HarnessIOAdapter(_FakeHarness())
+    await adapter.start(_context())
+    request = ToolApprovalRequest(
+        request_id="intr_1",
+        call_id="c1",
+        tool_name="delete_all",
+        provider_data={"kind": "permission", "interrupt_id": "intr_1"},
+    )
+    pending = asyncio.create_task(adapter.handle(request))
+    await asyncio.sleep(0.01)
+    assert not pending.done()
+    interactive = InteractiveInput()
+    interactive.answer("intr_1", interrupt_answer("permission", approved=True, remember=True))
+    await adapter.send(interactive)
+    assert (await pending).decision is ToolApprovalDecision.ALLOW_FOR_SESSION
+    await adapter.stop()
+
+
+def test_approval_answers_keep_their_decision() -> None:
+    request = ToolApprovalRequest(request_id="intr_1", call_id="c1", tool_name="simplify_skill_experiences")
+
+    def decision(value: Any) -> ToolApprovalDecision:
+        return _response_for(request, value).decision
+
+    assert decision(interrupt_answer("skill_evolution_approval", approved=False, feedback="no")) is (
+        ToolApprovalDecision.DENY
+    )
+    assert decision({"action": "allow_always"}) is ToolApprovalDecision.ALLOW_FOR_SESSION
+    assert decision({"action": "allow_once"}) is ToolApprovalDecision.ALLOW
+    assert decision({"feedback": "unclear"}) is ToolApprovalDecision.DENY
+    assert decision(True) is ToolApprovalDecision.ALLOW
+
+
+def test_approval_answers_read_typed_words_and_edits() -> None:
+    request = ToolApprovalRequest(request_id="intr_1", call_id="c1", tool_name="doc_tool")
+
+    def respond(value: Any) -> ToolApprovalResponse:
+        return _response_for(request, value)
+
+    assert respond("yes").decision is ToolApprovalDecision.ALLOW
+    assert respond("always").decision is ToolApprovalDecision.ALLOW_FOR_SESSION
+    assert respond("no").decision is ToolApprovalDecision.DENY
+    assert respond("not now").reason == "not now"
+    edited = respond({"updated_arguments": {"x": "SAFE"}})
+    assert edited.decision is ToolApprovalDecision.ALLOW and edited.updated_arguments == {"x": "SAFE"}
+    for value in ({}, 1, None):
+        assert respond(value).decision is ToolApprovalDecision.DENY
 
 
 @pytest.mark.asyncio

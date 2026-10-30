@@ -48,11 +48,12 @@ def compose_bridge_inbound(
             adapter is registered so the bridge LLM can react to the
             degradation.
         language: ``"cn"`` (default) or ``"en"``.
-        time_info: Pre-rendered ``<absolute local time> (<relative
-            diff>)`` of the inbound message's send time, or ``None`` to
-            omit it. Lets the bridge avatar gauge how delayed the
-            message is when it schedules the relay. Passed as a ready
-            string so this stays a zero-dependency pure function.
+        time_info: Pre-rendered absolute local send time of the inbound
+            message, or ``None`` to omit it. Lets the bridge avatar gauge
+            how delayed the message is (against the ``<team-clock>``
+            anchor on its input) when it schedules the relay. No relative
+            diff: the text stays in the avatar's history. Passed as a
+            ready string so this stays a zero-dependency pure function.
 
     Returns:
         Composed text suitable for ``agent.deliver_input``.

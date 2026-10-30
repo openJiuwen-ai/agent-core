@@ -47,6 +47,13 @@ contain turns from multiple agents. The single-agent harness API therefore uses
   snapshot export.
 - `HarnessProvider`: provider-owned configuration validation and
   construction of an unstarted harness.
+- `HarnessModelControl`: an optional Protocol next to `HarnessProtocol`.
+  `list_models()` probes the provider catalog (`ModelOption`: id, efforts,
+  default effort, vendor extensions) on a started or unstarted harness;
+  `set_model(ModelSelection)` switches model and/or reasoning effort for the
+  following turns. Gated by `HarnessCapability.MODEL_DISCOVERY` /
+  `MODEL_SELECTION`; separate so existing `HarnessProtocol` implementations
+  stay conformant.
 - `HarnessCard`: static identity, protocol version, and optional
   harness capabilities, compatible protocol versions, and required/optional
   host capabilities.
@@ -55,6 +62,12 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
+- `ModelRequestEvent`: one physical model request of a turn (request messages,
+  tool definitions, sampling parameters, reply, response id, time to first
+  chunk, finish reasons and per-request usage), emitted only when the host declares
+  `HostCapability.MODEL_REQUEST_OBSERVATION`. Usage follows the GenAI
+  conventions: `input_tokens` is the whole prompt and cached input is a
+  breakdown inside it.
 - `HarnessEventCursor`: a closable async cursor that releases the observation
   consumer lease on normal completion or early `aclose()`.
 - `EventBufferConfig` and `event_retention`: bounded backpressure with derived
@@ -171,6 +184,14 @@ class MyHarness:
     unknown event types and schema versions.
 15. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
+16. When the host declares `MODEL_REQUEST_OBSERVATION`, every model request of a
+    turn is reported by one `ModelRequestEvent` before any item it caused and
+    before the turn's terminal event; caused items list its `request_id` in
+    `causation_ids`. A request the provider could not observe is still reported
+    from its reply with `input_observed=False`.
+17. `set_model` never changes the model of a running turn: it applies at once
+    while idle, otherwise before the next turn starts, and survives provider
+    reconnects within the cycle. `list_models` issues no model request.
 
 ## Documents
 

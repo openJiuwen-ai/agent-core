@@ -124,7 +124,7 @@ def test_failed_probe_keeps_existing_page_targets(probe, registry) -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
     runtime._code_executor = AsyncMock(return_value="### Error\nReferenceError: unavailable helper")
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://example.test/current", title="Current page")
     previous = page.export()
     with patch.object(page, registry, wraps=getattr(page, registry)) as register:
@@ -481,7 +481,7 @@ def test_runtime_unwrap_mcp_result_field() -> None:
 
     raw = {"result": '### Result\n{"ok": true, "cards": []}'}
 
-    assert runtime._unwrap_mcp_text_result(raw) == '### Result\n{"ok": true, "cards": []}'
+    assert runtime.unwrap_mcp_text_result(raw) == '### Result\n{"ok": true, "cards": []}'
 
 
 def test_build_card_probe_js_has_cache_first_diagnostics() -> None:

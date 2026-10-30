@@ -40,6 +40,7 @@ class _FakeAffinityLLM:
         *,
         session_id: str | None = None,
         parent_session_id: str | None = None,
+        turn_num: int | None = None,
         enable_kv_cache_affinity: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
@@ -48,6 +49,7 @@ class _FakeAffinityLLM:
         return {
             "session_id": session_id,
             "parent_session_id": parent_session_id,
+            "turn_num": turn_num,
         }
 
     async def evict_kvc(self, **kwargs: Any) -> bool:
@@ -203,6 +205,53 @@ async def test_affinity_invoke_adds_session_agent_hint_kwargs() -> None:
     assert result.content == "ok"
     assert llm.invoke_kwargs["session_id"] == "sess_affinity"
     assert llm.invoke_kwargs["parent_session_id"] == "sess_affinity"
+    assert llm.invoke_kwargs["turn_num"] == 1
+
+
+@pytest.mark.asyncio
+async def test_affinity_reuses_turn_num_for_every_model_call_in_callback_context() -> None:
+    session = Session(session_id="sess_affinity")
+    context = _FakeContext(window=_window([]), change=None)
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+    callback_context = _ctx(agent, session, context)
+
+    await agent._railed_model_call(callback_context)
+    first_turn_num = llm.invoke_kwargs["turn_num"]
+    await agent._railed_model_call(callback_context)
+
+    assert llm.invoke_kwargs["turn_num"] == first_turn_num
+
+
+@pytest.mark.asyncio
+async def test_affinity_fallback_turn_num_increments_per_agent_invoke() -> None:
+    session = Session(session_id="sess_affinity")
+    context = _FakeContext(window=_window([]), change=None)
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+
+    await agent._railed_model_call(_ctx(agent, session, context))
+    first_turn_num = llm.invoke_kwargs["turn_num"]
+    await agent._railed_model_call(_ctx(agent, session, context))
+
+    assert (first_turn_num, llm.invoke_kwargs["turn_num"]) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_affinity_prefers_turn_num_bound_by_harness() -> None:
+    session = Session(session_id="sess_affinity")
+    context = _FakeContext(window=_window([]), change=None)
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+
+    callback_context = _ctx(agent, session, context)
+    callback_context.extra["_turn_number"] = 7
+    await agent._railed_model_call(callback_context)
+
+    assert llm.invoke_kwargs["turn_num"] == 7
 
 
 @pytest.mark.asyncio
@@ -278,6 +327,7 @@ async def test_affinity_stream_adds_session_agent_hint_kwargs() -> None:
     assert result.content == "ok"
     assert llm.stream_kwargs["session_id"] == "sess_affinity"
     assert llm.stream_kwargs["parent_session_id"] == "sess_affinity"
+    assert llm.stream_kwargs["turn_num"] == 1
 
 
 @pytest.mark.asyncio
@@ -330,6 +380,7 @@ async def test_messages_change_triggers_best_effort_messages_evict_before_invoke
         "messages": old_messages,
         "tools": [],
         "model": "test-model",
+        "turn_num": llm.invoke_kwargs["turn_num"],
         "msg_start": 1,
         "msg_end": 2,
     }
@@ -362,6 +413,7 @@ async def test_tools_change_triggers_tools_evict_before_invoke() -> None:
         "messages": [_msg("user", "q")],
         "tools": old_tools,
         "model": "test-model",
+        "turn_num": llm.invoke_kwargs["turn_num"],
         "tools_start": 0,
         "tools_end": 1,
     }
@@ -421,12 +473,15 @@ async def test_affinity_disabled_does_not_detect_or_evict_or_add_agent_hint_kwar
     agent = _agent(enable_affinity=False)
     agent.set_llm(llm)
 
-    await agent._railed_model_call(_ctx(agent, session, context))
+    callback_context = _ctx(agent, session, context)
+    await agent._railed_model_call(callback_context)
 
     assert context.detected_windows == []
     assert llm.evict_calls == []
     assert "session_id" not in llm.invoke_kwargs
     assert "parent_session_id" not in llm.invoke_kwargs
+    assert "_kv_cache_turn_num" not in callback_context.extra
+    assert session.get_state("kv_cache_turn_number") is None
 
 
 @pytest.mark.asyncio

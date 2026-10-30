@@ -14,13 +14,21 @@ This module renders that input as semantic XML instead, giving the LLM a
 clean boundary:
 
 - ``<team-inbound>`` wraps the **original message** verbatim, with the
-  sender / id / type / time as attributes.
+  sender / id / type / time as attributes. ``time`` is the absolute send
+  time only: the block stays in the history and is read again later.
+- ``<team-clock>`` is the current-time anchor delivered with each admitted
+  input, so the member can tell how long ago an absolute ``time`` was.
 - ``<team-event>`` wraps a **framework event** (task assignment, plan
   decision, nudge, completion notice, task board, roster change, ...),
   with the event type in the ``kind`` attribute.
 - ``<team-context>`` wraps **standing team state** the member is being
   told about for the first time (its own identity, the team metadata) —
   a fact about the team rather than something that happened.
+- ``<team-policy>`` wraps the **standing team policy** in an external CLI
+  member's system prompt. It is the one block of this family that is not a
+  conversation message, and it is what lets the other four be described as
+  a family: the tools the policy names without a namespace are the same
+  tools the messages name, so one declaration inside it covers them all.
 - ``<team-note>`` carries a framework-added hint or constraint attached to
   either of the above (e.g. a reply hint, or the HITT silence constraint).
   It is rendered **nested inside the block it annotates**, as the last
@@ -124,8 +132,9 @@ def render_inbound(
         message_id: The message id, so the LLM can reference / mark it.
         msg_type: A stable contract token — ``INBOUND_TYPE_DIRECT`` or
             ``INBOUND_TYPE_BROADCAST`` — not a localized label.
-        time_info: Human-readable send time (already rendered by
-            ``timefmt.format_time_context``).
+        time_info: Absolute send time (already rendered by
+            ``timefmt.format_absolute_time``). No relative diff: this block
+            is written into the history and read again later.
         for_controller: When True, add ``for="controller"`` so a HITT
             avatar treats this as a notification for its human controller.
         note_kind: Optional ``<team-note>`` kind (e.g. ``"reply-hint"``,
@@ -174,6 +183,26 @@ def render_controller_input(*, content: str) -> str:
         f'type="{INBOUND_TYPE_DIRECT}"',
     ]
     return _render_block("team-inbound", attrs, content)
+
+
+def render_clock(*, now: str) -> str:
+    """Render the current-time anchor as a self-closing ``<team-clock>``.
+
+    Every ``time`` attribute written into a member's history is an absolute
+    send time. A relative diff ("3 minutes ago") would be true only when it was
+    rendered and would go stale the moment the history is read again, so the
+    member gets the current time instead, once per admitted input, and
+    measures elapsed time against the newest anchor itself. An older anchor
+    records what "now" was back then and is never refreshed.
+
+    Args:
+        now: The current time, already rendered by
+            ``timefmt.format_absolute_time``.
+
+    Returns:
+        The rendered ``<team-clock now="..."/>`` element.
+    """
+    return f'<team-clock now="{_esc_attr(now)}"/>'
 
 
 def render_event(
@@ -271,6 +300,33 @@ def render_team_context_with_identity(
     return f"<team-context>\n{chr(10).join(inner)}\n</team-context>"
 
 
+def render_team_policy(*, body: str, tools: str, note: str) -> str:
+    """Render the standing team policy as a ``<team-policy>`` XML block.
+
+    The ``tools`` attribute names the MCP server that provides the team's
+    collaboration tools, and ``note`` states what that means for the bare tool
+    names the policy uses. How one of those tools is actually addressed is not
+    stated here: the name a model calls it by is the harness provider's to
+    state, and the two meet on the server name alone.
+
+    The body is the team's own prompt text rather than something a sender
+    wrote, so, unlike every other block in this module, it is **not escaped**:
+    it is Markdown, and escaping would corrupt the backticks, ampersands and
+    comparison operators the policy templates are written with.
+
+    Args:
+        body: The assembled policy sections, inserted verbatim.
+        tools: Name of the MCP server providing the team's tools.
+        note: The tool-namespace declaration, inserted verbatim as the
+            block's first child.
+
+    Returns:
+        The rendered ``<team-policy>`` block.
+    """
+    declaration = f'<team-note kind="tool-namespace">\n{note}\n</team-note>'
+    return f'<team-policy tools="{_esc_attr(tools)}">\n{declaration}\n\n{body}\n</team-policy>'
+
+
 def snapshot_kind_of(text: str) -> str | None:
     """Return the snapshot kind ``text`` is, or None when it is not one.
 
@@ -329,10 +385,12 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "render_clock",
     "render_controller_input",
     "render_event",
     "render_inbound",
     "render_team_context",
     "render_team_context_with_identity",
+    "render_team_policy",
     "snapshot_kind_of",
 ]

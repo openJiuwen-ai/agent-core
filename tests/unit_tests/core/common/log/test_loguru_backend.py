@@ -1,4 +1,5 @@
 # -*- coding: UTF-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import importlib
 import json
@@ -524,3 +525,53 @@ def test_loguru_backend_rejects_invalid_serialize_mode(tmp_path):
 
     with pytest.raises(BaseError):
         _load_log_config(config_file_path)
+
+
+@pytest.mark.parametrize("level", ["warning", "error", "critical"])
+def test_exc_info_true_prints_the_in_flight_traceback(tmp_path, capsys, level):
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        try:
+            raise RuntimeError("boom-exc-info")
+        except RuntimeError:
+            getattr(logger, level)("failed: %s", "x", exc_info=True)
+
+    output = capsys.readouterr().out
+    assert "failed: x" in output
+    assert "Traceback" in output
+    assert "RuntimeError: boom-exc-info" in output
+
+
+def test_exc_info_accepts_an_exception_instance_outside_except(tmp_path, capsys):
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_instance.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    try:
+        raise ValueError("captured-earlier")
+    except ValueError as exc:
+        captured = exc
+
+    with patched_logging_config(config_file_path):
+        LogManager.get_logger("common").error("late report", exc_info=captured)
+
+    output = capsys.readouterr().out
+    assert "ValueError: captured-earlier" in output
+
+
+def test_falsy_exc_info_prints_no_traceback(tmp_path, capsys):
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_false.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        try:
+            raise RuntimeError("hidden")
+        except RuntimeError:
+            logger.error("quiet", exc_info=False)
+
+    output = capsys.readouterr().out
+    assert "quiet" in output
+    assert "Traceback" not in output

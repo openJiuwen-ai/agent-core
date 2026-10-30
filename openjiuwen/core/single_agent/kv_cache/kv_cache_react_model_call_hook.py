@@ -11,6 +11,9 @@ from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.kv_cache.kv_cache_metadata import resolve_session_lineage
 
 
+_KVC_TURN_NUMBER_STATE_KEY = "kv_cache_turn_number"
+
+
 @dataclass(frozen=True, slots=True)
 class KVCacheCallCapabilities:
     enable_affinity: bool
@@ -25,6 +28,36 @@ class KVCacheModelCallHook:
 
     def reset_warnings(self) -> None:
         self._affinity_warning_logged = False
+
+    @staticmethod
+    def resolve_turn_num(callback_extra: dict[str, Any], session: Any) -> int:
+        """Resolve the 1-based protocol turn number for this agent invoke.
+
+        A host that knows the real user-turn boundary supplies ``_turn_number``.
+        Direct Agent Core callers get a KVC-only, session-scoped fallback. This
+        method is called only after affinity capability checks pass, so KVC OFF
+        neither reads nor mutates session state.
+        """
+        for key in ("_turn_number", "_kv_cache_turn_num"):
+            value = callback_extra.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+
+        previous = 0
+        try:
+            value = session.get_state(_KVC_TURN_NUMBER_STATE_KEY)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                previous = value
+        except Exception:
+            logger.debug("Failed to read fallback KVC turn number", exc_info=True)
+
+        turn_num = previous + 1
+        try:
+            session.update_state({_KVC_TURN_NUMBER_STATE_KEY: turn_num})
+        except Exception:
+            logger.debug("Failed to persist fallback KVC turn number", exc_info=True)
+        callback_extra["_kv_cache_turn_num"] = turn_num
+        return turn_num
 
     def resolve_runtime(
         self,
@@ -69,6 +102,7 @@ class KVCacheModelCallHook:
         session_id: str | None,
         parent_session_id: str | None,
         model_name: str,
+        turn_num: int,
     ) -> None:
         if runtime.enable_affinity and runtime.supports_affinity:
             await self._evict_changed_window(
@@ -78,6 +112,7 @@ class KVCacheModelCallHook:
                 session_id=session_id,
                 parent_session_id=parent_session_id,
                 model_name=model_name,
+                turn_num=turn_num,
             )
 
     @staticmethod
@@ -88,6 +123,7 @@ class KVCacheModelCallHook:
         session: Any,
         session_id: str | None,
         parent_session_id: str | None,
+        turn_num: int,
     ) -> dict:
         extra_kwargs: dict = {}
         build_affinity = getattr(llm, "build_kv_cache_affinity_invoke_kwargs", None)
@@ -97,6 +133,7 @@ class KVCacheModelCallHook:
                     session=session,
                     session_id=session_id,
                     parent_session_id=parent_session_id,
+                    turn_num=turn_num,
                     enable_kv_cache_affinity=True,
                 )
             )
@@ -111,6 +148,7 @@ class KVCacheModelCallHook:
         session_id: str | None,
         parent_session_id: str | None,
         model_name: str,
+        turn_num: int,
     ) -> None:
         if not session_id:
             logger.warning("Skip Ascend KV cache window diff eviction because session_id is empty.")
@@ -126,6 +164,7 @@ class KVCacheModelCallHook:
             "messages": change.old_messages,
             "tools": change.old_tools,
             "model": model_name,
+            "turn_num": turn_num,
         }
         if change.msg_start is not None:
             evict_kwargs["msg_start"] = change.msg_start

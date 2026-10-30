@@ -145,6 +145,25 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
     def _set_session(self, session: Session):
         self._session = session
 
+    def trace_metadata(self) -> dict:
+        """Export retrieval facts for the workflow trace span.
+
+        Consumed by tracer extension handlers (tracer_otel) and mapped onto
+        GenAI semconv attributes: top_k -> gen_ai.retrieval.top_k, the bound
+        knowledge base ids -> gen_ai.data_source.id, and the agentic-retrieval
+        LLM id -> gen_ai.request.model (only present when agentic retrieval
+        is enabled, since plain retrieval makes no model request).
+        """
+        metadata = {
+            "top_k": self._config.retrieval_config.top_k,
+            "data_source_ids": [
+                component_kb_config.kb_config.kb_id for component_kb_config in self._config.component_kb_configs
+            ],
+        }
+        if self._config.retrieval_config.agentic and self._config.model_id:
+            metadata["request_model"] = self._config.model_id
+        return metadata
+
     async def _initialize_if_needed(self):
         """Lazily initialise the knowledge base on first invocation."""
         if self._initialized:

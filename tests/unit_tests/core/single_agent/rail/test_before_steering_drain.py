@@ -15,6 +15,7 @@ import asyncio
 
 import pytest
 
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.single_agent.rail.base import (
     EVENT_METHOD_MAP,
@@ -22,6 +23,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
     SteeringDrainInputs,
+    SteeringInput,
 )
 
 
@@ -187,3 +189,31 @@ async def test_inputs_are_restored_after_the_hook() -> None:
     await _agent()._drain_steering_batch(ctx)
 
     assert ctx.inputs is invoke_inputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_contextual_inputs_switch_context_without_cross_context_batching() -> None:
+    """Each model boundary consumes only one contiguous invocation context."""
+    first_context = RunContext(extra={"route": "first"})
+    second_context = RunContext(extra={"route": "second"})
+    ctx = _ctx()
+    queue = ctx.steering_queue
+    assert queue is not None
+    queue.put_nowait(SteeringInput("first-1", first_context))
+    queue.put_nowait(SteeringInput("first-2", first_context))
+    queue.put_nowait(SteeringInput("second", second_context))
+    agent = _agent()
+
+    first_batch = await agent._drain_steering_batch(ctx)
+
+    assert first_batch == ["first-1", "first-2"]
+    assert ctx.extra["run_context"] is first_context
+    assert ctx.has_pending_steering()
+    assert ctx.steering_pending_count() == 1
+
+    second_batch = await agent._drain_steering_batch(ctx)
+
+    assert second_batch == ["second"]
+    assert ctx.extra["run_context"] is second_context
+    assert not ctx.has_pending_steering()

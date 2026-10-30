@@ -40,11 +40,21 @@ class BackendError(EngineError):
     stays consistent with "Team budget" (the shared ledger that already
     counted those tokens). ``None`` when the backend could not attribute
     tokens (e.g. the failure happened before any model call).
+
+    Also carries the model the backend ran the failed call on, when the
+    provider reported one (an external CLI) — so the AGENT_FAILED event names
+    the endpoint that actually failed instead of the raw option hint.
     """
 
-    def __init__(self, message: str, *, tokens: int | None = None) -> None:
+    def __init__(self, message: str, *, tokens: int | None = None,
+                 retryable: bool = True, model: str | None = None) -> None:
         super().__init__(message)
         self.tokens = tokens
+        self.model = model
+        # ``False`` marks a deterministic validation/config error (e.g. a
+        # third-party model-option rule violation) that repeating can never fix:
+        # the engine re-raises it instead of burning retry attempts on it.
+        self.retryable = retryable
 
 
 class WorkflowAborted(BaseException):

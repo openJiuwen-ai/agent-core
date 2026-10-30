@@ -16,6 +16,9 @@ from openjiuwen.harness_protocol.models import (
     HarnessContext,
     HarnessInput,
     JsonObject,
+    ModelChoice,
+    ModelOption,
+    ModelSelection,
     SendReceipt,
 )
 from openjiuwen.harness_protocol.state import HarnessState
@@ -124,6 +127,36 @@ class HarnessProtocol(Protocol):
 
 
 @runtime_checkable
+class HarnessModelControl(Protocol):
+    """Optional model control a harness may implement next to ``HarnessProtocol``.
+
+    It is a separate Protocol so existing ``HarnessProtocol`` implementations
+    stay conformant. Hosts check ``card.supports(MODEL_DISCOVERY)`` /
+    ``card.supports(MODEL_SELECTION)`` before calling; an implementation that
+    does not declare the capability raises ``UnsupportedHarnessCapabilityError``.
+    """
+
+    async def list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the models the provider currently offers.
+
+        Works on a started harness (reads the live session) and on an
+        unstarted one (performs a short handshake from provider configuration
+        without issuing a model request). Requires ``MODEL_DISCOVERY``.
+        """
+        ...
+
+    async def set_model(self, selection: ModelSelection) -> None:
+        """Switch model and/or reasoning effort for the following turns.
+
+        Applied immediately while no turn runs, otherwise before the next turn
+        starts; a running turn keeps its model. The selection survives provider
+        reconnects within the cycle. Requires ``MODEL_SELECTION`` and a started
+        harness.
+        """
+        ...
+
+
+@runtime_checkable
 class HarnessProvider(Protocol):
     """Factory SPI used to discover and construct third-party harnesses."""
 
@@ -137,4 +170,31 @@ class HarnessProvider(Protocol):
         ...
 
 
-__all__ = ["HarnessProtocol", "HarnessProvider"]
+@runtime_checkable
+class ModelConfigProvider(Protocol):
+    """Optional provider hook mapping a host's model choice onto its configuration.
+
+    A ``HarnessProvider`` implements it next to ``create`` so a host never
+    knows the provider's configuration fields: the host picks a model (and
+    effort) from the provider's built-in catalog or from an endpoint it owns,
+    and merges the returned fragment into the ``create`` mapping. A choice
+    with an ``endpoint`` requires the card to declare ``ENDPOINT_MODELS``.
+    """
+
+    def model_config(self, choice: ModelChoice, *, fallback: ModelChoice | None = None) -> JsonObject:
+        """Return the configuration fragment that runs ``choice``.
+
+        Args:
+            choice: The model to create the harness on.
+            fallback: A model the provider may switch to on its own (the
+                Claude Code / Codex authentication fallback); providers
+                without such a mechanism raise when it is given.
+
+        Raises:
+            ValueError: When the provider cannot run the choice, e.g. an
+                effort its runtime has no selector for.
+        """
+        ...
+
+
+__all__ = ["HarnessModelControl", "HarnessProtocol", "HarnessProvider", "ModelConfigProvider"]

@@ -4,8 +4,8 @@
 
 1. 用 `view_task` 查看可处理任务——`status=pending` 且无 assignee 的任务可被自主认领；`assignee` 指向你的 pending 任务是 Leader 明确指派给你的任务
 2. **领取前判断**：评估未指派任务是否与自己的领域专长匹配，只领取属于自己专业领域的任务；明确指派给你的任务应优先处理。不匹配的未指派任务原则上留给更合适的成员——**但若某任务长时间无人认领且处于你能力边缘，主动认领或 `send_message` 请 Leader 重新分配**，避免 DAG 僵死
-3. 用 `claim_task(status=claimed)` 开始任务；这既适用于未指派任务，也适用于已指派给你的 pending 任务
-4. 完成全部工作后用 `claim_task(status=completed)` 标记完成
+3. 用 `claim_task(status=claimed)` 开始任务；这既适用于未指派任务，也适用于已指派给你的 pending 任务。领取结果会列出本任务直接上游的交付摘要
+4. 完成全部工作后用 `claim_task(status=completed, summary=..., note=...)` 标记完成：`summary` 一句话说明交付了什么、主产物在哪（交付物本身很短时直接写进摘要），`note` 写完整的产物路径与关键决策。完成交接由任务的 `summary` / `note` 承载，**不要**用 `send_message` 汇报完成。只有存在需要 Leader 知道或决定的事项（偏离计划、范围变化、遗留风险、阻塞）时才发消息，且只写这些事项本身
 5. 继续 `view_task` 领取下一个任务
 
 - **同一时刻只能有一个进行中（in_progress）的任务**：手头有在做的任务时，领取新任务会被拒绝

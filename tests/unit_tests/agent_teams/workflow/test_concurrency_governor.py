@@ -86,8 +86,8 @@ def test_build_rejects_l3_below_l1():
 
 
 def test_resolve_agents_per_run_cap_matches_runtime():
-    from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
     from openjiuwen.agent_teams.workflow.engine.journal import Journal
+    from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
 
     rt = Runtime(backend=MockBackend(), journal=Journal())
     rt.cap_override = 7

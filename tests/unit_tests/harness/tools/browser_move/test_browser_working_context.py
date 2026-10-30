@@ -16,8 +16,8 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMe
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
@@ -542,8 +542,8 @@ def test_processor_guidance_defines_each_working_memory_field() -> None:
     processor = BrowserWorkingContextProcessor(BrowserWorkingContextProcessorConfig(language="en"))
     prompt = _inject(processor, _FakeContext(_FakeSession())).context_messages[-1].content
 
-    assert "Runtime-owned execution context" in prompt
-    assert "Inferred fields are extraction hints, not extra user requirements" in prompt
+    assert "Shared execution context" in prompt
+    assert "Business completion is your judgment" in prompt
     assert "do not echo this context" in prompt
     assert '"runtime_directive":"continue"' in prompt
     assert '"request":{"kind":"initial"' in prompt
@@ -563,8 +563,8 @@ def test_processor_renders_chinese_guidance_with_stable_schema_keys() -> None:
 
     prompt = _inject(processor, context).context_messages[-1].content
 
-    assert "这是 runtime 维护的执行上下文" in prompt
-    assert "推断字段是提取提示，不是额外用户要求" in prompt
+    assert "这是共享执行上下文" in prompt
+    assert "业务完成由你结合原始用户目标判断" in prompt
     assert "不要复述上下文" in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_BEGIN not in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_END not in prompt
@@ -584,6 +584,7 @@ def test_working_context_is_valid_json_within_configured_limit() -> None:
                 "task_id": "bounded-task",
                 "goal": "g" * 2_000,
                 "status": "in_progress",
+                "requirements_source": "explicit",
                 "required_evidence_slots": [
                     {"entity": f"entity-{index}", "variant": "default", "field": f"field-{index}"}
                     for index in range(20)
@@ -700,7 +701,7 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
     )
     assert "Now check its tracking link" in prompt
     assert "Order 123 is shipped." in prompt
-    assert "Runtime-owned" in prompt
+    assert "Shared execution context" in prompt
 
 
 def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_session_is_absent() -> None:
@@ -955,6 +956,7 @@ def test_processor_runtime_projection_ignores_legacy_model_memory() -> None:
                 "task_id": "task-runtime",
                 "goal": "Return the current page title",
                 "status": "in_progress",
+                "requirements_source": "explicit",
                 "required_fields": ["title"],
                 "field_coverage": [],
                 "structured_evidence": [],
@@ -995,6 +997,7 @@ def test_processor_projects_runtime_task_state_before_current_page_state() -> No
                         "completion_condition": "requested fields have evidence",
                     }
                 },
+                "requirements_source": "explicit",
                 "required_fields": ["title", "price"],
                 "field_coverage": ["title"],
                 "blockers": [],
@@ -1030,7 +1033,7 @@ def test_processor_projects_runtime_task_state_before_current_page_state() -> No
 
     assert rendered.context_messages[-1] is current_state
     prompt = rendered.context_messages[-2].content
-    assert '"runtime_directive":"replan_before_browser_action"' in prompt
+    assert '"runtime_directive":"consider_different_strategy"' in prompt
     assert '"requirements":{' in prompt
     assert '"field":"price"' in prompt
     assert '"semantic_delta":"no_progress"' in prompt
@@ -1054,6 +1057,7 @@ def test_semantic_observation_closes_sort_evidence_before_replan_gate() -> None:
                     },
                     "extraction": {"status": "pending", "attempts": 0, "budget": 20},
                 },
+                "requirements_source": "explicit",
                 "required_fields": ["sort_state", "title"],
                 "required_evidence_slots": [
                     {"entity": "product", "variant": "default", "field": "sort_state"}
@@ -1111,6 +1115,7 @@ def test_changed_first_result_confirms_successful_sort_click() -> None:
                 "task_id": "sort-fallback",
                 "goal": "按销量排序",
                 "status": "in_progress",
+                "requirements_source": "explicit",
                 "required_fields": ["sort_state"],
                 "field_coverage": [],
                 "structured_evidence": [],

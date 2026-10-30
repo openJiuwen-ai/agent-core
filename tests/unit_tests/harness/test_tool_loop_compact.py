@@ -69,7 +69,7 @@ def _tool_call(tool_id: str, name: str, arguments: str) -> ToolCall:
 
 def _todo_round(index: int, *, arguments: str | None = None, result: str | None = None) -> list:
     args = arguments or (
-        '{"tasks":[{"id":"literature_review","content":"'
+        '{"todos":[{"id":"literature_review","content":"'
         + _CN_LIT_REVIEW
         + '","activeForm":"'
         + _CN_ACTIVE
@@ -354,3 +354,37 @@ async def test_bailout_disabled_keeps_compacting():
         )
         await rail.before_model_call(ctx)
         assert rail._get_tool_loop_compact_count(ctx) == expected
+
+
+@pytest.mark.asyncio
+async def test_rounds_separated_by_user_input_do_not_compact():
+    """Re-reading the same file after each new input is a re-check, not a loop."""
+    history = [UserMessage(content="go")]
+    for index in range(1, 5):
+        history.append(UserMessage(content=f"task-{index} just completed"))
+        history.extend(_todo_round(index, result=f"result-{index}"))
+
+    ctx, rail = _make_ctx(history)
+    await rail.before_model_call(ctx)
+
+    messages = ctx.context.get_messages()
+    assert _loop_summary_messages(messages) == []
+    assert messages == history
+    assert rail._get_tool_loop_compact_count(ctx) == 0
+
+
+@pytest.mark.asyncio
+async def test_only_the_back_to_back_tail_is_folded():
+    """An earlier identical round before a user input is neither counted nor deleted."""
+    history = [UserMessage(content="go")]
+    history.extend(_todo_round(1))
+    history.append(UserMessage(content="new input"))
+    for index in range(2, 5):
+        history.extend(_todo_round(index))
+
+    ctx, rail = _make_ctx(history)
+    await rail.before_model_call(ctx)
+
+    messages = ctx.context.get_messages()
+    assert len(_loop_summary_messages(messages)) == 1
+    assert any(isinstance(m, UserMessage) and m.content == "new input" for m in messages)

@@ -11,8 +11,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-09-16 |
-| 关联 feature | F_24_agent-time-awareness.md |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | F_24_agent-time-awareness.md · B_04_inbound-relative-time-and-mailbox-order.md |
 
 ## 范围 / 边界
 
@@ -187,6 +187,7 @@ def t(key: str, **kwargs: object) -> str       # 缺 key → KeyError
 
 ```python
 def format_time_context(timestamp_ms: int | None, now_ms: int) -> str
+def format_absolute_time(timestamp_ms: int | None) -> str
 ```
 
 - 输出形如 `2026-05-27 14:30:05 +08:00 (3 分钟前)`；`timestamp_ms is None` → `t("time.unknown")`。
@@ -196,6 +197,9 @@ def format_time_context(timestamp_ms: int | None, now_ms: int) -> str
   handlers/`（message / task_board / stale_task）、`tools/team_tools.py`（`view_task`
   render_for_llm）、`mcp/server.py`、`skill/cli.py`。这些是 `now_ms` 的注入方，各自取
   `get_current_time()`。
+- `format_absolute_time` 只输出绝对部分（形如 `2026-05-27 14:30:05 +08:00`），`None` →
+  `t("time.unknown")`。用于**写进成员对话历史、之后会被重读**的文本：`<team-inbound>` 的
+  `time`、bridge 入站头、`<team-clock now>` 锚点（见 S_09 不变量 28a）。
 
 ### constants.py
 
@@ -352,6 +356,9 @@ class TeamHarness:
 28. **边界归一**：`now < timestamp`（时钟漂移）与 `< 10s` 都归 `time.just_now`，绝不渲染负数
     或 "0 秒前"；`timestamp_ms is None` → `time.unknown`。
 29. **绝对时间用运行时本地时区 + 数字偏移**（`±HH:MM`）；相对差是 epoch 减法，与时区无关。
+30. **会留在历史里被重读的文本不带相对差**（[[B_04]]）。相对差只在渲染那一刻为真；工具结果 /
+    事件快照下次会整份重渲染，可以用 `format_time_context`，而入站消息块写进历史后不会再被改写，
+    只能用 `format_absolute_time`，"现在"交给每次输入附带的 `<team-clock>` 锚点。
 
 ## 数据结构
 

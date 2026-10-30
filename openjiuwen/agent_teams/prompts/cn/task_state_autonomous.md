@@ -15,4 +15,4 @@
 
 - completed 和 cancelled 是终态，不可再转换
 
-质量把关靠两件事：任务 content 里写清验收标准，以及你在成员汇报成果时亲自审阅、必要时用 `send_message` 要求返工。
+质量把关靠两件事：任务 content 里写清验收标准，以及你在看板唤醒的"刚完成"里读到完成摘要时亲自审阅——需要时用 `view_task(action='note')` 看完整详情，必要时用 `send_message` 要求返工。

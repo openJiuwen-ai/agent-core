@@ -22,15 +22,22 @@ _APPROVAL_MODES = ("auto", "prompt", "writes", "approve")
 
 @dataclass(frozen=True, slots=True)
 class CodexModelConfig:
-    """External model endpoint rendered as Codex ``model_provider`` overrides."""
+    """Model selection for the Codex thread, optionally on an external endpoint.
+
+    ``provider`` / ``api_base`` / ``api_key`` render Codex ``model_provider``
+    overrides for an external endpoint. Without them Codex runs on its own
+    login (for example a ChatGPT subscription) and ``model`` picks one of its
+    built-in models. ``effort`` is the Codex ``model_reasoning_effort``.
+    """
 
     model: str | None = None
     provider: str | None = None
     api_base: str | None = None
     api_key: str | None = field(default=None, repr=False)
+    effort: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("model", "provider", "api_base", "api_key"):
+        for name in ("model", "provider", "api_base", "api_key", "effort"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"Codex model {name} must be a non-empty string when provided")
@@ -48,6 +55,11 @@ class CodexModelConfig:
             raise ValueError(f"unknown Codex model config fields: {', '.join(unknown)}")
         return cls(**dict(config))  # type: ignore[arg-type]
 
+    @property
+    def is_external(self) -> bool:
+        """Return whether this targets an endpoint other than Codex's own login."""
+        return self.provider is not None or self.api_base is not None
+
 
 @dataclass(frozen=True, slots=True)
 class CodexHarnessConfig:
@@ -59,7 +71,11 @@ class CodexHarnessConfig:
     """
 
     # Append to effective developer instructions, or replace their field.
-    system_prompt_mode: Literal["append", "replace"] = "replace"
+    # Appending is the default so the host's prompt adds to what the CLI was
+    # configured with rather than dropping it, the way Claude Code's preset
+    # append does. It costs one ``config/read`` per connection, and a failure
+    # there fails startup instead of silently replacing.
+    system_prompt_mode: Literal["append", "replace"] = "append"
     skills: tuple[SkillSource, ...] = ()
     skill_conflict: str = "skip"
     cwd: str | None = None
@@ -82,9 +98,15 @@ class CodexHarnessConfig:
     client_title: str = "OpenJiuwen Harness"
     experimental_raw_events: bool = True
     event_buffer_capacity: int = 1024
+    # How long a tool item or turn end waits for the rollout record of a model
+    # request before the request is reported from raw events alone.
+    request_observation_wait_s: float = 5.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        wait_s = self.request_observation_wait_s
+        if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)) or wait_s < 0:
+            raise ValueError("Codex request_observation_wait_s must be a non-negative number")
         if self.system_prompt_mode not in ("append", "replace"):
             raise ValueError("system_prompt_mode must be 'append' or 'replace'")
         for name in ("cwd", "codex_bin", "client_name", "client_title"):

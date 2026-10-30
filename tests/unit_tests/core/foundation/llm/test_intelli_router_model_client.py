@@ -3,9 +3,14 @@
 """
 Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 """
+import asyncio
+import contextlib
 import importlib.util
+import json
 import os
+import threading
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,13 +19,26 @@ import pytest
 from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import (
     IntelliRouterClientConfig,
     IntelliRouterModelClient,
+    _CoreRoutingEventBridge,
     _router_cache,
     _web_servers,
 )
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.foundation.llm.schema.config import (
+    IntelliRouterConfig,
+    IntelliRouterDeploymentConfig,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ProviderType,
+)
 from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+
+
+# TestIntelliRouterModelClientInvoke.client overwrites _create_router on the
+# class without restoring it; tests that need real router construction must
+# patch it back with this import-time capture.
+_REAL_CREATE_ROUTER = IntelliRouterModelClient._create_router
 
 
 # ---------------------------------------------------------------------------
@@ -44,26 +62,29 @@ def intelli_router_client_config():
     return ModelClientConfig(
         client_provider=ProviderType.IntelliRouter,
         verify_ssl=False,
-        intelli_router_deployments=[
-            {
-                "model_name": "qwen-turbo",
-                "api_key": os.getenv("DASHSCOPE_API_KEY", "mock-dashscope-key"),
-                "api_base": "https://dashscope.aliyuncs.com",
-                "id": "dashscope-qwen-turbo",
-                "provider": "dashscope",
-                "tpm": 100000,
-                "rpm": 60,
-                "tags": ["primary"],
-                "timeout": 30.0,
+        intelli_router=IntelliRouterConfig(
+            model_group_id="group-1",
+            deployments=[
+                IntelliRouterDeploymentConfig(
+                    route_id="dashscope-qwen-turbo",
+                    model_id="model-qwen-turbo",
+                    model_name="qwen-turbo",
+                    api_key=os.getenv("DASHSCOPE_API_KEY", "mock-dashscope-key"),
+                    api_base="https://dashscope.aliyuncs.com",
+                    provider="dashscope",
+                    tpm=100000,
+                    rpm=60,
+                    timeout=30.0,
+                ),
+            ],
+            strategy="adaptive",
+            num_retries=3,
+            timeout=30.0,
+            strategy_kwargs={
+                "token_threshold": 1000,
+                "rpm_threshold": 10,
             },
-        ],
-        intelli_router_strategy="adaptive",
-        intelli_router_num_retries=3,
-        intelli_router_timeout=30.0,
-        intelli_router_strategy_kwargs={
-            "token_threshold": 1000,
-            "rpm_threshold": 10,
-        },
+        ),
     )
 
 
@@ -81,12 +102,18 @@ class FakeDeployment:
     model_name: str
     api_key: str
     api_base: str
+    model_id: str = None
     provider: str = "openai"
     tpm: int = None
     rpm: int = None
     tags: list = None
     timeout: float = None
     verify_ssl: bool = True
+    request_defaults: dict = None
+    endpoint_profile: str = None
+    custom_headers: dict = None
+    fallback_tag: str = None
+    model_description: str = None
 
 
 @dataclass
@@ -105,6 +132,24 @@ class FakeReliableRouter:
         self.kwargs = kwargs
 
 
+class FakeEventBus:
+    """Minimal fake EventBus for router construction tests."""
+    def __init__(self):
+        self.handlers = []
+
+    def register(self, handler):
+        self.handlers.append(handler)
+
+
+class FakeSession:
+    """Capture OutputSchema writes from the default route stream bridge."""
+    def __init__(self):
+        self.items = []
+
+    async def write_stream(self, data):
+        self.items.append(data)
+
+
 # ---------------------------------------------------------------------------
 # TestIntelliRouterClientConfig
 # ---------------------------------------------------------------------------
@@ -113,13 +158,15 @@ class TestIntelliRouterClientConfig:
     """Test IntelliRouterClientConfig extraction from ModelClientConfig."""
 
     def test_from_model_client_config(self, intelli_router_client_config):
-        """Verify all intelli_router_* fields are extracted from __pydantic_extra__."""
+        """Verify structured IntelliRouter config is extracted."""
         config = IntelliRouterClientConfig.from_model_client_config(intelli_router_client_config)
 
+        assert config.model_group_id == "group-1"
         assert len(config.deployments) == 1
         assert config.deployments[0]["model_name"] == "qwen-turbo"
         assert config.deployments[0]["api_key"] == os.getenv("DASHSCOPE_API_KEY", "mock-dashscope-key")
-        assert config.deployments[0]["id"] == "dashscope-qwen-turbo"
+        assert config.deployments[0]["route_id"] == "dashscope-qwen-turbo"
+        assert config.deployments[0]["model_id"] == "model-qwen-turbo"
         assert config.strategy == "adaptive"
         assert config.num_retries == 3
         assert config.timeout == 30.0
@@ -246,7 +293,38 @@ class TestRouterCache:
             from openjiuwen.core.common.exception.errors import BaseError
             with pytest.raises(BaseError) as exc_info:
                 IntelliRouterModelClient._create_router(config)
-            assert exc_info.value.status.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
+            assert exc_info.value.status.code == StatusCode.MODEL_RUNTIME_UNAVAILABLE.code
+
+    def test_create_router_passes_route_defaults_and_endpoint_fields(self):
+        """Route config fields are passed when the installed Deployment supports them."""
+        config = IntelliRouterClientConfig(
+            deployments=[{
+                "id": "d1",
+                "model_id": "m1",
+                "model_name": "m",
+                "api_key": "k",
+                "api_base": "b",
+                "provider": "openai",
+                "request_defaults": {"temperature": 0.2},
+                "endpoint_profile": "openrouter",
+                "custom_headers": {"HTTP-Referer": "https://example.com"},
+                "fallback_tag": "gpt-4o",
+                "model_description": "strong general model",
+            }],
+        )
+        with (
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+        ):
+            router = IntelliRouterModelClient._create_router(config)
+
+        deployment = router.kwargs["deployments"][0]
+        assert deployment.model_id == "m1"
+        assert deployment.request_defaults == {"temperature": 0.2}
+        assert deployment.endpoint_profile == "openrouter"
+        assert deployment.custom_headers == {"HTTP-Referer": "https://example.com"}
+        assert deployment.fallback_tag == "gpt-4o"
+        assert deployment.model_description == "strong general model"
 
     def test_create_router_with_observability(self):
         """When enable_observability=True, event_bus is created and passed to router."""
@@ -276,20 +354,25 @@ class TestRouterCache:
         mock_event_bus.register.assert_any_call(mock_logging_hook)
         mock_event_bus.register.assert_any_call(mock_metrics_collector)
 
-    def test_create_router_without_observability(self):
-        """When enable_observability=False, event_bus is None."""
+    def test_create_router_without_observability_registers_route_bridge(self):
+        """Route event bridge is active even when observability is disabled."""
         config = IntelliRouterClientConfig(
             deployments=[{"id": "d1", "model_name": "m", "api_key": "k", "api_base": "b", "provider": "openai"}],
             enable_observability=False,
         )
+        fake_intelli_router = MagicMock()
+        fake_intelli_router.EventBus = FakeEventBus
         with (
+            patch.dict("sys.modules", {"intelli_router": fake_intelli_router}),
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
         ):
             router = IntelliRouterModelClient._create_router(config)
 
         assert isinstance(router, FakeReliableRouter)
-        assert router.kwargs.get("event_bus") is None
+        event_bus = router.kwargs.get("event_bus")
+        assert isinstance(event_bus, FakeEventBus)
+        assert any(isinstance(handler, _CoreRoutingEventBridge) for handler in event_bus.handlers)
 
     def test_make_router_key_differs_with_observability(self):
         """enable_observability changes the cache key."""
@@ -316,6 +399,139 @@ class TestRouterCache:
         )
         assert IntelliRouterModelClient._make_router_key(config_no_port) != \
                IntelliRouterModelClient._make_router_key(config_with_port)
+
+    @pytest.mark.asyncio
+    async def test_core_route_bridge_emits_selected_route_callback(self):
+        """Selected routing events are bridged to core LLM_ROUTE callbacks."""
+        event = SimpleNamespace(
+            event_type=SimpleNamespace(value="stream_route_selected"),
+            extra={
+                "model_group_id": "group-1",
+                "route_id": "route-2",
+                "model_id": "model-2",
+                "model_name": "qwen-plus",
+                "provider": "dashscope",
+                "attempt": 2,
+                "fallback_reason": "DeploymentTimeoutError",
+            },
+            attempt=2,
+            total_attempts=2,
+            chunk_count=3,
+            error_type=None,
+            error_message=None,
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.trigger",
+            new_callable=AsyncMock,
+        ) as mock_trigger:
+            await _CoreRoutingEventBridge().handle_event(event)
+
+        mock_trigger.assert_awaited_once()
+        route_metadata = mock_trigger.await_args.kwargs["route_metadata"]
+        assert route_metadata == {
+            "model_group_id": "group-1",
+            "route_id": "route-2",
+            "model_id": "model-2",
+            "model_name": "qwen-plus",
+            "provider": "dashscope",
+            "attempt": 2,
+            "fallback_reason": "DeploymentTimeoutError",
+            "status": "selected",
+            "total_attempts": 2,
+            "chunk_count": 3,
+            "result_type": "answer",
+        }
+
+    @pytest.mark.asyncio
+    async def test_core_route_bridge_logs_retry_without_frontend_callback(self):
+        """A failed route is logged before failover, and is not a final LLM_ROUTE event."""
+        event = SimpleNamespace(
+            event_type=SimpleNamespace(value="request_retried"),
+            extra={
+                "model_group_id": "group-1",
+                "route_id": "route-1",
+                "model_name": "qwen-coder",
+                "provider": "openai",
+                "fallback_reason": "DeploymentRateLimitError",
+            },
+            deployment_id="route-1",
+            provider="openai",
+            attempt=1,
+            total_attempts=3,
+            error_type="DeploymentRateLimitError",
+            error_message="rate limit",
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.trigger",
+            new_callable=AsyncMock,
+        ) as mock_trigger, patch(
+            "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.llm_logger",
+        ) as mock_llm_logger:
+            await _CoreRoutingEventBridge().handle_event(event)
+
+        mock_trigger.assert_not_awaited()
+        mock_llm_logger.warning.assert_called_once()
+        warning_args = mock_llm_logger.warning.call_args.args
+        assert "route-1" in warning_args
+        assert "qwen-coder" in warning_args
+        assert "DeploymentRateLimitError" in warning_args
+        assert "rate limit" in warning_args
+
+    @pytest.mark.asyncio
+    async def test_core_route_bridge_ignores_stream_succeeded_events(self):
+        """Stream route is emitted before output, not repeated after stream success."""
+        event = SimpleNamespace(
+            event_type=SimpleNamespace(value="stream_succeeded"),
+            extra={"model_group_id": "group-1", "route_id": "route-1"},
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.trigger",
+            new_callable=AsyncMock,
+        ) as mock_trigger:
+            await _CoreRoutingEventBridge().handle_event(event)
+
+        mock_trigger.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_default_route_stream_writer_writes_output_schema(self, monkeypatch):
+        """The default LLM_ROUTE subscriber writes a frontend stream event."""
+        from openjiuwen.core.foundation.llm import model as model_module
+        from openjiuwen.core.foundation.llm.model import _ensure_llm_route_stream_writer_registered
+        from openjiuwen.core.runner.callback import AsyncCallbackFramework, trigger
+        from openjiuwen.core.runner.callback.events import LLMCallEvents
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+        from openjiuwen.core.session import _current_session
+
+        # Isolate the process-global subscriber and its registration cache.
+        monkeypatch.setattr(GLOBAL_RUNNER, "_callback_framework", AsyncCallbackFramework())
+        monkeypatch.setattr(model_module, "_llm_route_stream_writer_framework_id", None)
+
+        session = FakeSession()
+        token = _current_session.set(session)
+        try:
+            _ensure_llm_route_stream_writer_registered()
+            await trigger(
+                LLMCallEvents.LLM_ROUTE,
+                route_metadata={
+                    "status": "selected",
+                    "model_group_id": "group-1",
+                    "route_id": "route-1",
+                },
+            )
+        finally:
+            _current_session.reset(token)
+
+        assert len(session.items) == 1
+        assert session.items[0].type == "llm_route"
+        assert session.items[0].payload == {
+            "status": "selected",
+            "model_group_id": "group-1",
+            "route_id": "route-1",
+            "result_type": "answer",
+        }
 
     def test_create_router_with_web_dashboard(self):
         """When enable_observability=True and web_dashboard_port > 0, MetricsWebServer is created and started."""
@@ -535,6 +751,20 @@ class TestIntelliRouterModelClientInvoke:
         call_kwargs = client._router.invoke.call_args.kwargs
         assert "output_parser" not in call_kwargs
 
+    @pytest.mark.asyncio
+    async def test_invoke_uses_model_config_sampling_defaults(self, client):
+        client._router.invoke = AsyncMock(return_value=MagicMock(
+            content="raw", tool_calls=None, usage_metadata=None,
+            finish_reason="stop", reasoning_content=None, spec=[],
+        ))
+
+        await client.invoke([UserMessage(content="Hi")], temperature=0.2)
+
+        call_kwargs = client._router.invoke.call_args.kwargs
+        assert call_kwargs["temperature"] == 0.2
+        assert call_kwargs["top_p"] == 0.9
+        assert call_kwargs["max_tokens"] == 1024
+
 
 # ---------------------------------------------------------------------------
 # TestIntelliRouterModelClientStream
@@ -591,14 +821,12 @@ class TestIntelliRouterModelClientStream:
                 finish_reason="null",
                 tool_calls=None,
                 reasoning_content=None,
-                metadata={"source": "router"},
             )
             yield SimpleNamespace(
                 content="1}",
                 finish_reason="stop",
                 tool_calls=None,
                 reasoning_content=None,
-                metadata={"source": "router"},
             )
 
         async def fake_parse(content):
@@ -621,7 +849,7 @@ class TestIntelliRouterModelClientStream:
         assert [chunk.content for chunk in chunks] == ['{"value":', "1}"]
         assert chunks[0].parser_content is None
         assert chunks[1].parser_content == {"value": 1}
-        assert chunks[1].metadata == {"source": "router"}
+        assert chunks[1].metadata == {}
         assert "output_parser" not in client._router.stream.call_args.kwargs
 
     @pytest.mark.asyncio
@@ -859,6 +1087,30 @@ class TestIntelliRouterConvertResponse:
         assert result.content == "Hello"
 
     @pytest.mark.asyncio
+    async def test_to_ow_assistant_message_drops_router_message_metadata(
+        self, model_request_config, intelli_router_client_config,
+    ):
+        with (
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+        ):
+            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+        ir_msg = SimpleNamespace(
+            content="Hello",
+            tool_calls=None,
+            usage_metadata=None,
+            finish_reason="stop",
+            reasoning_content=None,
+            metadata={"route_id": "route-1"},
+        )
+
+        result = await client._to_ow_assistant_message(ir_msg)
+
+        assert result.metadata == {}
+        assert result.provider_metadata == {}
+
+    @pytest.mark.asyncio
     async def test_to_ow_assistant_message_empty(self, model_request_config, intelli_router_client_config):
         with (
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
@@ -884,6 +1136,20 @@ class TestIntelliRouterConvertResponse:
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
         assert isinstance(result, AssistantMessageChunk)
         assert result.content == "Hello chunk"
+
+    def test_to_ow_chunk_drops_router_chunk_metadata(self):
+        ir_chunk = SimpleNamespace(
+            content="Hello chunk",
+            finish_reason="stop",
+            tool_calls=None,
+            reasoning_content=None,
+            metadata={"route_id": "route-1"},
+        )
+
+        result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
+
+        assert result.metadata == {}
+        assert result.provider_metadata == {}
 
     def test_to_ow_chunk_empty(self, model_request_config, intelli_router_client_config):
         with (
@@ -1053,6 +1319,32 @@ class TestIntelliRouterConvertResponse:
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
         assert result.reasoning_content == "thinking..."
 
+    def test_to_ow_chunk_converts_usage_metadata(self):
+        """Chunk usage_metadata should be converted to openJiuwen UsageMetadata."""
+        ir_chunk = SimpleNamespace(
+            content="",
+            tool_calls=None,
+            finish_reason="stop",
+            reasoning_content=None,
+            usage_metadata=SimpleNamespace(
+                input_tokens=3,
+                output_tokens=2,
+                total_tokens=5,
+                cache_tokens=1,
+                reasoning_tokens=1,
+                model_name="returned-model",
+            ),
+        )
+
+        result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
+
+        assert result.usage_metadata is not None
+        assert result.usage_metadata.input_tokens == 3
+        assert result.usage_metadata.output_tokens == 2
+        assert result.usage_metadata.total_tokens == 5
+        assert result.usage_metadata.reasoning_tokens == 1
+        assert result.usage_metadata.model_name == "returned-model"
+
 
 # ---------------------------------------------------------------------------
 # TestIntelliRouterIntegrationDashScope — real API calls (skipped without key)
@@ -1066,22 +1358,23 @@ def _make_dashscope_client_config():
     return ModelClientConfig(
         client_provider=ProviderType.IntelliRouter,
         verify_ssl=False,
-        intelli_router_deployments=[
-            {
-                "model_name": "qwen-turbo",
-                "api_key": DASHSCOPE_API_KEY,
-                "api_base": DASHSCOPE_API_BASE,
-                "id": "dashscope-qwen-turbo",
-                "provider": "dashscope",
-                "tpm": 100000,
-                "rpm": 60,
-                "tags": ["primary"],
-                "timeout": 30.0,
-            },
-        ],
-        intelli_router_strategy="simple-shuffle",
-        intelli_router_num_retries=2,
-        intelli_router_timeout=30.0,
+        intelli_router=IntelliRouterConfig(
+            deployments=[
+                IntelliRouterDeploymentConfig(
+                    route_id="dashscope-qwen-turbo",
+                    model_name="qwen-turbo",
+                    api_key=DASHSCOPE_API_KEY,
+                    api_base=DASHSCOPE_API_BASE,
+                    provider="dashscope",
+                    tpm=100000,
+                    rpm=60,
+                    timeout=30.0,
+                ),
+            ],
+            strategy="simple-shuffle",
+            num_retries=2,
+            timeout=30.0,
+        ),
     )
 
 
@@ -1102,7 +1395,8 @@ class TestIntelliRouterIntegrationDashScope:
         from intelli_router import ReliableRouter, Deployment
         deployments = [
             Deployment(
-                id=d.get("id"),
+                id=d.get("route_id") or d.get("id"),
+                model_id=d.get("model_id"),
                 model_name=d["model_name"],
                 api_key=d["api_key"],
                 api_base=d["api_base"],
@@ -1120,7 +1414,10 @@ class TestIntelliRouterIntegrationDashScope:
     @pytest.mark.asyncio
     async def test_invoke_dashscope_qwen_turbo(self):
         """Real invoke call to DashScope qwen-turbo."""
-        deployments_cfg = _make_dashscope_client_config().intelli_router_deployments
+        deployments_cfg = [
+            dep.model_dump(exclude_none=True)
+            for dep in _make_dashscope_client_config().intelli_router.deployments
+        ]
         router = self._build_real_router(deployments_cfg)
 
         model_request_config = ModelRequestConfig(model="qwen-turbo", max_tokens=50)
@@ -1137,7 +1434,10 @@ class TestIntelliRouterIntegrationDashScope:
     @pytest.mark.asyncio
     async def test_stream_dashscope_qwen_turbo(self):
         """Real stream call to DashScope qwen-turbo."""
-        deployments_cfg = _make_dashscope_client_config().intelli_router_deployments
+        deployments_cfg = [
+            dep.model_dump(exclude_none=True)
+            for dep in _make_dashscope_client_config().intelli_router.deployments
+        ]
         router = self._build_real_router(deployments_cfg)
 
         model_request_config = ModelRequestConfig(model="qwen-turbo", max_tokens=50)
@@ -1196,3 +1496,151 @@ class TestIntelliRouterIntegrationDashScope:
         assert isinstance(result, AssistantMessage)
         assert len(result.content) > 0
         print(f"[DashScope failover] response: {result.content}")
+
+
+# ---------------------------------------------------------------------------
+# TestCrossEventLoopRouterCache (issue #2044)
+# ---------------------------------------------------------------------------
+
+class _LocalCompletionHandler(BaseHTTPRequestHandler):
+    """Local OpenAI-style chat-completion endpoint that keeps connections alive."""
+
+    protocol_version = "HTTP/1.1"
+    # A keep-alive connection left open by a retired event loop must not pin
+    # its handler thread forever when the owning client is never closed.
+    timeout = 15
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        body = json.dumps({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class TestCrossEventLoopRouterCache:
+    """Cross-event-loop reuse of _router_cache must rebuild, not reuse (issue #2044)."""
+
+    @staticmethod
+    def _fake_router_result(content="hi"):
+        return MagicMock(
+            content=content, tool_calls=None, usage_metadata=None,
+            finish_reason="stop", reasoning_content=None, spec=[],
+        )
+
+    def test_router_rebuilt_when_event_loop_changes(
+        self, model_request_config, intelli_router_client_config
+    ):
+        """A second asyncio.run cycle gets a rebuilt router; the stale one is closed.
+
+        Mirrors the smoke-test pattern (pytest-asyncio runs each case on a
+        fresh event loop): the cached router from cycle 1 would carry dead
+        httpx connections into cycle 2 unless it is rebuilt.
+        """
+        created = []
+
+        def _fake_create(config, cache_key=""):
+            router = MagicMock()
+            router.invoke = AsyncMock(return_value=self._fake_router_result())
+            router.close = AsyncMock()
+            created.append(router)
+            return router
+
+        with patch.object(IntelliRouterModelClient, "_create_router", side_effect=_fake_create):
+            client1 = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+            asyncio.run(client1.invoke("hello"))
+
+            client2 = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+            async def _second_case():
+                await client2.invoke("hello")
+                await client1.invoke("hello")  # stale instance adopts the rebuilt router
+
+            asyncio.run(_second_case())
+
+        assert len(created) == 2                   # rebuilt instead of reused
+        created[0].close.assert_awaited_once()     # stale router was closed
+        assert created[0].invoke.await_count == 1  # only the first loop used it
+        assert created[1].invoke.await_count == 2  # client2 + adopted client1
+        assert client1._router is created[1]
+        assert client2._router is created[1]
+
+    def test_cross_loop_reuse_recovers_with_real_router(self):
+        """End-to-end: a real router against a local keep-alive endpoint.
+
+        Cycle 1 pools its connection on loop 1. Depending on the resolved
+        httpx build, reusing that connection on loop 2 either fails the call
+        without a single real request (the issue #2044 smoke signature, as
+        seen in the smoke environment) or httpx quietly opens a fresh
+        connection (current stack). In both worlds cycle 2 must end up with
+        a rebuilt router and succeed; this pins that end-to-end behavior.
+        """
+        if importlib.util.find_spec("intelli_router") is None:
+            pytest.skip("intelli_router package not installed")
+
+        # One thread per connection: the routers' httpx pools are never closed
+        # in this test (each asyncio.run retires its loop), so keep-alive
+        # connections linger. A single-threaded server would block on them and
+        # hang server.shutdown(); a threading server just keeps accepting.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalCompletionHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        clients = []
+        try:
+            port = server.server_address[1]
+            client_config = ModelClientConfig(
+                client_provider=ProviderType.IntelliRouter,
+                intelli_router=IntelliRouterConfig(
+                    model_group_id="loop-regression",
+                    deployments=[
+                        IntelliRouterDeploymentConfig(
+                            route_id="local-dep1",
+                            model_name="test-model",
+                            api_key="k",
+                            api_base=f"http://127.0.0.1:{port}",
+                            provider="openai",
+                            tpm=100000,
+                            rpm=60,
+                            timeout=5.0,
+                        )
+                    ],
+                    strategy="adaptive",
+                    num_retries=3,
+                    timeout=5.0,
+                ),
+            )
+            request_config = ModelRequestConfig(model="test-model")
+
+            with patch.object(IntelliRouterModelClient, "_create_router", _REAL_CREATE_ROUTER):
+                client1 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client1)
+                result1 = asyncio.run(client1.invoke("hello"))
+
+                client2 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client2)
+                result2 = asyncio.run(client2.invoke("hello"))
+
+            assert result1.content == "hi"
+            assert result2.content == "hi"
+        finally:
+            for client in clients:
+                # Best-effort release of pooled connections; a pool bound to a
+                # retired loop raises on close, which is fine to ignore here.
+                with contextlib.suppress(RuntimeError, OSError):
+                    asyncio.run(client._router.close())
+            server.shutdown()
+            server.server_close()

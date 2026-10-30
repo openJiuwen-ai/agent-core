@@ -42,7 +42,7 @@ class TeamMessageManager:
         team_name: str,
         member_name: str,
         db: TeamDatabase,
-        messager: Messager,
+        messager: Messager | None,
     ):
         """Initialize team messaging manager
 
@@ -50,7 +50,7 @@ class TeamMessageManager:
             team_name: Team identifier
             member_name: Current member identifier
             db: Team database instance
-            messager: Messager instance for event publishing
+            messager: Transport for event publishing; None permits offline direct messages
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -96,6 +96,9 @@ class TeamMessageManager:
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
             return None
+
+        if self.messager is None:
+            return message_id
 
         try:
             await self.messager.publish(
@@ -143,6 +146,11 @@ class TeamMessageManager:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
 
+        await self.publish_broadcast(message_id, sender)
+        return message_id
+
+    async def publish_broadcast(self, message_id: str, from_member_name: str) -> None:
+        """Publish an already persisted broadcast (also used after group history sync)."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
@@ -150,7 +158,7 @@ class TeamMessageManager:
                     BroadcastEvent(
                         message_id=message_id,
                         team_name=self.team_name,
-                        from_member_name=sender,
+                        from_member_name=from_member_name,
                     )
                 ),
             )
@@ -158,8 +166,7 @@ class TeamMessageManager:
         except Exception as e:
             team_logger.error(f"Failed to publish broadcast event for {message_id}: {e}")
 
-        team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
-        return message_id
+        team_logger.debug(f"Broadcast message sent from {from_member_name}: {message_id}")
 
     async def multicast_message(
         self,
@@ -314,6 +321,10 @@ class TeamMessageManager:
             intended reader.
         """
         return await self.db.message.has_unread_messages(self.team_name, include_broadcast=include_broadcast)
+
+    async def members_with_unread(self, member_names: list[str]) -> set[str]:
+        """Subset of ``member_names`` with unread direct or broadcast input."""
+        return await self.db.message.members_with_unread(self.team_name, member_names)
 
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member

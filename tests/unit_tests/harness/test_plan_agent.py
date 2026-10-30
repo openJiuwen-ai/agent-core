@@ -83,7 +83,7 @@ class TestBuildPlanAgentConfig:
         assert len(spec.rails) == 1
         assert isinstance(spec.rails[0], SysOperationRail)
         assert spec.enable_task_loop is False
-        assert spec.max_iterations == 25
+        assert spec.max_iterations == 50
 
     def test_defaults_cn(self):
         spec = build_plan_agent_config(language="cn")

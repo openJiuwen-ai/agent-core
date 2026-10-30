@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ValidationError
+from openjiuwen.core.common.exception.errors import FrameworkError, ValidationError
 from openjiuwen.harness.tools.worktree.manager import WorktreeManager
 from openjiuwen.harness.tools.worktree.models import (
     WorktreeConfig,
@@ -274,6 +274,21 @@ class TestCreateAgentWorktree:
         with pytest.raises(ValueError, match="Invalid worktree name"):
             await mgr.create_agent_worktree("../../bad")
         logger.info("create_agent_worktree rejects invalid slug")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @pytest.mark.level1
+    async def test_not_in_git_repo_raises_framework_error(self, mock_git_root, mock_backend):
+        mock_git_root.return_value = None
+
+        mgr = _make_manager(mock_backend)
+        with pytest.raises(FrameworkError) as exc_info:
+            await mgr.create_agent_worktree("agent-slug")
+
+        assert exc_info.value.status is StatusCode.TOOL_WORKTREE_INIT_FAILED
+        assert "not in a git repository" in exc_info.value.message
+        assert "Select a project directory" in exc_info.value.message
+        logger.info("create_agent_worktree raises FrameworkError outside git repo")
 
 
 class TestOwnerSlug:

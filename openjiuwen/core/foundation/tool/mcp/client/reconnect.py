@@ -2,36 +2,46 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Transport-layer reconnect decorators for MCP clients.
 
-SSE 的 mcp SDK 后台 ``post_writer`` 协程在
-TCP 连接被重置时自爆并 ``write_stream.aclose()``，而 client 侧
-``call_tool`` / ``list_tools`` 撞上已关闭的流即报错且不自愈，导致会话
-半死、上层退化为只发 keepalive。
+Long-lived MCP sessions break when the peer restarts: SSE streams close and
+streamable HTTP answers HTTP 404 / JSON-RPC 32600 ("Session terminated") for
+every call carrying the stale ``Mcp-Session-Id``. ``@with_reconnect`` rebuilds
+the transport once and retries the failed call.
 
-此处提供 ``@with_reconnect`` 装饰器，对 ``call_tool`` / ``list_tools`` /
-``get_tool_info`` / ``list_resources`` / ``read_resource`` 这类用户调用方法
-做横切重连：撞可重试传输层错误时，自动 ``disconnect + connect`` 后重试一次。
-装饰器自包含（用 ``getattr`` 懒初始化每实例重连锁，不改基类）。
+MCP business errors are never retried; only transport failures and
+session-invalidating ``McpError`` responses qualify.
 """
 from __future__ import annotations
 
 import asyncio
 import functools
 import os
+import random
+import time
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
+
+_SESSION_ERROR_MARKERS = (
+    "session terminated",
+    "session not found",
+    "invalid session",
+    "no valid session",
+)
+_TRANSPORT_ERROR_MARKERS = (
+    "connection closed",
+    "stream closed",
+)
 
 # 可重试的传输层错误 markers。每条 marker 是 ``(pattern, skip_for_runtime_error)``
 # 二元组：pattern 用类名/消息文本子串匹配（命中即重试）；第二项标记这条 marker
 # 是否对 ``RuntimeError`` 不适用。pattern 在定义时不强制小写——加载时
 # 统一 ``.lower()`` 兜底，匹配端也把异常类名/消息转小写，故整体大小写不敏感。
-_RETRYABLE_MARKER_DEFS: tuple[tuple[str, bool], ...] = (
-    ("session terminated", False),
+_RETRYABLE_MARKER_DEFS: tuple[tuple[str, bool], ...] = tuple(
+    (pattern, False) for pattern in _SESSION_ERROR_MARKERS + _TRANSPORT_ERROR_MARKERS
+) + (
     ("closedresourceerror", False),
     ("brokenresourceerror", False),
     ("endofstream", False),
-    ("stream closed", False),
-    ("connection closed", False),
     ("remoteprotocolerror", False),
     ("readerror", False),
     ("writeerror", False),
@@ -47,19 +57,39 @@ _RETRYABLE_MARKERS: tuple[tuple[str, bool], ...] = tuple(
 # 可重试的异常类型集合（优先于 markers 判定，更稳健）。
 _RETRYABLE_TYPES: tuple[type, ...] = ()
 try:
-    # anyio 的高层资源关闭/损坏异常
     from anyio import ClosedResourceError as _AnyioClosedResourceError  # type: ignore
     from anyio import BrokenResourceError as _AnyioBrokenResourceError  # type: ignore
 
     _RETRYABLE_TYPES += (_AnyioClosedResourceError, _AnyioBrokenResourceError)
 except Exception as _imp_exc:
     logger.debug("[mcp-reconnect] failed to import anyio retryable types: %r", _imp_exc)
+
+_McpError: type | None = None
 try:
     from mcp.shared.exceptions import McpError as _McpError  # type: ignore
-
-    _RETRYABLE_TYPES += (_McpError,)
 except Exception as _imp_exc:
-    logger.debug("[mcp-reconnect] failed to import MCP retryable type McpError: %r", _imp_exc)
+    logger.debug("[mcp-reconnect] failed to import McpError: %r", _imp_exc)
+
+#: JSON-RPC codes the MCP SDK uses for session and transport failures.
+_SESSION_TERMINATED_CODE = 32600
+_CONNECTION_CLOSED_CODE = -32000
+
+
+def _is_retryable_mcp_error(error: Exception) -> bool:
+    """Return True for MCP errors caused by a session or transport failure."""
+    if _McpError is None or not isinstance(error, _McpError):
+        return False
+    error_data = getattr(error, "error", None)
+    code = getattr(error_data, "code", None)
+    message = str(getattr(error_data, "message", "") or error).lower()
+    if code == _CONNECTION_CLOSED_CODE:
+        return True
+    if code == _SESSION_TERMINATED_CODE and "session" in message:
+        return True
+    return any(
+        marker in message
+        for marker in _SESSION_ERROR_MARKERS + _TRANSPORT_ERROR_MARKERS
+    )
 
 
 def is_retryable_transport_error(error: Exception) -> bool:
@@ -70,6 +100,8 @@ def is_retryable_transport_error(error: Exception) -> bool:
     已小写化）做子串包含。每条 marker 自带"是否对 RuntimeError 不适用"标记，
     避免我们自己的未连接守卫被误判为可重试传输错误。
     """
+    if _McpError is not None and isinstance(error, _McpError):
+        return _is_retryable_mcp_error(error)
     try:
         if _RETRYABLE_TYPES and isinstance(error, _RETRYABLE_TYPES):
             return True
@@ -82,6 +114,66 @@ def is_retryable_transport_error(error: Exception) -> bool:
         not (skip and is_runtime_error) and (pattern in name or pattern in text)
         for pattern, skip in _RETRYABLE_MARKERS
     )
+
+
+def _is_not_connected_guard(error: Exception) -> bool:
+    return isinstance(error, RuntimeError) and "not connected" in str(error).lower()
+
+
+def _resolve_reconnect_timeout(client: Any, explicit: Any) -> float:
+    """Use the call deadline when available; ``-1`` falls back to the client default."""
+    if isinstance(explicit, (int, float)) and explicit > 0:
+        return float(explicit)
+    stamped = getattr(client, "_jws_call_timeout", None)
+    if isinstance(stamped, (int, float)) and stamped > 0:
+        return float(stamped)
+    return -1
+
+
+def should_attempt_reconnect(client: Any, error: Exception) -> bool:
+    """Decide whether a failed call should trigger one reconnect attempt.
+
+    ``Not connected`` is the client's own guard. It is retryable only when the
+    client was torn down by a transport failure (``_lazy_reconnect``), never
+    after an explicit user disconnect.
+    """
+    if _is_not_connected_guard(error):
+        return bool(getattr(client, "_lazy_reconnect", False))
+    return is_retryable_transport_error(error)
+
+
+_RECONNECT_BASE_DELAY = 5.0
+_RECONNECT_MAX_DELAY = 120.0
+_RECONNECT_JITTER = 0.2
+
+
+def _cooldown_remaining(client: Any) -> float:
+    """Seconds left before the next *automatic* reconnect attempt."""
+    try:
+        until = float(getattr(client, "_reconnect_cooldown_until", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, until - time.monotonic())
+
+
+def _record_reconnect_failure(client: Any) -> None:
+    """Exponential backoff with jitter: 5s, 10s, ... capped at 120s."""
+    count = getattr(client, "_reconnect_failure_count", 0)
+    count = count + 1 if isinstance(count, int) and count >= 0 else 1
+    delay = min(_RECONNECT_MAX_DELAY, _RECONNECT_BASE_DELAY * (2 ** min(count - 1, 5)))
+    delay *= 1.0 - _RECONNECT_JITTER + random.random() * (2 * _RECONNECT_JITTER)
+    setattr(client, "_reconnect_failure_count", count)
+    setattr(client, "_reconnect_cooldown_until", time.monotonic() + delay)
+    logger.warning(
+        "[mcp-reconnect] %s reconnect failed %d time(s); next auto attempt in %.1fs",
+        type(client).__name__, count, delay,
+    )
+
+
+def record_reconnect_success(client: Any) -> None:
+    """Reset automatic reconnect backoff after a successful connection."""
+    setattr(client, "_reconnect_failure_count", 0)
+    setattr(client, "_reconnect_cooldown_until", 0.0)
 
 
 def _get_reconnect_lock(client: Any) -> asyncio.Lock:
@@ -167,38 +259,110 @@ def with_reconnect(method):
 
     Wraps ``call_tool`` / ``list_tools`` / ``get_tool_info`` /
     ``list_resources`` / ``read_resource``. ``N`` defaults to 3 total attempts
-    (2 retries) and can be customized per client instance by defining
-    ``self._reconnect_attempts`` (total attempts, including the first try).
+    (2 retries). ``StreamableHttpClient`` overrides it to 2; other clients can
+    set ``self._reconnect_attempts`` (total attempts, including the first try).
 
     Non-transport errors (e.g. ``ValueError``) propagate immediately without
     reconnecting. The decorated method's timeout (passed as ``timeout`` kwarg)
     is forwarded to ``disconnect``/``connect`` so the reconnect itself respects
     the same deadline as the original call.
+
+    Automatic reconnects are rate-limited by an exponential cooldown
+    (5s..120s, jittered). The client's explicit ``reconnect()`` API bypasses
+    the cooldown so an operator can force recovery.
     """
 
     @functools.wraps(method)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        attempts = _get_attempts()
+        attempts = getattr(self, "_reconnect_attempts", None)
         if not isinstance(attempts, int) or attempts < 1:
-            attempts = 2
-        for attempt in range(attempts):
-            try:
-                return await method(self, *args, **kwargs)
-            except Exception as e:
-                # Only retry on transport-layer errors and if we have remaining attempts.
-                if attempt < attempts - 1 and is_retryable_transport_error(e):
+            attempts = _get_attempts()
+        task = asyncio.current_task()
+        call_token = object()
+        active_calls = getattr(self, "_active_calls", None)
+        reconnect_cancelled = getattr(self, "_reconnect_cancelled_calls", None)
+        try:
+            for attempt in range(attempts):
+                generation = getattr(self, "_generation", None)
+                if isinstance(active_calls, dict) and task is not None:
+                    active_calls[task] = call_token
+                try:
+                    return await method(self, *args, **kwargs)
+                except asyncio.CancelledError:
+                    # Only cancellation issued by the reconnect teardown is
+                    # retried; caller cancellation must propagate unchanged.
+                    if not isinstance(reconnect_cancelled, dict) or task is None:
+                        raise
+                    marker = reconnect_cancelled.get(task)
+                    if marker is not call_token:
+                        raise
+                    cancelling = getattr(task, "cancelling", None)
+                    if cancelling is not None and cancelling() > 1:
+                        raise
+                    reconnect_cancelled.pop(task, None)
+                    uncancel = getattr(task, "uncancel", None)
+                    if uncancel is not None:
+                        uncancel()
+                    error: Exception = RuntimeError(
+                        "Not connected to streamable-http server"
+                    )
+                except Exception as exc:
+                    error = exc
+                finally:
+                    if isinstance(active_calls, dict) and task is not None:
+                        if active_calls.get(task) is call_token:
+                            active_calls.pop(task, None)
+
+                # Only retry on transport-layer errors and if attempts remain.
+                if attempt < attempts - 1 and should_attempt_reconnect(self, error):
+                    # Another caller already rebuilt the transport while this
+                    # call was in flight; retry without tearing it down again.
+                    current = getattr(self, "_generation", None)
+                    if generation is not None and current != generation:
+                        logger.info(
+                            "[mcp-reconnect] %s.%s retrying on generation %s "
+                            "(was %s) without reconnecting",
+                            type(self).__name__, method.__name__, current, generation,
+                        )
+                        continue
+                    remaining = _cooldown_remaining(self)
+                    if remaining > 0:
+                        logger.warning(
+                            "[mcp-reconnect] %s.%s skipping auto reconnect: "
+                            "cooldown has %.1fs remaining",
+                            type(self).__name__, method.__name__, remaining,
+                        )
+                        raise error
+                    if _is_not_connected_guard(error):
+                        setattr(self, "_lazy_reconnect", True)
                     logger.warning(
                         "[mcp-reconnect] %s.%s hit transport error (attempt %d/%d), reconnecting: %r",
-                        type(self).__name__, method.__name__, attempt + 1, attempts, e,
+                        type(self).__name__, method.__name__, attempt + 1, attempts, error,
                     )
-                    if await reconnect(self, timeout=kwargs.get("timeout", -1)):
+                    try:
+                        reconnected = await reconnect(
+                            self,
+                            timeout=_resolve_reconnect_timeout(self, kwargs.get("timeout")),
+                        )
+                    except Exception:
+                        if not _cooldown_remaining(self):
+                            _record_reconnect_failure(self)
+                        raise
+                    if reconnected:
+                        record_reconnect_success(self)
                         logger.info(
                             "[mcp-reconnect] %s.%s reconnect succeeded, retrying (attempt %d/%d)",
                             type(self).__name__, method.__name__, attempt + 2, attempts,
                         )
                         continue
-                raise
-        return None
+                    if not _cooldown_remaining(self):
+                        _record_reconnect_failure(self)
+                raise error
+            return None
+        finally:
+            if isinstance(reconnect_cancelled, dict) and task is not None:
+                if reconnect_cancelled.get(task) is call_token:
+                    reconnect_cancelled.pop(task, None)
 
     return wrapper
 

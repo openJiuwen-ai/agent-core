@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from .evidence import same_page_url
+from .evidence import observed_label, same_page_url
 
 
 def navigation_destination(href: Any, page_url: str = "", *, role: str = "", kind: str = "") -> str:
@@ -172,6 +172,7 @@ class BrowserTarget:
     field_name: str = ""
     selected: bool = False
     selected_source: str = ""
+    decision_state: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def generation_id(self) -> str:
@@ -184,11 +185,16 @@ class BrowserTarget:
             "target_id": self.target_id,
             "generation_id": self.generation_id,
         }
+        label = observed_label({"name": self.name, "text": self.text})
+        if label:
+            result["label"] = _compact_text(label, 160)
         if self.href:
             result["href"] = self.href
             result["recommended_action"] = "navigate_primary_link" if self.navigation_url else "click"
         if self.role:
             result["role"] = self.role
+        if self.name:
+            result["name"] = _compact_text(self.name, 160)
         if self.text:
             result["text"] = _compact_text(self.text, 80)
         if self.region:
@@ -236,8 +242,19 @@ class BrowserPageState:
         self._ref_targets: Dict[str, str] = {}
         self._selector_targets: Dict[tuple[int, str], str] = {}
         self._interactive_target_ids: list[str] = []
+        self._decision_target_ids: list[str] = []
+        self.decision_omitted = 0
+        self.decision_snapshot: dict[str, Any] = {}
         self._cards: list[Dict[str, Any]] = []
         self._target_counter = 0
+        self.interaction_revision = 0
+        self.pending_interaction = False
+        self.observed_selected_filters: Any = None
+        self.observation_metadata: Dict[str, Any] = {}
+        self.read_observation: Dict[str, Any] = {}
+        self.card_probe_cache: Dict[str, Any] = {}
+        self.card_read: dict[str, Any] = {}  # Last probe provenance; content stays in _cards/offload.
+        self.cards_observed_revision = -1
         self.listing_stale = False
 
     @property
@@ -248,12 +265,21 @@ class BrowserPageState:
     def advance(self, *, url: str = "", title: str = "") -> None:
         """Start a new document generation while retaining stale-target history."""
         self.generation += 1
+        self.observed_selected_filters = None
+        self.observation_metadata = {}
+        self.read_observation = {}
+        self.card_probe_cache = {}
+        self.pending_interaction = False
+        self.interaction_revision += 1
         self.url = str(url or "").strip()
         self.title = _compact_text(title, 300)
         self.field_coverage.clear()
         self.blockers.clear()
         self._interactive_target_ids.clear()
+        self.decision_omitted = 0
+        self.decision_snapshot = {}
         self._cards.clear()
+        self.card_read = {}
         self.listing_stale = False
         self._trim_target_history()
 
@@ -273,6 +299,7 @@ class BrowserPageState:
         requested = _generation_number(generation_id)
         if requested != self.generation:
             raise ValueError(
+                "browser_observation_stale: generation; "
                 f"Stale PageState generation {generation_id}; current generation is "
                 f"{self.generation_id}. Probe or snapshot the current page again."
             )
@@ -301,6 +328,9 @@ class BrowserPageState:
                     entry["requires_scroll"] = True
                 matches.append(entry)
         self._update_blockers(payload, elements)
+        self._decision_target_ids = [item["target_id"] for item in matches]
+        self.decision_omitted = max(0, int(payload.get("total_candidates") or len(matches)) - len(matches))
+        self.decision_snapshot = dict(payload.get("decision_snapshot") or {})
         return matches
 
     def register_cards(self, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -310,6 +340,7 @@ class BrowserPageState:
         if not isinstance(cards, list):
             cards = []
         self._cards = []
+        self.cards_observed_revision = self.interaction_revision
         self.listing_stale = False
         for card in cards:
             if not isinstance(card, dict):
@@ -525,6 +556,7 @@ class BrowserPageState:
                 raise ValueError(f"Unknown AX ref: {normalized_ref}. Capture the current page snapshot again.")
             if ref_generation != self.generation:
                 raise ValueError(
+                    "browser_observation_stale: reference; "
                     f"Stale AX ref {normalized_ref} belongs to g{ref_generation}; "
                     f"current generation is {self.generation_id}."
                 )
@@ -539,6 +571,7 @@ class BrowserPageState:
             selector_generation = self.selector_generations.get(normalized_selector)
             if selector_generation is not None and selector_generation != self.generation:
                 raise ValueError(
+                    "browser_observation_stale: selector; "
                     f"Stale selector belongs to g{selector_generation}; current generation is "
                     f"{self.generation_id}: {normalized_selector}"
                 )
@@ -570,6 +603,7 @@ class BrowserPageState:
             return target.target_id
         if target.source == "ax":
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale AX target_id {target.target_id} belongs to {target.generation_id}; "
                 "capture the current page snapshot again."
             )
@@ -583,6 +617,7 @@ class BrowserPageState:
         if len(candidates) != 1:
             reason = "not found" if not candidates else f"ambiguous ({len(candidates)} matches)"
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale target_id {target.target_id} cannot be safely refreshed in "
                 f"{self.generation_id}: {reason}. Probe the current page again."
             )
@@ -607,7 +642,8 @@ class BrowserPageState:
         if stale.generation == self.generation:
             return stale.target_id
         if stale.source == "ax" or not (stale.selector or stale.href):
-            raise ValueError(f"Stale target_id {stale.target_id} has no refreshable runtime identity.")
+            raise ValueError(f"browser_observation_stale: target; Stale target_id {stale.target_id} "
+                             "has no refreshable runtime identity.")
         target = self._new_target(
             source=stale.source,
             locator=dict(stale.locator),
@@ -686,6 +722,21 @@ class BrowserPageState:
             self.selector_generations[selector] = self.generation
             self._selector_targets[(self.generation, selector)] = target.target_id
 
+    def export_decision_targets(self) -> list[dict[str, Any]]:
+        """Local policy projection; node guards are never part of public PageState."""
+        exported = []
+        for target_id in getattr(self, "_decision_target_ids", []):
+            target = self._targets.get(target_id)
+            if target is not None and target.generation == self.generation:
+                exported.append({**target.compact_index(), "decision_state": target.decision_state})
+        return exported
+
+    def export_decision_observation(self) -> dict[str, Any]:
+        if not self.decision_snapshot:
+            return {}
+        return {**self.decision_snapshot, "page": self.export_summary(),
+                "controls": self.export_decision_targets(), "omitted_count": self.decision_omitted}
+
     def export(self) -> Dict[str, Any]:
         """Return a bounded PageState index suitable for every browser result."""
         interactives = self._export_targets(
@@ -694,19 +745,39 @@ class BrowserPageState:
         )
         return {
             "page_id": self.page_id,
+            "interaction_revision": self.interaction_revision,
+            "cards_observed": self.cards_observed_revision == self.interaction_revision and not self.listing_stale,
             "generation_id": self.generation_id,
             "url": self.url,
             "title": self.title,
             "interactives": interactives,
             "cards": self._cards[:_MAX_PUBLIC_CARDS],
+            **({"card_read": {k: v for k, v in self.card_read.items() if k != "recipe"}} if self.card_read else {}),
             **({"listing_stale": True} if self.listing_stale else {}),
             "field_coverage": sorted(self.field_coverage),
             "blockers": sorted(self.blockers),
         }
 
-    def invalidate_listing(self) -> None:
-        """A changed sort/filter invalidates result identities, not stable controls."""
-        self._cards.clear()
+    def mark_interaction(self) -> None:
+        """Invalidate cross-read association before a potentially mutating action.
+
+        Keep target identities for the already admitted call; fresh card probes
+        re-establish listing facts. This counter is not a second task state machine.
+        """
+        self.interaction_revision += 1
+        self.pending_interaction = True
+        # Keep content for before/after comparison; its revision no longer permits
+        # presenting it as a fresh observation. A repeat read is not new progress.
+        self.card_probe_cache = {}
+        self.listing_stale = True
+
+    def invalidate_listing(self, *, advance_revision: bool = True) -> None:
+        """Retire list identities; action acknowledgement must not advance twice."""
+        # Retain source content for understanding and duplicate detection, but
+        # remove its executable target identities below.
+        self.card_probe_cache = {}
+        if advance_revision:
+            self.interaction_revision += 1
         self.listing_stale = True
         for target_id, target in list(self._targets.items()):
             if target.generation != self.generation or not target.source.startswith("card"):
@@ -722,6 +793,8 @@ class BrowserPageState:
 
         return {
             "page_id": self.page_id,
+            "interaction_revision": self.interaction_revision,
+            "cards_observed": self.cards_observed_revision == self.interaction_revision and not self.listing_stale,
             "generation_id": self.generation_id,
             "url": self.url,
             "title": self.title,
@@ -765,6 +838,12 @@ class BrowserPageState:
                 existing.clickable = bool(item.get("clickable", False))
                 existing.selected = bool(item.get("selected", False))
                 existing.selected_source = str(item.get("selected_source") or "")[:40]
+                existing.name = str(item.get("accessible_name") or item.get("name") or "").strip()
+                existing.text = str(item.get("text") or item.get("title") or "").strip()
+                existing.role = str(item.get("role") or "").strip()
+                existing.region = str(item.get("region") or "").strip()
+                existing.kind = str(item.get("kind") or "").strip()
+                existing.decision_state = dict(item.get("decision_state") or {})
                 if href:
                     existing.href = href
                     existing.navigation_url = navigation_url
@@ -787,6 +866,7 @@ class BrowserPageState:
             clickable=bool(item.get("clickable", False)),
             selected=bool(item.get("selected", False)),
             selected_source=str(item.get("selected_source") or "")[:40],
+            decision_state=dict(item.get("decision_state") or {}),
         )
         if selector:
             self.selector_generations[selector] = self.generation
@@ -891,6 +971,7 @@ class BrowserPageState:
     def _validate_target_generation(self, target: BrowserTarget) -> None:
         if target.page_id != self.page_id or target.generation != self.generation:
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale target_id {target.target_id} belongs to {target.generation_id}; "
                 f"current generation is {self.generation_id}."
             )

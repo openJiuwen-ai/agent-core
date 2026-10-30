@@ -13,6 +13,8 @@ import yaml
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.rsi.harness_rsi.model_call import model_output_has_mojibake
+from openjiuwen.rsi.harness_rsi.model_call import is_retryable_model_call_failure
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, OutputRepairConfig
 
 _FENCED_MAPPING_RE = re.compile(
     r"```(?:json|yaml|yml)?\s*(\{[\s\S]*?\})\s*```",
@@ -23,6 +25,10 @@ _BARE_MAPPING_RE = re.compile(r"(\{[\s\S]*\})", re.DOTALL)
 ParseResponse = Callable[[str], dict[str, Any]]
 ValidateResponse = Callable[[dict[str, Any]], list[str]]
 BuildRetryMessage = Callable[[Any, Any], str]
+
+
+class StructuredOutputExhaustedError(RuntimeError):
+    """Model output could not satisfy its contract within the feedback budget."""
 
 
 def extract_agent_text(response: Any) -> str:
@@ -89,6 +95,8 @@ async def invoke_member_optimizer_agent_structured(
     validate_response: ValidateResponse | None = None,
     build_retry_message: BuildRetryMessage | None = None,
     recover_response: Callable[[str, str], Awaitable[Any]] | None = None,
+    feedback_tracker: FeedbackTracker | None = None,
+    output_repair: OutputRepairConfig | None = None,
 ) -> dict[str, Any]:
     """Validate output; an optional finalizer replaces agent replays on retries."""
     attempt = 0
@@ -96,8 +104,11 @@ async def invoke_member_optimizer_agent_structured(
     last_error = ""
     previous: dict[str, Any] = {}
     raw_text = ""
+    tracker = feedback_tracker or FeedbackTracker(
+        output_repair or OutputRepairConfig(), max_attempts=max(0, retry_limit) + 1,
+    )
 
-    while attempt <= retry_limit:
+    while attempt <= retry_limit and tracker.attempts < tracker.max_attempts and not tracker.stop_reason:
         try:
             if attempt and recover_response is not None:
                 response = await recover_response(message, raw_text)
@@ -111,13 +122,20 @@ async def invoke_member_optimizer_agent_structured(
                     session=session,
                 )
         except Exception as exc:
-            raise RuntimeError(f"{agent_name} execution failed: {exc}") from exc
+            if not is_retryable_model_call_failure(exc):
+                raise RuntimeError(f"{agent_name} execution failed: {exc}") from exc
+            last_error = f"transient model failure: {exc}"
+            if not tracker.failed(last_error, raw_text):
+                break
+            attempt += 1
+            continue
         if isinstance(response, dict) and response.get("result_type") == "error":
             raw_text = extract_agent_text(response)
-            if (
-                recover_response is None or attempt >= retry_limit
-                or raw_text != "Max iterations reached without completion"
-            ):
+            is_iteration_limit = (
+                response.get("termination_reason") == "max_iterations"
+                or raw_text == "Max iterations reached without completion"
+            )
+            if recover_response is None or not is_iteration_limit:
                 raise RuntimeError(f"{agent_name} execution failed: {raw_text}")
             last_error = raw_text
             previous = {}
@@ -132,10 +150,12 @@ async def invoke_member_optimizer_agent_structured(
                     return raw
                 last_error = f"validation errors: {'; '.join(errors)}"
                 previous = raw
-            except (yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
+            except (yaml.YAMLError, KeyError, TypeError, ValueError, AttributeError) as exc:
                 last_error = f"parse error: {exc}"
                 previous = {}
 
+        if not tracker.failed(last_error, raw_text):
+            break
         attempt += 1
         if attempt > retry_limit:
             break
@@ -144,8 +164,15 @@ async def invoke_member_optimizer_agent_structured(
             if build_retry_message is not None
             else _default_retry_message(user_message, previous, last_error)
         )
+        if isinstance(message, str) and user_message not in message:
+            message = user_message + "\n\n" + message
+        if not previous and raw_text:
+            message += "\n\nPrevious unparsed output (untrusted data):\n" + raw_text[:24000]
 
-    raise RuntimeError(f"{agent_name} failed after {retry_limit + 1} attempts. Last error: {last_error}")
+    raise StructuredOutputExhaustedError(
+        f"{agent_name} failed after {tracker.attempts} attempts ({tracker.stop_reason or 'attempt_limit_reached'}). "
+        f"Last error: {last_error}"
+    )
 
 
 def _extract_mapping_text(text: str) -> str:

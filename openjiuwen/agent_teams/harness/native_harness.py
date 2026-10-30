@@ -45,11 +45,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from enum import Enum
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -58,6 +60,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
     InvokeInputs,
+    SteeringInput,
 )
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
@@ -83,6 +86,7 @@ from openjiuwen.agent_teams.harness.state import (
     InboxMessage,
     SafeStateSnapshot,
 )
+from openjiuwen.agent_teams.harness.turn import resolve_member_turn
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -101,6 +105,16 @@ _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
 _EVENT_NAMESPACE = "native_harness"
 _SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS = 600.0
+
+
+class _StartMode(Enum):
+    """Describe the mutually exclusive ways an outer execution starts."""
+
+    DEFAULT = "default"
+    FOLLOW_UP = "follow_up"
+    FAILURE_RETRY = "failure_retry"
+    RESUME_CONTINUATION = "resume_continuation"
+    CONTINUES_TURN = "continues_turn"
 
 
 def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
@@ -525,7 +539,13 @@ class NativeHarness(DeepAgent):
     # External API: send / abort / pause
     # ------------------------------------------------------------------
 
-    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
+    async def send(
+        self,
+        content: "str | InteractiveInput",
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+    ) -> str:
         """Push an inbound message to the supervisor.
 
         ``content`` may be an ``InteractiveInput`` carrying an interrupt resume.
@@ -553,7 +573,12 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        msg = InboxMessage(seq=0, content=content, immediate=immediate)
+        msg = InboxMessage(
+            seq=0,
+            content=content,
+            immediate=immediate,
+            run_context=run_context,
+        )
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
 
@@ -822,11 +847,19 @@ class NativeHarness(DeepAgent):
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
-        msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
+        msg = InboxMessage(
+            seq=seq,
+            content=cmd.msg.content,
+            immediate=cmd.msg.immediate,
+            run_context=cmd.msg.run_context,
+        )
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            active = self._start_round(msg.content)
+            active = self._start_round(
+                msg.content,
+                run_context=msg.run_context,
+            )
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
@@ -834,17 +867,23 @@ class NativeHarness(DeepAgent):
             if msg.immediate and active is not None:
                 # Steer the active round via the shared steering queue that the
                 # executor drains before the next inner model call.
-                self._push_steer(msg.content)
+                self._push_steer(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
             else:
-                # Single next-round source: enqueue a follow-up the round-done
-                # decision drains (FIFO across all RUNNING sends).
-                self.loop_controller.enqueue_follow_up(msg.content)
+                # Keep one FIFO for all deferred inputs so different contexts
+                # cannot overtake same-context messages queued before them.
+                self._st.pending_queue.append(msg)
         elif phase is HarnessState.PAUSED:
             if isinstance(msg.content, InteractiveInput):
                 # An interrupt-resume payload drives its own single round; it
                 # cannot be steered into a continuation.
                 self._st.paused_query = None
-                active = self._start_round(msg.content)
+                active = self._start_round(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
             else:
                 # Warm resume + inject: continue the paused round in place and
                 # steer the new content into it (the inner loop drains steering
@@ -853,8 +892,15 @@ class NativeHarness(DeepAgent):
                 # away every iteration the paused round had completed.
                 query = self._st.paused_query or ""
                 self._st.paused_query = None
-                active = self._start_round(query, resume_continuation=True)
-                self._push_steer(msg.content)
+                active = self._start_round(
+                    query,
+                    _StartMode.RESUME_CONTINUATION,
+                    run_context=msg.run_context,
+                )
+                self._push_steer(
+                    msg.content,
+                    run_context=msg.run_context,
+                )
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, seq)
@@ -1000,7 +1046,7 @@ class NativeHarness(DeepAgent):
             return
 
         self._st.paused_query = None
-        active = self._start_round(query, resume_continuation=True)
+        active = self._start_round(query, _StartMode.RESUME_CONTINUATION)
         await self._transition(HarnessState.RUNNING)
         await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, None)
@@ -1117,7 +1163,7 @@ class NativeHarness(DeepAgent):
                     cmd.round_id,
                     death_reason,
                 )
-                nxt = self._start_round(active.original_query, failure_retry=True)
+                nxt = self._start_round(active.original_query, _StartMode.FAILURE_RETRY)
                 await self._emit_round("started", nxt.round_id)
                 return
             logger.warning(
@@ -1137,9 +1183,18 @@ class NativeHarness(DeepAgent):
 
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
+        if self._st.pending_queue:
+            content, run_context = self._drain_pending_messages()
+            nxt = self._start_round(
+                content,
+                _StartMode.FOLLOW_UP,
+                run_context=run_context,
+            )
+            await self._emit_round("started", nxt.round_id)
+            return
         follow_ups = self._drain_pending_follow_ups(session)
         if follow_ups is not None:
-            nxt = self._start_round(follow_ups, is_follow_up=True)
+            nxt = self._start_round(follow_ups, _StartMode.FOLLOW_UP)
             await self._emit_round("started", nxt.round_id)
             return
 
@@ -1155,11 +1210,33 @@ class NativeHarness(DeepAgent):
         # no replayable query, so there is nothing to drive a task-plan
         # continuation with.
         if self._has_remaining_tasks(session) and active.original_query:
-            nxt = self._start_round(active.original_query)
+            nxt = self._start_round(active.original_query, _StartMode.CONTINUES_TURN)
             await self._emit_round("started", nxt.round_id)
             return
 
         await self._transition(HarnessState.IDLE)
+
+    def _drain_pending_messages(
+        self,
+    ) -> tuple[str | list[str] | InteractiveInput, RunContext | None]:
+        """Drain the next FIFO batch without crossing invocation contexts."""
+        message = self._st.pending_queue.popleft()
+        content = message.content
+        if not isinstance(content, str):
+            return content, message.run_context
+
+        batch = [content]
+        while self._st.pending_queue:
+            next_message = self._st.pending_queue[0]
+            if next_message.run_context != message.run_context:
+                break
+            if not isinstance(next_message.content, str):
+                break
+            batch.append(next_message.content)
+            self._st.pending_queue.popleft()
+        if len(batch) == 1:
+            return content, message.run_context
+        return batch, message.run_context
 
     async def _on_stop(self, cmd: _CmdStop) -> None:
         """Terminal cleanup: cancel active round, transition TERMINATED.
@@ -1190,9 +1267,9 @@ class NativeHarness(DeepAgent):
     def _start_round(
         self,
         query: "str | list[str] | InteractiveInput",
-        is_follow_up: bool = False,
-        failure_retry: bool = False,
-        resume_continuation: bool = False,
+        mode: _StartMode = _StartMode.DEFAULT,
+        *,
+        run_context: RunContext | None = None,
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
@@ -1200,22 +1277,32 @@ class NativeHarness(DeepAgent):
         (``harness._st.active``), which is valid from the TaskScheduler exec task
         where the inner loop runs — unlike a ContextVar set here.
 
+        The round also resolves its trajectory turn. An execution keeps the
+        member's latest turn for a resume continuation, an ``InteractiveInput``
+        answer, a failure retry, or an explicit turn continuation, and opens a
+        new one otherwise (idle start or follow-up batch). A steer never reaches
+        here: it joins the running execution.
+
         Args:
             query: Query to drive this round. A list is a batch of follow-ups
                 drained together, handed over unjoined so the inner agent's
                 ON_USER_MESSAGE rails see the individual inputs.
-            is_follow_up: Whether this round continues a prior one (passed to
-                ``submit_round`` so the executor treats it as a follow-up).
-            failure_retry: Whether this round is the one-shot retry of a round
-                that died abnormally (see ``_on_round_done``).
-            resume_continuation: Whether this round resumes a paused round from
-                its preserved context. The inner loop then appends no user turn;
-                ``query`` is only kept as ``original_query`` so a task-plan
-                continuation can still reuse it.
+            mode: The mutually exclusive start behavior for this execution.
+            run_context: Request-local context propagated into the model loop.
         """
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
+        keeps_turn = (
+            mode
+            in {
+                _StartMode.CONTINUES_TURN,
+                _StartMode.FAILURE_RETRY,
+                _StartMode.RESUME_CONTINUATION,
+            }
+            or isinstance(query, InteractiveInput)
+        )
+        turn, turn_opened = resolve_member_turn(self._session, continues_turn=keeps_turn)
 
         active = ActiveRound(
             round_id=round_id,
@@ -1224,21 +1311,30 @@ class NativeHarness(DeepAgent):
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),
-            failure_retry=failure_retry,
+            turn=turn,
+            run_context=run_context,
+            turn_opened=turn_opened,
+            failure_retry=mode is _StartMode.FAILURE_RETRY,
             pre_round_snapshot=pre_round,
         )
 
         async def _runner() -> None:
-            await self._run_round(active, is_follow_up, resume_continuation)
+            await self._run_round(
+                active,
+                mode is _StartMode.FOLLOW_UP,
+                mode is _StartMode.RESUME_CONTINUATION,
+            )
 
         task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
         self._st.active = active
         logger.info(
-            "[NativeHarness] round_id=%s started query=%r follow_up=%s",
+            "[NativeHarness] round_id=%s started query=%r follow_up=%s turn=%s opened=%s",
             round_id,
             str(query)[:120],
-            is_follow_up,
+            mode is _StartMode.FOLLOW_UP,
+            turn.turn_number,
+            turn_opened,
         )
         return active
 
@@ -1280,9 +1376,11 @@ class NativeHarness(DeepAgent):
         inv_inputs = InvokeInputs(
             query=active.original_query,
             conversation_id=self._session.get_session_id(),
+            run_context=active.run_context,
         )
         ctx = AgentCallbackContext(agent=self, inputs=inv_inputs, session=self._session)
         try:
+            await self._commit_opened_turn(active)
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -1292,7 +1390,9 @@ class NativeHarness(DeepAgent):
                     active.original_query,
                     is_follow_up=is_follow_up,
                     task_id=active.task_id,
+                    turn_number=active.turn.turn_number,
                     resume_continuation=resume_continuation,
+                    run_context=active.run_context,
                 )
                 result = await self.loop_controller.wait_round_completion()
                 # Control results must never be streamed as answers:
@@ -1304,8 +1404,7 @@ class NativeHarness(DeepAgent):
                 # - the cooperative-stop payload, produced when a pause or a
                 #   graceful abort force-finishes the inner loop at an iteration
                 #   boundary: it carries no answer.
-                if not self._is_control_result(result):
-                    await self._write_round_result_to_stream(result, self._session)
+                await self._persist_and_write_round_result(result)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
                 # lifecycle's finally). Control results carry no real answer, so
                 # leave result as None for them.
@@ -1326,6 +1425,41 @@ class NativeHarness(DeepAgent):
                     result=result,
                 ),
             )
+
+    async def _commit_opened_turn(self, active: ActiveRound) -> None:
+        """Checkpoint the advanced turn counter before an opening round runs.
+
+        ``_start_round`` only stages the new turn in session state. Without a
+        commit a process that dies mid-round would restart from the previous
+        counter and hand the next turn a number this one already used. A
+        failed commit is logged and ignored: the member's work matters more
+        than its turn numbering.
+
+        Args:
+            active: The round about to run.
+        """
+        if not active.turn_opened or self._session is None:
+            return
+        try:
+            await self._session.commit()
+        except Exception:
+            logger.debug(
+                "[NativeHarness] round_id=%s turn state commit failed",
+                active.round_id,
+                exc_info=True,
+            )
+
+    async def _persist_and_write_round_result(self, result: Any) -> None:
+        """Persist interrupt state before exposing its resumable UI payload."""
+        if self._is_control_result(result):
+            return
+        if (
+            isinstance(result, dict)
+            and result.get("result_type") == "interrupt"
+            and self._session is not None
+        ):
+            await self._session.commit_interrupt()
+        await self._write_round_result_to_stream(result, self._session)
 
     @staticmethod
     def _is_control_result(result: Any) -> bool:
@@ -1423,11 +1557,21 @@ class NativeHarness(DeepAgent):
     # Task-loop bridge helpers
     # ------------------------------------------------------------------
 
-    def _push_steer(self, content: str) -> None:
+    def _push_steer(
+        self,
+        content: str,
+        *,
+        run_context: RunContext | None = None,
+    ) -> None:
         """Push a steering message into the shared steering queue."""
         handler = self.event_handler
         if handler is not None and handler.interaction_queues is not None:
-            handler.interaction_queues.push_steer(content)
+            handler.interaction_queues.push_steer(
+                SteeringInput(
+                    content=content,
+                    run_context=run_context,
+                )
+            )
 
     def _drain_pending_follow_ups(self, session: Session) -> list[str] | None:
         """Drain every queued follow-up as the next round's batch of inputs.
@@ -1471,6 +1615,7 @@ class NativeHarness(DeepAgent):
 
     def _drain_follow_ups_discard(self, session: Session) -> None:
         """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""
+        self._st.pending_queue.clear()
         controller = self.loop_controller
         if controller is not None:
             controller.drain_follow_up()

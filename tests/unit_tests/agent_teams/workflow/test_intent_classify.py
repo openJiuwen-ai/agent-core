@@ -1,11 +1,13 @@
 # coding: utf-8
 from __future__ import annotations
-import pytest
-from unittest.mock import patch, AsyncMock
-from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
-from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
-from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
+from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
+from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
 
 _INTENT_SCHEMA = {
     "type": "object",

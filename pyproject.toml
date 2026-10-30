@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.19"
+version = "0.1.20"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -25,7 +25,7 @@ dependencies = [
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
-    "filelock>=3.25.0",
+    "filelock>=3.25.0,<4",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
     # Database ORM
@@ -45,6 +45,7 @@ dependencies = [
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
     "dashscope>=1.25.6",
+    "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter_261030#subdirectory=intelli_router",
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
@@ -79,6 +80,17 @@ dependencies = [
     # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
     # no longer pulls it, so declare it explicitly to keep imports working.
     "opentelemetry-sdk>=1.25.0",
+    # OTel HTTP auto-instrumentation for W3C traceparent propagation. Base
+    # dependencies (not an extra) so deployments get the feature by simply
+    # installing openjiuwen; the switch itself stays off by default (gated by
+    # ObservabilityConfig.global_instrument_enable / the
+    # OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE environment variable).
+    "opentelemetry-instrumentation-httpx>=0.44b0",
+    "opentelemetry-instrumentation-requests>=0.44b0",
+    # PyPI name is ``aiohttp-client`` (module opentelemetry.instrumentation.aiohttp_client).
+    "opentelemetry-instrumentation-aiohttp-client>=0.44b0",
+    # Server-side (inbound traceparent extraction) for FastAPI services.
+    "opentelemetry-instrumentation-fastapi>=0.44b0",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
@@ -113,6 +125,13 @@ observability = [
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+]
+cua = [
+    # Install: pip install 'openjiuwen[cua]' (desktop tools for the cua agent; Windows and Linux X11).
+    "pyautogui>=0.9.54",
+    "psutil>=5.9.0",
+    "pygetwindow>=0.0.9; sys_platform == 'win32'",
+    "python-xlib>=0.33; sys_platform == 'linux'",
 ]
 mobile-gui = [
     # Install: pip install 'openjiuwen[mobile-gui]'
@@ -175,9 +194,6 @@ docs = [
 
 dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
 
-# IntelliRouter
-intelli-router = ["intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router"]
-
 [project.entry-points."openjiuwen.remote_clients"]
 A2A = "openjiuwen.extensions.a2a.a2a_remote_client:A2ARemoteClient"
 
@@ -213,6 +229,8 @@ openjiuwen = [
     "**/locales/**/*.md",
     "**/harness/resources/*.yaml",
     "extensions/observability/schemas/*.json",
+    "harness/moa/NOTICE",
+    "**/harness/moa/skills/**/*.md",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",
@@ -222,6 +240,7 @@ openjiuwen = [
     "rsi/**/*.md",
     "rsi/**/*.template",
     "rsi/**/*.yaml",
+    "rsi/**/skills/**/*",
 ]
 
 [tool.coverage.run]

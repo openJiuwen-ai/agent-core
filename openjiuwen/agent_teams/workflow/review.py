@@ -67,10 +67,12 @@ def build_reviewers(
     Args:
         deliverable: The object to verify — inline text (``str``) or a list of
             file paths (``Sequence[str]``).
-        specs: List of ``{"type", "instruction"?, "label"?}``. ``type`` is one of
-            ``verifier`` / ``inspector`` / ``challenger``. An ``inspector``
-            without ``instruction`` falls back to the default 6-dimension rubric
-            (``reviewer_dims_for_inspector``).
+        specs: List of ``{"type", "instruction"?, "label"?, "options"?}``.
+            ``type`` is one of ``verifier`` / ``inspector`` / ``challenger``.
+            An ``inspector`` without ``instruction`` falls back to the default
+            6-dimension rubric (``reviewer_dims_for_inspector``). ``options``
+            is the per-reviewer ``agent()`` options bag (e.g.
+            ``{"model": ...}``); it overrides the ``verify()``-level options.
         acceptance: Optional acceptance criteria / requirements presented to every
             reviewer.
         language: Prompt language (``cn`` / ``en``).
@@ -89,6 +91,11 @@ def build_reviewers(
         if rtype == "inspector" and not instruction:
             instruction = load_template("reviewer_dims_for_inspector", language).content
         label = spec.get("label") or f"{rtype}-{i}"
+        reviewer_options = spec.get("options")
+        if reviewer_options is not None and not isinstance(reviewer_options, dict):
+            raise ValueError(
+                f"reviewer options must be a dict, got {type(reviewer_options).__name__}"
+            )
         body = load_template(template, language).content
         if not isinstance(body, str):
             raise EngineError(f"swarmflow reviewer template {template!r} resolved to non-str content")
@@ -98,7 +105,9 @@ def build_reviewers(
             deliverable=deliverable_text,
             acceptance=acceptance or "",
         )
-        reviewers.append(Reviewer(kind=_TYPE_KIND[rtype], prompt=prompt, label=label))
+        reviewers.append(
+            Reviewer(kind=_TYPE_KIND[rtype], prompt=prompt, label=label, options=reviewer_options, role=rtype)
+        )
     return reviewers
 
 

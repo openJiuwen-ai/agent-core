@@ -3104,3 +3104,24 @@ def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter)
     assert attrs.get(AT_TEAM_NAME) == "test_team"
     assert attrs.get(GEN_AI_CONVERSATION_ID) == "session-1"
     assert attrs.get(GEN_AI_CONVERSATION_ID) == "session-1"
+
+
+def test_team_rail_contributes_the_member_round_turn() -> None:
+    """A member's round states its own turn; one Team trace holds many of them."""
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
+    from openjiuwen.extensions.observability.semconv import OJ_TURN_ID, OJ_TURN_NUMBER
+
+    running = SimpleNamespace(
+        member_name="researcher",
+        team_name="alpha",
+        active_round=SimpleNamespace(turn=MemberTurn(turn_id="member-turn-4", turn_number=4)),
+    )
+    idle = SimpleNamespace(member_name="researcher", team_name="alpha", active_round=None)
+
+    running_attributes = TeamObservabilityRail._build_decoration(running).attributes
+    idle_attributes = TeamObservabilityRail._build_decoration(idle).attributes
+
+    assert running_attributes[OJ_TURN_ID] == "member-turn-4"
+    assert running_attributes[OJ_TURN_NUMBER] == 4
+    assert OJ_TURN_ID not in idle_attributes
+    assert OJ_TURN_NUMBER not in idle_attributes

@@ -1662,7 +1662,7 @@ async def test_embedding_rate_limit_spaces_api_calls(tmp_path):
     for text in texts:
         assert await store.embedding_of(text) is not None
 
-    assert len(emb.call_times) == 3
+    assert len(emb.call_times) == 4
     min_interval = 1.0 / max_rps
     for prev, curr in zip(emb.call_times, emb.call_times[1:]):
         assert curr - prev >= min_interval - 0.02
@@ -1684,7 +1684,7 @@ async def test_embedding_cache_hit_skips_rate_limit(tmp_path):
     elapsed = time.monotonic() - t0
 
     assert first == second
-    assert len(emb.call_times) == 1
+    assert len(emb.call_times) == 2
     assert elapsed < 0.05
 
 
@@ -1736,12 +1736,12 @@ async def test_find_duplicate_batches_cold_cache_then_one_miss(tmp_path):
     await store.add_fact("delta rule")
     assert emb.docs == 1
     assert emb.doc_batch_sizes == [4]
-    assert emb.queries == 0
+    assert emb.queries == 1
 
     await store.add_fact("epsilon rule")
     assert emb.docs == 2
     assert emb.doc_batch_sizes[-1] == 1
-    assert emb.queries == 0
+    assert emb.queries == 1
 
 
 @pytest.mark.asyncio
@@ -1764,7 +1764,7 @@ async def test_find_duplicate_query_only_provider_caches_after_first_add(tmp_pat
     )
     await store.add_fact("gamma rule")
     first_pass = len(emb.call_times)
-    assert first_pass == 3
+    assert first_pass == 4
     await store.add_fact("delta rule")
     assert len(emb.call_times) == first_pass + 1
 

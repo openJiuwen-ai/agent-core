@@ -3,8 +3,9 @@
 
 """Structured payloads and result types for ``interact_team``.
 
-The runtime exposes three interaction perspectives:
+The runtime accepts the following interaction inputs:
 
+* **Group chat** — archive public discussion and notify only explicit mentions.
 * **God view** — speak directly to the team's leader DeepAgent. Equivalent
   to the historical ``invoke``/``deliver_to_leader`` channel.
 * **Operator view** — speak as the external user, addressing one member
@@ -33,6 +34,33 @@ from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 
 
 _EXTERNAL_TEAM_EVENT_TYPE = "team.external_event"
+
+
+@dataclass(frozen=True, slots=True)
+class GroupChatMessage:
+    """Public user input; an empty mentions list only archives the message."""
+
+    body: str
+    client_message_id: str
+    mentions: tuple[str, ...] = ()
+    attachments: tuple[dict[str, Any], ...] = ()
+
+    @classmethod
+    def from_wire(cls, payload: object) -> "GroupChatMessage | None":
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict) or payload.get("type") != "group_chat":
+            return None
+        allowed = {"type", "body", "client_message_id", "mentions", "attachments"}
+        if set(payload) - allowed:
+            raise ValueError("Unknown group chat input fields")
+        body, identity = payload.get("body"), payload.get("client_message_id")
+        mentions, attachments = payload.get("mentions", []), payload.get("attachments", [])
+        if not isinstance(body, str) or not isinstance(identity, str) or not identity.strip():
+            raise ValueError("Group chat requires body and client_message_id")
+        if not isinstance(mentions, (list, tuple)) or not isinstance(attachments, (list, tuple)):
+            raise ValueError("Group mentions and attachments must be arrays")
+        return cls(body, identity, tuple(mentions), tuple(attachments))
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +152,7 @@ class ExternalTeamEvent:
 
 
 InteractPayload = Union[
+    GroupChatMessage,
     GodViewMessage,
     OperatorMessage,
     HumanAgentMessage,
@@ -220,6 +249,7 @@ class DeliverResult:
 
 
 __all__ = [
+    "GroupChatMessage",
     "DeliverResult",
     "ExternalTeamEvent",
     "GodViewMessage",

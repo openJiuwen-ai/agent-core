@@ -48,6 +48,10 @@ from openjiuwen.core.common.logging import team_logger
 # reach their rows through different objects, and tests fake them in one line.
 TaskGetter = Callable[[str], Awaitable[Any]]
 MemberGetter = Callable[[str], Awaitable[Any]]
+# ``(upstream_rows, downstream_rows)`` of the referenced task: the tasks it
+# depends on and the tasks that depend on it. Optional — a delivery site
+# without it renders the briefs as "none" (F_118 / D7).
+TaskLinksGetter = Callable[[str], Awaitable[tuple[list[Any], list[Any]]]]
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-z_]+)\.([a-z_]+)\s*\}\}")
 
@@ -77,6 +81,111 @@ _TASK_FIELDS: dict[str, Callable[[Any], str]] = {
     "review_round": lambda task: str(task.review_round),
     "max_review_rounds": _task_max_rounds,
 }
+
+# Computed task fields (F_118 / D7): one line per linked task, resolved at
+# delivery time like every other ``task.*`` value. The upstream line carries
+# the author's completion summary (F_119); the full detail stays one
+# ``view_task(action='note')`` call away.
+_TASK_LINK_FIELDS = ("upstream_brief", "downstream_brief")
+
+_NONE_PHRASE = {"cn": "无", "en": "none"}
+
+_UPSTREAM_NOTE_HINT = {
+    "cn": "需要某个上游任务的详细完成说明时，用 `view_task(action='note', task_id=...)` 查看。",
+    "en": "For an upstream task's full completion note, call `view_task(action='note', task_id=...)`.",
+}
+
+# Rendered length ceiling of a completion summary (F_119). The stored value is
+# never cut; only lightweight renderings (digests, briefs) are.
+SUMMARY_RENDER_LIMIT = 200
+
+
+def completion_summary(task: Any) -> str:
+    """Render a task's completion summary as one bounded line.
+
+    Falls back to the first non-empty line of the completion note when the
+    author gave no summary. Line breaks are folded into spaces and the result
+    is cut to ``SUMMARY_RENDER_LIMIT`` characters with a trailing ``…``.
+
+    Args:
+        task: A task row (or any object with ``summary`` / ``note``).
+
+    Returns:
+        The one-line summary, or ``""`` when the task has neither field.
+    """
+    text = (getattr(task, "summary", None) or "").strip()
+    if not text:
+        note = getattr(task, "note", None) or ""
+        text = next((line.strip() for line in note.splitlines() if line.strip()), "")
+    text = " ".join(text.split())
+    if len(text) > SUMMARY_RENDER_LIMIT:
+        return text[:SUMMARY_RENDER_LIMIT] + "…"
+    return text
+
+
+def completion_summary_truncated(task: Any) -> bool:
+    """Whether :func:`completion_summary` had to drop part of the task's text.
+
+    True when the rendered line is cut, or when it fell back to the note while
+    the note has more than its first line.
+    """
+    summary = " ".join((getattr(task, "summary", None) or "").split())
+    if summary:
+        return len(summary) > SUMMARY_RENDER_LIMIT
+    note_lines = [line for line in (getattr(task, "note", None) or "").splitlines() if line.strip()]
+    if not note_lines:
+        return False
+    return len(note_lines) > 1 or len(" ".join(note_lines[0].split())) > SUMMARY_RENDER_LIMIT
+
+
+def _task_line(task: Any, *, with_summary: bool) -> str:
+    parts = [f"{task.task_id} · {task.title or ''}"]
+    if task.assignee:
+        parts.append(f"· {task.assignee}")
+    summary = completion_summary(task) if with_summary else ""
+    if summary:
+        parts.append(f"· {summary}")
+    return " ".join(parts)
+
+
+def upstream_lines(upstream: list[Any]) -> list[str]:
+    """One bullet per upstream task: ``- task_id · title · assignee · <completion summary>``.
+
+    Args:
+        upstream: Upstream task rows (the task's direct dependencies).
+
+    Returns:
+        The bullet lines, empty when there is no upstream task.
+    """
+    return [f"- {_task_line(task, with_summary=True)}" for task in upstream]
+
+
+def upstream_brief(upstream: list[Any], language: str = "cn") -> str:
+    """Render one line per upstream task with its completion summary.
+
+    Only the summary is rendered; a closing line points to
+    ``view_task(action='note')`` for the full detail.
+
+    Args:
+        upstream: Upstream task rows (the task's direct dependencies).
+        language: Rendering language of the closing hint ('cn' or 'en').
+
+    Returns:
+        The bullet lines plus the hint, or ``""`` when there is no upstream task.
+    """
+    lines = upstream_lines(upstream)
+    if not lines:
+        return ""
+    lines.append(_UPSTREAM_NOTE_HINT.get(language, _UPSTREAM_NOTE_HINT["en"]))
+    return "\n".join(lines)
+
+
+def _task_briefs(upstream: list[Any], downstream: list[Any], language: str) -> dict[str, str]:
+    none = _NONE_PHRASE.get(language, _NONE_PHRASE["en"])
+    up = upstream_brief(upstream, language) or none
+    down = "\n".join(f"- {_task_line(task, with_summary=False)}" for task in downstream) or none
+    return {"upstream_brief": up, "downstream_brief": down}
+
 
 _MEMBER_FIELDS: dict[str, Callable[[Any], str]] = {
     "member_name": lambda member: str(member.member_name),
@@ -171,6 +280,7 @@ async def expand_message(
     member_getter: MemberGetter,
     language: str,
     loader: TemplateLoader = load_template,
+    task_links_getter: TaskLinksGetter | None = None,
 ) -> ExpandedMessage:
     """Render one message row into the text to deliver.
 
@@ -188,8 +298,17 @@ async def expand_message(
     if meta is None:
         return ExpandedMessage(body=msg.content, is_template=False)
     try:
-        values = await _resolve_namespaces(meta, task_getter=task_getter, member_getter=member_getter)
         template = loader(str(meta["template"]), language)
+        # The link briefs cost extra queries; only pay for them when this
+        # template actually renders one (today: the task-start handoffs).
+        links_wanted = any(f"task.{field}" in template.content for field in _TASK_LINK_FIELDS)
+        values = await _resolve_namespaces(
+            meta,
+            task_getter=task_getter,
+            member_getter=member_getter,
+            task_links_getter=task_links_getter if links_wanted else None,
+            language=language,
+        )
         return ExpandedMessage(body=_substitute(template.content, values), is_template=True)
     except Exception:
         team_logger.warning(
@@ -205,6 +324,8 @@ async def _resolve_namespaces(
     *,
     task_getter: TaskGetter,
     member_getter: MemberGetter,
+    task_links_getter: TaskLinksGetter | None = None,
+    language: str = "cn",
 ) -> dict[str, dict[str, str]]:
     """Fetch the referenced rows and project them onto the whitelists.
 
@@ -222,6 +343,8 @@ async def _resolve_namespaces(
         if task is None:
             raise RefUnresolved(f"task {task_id} not found")
         values[_REF_TASK] = {field: read(task) for field, read in _TASK_FIELDS.items()}
+        upstream, downstream = await task_links_getter(str(task_id)) if task_links_getter else ([], [])
+        values[_REF_TASK].update(_task_briefs(upstream, downstream, language))
 
     member_name = refs.get(_REF_MEMBER)
     if member_name:
@@ -231,6 +354,22 @@ async def _resolve_namespaces(
         values[_REF_MEMBER] = {field: read(member) for field, read in _MEMBER_FIELDS.items()}
 
     return values
+
+
+async def task_links(db: Any, task_id: str) -> tuple[list[Any], list[Any]]:
+    """Fetch ``(upstream_rows, downstream_rows)`` of ``task_id`` from a ``TeamDatabase``.
+
+    The one DB-shaped helper both delivery sites (in-process drain, external
+    inbox) bind as ``task_links_getter``, so the two never drift on which
+    rows a brief shows. Rows whose task was swept are simply absent.
+    """
+    deps = await db.task.get_task_dependencies(task_id)
+    upstream_ids = [dep.depends_on_task_id for dep in deps]
+    downstream_ids = await db.task.get_dependent_task_ids(task_id)
+    rows = {row.task_id: row for row in await db.task.get_tasks_by_ids(list({*upstream_ids, *downstream_ids}))}
+    upstream = [rows[tid] for tid in upstream_ids if tid in rows]
+    downstream = [rows[tid] for tid in downstream_ids if tid in rows]
+    return upstream, downstream
 
 
 def _substitute(template: str, values: dict[str, dict[str, str]]) -> str:
@@ -250,9 +389,16 @@ __all__ = [
     "ExpandedMessage",
     "MemberGetter",
     "RefUnresolved",
+    "SUMMARY_RENDER_LIMIT",
     "TaskGetter",
+    "TaskLinksGetter",
     "build_meta",
+    "completion_summary",
+    "completion_summary_truncated",
     "expand_message",
     "fallback_line",
     "parse_meta",
+    "task_links",
+    "upstream_brief",
+    "upstream_lines",
 ]

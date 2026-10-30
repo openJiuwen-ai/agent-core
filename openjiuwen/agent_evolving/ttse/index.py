@@ -588,10 +588,24 @@ class TTSEIndex:
             )
             self._chroma_stale = True
 
+    async def _embedding_ready(self, store: Any) -> bool:
+        """False when the embedding probe fails.
+
+        Callers return before delete or rebuild. ``_chroma_stale`` is left
+        alone: a bank change during the outage must still rebuild after the
+        probe recovers, even when the embedding fingerprint did not change.
+        """
+        available = getattr(store, "embedding_available", None)
+        if not callable(available):
+            return True
+        return bool(await available())
+
     async def ensure_chroma(self, store: Any) -> None:
         """Rebuild ANN when embedding was attached late or the model changed."""
         expected = _fingerprint(getattr(store, "_embedding", None))
         if not expected:
+            return
+        if not await self._embedding_ready(store):
             return
         if not self._chroma_stale and expected == self._chroma_fingerprint:
             return
@@ -623,6 +637,8 @@ class TTSEIndex:
         expected = _fingerprint(embedding)
         if not expected:
             self._chroma_stale = False
+            return
+        if not await self._embedding_ready(store):
             return
         chroma = self._chroma_store()
         if chroma is None:
@@ -674,6 +690,10 @@ class TTSEIndex:
                 self._write_fingerprint(expected)
                 self._chroma_stale = False
             else:
+                # Probe success is cached for the life of this provider, so
+                # this flag schedules another full rebuild on the next consult,
+                # including the per-text fallback. A partial batch can keep
+                # calling the provider until every record embeds.
                 self._chroma_stale = True
                 logger.warning(
                     "[TTSERail] chroma rebuilt incomplete records=%s/%s; fingerprint not written",
@@ -959,11 +979,15 @@ class TTSEIndex:
         has_provider = getattr(store, "has_embedding_provider", lambda: False)
         can_embed = store is not None and callable(embed) and bool(has_provider())
         if want_embed and can_embed:
-            try:
-                query_vec = await embed(query)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning('[TTSERail] consult query embedding failed: %s', exc)
-                query_vec = None
+            available = getattr(store, "embedding_available", None)
+            # Cached query vectors still search Chroma. Skip them when the
+            # probe has failed so hybrid/embed falls through to BM25.
+            if not callable(available) or await available():
+                try:
+                    query_vec = await embed(query)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning('[TTSERail] consult query embedding failed: %s', exc)
+                    query_vec = None
         embed_rank: List[str] = []
         embed_scores: Dict[str, float] = {}
         if query_vec:

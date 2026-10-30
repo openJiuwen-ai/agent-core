@@ -41,6 +41,13 @@ class BaseInterruptRail(AgentRail)
 
 * **tool_names**(Iterable[str], 可选)：需要拦截的工具名称列表。默认值：`None`，表示不拦截任何工具。
 
+**类属性**：
+
+* **interrupt_kind**(str)：本 Rail 发起的中断类型（见 `openjiuwen.core.single_agent.interrupt.InterruptKind`），供宿主展示与决定答复形状。内置 Rail：`ConfirmInterruptRail` 为 `confirm`，`AskUserRail` 为 `ask_user`，`PermissionInterruptRail` 为 `permission`。默认值：`""`。
+* **interrupt_owner**(str)：路由答复的键，默认为 Rail 的类路径，可按实例设置（`rail.interrupt_owner = "..."`）。Rail 抛出中断时写入请求；恢复时 `resolve_interrupt` 收到的 `user_input` 只来自本 Rail 发起的中断，同一工具调用上其它 Rail 的答复不会传进来。同一 Agent 上挂两个同类 Rail 时，需给其中一个设置不同的 `interrupt_owner`，否则二者会读到对方的答复。
+
+> 同一工具调用仍在暂停时，之前轮次已给出的答复会在后续恢复轮次继续传给对应的 Rail。若处理答复有外部副作用（如写规则），用 `self.is_carried_answer(ctx.extra, tool_call_id)` 判断，避免重复执行。中断暂停不会触发 `on_tool_exception`；`after_tool_call` 中 `ctx.is_paused` 为真表示调用暂停、尚无结果。
+
 ### approve
 
 ```python

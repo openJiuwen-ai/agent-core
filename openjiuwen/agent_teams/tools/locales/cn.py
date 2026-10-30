@@ -72,6 +72,17 @@ STRINGS: dict[str, str] = {
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择合适的模型"
     ),
+    "spawn_teammate.model_name_group": (
+        "可选。仅当用户明确要求该成员使用某个模型时填写，且必须原样填写下方 selectable_models 中的一项；"
+        "用户未提及模型时省略，由模型组自动选择。\n"
+        "填写前，将用户的说法与 selectable_models 逐项比对（比对时忽略大小写、空格和连字符）：\n"
+        "- 与某一项完全一致：只对应该项，直接使用。\n"
+        "- 否则，名称中包含用户说法的每一项都算对应。只对应一项时直接使用；"
+        "对应多项时，必须先调用 ask_user 列出这些候选让用户选择，"
+        "不得自行挑选名称最短或看起来最接近的一项。"
+        "例如用户说“用 GLM”，而列表中有 GLM-5.3 和 GLM-5.3-Flash，必须询问。\n"
+        "- 一项都不对应：先调用 ask_user 告知用户当前可选的模型，不得替换为其他模型。"
+    ),
     "spawn_teammate.permissions": (
         "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
@@ -196,13 +207,32 @@ STRINGS: dict[str, str] = {
         "你不得自行选择、推断或补全；用户未明确指定时必须省略，使该 Agent 使用其自身默认模型"
     ),
     "spawn_external_cli.fallback_model_name": (
-        "必填，但在没有兼容模型时允许为 null。存在兼容模型时，必须从团队模型池中选择，并根据"
-        "该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，优先选择"
-        "当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
+        "认证回退模型。只对下方目录 compatible_fallback_models 中列出的 cli_agent 有效；"
+        "未列出的 cli_agent 没有认证回退，必须省略本字段。该 cli_agent 存在兼容模型时必须填写，"
+        "从团队模型池中按该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，"
+        "优先选择当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
         "不兼容的模型。"
         "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
-        "仅对运行时明确报告的认证失败生效。只有团队模型池中不存在兼容模型时才能传 null，"
+        "仅对运行时明确报告的认证失败生效。没有兼容模型时省略本字段，"
         "此时仍可使用其自身默认模型，但不启用自动回退"
+    ),
+    "spawn_external_cli.builtin_model": (
+        "可选。从下方目录中该 cli_agent 的条目里选择一个内置模型，使用 CLI 自身登录（如订阅）运行，"
+        "按成员工作量选择；与 model_name 互斥。省略时由 CLI 使用其自身默认模型"
+    ),
+    "spawn_external_cli.effort": (
+        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
+        "省略时取该模型的 default_effort"
+    ),
+    # ===== set_member_model ====================================================
+    # set_member_model._desc lives in descs/cn/member/set_member_model.md
+    "set_member_model.member_name": "要切换模型的外部 CLI 成员 member_name（语义化 slug，不是显示名）",
+    "set_member_model.model": (
+        "可选。新的内置模型，必须来自下方目录中该成员 cli_agent 的条目；省略时保持当前模型，只调整 effort"
+    ),
+    "set_member_model.effort": (
+        "可选。新的推理强度，必须是所选模型的 efforts 之一；指定了 model 而省略时取其 default_effort，"
+        "未指定 model 而省略时保持不变"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
@@ -233,11 +263,26 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
-        "调度模式必填，成员不会自主认领"
+        "承担该任务的成员名称（可选）；该成员必须已存在（先 spawn_teammate）且不能是 leader。"
+        "未填写则进入公共认领池，等待成员自主认领"
+    ),
+    "create_task_scheduled.task.assignee": (
+        "承担该任务的成员名称（与 member 二选一）；该成员必须已存在（也可以是本次调用中其他任务用 member "
+        "内联声明的成员）且不能是 leader。调度模式必填承担者，成员不会自主认领"
+    ),
+    "create_task_scheduled.task.member": (
+        "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"
+        "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
+        "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
+    ),
+    "create_task_scheduled.task.member.lifetime": (
+        "退场策略：shutdown = 名下任务全部完成后自动关闭（终态，名字不可复用）；"
+        "dormant = 自动休眠（保留在名册，不处理任何事件），"
+        "仅被点名（send_message(to=该成员) 或派新任务）时唤醒"
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
@@ -257,9 +302,10 @@ STRINGS: dict[str, str] = {
     # view_task._desc lives in descs/cn/task/view_task.md
     "view_task.action": (
         "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
+        "'note'（单个任务完整的完成摘要与详情，需传 task_id）、"
         "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
     ),
-    "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
+    "view_task.task_id": "任务 ID — action=get / note 时必填，其他模式忽略",
     "view_task.status": (
         "仅 action=list 时使用的状态过滤："
         "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
@@ -300,10 +346,20 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/cn/task/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",
     "claim_task.status": "目标状态：'claimed'（领取）或 'completed'（完成）",
+    "claim_task.summary": (
+        "仅 status=completed 时生效：一句话完成摘要——交付了什么、主产物在哪；leader 与下游看到的就是它；交付物本身很短（一句话、一个数字、一个结论）时直接写进摘要，别只写文件路径"
+    ),
+    "claim_task.note": "仅 status=completed 时生效：完整的完成详情——产物路径、关键决策或后续注意事项",
+    "claim_task.fields_ignored": "summary / note 仅在 status=completed 时生效，本次领取已忽略。",
+    "claim_task.upstream_header": "上游交付（本任务的直接依赖）：",
+    "claim_task.upstream_note_hint": "需要某个上游任务的详细完成说明时，用 `view_task(action='note', task_id=...)` 查看。",
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/cn/task/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
-    "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
+    "member_complete_task.summary": (
+        "一句话完成摘要：交付了什么、主产物在哪；用于 leader 摘要与下游上游列表；交付物本身很短（一句话、一个数字、一个结论）时直接写进摘要，别只写文件路径"
+    ),
+    "member_complete_task.note": "完整的完成详情：产物路径、关键决策或后续注意事项；校验者与 view_task(action='note') 读取全文",
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/cn/task/verify_task.md
     "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",
@@ -379,10 +435,12 @@ STRINGS: dict[str, str] = {
     ),
     "swarmflow_worker.schema": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
-        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
-        "的结构化结果。重要提示：`structured_output` 是**唯一**的结果提交方式——如果你"
-        "不调用它，任务被视为失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出"
-        "——结果只能通过工具调用被捕获。调用 `structured_output` 后立即停止。"
+        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入严格符合其输入 "
+        "schema 的结构化结果——每一层的必填属性都要逐个给出（数组内每个元素也一样），"
+        "属性名与嵌套结构和 schema 完全一致，不要增删字段或改变结构形状。重要提示："
+        "`structured_output` 是**唯一**的结果提交方式——如果你不调用它，任务被视为"
+        "失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出——结果只能通过工具调用"
+        "被捕获。调用 `structured_output` 后立即停止。"
     ),
     "swarmflow_worker.free": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
@@ -390,7 +448,8 @@ STRINGS: dict[str, str] = {
     ),
     "structured_output.reminder": (
         "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
-        "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
+        "写在文本中。提交的参数必须严格符合该工具的 input schema——每层必填属性给全、"
+        "属性名与结构完全一致。这是唯一的结果提交方式，不调用该工具=任务失败。"
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc

@@ -334,6 +334,11 @@ class TaskLoopEventHandler(EventHandler):
             if event.metadata
             else False
         )
+        turn_number = (
+            event.metadata.get("_turn_number")
+            if event.metadata
+            else None
+        )
 
         coordinator = agent.loop_coordinator
         if coordinator is None:
@@ -387,6 +392,12 @@ class TaskLoopEventHandler(EventHandler):
             "is_follow_up": is_follow_up,
             "_resume_continuation": resume_continuation,
         }
+        if turn_number is not None:
+            task_metadata["_turn_number"] = turn_number
+        if event.metadata:
+            for key in ("_moa_work_binding", "_moa_input_origin"):
+                if key in event.metadata:
+                    task_metadata[key] = event.metadata[key]
 
         try:
             core_task = CoreTask(

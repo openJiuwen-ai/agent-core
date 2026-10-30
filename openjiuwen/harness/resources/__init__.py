@@ -21,6 +21,7 @@ from openjiuwen.harness.resources.extension_resolver import (
     resolve_plugin_parts,
 )
 from openjiuwen.harness.schema.extension_spec import (
+    AgentRuntimeSpec,
     AgentTemplateSpec,
     McpDirSpec,
     McpServerSpec,
@@ -28,10 +29,12 @@ from openjiuwen.harness.schema.extension_spec import (
     PluginSpec,
     PromptSectionSpec,
     RubricSpec,
+    RuntimeSpec,
     SkillSpec,
 )
 
 __all__ = [
+    "AgentRuntimeSpec",
     "AgentTemplateSpec",
     "ExtensionParts",
     "LoadRecord",
@@ -45,6 +48,7 @@ __all__ = [
     "ResourceKind",
     "ResourceRef",
     "RubricSpec",
+    "RuntimeSpec",
     "SkillSpec",
     "find_agent_template_manifest",
     "find_plugin_manifest",

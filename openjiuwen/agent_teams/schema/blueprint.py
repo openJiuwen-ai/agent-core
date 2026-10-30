@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    ExternalCliMemberSpec,
     MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
@@ -145,7 +146,7 @@ class StorageSpec(BaseModel):
 # does the dispatch when both arms declare the discriminator as ``Literal``
 # (already wired in ``schema/team.py``).
 PredefinedMemberSpec = Annotated[
-    Union[BridgeMemberSpec, TeamMemberSpec],
+    Union[BridgeMemberSpec, ExternalCliMemberSpec, TeamMemberSpec],
     Field(discriminator="role_type"),
 ]
 
@@ -204,6 +205,20 @@ class TeamAgentSpec(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     agents: dict[str, DeepAgentSpec]
+    reviewer_agent: DeepAgentSpec | None = None
+    """Base spec for the one-shot reviewers spawned per review round.
+
+    Under scheduled dispatch a task's reviewers run as temporary harnesses that
+    only inspect a deliverable and cast a vote, so they should carry a narrow,
+    read-only capability set rather than a teammate's full one. The host that
+    assembles member capabilities builds this spec. ``None`` falls back to the
+    teammate spec with the framework-level trimming the scheduler applies
+    (read-only file tools, no todo planning, no sub-agents).
+
+    Kept out of ``agents`` on purpose: that dict is also looked up by member
+    name, so a reserved ``"reviewer"`` key would collide with a member of that
+    name.
+    """
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
@@ -293,17 +308,15 @@ class TeamAgentSpec(BaseModel):
     deployment tpm / rpm budgets and (optionally) health checks.
 
     At ``build()`` time the config expands into ``TeamSpec.model_pool``
-    (one entry per logical model name, each carrying the full deployment
-    list) and ``model_pool_strategy`` is set to ``"intelli_router"``, so
+    (one logical ``"*"`` entry carrying the full deployment list) and
+    ``model_pool_strategy`` is set to ``"intelli_router"``, so
     all downstream machinery (``resolve_member_model``,
     ``inherit_pool_ids``, ``update_model_pool``) keeps working against
     the flat pool view.
 
     Mutually exclusive with ``model_pool`` and ``model_router``. The
-    first resolved model name — ``"*"`` (unified routing) unless
-    ``model_names`` overrides the order — is the team default, so a
-    leader without an explicit ``leader.model_name`` gets the broadest
-    failover.
+    The sole logical model name is ``"*"`` (unified routing), so a leader
+    without an explicit ``leader.model_name`` gets the broadest failover.
     """
     model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.
@@ -357,7 +370,7 @@ class TeamAgentSpec(BaseModel):
     stops the automatic rework loop and escalates to the leader instead.
     See F_62.
     """
-    review_stall_timeout: int = 1800
+    review_stall_timeout: int = 2400
     """Seconds before a stalled review round escalates to the leader.
 
     A round that produced no verdict (including no votes at all) within
@@ -534,8 +547,29 @@ class TeamAgentSpec(BaseModel):
     runs draw down one pool rather than getting a ceiling each.
     """
 
+    progressive_tool: bool = False
+    """Opt swarmflow worker avatars into progressive tool exposure.
+
+    True writes ``ProgressiveToolSpec(enabled=True)`` into the worker base spec
+    so each worker mounts the harness ``ProgressiveToolRail`` (``tool_search``
+    meta-tool + deferred tools). Team-level and independent of the single-agent
+    global ``progressive_tool_enabled`` switch: the two member kinds expose
+    different tool surfaces, so one deployment may want them set differently.
+    Only meaningful when ``enable_swarmflow`` is True; ignored otherwise.
+    """
+
     enable_permissions: bool = False
     """Team-specific permission control."""
+
+    enable_organization: bool = True
+    """Spec-level gate for organization tool mounting.
+
+    True mounts org control tools on the leader and rehydrates existing
+    organization bindings. False skips both, so the leader sees no
+    organization tools at all. Default True preserves standalone library
+    behavior; hosts map their own switch to this field, JiuwenSwarm maps
+    its experimental team organization toggle.
+    """
 
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
@@ -733,7 +767,7 @@ class TeamAgentSpec(BaseModel):
             db_config.connection_string = str(get_agent_teams_home() / "team.db")
         return db_config
 
-    def build(self) -> "TeamAgent":
+    def build(self, *, conversation_mode: Literal["team", "group_chat"] = "team") -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
         from openjiuwen.harness.prompts import resolve_language
@@ -774,6 +808,7 @@ class TeamAgentSpec(BaseModel):
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
+            conversation_mode=conversation_mode,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
@@ -1004,6 +1039,7 @@ class TeamAgentSpec(BaseModel):
 __all__ = [
     "DeepAgentSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliMemberSpec",
     "LeaderSpec",
     "PredefinedMemberSpec",
     "StorageSpec",

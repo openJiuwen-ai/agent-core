@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Any, Literal
 
@@ -37,6 +37,20 @@ class ContextCompressionUsage(BaseModel):
     details: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ContextCompressionModifiedMessage(BaseModel):
+    """A message a context processor rewrote in place, keeping its identity."""
+
+    message_id: str
+    """The message's ``context_message_id``, the id trajectory windows use for it."""
+
+    role: str = Field(default="")
+    tool_call_id: str | None = Field(default=None)
+    offload_handle: str | None = Field(default=None)
+    """Handle that restores the original content; None when the rewrite offloaded nothing."""
+
+    offload_type: str | None = Field(default=None)
+
+
 class ContextCompressionState(BaseModel):
     type: str = Field(default=CONTEXT_COMPRESSION_STATE_TYPE)
     operation_id: str
@@ -48,6 +62,8 @@ class ContextCompressionState(BaseModel):
     after: ContextCompressionMetric | None = Field(default=None)
     statistic: ContextStats = Field(default_factory=ContextStats)
     saved: ContextCompressionSaved | None = Field(default=None)
+    modified_messages: list[ContextCompressionModifiedMessage] = Field(default_factory=list)
+    """Messages present before and after the operation whose content or offload state changed."""
     compression_usage: ContextCompressionUsage | None = Field(default=None)
     duration_ms: int | None = Field(default=None)
     context_max: int | None = Field(default=None)

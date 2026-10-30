@@ -829,7 +829,21 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             return
         if not self._is_started.is_set():
             self._is_started.set()
-            await TracerWorkflowUtils.trace_component_begin(self._session)
+            # Components may export static facts (top_k, data source ids, ...)
+            # onto their trace span; the hook defaults to None on the base class.
+            extra_metadata = None
+            trace_metadata_hook = getattr(self._executable, "trace_metadata", None)
+            if trace_metadata_hook is not None:
+                try:
+                    extra_metadata = trace_metadata_hook()
+                except Exception as e:
+                    logger.warning(
+                        f"trace_metadata() failed for node [{self._node_id}]",
+                        event_type=LogEventType.GRAPH_VERTEX_ABILITY_ERROR,
+                        exception=e,
+                        **self._log_message
+                    )
+            await TracerWorkflowUtils.trace_component_begin(self._session, extra_metadata=extra_metadata)
 
     async def __trace_component_done__(self) -> None:
         if not self._trace_enable():

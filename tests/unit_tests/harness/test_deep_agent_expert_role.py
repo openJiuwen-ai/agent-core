@@ -355,13 +355,19 @@ async def test_direct_call_without_session_skips_expert_role_attachment(
 
     await agent.invoke("hello")
 
-    assert fake.invoke_calls[0]["inputs"] == {"query": "hello"}
+    invoke_inputs = dict(fake.invoke_calls[0]["inputs"])
+    invoke_inputs.pop("_steering_queue", None)
+    invoke_inputs.pop("_host_max_iterations", None)
+    assert invoke_inputs == {"query": "hello"}
     assert fake.invoke_calls[0]["session"] is None
     assert await _expert_role(agent, "default_session") is None
 
     chunks = [chunk async for chunk in agent.stream("streamed")]
     assert chunks
-    assert fake.stream_calls[0]["inputs"] == {"query": "streamed"}
+    stream_inputs = dict(fake.stream_calls[0]["inputs"])
+    stream_inputs.pop("_steering_queue", None)
+    stream_inputs.pop("_host_max_iterations", None)
+    assert stream_inputs == {"query": "streamed"}
     assert fake.stream_calls[0]["session"] is None
     assert await _expert_role(agent, "default_session") is None
 

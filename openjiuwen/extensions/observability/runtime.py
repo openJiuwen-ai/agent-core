@@ -14,7 +14,6 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
-
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -41,6 +40,10 @@ from openjiuwen.extensions.observability.exporters.transforming import (
     TransformingSpanExporter,
 )
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
+from openjiuwen.extensions.observability.instrumentation import (
+    ensure_global_http_instrumentation,
+    resolve_global_instrument_flag,
+)
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
     get_active_span_tracker,
@@ -186,6 +189,11 @@ class ObservabilityRuntime:
                     trace.set_tracer_provider(provider)
                 except Exception as exc:
                     logger.warning("otel: set_tracer_provider failed - {}", exc)
+                # HTTP instrumentation (traceparent propagation) must run after
+                # the global provider is set: the instrumentors bind their
+                # tracer to the process-global provider at instrument() time.
+                if resolve_global_instrument_flag(config.global_instrument_enable):
+                    ensure_global_http_instrumentation()
             except Exception:
                 self._unregister_callbacks()
                 if provider is not None:
@@ -292,6 +300,7 @@ class ObservabilityRuntime:
                 context_compression_handler.on_llm_request_input,
             ),
             (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
+            (LLMCallEvents.LLM_RESPONSE_STARTED, handler.on_llm_response_started),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
             (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
             (LLMCallEvents.LLM_INVOKE_OUTPUT, handler.on_llm_invoke_output),

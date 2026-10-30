@@ -15,6 +15,9 @@ View team task information.
 - Understand task dependencies (blocked_by: what blocks it, blocks: what it blocks)
 - Verify task state after a member reports progress
 
+### action=note (requires task_id)
+- Read a task's full completion summary (`summary`) and completion detail (`note`) — the summaries in digests and upstream lists are one truncated line
+
 ### action=claimable
 - Quickly get all pending tasks ready to claim
 - After completing a task, find the next available one
@@ -26,7 +29,10 @@ Summary per task: task_id, title, status, assignee, blocked_by.
 Does not include content — use action=get for single-task detail.
 
 ### get
-Full single-task detail: includes content, blocked_by (upstream dependencies), blocks (downstream dependencies).
+Full single-task detail: includes content, summary / note (completion summary and detail), blocked_by (upstream dependencies), blocks (downstream dependencies).
+
+### note
+A task's completion summary (`summary`) and full completion detail (`note`), untruncated.
 
 ## Tips
 

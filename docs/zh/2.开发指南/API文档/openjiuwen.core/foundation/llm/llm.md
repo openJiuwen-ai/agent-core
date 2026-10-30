@@ -4,8 +4,40 @@
 
 - 提供 `Model` 统一调用入口，根据 `client_provider` 选择协议实现（OpenAI 兼容或 Anthropic）；
 - 定义 `BaseModelClient` 抽象基类及 `OpenAIModelClient`、`AnthropicModelClient` 实现；旧厂商名是别名，见[LLM 协议收敛](../../../基础功能/LLM协议收敛.md)；
+- 提供独立的轻量 `JevSystemOneClient`，用于 System One 类型化评估；
 - 提供模型请求/客户端配置（`ModelRequestConfig`、`ModelClientConfig`）及消息、流式块、工具调用等 Schema；
 - 提供输出解析器抽象（`BaseOutputParser`）及 `JsonOutputParser`实现。
+
+---
+
+## Jev System One 类型化评估
+
+`JevSystemOneClient` 直接调用 `POST /v1/systemone`。System One 接收共享的 `state`，以及 `NoulQuestion`、`ChoiceQuestion` 或 `ScoreQuestion` 类型化问题，并返回对应的类型化答案。由于它不是“消息输入、AssistantMessage 输出”的聊天协议，因此客户端直接实例化，不通过 `Model`、`ModelClientConfig` 或模型客户端注册表选择。
+
+```python
+import os
+
+from openjiuwen.core.foundation.llm.system_one import JevSystemOneClient, NoulQuestion
+
+
+async def evaluate_request():
+    async with JevSystemOneClient(api_key=os.environ["TYPESAFE_API_KEY"]) as client:
+        response = await client.system_one(
+            state="I was charged twice. Please help.",
+            questions={
+                "needs_refund": NoulQuestion(
+                    instructions="Is the customer asking for a refund?",
+                )
+            },
+        )
+        return response.answers["needs_refund"]
+```
+
+默认端点为 TypeSafe（`https://api.typesafe.ai`），默认模型别名为 `jev-latest`。如需使用 OpenRouter 的 TypeSafe 兼容路由，设置 `api_base="https://openrouter.ai/api"`、`model_name="typesafe/jev-1.13"` 并提供 OpenRouter API key。客户端会对官方文档要求的 `429` 和 `529` 响应进行退避重试。
+
+`endpoint_path` 默认 `/v1/systemone`，直接追加到 `api_base`，不隐式改写地址前缀。同一类型化客户端也支持 OpenRouter Decisions：设置 `api_base="https://openrouter.ai/api/alpha"`、`endpoint_path="/decisions"`。如果已有 TypeSafe base 以 `/v1` 结尾，设置 `endpoint_path="/systemone"`。该参数只能是绝对路径，不能包含源站、查询参数或片段。
+
+响应采用严格类型解析，布尔值或字符串概率会被拒绝，不会先转换成数字。候选集合、概率分布和置信度阈值仍由调用方校验。使用共享任务 deadline 的应用可设置 `max_retries=0`，在 `system_one` 外统一实施有限重试和总预算，避免嵌套重试。注入的 HTTP 客户端始终由调用方负责关闭。
 
 ---
 

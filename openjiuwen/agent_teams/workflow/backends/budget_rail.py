@@ -47,6 +47,9 @@ class SwarmflowBudgetRail(AgentRail):
         self._budget = budget
         self._wf_budget = workflow_budget
         self.call_tokens: int = 0
+        self.call_cache_tokens: int = 0
+        self.call_input_tokens: int = 0
+        self.call_output_tokens: int = 0
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Refuse to start a model call the run can no longer pay for.
@@ -68,7 +71,45 @@ class SwarmflowBudgetRail(AgentRail):
             self._budget.add(tokens)            # session-wide (nested double-count)
             if self._wf_budget is not None:
                 self._wf_budget.add(tokens)     # per-run (same tokens, second ledger)
+        cache = _usage_field(inputs.response, "cache_tokens")
+        if cache > 0:
+            self.call_cache_tokens += cache
+        in_n = _usage_field(inputs.response, "input_tokens")
+        out_n = _usage_field(inputs.response, "output_tokens")
+        if in_n > 0:
+            self.call_input_tokens += in_n
+        if out_n > 0:
+            self.call_output_tokens += out_n
         self._stop_if_exhausted(ctx, "after")
+
+    def bill(
+        self,
+        tokens: int,
+        *,
+        cache_tokens: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        """Credit usage reported after a turn (members with no model-call hook).
+
+        Same two ledgers, same tally as ``after_model_call`` — the input /
+        output / cache split rides along when the reporter has one (external
+        CLIs report their turn usage after the fact). The ceiling is then
+        enforced by the engine's entry gate before the next call rather than
+        mid-loop, so one external turn can overrun by at most its own size.
+        """
+        if tokens <= 0:
+            return
+        self.call_tokens += tokens
+        self._budget.add(tokens)
+        if self._wf_budget is not None:
+            self._wf_budget.add(tokens)
+        if cache_tokens > 0:
+            self.call_cache_tokens += cache_tokens
+        if input_tokens > 0:
+            self.call_input_tokens += input_tokens
+        if output_tokens > 0:
+            self.call_output_tokens += output_tokens
 
     def _stop_if_exhausted(self, ctx: AgentCallbackContext, when: str) -> None:
         """End this agent's round when either ledger has nothing left.
@@ -111,6 +152,21 @@ class SwarmflowBudgetRail(AgentRail):
                     "exhausted_ledger": "workflow",
                 }
             )
+
+
+def _usage_field(response: object | None, field: str) -> int:
+    """Token field one model response reports via ``usage_metadata``, or 0.
+
+    ``cache_tokens`` (the foundation layer normalizes provider-specific cache
+    fields into it) is a subset of input tokens already counted by
+    ``_usage_tokens`` — tallied alongside for display, never billed again.
+    """
+    if response is None:
+        return 0
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return 0
+    return int(getattr(usage, field, 0) or 0)
 
 
 def _usage_tokens(response: object | None) -> int:

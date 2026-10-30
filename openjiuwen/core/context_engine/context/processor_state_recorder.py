@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import math
 from dataclasses import dataclass
@@ -8,15 +8,17 @@ from typing import Any, Callable, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextStats
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.context_utils import CONTEXT_MESSAGE_ID_KEY, ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.context_state import (
     CONTEXT_COMPRESSION_STATE_TYPE,
     ContextCompressionMetric,
+    ContextCompressionModifiedMessage,
     ContextCompressionSaved,
     ContextCompressionState,
     ContextCompressionUsage,
 )
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
@@ -186,6 +188,11 @@ class ContextProcessorStateRecorder:
             after=after,
             statistic=self._build_statistic(statistic_messages),
             saved=saved,
+            modified_messages=(
+                self._build_modified_messages(state_input.before_messages, state_input.after_messages)
+                if state_input.after_messages is not None
+                else []
+            ),
             compression_usage=self._build_compression_usage(state_input.compression_usage),
             duration_ms=(
                 int((state_input.ended_at - state_input.started_at) * 1000)
@@ -204,6 +211,63 @@ class ContextProcessorStateRecorder:
             compact_summary=state_input.compact_summary or "",
             error=state_input.error,
         )
+
+    @staticmethod
+    def _build_modified_messages(
+            before_messages: list[BaseMessage],
+            after_messages: list[BaseMessage],
+    ) -> list[ContextCompressionModifiedMessage]:
+        """Identify messages a processor rewrote in place.
+
+        ``ContextEvent.messages_to_modify`` cannot identify them: compressors
+        index the input list while offloaders index the output list, and a GET
+        pass indexes the full context rather than the returned window. Messages
+        keep their ``context_message_id`` across a rewrite, so matching ids
+        between the two lists names exactly the rewritten ones. Messages without
+        an id, and removed or newly created ones, are not rewrites.
+
+        Args:
+            before_messages: Messages the processor received.
+            after_messages: Messages the processor produced.
+
+        Returns:
+            One entry per rewritten message, in output order.
+        """
+        before_by_id: dict[str, BaseMessage] = {}
+        for message in before_messages:
+            message_id = ContextProcessorStateRecorder._context_message_id(message)
+            if message_id:
+                before_by_id.setdefault(message_id, message)
+
+        modified: list[ContextCompressionModifiedMessage] = []
+        for message in after_messages:
+            message_id = ContextProcessorStateRecorder._context_message_id(message)
+            original = before_by_id.get(message_id) if message_id else None
+            if original is None or original is message:
+                continue
+            offloaded = isinstance(message, OffloadMixin)
+            newly_offloaded = offloaded and (
+                not isinstance(original, OffloadMixin) or original.offload_handle != message.offload_handle
+            )
+            if not newly_offloaded and original.content == message.content:
+                continue
+            modified.append(
+                ContextCompressionModifiedMessage(
+                    message_id=message_id,
+                    role=message.role,
+                    tool_call_id=getattr(message, "tool_call_id", None),
+                    offload_handle=message.offload_handle if newly_offloaded else None,
+                    offload_type=message.offload_type if newly_offloaded else None,
+                )
+            )
+        return modified
+
+    @staticmethod
+    def _context_message_id(message: BaseMessage) -> str:
+        metadata = getattr(message, "metadata", None)
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get(CONTEXT_MESSAGE_ID_KEY) or "")
 
     @staticmethod
     def _build_compression_usage(usage: Optional[dict[str, Any]]) -> Optional[ContextCompressionUsage]:

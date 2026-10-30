@@ -7,8 +7,8 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,31 @@ _PATH_TOOLS = frozenset({
 })
 _NETWORK_TOOLS = frozenset({"mcp_fetch_webpage", "mcp_free_search", "mcp_paid_search"})
 
+# cua desktop-control tools (mouse/keyboard/app lifecycle), under their
+# model-facing names. The rules that target them live with the cua agent's own
+# permissions, not in the package builtin rules: the names are bare, and a
+# category alone changes nothing for another agent's same-named tool.
+_OS_CONTROL_TOOL_PREFIX = ""
+_OS_CONTROL_TOOL_NAMES = (
+    "click",
+    "double_click",
+    "right_click",
+    "move_cursor",
+    "drag",
+    "type_text",
+    "press_key",
+    "hotkey",
+    "scroll",
+    "launch_app",
+    "kill_app",
+    "bring_to_front",
+)
+_OS_CONTROL_TOOLS = frozenset(f"{_OS_CONTROL_TOOL_PREFIX}{name}" for name in _OS_CONTROL_TOOL_NAMES)
+
+
+# Structured argument values an os_control rule pattern may match against.
+_OS_CONTROL_ARG_KEYS = frozenset({"text", "name", "bundle_id", "value", "key", "keys"})
+
 _PATH_ARG_KEYS = frozenset({
     "path", "file_path", "target_file", "file", "old_path", "new_path",
     "source_path", "dest_path", "directory", "dir",
@@ -100,6 +125,8 @@ def _tool_category(
         return "path"
     if tool_name in _NETWORK_TOOLS:
         return "network"
+    if tool_name in _OS_CONTROL_TOOLS:
+        return "os_control"
     return None
 
 
@@ -135,6 +162,145 @@ def _command_text(tool_args: dict[str, Any]) -> str:
     return str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
 
 
+# Quoted argument bodies are not the command being executed. Recurse into:
+# interpreter payloads (-c / -Command / python -c / node -e), including when a
+# known wrapper (sudo, su, pkexec, timeout, ssh, docker exec/run, ...) precedes
+# the interpreter; ssh / docker / su -c command quotes; and double quotes that expand
+# command substitutions. Single-quoted script arguments stay opaque.
+_SHELL_QUOTED_SPAN_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+_SHELL_ANCHOR_RE = r"(?:^|(?<=[;&|()]))\s*"
+_SHELL_WRAPPER_RE = (
+    r"(?:"
+    r"(?:sudo|doas|pkexec|timeout|su|env|command|nice|nohup|xargs|time)(?:\s+\S+)*\s+"
+    r"|ssh(?:\.exe)?(?:\s+\S+)*\s+"
+    r"|docker(?:\.exe)?\s+(?:exec|run)(?:\s+\S+)*\s+"
+    r")*"
+)
+_SHELL_EVAL_PREFIX_RE = re.compile(
+    r"(?ix)"
+    + _SHELL_ANCHOR_RE
+    + _SHELL_WRAPPER_RE
+    + r"(?:[^\s;&|()]*[\\/])?"
+    r"(?:bash|sh|zsh|dash|ash|fish|pwsh|powershell|cmd)(?:\.exe)?"
+    r"(?:\s+-{1,2}[A-Za-z][A-Za-z-]*)*"
+    r"\s+(?:-[A-Za-z]*c[A-Za-z]*|--?command|/c|/k)"
+    r"\s*$"
+)
+_CODE_EVAL_PREFIX_RE = re.compile(
+    r"(?ix)"
+    + _SHELL_ANCHOR_RE
+    + _SHELL_WRAPPER_RE
+    + r"(?:[^\s;&|()]*[\\/])?"
+    r"(?:python(?:3|w)?|py|ruby|perl)(?:\.exe)?"
+    r"(?:\s+-{1,2}[A-Za-z][A-Za-z-]*)*"
+    r"\s+-c"
+    r"\s*$"
+    r"|"
+    + _SHELL_ANCHOR_RE
+    + _SHELL_WRAPPER_RE
+    + r"(?:[^\s;&|()]*[\\/])?"
+    r"(?:node|nodejs)(?:\.exe)?"
+    r"(?:\s+-{1,2}[A-Za-z][A-Za-z-]*)*"
+    r"\s+(?:-e|--eval)"
+    r"\s*$"
+)
+_REMOTE_PAYLOAD_PREFIX_RE = re.compile(
+    r"(?ix)"
+    r"(?:^|(?<=[;&|()]))"
+    r"\s*"
+    r"(?:ssh(?:\.exe)?(?:\s+\S+)+"
+    r"|docker(?:\.exe)?\s+(?:exec|run)(?:\s+\S+)+"
+    r"|su(?:\s+\S+)*\s+(?:-c|--command))"
+    r"\s*$"
+)
+_MAX_SHELL_REGEX_DEPTH = 4
+
+
+def _compiled_shell_regexes(expr: str, flags: int) -> list[re.Pattern[str]]:
+    try:
+        return [re.compile(expr, flags)]
+    except re.error:
+        # YAML 双引号落盘后 `C:\Users` 可能变成非法 `\U`；旧版 `posix|win` 整段编译失败。
+        compiled: list[re.Pattern[str]] = []
+        if "|" in expr:
+            for part in expr.split("|"):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    compiled.append(re.compile(part, flags))
+                except re.error:
+                    continue
+        if not compiled:
+            logger.warning(
+                "[PermissionEngine] permission.tiered_policy.invalid_shell_regex expr=%r",
+                expr,
+            )
+        return compiled
+
+
+def _quote_span_is_eval_payload(command: str, quote_start: int) -> bool:
+    prefix = command[:quote_start]
+    return bool(
+        _SHELL_EVAL_PREFIX_RE.search(prefix)
+        or _CODE_EVAL_PREFIX_RE.search(prefix)
+        or _REMOTE_PAYLOAD_PREFIX_RE.search(prefix)
+    )
+
+
+_SUBST_DOLLAR_RE = re.compile(r"\$\((.*)\)", re.DOTALL)
+_SUBST_BACKTICK_RE = re.compile(r"`([^`]*)`")
+
+
+def _double_quote_has_command_substitution(span_text: str) -> bool:
+    """Double quotes expand ``$(...)`` and backticks; single quotes do not."""
+    if not span_text.startswith('"'):
+        return False
+    inner = span_text[1:-1]
+    return "$(" in inner or "`" in inner
+
+
+def _command_substitution_bodies(text: str) -> list[str]:
+    bodies = [match.group(1) for match in _SUBST_DOLLAR_RE.finditer(text)]
+    bodies.extend(match.group(1) for match in _SUBST_BACKTICK_RE.finditer(text))
+    return [body for body in bodies if body.strip()]
+
+
+def _regex_matches_shell_text(
+    compiled: re.Pattern[str],
+    command: str,
+    *,
+    depth: int = 0,
+) -> bool:
+    """True when ``compiled`` hits command text outside quoted non-eval arguments."""
+    if depth > _MAX_SHELL_REGEX_DEPTH or not command:
+        return False
+    candidates = [command]
+    normalized = command.replace("\\", "/")
+    if normalized != command:
+        candidates.append(normalized)
+    for text in candidates:
+        spans = tuple(match.span() for match in _SHELL_QUOTED_SPAN_RE.finditer(text))
+        for match in compiled.finditer(text):
+            if not any(start < match.start() < end for start, end in spans):
+                return True
+        for quoted in _SHELL_QUOTED_SPAN_RE.finditer(text):
+            span_text = quoted.group(0)
+            if not (
+                _quote_span_is_eval_payload(text, quoted.start())
+                or _double_quote_has_command_substitution(span_text)
+            ):
+                continue
+            inner = span_text[1:-1]
+            if inner and _regex_matches_shell_text(compiled, inner, depth=depth + 1):
+                return True
+            if _double_quote_has_command_substitution(span_text):
+                for body in _command_substitution_bodies(inner):
+                    if _regex_matches_shell_text(compiled, body, depth=depth + 1):
+                        return True
+    return False
+
+
 def _shell_pattern_matches(pattern: str, command: str) -> bool:
     if not pattern or not command:
         return False
@@ -142,34 +308,10 @@ def _shell_pattern_matches(pattern: str, command: str) -> bool:
     if p.lower().startswith("re:"):
         expr = p[3:].strip()
         flags = re.IGNORECASE if sys.platform == "win32" else 0
-        norm = command.replace("\\", "/")
-
-        def _try_subexpr(sub: str) -> bool:
-            if not sub:
-                return False
-            try:
-                if re.search(sub, command, flags):
-                    return True
-                if norm != command and re.search(sub, norm, flags):
-                    return True
-            except re.error:
-                return False
-            return False
-
-        try:
-            if re.search(expr, command, flags):
-                return True
-            if norm != command and re.search(expr, norm, flags):
-                return True
-        except re.error:
-            # 例如 YAML 双引号落盘后 `C:\Users` 变成非法 \U；add_dir 旧版 `posix|win` 第二支整段编译失败
-            if "|" in expr:
-                for part in expr.split("|"):
-                    if _try_subexpr(part.strip()):
-                        return True
-            logger.warning("[PermissionEngine] permission.tiered_policy.invalid_shell_regex expr=%r", expr)
-            return False
-        return False
+        return any(
+            _regex_matches_shell_text(compiled, command)
+            for compiled in _compiled_shell_regexes(expr, flags)
+        )
     glob_chars = frozenset("*?[")
     if any(ch in p for ch in glob_chars):
         return match_wildcard(command, p)
@@ -189,6 +331,30 @@ def _path_pattern_matches(pattern: str, value: str) -> bool:
             logger.warning("[PermissionEngine] permission.tiered_policy.invalid_path_regex expr=%r", expr)
             return False
     return _TIERED_PATH_MATCHER.match_path(p, value)
+
+
+def _os_control_pattern_matches(pattern: str, tool_args: dict[str, Any]) -> bool:
+    """os_control rule matching.
+
+    ``*`` matches any invocation of the tool (whole-tool guardrail). Any other
+    pattern is matched (exact / glob / ``re:``) against the tool's relevant
+    string arguments (text, app name/bundle, key names).
+    """
+    p = (pattern or "").strip()
+    if not p:
+        return False
+    if p == "*":
+        return True
+    for key in _OS_CONTROL_ARG_KEYS:
+        val = tool_args.get(key)
+        if isinstance(val, str):
+            if val.strip() and _shell_pattern_matches(p, val.strip()):
+                return True
+        elif isinstance(val, list):
+            joined = " ".join(str(x) for x in val if x is not None).strip()
+            if joined and _shell_pattern_matches(p, joined):
+                return True
+    return False
 
 
 def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:
@@ -349,6 +515,8 @@ def tiered_policy_rule_matches(
     if cat == "network":
         # 产品设计：网络类暂仅整工具；参数规则不匹配
         return False
+    if cat == "os_control":
+        return _os_control_pattern_matches(pattern, tool_args)
     return False
 
 

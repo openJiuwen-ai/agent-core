@@ -8,8 +8,10 @@ remain in `openjiuwen/agent_teams/external/cli_agent`.
 
 ## Scope
 
-- `protocol.py`: behavioral Harness and provider factory Protocols.
-- `models.py`: lifecycle commands, context, capability card, and JSON types.
+- `protocol.py`: behavioral Harness, optional model-control, and provider
+  factory Protocols.
+- `models.py`: lifecycle commands, context, capability card, model
+  selection/options, and JSON types.
 - `events.py`: ordered observation-plane event envelope and payloads.
 - `results.py`: normalized terminal result, usage, and failure types.
 - `interactions.py`: awaited provider-request/host-response control plane.
@@ -95,6 +97,28 @@ boundary. Do not introduce Round aliases for these concepts.
 15. Public event cursors provide idempotent `aclose()` so early consumer exit
     releases the single-consumer lease. Wire events use the official codec and
     preserve unknown event types.
+16. `ModelRequestEvent` is gated by `HostCapability.MODEL_REQUEST_OBSERVATION`.
+    A provider reports every model request once, before the items it caused
+    (which cite its `request_id` in `causation_ids`) and before the terminal
+    turn event; an unobservable request is still reported from its reply with
+    `input_observed=False`. Input `message_id` values stay stable while the
+    message remains in the conversation.
+17. Model control is the optional `HarnessModelControl` Protocol, never new
+    members on `HarnessProtocol`. `list_models` (MODEL_DISCOVERY) works on a
+    started or unstarted harness and issues no model request; `set_model`
+    (MODEL_SELECTION) applies at once while idle, otherwise before the next
+    turn, never mid-turn, and survives reconnects within the cycle. Effort
+    values are provider vocabulary; the protocol does not enumerate them.
+18. The model a harness is created on is a `ModelChoice` (a built-in model
+    when `endpoint is None`, else a host `ModelEndpoint`), mapped onto the
+    provider's configuration by the optional `ModelConfigProvider.model_config`
+    provider hook. A provider takes endpoint models only when its card declares
+    `ENDPOINT_MODELS`. Hosts never branch on a provider name to set a model.
+19. The authentication fallback is the `AUTH_FALLBACK` capability: a provider
+    declaring it accepts `model_config(..., fallback=)`, asks the host with an
+    `AUTH_FALLBACK_REQUEST_TYPE` provider interaction before switching and
+    announces the switch with an `AUTH_FALLBACK_EVENT_TYPE` provider event.
+    Both names are the contract between providers and hosts.
 
 ## Compatibility
 

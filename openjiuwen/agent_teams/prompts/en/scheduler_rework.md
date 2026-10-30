@@ -4,8 +4,4 @@
 
 {{param.feedback}}
 
-## Goal and acceptance criteria
-
-{{task.content}}
-
-Fix per the feedback, then resubmit via `member_complete_task(task_id='{{task.task_id}}')`.
+Fix per the feedback, then resubmit via `member_complete_task(task_id='{{task.task_id}}')`, updating `summary` / `note` if the delivery changed. No need to notify the Leader after resubmitting.

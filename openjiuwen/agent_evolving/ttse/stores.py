@@ -204,6 +204,12 @@ _SHARED_STORES_GUARD = threading.Lock()
 _CROSS_LOOP_LOCK_POLL_S = 0.005
 # Cold-cache fill uses provider.embed_documents in chunks (one RPC per chunk).
 _EMBED_DOC_BATCH = 32
+# Availability probe. A failed batch must not set this; some providers reject
+# embed_documents and still embed individual texts. A down result expires so a
+# transient outage does not disable semantic retrieval for the process lifetime.
+_EMBED_PROBE_TEXT = "ttse"
+_EMBED_PROBE_RETRY_S = 300.0
+
 # Headroom above max_facts+max_tips for in-flight query texts (consult / dedup).
 _EMBED_CACHE_SLACK = 100
 
@@ -297,6 +303,11 @@ class TTSERecordStore:
         self.tips: List[Dict[str, Any]] = []
         self.retired: List[Dict[str, Any]] = []  # [{"text","rtype","reason","retired_at_task"}]
         self._emb_cache: OrderedDict[str, List[float]] = OrderedDict()
+        # None until the first semantic use. True sticks until the provider
+        # changes. False skips bank-sized scans until ``_EMBED_PROBE_RETRY_S``.
+        self._embedding_probe: Optional[bool] = None
+        self._embedding_probe_at: float = 0.0
+        self._embedding_probe_lock = _CrossLoopLock()
         # threading.Lock-backed: shared_store outlives any one event loop.
         self._lock = _CrossLoopLock()
         # Cross-session induce/dream must serialize on the same bank object.
@@ -332,6 +343,8 @@ class TTSERecordStore:
             return
         if self._embedding is not None:
             self._emb_cache.clear()
+        self._embedding_probe = None
+        self._embedding_probe_at = 0.0
         self._embedding = embedding
         index = getattr(self, "index", None)
         note = getattr(index, "note_embedding", None)
@@ -640,6 +653,8 @@ class TTSERecordStore:
             return cached
         if self._embedding is None:
             return None
+        if not await self.embedding_available():
+            return None
         try:
             model = getattr(self._embedding, "model", None) or getattr(self._embedding, "id", "unknown")
             logger.debug("[TTSERail] embedding model=%s text=%s", model, text[:60])
@@ -666,6 +681,8 @@ class TTSERecordStore:
         ``embed_query``. Repeat scans after a warm cache do no I/O.
         """
         if self._embedding is None:
+            return
+        if not await self.embedding_available():
             return
         missing: List[str] = []
         seen: set[str] = set()
@@ -701,6 +718,56 @@ class TTSERecordStore:
     def has_embedding_provider(self) -> bool:
         """Whether cosine semantic similarity is enabled (a provider is configured)."""
         return self._embedding is not None
+
+    def _cached_embedding_probe(self) -> Optional[bool]:
+        """Return a still-valid probe verdict, or None when a new probe is due.
+
+        Success sticks until the provider changes. Failure expires after
+        ``_EMBED_PROBE_RETRY_S`` so a blip at startup does not pin the
+        process-wide bank on BM25.
+        """
+        verdict = self._embedding_probe
+        if verdict is None:
+            return None
+        if verdict:
+            return True
+        if time.monotonic() - self._embedding_probe_at >= _EMBED_PROBE_RETRY_S:
+            return None
+        return False
+
+    def _remember_embedding_probe(self, verdict: bool) -> None:
+        self._embedding_probe = verdict
+        self._embedding_probe_at = time.monotonic()
+
+    async def embedding_available(self) -> bool:
+        """Probe the embedding API, then reuse that verdict.
+
+        A missing provider is not an error. A failed or empty probe skips
+        semantic dedup, Chroma rebuild, and per-text fallback until the retry
+        window elapses. Concurrent first callers share one probe. A later batch
+        failure still falls through to per-text; that path is not a probe.
+        """
+        if self._embedding is None:
+            return False
+        cached = self._cached_embedding_probe()
+        if cached is not None:
+            return cached
+        async with self._embedding_probe_lock:
+            cached = self._cached_embedding_probe()
+            if cached is not None:
+                return cached
+            try:
+                await self._wait_embedding_slot()
+                vec = await self._embedding.embed_query(_EMBED_PROBE_TEXT)
+            except Exception as exc:  # noqa: BLE001 - one warning, then substring / BM25
+                logger.warning("[TTSERail] embedding unavailable, skipping semantic index: %s", exc)
+                self._remember_embedding_probe(False)
+                return False
+            verdict = bool(vec)
+            self._remember_embedding_probe(verdict)
+            if not verdict:
+                logger.warning("[TTSERail] embedding unavailable, skipping semantic index: empty embedding")
+            return verdict
 
     async def _find_duplicate(self, text: str, store: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Return the matching record if ``text`` duplicates an existing rule.
