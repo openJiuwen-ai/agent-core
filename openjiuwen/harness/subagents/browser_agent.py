@@ -354,8 +354,11 @@ def create_browser_agent(
     """Create the browser subagent with task-scoped capability context.
 
     ``browser_capabilities`` is resolved against the trusted capability
-    catalog here. Core is always applied, including when the caller omits the
-    optional capability list.
+    catalog here. Omitting the list now exposes only ``core`` tools, rather
+    than the previously unrestricted MCP tool set. Callers that need run-code,
+    PDF, network, storage, or coordinate tools must explicitly request
+    ``advanced_code``/``unsafe_dev``, ``pdf``, ``network``, ``storage``, or
+    ``vision`` respectively.
     """
     if browser_capabilities is not None and (
         not isinstance(browser_capabilities, list)

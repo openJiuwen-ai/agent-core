@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 
 _HANDLE_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
 _SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
-_OFFLOAD_FILE_PREFIX = "ToolResultWindowProcessor"
+_OFFLOAD_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+_[0-9a-f]{32}\.json$")
+_RECALLABLE_TOOLS = frozenset({"browser_probe_interactives", "browser_probe_cards", "browser_snapshot"})
 _DEFAULT_LIMIT = 8000
 _MAX_LIMIT = 16000
 _MAX_QUERY_LENGTH = 256
@@ -30,7 +31,7 @@ _QUERY_CONTEXT_CHARS = 300
 _RECALL_DESC_EN = (
     "Recall a bounded text fragment from an older browser probe or snapshot result when a "
     "<persisted-output> marker's preview is insufficient. Pass only its 32-character handle. "
-    "The tool can read only ToolResultWindowProcessor output owned by the current browser session; "
+    "The tool can read only browser probe or snapshot output owned by the current browser session; "
     "it cannot read arbitrary files. Use query to find the first matching fragment at or after "
     "offset, or omit query to read a chunk. Recalled refs and selectors are stale evidence after "
     "navigation and must never be used for browser interaction."
@@ -38,7 +39,7 @@ _RECALL_DESC_EN = (
 _RECALL_DESC_CN = (
     "当旧浏览器 probe 或 snapshot 的 <persisted-output> 预览不足时，从落盘结果中恢复一段受限文本。"
     "只传入标记里的 32 位 handle。此工具只能读取当前 Browser session 所属的 "
-    "ToolResultWindowProcessor 结果，不能读取任意文件。可用 query 从 offset 开始定位第一处匹配，"
+    "浏览器 probe 或 snapshot 结果，不能读取任意文件。可用 query 从 offset 开始定位第一处匹配，"
     "不传 query 时按 offset 分块读取。页面导航后，恢复结果中的 ref 和 selector 已过期，"
     "只能作为文本证据，禁止用于浏览器交互。"
 )
@@ -180,7 +181,15 @@ class BrowserOffloadRecallTool(Tool):
         if not offload_dir.is_relative_to(self._workspace_root):
             raise ValueError("browser offload directory escapes the configured workspace")
 
-        candidate_path = offload_dir / f"{_OFFLOAD_FILE_PREFIX}_{handle}.json"
+        # The window processor may use a caller-configured filename prefix.
+        # The random handle and session directory still identify the artifact.
+        candidates = [
+            path for path in offload_dir.glob(f"*_{handle}.json")
+            if _OFFLOAD_NAME_PATTERN.fullmatch(path.name)
+        ]
+        if len(candidates) != 1:
+            raise ValueError("browser offload handle was not found in the current session")
+        candidate_path = candidates[0]
         if candidate_path.is_symlink():
             raise ValueError("browser offload handle was not found in the current session")
         offload_path = candidate_path.resolve()
@@ -199,6 +208,8 @@ class BrowserOffloadRecallTool(Tool):
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages or not isinstance(messages[0], dict):
             raise ValueError("browser offload artifact does not contain a tool result")
+        if messages[0].get("name") not in _RECALLABLE_TOOLS:
+            raise ValueError("browser offload artifact is not a recallable browser result")
         return messages[0]
 
     @staticmethod

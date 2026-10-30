@@ -19,10 +19,13 @@ def _session(session_id: str):
     return SimpleNamespace(get_session_id=lambda: session_id)
 
 
-def _write_offload(tmp_path, session_id: str, content: str, *, handle: str = _HANDLE):
+def _write_offload(
+    tmp_path, session_id: str, content: str, *, handle: str = _HANDLE,
+    prefix: str = "ToolResultWindowProcessor", tool_name: str = "browser_snapshot",
+):
     offload_dir = tmp_path / "context" / f"{session_id}_context" / "offload"
     offload_dir.mkdir(parents=True)
-    path = offload_dir / f"ToolResultWindowProcessor_{handle}.json"
+    path = offload_dir / f"{prefix}_{handle}.json"
     path.write_text(
         json.dumps(
             {
@@ -30,7 +33,7 @@ def _write_offload(tmp_path, session_id: str, content: str, *, handle: str = _HA
                 "messages": [
                     {
                         "role": "tool",
-                        "name": "browser_snapshot",
+                        "name": tool_name,
                         "tool_call_id": "call-1",
                         "content": content,
                     }
@@ -40,6 +43,28 @@ def _write_offload(tmp_path, session_id: str, content: str, *, handle: str = _HA
         encoding="utf-8",
     )
     return path
+
+
+@pytest.mark.asyncio
+async def test_recalls_custom_offload_file_prefix(tmp_path):
+    _write_offload(tmp_path, "browser-session", "custom prefix output", prefix="BrowserWindowA")
+    tool = BrowserOffloadRecallTool(tmp_path)
+
+    result = await tool.invoke({"handle": _HANDLE}, session=_session("browser-session"))
+
+    assert result.success is True
+    assert result.data["content"] == "custom prefix output"
+
+
+@pytest.mark.asyncio
+async def test_rejects_other_tool_result_with_matching_handle(tmp_path):
+    _write_offload(tmp_path, "browser-session", "private", prefix="OtherProcessor", tool_name="shell")
+    tool = BrowserOffloadRecallTool(tmp_path)
+
+    result = await tool.invoke({"handle": _HANDLE}, session=_session("browser-session"))
+
+    assert result.success is False
+    assert "not a recallable browser result" in result.error
 
 
 @pytest.mark.asyncio
