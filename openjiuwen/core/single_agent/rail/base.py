@@ -13,6 +13,7 @@ Created on: 2025-11-25
 from __future__ import annotations
 
 import asyncio
+import copy
 import sys
 import time
 from abc import ABC
@@ -652,6 +653,37 @@ class AgentRail(ABC):
     """
 
     priority: int = 50
+
+    def clone_for_subagent(self) -> "AgentRail":
+        """Fork rail state without copying external services or model clients.
+
+        Containers owned by the rail are copied recursively. Subclasses owning
+        other mutable runtime objects must override this method and recreate
+        those objects; shared host services can deliberately stay shared.
+        """
+        memo: Dict[int, Any] = {}
+
+        def fork(value: Any) -> Any:
+            if type(value) not in (dict, list, set, tuple):
+                return value
+            if id(value) in memo:
+                return memo[id(value)]
+            if isinstance(value, dict):
+                result = {}
+                memo[id(value)] = result
+                result.update((key, fork(item)) for key, item in value.items())
+            elif isinstance(value, list):
+                result = []
+                memo[id(value)] = result
+                result.extend(fork(item) for item in value)
+            else:
+                result = type(value)(fork(item) for item in value)
+                memo[id(value)] = result
+            return result
+
+        cloned = copy.copy(self)
+        cloned.__dict__ = {key: fork(value) for key, value in vars(self).items()}
+        return cloned
 
     def init(self, agent):
         pass

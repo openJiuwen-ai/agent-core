@@ -26,7 +26,7 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, RESUM
 from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptEntry,
     ToolInterruptionState,
-    RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
+    RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY, RESUME_ORIGINAL_TOOL_CALLS_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 
@@ -327,13 +327,17 @@ class ToolInterruptHandler:
         resume_user_input_keys = self._resume_user_input_keys_for_state(state)
         ctx.extra.update({key: user_input for key in resume_user_input_keys})
 
+        original_tool_calls = {}
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
             tc = copy.deepcopy(entry.tool_call)
             if entry.is_sub_agent:
+                original_tool_calls[outer_id] = entry.tool_call
                 tc = self._build_sub_agent_resume_tool_call(tc, user_input)
             tools_to_execute.append(tc)
 
+        # Resume replies are execution payloads, not new permission subjects.
+        ctx.extra[RESUME_ORIGINAL_TOOL_CALLS_KEY] = original_tool_calls
         try:
             if tools_to_execute:
                 execute_tool_call = resume_ctx.execute_tool_call
@@ -341,11 +345,14 @@ class ToolInterruptHandler:
             else:
                 results = []
         finally:
+            ctx.extra.pop(RESUME_ORIGINAL_TOOL_CALLS_KEY, None)
             for resume_user_input_key in resume_user_input_keys:
                 ctx.extra.pop(resume_user_input_key, None)
 
+        # Keep the original delegation across any further child interrupts.
+        calls_for_state = [original_tool_calls.get(call.id, call) for call in tools_to_execute]
         new_interrupted_tools, sub_agent_outputs, auto_confirm_mapping = self._collect_interrupts(
-            results, tools_to_execute
+            results, calls_for_state
         )
 
         state.interrupted_tools = new_interrupted_tools

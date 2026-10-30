@@ -264,7 +264,7 @@ def resolve_deep_agent_parts(
         # only to tear them down again at the end of a one-shot run.
         sys_operation_obj = None
     elif not isinstance(sys_operation, SysOperation):
-        sysop_id = f"{card.name}_{card.id}"
+        sysop_id = f"{card.name}_{tool_owner_id or card.id}"
         # Get-or-create: the id is stable across rebuilds (a member harness is
         # reconstructed on every team resume), and add_sys_operation is a strict
         # add that errors on a duplicate id. Resolve the existing instance first
@@ -460,8 +460,8 @@ def create_deep_agent(
         card: Agent identity card. If None, a default
             card is created. Its id is the persistence identity used in
             checkpointer keys, so it must stay stable across restarts.
-        tool_owner_id: Owner id qualifying this agent's stateful tool
-            registrations. Defaults to ``card.id``; pass it when several live
+        tool_owner_id: Runtime owner qualifying stateful tool registrations
+            and an automatically created SysOperation. Defaults to ``card.id``; pass it when several live
             agents share one card identity (e.g. one adapter per session) so
             their tool instances do not overwrite each other.
         system_prompt: System prompt for the inner
