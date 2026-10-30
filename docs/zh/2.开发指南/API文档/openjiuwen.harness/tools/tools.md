@@ -24,6 +24,14 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 | `BashTool` | 执行 Bash 命令，支持超时控制 |
 | `PowerShellTool` | 执行 PowerShell 命令并返回输出 |
 
+WriteFileTool、EditFileTool、BashTool 和 PowerShellTool 的文件操作历史保存在
+`<历史根目录>/.agent_history/`。独立使用 agent-core 时，历史根目录为当前 agent 的
+workspace；未设置 workspace 时使用当前工作目录。宿主可通过 `JIUWENSWARM_DATA_DIR`
+（其次为 `JIUWENCLAW_DATA_DIR`，或 `JIUWENSWARM_HOME/.jiuwenswarm`）指定跨项目数据目录。
+如果 agent workspace 不在该宿主目录下，历史仍留在 workspace，避免不同租户共享文件内容。
+开启文件系统沙箱限制时，历史目录必须落在允许的沙箱根内；目录和文件在类 Unix 系统上分别以
+`0700` 和 `0600` 权限写入。
+
 ### 代码工具
 
 | 工具 | 说明 |

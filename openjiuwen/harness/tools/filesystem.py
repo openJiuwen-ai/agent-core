@@ -28,7 +28,7 @@ from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import OperationMode, SysOperation
-from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -596,6 +596,21 @@ def _get_history_file_lock(history_path: str) -> threading.Lock:
         return lock
 
 
+def _write_history_json(history_path: str, history: Dict[str, list]) -> None:
+    """Persist a history snapshot with private directory and file permissions."""
+    directory = os.path.dirname(history_path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(directory, 0o700)
+    tmp = history_path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if os.name != "nt":
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, history_path)
+
+
 def _append_op_history_sync(
         history_path: str, file_path: str, entry: Dict[str, Any]) -> None:
     """Holds the per-history-file threading lock; caller additionally holds _HISTORY_LOCK."""
@@ -608,11 +623,7 @@ def _append_op_history_sync(
         entries.append(entry)
         if len(entries) > MAX_HISTORY_PER_FILE:
             history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
-        os.makedirs(os.path.dirname(history_path), exist_ok=True)
-        tmp = history_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, history_path)
+        _write_history_json(history_path, history)
 
 
 async def _append_op_history(history_path: str, file_path: str, action: str,
@@ -763,11 +774,7 @@ def _detect_and_record_deletions_sync(history_path: str) -> None:
                 deletions_added = True
         if not deletions_added:
             return
-        os.makedirs(os.path.dirname(history_path), exist_ok=True)
-        tmp = history_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, history_path)
+        _write_history_json(history_path, history)
 
 
 async def _detect_and_record_deletions(history_path: str) -> None:
@@ -1667,7 +1674,7 @@ class WriteFileTool(Tool):
         return "utf-16-le" if raw[:2] == b"\xff\xfe" else "utf-8"
 
     def _build_history_path(self, session: Any) -> str:
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        base_dir = get_agent_history_root(self.operation)
         agent_id = (
             session.agent_id() if hasattr(session, "agent_id")
             else session.get_agent_id() if hasattr(session, "get_agent_id")
@@ -2052,7 +2059,7 @@ class EditFileTool(Tool):
         return content[index:index + len(old_str)]
 
     def _build_history_path(self, session: Any) -> str:
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        base_dir = get_agent_history_root(self.operation)
         agent_id = (
             session.agent_id() if hasattr(session, "agent_id")
             else session.get_agent_id() if hasattr(session, "get_agent_id")
