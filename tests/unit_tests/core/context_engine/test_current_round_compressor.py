@@ -446,3 +446,83 @@ class TestCurrentRoundCompressor:
         assert "Task #T-7: write docs Status: claimed" in reinjected.content
         assert "outside selected span" not in reinjected.content
 
+
+
+# ---------------------------------------------------------------------------
+# #1506: tool definitions count toward the compression trigger threshold
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tools_overhead_counts_toward_trigger_threshold():
+    """Messages below the threshold but messages+tools above it must trigger.
+
+    Regression for #1506: the trigger previously counted message tokens only,
+    so a context whose tool definitions already consumed most of the window
+    could stay over the model limit even after compression ran.
+    """
+    class _ToolsCounter:
+        def __init__(self):
+            self.count_messages_calls = 0
+            self.count_tools_calls = 0
+
+        def count_messages(self, messages, **kwargs):
+            self.count_messages_calls += 1
+            # messages alone stay under the threshold
+            return 10 * len(messages)
+
+        def count_tools(self, tools, **kwargs):
+            self.count_tools_calls += 1
+            return 500  # tool definitions dominate the window
+
+    tools_counter = _ToolsCounter()
+    with patch(
+        "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model",
+        MagicMock(return_value=MagicMock()),
+    ):
+        config = CurrentRoundCompressorConfig(
+            tokens_threshold=200,
+            messages_to_keep=1,
+        )
+        compressor = CurrentRoundCompressor(config)
+
+        ctx = MagicMock()
+        # 6 messages -> 60 tokens from messages; +500 tools => 560 > 200.
+        ctx.__len__ = MagicMock(return_value=6)
+        ctx.token_counter = MagicMock(return_value=tools_counter)
+        ctx.get_messages = MagicMock(return_value=[UserMessage(content="x")] * 6)
+        ctx.get_tools = MagicMock(return_value=[MagicMock()])
+
+        triggered = await compressor.trigger_add_messages(ctx, [])
+        assert triggered is True
+        assert tools_counter.count_tools_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_tools_overhead_without_tools_keeps_old_behavior():
+    """No tools registered -> trigger decision is unchanged (messages only)."""
+    class _Counter:
+        def count_messages(self, messages, **kwargs):
+            return 10 * len(messages)
+
+        def count_tools(self, tools, **kwargs):
+            raise AssertionError("count_tools must not be called without tools")
+
+    counter = _Counter()
+    with patch(
+        "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model",
+        MagicMock(return_value=MagicMock()),
+    ):
+        config = CurrentRoundCompressorConfig(
+            tokens_threshold=200,
+            messages_to_keep=1,
+        )
+        compressor = CurrentRoundCompressor(config)
+
+        ctx = MagicMock()
+        ctx.__len__ = MagicMock(return_value=6)
+        ctx.token_counter = MagicMock(return_value=counter)
+        ctx.get_messages = MagicMock(return_value=[UserMessage(content="x")] * 6)
+        ctx.get_tools = MagicMock(return_value=[])
+
+        triggered = await compressor.trigger_add_messages(ctx, [])
+        assert triggered is False
