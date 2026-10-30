@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import default_max_tokens
 from openjiuwen.core.foundation.llm.reasoning import (
     is_reasoning_config_intent,
     resolve_reasoning_plan,
@@ -20,7 +21,6 @@ from openjiuwen.core.foundation.llm.schema.message import BaseMessage, UserMessa
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
 from openjiuwen.harness.moa.state import ProposalAttempt, ProposalBatch, TurnKey, active_moa
 from openjiuwen.harness.prompts.moa import render_reference_proposals
-
 
 _INPUT_CONTEXT_OVERFLOW_PATTERNS = (
     r"\b(?:prompt|input)(?: tokens?(?: count| length)?| length)? (?:is |was )?too long\b",
@@ -76,7 +76,8 @@ def _anthropic_output_tokens(
     extra_body = dict(extra_body or {})
     extra_body = {**extra_body, **plan.extra_body} if override else {**plan.extra_body, **extra_body}
 
-    ceiling = requested or 8192
+    model_name = kwargs.get("model") or getattr(model_config, "model_name", None)
+    ceiling = requested or default_max_tokens(model_name)
     if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling <= 0:
         return None
     thinking = params.get("thinking")

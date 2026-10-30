@@ -25,6 +25,7 @@ from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
     _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY,
     AnthropicModelClient,
+    default_max_tokens,
     _apply_messages_cache_breakpoint,
     _apply_static_cache_breakpoints,
     _content_to_blocks,
@@ -1001,3 +1002,45 @@ class TestSamplingParams:
         replayed = params["messages"][0]["content"]
         assert replayed[0] == thinking
         assert {key: replayed[1][key] for key in tool_use} == tool_use
+
+
+# ---------------------------------------------------------------------------
+# G. max_tokens fallback stays inside older Claude output caps
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultMaxTokens:
+    @pytest.mark.parametrize(
+        "model_name, expected",
+        [
+            ("claude-3-opus-20240229", 4096),
+            ("claude-3-sonnet-20240229", 4096),
+            ("claude-3-haiku-20240307", 4096),
+            ("anthropic.claude-3-haiku-20240307-v1:0", 4096),
+            ("claude-3-5-sonnet-20241022", 8192),
+            ("claude-3-5-haiku-20241022", 8192),
+            ("anthropic/claude-3.5-sonnet", 8192),
+            ("anthropic/claude-3.5-haiku", 8192),
+            ("claude-3-7-sonnet-20250219", 32768),
+            ("claude-sonnet-4-5", 32768),
+            ("claude-opus-4", 32768),
+            ("test-model", 32768),
+        ],
+    )
+    def test_unset_max_tokens_follows_model_output_cap(self, model_name, expected):
+        params = TestSamplingParams()._params(_make_client(), model=model_name, max_tokens=None)
+        assert params["max_tokens"] == expected
+
+    def test_missing_model_name_keeps_high_default(self):
+        assert default_max_tokens(None) == 32768
+        assert default_max_tokens("") == 32768
+        assert default_max_tokens("  ") == 32768
+
+    def test_explicit_max_tokens_overrides_old_model_cap(self):
+        client = _make_client()
+        client.model_config.max_tokens = 1024
+        params = TestSamplingParams()._params(client, model="claude-3-opus-20240229", max_tokens=None)
+        assert params["max_tokens"] == 1024
+
+        params = TestSamplingParams()._params(client, model="claude-3-5-sonnet-20241022", max_tokens=2048)
+        assert params["max_tokens"] == 2048
