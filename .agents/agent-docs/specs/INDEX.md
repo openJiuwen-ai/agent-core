@@ -1,7 +1,7 @@
 ---
 title: 当前规约 S索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: spacewing
+author_email: ljcjeans@163.com
 generated: true
 ---
 

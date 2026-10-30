@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: spacewing
+author_email: ljcjeans@163.com
 generated: true
 ---
 
@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 272 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 273 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -18,9 +18,10 @@ generated: true
 | [agent_evolving](#module-1) | 1 |
 | [agent_teams](#module-2) | 199 |
 | [agent_teams/workflow](#module-3) | 15 |
-| [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 54 |
-| [未分类](#module-6) | 6 |
+| [core/runner](#module-4) | 1 |
+| [extensions/observability](#module-5) | 2 |
+| [harness](#module-6) | 54 |
+| [未分类](#module-7) | 6 |
 
 <a id="module-1"></a>
 
@@ -260,6 +261,14 @@ generated: true
 
 <a id="module-4"></a>
 
+## core/runner
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261029_2019_runner-root-task-group-cross-loop-reuse](bugfix/B_20261029_2019_runner-root-task-group-cross-loop-reuse.md) | B | Runner 根任务组跨事件循环复用陈旧 owner，stop 抛 attached to a different loop | spacewing | openjiuwen/core/runner | openjiuwen/core/runner/runner.py | 无独立 D：无前置设计文档，修复源自 Runner 单例跨事件循环缺陷的渐进修复 PR !2323 |
+
+<a id="module-5"></a>
+
 ## extensions/observability
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -267,7 +276,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | extensions/observability | — | — |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## harness
 
@@ -328,7 +337,7 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## 未分类
 

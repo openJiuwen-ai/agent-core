@@ -1,7 +1,7 @@
 ---
 title: 故障修复 B索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: spacewing
+author_email: ljcjeans@163.com
 generated: true
 ---
 
@@ -9,13 +9,14 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 11 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 12 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_teams](#module-1) | 11 |
+| [core/runner](#module-2) | 1 |
 
 <a id="module-1"></a>
 
@@ -34,3 +35,11 @@ generated: true
 | [B_08_single-branch-worktree-startup-failure](agent_teams/B_08_single-branch-worktree-startup-failure.md) | B | 单分支仓库的 worktree 基线失效导致调查成员未启动 | MengHan18 | openjiuwen/agent_teams | — | 待核实 |
 | [B_09_all-done-prompt-stalls-remaining-work](agent_teams/B_09_all-done-prompt-stalls-remaining-work.md) | B | 看板清空的收尾提示让 leader 停止建任务，且之后再清空不再提示 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [B_10_task-assigned-to-retired-member-stalls](agent_teams/B_10_task-assigned-to-retired-member-stalls.md) | B | 任务派给已退役的任务级成员后整夜无人执行 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
+
+<a id="module-2"></a>
+
+## core/runner
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261029_2019_runner-root-task-group-cross-loop-reuse](B_20261029_2019_runner-root-task-group-cross-loop-reuse.md) | B | Runner 根任务组跨事件循环复用陈旧 owner，stop 抛 attached to a different loop | spacewing | openjiuwen/core/runner | openjiuwen/core/runner/runner.py | 无独立 D：无前置设计文档，修复源自 Runner 单例跨事件循环缺陷的渐进修复 PR !2323 |
