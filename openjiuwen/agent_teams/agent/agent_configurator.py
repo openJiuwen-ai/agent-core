@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -298,6 +299,14 @@ class AgentConfigurator:
     @workspace_initialized.setter
     def workspace_initialized(self, value: bool) -> None:
         self._infra.workspace_initialized = value
+
+    @property
+    def swarmflow(self) -> Optional["SwarmflowInfra"]:
+        return self._infra.swarmflow
+
+    @swarmflow.setter
+    def swarmflow(self, value: Optional["SwarmflowInfra"]) -> None:
+        self._infra.swarmflow = value
 
     @property
     def task_manager(self) -> Any:
@@ -844,11 +853,17 @@ class AgentConfigurator:
                 member_card_id=self._card.id,
                 project_dir=member_project_dir,
             )
-        # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
-        # positional pool lookup by ``agent(model=...)`` name hint; no hint
-        # resolves to None so the worker falls back to the leader's model, but
-        # an explicit name that misses the pool raises (no silent downgrade).
-        # The leader-only async ``swarmflow`` tool is gated on this being non-None.
+        # Swarmflow shared infrastructure (worker-model resolver / worker +
+        # human base specs / concurrency governor / budget ledger /
+        # external-CLI allowlist / expert table). It is a team-level
+        # singleton — one governor and one ledger across every member —
+        # hosted on the leader's TeamInfra: the leader constructs the
+        # container once (gate unchanged: role + ``enable_swarmflow``) and
+        # re-uses it on later setups, while an in-process teammate reads
+        # the instance injected by ``share_swarmflow_with`` before
+        # configure. A member with no injection keeps every field empty,
+        # and the tool factory's resolver gate then drops ``swarmflow``
+        # from its tool set.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
@@ -856,56 +871,20 @@ class AgentConfigurator:
         swarmflow_budget = None
         swarmflow_external_cli_agents: tuple[Any, ...] = ()
         swarmflow_expert_specs: dict[str, Any] = {}
-        if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
-            # Callable class (same call contract as the historical closure) so
-            # the inject chain stays unchanged, plus pool_names for the
-            # engine's fail-fast model-hint check. The resolver-level
-            # ValueError raise from release/v0.1.19-2 is kept verbatim: it
-            # backs the non-engine callers (CLI MCP tool set, tool gateway)
-            # and the shrunk-pool window behind the engine's pre-flight.
-            swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
+        infra = self.swarmflow
+        if infra is None and ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
+            from openjiuwen.agent_teams.workflow.swarmflow_infra import build_swarmflow_infra
 
-            base_specs = spec.agents
-            swarmflow_worker_base_spec = _derive_swarmflow_worker_base_spec(spec, member_observability_rail_specs)
-            # Human-session avatars derive from the human_agent spec; fall back to
-            # the raw worker base so human_session still works when no dedicated
-            # human_agent spec is configured (it just lacks human-tuned desc).
-            # Like the worker base, it mounts the observability rail pair so
-            # the avatar's records carry an agent span in the trajectory.
-            human_base = base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
-            swarmflow_human_base_spec = (
-                human_base.model_copy(
-                    update={"rails": list(human_base.rails or []) + member_observability_rail_specs},
-                )
-                if human_base is not None
-                else None
-            )
-
-            from openjiuwen.agent_teams.workflow.concurrency import (
-                ConcurrencyGovernor,
-                validate_swarmflow_concurrency,
-            )
-
-            l2_cap = validate_swarmflow_concurrency(spec.swarmflow_concurrency)
-            swarmflow_concurrency_governor = ConcurrencyGovernor(
-                spec.swarmflow_concurrency,
-                agents_per_run_cap=l2_cap,
-            )
-
-            from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-
-            # One ledger per leader, shared by every run it launches (like the
-            # governor's L3): concurrent runs draw down one pool. ``total=None``
-            # keeps it unbounded while still giving scripts a live ``spent()``.
-            swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
-            swarmflow_external_cli_agents = _derive_swarmflow_external_cli_agents(spec)
-
-            from openjiuwen.agent_teams.workflow.backends.expert_specs import derive_swarmflow_expert_specs
-
-            # Experts are AgentGroup members already in the blueprint; a script
-            # picks one by member name. Derived once here, next to the worker
-            # base spec, so both ride the same rails and progressive_tool switch.
-            swarmflow_expert_specs = derive_swarmflow_expert_specs(spec, member_observability_rail_specs)
+            infra = build_swarmflow_infra(spec, ctx, member_observability_rail_specs)
+            self.swarmflow = infra
+        if infra is not None:
+            swarmflow_model_resolver = infra.model_resolver
+            swarmflow_worker_base_spec = infra.worker_base_spec
+            swarmflow_human_base_spec = infra.human_base_spec
+            swarmflow_concurrency_governor = infra.concurrency_governor
+            swarmflow_budget = infra.budget
+            swarmflow_external_cli_agents = infra.external_cli_agents
+            swarmflow_expert_specs = infra.expert_specs
 
         # The host's expert catalog backs the leader's expert tools; members
         # never get it (spawning is a leader capability).
@@ -1009,13 +988,17 @@ class AgentConfigurator:
             task_event_tracker=self._resources.task_event_tracker,
         )
 
-        # Leader's own model calls (decision / tool use / script generation) bill
-        # the session budget — NOT the per-run budget. Only when swarmflow is
-        # enabled (swarmflow_budget is a real ledger) does the leader carry this
-        # rail; the per-run ledger is passed as None so the rail only adds to the
-        # session pool. TinyAgent intent classify gets the same treatment in
-        # avatar_session_backend.
-        if swarmflow_budget is not None and ctx.role == TeamRole.LEADER:
+        # A member's own model calls (decision / tool use / script generation)
+        # bill the session budget — NOT the per-run budget. Every member whose
+        # swarmflow handles are wired carries this rail (the leader that
+        # constructed them, an in-process teammate that received the share):
+        # "whoever holds the ledger bills it", so teammate loops draw down the
+        # same session pool the leader's and the workers' calls do. The
+        # per-run ledger is passed as None so the rail only adds to the
+        # session pool; a member without injected handles mounts no rail
+        # (behaviour unchanged). TinyAgent intent classify gets the same
+        # treatment in avatar_session_backend.
+        if swarmflow_budget is not None:
             from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 
             self.harness.add_rail(SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None))

@@ -160,7 +160,11 @@ class TeamHarness:
         """Stop the native supervisor; keep the (terminated) native for config reads.
 
         The terminated native still answers ``workspace`` / ``sys_operation`` /
-        ``deep_config``; :meth:`start` rebuilds a fresh one next cycle.
+        ``deep_config``; :meth:`start` rebuilds a fresh one next cycle. Owned
+        swarmflow runs are left running: they are hosted by the member runtime
+        and the team-level controller, not by this cycle's native, so the
+        round recycle must not stop them (only :meth:`dispose` does, for
+        permanent teardown).
         """
         if self._native is not None and self._native.state is not HarnessState.TERMINATED:
             await self._native.stop()
@@ -196,6 +200,11 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
+            # Unlike ``start`` (:meth:`start` re-pushes ``_bg_controller`` onto
+            # the rebuilt native), run_once callers (workers, scheduler,
+            # tiny_agent) never hold a background task controller, so no
+            # re-push happens here. A future controller-holding run_once
+            # caller must add it.
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
@@ -226,10 +235,34 @@ class TeamHarness:
         (idempotent) and drops its ``sys_operation`` so a discarded
         member/session does not leak it. No-op when no native was ever built.
         """
+        await self._stop_owned_swarmflow_runs(include_paused=True)
         if self._active_agent_session is not None:
             await self._active_agent_session.commit()
         if self._native is not None:
             await self._native.dispose()
+
+    async def _stop_owned_swarmflow_runs(self, *, include_paused: bool = False) -> None:
+        """Gracefully stop this member's swarmflow runs before harness teardown.
+
+        The native's ``stop`` cancels in-flight async tools as a bare cancel:
+        the swarmflow task dies with no terminal progress event and no journal
+        record, leaving the embedder's workflow card stuck on running. Stopping
+        through the controller first unwinds each run properly (abort →
+        terminal event → journal record). Best-effort: a controller failure
+        only logs — teardown must proceed regardless. No controller attached
+        (teammates today, leader-less embedders) or no member name: no-op.
+        """
+        controller = self._bg_controller
+        if controller is None or not self._member_name:
+            return
+        try:
+            await controller.stop_by_owner(self._member_name, include_paused=include_paused)
+        except Exception:
+            logger.warning(
+                "[TeamHarness] stop_by_owner failed for member %s; continuing teardown",
+                self._member_name,
+                exc_info=True,
+            )
 
     @staticmethod
     def _session_id_of(team_session: Optional[Any]) -> Optional[str]:
@@ -526,6 +559,18 @@ class TeamHarness:
         """Inject loaded memory into the agent's system prompt."""
         if self._native is not None:
             await memory_manager.load_and_inject(self._native, query=query)
+
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's attached background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller`: the session-level
+        controller the embedder attached (None before attach / for embedders
+        that hold none). The spawn path reads it off the leader to hand the
+        SAME instance to an in-process teammate, so every member's runs
+        register in one session registry.
+        """
+        return self._bg_controller
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller (pause/resume surface).
