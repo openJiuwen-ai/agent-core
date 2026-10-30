@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import pytest
 
@@ -27,6 +28,129 @@ def _native_cfg(paths: list[dict], *, defaults: dict | None = None, enabled: boo
             "paths": paths,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("command, target", [
+    ("node a.js", "a.js"),
+    ("node --trace-warnings ./a.js", "a.js"),
+    ("node --title worker ./a.js", "a.js"),
+    ("node --future-option worker ./a.js", "a.js"),
+    ("cd child && node a.js", "child/a.js"),
+    ("cd child && python -u -W ignore a.py", "child/a.py"),
+    ("cd child && bash -o pipefail a.sh", "child/a.sh"),
+    ("cd child || node a.js", "a.js"),
+    ("cd child | node a.js", "a.js"),
+    ("node --require ./preload.js safe.js", "preload.js"),
+])
+async def test_shell_exec_deny_survives_command_spelling(tmp_path, scoped, command, target):
+    defaults = {"read": "allow", "write": "allow", "exec": "allow" if scoped else "deny"}
+    paths = [{"path": (tmp_path / target).as_posix(), "match": "glob", "exec": "deny"}] if scoped else []
+    cfg = _native_cfg(paths, defaults=defaults)
+    cfg.update(tools={"bash": "allow"}, defaults={"*": "allow"})
+    engine = PermissionEngine(cfg, workspace_root=tmp_path)
+    result = await engine.check_permission("bash", {"command": command, "workdir": str(tmp_path)})
+    assert result.permission == PermissionLevel.DENY
+    assert ("file_guard:glob" if scoped else "file_guard:defaults") in result.matched_rule
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["allow", "ask", "deny"])
+async def test_shell_script_honors_all_policy_levels(tmp_path, policy):
+    cfg = _native_cfg([], defaults={"read": "allow", "write": "allow", "exec": policy})
+    cfg.update(tools={"bash": "allow"}, defaults={"*": "allow"})
+    result = await PermissionEngine(cfg, workspace_root=tmp_path).check_permission(
+        "bash", {"command": "cd child && node --trace-warnings a.js", "workdir": str(tmp_path)},
+    )
+    assert result.permission == PermissionLevel(policy)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows MSYS drive semantics")
+@pytest.mark.parametrize("shell_type", ["auto", "bash"])
+async def test_msys_exec_rule_matches_actual_drive_in_engine(tmp_path, monkeypatch, shell_type):
+    monkeypatch.setattr("openjiuwen.core.sys_operation.local.shell_operation._available_bash", lambda **_kw: "bash")
+    cfg = _native_cfg(
+        [{"path": "E:/code/guarded/**", "match": "glob", "exec": "deny"}],
+        defaults={"read": "allow", "write": "allow", "exec": "allow"},
+    )
+    cfg.update(tools={"bash": "allow"}, defaults={"*": "allow"})
+    engine = PermissionEngine(cfg, workspace_root=tmp_path)
+    result = await engine.check_permission("bash", {
+        "command": "pwd && cd /e/code/guarded && node --trace-warnings a.js",
+        "workdir": str(tmp_path), "shell_type": shell_type,
+    })
+    assert result.permission == PermissionLevel.DENY
+    assert "file_guard:glob" in result.matched_rule
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows cmd switches")
+@pytest.mark.parametrize("command", ["dir", "dir /b", "dir /s", "cd /d", "cmd /c dir /b", "dir /b && dir /s"])
+async def test_cmd_switches_keep_workspace_allow(tmp_path, command):
+    cfg = _native_cfg([{"path": str(tmp_path), "read": "allow"}])
+    cfg["tools"] = {"bash": "allow"}
+    result = await PermissionEngine(cfg, workspace_root=tmp_path).check_permission("bash", {"command": command})
+    assert result.permission == PermissionLevel.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_tilde_guarded_script_is_denied(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cfg = _native_cfg(
+        [{"path": str(home / "guarded"), "exec": "deny"}],
+        defaults={"read": "allow", "write": "allow", "exec": "allow"},
+    )
+    cfg["tools"] = {"bash": "allow"}
+    result = await PermissionEngine(cfg, workspace_root=tmp_path).check_permission(
+        "bash", {"command": "cd ~/guarded && node a.js", "shell_type": "bash"},
+    )
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.asyncio
+async def test_analysis_limits_return_deny_without_raising(tmp_path, monkeypatch):
+    from openjiuwen.harness.security.permission_engine.fileguard import path_extract
+
+    cfg = _native_cfg([], defaults={"read": "allow", "write": "allow", "exec": "allow"})
+    cfg["tools"] = {"bash": "allow"}
+    engine = PermissionEngine(cfg, workspace_root=tmp_path)
+    command = "; ".join(f"cd dir{index}" for index in range(10)) + "; node a.js"
+    result = await engine.check_permission("bash", {"command": command})
+    assert result.permission == PermissionLevel.DENY
+    assert result.matched_rule == "file_guard:analysis_limit"
+    monkeypatch.setattr(path_extract, "_MAX_INLINE_DEPTH", 0)
+    result = await engine.check_permission("bash", {"command": "bash -c 'node a.js'"})
+    assert result.permission == PermissionLevel.DENY
+    assert result.matched_rule == "file_guard:analysis_limit"
+
+
+@pytest.mark.asyncio
+async def test_inline_literal_read_denial_survives_shell_wrapper(tmp_path):
+    cfg = _native_cfg(
+        [{"path": str(tmp_path / "secret"), "read": "deny"}],
+        defaults={"read": "allow", "write": "allow", "exec": "allow"},
+    )
+    cfg["tools"] = {"bash": "allow"}
+    result = await PermissionEngine(cfg, workspace_root=tmp_path).check_permission(
+        "bash", {"command": "bash -lc 'cd secret && cat ./data.txt'", "shell_type": "bash"},
+    )
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.asyncio
+async def test_analysis_limit_boundary_does_not_hide_other_framework_errors(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import BaseError, build_error
+
+    engine = PermissionEngine(_native_cfg([]), workspace_root=tmp_path)
+    error = build_error(StatusCode.TOOL_EXECUTION_ERROR, reason="other error", card=None)
+    monkeypatch.setattr(engine, "_check_permission", AsyncMock(side_effect=error))
+    with pytest.raises(BaseError, match="other error"):
+        await engine.check_permission("bash", {"command": "node a.js"})
 
 
 def test_native_path_inherits_axis_defaults(tmp_path: Path) -> None:

@@ -26,6 +26,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from openjiuwen.core.common.exception.errors import BaseError
+
 from openjiuwen.harness.security.permission_engine.delguard.deletion_guard import (
     DeletionGuard,
     build_deletion_guard,
@@ -330,6 +332,21 @@ class PermissionEngine:
     # ---------- 权限检查 ----------
 
     async def check_permission(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> PermissionResult:
+        """Return a policy decision, including explicit denial on analysis limits."""
+        try:
+            return await self._check_permission(tool_name, tool_args)
+        except BaseError as exc:
+            if not isinstance(exc.details, dict) or exc.details.get("rule_id") != "file_guard:analysis_limit":
+                raise
+            return PermissionResult(
+                permission=PermissionLevel.DENY, matched_rule="file_guard:analysis_limit", reason=str(exc),
+            )
+
+    async def _check_permission(
         self,
         tool_name: str,
         tool_args: dict[str, Any],

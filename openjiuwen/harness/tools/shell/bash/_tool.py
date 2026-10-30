@@ -16,6 +16,7 @@ from typing import (
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
@@ -70,6 +71,10 @@ async def _backup_shell_writes(command: str, workdir: str, shell_type: str) -> N
         )
     except (OSError, RuntimeError, ValueError):
         return
+    except BaseError as exc:
+        if not isinstance(exc.details, dict) or exc.details.get("rule_id") != "file_guard:analysis_limit":
+            raise
+        return  # PermissionEngine owns denial; optional backups remain best effort.
     for path, action in accesses:
         if action != "write":
             continue
