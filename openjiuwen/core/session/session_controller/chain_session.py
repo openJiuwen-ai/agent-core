@@ -23,6 +23,25 @@ from openjiuwen.core.session.session_controller.utils import SessionPaths
 T = TypeVar('T')
 
 
+def _link_target_ids(link_data: dict, link_file: Path) -> Optional[tuple[str, str]]:
+    """Resolve the downstream ids stored in a .link file.
+
+    New links persist the ids in the payload because both ids may contain
+    ``_``; the legacy ``{target_agent}_{target_session}.link`` filename is
+    ambiguous and only used for links written before the payload carried ids.
+    """
+    target_agent = link_data.get('target_agent')
+    target_session = link_data.get('target_session')
+    if isinstance(target_agent, str) and isinstance(target_session, str):
+        return target_agent, target_session
+
+    filename = link_file.stem
+    if '_' not in filename:
+        return None
+    target_agent, target_session = filename.split('_', 1)
+    return target_agent, target_session
+
+
 class ChainSession(Generic[T]):
     """
     Chained session data container.
@@ -158,11 +177,9 @@ class ChainSession(Generic[T]):
                                 link_file.unlink()
                                 continue
 
-                            # Parse filename to get target info
-                            # Filename format: {target_agent}_{target_session}.link
-                            filename = link_file.stem
-                            if '_' in filename:
-                                target_agent, target_session = filename.split('_', 1)
+                            target = _link_target_ids(link_data, link_file)
+                            if target is not None:
+                                target_agent, target_session = target
 
                                 # Parse sharing policy
                                 policy_data = link_data.get('permission', {})
@@ -250,6 +267,11 @@ class ChainSession(Generic[T]):
                     current_links.add(link_file)
 
                     link_data = {
+                        # Persist the ids so ids containing '_' survive the
+                        # round-trip; the filename remains a human-readable
+                        # legacy locator.
+                        'target_agent': target_agent,
+                        'target_session': target_session,
                         'permission': {
                             'level': policy.permission.value,
                             'field_scopes': (
