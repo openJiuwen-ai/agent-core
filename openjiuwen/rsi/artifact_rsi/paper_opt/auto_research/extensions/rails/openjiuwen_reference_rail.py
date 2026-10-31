@@ -79,6 +79,7 @@ from openjiuwen.harness.prompts.tools.filesystem import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.filesystem import GlobTool, ListDirTool, ReadFileTool
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.reference_index import (
     ReferencePathError as IndexPathError,
 )
@@ -97,6 +98,41 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementa
 # Walk from this file: rails -> extensions -> auto_research -> paper_opt ->
 # artifact_rsi -> rsi -> openjiuwen -> repo root.
 _DEFAULT_ASSETS_ROOT = Path(__file__).resolve().parents[7] / "docs"
+
+logger = get_logger(__name__)
+# Namespace roots already reported missing, so a run that builds many coding
+# agents warns once per root rather than once per agent.
+_warned_missing_roots: set[Path] = set()
+
+
+def missing_reference_roots(roots: ReferenceRoots) -> list[tuple[str, Path]]:
+    """Namespaces whose root directory does not exist.
+
+    A pip-installed ``openjiuwen`` ships the package but not the repository's
+    ``docs/`` and ``examples/``, so those namespaces are empty unless they are
+    copied next to the installed package (``repo_root()``).
+    """
+    return [(name, path) for name, path in roots.namespaces() if not path.is_dir()]
+
+
+def warn_missing_reference_roots(roots: ReferenceRoots) -> list[tuple[str, Path]]:
+    """Log one warning per missing namespace root; returns the missing ones."""
+    missing = missing_reference_roots(roots)
+    for name, path in missing:
+        resolved = path.resolve()
+        if resolved in _warned_missing_roots:
+            continue
+        _warned_missing_roots.add(resolved)
+        logger.warning(
+            "OpenJiuwen reference namespace %r not found at %s; the coding agent's "
+            "openjiuwen_ref_* tools cannot read it. A pip-installed openjiuwen does not "
+            "include the repository's docs/ and examples/: check out agent-core, or copy "
+            "them next to the installed package.",
+            name,
+            resolved,
+        )
+    return missing
+
 
 _READ_NAME = "openjiuwen_ref_read_file"
 _GLOB_NAME = "openjiuwen_ref_glob"
@@ -494,6 +530,7 @@ class OpenJiuwenReferenceRail(DeepAgentRail):
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
+        warn_missing_reference_roots(self._roots)
         sandbox_roots = [
             str(path.resolve())
             for _, path in self._roots.namespaces()
@@ -528,6 +565,8 @@ class OpenJiuwenReferenceRail(DeepAgentRail):
 
 __all__ = [
     "OpenJiuwenReferenceRail",
+    "missing_reference_roots",
+    "warn_missing_reference_roots",
     "ReferencePathError",
     "normalize_reference_path",
     "rewrite_glob_pattern",
