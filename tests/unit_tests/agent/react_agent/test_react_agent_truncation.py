@@ -138,6 +138,39 @@ class TestWriteInvokeResultToStream(unittest.IsolatedAsyncioTestCase):
         schema = session.write_stream.call_args[0][0]
         self.assertIsNone(schema.payload.get("finish_reason"))
 
+    async def test_soft_stop_exhausted_flag_is_forwarded(self):
+        agent = _make_agent()
+        session = MagicMock()
+        session.write_stream = AsyncMock()
+
+        result = {
+            "output": "思考循环恢复失败，请重试或简化任务。",
+            "result_type": "error",
+            "finish_reason": "null",
+            "soft_stop_recovery_exhausted": True,
+        }
+        await agent._write_invoke_result_to_stream(result, session)
+
+        schema = session.write_stream.call_args[0][0]
+        self.assertEqual(schema.type, "answer")
+        self.assertTrue(schema.payload.get("soft_stop_recovery_exhausted"))
+        self.assertEqual(schema.payload["output"], "思考循环恢复失败，请重试或简化任务。")
+
+    async def test_plain_error_omits_soft_stop_flag(self):
+        agent = _make_agent()
+        session = MagicMock()
+        session.write_stream = AsyncMock()
+
+        result = {
+            "output": "模型未返回有效内容（空响应），请重试或检查上下文。",
+            "result_type": "error",
+            "finish_reason": "null",
+        }
+        await agent._write_invoke_result_to_stream(result, session)
+
+        schema = session.write_stream.call_args[0][0]
+        self.assertNotIn("soft_stop_recovery_exhausted", schema.payload)
+
 
 class TestInjectTruncationNotice(unittest.IsolatedAsyncioTestCase):
     async def test_injects_assistant_and_user_messages(self):

@@ -3245,14 +3245,17 @@ class ReActAgent(BaseAgent):
                                 and schema.payload.id == pending_id)):
                         await session.write_stream(schema)
         else:
+            payload = {
+                "output": result.get("output", ""),
+                "result_type": result_type,
+                "finish_reason": result.get("finish_reason"),
+            }
+            if result.get("soft_stop_recovery_exhausted"):
+                payload["soft_stop_recovery_exhausted"] = True
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
-                payload={
-                    "output": result.get("output", ""),
-                    "result_type": result_type,
-                    "finish_reason": result.get("finish_reason"),
-                },
+                payload=payload,
             ))
 
     async def stream(
