@@ -4,12 +4,15 @@
 """Message and message-read-status data access object."""
 
 import json
+from types import SimpleNamespace
 from typing import List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.group_chat.meta import group_addressed, group_metadata
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
@@ -230,6 +233,27 @@ class MessageDao:
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
             rows = result.scalars().all()
+            member = (
+                await session.execute(
+                    select(TeamMember).where(
+                        TeamMember.team_name == team_name,
+                        TeamMember.member_name == member_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            role = member.role if member is not None else None
+            session_id = get_session_id()
+            visible = [
+                row for row in rows
+                if not (meta := group_metadata(row))
+                or group_addressed(
+                    member_name=member_name,
+                    from_member_name=row.from_member_name,
+                    meta=meta,
+                    role=role,
+                    session_id=session_id,
+                )
+            ]
 
             read_result = await session.execute(
                 select(read_status_model).where(
@@ -240,9 +264,79 @@ class MessageDao:
             read_status = read_result.scalar_one_or_none()
 
             if not unread_only:
-                return list(rows)
+                return visible
 
-            return [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+            return [row for row in visible if read_status is None or row.timestamp > read_status.read_at]
+
+    async def get_broadcast_read_at(self, team_name: str, member_name: str) -> int:
+        """Return this member's broadcast watermark, or zero when unset."""
+        read_status_model = _get_message_read_status_model()
+        async with self._sessions.read() as session:
+            read_status = (
+                await session.execute(
+                    select(read_status_model).where(
+                        read_status_model.member_name == member_name,
+                        read_status_model.team_name == team_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if read_status is None or read_status.read_at is None:
+                return 0
+            return int(read_status.read_at)
+
+    async def get_unread_group_members(self, team_name: str) -> list[str]:
+        """Return UNSTARTED or ERROR members with an unread mention in this session."""
+        message_model = _get_message_model()
+        read_status_model = _get_message_read_status_model()
+        async with self._sessions.read() as session:
+            members = (
+                await session.execute(
+                    select(TeamMember).where(
+                        TeamMember.team_name == team_name,
+                        TeamMember.status.in_([
+                            MemberStatus.UNSTARTED.value,
+                            MemberStatus.ERROR.value,
+                        ]),
+                        TeamMember.role != "passive_human",
+                    )
+                )
+            ).scalars().all()
+            broadcasts = (
+                await session.execute(
+                    select(message_model).where(
+                        message_model.team_name == team_name,
+                        message_model.broadcast.is_(True),
+                    )
+                )
+            ).scalars().all()
+            watermarks = {
+                row.member_name: int(row.read_at or 0)
+                for row in (
+                    await session.execute(
+                        select(read_status_model).where(read_status_model.team_name == team_name)
+                    )
+                ).scalars().all()
+            }
+            session_id = get_session_id()
+            names: list[str] = []
+            for member in members:
+                covered = watermarks.get(member.member_name, 0)
+                for row in broadcasts:
+                    meta = group_metadata(row)
+                    if (
+                        meta
+                        and row.timestamp > covered
+                        and group_addressed(
+                            member_name=member.member_name,
+                            from_member_name=row.from_member_name,
+                            meta=meta,
+                            role=member.role,
+                            session_id=session_id,
+                        )
+                    ):
+                        names.append(member.member_name)
+                        break
+            return names
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
         """Get all messages for a team (without read status)."""
@@ -333,12 +427,50 @@ class MessageDao:
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
                     TeamMember.status != MemberStatus.SHUTDOWN.value,
+                    TeamMember.role != "passive_human",
                     TeamMember.member_name != message_model.from_member_name,
                     ~covered_by_watermark,
+                    or_(
+                        message_model.meta.is_(None),
+                        ~message_model.meta.contains('"type": "group_chat"'),
+                    ),
                 )
                 .limit(1)
             )
-            return unread_broadcast.first() is not None
+            if unread_broadcast.first() is not None:
+                return True
+
+            group_rows = await session.execute(
+                select(
+                    message_model.meta,
+                    message_model.from_member_name,
+                    message_model.timestamp,
+                    TeamMember.member_name,
+                    TeamMember.role,
+                )
+                .join(TeamMember, TeamMember.team_name == message_model.team_name)
+                .where(
+                    message_model.team_name == team_name,
+                    message_model.broadcast.is_(True),
+                    message_model.meta.contains('"type": "group_chat"'),
+                    TeamMember.status != MemberStatus.SHUTDOWN.value,
+                    TeamMember.role != "passive_human",
+                    TeamMember.member_name != message_model.from_member_name,
+                    ~covered_by_watermark,
+                )
+            )
+            session_id = get_session_id()
+            for meta_raw, sender, _timestamp, member_name, role in group_rows.all():
+                meta = group_metadata(SimpleNamespace(meta=meta_raw))
+                if group_addressed(
+                    member_name=member_name,
+                    from_member_name=sender,
+                    meta=meta,
+                    role=role,
+                    session_id=session_id,
+                ):
+                    return True
+            return False
 
     async def _mark_read_in_session(
         self,

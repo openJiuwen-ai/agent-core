@@ -222,6 +222,22 @@ def test_enable_hitt_false_with_human_agent_predefined_raises():
 
 
 @pytest.mark.level0
+def test_enable_hitt_false_with_passive_human_predefined_raises():
+    """A passive human is also a HITT member and cannot be declared while HITT is off."""
+    pre = TeamMemberSpec(
+        member_name="guest",
+        display_name="Guest",
+        role_type=TeamRole.PASSIVE_HUMAN,
+        desc="A person without a model",
+    )
+    spec = _minimal_spec(enable_hitt=False, predefined_members=[pre])
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    with pytest.raises(BaseError, match="enable_hitt=False"):
+        spec._validate_hitt_consistency()
+
+
+@pytest.mark.level0
 def test_enable_hitt_false_no_human_agent_predefined_passes():
     """Spec.enable_hitt=False with no HUMAN_AGENT predefined is the default valid case."""
     spec = _minimal_spec(enable_hitt=False)

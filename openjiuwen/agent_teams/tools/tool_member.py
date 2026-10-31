@@ -253,6 +253,51 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         )
 
 
+class SpawnPassiveHumanTool(_SpawnToolBase):
+    """Register a passive human who has no harness and no model."""
+
+    def __init__(self, team: TeamBackend, t: Translator, *, desc_key: str = "spawn_passive_human"):
+        super().__init__(team, t, "spawn_passive_human", desc_key=desc_key)
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_human_agent", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_human_agent", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_human_agent", "desc")},
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+        if not self.team.hitt_enabled():
+            return self._fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team)."
+            )
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_passive_human(
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc", ""),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="passive_human",
+        )
+
+
 class SpawnBridgeAgentTool(_SpawnToolBase):
     """Spawn a bridge agent to a remote independent agent (``role_type='bridge_agent'``).
 

@@ -1,0 +1,1 @@
+Register a passive human. This member has no model, no file tools, and no shell, and is ready immediately. The person participates through tool calls and addressed messages, and cannot drive an avatar.

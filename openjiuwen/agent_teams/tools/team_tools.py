@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.tools.tool_permissions import (
     LEADER_TOOLS,
     MEMBER_ONLY_TOOLS,
     MEMBER_TOOLS,
+    PASSIVE_HUMAN_TOOLS,
     SHARED_TOOLS,
 )
 from openjiuwen.agent_teams.tools.tool_task import (
@@ -54,6 +55,7 @@ __all__ = [
     "LEADER_TOOLS",
     "MEMBER_ONLY_TOOLS",
     "MEMBER_TOOLS",
+    "PASSIVE_HUMAN_TOOLS",
     "SHARED_TOOLS",
     "BuildTeamTool",
     "CleanTeamTool",

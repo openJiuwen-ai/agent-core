@@ -471,6 +471,31 @@ class TestShutdownMember:
         assert result.ok
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_shutdown_member_force_finalizes_requested(self, agent_team, sample_agent_card, db):
+        """force=True upgrades SHUTDOWN_REQUESTED to SHUTDOWN without re-enabling."""
+        await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            status=MemberStatus.READY,
+        )
+        soft = await agent_team.shutdown_member(member_name="member1", force=False)
+        assert soft.ok
+        row = await db.member.get_member("member1", agent_team.team_name)
+        assert row.status == MemberStatus.SHUTDOWN_REQUESTED.value
+
+        soft_again = await agent_team.shutdown_member(member_name="member1", force=False)
+        assert soft_again.ok
+        row = await db.member.get_member("member1", agent_team.team_name)
+        assert row.status == MemberStatus.SHUTDOWN_REQUESTED.value
+
+        forced = await agent_team.shutdown_member(member_name="member1", force=True)
+        assert forced.ok
+        row = await db.member.get_member("member1", agent_team.team_name)
+        assert row.status == MemberStatus.SHUTDOWN.value
+
+    @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_shutdown_member_not_found(self, agent_team):
         """Test shutting down non-existent member surfaces the reason."""

@@ -90,12 +90,66 @@ def independent_member_workspace(member_name: str) -> Path:
     return get_openjiuwen_home() / f"{member_name}_workspace"
 
 
+def team_workspace_dir(team_name: str) -> Path:
+    """Return the shared workspace directory for one team.
+
+    Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-workspace/``
+    """
+    return team_home(team_name) / "team-workspace"
+
+
 def team_memory_dir(team_name: str) -> Path:
     """Return the per-team shared memory directory.
 
-    Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-memory/``
+    Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-workspace/team-memory/``
     """
-    return team_home(team_name) / "team-workspace" / "team-memory"
+    return team_workspace_dir(team_name) / "team-memory"
+
+
+def group_conversation_registry_dir(team_name: str) -> Path:
+    """Return the directory that records a session's conversation workspace.
+
+    Layout: ``{team_home}/{team_name}/conversation-workspaces/``
+    """
+    _require_path_component(team_name, "team_name")
+    directory = team_home(team_name) / "conversation-workspaces"
+    if directory.is_symlink():
+        raise ValueError(f"conversation registry must not be a symlink: {directory}")
+    return directory
+
+
+def group_conversation_dir(
+    team_name: str,
+    session_id: str,
+    workspace: Path | str | None = None,
+) -> Path:
+    """Return the directory holding one session's public conversation projection.
+
+    Layout: ``{workspace}/conversations/<team-scope>/<session-scope>/``
+    """
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id must be a non-empty string")
+    root = Path(workspace) if workspace is not None else team_workspace_dir(team_name)
+    return root / "conversations" / _scope(team_name) / _scope(session_id)
+
+
+def _require_path_component(value: str, label: str) -> None:
+    """Reject a value that is not one filesystem path component."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value in (".", "..")
+        or "/" in value
+        or "\\" in value
+        or len(value.encode("utf-8")) > 255
+    ):
+        raise ValueError(f"{label} must be a single path component")
+
+
+def _scope(value: str) -> str:
+    """Return a readable, collision-resistant directory segment."""
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"{_safe_segment(value)}-{digest}"
 
 
 def _safe_segment(value: str, fallback: str = "_") -> str:

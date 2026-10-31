@@ -70,11 +70,13 @@ class BuildTeamTool(TeamTool):
                 enable_task_verification=enable_task_verification_arg,
             ),
         )
+        stored = await self.db.team.get_team(self.team.team_name)
+        stored_display_name = stored.display_name if stored is not None else display_name
         return ToolOutput(
             success=True,
             data={
                 "team_name": self.team.team_name,
-                "display_name": display_name,
+                "display_name": stored_display_name,
                 "leader_member_name": self.team.member_name,
                 "leader_display_name": leader_display_name,
                 "enable_hitt": self.team.hitt_enabled(),

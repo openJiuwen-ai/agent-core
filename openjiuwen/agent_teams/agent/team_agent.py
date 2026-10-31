@@ -737,13 +737,18 @@ class TeamAgent(BaseAgent):
         # Cache the user query so CoordinationManager can pass it to the
         # memory pipeline during start(). ``.get`` default does not cover a
         # present-but-None value, so normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        raw_query, group_message, group_invalid = self._split_initial_query(inputs)
+        self._state.pending_user_query = "" if group_message is not None or group_invalid else raw_query
+        routed_payloads = (
+            [group_message] if group_message is not None else self._initial_leader_route_payloads(raw_query)
+        )
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
-                if routed_payloads is not None:
+                if group_invalid:
+                    await self._emit_interact_failed("invalid_group_chat")
+                    self._stream_controller.close_stream()
+                elif routed_payloads is not None:
                     await self._dispatch_initial_leader_route(routed_payloads)
                 else:
                     # Only drive a first round when there is an actual message.
@@ -794,14 +799,19 @@ class TeamAgent(BaseAgent):
         self._stream_controller.stream_queue = asyncio.Queue()
         # ``.get`` default does not cover a present-but-None value, so
         # normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        raw_query, group_message, group_invalid = self._split_initial_query(inputs)
+        self._state.pending_user_query = "" if group_message is not None or group_invalid else raw_query
+        routed_payloads = (
+            [group_message] if group_message is not None else self._initial_leader_route_payloads(raw_query)
+        )
 
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
-                if routed_payloads is not None:
+                if group_invalid:
+                    await self._emit_interact_failed("invalid_group_chat")
+                    self._stream_controller.close_stream()
+                elif routed_payloads is not None:
                     await self._dispatch_initial_leader_route(routed_payloads)
                 else:
                     # Only drive a first round when there is an actual message.
@@ -925,6 +935,20 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(initial_message)
 
+    def _split_initial_query(self, inputs: Any) -> tuple[Any, Any, bool]:
+        """Separate a group-chat dict from the query string the leader already accepts."""
+        if not isinstance(inputs, dict):
+            return (str(inputs) if inputs is not None else ""), None, False
+        raw = inputs.get("query") or ""
+        if isinstance(raw, dict) and raw.get("type") == "group_chat":
+            from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+            try:
+                return "", GroupChatMessage.from_wire(raw), False
+            except ValueError:
+                return "", None, True
+        return raw, None, False
+
     def _initial_leader_route_payloads(self, raw_query: Any) -> list["InteractPayload"] | None:
         """Parse leader initial input when it uses explicit team routing."""
         if not isinstance(raw_query, str) or not raw_query.strip():
@@ -945,10 +969,33 @@ class TeamAgent(BaseAgent):
 
         result = await TeamRuntimeManager.dispatch_payloads(self, payloads)
         if result.ok:
+            from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+            if any(isinstance(payload, GroupChatMessage) for payload in payloads):
+                await self._emit_group_accepted(result.data)
+                notified = (result.data or {}).get("notified_members") or []
+                if self._member_name() not in notified:
+                    self._stream_controller.close_stream()
             return
 
         await self._emit_interact_failed(result.reason)
         self._stream_controller.close_stream()
+
+    async def _emit_group_accepted(self, data: Any) -> None:
+        """Tell the host the public message was archived."""
+        if self._stream_controller.stream_queue is None:
+            return
+        from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+        await self._stream_controller.stream_queue.put(
+            TeamOutputSchema(
+                type="message",
+                index=0,
+                payload={"event_type": "team.group_message.accepted", "data": data},
+                source_member=self._member_name(),
+                role=self.role,
+            )
+        )
 
     async def _emit_interact_failed(self, reason: Optional[str]) -> None:
         """Emit a stream-visible failure for initial interact routing."""
@@ -1152,7 +1199,49 @@ class TeamAgent(BaseAgent):
             return False
         if started:
             team_logger.info("Auto-started member via interact: {}", member_name)
-        return started
+            return True
+        return await self._restart_errored_member(member_name)
+
+    async def _restart_errored_member(self, member_name: str) -> bool:
+        """Recover one ERROR member that a group mention still addresses."""
+        backend = self.team_backend
+        if backend is None:
+            return False
+        member = await backend.db.member.get_member(member_name, backend.team_name)
+        if member is None or member.role == TeamRole.PASSIVE_HUMAN.value:
+            return False
+        if member.status != MemberStatus.ERROR.value:
+            return False
+        transitioned = await backend.db.member.try_transition_member_status(
+            member_name,
+            backend.team_name,
+            MemberStatus.ERROR,
+            MemberStatus.RESTARTING,
+        )
+        if not transitioned:
+            return False
+        restarted = await self._spawn_manager.restart_teammate(member_name)
+        if not restarted:
+            await backend.db.member.try_transition_member_status(
+                member_name,
+                backend.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.ERROR,
+            )
+        return bool(restarted)
+
+    async def start_mentioned_members(self) -> None:
+        """Start UNSTARTED or ERROR members named by an unread group mention."""
+        backend = self.team_backend
+        if backend is None or not backend.is_leader:
+            return
+        try:
+            names = await backend.db.message.get_unread_group_members(backend.team_name)
+        except Exception as exc:
+            team_logger.error("start_mentioned_members failed: {}", exc)
+            return
+        for member_name in names:
+            await self.auto_start_member(member_name)
 
     async def auto_start_all(self) -> list[str]:
         """Start all UNSTARTED members via TeamBackend.startup.
@@ -1192,6 +1281,25 @@ class TeamAgent(BaseAgent):
 
     async def recover_team(self) -> list[str]:
         return await self._recovery_manager.recover_team()
+
+    async def ensure_team_built(self) -> None:
+        """Create the team row from the static spec before the leader model runs.
+
+        ``predefined_members`` stay on the backend. ``build_team`` registers
+        them, and its ``on_team_built`` callback records the created state.
+        """
+        spec = self.spec
+        backend = self.team_backend
+        if backend is None or spec is None:
+            raise RuntimeError("ensure_team_on_start requires a team spec and a team backend")
+        leader = spec.leader
+        await backend.build_team(
+            display_name=spec.team_name,
+            desc=spec.team_desc,
+            leader_display_name=leader.display_name if leader is not None else "Team Leader",
+            leader_desc=leader.desc if leader is not None else "",
+            overrides=None,
+        )
 
     # ------------------------------------------------------------------
     # Leader config persistence / recovery
