@@ -2593,3 +2593,73 @@ async def test_runner_start_propagates_runtime_stream_failure(
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.parametrize("explicit_runtime_tools", [True, False])
+def test_team_cold_recovery_uses_current_tools_without_replacing_history(monkeypatch, explicit_runtime_tools):
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+    from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig
+    from openjiuwen.core.sys_operation.config import PreDeployLauncherConfig
+    from openjiuwen.harness.schema.deep_agent_spec import SysOperationSpec
+
+    team_name = "tool_recovery_" + uuid.uuid4().hex
+    old_tool = SysOperationSpec(id=team_name + ".old-local")
+    checkpoint = TeamAgentSpec(
+        team_name=team_name,
+        agents={
+            "leader": DeepAgentSpec(sys_operation=old_tool, system_prompt="retained leader"),
+            "teammate": DeepAgentSpec(sys_operation=old_tool, system_prompt="retained teammate"),
+            "checkpoint-only": DeepAgentSpec(sys_operation=old_tool),
+        },
+    )
+    current_tool = SysOperationSpec(
+        id=team_name + ".current-sandbox",
+        mode=OperationMode.SANDBOX,
+        gateway_config=SandboxGatewayConfig(
+            launcher_config=PreDeployLauncherConfig(
+                base_url="https://sandbox.example",
+                sandbox_type="jiuwenbox-conch",
+                extra_params={"template_name": "tools"},
+            )
+        ),
+    )
+    runtime = TeamAgentSpec(
+        team_name=team_name,
+        agents={
+            role: DeepAgentSpec(
+                sys_operation=current_tool if explicit_runtime_tools else None,
+                system_prompt="new prompt must not overwrite history",
+            )
+            for role in ("leader", "teammate")
+        },
+    )
+    checkpoint.reviewer_agent = DeepAgentSpec(sys_operation=old_tool)
+    runtime.reviewer_agent = DeepAgentSpec(sys_operation=current_tool if explicit_runtime_tools else None)
+    session = create_agent_team_session(session_id=team_name, team_id=team_name)
+    write_team_namespace(
+        session,
+        team_name,
+        {
+            "spec": checkpoint.model_dump(mode="json"),
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {"team_name": team_name, "display_name": team_name, "leader_member_name": "leader"},
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+    configured = []
+    monkeypatch.setattr(TeamAgent, "configure", lambda self, spec, context: configured.append(spec))
+    TeamAgent.recover_from_session(session, team_name, runtime_spec=runtime)
+    recovered = configured[0]
+    expected = current_tool if explicit_runtime_tools else old_tool
+    for role in ("leader", "teammate"):
+        assert recovered.agents[role].sys_operation == expected
+        assert recovered.agents[role].system_prompt == "retained " + role
+    assert recovered.reviewer_agent.sys_operation == expected
+    assert recovered.agents["checkpoint-only"].sys_operation == old_tool
+    assert checkpoint.agents["leader"].sys_operation == old_tool
+    assert runtime.agents["leader"].system_prompt.startswith("new prompt")

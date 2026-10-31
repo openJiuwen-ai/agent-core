@@ -23,7 +23,7 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-10-26 |
+| 最近一次修订日期 | 2026-10-31 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_83_session-ddl-under-write-lock.md`、`B_07_team-interrupt-resume-entry-and-leader-ready.md` |
 
 ## 范围 / 边界
@@ -518,3 +518,8 @@ session.state
   类型，与 namespace 中的 `lifecycle: "running" | "paused"` 是**不同枚举**
   ——后者是 round 运行时状态，由 coordination 写入。混用会得到错误的恢复
   策略，命名相近务必看清来源。
+
+
+## 冷恢复时的工具配置来源
+
+`TeamAgent.recover_from_session(..., runtime_spec=...)` 保留 checkpoint 的成员、提示词和会话状态，但在创建 Leader 或恢复成员之前，对同名成员采用当前 `runtime_spec` 中显式提供的 `sys_operation`（包括当前 endpoint、挂载和身份配置）。Reviewer 同样处理。当前值为 `None` 时保留 checkpoint 值；不得据此隐式切到 LOCAL。只复制工具配置，不替换整份成员 spec，不修改调用方的 runtime spec。新成员仍经当前 Team blueprint 装配；恢复后的 blueprint 在后续 checkpoint 中正常持久化。

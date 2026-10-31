@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/runtime/`、`openjiuwen/core/runner/team_runner.py`（`_resolve_team_agent_spec` 入参归一化） |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-31 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md` |
 
 ## 范围 / 边界
@@ -159,8 +159,7 @@ F_05 之前还存在两个 kind：`WARM_RECOVER`（cross-session 复用同一个
 不允许的形态（运行时会报错或退化）：
 
 - `name + None session` —— pool 缺失时无源可读，直接拒绝。
-- `spec + old_session` 不被禁止但**不推荐**：caller 已经持 spec 时直接用，bucket
-  里的 spec 不再生效；如想从 bucket 拿 spec，请用 `name` 形态。
+- `spec + old_session` 在冷恢复时保留 bucket 的会话和成员声明，并合并当前 spec 的运行时依赖、模型池以及显式工具配置（见 S_04）。仅需完整沿用 checkpoint 配置时可用 `name` 形态。
 
 `agent_customizer` 在 `name` 路径上不可恢复——它是 `Field(exclude=True)` 的
 Callable，序列化时丢失，且 `_resolve_spec_from_session_bucket` 不接受

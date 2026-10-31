@@ -75,6 +75,27 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+def _merge_runtime_tool_configuration(checkpoint: TeamAgentSpec, runtime: TeamAgentSpec) -> None:
+    """Refresh explicit deployment tools while retaining checkpoint member state."""
+    for name, current_member in runtime.agents.items():
+        if name in checkpoint.agents and current_member.sys_operation is not None:
+            checkpoint.agents[name] = checkpoint.agents[name].model_copy(
+                update={
+                    "sys_operation": current_member.sys_operation.model_copy(deep=True),
+                }
+            )
+    if (
+        checkpoint.reviewer_agent is not None
+        and runtime.reviewer_agent is not None
+        and runtime.reviewer_agent.sys_operation is not None
+    ):
+        checkpoint.reviewer_agent = checkpoint.reviewer_agent.model_copy(
+            update={
+                "sys_operation": runtime.reviewer_agent.sys_operation.model_copy(deep=True),
+            }
+        )
+
+
 def team_member_execution_subject(
     *,
     session_id: str,
@@ -1899,7 +1920,8 @@ class TeamAgent(BaseAgent):
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
             runtime_spec: Optional live spec from the current process. Used to
-                reinject ``build_context`` and ``memory.embedding_config``, which
+                refresh explicitly configured member tool specifications and reinject
+                ``build_context`` and ``memory.embedding_config``, which
                 are ``Field(exclude=True)`` and never survive the checkpoint
                 round-trip. When omitted the recovered spec is used as-is
                 (rebuilding context from its seed).
@@ -1921,6 +1943,12 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        # Execution endpoints, credentials and mounts belong to the current
+        # deployment. Keep the checkpoint's roster/prompts/conversation, but
+        # refresh explicitly supplied tool specs before rebuilding any member.
+        # An omitted tool spec preserves the checkpoint rather than selecting LOCAL.
+        if runtime_spec is not None:
+            _merge_runtime_tool_configuration(spec, runtime_spec)
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
