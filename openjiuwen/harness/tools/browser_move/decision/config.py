@@ -19,6 +19,16 @@ class BrowserDecisionConfig:
     candidate_limit: int = 30
     min_confidence: float = 0.65
     fallback_reserve_ms: int = 1000
+    action_min_confidence: float | None = None
+    target_min_confidence: float | None = None
+
+    @property
+    def action_threshold(self) -> float:
+        return self.min_confidence if self.action_min_confidence is None else self.action_min_confidence
+
+    @property
+    def target_threshold(self) -> float:
+        return self.min_confidence if self.target_min_confidence is None else self.target_min_confidence
 
     def __post_init__(self) -> None:
         if self.mode not in {"llm", "shadow", "hybrid"}:
@@ -55,6 +65,9 @@ class BrowserDecisionConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
                 raise ValueError(f"browser.decision.{name} must be an integer between {lower} and {upper}")
-        if (isinstance(self.min_confidence, bool) or not isinstance(self.min_confidence, (int, float))
-                or not 0 <= self.min_confidence <= 1):
-            raise ValueError("browser.decision.min_confidence must be between 0 and 1")
+        for name in ("min_confidence", "action_min_confidence", "target_min_confidence"):
+            value = getattr(self, name)
+            if value is None and name != "min_confidence":
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                raise ValueError(f"browser.decision.{name} must be between 0 and 1")

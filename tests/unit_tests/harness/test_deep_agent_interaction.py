@@ -852,6 +852,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     write_result = AsyncMock()
     build_next_work = MagicMock(return_value=None)
 
+    monkeypatch.setattr(agent, "_ensure_initialized", AsyncMock())
     monkeypatch.setattr(
         agent,
         "prepare_interaction_task_loop",

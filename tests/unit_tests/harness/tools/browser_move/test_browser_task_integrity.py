@@ -426,7 +426,9 @@ def test_dynamic_sort_probe_emits_only_unique_actionable_targets(mode):
       global.window = {location:{hostname:'example.test', href:'https://example.test'},
         innerWidth:800, innerHeight:600, scrollX:0, scrollY:0,
         getComputedStyle:() => ({display:'block',visibility:'visible',opacity:'1',pointerEvents:'auto'})};
+      global.NodeFilter = {SHOW_TEXT:4};
       global.document = {title:'Sort', elementFromPoint:()=>target,
+        createTreeWalker:()=>({nextNode:()=>null}),
         querySelectorAll:(selector) => {
           if (selector.includes(',')) return [target];
           return MODE !== 'ambiguous' && selector.split(' > ').length >= 6 ? [target] : [target,twin];

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 ArtifactType: TypeAlias = Literal["program", "paper"]
 RsiScenario: TypeAlias = Literal["harness", "artifact"]
@@ -176,6 +176,7 @@ class EngineReport:
     # Defaults keep older program providers and persisted reports compatible.
     best_score: float | None = None
     baseline: float | None = None
+    score_details: dict[str, Any] | None = None
 
 
 __all__ = [

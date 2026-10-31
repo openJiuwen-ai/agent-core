@@ -102,6 +102,27 @@ _HTML_READ_CHUNK_CHARS = 16_384
 _PREVIOUS_ATTEMPT_NOTES_FILENAME = "PREVIOUS_ATTEMPT_NOTES.md"
 _LATEX_RUNTIME_CONFIG_FILENAME = ".latex-runtime.json"
 
+# The modify-run preamble below defaults to "regenerate every section,
+# don't copy verbatim" — correct for the common multi-iteration research
+# flow, but directly contradictory to a manager subtask contract that asks
+# for an append-only edit (preserve the paper, touch only the named
+# section(s)). Appended to both modify-run preambles so a restrictive
+# contract can override the default without the two instructions fighting
+# in the same prompt (observed against a real run: the model received
+# both "do not copy verbatim" and an append-only contract at once, and
+# produced neither a verbatim-preserved paper nor a fully regenerated one).
+_APPEND_ONLY_GUIDANCE = (
+    "If the manager subtask contract below restricts you to editing specific "
+    "section(s) only, follow that restriction instead of the general guidance "
+    'above -- "do not copy verbatim" does not apply to sections outside that '
+    "restriction. In that case you must still write every file under "
+    "sections/*.tex: for every section you are not asked to change, copy its "
+    "original content byte-for-byte into sections/<id>.tex; for the "
+    "section(s) you are asked to change, write the complete section file -- "
+    "keep its existing content and append your new material, never output "
+    "only the new material by itself."
+)
+
 
 class _HtmlTextExcerptParser(HTMLParser):
     """Collect bounded visible HTML text without retaining the whole document."""
@@ -364,7 +385,12 @@ class ReportingAgent:
         if summary_path is None:
             return None
         try:
-            summary = summary_path.read_text(encoding="utf-8")
+            # errors="replace": this is the same research_summary.md the
+            # bibliography pass below reads leniently -- every other local
+            # source read in this function (HTML excerpt, plain-text excerpt
+            # below) already tolerates bad bytes, this first/earliest read
+            # must not be the one that still crashes the whole attempt.
+            summary = summary_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
 
@@ -659,7 +685,7 @@ class ReportingAgent:
                     "Expand or repair the short/missing sections named above, then compile with "
                     "ts-latex. Prioritize actually finishing every section, compiling, and staying "
                     "within word/citation/traceable-number requirements over polish.\n\n"
-                    f"{bands}"
+                    f"{bands}\n\n{_APPEND_ONLY_GUIDANCE}"
                 )
             else:
                 preamble = (
@@ -672,7 +698,7 @@ class ReportingAgent:
                     "still supports, clearly labeling them as historical/prior-paper evidence rather "
                     "than new measurements. Revise or retract prior claims that this run contradicts. "
                     "Layout, prose, and figures may be regenerated.\n\n"
-                    f"{bands}"
+                    f"{bands}\n\n{_APPEND_ONLY_GUIDANCE}"
                 )
         else:
             preamble = (
@@ -1087,7 +1113,11 @@ class ReportingAgent:
         for section_id in DOCUMENT_ORDER:
             section_path = sections_dir / f"{section_id}.tex"
             if section_path.is_file():
-                drafts[section_id] = section_path.read_text(encoding="utf-8")
+                # errors="replace": a section file the agent's own session wrote
+                # can end up with a stray non-UTF-8 byte (e.g. an em dash written
+                # under the host's local codepage); one bad byte must not crash
+                # the whole reporting attempt and burn a retry over it.
+                drafts[section_id] = section_path.read_text(encoding="utf-8", errors="replace")
 
         notes: list[str] = []
         if session_error:
@@ -1133,10 +1163,14 @@ class ReportingAgent:
         title_path = workspace / "title.txt"
         if title_path.is_file():
             keywords_path = workspace / "keywords.txt"
-            keywords = keywords_path.read_text(encoding="utf-8").strip() if keywords_path.is_file() else None
+            keywords = (
+                keywords_path.read_text(encoding="utf-8", errors="replace").strip()
+                if keywords_path.is_file()
+                else None
+            )
             (workspace / "main.tex").write_text(
                 assemble_document(
-                    title=title_path.read_text(encoding="utf-8").strip(),
+                    title=title_path.read_text(encoding="utf-8", errors="replace").strip(),
                     section_bodies=drafts,
                     document_order=DOCUMENT_ORDER,
                     keywords=keywords,

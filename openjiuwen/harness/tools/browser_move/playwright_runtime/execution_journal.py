@@ -262,7 +262,7 @@ def _log(state: dict[str, Any], entry: dict[str, Any]) -> None:
 
 
 def _never_performed(error: Any) -> bool:
-    """Playwright timed out while still waiting (e.g. for a visible, enabled, stable element).
+    """Playwright failed locator resolution/actionability before sending the action.
 
     Its call log says "performing <action>" only once the action is actually sent to the page; an
     error without a call log proves nothing and stays uncertain.
@@ -271,7 +271,12 @@ def _never_performed(error: Any) -> bool:
     # Strip formatting before parsing entries; never infer dispatch from DOM text.
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error or ""))
     header, separator, call_log = text.partition("Call log:")
-    if not separator or not re.search(r"(?:Timeout|TimeoutError).*exceeded", header):
+    strict = re.match(
+        r"(?:### Error\s+)?(?:(?:Error|browserBackend\.callTool|locator\.[\w]+):\s*)*"
+        r"strict mode violation: [^\n]+ resolved to ([0-9]+) elements:", header.strip(),
+    )
+    preflight = bool(strict and int(strict[1]) > 1) or bool(re.search(r"(?:Timeout|TimeoutError).*exceeded", header))
+    if not separator or not preflight:
         return False
     # Only executor log entries count: DOM/page strings and missing logs prove nothing.
     lines = [line.strip()[2:].strip().lower() for line in call_log.splitlines()
@@ -292,8 +297,8 @@ def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
     error = result.get("error") or result.get("result") or ""
     return isinstance(error, str) and bool(
         re.fullmatch(
-            r"(?:### Error\s+)?(?:Error: )?Ref [\w.-]+ not found in the current page snapshot\. "
-            r"Try capturing new snapshot\.?\s*",
+            r'(?:### Error\s+)?(?:Error: )?(?:Ref [\w.-]+ not found in the current page snapshot\. '
+            r'Try capturing new snapshot\.?|"[^\r\n]+" does not match any elements\.)\s*',
             error,
         )
     )
@@ -301,6 +306,11 @@ def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
 
 def _aggregate(entry: dict[str, Any]) -> None:
     steps = entry["steps"]
+    # A reader may fail to observe its condition; it cannot leave a mutation unknown.
+    # Keep the failed step and prior ACKs visible, including in older executor receipts.
+    for step in steps:
+        if step["impact"] == "read" and step["execution_state"] == "dispatched_unknown":
+            step["execution_state"] = "partial"
     states = {s["execution_state"] for s in steps}
     if "dispatched_unknown" in states:
         entry["execution_state"] = "dispatched_unknown"
@@ -325,13 +335,18 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
     rejected = (
         outcome.get("denied")
         or result.get("executed") is False
-        or _native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
         or not success and result.get("executed") is not True
-        and str(getattr(inputs, "tool_name", "")).endswith(("browser_click", "browser_type", "browser_select_option"))
-        and _never_performed(result.get("error") or result.get("result"))
+        and (
+            _native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
+            or str(getattr(inputs, "tool_name", "")).endswith(
+                ("browser_click", "browser_type", "browser_select_option", "browser_press_key")
+            ) and _never_performed(result.get("error") or result.get("result"))
+        )
     )
     executed = False if rejected else True if success else result.get("executed")
     status = "rejected_before_dispatch" if rejected else "acknowledged" if success else "dispatched_unknown"
+    if status == "dispatched_unknown" and not is_write(str(getattr(inputs, "tool_name", "")), arguments(inputs)):
+        status = "partial"
     entry = next((e for e in state.get("execution_journal", []) if e["call_id"] == _id(inputs)), None)
     if entry is None:
         return {"executed": executed, "execution_state": status}
@@ -350,7 +365,7 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
             uncertain_execution = not ok and ran is not False and ran is not True
             if (
                 uncertain_execution
-                and step.get("op") in {"click", "fill", "type", "select_option", "set_checked"}
+                and step.get("op") in {"click", "fill", "type", "select_option", "set_checked", "press", "press_key"}
                 and _never_performed(received.get("error"))
             ):
                 ran = False  # Timed out before the action was sent: not a write, nothing to reconcile.
@@ -372,7 +387,7 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
             step.update(execution_state="dispatched_unknown", executed=None)
         else:
             step.update(execution_state=status, executed=executed)
-        if step.get("executed") is True and step.get("expected_feedback"):
+        if step.get("execution_state") in {"acknowledged", "verified"} and step.get("expected_feedback"):
             step["observed_feedback"] = step["expected_feedback"]
             step["evidence_ref"] = {"call_id": entry["call_id"], "source": entry.get("source"),
                                     "reader": "wait_for_text"}

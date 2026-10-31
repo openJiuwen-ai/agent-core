@@ -5,6 +5,7 @@
 import asyncio
 import math
 import ssl
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from types import TracebackType
@@ -15,6 +16,7 @@ import httpx
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger
+from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.foundation.llm.system_one.schema import (
     SystemOneQuestion,
@@ -22,6 +24,7 @@ from openjiuwen.core.foundation.llm.system_one.schema import (
     SystemOneState,
     _SystemOneRequest,
 )
+from openjiuwen.core.foundation.llm.utils.provider_error import format_provider_exception
 
 _SYSTEM_ONE_ENDPOINT: Final = "/v1/systemone"
 _RETRYABLE_STATUS_CODES: Final = frozenset({429, 529})
@@ -67,6 +70,15 @@ def _retry_after_seconds(headers: httpx.Headers) -> float | None:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    return None
+
+
+def _loggable_body(response: httpx.Response | None) -> str | None:
+    """Return the body for llm.log; error bodies may echo request state."""
+    if response is None:
+        return None
+    if response.is_success or not UserConfig.is_sensitive():
+        return response.text
     return None
 
 
@@ -192,6 +204,8 @@ class JevSystemOneClient:
             model_provider="jev",
         )
 
+        started = time.monotonic()
+        response = None
         try:
             response = await self._post_with_retry(
                 url,
@@ -202,13 +216,49 @@ class JevSystemOneClient:
             response.raise_for_status()
             # A boolean/string confidence must not become a valid float before
             # callers enforce their decision thresholds and distributions.
-            return SystemOneResponse.model_validate(response.json(), strict=True)
+            result = SystemOneResponse.model_validate(response.json(), strict=True)
         except (httpx.HTTPError, ValueError) as exc:
+            llm_logger.error(
+                "Jev System One request failed.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=resolved_model,
+                model_provider="jev",
+                latency_ms=(time.monotonic() - started) * 1000,
+                exception=format_provider_exception(exc),
+                metadata={
+                    "url": url,
+                    "status_code": None if response is None else response.status_code,
+                    "response": _loggable_body(response),
+                },
+            )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"Jev System One request failed: {exc}",
                 cause=exc,
             ) from exc
+        except asyncio.CancelledError:
+            # Callers bound Jev with asyncio.timeout; an unreachable api_base
+            # ends here instead of in the error branch above.
+            llm_logger.warning(
+                "Jev System One request cancelled.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=resolved_model,
+                model_provider="jev",
+                latency_ms=(time.monotonic() - started) * 1000,
+                metadata={"url": url},
+            )
+            raise
+
+        llm_logger.info(
+            "Jev System One response received.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=resolved_model,
+            model_provider="jev",
+            latency_ms=(time.monotonic() - started) * 1000,
+            usage=result.usage.model_dump(),
+            metadata={"status_code": response.status_code, "response": response.text},
+        )
+        return result
 
     async def _post_with_retry(
         self,
@@ -230,6 +280,13 @@ class JevSystemOneClient:
 
             retry_after = _retry_after_seconds(response.headers)
             delay = retry_after if retry_after is not None else self.retry_backoff * (2**attempt)
+            llm_logger.warning(
+                "Jev System One returned a retryable status, retrying.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=json.get("model"),
+                model_provider="jev",
+                metadata={"status_code": response.status_code, "attempt": attempt + 1, "delay_s": delay},
+            )
             await asyncio.sleep(delay)
 
         raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="System One retry loop returned no response.")

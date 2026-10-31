@@ -3,6 +3,11 @@
 workspace_dir: .local/rsi/workspace
 max_epochs: 5
 
+promotion:
+  policy_version: continuous_two_stage_v2
+  min_improvement: 0.05
+  non_target_max_regression: 0.05
+
 model_configs:
   evaluation: ""
   analysis: ""
@@ -18,20 +23,36 @@ data_loader:
     - task_type
 
 evaluator:
+  score_mode: continuous
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
+  solver_max_iterations: 300
+  solver_on_max_iterations: error
+  solver_max_iterations_hard_limit: 300
+  judge_agent_max_iterations: 300
   backend: single_harness
   evaluation_method: script-based
   transient_case_retry_limit: 2
 
 evaluation_result_analyzer:
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
   diagnosis_agent_max_retries: 2
   diagnosis_agent_max_concurrency: 5
-  diagnosis_agent_max_iterations: 20
+  diagnosis_agent_max_iterations: 300
   max_issues: 8
   evidence_limit_per_issue: 3
   output_filename: issues.yaml
 
 member_optimizer:
+  action_planning_max_attempts: 10
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
   action_group_configs:
+    - config
     - prompt
     - skill
     - tool
@@ -43,5 +64,4 @@ member_optimizer:
 scheduling:
   evaluation_strategy: hybrid
   coordination_strategy: team_first_single_pass
-  promotion_policy: epoch_full_evaluation
   full_evaluation_enabled: true

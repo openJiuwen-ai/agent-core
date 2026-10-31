@@ -16,6 +16,8 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
@@ -103,7 +105,17 @@ class SessionManager:
         self._state.team_session = session if isinstance(session, AgentTeamSession) else None
 
         if team_backend:
-            await team_backend.db.create_cur_session_tables()
+            try:
+                tables_ready = await team_backend.db.create_cur_session_tables()
+                if tables_ready is False:
+                    raise build_error(
+                        StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                        error_msg="team session database initialization failed",
+                    )
+            except BaseException:
+                self._reset_session_id_token()
+                self._state.team_session = None
+                raise
 
         spec = self._configurator.spec
         if spec and self._configurator.role == TeamRole.LEADER:

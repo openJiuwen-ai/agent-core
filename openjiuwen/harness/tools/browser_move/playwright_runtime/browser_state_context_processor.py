@@ -147,6 +147,10 @@ class BrowserStateContextProcessor(ContextProcessor):
         del kwargs
         source_messages = context.get_messages() if context is not None else context_window.context_messages
         action_group_id, refresh_tool_call_ids, observation_only = self._completed_state_action_group(source_messages)
+        invalidated = any(
+            isinstance(message, ToolMessage) and str(message.tool_call_id or "") in refresh_tool_call_ids
+            and self._tool_observation_invalidated(message) for message in source_messages
+        )
         reconciliation_only = self._requires_reconciliation(source_messages, refresh_tool_call_ids)
         should_refresh = self._cached_state is None or bool(
             action_group_id and action_group_id not in self._seen_action_group_ids
@@ -163,7 +167,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                     include_decision = self.config.decision_policy.should_observe(context) or include_decision
                 except Exception:
                     browser_agent_log_warning("[BROWSER_POLICY] observation eligibility failed; use original LLM")
-            if reconciliation_only and action_group_id:
+            if invalidated and action_group_id:
+                captured_state = await self._capture_compact_state(action_group_id=action_group_id)
+            elif reconciliation_only and action_group_id:
                 captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id,
                                                                          include_decision=include_decision)
             elif observation_only and action_group_id:
@@ -311,9 +317,12 @@ class BrowserStateContextProcessor(ContextProcessor):
         observation_ids: set[str] = set()
         for tool_call in tool_calls:
             call_id = str(tool_call.id or "")
+            tool_message = tool_messages.get(call_id)
+            if call_id and cls._tool_observation_invalidated(tool_message):
+                observation_ids.add(call_id)  # A denied action can still disprove its cached dispatch basis.
+                continue
             if not call_id or call_id not in executed_call_ids:
                 continue
-            tool_message = tool_messages.get(call_id)
             if cls._is_refresh_tool_name(tool_call.name) and cls._tool_message_changed_state(tool_message):
                 mutation_ids.add(call_id)
             if cls._is_observation_tool_name(tool_call.name) and cls._tool_message_succeeded(tool_message):
@@ -344,6 +353,18 @@ class BrowserStateContextProcessor(ContextProcessor):
             if cls._tool_message_was_executed(message)
         }
         return completed_call_ids, tool_messages, executed_call_ids
+
+    @staticmethod
+    def _tool_observation_invalidated(message: ToolMessage | None) -> bool:
+        if message is None:
+            return False
+        if (message.metadata or {}).get("observation_invalidated") is True:
+            return True
+        try:
+            result = json.loads(message.content)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(result, dict) and result.get("observation_invalidated") is True
 
     @staticmethod
     def _tool_message_was_executed(message: ToolMessage) -> bool:

@@ -121,13 +121,13 @@ def test_populated_search_can_use_explicit_new_query_and_then_submit():
     assert not any(s["op"] == "press" for s in menu.steps.values())
     field["decision_state"]["current_value"] = "Python教程"
     menu = build_menu([field], "搜索“Python教程”，切换到“最多播放”", limit=30)
-    assert [s["op"] for s in menu.steps.values()] == ["press"]
+    assert [s["op"] for s in menu.steps.values()] == ["press", "extract_value"]
 
 
 def test_multiple_actual_queries_do_not_become_implicit_field_values():
     field = control("search", "Search", 1, tag="input", search_like=True, current_value="")
     field["role"] = "searchbox"
-    assert not build_menu([field], "搜索“鼠标”和“键盘”", limit=30).steps
+    assert {s["op"] for s in build_menu([field], "搜索“鼠标”和“键盘”", limit=30).steps.values()} == {"extract_value"}
 
 
 def test_optional_click_intent_keeps_fixed_reads_available():
@@ -451,14 +451,15 @@ def test_first_result_never_compiles_second_result_click_and_reads_when_order_mi
     menu = build_menu(
         [link], "打开第一条搜索结果", limit=30, page=page, allow_page_actions=True, probe_tools=("browser_probe_cards",)
     )
-    assert all(s.get("target_id") != "baike" for s in menu.steps.values())
+    assert not any(s["op"] in {"click", "navigate"} for s in menu.steps.values())
     assert any(s["op"] == "probe_cards" for s in menu.steps.values())
     page.update(cards=[first_card()], cards_observed=True)
     menu = build_menu(
         [link], "打开第一条搜索结果", limit=30, page=page, allow_page_actions=True, probe_tools=("browser_probe_cards",)
     )
     assert any(s.get("url") == "https://www.tsinghua.edu.cn/" for s in menu.steps.values())
-    assert all(s.get("target_id") != "baike" and s["op"] != "probe_cards" for s in menu.steps.values())
+    assert not any(s["op"] == "click" and s.get("target_id") == "baike" for s in menu.steps.values())
+    # Reader retirement belongs to the existing shared receipts, not a cards-present flag.
 
 
 @pytest.mark.asyncio
@@ -469,7 +470,7 @@ async def test_fixed_read_then_first_navigation_stays_in_one_guarded_loop():
     page.observe(url="https://www.baidu.com/s?wd=清华大学")
     page.decision_snapshot["page_guard"] = {"document": "doc"}
     tools = [{"name": name} for name in ("browser_probe_cards", "browser_page_action")]
-    choose_matching(client, "READ ordered result")
+    choose_matching(client, "READ first up to")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=tools)
     call = result.tool_calls[0]
     assert call.name == "browser_probe_cards"
@@ -500,7 +501,7 @@ async def test_read_coverage_preserves_late_guards_llm_fallback_and_cancellation
     runtime.decision_policy = policy
     page = runtime.ensure_page_state()
     page.decision_snapshot["page_guard"] = {"document": "doc"}
-    choose_matching(client, "READ ordered result")
+    choose_matching(client, "READ first up to")
     tools = [{"name": "browser_probe_cards"}]
     if failure == "provider":
         client.evaluate.side_effect = DecisionUnavailable("jev_http_503")

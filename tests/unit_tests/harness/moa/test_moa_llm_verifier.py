@@ -256,9 +256,7 @@ async def test_real_tracker_keeps_submitted_steps_after_exception_or_invalid_sco
     with pytest.raises(BaseError) as error:
         await scorer("task", ("step 1",), 1)
     assert error.value.status is StatusCode.DEEPAGENT_RUNTIME_ERROR
-    if isinstance(first_response, Exception):
-        assert error.value.cause is first_response
-        assert error.value.__cause__ is first_response
+    assert "no valid progress scores" in str(error.value)
     assert await scorer("task", ("step 1", "step 2"), 1) == 1.0
     assert scorer._tracker._step_texts == ["step 1", "step 2"]
     prompt = model.invoke.call_args.kwargs["messages"][0].content
@@ -378,7 +376,7 @@ async def test_all_invalid_scores_keep_step_and_explicit_invalid_history():
 
 
 @pytest.mark.asyncio
-async def test_repeat_exception_waits_for_other_requests_and_retains_submitted_step():
+async def test_repeat_exception_keeps_successful_scores_and_retains_submitted_step():
     all_started = asyncio.Event()
     failed = asyncio.Event()
     release = asyncio.Event()
@@ -408,17 +406,13 @@ async def test_repeat_exception_waits_for_other_requests_and_retains_submitted_s
         assert not running.done()
     finally:
         release.set()
-    with pytest.raises(BaseError, match="scoring request failed") as error:
-        await running
-    assert error.value.status is StatusCode.DEEPAGENT_RUNTIME_ERROR
-    assert isinstance(error.value.cause, RuntimeError)
-    assert error.value.__cause__ is error.value.cause
-    assert str(error.value.cause) == "request failed"
+    assert await running == 1.0
     assert sorted(completed) == [1, 2]
-    assert tracker.steps == [] and tracker._step_texts == ["step 1"]
+    assert tracker.steps == [1] and tracker._step_texts == ["step 1"]
+    assert tracker.result().per_rep_scores == [[None], [1.0], [1.0]]
     candidate.invoke = AsyncMock(return_value=AssistantMessage(content="<c1>T</c1>"))
     assert await tracker.update("step 2") == 1.0
-    assert tracker.result().steps == [2]
+    assert tracker.result().steps == [1, 2]
     assert tracker._step_texts == ["step 1", "step 2"]
     prompt = candidate.invoke.await_args.kwargs["messages"][0].content
     assert prompt.count("step 1") == prompt.count("step 2") == 1
@@ -583,7 +577,7 @@ def test_non_numeric_alternatives_do_not_become_probability_scores():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "configured, temperature, max_tokens", [({}, 1.0, 4096), ({"temperature": 0.4, "max_tokens": 2048}, 0.4, 2048)]
+    "configured, temperature, max_tokens", [({}, 1.0, None), ({"temperature": 0.4, "max_tokens": 2048}, 0.4, 2048)]
 )
 async def test_chat_wire_preserves_config_and_decodes_returned_probability(configured, temperature, max_tokens):
     model = Model(
@@ -644,7 +638,11 @@ async def test_chat_wire_preserves_config_and_decodes_returned_probability(confi
         assert await scorer("verify the task", ("ran validation",), 1) == pytest.approx(0.75)
     assert len(sent) == 1
     assert sent[0]["logprobs"] is True and sent[0]["top_logprobs"] == 20
-    assert sent[0]["temperature"] == temperature and sent[0]["max_tokens"] == max_tokens
+    assert sent[0]["temperature"] == temperature
+    if max_tokens is None:
+        assert "max_tokens" not in sent[0]
+    else:
+        assert sent[0]["max_tokens"] == max_tokens
     assert "tools" not in sent[0]
     assert sent[0]["messages"][0]["role"] == "user"
     assert "Attached images" not in sent[0]["messages"][0]["content"]
@@ -670,6 +668,7 @@ def test_non_chat_scoring_models_fail_at_construction(provider, api_mode):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_tokens", [None, 2048])
 @pytest.mark.parametrize(
     "status,message,fallback",
     [
@@ -680,7 +679,7 @@ def test_non_chat_scoring_models_fail_at_construction(provider, api_mode):
         (429, "logprobs is not supported", False),
     ],
 )
-async def test_explicit_parameter_rejection_falls_back_to_real_text_scores(status, message, fallback):
+async def test_explicit_parameter_rejection_falls_back_to_real_text_scores(status, message, fallback, max_tokens):
     model = Model(
         model_client_config=ModelClientConfig(
             client_provider="OpenAI",
@@ -689,8 +688,9 @@ async def test_explicit_parameter_rejection_falls_back_to_real_text_scores(statu
             max_retries=0,
             use_shared_llm_http_client=True,
         ),
-        model_config=ModelRequestConfig(model="verifier"),
+        model_config=ModelRequestConfig(model="verifier", max_tokens=max_tokens),
     )
+    before = model.model_config.model_dump()
     sent = []
 
     async def handler(request):
@@ -738,6 +738,12 @@ async def test_explicit_parameter_rejection_falls_back_to_real_text_scores(statu
                 with pytest.raises(Exception):
                     await score("task", ("step1",), 1)
                 assert len(sent) == 1
+    for body in sent:
+        if max_tokens is None:
+            assert "max_tokens" not in body
+        else:
+            assert body["max_tokens"] == max_tokens
+    assert model.model_config.model_dump() == before
 
 
 @pytest.mark.parametrize(
@@ -762,3 +768,28 @@ def test_text_only_prompt_matches_pinned_upstream(problem, steps, checkpoints, e
 def test_progress_prompt_has_no_image_parameter_or_branch():
     assert "n_images" not in inspect.signature(build_progress_prompt).parameters
     assert "n_images" not in inspect.getsource(build_progress_prompt)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "responses, expected, counts",
+    [
+        ([RuntimeError("private-api-key"), "<c1>A</c1>", "<c1>T</c1>"], 0.5, (2, 1, 0)),
+        ([RuntimeError("private-api-key"), "unparseable", "<c1>T</c1>"], 1.0, (1, 1, 1)),
+        ([RuntimeError("private-api-key")] * 3, None, (0, 3, 0)),
+    ],
+)
+async def test_partial_failures_average_only_valid_samples_and_log_safe_counts(responses, expected, counts):
+    outputs = [AssistantMessage(content=value) if isinstance(value, str) else value for value in responses]
+    tracker = ProgressTracker("private-prompt", model=model(AsyncMock(side_effect=outputs)), n_evaluations=3)
+    with patch("openjiuwen.harness.moa.verifier.llm_verifier.progress.agent_logger") as logger:
+        value = await tracker.update("private-step")
+    valid = [row[-1] for row in tracker.result().per_rep_scores if row[-1] is not None]
+    assert value == (expected if expected is not None else 0.5)
+    assert len(valid) == counts[0]
+    aggregate = next(call for call in logger.info.call_args_list if "aggregate" in call.args[0])
+    assert aggregate.args[4:7] == counts
+    assert aggregate.args[7] == expected
+    assert "private-api-key" not in str(logger.mock_calls)
+    assert "private-prompt" not in str(logger.mock_calls)
+    assert "private-step" not in str(logger.mock_calls)

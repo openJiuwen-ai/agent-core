@@ -43,7 +43,12 @@ from tests.unit_tests.harness.tools.browser_move.test_browser_jev_phase_contract
     new_state,
     session_for,
 )
-from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import TOOLS, messages_for, setup_policy
+from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import (
+    TOOLS,
+    choose_operation,
+    messages_for,
+    setup_policy,
+)
 from tests.unit_tests.harness.tools.browser_move.test_browser_september17_contracts import dom_page  # noqa: F401
 
 
@@ -308,9 +313,11 @@ async def test_simple_goal_with_then_does_not_require_phase_but_ambiguous_values
     await policy.invoke(await messages_for(policy, context, captured), tools=[*TOOLS, {"name": "browser_phase"}])
     assert client.evaluate.await_count == 1
     policy, llm, client, _, context, captured = setup_policy(goal="分别搜索“mouse”和“keyboard”")
+    choose_operation(client, "HANDOFF")
     response = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
-    assert response.metadata["browser_policy"]["reason"] == "no_supported_actions"
-    client.evaluate.assert_not_awaited()
+    assert response.metadata["browser_policy"]["reason"] == "handoff_to_llm"
+    criteria = client.evaluate.call_args.args[0]["questions"]["action"]["criteria"]
+    assert "TYPE_TEXT" not in criteria and "READ_TARGET_TEXT" in criteria
     llm.invoke.assert_awaited_once()
 
 
@@ -441,7 +448,9 @@ def test_satisfied_optional_fill_condition_does_not_block_search_submit():
     observe_conditions(state, {"capture_id": "filled", "controls": [field]})
     menu = build_menu([field], state["goal"], limit=30, field_bindings=state["active_phase_contract"]["bindings"])
     constrain_actions(menu, state, [field])
-    assert list(menu.steps.values()) == [{"target_id": "q", "op": "press", "key": "Enter"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "q", "op": "press", "key": "Enter"}
+    ]
 
 
 def test_navigation_expires_unexecuted_node_binding_without_forging_proof():

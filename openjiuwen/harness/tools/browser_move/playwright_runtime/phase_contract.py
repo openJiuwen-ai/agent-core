@@ -37,6 +37,8 @@ OPERATIONS = {
     "hover",
     "select_tab",
     "read_text",
+    "extract_text",
+    "extract_value",
     "find",
     "snapshot",
     "tabs",
@@ -143,7 +145,10 @@ def binding_targets(controls: list[dict[str, Any]], *, limit: int = 30) -> dict[
     valid = [c for c in controls if _is_bindable(c, counts)]
     return {
         "targets": [{"target_id": c["target_id"], "name": str(c.get("name") or c.get("text") or "")[:120],
-                     "role": c.get("role"), "field": (c.get("decision_state") or {}).get("tag")}
+                     "role": c.get("role"), "field": (c.get("decision_state") or {}).get("tag"),
+                     "href": str(c.get("href") or (c.get("decision_state") or {}).get("href") or "")[:240],
+                     "region": c.get("region"),
+                     "nearby_text": str((c.get("decision_state") or {}).get("nearby_text") or "")[:240]}
                     for c in valid[:limit]],
         "omitted": max(0, len(valid) - limit), "unbound": len(controls) - len(valid),
         "refresh": "browser_probe_interactives or browser_phase verify; use these target_ids, not AX refs",
@@ -237,7 +242,8 @@ def _control(controls: list[dict[str, Any]], target_id: Any) -> dict[str, Any]:
                   else "non_unique" if len(matches) > 1 else "missing_identity")
         raise PhaseInputError("phase_target_requires_fresh_unique_observation", target_id=target_id,
                               reason=reason, bindings=binding_targets(controls),
-                              correction="Refresh and rebind; omit optional binding for an objective-only update.")
+                              correction="Use current phase_bindings targets; historical/navigation-only cards are "
+                              "not control bindings. Refresh and rebind, or omit binding for an objective-only update.")
     return matches[0]
 
 
@@ -522,8 +528,20 @@ def constrain_actions(menu: Any, state: dict[str, Any], controls: list[dict[str,
         # Local intent constrains mutations; fixed observations can establish
         # whether it is satisfied, like the existing VERIFY operation.
         allowed = step["op"] in phase["allowed_operations"] or step["op"] in {
-            "probe_cards", "probe_interactives", "read_text", "find", "snapshot", "tabs", "wait"
+            "probe_cards",
+            "probe_interactives",
+            "read_text",
+            "extract_text",
+            "extract_value",
+            "find",
+            "snapshot",
+            "tabs",
+            "wait",
         }
+        if step["op"] == "navigate" and phase["targets"]:
+            # A generic observed card must not evade the LLM's selected-object binding.
+            allowed = allowed and any(c.get("href") == step.get("url") and any(
+                same_node(binding, c) for binding in phase["targets"]) for c in controls)
         if control:
             if phase["targets"]:
                 allowed = allowed and any(same_node(binding, control) for binding in phase["targets"])
@@ -547,12 +565,25 @@ class BrowserPhaseTool(Tool):
                 name="browser_phase",
                 description=(
                     "Optional local intent update or explicit fresh verification. Ordinary browser actions do not "
-                    "require this tool. Set needs only objective; allowed_operations, observed target_ids, "
+                    "require this tool. Set requires op=set and objective; omit phase_version/inspect_cart from set. "
+                    "Verify uses op=verify with optional phase_version/inspect_cart, without set fields. "
+                    "allowed_operations, observed target_ids, "
                     "bound_values [{target_id,value}] and conditions are optional. For complex work prepare one "
                     "current executable fragment with resolved parameters and known completion conditions; "
                     "update only when intent/bindings change, not before each action. Example: "
                     '{"op":"set","objective":"Search the selected query and read its results"}. '
-                    "Use target_ids from browser_state.phase_bindings, not native AX refs. "
+                    "In normal interpretation/recovery, preserve the selected objects with target_ids and limit "
+                    "allowed_operations to remaining work. For read-only work: "
+                    '{"op":"set","objective":"Read details of the selected item",'
+                    '"allowed_operations":["read_text","find","snapshot"]}. '
+                    "target_ids bind operation controls, not merely matching object names: an item title link "
+                    "opens details and cannot stand in for a remove/edit button. If that control is missing, "
+                    "inspect with a targeted probe/snapshot or use an ordinary LLM tool; do not hand off an "
+                    "unbound mutation with every operation enabled. "
+                    "When source observations already answer the goal, answer directly instead of adding steps. "
+                    "Use current browser_state.phase_bindings target_ids, not native AX refs or historical card IDs. "
+                    "A navigation-only card is an observed object, not a guarded control binding: retain its "
+                    "primary_link in the objective and omit optional target_ids until a fresh control is observed. "
                     'Example condition: {"kind":"url_query","key":"order","value":"pubdate"}. '
                     'Example verify: {"op":"verify"}. To discover cart reader selectors without arbitrary scripts: '
                     '{"op":"verify","inspect_cart":true}; hints do not establish a baseline. '

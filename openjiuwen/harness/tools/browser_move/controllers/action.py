@@ -291,7 +291,9 @@ def validate_batch_steps(steps: Any) -> list[str]:
             continue
         op = str(step.get("op") or "").strip().lower()
         if op not in _BATCH_SUPPORTED_OPS:
-            errors.append(f"steps[{index}].op is unsupported: {op or '<missing>'}")
+            correction = ("; use browser_page_action with generation_id and op=snapshot or op=wait,ms=500"
+                          if op in {"snapshot", "wait"} else "; choose a supported batch step operation")
+            errors.append(f"steps[{index}].op is unsupported: {op or '<missing>'}{correction}")
             continue
         errors.extend(_validate_batch_op_requirements(index, op, step))
         errors.extend(_validate_batch_locator_contract(index, op, step))
@@ -1089,7 +1091,8 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "      const step = steps[index] || {};\n"
         "      const targetId = kind === 'option' ? step.resolved_option_target_id : step.resolved_target_id;\n"
         "      if (targetId && (pageNavigated || page !== initialPage || page.url() !== initialPageUrl)) {\n"
-        "        throw new Error('stale target after navigation; observe the current page before acting');\n"
+        "        throw new Error('browser_observation_stale: target_after_navigation; "
+        "stale target after navigation; observe the current page before acting');\n"
         "      }\n"
         "      const checked = await validateTarget(locator, timeout, requireEnabled);\n"
         "      return checked;\n"
@@ -2540,10 +2543,11 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "steps": (
                 "list[object]: required, 1-25 items. Each step has op plus target fields. Supported op values: "
                 "click, fill, type, autocomplete, select_visible_text, press, select_option, set_checked, "
-                "wait_for_selector, wait_for_text, wait_for_load_state, wait_for_url, "
-                "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
-                "wait_for_dom_text_change, wait_for_stable, wait_for_tab, extract_text, extract_value, "
-                "screenshot. Targets may use selector, role+name, label, placeholder, testid, or text. "
+                "extract_text, extract_value, screenshot. Common conditional waits: wait_for_selector with "
+                "an observed target, wait_for_text with text, wait_for_url with an observed destination, or "
+                "wait_for_tab for a new page from this action. Other legacy wait operations remain supported. "
+                "Consume the returned observation first; wait/snapshot belong to browser_page_action. "
+                "Targets may use selector, role+name, label, placeholder, testid, or text. "
                 "For fill/type/autocomplete use value. For autocomplete also use choose_text/option_text "
                 "or option_selector/choose_selector. For native select_option, use value/option_value, "
                 "option_text/option_label/label_value, index, or values for MCP-style multi/single selection."

@@ -30,7 +30,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import MemberAc
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     load_action_definitions,
 )
-from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import MemberActionPlanner
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import ActionPlanRejectedError, MemberActionPlanner
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
@@ -134,18 +134,25 @@ class MemberOptimizer:
         self.config = config
         self._action_group_config_paths: list[str] = list(config.action_group_configs)
 
-        self._role_attributor = role_attributor or RoleAttributor()
-        self._mechanism_attributor = mechanism_attributor or MechanismAttributor()
+        self._role_attributor = role_attributor or RoleAttributor(output_repair=config.output_repair)
+        self._mechanism_attributor = mechanism_attributor or MechanismAttributor(output_repair=config.output_repair)
         self._member_selector = member_selector or MemberSelector()
-        self._action_planner = action_planner or MemberActionPlanner()
+        self._action_planner = action_planner or MemberActionPlanner(
+            output_repair=config.output_repair,
+            max_attempts=config.action_planning_max_attempts,
+        )
         self._action_executor = action_executor or MemberActionExecutor(
             execution_concurrency=config.execution_concurrency,
             role_execution_concurrency=config.role_execution_concurrency,
             action_execution_concurrency_per_role=config.action_execution_concurrency_per_role,
             agent_skills_dirs=config.agent_skills_dirs,
+            output_repair=config.output_repair,
+            runtime_iteration_hard_limit=config.runtime_iteration_hard_limit,
         )
         self._verifier = verifier or HarnessChangeVerifier(
             agent_skills_dirs=config.agent_skills_dirs,
+            output_repair=config.output_repair,
+            runtime_iteration_hard_limit=config.runtime_iteration_hard_limit,
         )
 
     def register_action_group(self, action_group_config_path: str) -> None:
@@ -1346,7 +1353,12 @@ def _write_current_harness_refs(
 
 def _is_action_plan_rejection(error: Exception) -> bool:
     """Treat an LLM plan that fails the action contract as a rejected candidate."""
-    return isinstance(error, RuntimeError) and str(error).startswith("Member action plan validation failed:")
+    if isinstance(error, ActionPlanRejectedError):
+        return True
+    # Keep compatibility with injected planners using the original error text.
+    return isinstance(error, RuntimeError) and str(error).startswith(
+        ("Member action plan validation failed:", "Member action plan validation failed ("),
+    )
 
 
 __all__ = [

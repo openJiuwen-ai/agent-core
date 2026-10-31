@@ -269,3 +269,39 @@ def test_task_query_keeps_repair_instruction_and_contract_brief():
     assert "abstract is 40 words short" in query
     assert "## Manager subtask contract" in query
     assert "finish the paper" in query
+
+
+def test_task_query_omits_append_only_guidance_for_from_scratch_runs():
+    # previous_context=None (the default) is the from-scratch path -- the
+    # append-only guidance only matters once there's a prior paper to
+    # preserve sections of, so it must not appear here.
+    query = ReportingAgent._build_task_query({"design": "the living design"}, "")
+
+    assert "restricts you to editing specific" not in query
+
+
+def test_task_query_includes_append_only_guidance_for_modify_runs():
+    # A non-None previous_context is today's only signal for "this is a
+    # modify-paper run" (see agent.py's `modify = previous_context is not
+    # None); any truthy sentinel exercises that branch without needing a
+    # real ResearchContext.
+    query = ReportingAgent._build_task_query(
+        {"design": "the living design"},
+        "",
+        previous_context=object(),
+    )
+
+    assert "restricts you to editing specific" in query
+    assert "copy its original content byte-for-byte" in query
+
+
+def test_task_query_includes_append_only_guidance_on_modify_retry():
+    # Same guidance must survive on the repair-instruction branch (a
+    # modify-run retry), not just the first attempt.
+    query = ReportingAgent._build_task_query(
+        {"design": "the living design"},
+        "section 'experiments' unresolved issues: too short",
+        previous_context=object(),
+    )
+
+    assert "restricts you to editing specific" in query

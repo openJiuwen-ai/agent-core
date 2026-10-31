@@ -148,7 +148,9 @@ def test_changed_sort_invalidates_cards_without_invalidating_controls():
     tracker = runtime._ensure_semantic_state_tracker()
     tracker.observe({"selected_filters": ["Comprehensive"]}, action_group_id="initial")
     runtime._invalidate_changed_listing({"semantic_state": {"selected_filters": ["Sales"]}})
-    assert page.export()["cards"] == [] and page.export()["listing_stale"]
+    assert page.export()["cards"][0]["title"] == "Old item"
+    assert page.export()["listing_stale"] and not page.export()["cards_observed"]
+    assert not any(t.get("name") == "Old item" for t in page.export_decision_targets())
     assert page.resolve_target(generation_id=page.generation_id, target_id=payload["elements"][0]["target_id"])
     with pytest.raises(ValueError):
         page.resolve_target(generation_id=page.generation_id, target_id=cards["cards"][0]["target_id"])

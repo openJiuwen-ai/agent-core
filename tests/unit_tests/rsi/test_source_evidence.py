@@ -10,7 +10,12 @@ import pytest
 
 from openjiuwen.rsi.events import EventNode, EventProgress, EventUsage, NodeStageEvent
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
-from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig, DataLoaderConfig, EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.config import (
+    AutoCoordinatingHarnessConfig,
+    DataLoaderConfig,
+    EvaluatorConfig,
+    PromotionConfig,
+)
 from openjiuwen.rsi.harness_rsi.evaluator import TeamEvaluator
 from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
@@ -88,6 +93,7 @@ def setup(tmp_path):
     evaluator, analyzer = Evaluator(), NoIssueAnalyzer()
     controller = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
+            promotion=PromotionConfig(policy_version="legacy_epoch_v1"),
             max_epochs=3,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=1),

@@ -394,6 +394,10 @@ class TaskLoopEventHandler(EventHandler):
         }
         if turn_number is not None:
             task_metadata["_turn_number"] = turn_number
+        if event.metadata:
+            for key in ("_moa_work_binding", "_moa_input_origin"):
+                if key in event.metadata:
+                    task_metadata[key] = event.metadata[key]
 
         try:
             core_task = CoreTask(

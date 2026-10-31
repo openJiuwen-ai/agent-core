@@ -729,6 +729,7 @@ class BrowserAgentRuntime:
         stale = sorted(stale_values)
         if stale:
             raise ValueError(
+                "browser_observation_stale: reference; "
                 "Stale browser snapshot reference(s) "
                 f"{', '.join(stale)} belong to an older page generation. "
                 "Call browser_snapshot again and use refs from "
@@ -1325,6 +1326,32 @@ class BrowserAgentRuntime:
             return await self.capture_reconciliation_browser_state(
                 action_group_id=action_group_id, include_decision=True,
             )
+        observation_error = ""
+        policy_config = getattr(getattr(self, "decision_policy", None), "decision_config", None)
+        snapshot = self.ensure_page_state().decision_snapshot
+        needs_decision = getattr(policy_config, "mode", "llm") in {"hybrid", "shadow"} or snapshot.get("invalidated")
+        needs_repair = needs_decision and (
+            not snapshot.get("capture_id") or snapshot.get("url") != self.ensure_page_state().url
+        )
+        if needs_repair:
+            # Repair missing or explicitly invalidated data once, using the existing metadata path.
+            # The primary tool receipt is already committed; never replay it or fetch full AX.
+            try:
+                async with asyncio.timeout(2):
+                    repaired = await self.capture_reconciliation_browser_state(
+                        action_group_id=action_group_id, include_decision=True,
+                    )
+                repaired["capture_source"] = "decision_repair_rpc"
+                if not repaired.get("decision_observation", {}).get("capture_id"):
+                    repaired["decision_observation_error"] = "decision_repair_missing_snapshot"
+                return repaired
+            except Exception as exc:
+                observation_error = f"decision_repair_{type(exc).__name__}"
+                self.ensure_page_state().decision_snapshot = {"invalidated": observation_error}
+                browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+                    "component": "observation", "capture_mode": "decision_repair_rpc",
+                    "action_group_id": action_group_id, "success": False, "error": observation_error,
+                }))
         page_state = self.export_page_state()
         semantic_tracker = self._ensure_semantic_state_tracker()
         semantic_state = semantic_tracker.current_state
@@ -1356,6 +1383,7 @@ class BrowserAgentRuntime:
             "dom": "",
             "dom_error": None,
             "decision_observation": self.ensure_page_state().export_decision_observation(),
+            "decision_observation_error": observation_error,
         }
 
     def _with_semantic_provenance(
@@ -1415,13 +1443,22 @@ class BrowserAgentRuntime:
         self._post_observation = None
 
     def retain_post_observation(self, parsed: Dict[str, Any]) -> None:
+        error = parsed.pop("_runtime_observation_error", None)
         metadata = parsed.pop("_runtime_observation", None)
         if not isinstance(metadata, dict) or metadata.get("ok") is False:
+            if error:
+                browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+                    "component": "post_observation", "success": False, "error": str(error)[:100],
+                }))
             return
         if parsed.get("decision_snapshot") and not metadata.get("decision_probe"):
             metadata["decision_probe"] = copy.deepcopy(parsed)
         probe = metadata.get("decision_probe") or {}
         if not probe.get("ok") or probe.get("url") != metadata.get("url"):
+            browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+                "component": "post_observation", "success": False,
+                "error": "decision_probe_unavailable" if not probe.get("ok") else "decision_probe_url_mismatch",
+            }))
             return
         self.observe_page_url(metadata.get("url"))
         page = self.ensure_page_state()
@@ -1442,18 +1479,26 @@ class BrowserAgentRuntime:
         metadata = build_browser_state_metadata_js(decision_probe=probe)
         # Only runtime-owned operations enter here, after ordinary admission.
         # A probe failure must never discard or replay the action's receipt.
+        # browser_run_code_unsafe exposes Page in a Node VM without global timers.
+        # A Page timeout is only the losing race deadline on the fast path, not a fixed wait.
         return ("async (page) => { const result = await (" + js_code + ")(page); "
                 "try { if (result && typeof result === 'object' && (!result.url || result.url === page.url()) "
-                "&& !result.page_binding?.tab_switched) { let timer; try { "
-                "result._runtime_observation = await Promise.race([(" + metadata + ")(page), "
-                "new Promise(resolve => {timer = setTimeout(() => resolve(null), 2000);})]); "
-                "} finally {clearTimeout(timer);} } } catch (_) {} return result; }")
+                "&& !result.page_binding?.tab_switched) { "
+                "const observed = await Promise.race([(" + metadata + ")(page), "
+                "page.waitForTimeout(2000).then(() => ({ok:false,error:'post_observation_timeout'}))]); "
+                "if (observed && observed.ok !== false) result._runtime_observation = observed; "
+                "else result._runtime_observation_error = 'post_observation_timeout'; "
+                "} } catch (error) { if (result && typeof result === 'object') "
+                "result._runtime_observation_error = 'post_observation_' + (error.name || 'Error'); } "
+                "return result; }")
 
     async def call_fixed_with_observation(self, js_code: str) -> Any:
         self._post_observation = None
         raw = await self.call_playwright_run_code_unsafe(self._fixed_observation_script(js_code))
         parsed = decode_mcp_result(raw)
-        if isinstance(parsed, dict) and "_runtime_observation" in parsed:
+        if isinstance(parsed, dict) and any(
+            k in parsed for k in ("_runtime_observation", "_runtime_observation_error")
+        ):
             self.retain_post_observation(parsed)
             if isinstance(raw, dict) and raw.get("__browser_compact_rpc__"):
                 return {**raw, "payload": parsed}
@@ -1672,6 +1717,17 @@ class BrowserAgentRuntime:
             target = await self._materialize_ax_target(target)
 
         locator = dict(target.locator)
+        if not any(locator.get(key) for key in ("selector", "ref", "role", "label", "placeholder", "text", "testid")):
+            if target.navigation_url:
+                raise ValueError(
+                    f"browser_target_navigation_only: target_id={target.target_id}; no clickable binding. "
+                    f"Observed primary URL: {target.navigation_url}. Use browser_page_action navigate explicitly "
+                    "or observe a clickable control; a popup batch cannot be changed to same-page navigation."
+                )
+            raise ValueError(
+                f"browser_target_binding_unavailable: target_id={target.target_id}; "
+                "observe the current control before retrying."
+            )
         if option:
             for key in (
                 "option_target_id",
@@ -1789,6 +1845,7 @@ class BrowserAgentRuntime:
         )
         if not refreshed_any and not condition_only:
             raise ValueError(
+                "browser_observation_stale: generation; "
                 f"Stale PageState generation {generation_id}; current generation is "
                 f"{page_state.generation_id}. Probe or snapshot the current page again."
             )
@@ -1823,7 +1880,8 @@ class BrowserAgentRuntime:
 
         if _has_non_empty_mapping_value(step, ("ref", "option_ref", "choose_ref")):
             raise ValueError(
-                "Native AX refs cannot be refreshed across PageState generations; capture the current snapshot again"
+                    "browser_observation_stale: reference; Native AX refs cannot be refreshed across "
+                    "PageState generations; capture the current snapshot again"
             )
         has_model_selector = _has_non_empty_mapping_value(
             step,
@@ -1848,7 +1906,8 @@ class BrowserAgentRuntime:
         if stale is None:
             raise ValueError(f"Unknown PageState target_id: {target_id}")
         if stale.source == "ax":
-            raise ValueError(f"Stale AX target_id {target_id} cannot cross generations; capture a current snapshot")
+            raise ValueError(f"browser_observation_stale: target; Stale AX target_id {target_id} "
+                             "cannot cross generations; capture a current snapshot")
         if stale.href and not stale.selector:
             return page_state.rebind_target(
                 target_id,
@@ -1858,7 +1917,8 @@ class BrowserAgentRuntime:
             )
         selector = str(stale.selector or stale.locator.get("selector") or "").strip()
         if not selector:
-            raise ValueError(f"Stale target_id {target_id} has no runtime-owned selector to refresh")
+            raise ValueError(f"browser_observation_stale: target; Stale target_id {target_id} "
+                             "has no runtime-owned selector to refresh")
         await self.ensure_runtime_ready()
         script = f"""() => {{
           const selector = {json.dumps(selector)};
@@ -1893,6 +1953,7 @@ class BrowserAgentRuntime:
         )
         if not valid:
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale target_id {target_id} could not be refreshed in {page_state.generation_id}: "
                 f"{validation or 'validation unavailable'}"
             )
@@ -2114,6 +2175,7 @@ class BrowserAgentRuntime:
                 "ok": False,
                 "status": "failed",
                 "error": f"batch_target_validation_failed: {exc}",
+                "reason": str(exc),
                 "executed": False,
                 "state_changed": False,
                 "generation_id": page_state.generation_id,
@@ -2175,11 +2237,48 @@ class BrowserAgentRuntime:
             extracted = result.get("extracted")
             if isinstance(extracted, dict):
                 self.ensure_page_state().add_field_coverage(extracted.keys())
+            await self._refresh_failed_batch_read(result)
             result["generation_id"] = self.generation_id
             if recovered_generation:
                 result["generation_recovered_from"] = recovered_generation
             result["page_state"] = self.export_page_state()
         return result
+
+    async def _refresh_failed_batch_read(self, result: Dict[str, Any]) -> None:
+        """Refresh lost read bindings once; earlier successful actions are never replayed."""
+        steps = result.get("steps") or []
+        action_acked = False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            op = str(step.get("op") or "")
+            if step.get("ok") and op in _BATCH_REGISTERED_TARGET_OPS | {"press"}:
+                action_acked = True
+            if action_acked and op in {"extract_text", "extract_value"}:
+                if step.get("ok") is False and step.get("executed") is False:
+                    break
+        else:
+            return
+        result["recovery_hint"] = (
+            "Earlier successful steps remain acknowledged. Read the current field with a freshly observed target_id; "
+            "do not repeat successful fills because extraction failed."
+        )
+        self.clear_post_observation()
+        try:
+            async with asyncio.timeout(2):
+                metadata, error = await self.capture_browser_metadata(include_decision=True)
+            if not error:
+                self.retain_post_observation({"_runtime_observation": metadata})
+                if not self._has_post_observation():
+                    error = "decision_probe_unavailable"
+        except Exception as exc:
+            error = f"read_binding_refresh_{type(exc).__name__}: {str(exc)[:200]}"
+        result["observation_updated"] = not bool(error)
+        if error:
+            result["observation_error"] = str(error)[:300]
+        browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+            "component": "read_binding_refresh", "success": not bool(error), "error": error,
+        }))
 
     def normalize_model_batch_steps(self, steps: Any) -> Any:
         """Repair a target-less sorting wait only from its explicit preceding click."""
@@ -2368,7 +2467,7 @@ class BrowserAgentRuntime:
                 ],
             },
             "audit": raw_audit,
-            "local_excerpt": str(parsed.get("local_excerpt") or "")[:1200] if not matches else "",
+            "local_excerpt": str(parsed.get("local_excerpt") or "")[:1200],
             "_raw_observation": public_observation,
         }
 
@@ -2405,15 +2504,10 @@ class BrowserAgentRuntime:
             result = copy.deepcopy(cached["result"])
             result["diagnostics"]["observation_reused"] = True
             return result
-        js_code = build_card_probe_js(
-            max_cards=effective_max_cards,
-            viewport_only=viewport_only,
-            include_buttons=include_buttons,
-            query=query,
-            site_profiles=site_profiles,
-            selector_cache_records=selector_cache_records,
-            generation_id=self.generation_id,
-        )
+        recipe = dict(max_cards=effective_max_cards, viewport_only=viewport_only,
+                      include_buttons=include_buttons, query=query, site_profiles=site_profiles,
+                      selector_cache_records=selector_cache_records, generation_id=self.generation_id)
+        js_code = build_card_probe_js(**recipe)
 
         try:
             parsed, raw_audit, parse_retry_count = await self._execute_probe_json(
@@ -2445,6 +2539,12 @@ class BrowserAgentRuntime:
         normalize_card_probe_payload(parsed)
         page_state = self.ensure_page_state()
         cards = page_state.register_cards(parsed)
+        page_state.card_read = {"url": page_state.url, "generation_id": page_state.generation_id,
+                               "interaction_revision": page_state.interaction_revision,
+                               "observed_at_ms": int(time.time() * 1000),
+                               "range": {"viewport_only": viewport_only, "query": query,
+                                         "max_cards": effective_max_cards},
+                               "selector_source": parsed.get("selector_source"), "recipe": copy.deepcopy(recipe)}
         self.register_card_primary_links(parsed)
         parsed["page_state"] = page_state.export()
 
@@ -2474,6 +2574,9 @@ class BrowserAgentRuntime:
             "title": parsed.get("title") or exported.get("title"),
             "generation_id": exported["generation_id"],
             "count": len(cards),
+            "read_scope": {"viewport_only": viewport_only, "query": query, "max_cards": effective_max_cards},
+            "truncated": parsed.get("truncated"),
+            "limit_reached": len(cards) >= effective_max_cards,
             "observed_count": int(parsed.get("observed_count") or 0),
             "cards": cards,
             "page_state": page_state.export_summary(),
@@ -2743,7 +2846,21 @@ class BrowserRuntimeRail(AgentRail):
         if isinstance(limit, (int, float)) and client_config is not None:
             remaining = min(float(state.get("deadline_at") or time.time() + limit) - time.time(),
                             float(state.get("invocation_remaining_s", limit + 15)))
-            client_config.stream_first_chunk_timeout = max(0.1, min(limit, remaining - 15))
+            client_config.stream_first_chunk_timeout = min(limit, max(remaining, 0.0))
+
+        # Use the existing tool-disabled summary pass instead of starting another
+        # action loop with a fabricated 0.1s model allowance. The task deadline
+        # still bounds synthesis in both llm and hybrid modes.
+        remaining = min(float(state.get("deadline_at") or time.time() + 60) - time.time(),
+                        float(state.get("invocation_remaining_s", 60)))
+        if remaining <= 15 and str(state.get("status")) not in _BROWSER_TERMINAL_STATUSES:
+            state["status"] = "partial" if self._has_task_evidence(state) else "blocked"
+            state["terminal_reason"] = "task_deadline_insufficient_for_action"
+            state["next_action_class"] = "finish"
+            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        if remaining <= 1:
+            ctx.request_force_finish(self._structured_terminal_result(state))
+            return
 
         if self._prepare_terminal_synthesis(ctx, session, state):
             return
@@ -2908,9 +3025,9 @@ class BrowserRuntimeRail(AgentRail):
         remaining_s = deadline - time.monotonic() if deadline else 0.0
         state = ctx.session.get_state(_BROWSER_PHASE_STATE_KEY) if getattr(ctx, "session", None) is not None else {}
         state = state if isinstance(state, dict) else {}
-        first_chunk_timeout = isinstance(exception, TimeoutError) or "first_chunk" in str(exception).lower()
+        failure = self._model_failure_details(exception)
         retry_budget = ctx.retry_attempt < _BROWSER_MODEL_RETRY_LIMIT and remaining_s > 20.0
-        if retry_budget and not first_chunk_timeout and not unresolved_writes(state):
+        if retry_budget and failure["source"] == "upstream" and not unresolved_writes(state):
             ctx.request_retry(delay_seconds=min(0.5, max(0.0, remaining_s - 5.0)))
             return
         ctx.request_force_finish(self._structured_model_failure(ctx, exception))
@@ -2934,6 +3051,21 @@ class BrowserRuntimeRail(AgentRail):
         )
         return _contains_any_token(message, retryable_tokens)
 
+    @staticmethod
+    def _model_failure_details(exception: Exception | None) -> dict[str, str]:
+        message = str(exception or "").lower()
+        if "browser_task_deadline_exhausted" in message:
+            return {"code": "task_deadline_exhausted", "source": "runtime", "stage": "task"}
+        if "first_chunk" in message:
+            return {"code": "model_first_chunk_timeout", "source": "client", "stage": "first_chunk"}
+        if "idle_chunk" in message:
+            return {"code": "model_idle_chunk_timeout", "source": "client", "stage": "idle_chunk"}
+        if "browser_llm_total_timeout" in message:  # Older persisted/local adapters.
+            return {"code": "model_call_limit_exhausted", "source": "local", "stage": "call"}
+        if isinstance(exception, TimeoutError) or "timeout" in message or "timed out" in message:
+            return {"code": "model_timeout", "source": "unknown", "stage": "unknown"}
+        return {"code": "model_provider_unavailable", "source": "upstream", "stage": "request"}
+
     def _structured_model_failure(
         self,
         ctx: AgentCallbackContext,
@@ -2943,21 +3075,22 @@ class BrowserRuntimeRail(AgentRail):
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
         state = state if isinstance(state, dict) else {}
         evidence_available = self._has_task_evidence(state)
+        failure = self._model_failure_details(exception)
         status = "partial" if evidence_available else "failed"
         if state:
             state["status"] = "partial" if evidence_available else "blocked"
             state["next_action_class"] = "finish"
-            state["terminal_reason"] = "model_provider_unavailable"
+            state["terminal_reason"] = failure["code"]
             blockers = list(state.get("blockers") or [])
-            if "model_provider_unavailable" not in blockers:
-                blockers.append("model_provider_unavailable")
+            if failure["code"] not in blockers:
+                blockers.append(failure["code"])
             state["blockers"] = blockers[:10]
             session.update_state({_BROWSER_PHASE_STATE_KEY: state})
         payload = {
             "ok": False,
             "status": status,
             "error": {
-                "code": "model_provider_unavailable",
+                **failure,
                 "message": str(exception or "model provider failed")[:500],
                 "retry_attempts": int(ctx.retry_attempt) + 1,
             },
@@ -2977,7 +3110,7 @@ class BrowserRuntimeRail(AgentRail):
         return {
             "output": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "result_type": "error",
-            "error": "model_provider_unavailable",
+            "error": failure["code"],
             "authoritative_browser_result": self._authoritative_terminal_payload(state),
             "progress_state": self._load_progress_state(session).to_dict() if session is not None else {},
         }
@@ -3290,13 +3423,13 @@ class BrowserRuntimeRail(AgentRail):
             properties["resilience"] = resilience
             tool.properties = properties
         schema = getattr(tool, "input_params", None)
-        if isinstance(schema, dict):
-            SchemaUtils.validate_with_schema(cls._coerce_tool_args(tool_args), schema)
         if tool_name == "browser_batch_interact":
             args = cls._coerce_tool_args(tool_args)
             errors = validate_batch_steps(args.get("steps"))
             if errors:
                 raise build_error(StatusCode.SCHEMA_VALIDATE_INVALID, reason="; ".join(errors), data=args)
+        if isinstance(schema, dict):
+            SchemaUtils.validate_with_schema(cls._coerce_tool_args(tool_args), schema)
 
     def _runtime_evidence_fields(self, tool_args: Any) -> list[str]:
         args = self._coerce_tool_args(tool_args)
@@ -3343,13 +3476,34 @@ class BrowserRuntimeRail(AgentRail):
     async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("on_tool_exception", ctx)
         inputs, session = getattr(ctx, "inputs", None), getattr(ctx, "session", None)
-        receipt = execution_journal.record_result(session, inputs, {"success": False}, {})
+        result = {}
+        exc = getattr(ctx, "exception", None)
+        state = execution_journal.task_state(session)
+        entry = next((e for e in state.get("execution_journal", [])
+                      if e.get("call_id") == self._tool_call_id(inputs)), None)
+        stale_before_dispatch = False
+        if inputs is not None and isinstance(exc, ValueError):
+            not_dispatched = entry is None or entry.get("execution_state") == "prepared"
+            stale_before_dispatch = str(exc).startswith("browser_observation_stale:") and not_dispatched
+        if stale_before_dispatch:
+            # PageState rejected compilation before dispatch; preserve this even when
+            # the rail exception path, rather than a tool, produces the receipt.
+            result = {"ok": False, "executed": False, "state_changed": False,
+                      "error": "browser_observation_stale", "reason": str(exc)}
+            inputs.tool_result = result
+            if getattr(inputs, "tool_msg", None) is None:
+                inputs.tool_msg = ToolMessage(tool_call_id=self._tool_call_id(inputs), content="")
+        receipt = execution_journal.record_result(session, inputs, {"success": False}, result)
+        if result:
+            result.update(receipt)
+        invalidated = self._invalidate_rejected_observation(result)
         state = execution_journal.task_state(session)
         cart_verification.record_effects(state, self._tool_call_id(inputs))
         execution_journal.save(session, state)
         policy = getattr(self._runtime, "decision_policy", None)
         if policy is not None:
-            policy.record_execution(inputs, session, {"success": False, **receipt})
+            policy.record_execution(inputs, session, {"success": False, **receipt,
+                "observation_invalidated": invalidated, "observation_error": result.get("observation_error")})
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("after_tool_call", ctx)
@@ -3358,6 +3512,24 @@ class BrowserRuntimeRail(AgentRail):
         tool_result = self._normalize_tool_result(getattr(inputs, "tool_result", None))
         inputs.tool_result = tool_result
         outcome = BrowserAgentRuntime.classify_tool_result(tool_result)
+        session = getattr(ctx, "session", None)
+        state = execution_journal.task_state(session)
+        current_page = self._runtime.export_page_state()
+        if outcome["success"] and self._probe_source_mismatch(state, tool_result, tool_name, current_page):
+            # Validate before the policy or evidence store consumes the probe. Keep its raw
+            # receipt recoverable, but do not present it as an accepted current-page read.
+            expected_page = current_page if isinstance(current_page, dict) and current_page.get("url") else (
+                state.get("last_page") or {}
+            )
+            tool_result = {
+                "ok": False, "error": "browser_observation_source_mismatch",
+                "executed": True, "state_changed": False,
+                "expected_url": expected_page.get("url"), "observed_url": tool_result.get("url"),
+                "recovery_hint": "Refresh the current page observation before using this foreign Probe result.",
+                "_raw_observation": tool_result,
+            }
+            inputs.tool_result = tool_result
+            outcome = BrowserAgentRuntime.classify_tool_result(tool_result)
         receipt = execution_journal.record_result(getattr(ctx, "session", None), inputs, outcome, tool_result)
         session = getattr(ctx, "session", None)
         state = execution_journal.task_state(session)
@@ -3365,10 +3537,12 @@ class BrowserRuntimeRail(AgentRail):
         execution_journal.save(session, state)
         if isinstance(tool_result, dict):
             tool_result.update(receipt)
+        invalidated = self._invalidate_rejected_observation(tool_result)
         policy = getattr(self._runtime, "decision_policy", None)
         if policy is not None:
             policy.record_execution(inputs, getattr(ctx, "session", None), {
-                **outcome, **receipt,
+                **outcome, **receipt, "observation_invalidated": invalidated,
+                "observation_error": tool_result.get("observation_error") if isinstance(tool_result, dict) else None,
             })
         if tool_name == "browser_phase":
             self._set_tool_message_outcome(inputs, success=bool(outcome["success"]),
@@ -3412,17 +3586,6 @@ class BrowserRuntimeRail(AgentRail):
                     tool_msg.content = json.dumps(tool_result, ensure_ascii=False, default=str)
         if session is not None and self._recall_tool is not None:
             self._bind_observation_recall(session)
-        state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else {}
-        if outcome["success"] and self._probe_source_mismatch(state, tool_result, tool_name):
-            inputs.tool_result = {
-                "ok": False, "error": "browser_observation_source_mismatch",
-                "expected_url": state["last_page"]["url"], "observed_url": tool_result.get("url"),
-                "recovery_hint": "Refresh the current page with a native snapshot before using this Probe result.",
-            }
-            self._set_tool_message_outcome(inputs, success=False, executed=True, state_changed=False, denied=False)
-            self._consume_tool_call_timing(ctx, inputs)
-            self._mark_action_group_call_completed(ctx, {"executed": True, "state_changed": False})
-            return
         if outcome["success"] and isinstance(tool_result, dict):
             self._enrich_probe_result_contract(session, inputs, tool_name, tool_result)
         state_changed = self._result_may_have_changed_browser_state(
@@ -3655,6 +3818,46 @@ class BrowserRuntimeRail(AgentRail):
             }))
         return action_class, elapsed_ms
 
+    def _invalidate_rejected_observation(self, result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        codes = {"browser_policy_target_changed", "browser_policy_stale_page", "browser_policy_stale_node",
+                 "browser_policy_stale_target", "stale_hover_target", "observed_tab_changed",
+                 "browser_observation_stale"}
+        stale = None
+        # Partial batches may contain a rejected stale step after successful actions.
+        # Keep the batch ACK facts; invalidate only its now-disproved observation basis.
+        for item in [result, *(result.get("steps") or [])]:
+            if not isinstance(item, dict) or item.get("executed") is not False:
+                continue
+            error = item.get("error")
+            message = error.get("message", "") if isinstance(error, dict) else error
+            reason = str(item.get("reason") or message or "")
+            reason = reason.removeprefix("batch_target_validation_failed: ")
+            code = re.split(r"[:;\s]", reason, maxsplit=1)[0]
+            if code in codes:
+                detail = re.sub(r"[^a-zA-Z0-9_: -]", "", reason.split(";", 1)[0])[:160]
+                stale = {"code": "browser_observation_stale", "reason": detail}
+                break
+            # Compatibility for already emitted PageState errors, not page text or unknown IDs.
+            if re.fullmatch(r"Stale PageState generation g\d+; current generation is g\d+\. "
+                            r"Probe or snapshot the current page again\.", reason):
+                stale = {"code": "browser_observation_stale", "reason": "generation"}
+                break
+        if stale is None:
+            return False
+        page = self._runtime.ensure_page_state()
+        page.decision_snapshot = {"invalidated": stale["code"], "reason": stale["reason"]}
+        page.card_probe_cache = {}
+        page.listing_stale = True
+        if page.read_observation:
+            page.read_observation["interaction_revision"] = -1  # Historical text remains available, never a fresh view.
+        self._runtime.clear_post_observation()
+        result["observation_invalidated"] = True
+        result["observation_error"] = stale
+        result["recovery_hint"] = "Refresh the shared observation once before deciding again; do not replay the action."
+        return True
+
     @staticmethod
     def _set_tool_message_outcome(
         inputs: Any,
@@ -3669,8 +3872,11 @@ class BrowserRuntimeRail(AgentRail):
             return
         metadata = dict(tool_msg.metadata) if isinstance(tool_msg.metadata, dict) else {}
         result = getattr(inputs, "tool_result", None)
+        if isinstance(result, dict) and result.get("observation_invalidated"):
+            metadata["observation_invalidated"] = True
         if isinstance(result, dict) and result.get("execution_state"):
             metadata["execution_state"] = result["execution_state"]
+            tool_msg.content = json.dumps(result, ensure_ascii=False, default=str)
         metadata.update(
             {
                 "success": success,
@@ -5684,12 +5890,22 @@ class BrowserRuntimeRail(AgentRail):
             BrowserWorkingContextStore.refresh_field_coverage(state)
 
     @staticmethod
-    def _probe_source_mismatch(state: Any, result: Any, tool_name: str) -> bool:
+    def _probe_source_mismatch(state: Any, result: Any, tool_name: str, current_page: Any = None) -> bool:
         if "probe" not in tool_name or not isinstance(state, dict) or not isinstance(result, dict):
             return False
-        expected = evidence_subject((state.get("last_page") or {}).get("url"))
+        binding = current_page if isinstance(current_page, dict) and current_page.get("url") else (
+            state.get("last_page") or {}
+        )
+        expected = evidence_subject(binding.get("url"))
         observed = evidence_subject(result.get("url"))
-        return bool(expected and observed and expected != observed)
+        if expected and observed and expected != observed:
+            return True
+        # URL equality alone does not authorize another page/document's target bindings.
+        observed_page = result.get("page_state") or result
+        if not isinstance(observed_page, dict):
+            observed_page = result
+        return any(binding.get(key) and observed_page.get(key) and binding[key] != observed_page[key]
+                   for key in ("page_id", "generation_id"))
 
     @classmethod
     def _page_metadata_evidence(

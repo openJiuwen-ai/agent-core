@@ -47,6 +47,7 @@ def test_framework_trimming_applies_without_allow_lists():
     assert spec.add_general_purpose_agent is False
     assert spec.enable_async_subagent is False
     assert spec.enable_task_planning is False
+    assert spec.completion_timeout == 1200.0
     # The source spec is left untouched.
     assert "read_only" not in base.rails[0].params
     assert base.enable_task_planning is True
@@ -63,3 +64,15 @@ def test_allow_lists_keep_only_named_rails_and_builtin_tools():
     assert [rail.type for rail in spec.rails] == ["core.sys_operation"]
     # Raw tool cards cannot be classified by type and are inherited.
     assert [getattr(tool, "type", None) or tool.name for tool in spec.tools] == ["host.web_fetch", "raw_tool"]
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("member_timeout", [None, 900.0, 6000.0])
+def test_reviewer_round_cap_overrides_member_completion_timeout(member_timeout):
+    """The member value is a log threshold, not a review budget; the reviewer always gets its own cap."""
+    base = _member_spec().model_copy(update={"completion_timeout": member_timeout})
+
+    spec = build_reviewer_agent_spec(base)
+
+    assert spec.completion_timeout == 1200.0
+    assert base.completion_timeout == member_timeout

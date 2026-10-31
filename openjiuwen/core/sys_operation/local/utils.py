@@ -89,6 +89,7 @@ class AsyncProcessHandler:
         self._overall_timeout = timeout
         self._queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
         self._is_executed = False
+        self._background_tasks: set[asyncio.Task[str]] = set()
 
     def _kill_process_tree(self) -> None:
         """Kill the subprocess and all its children using process group.
@@ -318,6 +319,28 @@ class AsyncProcessHandler:
                 data=f"process wait error: {str(e)}"
             )
 
+    async def _drain_background_stderr(self, limit: int = 8192) -> str:
+        """Drain stderr without allowing retained diagnostics to grow without bound."""
+        if self._process.stderr is None:
+            return ""
+
+        retained = bytearray()
+        truncated = False
+        while True:
+            chunk = await self._process.stderr.read(self._chunk_size)
+            if not chunk:
+                break
+            remaining = limit - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated = True
+
+        message = retained.decode(self._encoding, errors="replace").strip()
+        if truncated:
+            message = f"{message}\n[stderr truncated]" if message else "[stderr truncated]"
+        return message
+
     async def background(self, grace: float = 3.0) -> tuple[int, Optional[str]]:
         """Launch process in background and wait briefly for early failure detection.
 
@@ -338,14 +361,30 @@ class AsyncProcessHandler:
 
         self._is_executed = True
         pid = self._process.pid
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=grace)
-            code = self._process.returncode
-            if code != 0:
-                return pid, f"process exited early with code {code}"
-            return pid, None
-        except asyncio.TimeoutError:
-            return pid, None  # still running after grace period — success
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(grace, 0)
+        stderr_task = asyncio.create_task(self._drain_background_stderr())
+        self._background_tasks.add(stderr_task)
+        stderr_task.add_done_callback(self._background_tasks.discard)
+        while self._process.returncode is None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return pid, None  # still running after grace period — success
+            await asyncio.sleep(min(0.05, remaining))
+
+        code = self._process.returncode
+        if code != 0:
+            # A descendant may keep the inherited stderr write end open after
+            # the direct child exits. Only wait for the grace period's remaining
+            # time, while leaving the task alive to keep draining the pipe.
+            remaining = max(0, deadline - loop.time())
+            done, _ = await asyncio.wait({stderr_task}, timeout=remaining)
+            stderr = stderr_task.result() if stderr_task in done else ""
+            error = f"process exited early with code {code}"
+            if stderr:
+                error = f"{error}: {stderr}"
+            return pid, error
+        return pid, None
 
     async def _reader(self, stream: asyncio.StreamReader, stream_type: StreamEventType):
         """Background stream reader coroutine for stdout/stderr.

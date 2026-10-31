@@ -27,6 +27,8 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +78,30 @@ async def test_bind_session_sets_contextvar():
     assert get_session_id() == ""
     await manager.bind_session(session)
     assert get_session_id() == "sess-A"
+
+
+@pytest.mark.asyncio
+async def test_bind_session_failure_resets_context_and_raises_framework_error():
+    manager = _make_manager()
+    database = MagicMock()
+    database.create_cur_session_tables = _async_false()
+    backend = MagicMock()
+    backend.db = database
+    manager._configurator.team_backend = backend
+
+    with pytest.raises(BaseError) as raised:
+        await manager.bind_session(_make_session("sess-failed"))
+
+    assert raised.value.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR
+    assert get_session_id() == ""
+    assert manager.team_session is None
+
+
+def _async_false():
+    async def _return_false():
+        return False
+
+    return _return_false
 
 
 @pytest.mark.asyncio

@@ -413,6 +413,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
     }
 
     def _emit(self, level: str, log_level: LogLevel, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._capture_invocation_log(log_level, msg, args, kwargs)
         if not self._logger.isEnabledFor(self._LOG_LEVEL_TO_STD.get(log_level, logging.INFO)):
             return
         event_type = kwargs.pop("event_type", None)
@@ -466,6 +467,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         """
         import traceback
 
+        self._capture_invocation_log(LogLevel.ERROR, msg, args, kwargs, exception=True)
         # Extract event_type, event, and stacklevel from kwargs
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
@@ -503,6 +505,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             logging.CRITICAL: LogLevel.CRITICAL,
         }
         log_level = log_level_map.get(level, LogLevel.INFO)
+        self._capture_invocation_log(log_level, msg, args, kwargs)
         # Extract event_type, event, and stacklevel from kwargs
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)

@@ -269,3 +269,176 @@ class TestMessageQueue:
 
         assert result == "ok(inner_result)"
 
+
+@pytest.mark.asyncio
+class TestInflightResponseOrphaning:
+    """Teardown leaves in-flight response futures unresolved (deadlock class).
+
+    Bug (2026-09-20 swarmflow pause deadlock, see the jiuwenswarm doc
+    "Swarmflow暂停超时与卡死-根因分析与修复"): publish_event awaits
+    queue_message.response "until it is handled", but NO teardown path —
+    router drop, inactive subscription, consumer context cancelled,
+    stop(), deactivate() — ever resolves pending response futures. The
+    publisher hangs forever.
+
+    Production chain: task abort kills the harness-owned consumer
+    (TaskLoopEventHandler) while the producer (execute_task) still has an
+    LLM-bound completion publish in flight.
+
+    With the planned deep fix (fail in-flight responses on every teardown
+    path via _inflight tracking), the pending-future assertions below must
+    flip to expecting a MESSAGE_QUEUE_CONSUMER_GONE error instead.
+
+    Note: assertions use asyncio.wait(), not wait_for() — wait_for cancels
+    the awaited future on timeout, which would destroy the evidence and
+    break the multi-stage checks in the consumer-cancelled case.
+    """
+
+    @staticmethod
+    async def assert_never_resolves(future: "asyncio.Future", seconds: float = 1.0) -> None:
+        done, pending = await asyncio.wait({future}, timeout=seconds)
+        assert future in pending, "response resolved — orphaning not reproduced"
+
+    async def test_response_orphaned_when_no_subscriber(self):
+        """Router silently drops messages for unknown topics — the response
+        future is never resolved and the publisher hangs."""
+        mq = MessageQueueInMemory(queue_max_size=10, timeout=60)
+        mq.start()
+        try:
+            message = InvokeQueueMessage()
+            message.payload = "lost at router"
+            message.response = asyncio.Future()
+            await mq.produce_message("topic_no_subscriber", message)
+
+            await self.assert_never_resolves(message.response)
+        finally:
+            await mq.stop()
+
+    async def test_response_orphaned_when_subscription_inactive(self):
+        """Router drops messages for inactive subscriptions — same orphaned
+        response, no error surfaced to the publisher."""
+        mq = MessageQueueInMemory(queue_max_size=10, timeout=60)
+        mq.start()
+        subscription = mq.subscribe("topic_inactive")
+        subscription.set_message_handler(MockMessageHandlerInvoke().handle_event)
+        # NOTE: no activate() — subscription stays inactive.
+        try:
+            message = InvokeQueueMessage()
+            message.payload = "lost at inactive subscription"
+            message.response = asyncio.Future()
+            await mq.produce_message("topic_inactive", message)
+
+            await self.assert_never_resolves(message.response)
+        finally:
+            await mq.stop()
+
+    async def test_response_orphaned_when_consumer_cancelled(self):
+        """The production deadlock, minimally reproduced.
+
+        The handler's awaited execution context is cancelled (what the
+        harness abort does to the TaskLoopEventHandler's round/LLM call).
+        CancelledError is not caught by the dispatch wrapper's
+        ``except BaseError/Exception`` clauses, so the response future is
+        never set — and neither stop() nor deactivate() sweeps it.
+        """
+        TOPIC = "topic_consumer_cancelled"
+        mq = MessageQueueInMemory(queue_max_size=10, timeout=60)
+        mq.start()
+        subscription = mq.subscribe(TOPIC)
+        started = asyncio.Event()
+        # Stands in for the consumer's own execution context (its harness
+        # round / in-flight LLM call).
+        consumer_context = asyncio.ensure_future(asyncio.Event().wait())
+
+        async def handler(request: Any) -> str:
+            started.set()
+            await consumer_context
+            return "never reached"
+
+        subscription.set_message_handler(handler)
+        subscription.activate()
+
+        try:
+            message = InvokeQueueMessage()
+            message.payload = "trigger"
+            message.response = asyncio.Future()
+            await mq.produce_message(TOPIC, message)
+            await asyncio.wait_for(started.wait(), 2.0)
+
+            # Abort the consumer's execution context (harness abort path).
+            consumer_context.cancel()
+
+            await self.assert_never_resolves(message.response)
+
+            # Neither teardown path resolves the orphaned future either.
+            await subscription.deactivate()
+            await self.assert_never_resolves(message.response)
+            await mq.stop()
+            await self.assert_never_resolves(message.response)
+        finally:
+            consumer_context.cancel()
+            await subscription.deactivate()
+            await mq.stop()
+
+    async def test_dispatch_task_dies_without_settling_on_cancel(self):
+        """Pin the exact killer mechanism: the per-message dispatch task
+        (_run) dies from cancellation WITHOUT settling the response future.
+
+        This instruments the production question "which path killed the
+        consumer chain": here the dispatch task is created by the queue
+        itself (background task), the handler's context is cancelled, and
+        we assert the dispatch task ended while message.response stayed
+        pending — i.e. death-by-cancel leaves no settlement, regardless
+        of which caller pulled the trigger.
+        """
+        TOPIC = "topic_dispatch_death"
+        mq = MessageQueueInMemory(queue_max_size=10, timeout=60)
+        mq.start()
+        subscription = mq.subscribe(TOPIC)
+        started = asyncio.Event()
+        handler_running = asyncio.Event()
+        consumer_context = asyncio.ensure_future(asyncio.Event().wait())
+
+        async def handler(request: Any) -> str:
+            started.set()
+            handler_running.set()
+            await consumer_context
+            return "never reached"
+
+        subscription.set_message_handler(handler)
+        subscription.activate()
+
+        try:
+            message = InvokeQueueMessage()
+            message.payload = "trigger"
+            message.response = asyncio.Future()
+            await mq.produce_message(TOPIC, message)
+            await asyncio.wait_for(started.wait(), 2.0)
+
+            # Kill the consumer's execution context — the cancellation
+            # propagates through the handler into the dispatch task.
+            consumer_context.cancel()
+            # Let the event loop run the cancellation to completion.
+            await asyncio.sleep(0.2)
+
+            # The dispatch background task received the CancelledError and
+            # ended (its except clauses do not catch BaseException), yet the
+            # response future was never settled: no result, no exception.
+            assert message.response.done() is False
+            assert not message.response.cancelled()
+            try:
+                message.response.result()
+                raised = None
+            except asyncio.InvalidStateError:
+                raised = "invalid_state"
+            except BaseException as exc:  # noqa: BLE001
+                raised = type(exc).__name__
+            assert raised == "invalid_state", (
+                f"expected pending future (InvalidStateError on .result()), "
+                f"got: {raised}"
+            )
+        finally:
+            consumer_context.cancel()
+            await subscription.deactivate()
+            await mq.stop()
+

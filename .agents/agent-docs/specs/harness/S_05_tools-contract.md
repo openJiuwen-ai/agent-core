@@ -411,7 +411,7 @@ share an interaction revision; independent later changes invalidate it. Navigati
 proof binds a selected result to the actual landing page, including popup batches.
 Browser tools execute serially through the existing scheduler. Semantic progress is
 advisory; recovery does not need a runtime-approved trial or semantic proof (F_17).
-Model total/idle and tool timeouts are independent of the task deadline.
+Client first/idle chunk waits and tool timeouts are bounded by the shared task deadline; hybrid adds no whole-stream cap (F_25).
 
 Jev selects operation and its scoped target in a single multi-head request. Closed
 fixed reads and known local UI remain available during unknown-effect recovery;
@@ -468,6 +468,104 @@ LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普�
 为空不能证明没有页面障碍。父层与 resume 保留同一结果；模型渲染只展示一次结果，避免三份重复投影。
 常用等待使用已有目标/文本/URL 条件；缺目标仍拒绝，旧目标校验、串行派发、权限和真实未知效果保护保留。
 本节取代 F_17 中继续默认维护 inferred 诊断和语义反证的部分，详见 [F_19](../../features/harness/F_19_browser-observation-first-results.md)。
+
+### October 9 decision observation handoff (F_21)
+
+Fixed-reader optional observation uses executor-supported Page APIs, not assumed Node VM
+globals. Capture failure preserves the primary tool receipt and carries a specific diagnostic.
+Missing compact decision data permits one bounded existing metadata reconciliation, without
+full AX capture or primary-action replay. Valid cached observations remain shared.
+
+Jev operation criteria summarize legal targets/values directly; independent target questions
+do not depend on another head's criteria or result. Both heads remain one request. The
+optional phase objective/bindings are the LLM's local handoff, never mandatory per action.
+Initial tabs and scoped reader content use existing task/cache state to avoid stale destinations
+and repeat reads caused only by unrelated control observations. Same-query ACK search
+submits are retired locally; LLM recovery, new bindings and changed scope remain possible.
+
+See [F_21](../features/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
+
+
+### Browser receipt and current binding consistency (2026-10-09)
+
+Failed read/wait steps retain their errors and conditions but aggregate as partial with
+previous ACKs intact. Only uncertain mutations propagate dispatched_unknown; a failed
+text wait is not observed feedback. Probe source checks prefer the current shared page
+binding to historical phase URLs and synchronize rejection body/metadata before policy
+or evidence processing. Navigation-only target errors preserve the target capability and
+observed URL; multi-step popup intent is never silently rewritten. Common model-facing
+waits are reduced while controller compatibility and required target checks remain. A
+read binding lost after a batch action permits one bounded existing observation refresh,
+without action replay or guessed rebinding. See F_22.
+
+
+### Browser reader admission and stale observation recovery (F_23, 2026-10-09)
+
+A successful fixed read is reusable work, not an invitation to sample again. The existing
+policy receipts retain its scope: page/document, query/range, object and local intent/bindings (F_25). Text-content changes alone do not re-admit that same read or reset
+its retry key. ACKed concrete interactions, changed relevant state, document/range or explicit local intent permit new reads.
+Unrelated revisions, arbitrary scripts and failed dispatches do not erase read history (F_25). Arbitrary evaluate remains potentially mutating.
+Raw observations stay available to LLM; historical text never becomes a fresh target.
+
+A definite stale page/node/target rejection invalidates the existing decision snapshot
+and post-action cache. Its unexecuted receipt triggers one bounded compact metadata/probe
+repair via the normal context lifecycle. No action is replayed or rebound. Failed repair
+returns to LLM with an empty decision observation and concrete diagnostic; an ordinary
+button failure does not invalidate the whole observation.
+
+FINISH hands judgment to LLM without requiring phase conditions. Optional set requires
+op/objective; verify-only fields and noncurrent targets remain rejected with correction
+guidance. Batch and page-action examples use their respective schemas. Completion means
+the user's authorized endpoint, not subsequent work the user reserved for themselves.
+Parent delegation preserves the endpoint and constraints without inventing comparisons
+or repeat verification. Recommendation regions and nearby control text are source facts,
+not business proof or new action gates.
+
+### Browser dispatch facts and local recovery (F_24, 2026-10-12)
+
+Complete executor strict-resolution errors before dispatch share the journal's undispatched
+classification; explicit execution and incomplete logs never lose unknown-effect protection.
+PageState stale errors carry a stable code and category. Unexecuted stale steps, including
+those after an ACK in a partial batch, invalidate the shared observation and request the
+existing bounded repair without undoing the ACK or replaying an action.
+
+Late guards retain their predicates and expose only mismatch categories. Existing policy
+receipts scope repeated stale-binding recovery to the operation/object; after two rejections
+one LLM recovery turn is requested. Scoped LLM recovery, successful object action or a new binding re-admits it,
+with guards still mandatory. Other controls and readers remain available. Navigation
+repetition feedback uses recent actions and observed page identity, without blocking tools.
+
+
+### Executor facts and model deadline ownership (F_25, 2026-10-12)
+
+The native targeting executor's exact selector-zero-match envelope is undispatched;
+script errors and explicit execution remain uncertain. Client first/idle waits keep their
+diagnostic stages. Hybrid wraps only the shared task deadline, not an extra total/idle
+limit. Near deadline, the existing tool-disabled synthesis/force-finish path preserves
+facts; it does not manufacture a 0.1-second provider request. Error receipts distinguish
+runtime task exhaustion, client waits, local limits, unknown timeouts and upstream errors.
+
+
+### Scoped reader work and local capabilities (F_25, 2026-10-12)
+
+Observed navigation has full-URL identity scoped to its source document and local objective.
+Late link/order checks rerun the original bounded probe recipe and selector provenance on
+live DOM. Repeated invalidations use existing receipts and a single local LLM handoff.
+Historical card/text content remains interpretable after target invalidation; stale content
+never grants a fresh executable binding. Automatic read identity excludes generic revision
+and content hashes. Concrete ACK interactions can reopen a range; repeated no-progress
+backoff survives unrelated captures/evaluate. LLM direct reads need no justification schema.
+
+The same one-request action/target menu offers capped full-page or current-viewport cards,
+bound extract_text/extract_value, observed links, number/date inputs and purpose-bound keys.
+Readonly current-value reads retain document/node/signature checks but ignore old values and
+unrelated form state; mutations retain full guards. Row text helps discover named controls,
+never infers an unlabeled icon's business meaning. Observed links cannot evade local object
+constraints. Both providers use the existing client schema and ordinary serial tool rails.
+
+Use action receipts/current observations before conditional waits. Retain per-step ACKs
+after failed waits and never replay to repair a read. Parent and worker preserve user
+budget, dates, object and stopping point; optional phase fields are handoff, not proof.
 
 ## TaskTool cua 委派与续跑（F_21，当前契约）
 

@@ -336,6 +336,20 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         result = await self.tool.invoke({"action": "delete", "ids": ["nonexistent_id"]}, session=self.mock_session)
         self.assertIn("No tasks deleted", result["message"])
 
+    async def test_invoke_update_rejects_ids_instead_of_todos(self):
+        """A missing todos array is a parameter error, not an internal iteration failure."""
+        for payload in (
+            {"action": "update", "ids": [self.test_todo_ids[0]], "status": "completed"},
+            {"action": "update", "id": self.test_todo_ids[0], "status": "in_progress"},
+            {"action": "append", "ids": ["new_task"]},
+        ):
+            with self.assertRaises(Exception) as caught:
+                await self.tool.invoke(payload, session=self.mock_session)
+            message = str(caught.exception)
+            self.assertIn("todos", message)
+            self.assertNotIn("NoneType", message)
+        self.tool.save_todos.assert_not_called()
+
     async def test_invoke_update_success(self):
         """Updates task content and status."""
         update_data = [{"id": self.test_todo_ids[0], "content": "Updated Task 1",

@@ -6,6 +6,7 @@
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable
 
+from openjiuwen.agent_teams import constants
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_async import (
     AsyncTaskCancelTool,
@@ -155,7 +156,7 @@ def _create_task_kwargs(
 ) -> dict[str, Any]:
     if create_task_cls is ScheduledTaskCreateTool:
         return {
-            "inline_member_enabled": team_mode != "predefined",
+            "inline_member_enabled": constants.INLINE_TASK_MEMBER_ENABLED and team_mode != "predefined",
             "model_config_allocator": model_config_allocator,
             "expert_resolver": expert_resolver,
         }

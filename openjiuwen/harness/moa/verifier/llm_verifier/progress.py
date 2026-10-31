@@ -32,12 +32,15 @@ import asyncio
 import math
 import re
 import string
+import time
+from uuid import uuid4
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
@@ -48,6 +51,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
 )
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
+from openjiuwen.harness.moa.state import active_moa
 from openjiuwen.harness.moa._validation import validate_positive_int
 from openjiuwen.harness.prompts.moa_verifier import build_progress_prompt, format_steps
 
@@ -262,6 +266,8 @@ class ProgressTracker:
     def __init__(self, problem: str, *, model: Model, n_evaluations: int = 1) -> None:
         validate_positive_int("n_evaluations", n_evaluations)
         validate_chat_model(model)
+        state = active_moa.get()
+        self._invoke_id = state.invoke_id if state is not None else uuid4().hex
         self.problem = problem
         self.model = model
         self.n_evaluations = n_evaluations
@@ -270,6 +276,7 @@ class ProgressTracker:
         self._step_texts: list[str] = []
         self._per_step_reps: list[list[float | None]] = []
         self._logprobs_enabled = True
+        self._checkpoint_id = 0
 
     async def _evaluate(self, prompt: str) -> float | None:
         config = self.model.model_config
@@ -278,7 +285,6 @@ class ProgressTracker:
             "messages": messages,
             "tools": None,
             "temperature": config.temperature if config.temperature is not None else 1.0,
-            "max_tokens": config.max_tokens if config.max_tokens is not None else 4096,
         }
         if self._logprobs_enabled:
             kwargs.update(logprobs=True, top_logprobs=20)
@@ -291,34 +297,70 @@ class ProgressTracker:
             kwargs.pop("logprobs")
             kwargs.pop("top_logprobs")
             response = await self.model.invoke(**kwargs)
-        return decode_progress_score(response)
+        score = decode_progress_score(response)
+        if score is None:
+            reason = "empty_content" if not _text_content(response) else "unparseable_score"
+            if response.finish_reason == "length":
+                reason = "truncated_without_score"
+            agent_logger.warning(
+                "MoA LLM invalid response: invoke=%s checkpoint=%s reason=%s",
+                self._invoke_id, self._checkpoint_id, reason,
+            )
+        return score
 
     async def update(self, step: str) -> float:
         """Submit one checkpoint; failed scores still retain its text."""
         self._step_texts.append(str(step))
         checkpoint = len(self._step_texts)
+        state = active_moa.get()
+        self._checkpoint_id = len(state.steps) if state is not None else checkpoint
         prompt = build_progress_prompt(self.problem, format_steps(self._step_texts), checkpoint, [checkpoint])
-        requests = [asyncio.create_task(self._evaluate(prompt)) for _ in range(self.n_evaluations)]
+        started = time.monotonic()
+        failures = 0
+
+        async def evaluate(repeat: int) -> float | None:
+            nonlocal failures
+            try:
+                value = await self._evaluate(prompt)
+                if value is not None and math.isfinite(value) and 0 <= value <= 1:
+                    agent_logger.debug(
+                        "MoA LLM sample: invoke=%s checkpoint=%s repeat=%s status=success score=%s",
+                        self._invoke_id, self._checkpoint_id, repeat, value,
+                    )
+                    return value
+                agent_logger.debug(
+                    "MoA LLM sample: invoke=%s checkpoint=%s repeat=%s status=invalid",
+                    self._invoke_id, self._checkpoint_id, repeat,
+                )
+                return None
+            except Exception as exc:
+                failures += 1
+                agent_logger.warning(
+                    "MoA LLM request failed: invoke=%s checkpoint=%s repeat=%s error_type=%s",
+                    self._invoke_id, self._checkpoint_id, repeat, type(exc).__name__,
+                )
+                return None
+
+        requests = [asyncio.create_task(evaluate(repeat + 1)) for repeat in range(self.n_evaluations)]
         try:
             reps = await asyncio.gather(*requests)
         except asyncio.CancelledError:
             for request in requests:
                 request.cancel()
             await asyncio.gather(*requests, return_exceptions=True)
+            agent_logger.info(
+                "MoA LLM cancelled: invoke=%s checkpoint=%s", self._invoke_id, self._checkpoint_id,
+            )
             raise
-        except Exception as exc:
-            # A repeat failure invalidates the checkpoint. Settle all requests
-            # before returning so an invocation never leaves scoring work behind.
-            await asyncio.gather(*requests, return_exceptions=True)
-            if isinstance(exc, BaseError):
-                raise
-            raise build_error(
-                StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg="MoA progress scoring request failed",
-                cause=exc,
-            ) from exc
         valid = [value for value in reps if value is not None]
         score = sum(valid) / len(valid) if valid else 0.5
+        agent_logger.info(
+            "MoA LLM aggregate: invoke=%s checkpoint=%s planned=%s successful=%s "
+            "failed=%s invalid=%s score=%s duration_ms=%s",
+            self._invoke_id, self._checkpoint_id, self.n_evaluations, len(valid), failures,
+            self.n_evaluations - failures - len(valid), score if valid else None,
+            round((time.monotonic() - started) * 1000, 3),
+        )
         self.steps.append(checkpoint)
         self.scores.append(score)
         self._per_step_reps.append(reps)

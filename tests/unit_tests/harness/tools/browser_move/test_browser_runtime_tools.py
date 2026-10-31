@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from mcp.types import CallToolResult, TextContent
+
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard, Tool, ToolCard
 from openjiuwen.core.foundation.tool.mcp.base import MCPTool, McpToolResult
@@ -422,11 +423,11 @@ def test_batch_interact_schema_supports_single_action_and_exposes_condition_wait
     assert "ref" in steps_schema["items"]["properties"]
     assert "option_target_id" in steps_schema["items"]["properties"]
     assert "wait_for_url" in operations
-    assert "wait_for_first_card_title" in operations
+    assert "wait_for_first_card_title" not in operations
     assert "wait_for_sort_state" in operations
-    assert "wait_for_result_count" in operations
-    assert "wait_for_dom_text_change" in operations
-    assert "wait_for_stable" in operations
+    assert "wait_for_result_count" not in operations
+    assert "wait_for_dom_text_change" not in operations
+    assert "wait_for_stable" not in operations
     assert "wait_for_tab" in operations
     assert "sleep" not in operations
     step_properties = steps_schema["items"]["properties"]

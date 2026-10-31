@@ -258,9 +258,12 @@ def test_changed_observation_readmits_reader_without_read_history_resetting_it()
     step = {"op": "probe_cards", "max_cards": 12}
     key = BrowserPolicyModel._action_key(step, {}, first)
     first.state["llm_recent_actions"] = [{"op": "recall"}]
-    first.page["interaction_revision"] = 20
     assert BrowserPolicyModel._action_key(step, {}, first) == key
     first.page["cards"][0]["price"] = "$9"
+    assert BrowserPolicyModel._action_key(step, {}, first) == key  # Content is not new reader intent.
+    first.page["interaction_revision"] = 20
+    assert BrowserPolicyModel._action_key(step, {}, first) == key
+    first.page["reader_interaction"] = "ack-sort:0"
     assert BrowserPolicyModel._action_key(step, {}, first) != key
 
 

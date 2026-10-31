@@ -17,6 +17,13 @@ from collections.abc import Collection
 from openjiuwen.harness.manifest.builtin_elements import SYS_OPERATION
 from openjiuwen.harness.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec, RailSpec
 
+# A temp reviewer runs through ``run_once``, where ``completion_timeout`` is a
+# hard cap that cancels the round (for resident members it is only a slow-round
+# log threshold, and hosts may set it far higher). Pin the reviewer's own cap so
+# a stuck review ends in bounded time: the scheduler steers a still-voteless
+# reviewer halfway through, then re-dispatches it once this cap ends the run.
+REVIEWER_COMPLETION_TIMEOUT_SECONDS = 1200.0
+
 
 def build_reviewer_agent_spec(
     base: DeepAgentSpec,
@@ -27,8 +34,9 @@ def build_reviewer_agent_spec(
     """Derive a reviewer base spec from a member spec.
 
     Always applied: file tools become read-only, harness todo planning is off,
-    and no sub-agent is mounted (declared or general-purpose). MCP servers and
-    raw tool cards are inherited untouched.
+    no sub-agent is mounted (declared or general-purpose), and the round is
+    capped at ``REVIEWER_COMPLETION_TIMEOUT_SECONDS``. MCP servers and raw
+    tool cards are inherited untouched.
 
     Args:
         base: The member spec to derive from (usually the teammate spec).
@@ -57,6 +65,7 @@ def build_reviewer_agent_spec(
             "add_general_purpose_agent": False,
             "enable_async_subagent": False,
             "enable_task_planning": False,
+            "completion_timeout": REVIEWER_COMPLETION_TIMEOUT_SECONDS,
         }
     )
 
@@ -68,4 +77,4 @@ def _read_only_rail(rail: RailSpec) -> RailSpec:
     return rail.model_copy(update={"params": {**(rail.params or {}), "read_only": True}})
 
 
-__all__ = ["build_reviewer_agent_spec"]
+__all__ = ["REVIEWER_COMPLETION_TIMEOUT_SECONDS", "build_reviewer_agent_spec"]

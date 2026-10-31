@@ -122,7 +122,12 @@ def parse_survey_sources(summary_path: Path) -> list[ParsedSource]:
         pass
 
     try:
-        text = summary_path.read_text(encoding="utf-8")
+        # errors="replace": research_summary.md is topic_survey/LLM-written
+        # content and can carry a stray non-UTF-8 byte; unlike the manifest
+        # read above (caught by ValueError, UnicodeDecodeError's base class),
+        # this read was only guarded against OSError and would otherwise
+        # crash the whole reporting attempt over one bad byte.
+        text = summary_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     sources: list[ParsedSource] = []

@@ -23,7 +23,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.harness.moa import MoAConfig
 from openjiuwen.harness.moa.consultation import consult
 from openjiuwen.harness.moa.proposal import ProposalModel, _output_tokens
-from openjiuwen.harness.moa.state import MoAState, ProposalBatch, ProposalSource, active_moa
+from openjiuwen.harness.moa.state import MoAState, ProposalBatch, ProposalSource, ProposalStore, active_moa
 from openjiuwen.harness.prompts.moa import REFERENCE_SYSTEM_PROMPT, render_reference_proposals
 
 
@@ -55,7 +55,7 @@ class FixedBudgetContext:
 async def invoke_with_proposals(model, messages, *, expected_injected=True, **kwargs):
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "<ignore>& proposal"),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "<ignore>& proposal"),), key)),
         active_key=key,
         context=FixedBudgetContext(),
     )
@@ -66,8 +66,8 @@ async def invoke_with_proposals(model, messages, *, expected_injected=True, **kw
     finally:
         active_moa.reset(token)
     assert [message.model_dump() for message in messages] == before
-    assert state.pending is not None and state.pending.attempts[0].injected is expected_injected
-    return state.pending.attempts[0]
+    assert state.proposals.active is not None and state.proposals.active.attempts[0].injected is expected_injected
+    return state.proposals.active.attempts[0]
 
 
 def primary(provider="OpenAI", api_mode=None):
@@ -100,7 +100,7 @@ def primary(provider="OpenAI", api_mode=None):
         ({"reasoning": {"mode": "enabled", "budget_tokens": 2000}}, {"reasoning": None}, 777),
         ({}, {"extra_body": {"max_tokens": 5000}}, 5000),
         ({"extra_body": {"max_tokens": 5000}}, {"extra_body": {"max_tokens": 6000}}, 6000),
-        ({"max_tokens": None}, {}, 8192),
+        ({"max_tokens": None}, {}, 32768),
     ],
 )
 def test_anthropic_output_reserve_matches_actual_adapter(configured, overrides, expected):
@@ -124,6 +124,52 @@ def test_anthropic_output_reserve_matches_actual_adapter(configured, overrides, 
     wire = {**params, **params.get("extra_body", {})}
     assert wire["max_tokens"] == _output_tokens(model, overrides) == expected
     assert overrides == original
+
+
+@pytest.mark.parametrize(
+    "model_name, expected",
+    [
+        ("claude-3-opus-20240229", 4096),
+        ("claude-3-sonnet-20240229", 4096),
+        ("anthropic.claude-3-haiku-20240307-v1:0", 4096),
+        ("claude-3-5-sonnet-20241022", 8192),
+        ("anthropic/claude-3.5-haiku", 8192),
+        ("claude-3-7-sonnet-20250219", 32768),
+        ("claude-sonnet-4-5", 32768),
+        ("test-model", 32768),
+    ],
+)
+def test_anthropic_unset_max_tokens_follows_model_output_cap(model_name, expected):
+    model = primary(provider="Anthropic")
+    model.model_config.max_tokens = None
+    model.model_config.model_name = model_name
+    params = model._client._build_anthropic_params(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+    assert params["max_tokens"] == _output_tokens(model, {}) == expected
+
+
+def test_anthropic_explicit_max_tokens_ignores_old_model_output_cap():
+    model = primary(provider="Anthropic")
+    model.model_config.model_name = "claude-3-opus-20240229"
+    params = model._client._build_anthropic_params(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+    assert params["max_tokens"] == _output_tokens(model, {}) == 777
 
 
 @pytest.mark.parametrize(
@@ -152,7 +198,18 @@ def test_responses_output_reserve_matches_body_override_precedence(configured, o
         **overrides,
     )
     assert body["max_output_tokens"] == _output_tokens(model, {"send_max_output_tokens": True, **overrides}) == expected
-    assert _output_tokens(model, overrides) is None
+    default_body = model._client._build_responses_request_body(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        send_max_output_tokens=False,
+        **overrides,
+    )
+    assert default_body["max_output_tokens"] == _output_tokens(model, overrides) == expected
     assert overrides == original
 
 
@@ -170,7 +227,7 @@ async def test_anthropic_thinking_ceiling_prevents_proposal_that_would_overfill_
     sdk = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock(return_value=response)), close=AsyncMock())
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "private proposal"),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "private proposal"),), key)),
         active_key=key,
         context=FixedBudgetContext(limit=1500),
     )
@@ -180,7 +237,7 @@ async def test_anthropic_thinking_ceiling_prevents_proposal_that_would_overfill_
             await ProposalModel(model).invoke(messages=[UserMessage(content="task")])
     finally:
         active_moa.reset(token)
-    attempt = state.pending.attempts[0]
+    attempt = state.proposals.active.attempts[0]
     assert not attempt.injected and attempt.reason == "insufficient_context"
     sent = sdk.messages.create.await_args.kwargs
     assert sent["max_tokens"] == 3024
@@ -245,7 +302,7 @@ async def test_responses_conversion_keeps_multimodal_tool_pair_and_tail() -> Non
 
 
 @pytest.mark.asyncio
-async def test_responses_default_unknown_output_allowance_skips_proposal() -> None:
+async def test_responses_unspecified_output_allowance_injects_without_adding_a_cap() -> None:
     model = primary(api_mode=LLMApiMode.Responses)
     sent = {}
 
@@ -263,10 +320,10 @@ async def test_responses_default_unknown_output_allowance_skips_proposal() -> No
         "_make_responses_transport",
         return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
     ):
-        attempt = await invoke_with_proposals(model, request_messages(), expected_injected=False)
-    assert attempt.reason == "unknown_output_tokens"
+        attempt = await invoke_with_proposals(model, request_messages())
+    assert attempt.budget_mode == "unspecified"
     assert "max_output_tokens" not in sent
-    assert "reference-1" not in str(sent["input"])
+    assert "reference-1" in str(sent["input"][-1])
 
 
 @pytest.mark.asyncio
@@ -314,7 +371,7 @@ async def test_budget_trims_original_body_then_wraps_and_preserves_requested_out
     context = FixedBudgetContext(limit=900)
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "<attack>&" + "x" * 4_000),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "<attack>&" + "x" * 4_000),), key)),
         active_key=key,
         context=context,
     )
@@ -324,7 +381,7 @@ async def test_budget_trims_original_body_then_wraps_and_preserves_requested_out
             await ProposalModel(model).invoke(messages, tools=tools, max_tokens=400)
     finally:
         active_moa.reset(token)
-    attempt = state.pending.attempts[0]
+    attempt = state.proposals.active.attempts[0]
     assert attempt.reason == "trimmed" and 0 < attempt.kept_chars < 4_009
     request = sdk.chat.completions.create.await_args.kwargs
     assert request["max_tokens"] == 400

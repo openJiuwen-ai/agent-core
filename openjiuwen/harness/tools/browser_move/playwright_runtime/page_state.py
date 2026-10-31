@@ -253,6 +253,7 @@ class BrowserPageState:
         self.observation_metadata: Dict[str, Any] = {}
         self.read_observation: Dict[str, Any] = {}
         self.card_probe_cache: Dict[str, Any] = {}
+        self.card_read: dict[str, Any] = {}  # Last probe provenance; content stays in _cards/offload.
         self.cards_observed_revision = -1
         self.listing_stale = False
 
@@ -278,6 +279,7 @@ class BrowserPageState:
         self.decision_omitted = 0
         self.decision_snapshot = {}
         self._cards.clear()
+        self.card_read = {}
         self.listing_stale = False
         self._trim_target_history()
 
@@ -297,6 +299,7 @@ class BrowserPageState:
         requested = _generation_number(generation_id)
         if requested != self.generation:
             raise ValueError(
+                "browser_observation_stale: generation; "
                 f"Stale PageState generation {generation_id}; current generation is "
                 f"{self.generation_id}. Probe or snapshot the current page again."
             )
@@ -553,6 +556,7 @@ class BrowserPageState:
                 raise ValueError(f"Unknown AX ref: {normalized_ref}. Capture the current page snapshot again.")
             if ref_generation != self.generation:
                 raise ValueError(
+                    "browser_observation_stale: reference; "
                     f"Stale AX ref {normalized_ref} belongs to g{ref_generation}; "
                     f"current generation is {self.generation_id}."
                 )
@@ -567,6 +571,7 @@ class BrowserPageState:
             selector_generation = self.selector_generations.get(normalized_selector)
             if selector_generation is not None and selector_generation != self.generation:
                 raise ValueError(
+                    "browser_observation_stale: selector; "
                     f"Stale selector belongs to g{selector_generation}; current generation is "
                     f"{self.generation_id}: {normalized_selector}"
                 )
@@ -598,6 +603,7 @@ class BrowserPageState:
             return target.target_id
         if target.source == "ax":
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale AX target_id {target.target_id} belongs to {target.generation_id}; "
                 "capture the current page snapshot again."
             )
@@ -611,6 +617,7 @@ class BrowserPageState:
         if len(candidates) != 1:
             reason = "not found" if not candidates else f"ambiguous ({len(candidates)} matches)"
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale target_id {target.target_id} cannot be safely refreshed in "
                 f"{self.generation_id}: {reason}. Probe the current page again."
             )
@@ -635,7 +642,8 @@ class BrowserPageState:
         if stale.generation == self.generation:
             return stale.target_id
         if stale.source == "ax" or not (stale.selector or stale.href):
-            raise ValueError(f"Stale target_id {stale.target_id} has no refreshable runtime identity.")
+            raise ValueError(f"browser_observation_stale: target; Stale target_id {stale.target_id} "
+                             "has no refreshable runtime identity.")
         target = self._new_target(
             source=stale.source,
             locator=dict(stale.locator),
@@ -744,6 +752,7 @@ class BrowserPageState:
             "title": self.title,
             "interactives": interactives,
             "cards": self._cards[:_MAX_PUBLIC_CARDS],
+            **({"card_read": {k: v for k, v in self.card_read.items() if k != "recipe"}} if self.card_read else {}),
             **({"listing_stale": True} if self.listing_stale else {}),
             "field_coverage": sorted(self.field_coverage),
             "blockers": sorted(self.blockers),
@@ -764,7 +773,8 @@ class BrowserPageState:
 
     def invalidate_listing(self, *, advance_revision: bool = True) -> None:
         """Retire list identities; action acknowledgement must not advance twice."""
-        self._cards.clear()
+        # Retain source content for understanding and duplicate detection, but
+        # remove its executable target identities below.
         self.card_probe_cache = {}
         if advance_revision:
             self.interaction_revision += 1
@@ -961,6 +971,7 @@ class BrowserPageState:
     def _validate_target_generation(self, target: BrowserTarget) -> None:
         if target.page_id != self.page_id or target.generation != self.generation:
             raise ValueError(
+                "browser_observation_stale: target; "
                 f"Stale target_id {target.target_id} belongs to {target.generation_id}; "
                 f"current generation is {self.generation_id}."
             )

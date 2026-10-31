@@ -77,7 +77,7 @@ async def test_policy_uses_one_runtime_snapshot_and_does_not_reprobe():
     state = client.evaluate.call_args.args[0]["state"]
     assert state["page_text"] == "Fresh DOM: 销量"
     assert state["capture_id"] == "capture-a"
-    assert state["candidate_count"] == 1
+    assert state["candidate_count"] == 2  # Click and fixed target text read.
     runtime.probe_interactives.assert_not_awaited()
 
 

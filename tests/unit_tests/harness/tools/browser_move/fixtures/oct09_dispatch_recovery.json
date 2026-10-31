@@ -1,0 +1,54 @@
+{
+  "strict_error": "### Error\nError: browserBackend.callTool: Error: strict mode violation: locator('textarea#chat-textarea') resolved to 2 elements:\n    1) <textarea rows=\"1\" id=\"chat-textarea\" autocomplete=\"off\" data-ai-placeholder=\"\" data-normal-placeholder=\"\" class=\"chat-input-textarea chat-input-scroll-style\">清华大学</textarea> aka locator('#main-wrapper').getByText('清华大学', { exact: true })\n    2) <textarea rows=\"1\" id=\"chat-textarea\" autocomplete=\"off\" placeholder=\"郑钦文中网最好成绩是什么\" data-ai-placeholder=\"近视手术大概多少钱？\" data-normal-placeholder=\"郑钦文中网最好成绩是什么\" class=\"chat-input-textarea chat-input-scroll-style\"></textarea> aka getByRole('textbox', { name: '郑钦文中网最好成绩是什么' })\n\nCall log:\n\u001b[2m  - waiting for locator('textarea#chat-textarea')\u001b[22m",
+  "strict_args": {
+    "target": "textarea#chat-textarea",
+    "element": "百度搜索输入框"
+  },
+  "strict_tool": "mcp_playwright-official_browser_click",
+  "generation_errors": [
+    {
+      "ok": false,
+      "executed": false,
+      "execution_state": "rejected_before_dispatch",
+      "state_changed": false,
+      "operation": "navigate",
+      "error": "page_action_rejected",
+      "reason": "Stale PageState generation g1; current generation is g2. Probe or snapshot the current page again.",
+      "recovery_hint": "Observe current state; never automatically replay an uncertain action.",
+      "status": "failed"
+    },
+    {
+      "ok": false,
+      "executed": false,
+      "execution_state": "rejected_before_dispatch",
+      "state_changed": false,
+      "operation": "navigate",
+      "error": "page_action_rejected",
+      "reason": "Stale PageState generation g1; current generation is g2. Probe or snapshot the current page again.",
+      "recovery_hint": "Observe current state; never automatically replay an uncertain action.",
+      "status": "failed"
+    },
+    {
+      "ok": false,
+      "executed": false,
+      "execution_state": "rejected_before_dispatch",
+      "state_changed": false,
+      "operation": "navigate",
+      "error": "page_action_rejected",
+      "reason": "Stale PageState generation g1; current generation is g2. Probe or snapshot the current page again.",
+      "recovery_hint": "Observe current state; never automatically replay an uncertain action.",
+      "status": "failed"
+    },
+    {
+      "ok": false,
+      "executed": false,
+      "execution_state": "rejected_before_dispatch",
+      "state_changed": false,
+      "operation": "navigate",
+      "error": "page_action_rejected",
+      "reason": "Stale PageState generation g1; current generation is g2. Probe or snapshot the current page again.",
+      "recovery_hint": "Observe current state; never automatically replay an uncertain action.",
+      "status": "failed"
+    }
+  ]
+}

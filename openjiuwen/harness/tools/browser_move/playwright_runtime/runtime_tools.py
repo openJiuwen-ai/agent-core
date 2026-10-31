@@ -127,14 +127,18 @@ _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
 }
 
 _PROBE_CARDS_DESC = (
-    "Return compact repeated card/listing structures from the current page. "
+    "Return up to 12 compact cards from the selected page range. viewport_only=true reads the current "
+    "viewport after scrolling; false reads from the start across the page, not the next batch or all results. "
+    "read_scope, truncated and limit_reached describe coverage, not business completion. "
     "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
     "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
     "The result includes compact PageState with generation-scoped card/control target_id values, "
     "candidate card title, author/source, summary/snippet, price, rating, "
     "review count, availability, primary link, and visible controls, "
     "region/kind/result_index/is_ad semantics that distinguish main results, accounts, sidebars, "
-    "hot searches, shops, chats, and product links, "
+    "recommendation sections, hot searches, shops, chats, and product links. Cards on a page are not "
+    "necessarily that page's primary rows; keep region and original source text. Use a targeted "
+    "interactive probe/local_excerpt or fixed find/read_text when the desired row is absent. Returns "
     "match_count/visible/enabled/clickable/generation_id, recurring structure signatures, and "
     "cache diagnostics. Navigate primary_link/href directly instead of clicking a card hint. "
     "If this returns the fields needed "
@@ -175,7 +179,11 @@ _BATCH_INTERACT_DESC = (
     "Only read-only extraction and explicit wait operations accept a validated selector. "
     "wait_for_sort_state accepts the same target_id/ref as click and checks its live selected state; "
     "an explicit attribute requires an expected_value. Do not repeat successful steps after a later wait fails. "
-    "Locator strategies are mutually exclusive. "
+    "After an action that rerenders fields, observe fresh controls before extraction; a failed extract does not "
+    "undo a successful fill. A navigation-only target has a primary URL but cannot be clicked in a popup batch. "
+    "Locator strategies are mutually exclusive. wait and snapshot are NOT batch step ops. "
+    "Use browser_page_action {op:snapshot,generation_id:CURRENT} for a snapshot, or "
+    "{op:wait,ms:500,generation_id:CURRENT} for a short observation wait. "
     "A one-step call is rewritten by the runtime to an equivalent official browser primitive when "
     "one exists, so it does not fail and require another model turn. Multi-step calls are preflighted "
     "before side effects. Results use status=completed/partial/failed and contain only compact step "
@@ -190,12 +198,12 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                 "Ordered browser steps to execute in one batch. Supported ops: click, fill, type, "
                 "autocomplete, select_visible_text, press, select_option, set_checked, "
                 "wait_for_selector, wait_for_text, wait_for_load_state, wait_for_url, "
-                "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
-                "wait_for_dom_text_change, wait_for_stable, wait_for_tab, extract_text, "
+                "wait_for_sort_state, wait_for_tab, extract_text, "
                 "extract_value, screenshot. Common waits: wait_for_selector + target_id/ref; "
                 "wait_for_text + text; wait_for_url + url_contains (also checks this action's popups). "
-                "wait_for_first_card_title/dom_text_change/sort_state/result_count require a bound target "
-                "or selector. If no expected change is known, inspect the page/tabs instead of guessing a wait. "
+                "wait_for_sort_state requires the observed clicked target. Only wait for an observed URL or "
+                "known destination, never a guessed sort query parameter. If no expected change is known, "
+                "inspect the page/tabs instead of guessing a wait. "
                 "Use optional=true for an advisory wait; its failure does not undo an earlier action ACK."
             ),
             "minItems": 1,
@@ -219,11 +227,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                             "wait_for_text",
                             "wait_for_load_state",
                             "wait_for_url",
-                            "wait_for_first_card_title",
                             "wait_for_sort_state",
-                            "wait_for_result_count",
-                            "wait_for_dom_text_change",
-                            "wait_for_stable",
                             "wait_for_tab",
                             "extract_text",
                             "extract_value",
@@ -362,7 +366,8 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "url": {
                         "type": "string",
-                        "description": "Exact URL expected by wait_for_url.",
+                        "description": ("Observed exact destination for wait_for_url. "
+                                        "Do not guess an old-page URL after search/popup."),
                     },
                     "expected_url": {
                         "type": "string",
@@ -370,7 +375,8 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "url_contains": {
                         "type": "string",
-                        "description": "URL substring expected by wait_for_url.",
+                        "description": ("Observed destination substring for wait_for_url; "
+                                        "never invent sort/query parameters."),
                     },
                     "url_pattern": {
                         "type": "string",
@@ -393,10 +399,6 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                             "For wait_for_tab, activate the matched new tab for subsequent steps. Default true."
                         ),
                     },
-                    "expected_text": {
-                        "type": "string",
-                        "description": "Expected first-card title text.",
-                    },
                     "attribute": {
                         "type": "string",
                         "description": (
@@ -408,32 +410,12 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                         "type": "string",
                         "description": "Expected attribute or text value for a wait condition.",
                     },
-                    "count": {
-                        "type": "integer",
-                        "description": "Exact result count expected.",
-                    },
-                    "min_count": {
-                        "type": "integer",
-                        "description": "Minimum result count expected.",
-                    },
-                    "max_count": {
-                        "type": "integer",
-                        "description": "Maximum result count expected.",
-                    },
-                    "previous_text": {
-                        "type": "string",
-                        "description": "Previous DOM text used by wait_for_dom_text_change.",
-                    },
                     "poll_interval_ms": {
                         "type": "integer",
                         "description": (
                             "Dynamic-condition polling interval, clamped to 50..1000ms; default 100ms. "
                             "Polling always shares the step's total timeout."
                         ),
-                    },
-                    "stable_ms": {
-                        "type": "integer",
-                        "description": "How long a matched value must remain unchanged.",
                     },
                     "field": {
                         "type": "string",

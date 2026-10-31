@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.harness.tools.browser_move.decision.action_space import build_menu, goal_values
@@ -29,6 +30,12 @@ def answer(choice="a1", *, group="CLICK", flat=False, **changes):
     if not flat:
         action = response["answers"]["action"]
         action["probabilities"][group] = action["probabilities"].pop("a1")
+        # Default setup has one named button with separate click and fixed-read capabilities.
+        if group == "CLICK":
+            action["probabilities"]["READ_TARGET_TEXT"] = 0.0
+            response["answers"]["target_READ_TARGET_TEXT"] = {
+                "type": "choice", "choice": "a2", "probabilities": {"a2": 1.0}, "confidence": 1.0,
+            }
         if choice == "a1":
             action["choice"] = group
         response["answers"]["target_" + group] = {
@@ -232,7 +239,8 @@ async def test_executor_rejects_changed_state_without_dispatching_an_action(muta
         runtime.call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
     else:
         session = SimpleNamespace(get_session_id=lambda: "other")
-    with pytest.raises(ValueError, match="original LLM"):
+    code = "browser_policy_target_changed" if mutation in {"page", "node"} else "browser_policy_guard_failed"
+    with pytest.raises(ValueError, match=code):
         await policy.validate_tool_call(inputs, session)
 
 
@@ -267,9 +275,11 @@ def test_literal_values_and_missing_values_do_not_invent_form_content():
     assert goal_values("填写我的姓名和地址") == []
     control = {"target_id": "t1", "name": "姓名", "role": "textbox", "enabled": True, "actionable": True,
                "decision_state": {"tag": "input", "node_guard": {"node": 1}}}
-    assert not build_menu([control], "填写我的姓名", limit=30).steps
+    assert {s["op"] for s in build_menu([control], "填写我的姓名", limit=30).steps.values()} == {"extract_value"}
     menu = build_menu([control], '姓名填写“张 三”', limit=30)
-    assert list(menu.steps.values()) == [{"target_id": "t1", "op": "fill", "value": "张 三"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "t1", "op": "fill", "value": "张 三"}
+    ]
     control["decision_state"]["sensitive"] = True
     assert not build_menu([control], '填写“secret”', limit=30).steps
 
