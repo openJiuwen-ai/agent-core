@@ -294,6 +294,23 @@ def team_session_dir(team_name: str, session_id: str) -> Path:
     return team_sessions_dir(team_name) / _safe_segment(session_id)
 
 
+GROUP_PATH_HASH_LENGTH = 12
+"""Hash characters kept in group conversation path names.
+
+Full 64-character digests push the archive past the Windows MAX_PATH limit.
+"""
+
+
+def group_path_hash(value: str, length: int | None = GROUP_PATH_HASH_LENGTH) -> str:
+    """Return the SHA-256 hex digest of ``value``, truncated to ``length`` when given."""
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return digest if length is None else digest[:length]
+
+
+def _scope_segment(value: str, length: int | None) -> str:
+    return _safe_segment(value) + "-" + group_path_hash(value, length)
+
+
 def group_conversation_registry_dir(team_name: str) -> Path:
     """Return the default-home registry locating custom conversation workspaces."""
     if not team_name or team_name in (".", ".."):
@@ -306,6 +323,30 @@ def group_conversation_registry_dir(team_name: str) -> Path:
     return root
 
 
+def group_conversation_dirs(
+    team_name: str,
+    session_id: str,
+    *,
+    workspace_path: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Return the short-hash archive and the legacy full-hash archive, in that order.
+
+    Archives written before hashes were shortened keep their location, so a
+    session may own either layout. Cleanup must cover both.
+    """
+    group_conversation_registry_dir(team_name)
+    root = Path(workspace_path).expanduser() if workspace_path is not None else team_workspace_dir(team_name)
+    conversations = root.resolve() / "conversations"
+    paths = tuple(
+        conversations / _scope_segment(team_name, length) / _scope_segment(session_id, length)
+        for length in (GROUP_PATH_HASH_LENGTH, None)
+    )
+    for path in paths:
+        if path.resolve() != path:
+            raise ValueError("Conversation history must remain inside its own workspace directory without symlinks")
+    return paths
+
+
 def group_conversation_dir(
     team_name: str,
     session_id: str,
@@ -313,15 +354,8 @@ def group_conversation_dir(
     workspace_path: str | Path | None = None,
 ) -> Path:
     """Return a team/session-isolated public archive inside the shared workspace."""
-    group_conversation_registry_dir(team_name)
-    root = Path(workspace_path).expanduser() if workspace_path is not None else team_workspace_dir(team_name)
-    root = root.resolve()
-    team_scope = _safe_segment(team_name) + "-" + hashlib.sha256(team_name.encode("utf-8")).hexdigest()
-    session_scope = _safe_segment(session_id) + "-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-    path = root / "conversations" / team_scope / session_scope
-    if path.resolve() != path:
-        raise ValueError("Conversation history must remain inside its own workspace directory without symlinks")
-    return path
+    short, legacy = group_conversation_dirs(team_name, session_id, workspace_path=workspace_path)
+    return legacy if legacy.is_dir() else short
 
 
 def project_worktree_hash(project_dir: str) -> str:
