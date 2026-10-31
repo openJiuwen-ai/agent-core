@@ -64,6 +64,10 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
 - `TeamDatabase.close()` 改为终态：清空 `sessions`，之后 `initialize()` 抛 `AGENT_TEAM_STATE_INVALID`，
   不再重新打开；新增只读属性 `closed`。生产代码里没有 `close()` 的调用方，只有测试会在关闭后重开，已改为
   新建实例。`get_shared_db` 遇到已关闭的缓存实例会换一个新的，避免把死实例一直发给调用方。
+- `get_shared_db` 的缓存 key 对文件 SQLite 做 `expanduser().resolve()`：同一个库文件写成 `~/...`、
+  相对路径或绝对路径时共用一个 `TeamDatabase`，不会出现两套连接池、两把写锁争同一个文件。`:memory:`
+  和 PostgreSQL / MySQL 的连接串保持原样。相对路径按调用 `get_shared_db` 时的工作目录解析，与
+  engine 打开文件时的解析方式一致；进程中途切换工作目录不在考虑范围内。
 - `OrgDbContext` 不再缓存 provider：`sessions` 属性每次都读 `TeamDatabase.sessions`，库没初始化或已
   关闭就抛 `AGENT_TEAM_STATE_INVALID`；`initialize()` 只做"初始化数据库 + 确保组织表"。因此无论是还被
   引用的旧组织存储，还是 `team.list` 每次新建的 context，都没法把已关闭的库悄悄重新打开（重建 engine 和
@@ -116,7 +120,9 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
     `sessions` 与两个 engine 都为 `None`；原因消除后重试初始化成功。
 - `tests/unit_tests/agent_teams/test_database_concurrency.py` 新增 3 条：`retry_on_transient` 遇到一次
   看门狗超时后重试成功；连续两次看门狗超时即抛出；其它瞬时错误预算耗尽时抛出最后一次的原始异常。
-- `tests/unit_tests/agent_teams/test_shared_resources.py` 新增 1 条：已关闭的缓存实例会被换成新实例。
+- `tests/unit_tests/agent_teams/test_shared_resources.py` 新增 2 条：已关闭的缓存实例会被换成新实例；
+  同一个 SQLite 文件的 `~`、相对、绝对、含 `..` 四种写法拿到同一个实例，另一个文件拿到不同实例。
+  后一条在 key 归一化前的代码上失败。
 - 对照：把 `organization/db.py` 换回修复前版本，前 3 条组织测试失败；保留共享 provider、只把 DDL 改回
   直连 `engine.begin()`，锁测试单独失败；把 `tools/database/__init__.py` 换回上一提交的版本，关闭与
   初始化失败相关的 3 条失败。
@@ -124,7 +130,7 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
   `tests/unit_tests/server/test_group_service.py`、
   `tests/unit_tests/server/extensions/test_organization_package_uninstall.py`、
   `tests/agents/swarm/test_group_chat.py` 共 74 passed。
-- `tests/unit_tests/agent_teams` 全量：4110 passed / 36 skipped / 2 xfailed / 1 failed。失败的
+- `tests/unit_tests/agent_teams` 全量：4111 passed / 36 skipped / 2 xfailed / 1 failed。失败的
   `agent/test_member_activity.py::test_observe_member_status_emits_after_the_debounce` 在不含本次任何
   改动的基线上同样失败（4099 passed / 1 failed），与本修复无关。
 - 另：`test_database.py::TestTeamDatabaseInit::test_postgresql_initialize_uses_asyncpg_engine` 在与
@@ -144,9 +150,5 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
 
 - F_83 已知遗留未变：`drop_cur_session_tables` 与 `cleanup_all_runtime_state` 等清理路径仍走
   `engine.begin()`，属于停摆期操作，本期不处理。
-- `spawn/shared_resources.py` 的 `get_shared_db` 按原始 `connection_string` 缓存实例：同一个 SQLite
-  文件如果用不同写法（`~/...` 与绝对路径）引用，会得到两个 `TeamDatabase`，各有一套池和写锁，写操作
-  只能在 SQLite 文件锁上排队。应对 sqlite 的 key 做 `expanduser().resolve()` 归一化，影响所有调用方，
-  另行修复。
 - swarm 的 `team.list` 对每个历史 session 都会查一遍组织，读负载仍偏高（现在走读池，不再抢写池）；
   如需进一步优化在 swarm 侧缓存，与本修复无关。

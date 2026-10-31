@@ -15,6 +15,7 @@ same database engine and the same runtime to avoid duplicated state.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
 # ---- process-global singletons ------------------------------------------
 
 _runtime: "TeamRuntime | None" = None
-# Database instances keyed by normalized db_type + connection_string.
+# Database instances keyed by db_type + connection_string (SQLite file paths
+# resolved, see ``_db_cache_key``).
 _db_instances: dict[str, "TeamDatabase"] = {}
 
 
@@ -43,7 +45,8 @@ def get_shared_runtime() -> "TeamRuntime":
 def get_shared_db(config: Any) -> "TeamDatabase":
     """Return a process-global database instance matching *config*.
 
-    One TeamDatabase is cached per db_type+connection_string. Multiple
+    One TeamDatabase is cached per db_type+connection_string; spellings of
+    the same SQLite file (``~``, relative, absolute) share one instance. Multiple
     teams and sessions share the same instance; row-level isolation is
     provided by team_name / session_id columns.
     """
@@ -63,10 +66,22 @@ def cleanup_shared_resources() -> None:
 
 # ---- internals -----------------------------------------------------------
 
+def _db_cache_key(db_type: str, conn_str: str) -> str:
+    """Build the cache key, resolving file-backed SQLite paths.
+
+    One SQLite file must map to one TeamDatabase: two instances would mean two
+    pools and two write locks on the same file. ``~/x/team.db``, a relative
+    path and the absolute path all name the same file, so they share a key.
+    """
+    from openjiuwen.agent_teams.tools.database.config import DatabaseType
+
+    if db_type == DatabaseType.SQLITE and conn_str and conn_str != ":memory:":
+        conn_str = str(Path(conn_str).expanduser().resolve())
+    return f"{db_type}::{conn_str}"
+
+
 def _get_shared_db_instance(config: Any) -> "TeamDatabase":
-    db_type = config.db_type
-    conn_str = config.connection_string
-    key = f"{db_type}::{conn_str}"
+    key = _db_cache_key(config.db_type, config.connection_string)
     cached = _db_instances.get(key)
     # A closed TeamDatabase is terminal (it refuses to reinitialize), so a
     # closed cache entry is replaced instead of handed out forever.

@@ -60,7 +60,8 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   释放已建好的 engine 再抛出，可以重试。**`close()` 是终态**：之后 `initialize()` 抛
   `AGENT_TEAM_STATE_INVALID`，不会重新打开，任何还持有它的对象（如组织存储）都无法悄悄重建
   engine 和后台 checkpointer；要再用同一份存储就新建实例。`get_shared_db` 遇到已关闭
-  （`closed`）的缓存实例会换一个新的，不会把死实例一直发下去。
+  （`closed`）的缓存实例会换一个新的，不会把死实例一直发下去；缓存 key 对文件 SQLite 做
+  `expanduser().resolve()`，同一个库文件的不同写法共用一个实例（一个文件只有一把写锁）。
 - **PRAGMA（`engine.py` `_attach_sqlite_pragmas`）** —— 文件后端 SQLite 跑
   `journal_mode=WAL`（数据库级，首次连接时设一次）+ `synchronous=NORMAL` +
   `wal_autocheckpoint`（连接级，每次连接都设）。NORMAL 是安全、高吞吐的 WAL 搭配；
