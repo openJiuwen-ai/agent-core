@@ -12,6 +12,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import ArchiveError
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
@@ -221,11 +222,20 @@ class PrefixCompactProcessor(ContextProcessor):
         if not summary:
             return None, context_window
 
-        archive = await self._archive_compressed_messages(
-            context=context,
-            original_messages=original_messages,
-            span=span,
-        )
+        try:
+            archive = await self._archive_compressed_messages(
+                context=context,
+                original_messages=original_messages,
+                span=span,
+            )
+        except ArchiveError as exc:
+            logger.error(
+                "[%s] skipping compression to preserve messages: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+            return None, context_window
         memory_message = UserMessage(
             content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)
         )
@@ -532,33 +542,32 @@ class PrefixCompactProcessor(ContextProcessor):
         original_messages: list[BaseMessage],
         span: PrefixCompactSpan,
     ) -> Any | None:
+        """Archive messages replaced by a prefix compaction.
+
+        Returns ``None`` when recall is disabled or there is nothing to archive.
+        ``ArchiveError`` propagates so the caller can skip replacement and keep
+        the original messages.
+        """
         get_recall_config = getattr(context, "compression_recall_config", None)
         recall_config = get_recall_config() if callable(get_recall_config) else None
         if not isinstance(recall_config, CompressionRecallConfig) or not recall_config.enabled:
+            return None
+        if not span.messages_to_compress:
             return None
         from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
             archive_compression_messages,
         )
 
-        try:
-            return await asyncio.to_thread(
-                archive_compression_messages,
-                context=context,
-                processor_type=self.processor_type(),
-                original_messages=original_messages,
-                messages_to_compress=list(span.messages_to_compress),
-                preceding_messages=list(span.preserved_prefix),
-                chunk_size_tokens=recall_config.chunk_size_tokens,
-                chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[%s] compression recall archive failed; continuing without a recall marker: %s",
-                self.processor_type(),
-                exc,
-                exc_info=True,
-            )
-            return None
+        return await asyncio.to_thread(
+            archive_compression_messages,
+            context=context,
+            processor_type=self.processor_type(),
+            original_messages=original_messages,
+            messages_to_compress=list(span.messages_to_compress),
+            preceding_messages=list(span.preserved_prefix),
+            chunk_size_tokens=recall_config.chunk_size_tokens,
+            chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
+        )
 
     def _delete_compression_archive(self, archive: Any) -> None:
         from openjiuwen.core.context_engine.processor.forked.compressor.recall import (

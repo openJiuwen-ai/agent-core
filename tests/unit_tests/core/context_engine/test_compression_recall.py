@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,12 +17,16 @@ from openjiuwen.core.context_engine.processor.forked.compressor.current_round_co
     CurrentRoundCompressor,
     CurrentRoundCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.base import PrefixCompactSpan
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
     DialogueCompressor,
     DialogueCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.recall import archive as archive_module
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
     CompressionArchive,
+    _new_memory_id,
+    _recall_root,
     archive_compression_messages,
     delete_compression_archive,
 )
@@ -116,12 +125,15 @@ def test_archive_extracts_query_text_from_structured_user_content(tmp_path):
     archive_path = Path(archive.path)
 
     turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    manifest = json.loads((archive_path / "manifest.json").read_text(encoding="utf-8"))
     assert turns[0]["query"] == "How should database retries work?"
     assert turns[1]["query"] == "如何配置缓存淘汰策略？"
-    assert archive_path.name == f"{archive.memory_id}_如何配置缓存淘汰策略"
+    assert archive_path.name == archive.memory_id
+    assert manifest["schema_version"] == 1
+    assert manifest["archive_query"] == "如何配置缓存淘汰策略？"
 
 
-def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
+def test_archive_structured_content_without_text_keeps_empty_query_in_turns(tmp_path):
     messages = [
         AssistantMessage(content="Working on it."),
     ]
@@ -132,7 +144,10 @@ def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
         preceding=[UserMessage(content=[{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}])],
     )
 
-    assert Path(archive.path).name == f"{archive.memory_id}_no-query"
+    archive_path = Path(archive.path)
+    turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert archive_path.name == archive.memory_id
+    assert turns[0]["query"] == ""
 
 
 def test_archive_unwraps_channel_envelope_for_query(tmp_path):
@@ -145,8 +160,10 @@ def test_archive_unwraps_channel_envelope_for_query(tmp_path):
     archive_path = Path(archive.path)
 
     turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    manifest = json.loads((archive_path / "manifest.json").read_text(encoding="utf-8"))
     assert turns[0]["query"] == "帮我查一下昨天的报错"
-    assert archive_path.name == f"{archive.memory_id}_帮我查一下昨天的报错"
+    assert archive_path.name == archive.memory_id
+    assert manifest["archive_query"] == "帮我查一下昨天的报错"
 
 
 def test_archive_keeps_json_first_line_as_genuine_user_text(tmp_path):
@@ -195,7 +212,7 @@ def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path)
     assert "database timeout in worker" in chunk
 
 
-def test_archive_chunk_filenames_carry_content_summary(tmp_path):
+def test_archive_chunk_filenames_use_turn_chunk_ids(tmp_path):
     messages = [
         UserMessage(content="How should database retries work?"),
         AssistantMessage(content="Use exponential backoff for database timeout errors."),
@@ -206,10 +223,8 @@ def test_archive_chunk_filenames_carry_content_summary(tmp_path):
     turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
 
     chunk_names = [Path(path).name for path in turns[0]["chunk_paths"]]
-    assert all(name.startswith("turn_000_chunk_") for name in chunk_names)
-    assert chunk_names[0].endswith(".md")
-    # 首个 chunk 跳过 "## User" 裸角色标题，取真实内容行作为摘要
-    assert "How_should_database_retries_work" in chunk_names[0]
+    assert chunk_names
+    assert all(re.fullmatch(r"turn_000_chunk_\d{3}\.md", name) for name in chunk_names)
     for name in chunk_names:
         assert (archive_path / "chunks" / name).is_file()
 
@@ -445,28 +460,6 @@ async def test_compressor_adds_marker_only_after_archive_succeeds(tmp_path):
         query="database work",
     )
     assert result["chunks"]
-
-
-@pytest.mark.asyncio
-async def test_compressor_continues_without_marker_when_archive_fails(tmp_path):
-    blocking_workspace = tmp_path / "workspace-file"
-    blocking_workspace.write_text("not a directory", encoding="utf-8")
-    compressor = DialogueCompressor(DialogueCompressorConfig())
-    executor = MagicMock()
-    executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
-    compressor._compression_executor = executor
-    context = _context(blocking_workspace, recall_config=CompressionRecallConfig(enabled=True))
-    messages = [
-        UserMessage(content="Historical request"),
-        AssistantMessage(content="historical work " * 600),
-        UserMessage(content="Current task"),
-    ]
-    window = ContextWindow(system_messages=[], context_messages=messages, tools=[])
-
-    event, updated = await compressor.on_get_context_window(context, window)
-
-    assert event is not None
-    assert "COMPRESSION_RECALL" not in updated.context_messages[0].content
 
 
 @pytest.mark.asyncio
@@ -706,3 +699,238 @@ async def test_compressor_passes_recall_chunk_config_to_archive(tmp_path):
     assert len(archive_dirs) == 1
     turn = json.loads((archive_dirs[0] / "turns.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert len(turn["chunk_paths"]) >= 2
+
+
+def _workspace_for_recall_root_length(length: int, session_id: str = "s") -> Path:
+    parent = Path(tempfile.gettempdir()) / "ocw-recall-budget"
+    parent.mkdir(parents=True, exist_ok=True)
+    probe = _recall_root(parent / "x", session_id)
+    tail = str(probe)[len(str(parent / "x")) :]
+    name_length = length - len(str(parent)) - 1 - len(tail)
+    if name_length < 1:
+        raise RuntimeError(f"cannot build a recall root of length {length}")
+    workspace = parent / ("p" * name_length)
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True)
+    root = _recall_root(workspace, session_id)
+    if len(str(root)) != length:
+        raise RuntimeError(f"recall root length {len(str(root))} != {length}")
+    return workspace
+
+
+def _path_of_length(length: int) -> Path:
+    return Path("x" * length)
+
+
+def test_path_budget_rejects_directory_over_247_and_file_over_259():
+    exceeds = archive_module._exceeds_windows_path_budget
+    assert exceeds(_path_of_length(247), kind="directory") is False
+    assert exceeds(_path_of_length(259), kind="file") is False
+    assert exceeds(_path_of_length(248), kind="directory") is True
+    assert exceeds(_path_of_length(260), kind="file") is True
+
+
+def test_archive_paths_fit_accident_root(monkeypatch):
+    session_id = "s"
+    workspace = _workspace_for_recall_root_length(181, session_id)
+    recall_root = _recall_root(workspace, session_id)
+    ids = (
+        "20260102T030405123456Z",
+        "20260102T030405123456Z-ab12",
+        "0123456789abcdef",
+    )
+    assert [len(memory_id) for memory_id in ids] == [22, 27, 16]
+    captured: dict[str, dict[str, object]] = {}
+    real_replace = os.replace
+
+    def _capture_replace(src, dst):
+        temporary = Path(src)
+        chunk_files = sorted((temporary / "chunks").glob("*.md"))
+        captured[Path(dst).name] = {
+            "chunks_length": len(str(temporary / "chunks")),
+            "chunk_file_length": len(str(chunk_files[0])),
+            "paths": [
+                temporary,
+                temporary / "chunks",
+                temporary / "turns.jsonl",
+                temporary / "raw_messages.json",
+                temporary / "manifest.json",
+                *chunk_files,
+            ],
+        }
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(archive_module.os, "replace", _capture_replace)
+    for memory_id in ids:
+        monkeypatch.setattr(archive_module, "_new_memory_id", lambda _root, memory_id=memory_id: memory_id)
+        archive = _archive(
+            workspace,
+            [UserMessage(content="database retries"), AssistantMessage(content="use backoff")],
+            session_id=session_id,
+        )
+        archive_path = Path(archive.path)
+        record = captured[memory_id]
+        assert archive_path.name == memory_id
+        for path in record["paths"]:
+            kind = "file" if path.suffix in {".json", ".jsonl", ".md"} else "directory"
+            assert archive_module._exceeds_windows_path_budget(path, kind=kind) is False
+        for path in (archive_path, archive_path / "chunks"):
+            assert archive_module._exceeds_windows_path_budget(path, kind="directory") is False
+        for path in archive_path.rglob("*.md"):
+            assert archive_module._exceeds_windows_path_budget(path, kind="file") is False
+        if len(memory_id) == 27:
+            assert record["chunks_length"] == 230
+            assert record["chunk_file_length"] == 252
+    assert [path.name for path in recall_root.iterdir() if path.name.startswith(".")] == []
+
+
+def test_archive_preflight_rejects_without_creating_directories(monkeypatch):
+    session_id = "s"
+    workspace = _workspace_for_recall_root_length(189, session_id)
+    memory_id = "20260102T030405123456Z-ab12"
+    monkeypatch.setattr(archive_module, "_new_memory_id", lambda _root: memory_id)
+
+    with pytest.raises(archive_module.ArchiveError):
+        _archive(
+            workspace,
+            [UserMessage(content="database retries"), AssistantMessage(content="use backoff")],
+            session_id=session_id,
+        )
+
+    assert list(workspace.rglob("compression_recall")) == []
+
+
+def test_new_memory_id_collision_is_timestamp_plus_4_hex(tmp_path, monkeypatch):
+    fixed = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc)
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(archive_module, "datetime", _FrozenDateTime)
+    timestamp = fixed.strftime("%Y%m%dT%H%M%S%fZ")
+    recall_root = tmp_path / "compression_recall"
+    (recall_root / f"{timestamp}_legacy").mkdir(parents=True)
+
+    memory_id = _new_memory_id(recall_root)
+
+    assert len(memory_id) == 27
+    assert re.fullmatch(rf"{timestamp}-[0-9a-f]{{4}}", memory_id)
+    assert not re.fullmatch(r"[0-9a-f]{32}", memory_id)
+
+
+def test_new_memory_id_strftime_failure_is_16_hex(tmp_path, monkeypatch):
+    class _BrokenDateTime:
+        @staticmethod
+        def now(tz=None):
+            raise RuntimeError("clock unavailable")
+
+    monkeypatch.setattr(archive_module, "datetime", _BrokenDateTime)
+    memory_id = _new_memory_id(tmp_path / "compression_recall")
+
+    assert re.fullmatch(r"[0-9a-f]{16}", memory_id)
+
+
+def _plant_archive(recall_root: Path, memory_id: str, directory_name: str, session_id: str) -> Path:
+    directory = recall_root / directory_name
+    (directory / "chunks").mkdir(parents=True)
+    (directory / "chunks" / "turn_000_chunk_000.md").write_text("database timeout retry backoff\n", encoding="utf-8")
+    (directory / "turns.jsonl").write_text(
+        json.dumps(
+            {
+                "turn_id": "turn_000",
+                "query": "database timeout",
+                "answer": "retry backoff",
+                "chunk_paths": ["chunks/turn_000_chunk_000.md"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "memory_id": memory_id,
+                "session_id": session_id,
+                "created_at": "2026-01-02T03:04:05+00:00",
+                "turn_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_old_slug_directory_still_lists_and_deletes(tmp_path):
+    session_id = "session-1"
+    recall_root = _recall_root(tmp_path, session_id)
+    old_id = "20260102T030405123456Z"
+    kept_id = "20260102T030405654321Z"
+    old_dir = _plant_archive(recall_root, old_id, f"{old_id}_legacy", session_id)
+    kept_dir = _plant_archive(recall_root, kept_id, kept_id, session_id)
+
+    found = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id=session_id,
+        memory_id=old_id,
+        query="database timeout retry",
+    )
+    listed = {item["memory_id"] for item in found["archives_in_session"]}
+    assert listed == {old_id, kept_id}
+    assert found["chunks"]
+
+    delete_compression_archive(CompressionArchive(memory_id=old_id, path=str(old_dir)))
+
+    assert not old_dir.exists()
+    assert kept_dir.is_dir()
+    kept = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id=session_id,
+        memory_id=kept_id,
+        query="database timeout retry",
+    )
+    assert {item["memory_id"] for item in kept["archives_in_session"]} == {kept_id}
+    assert kept["chunks"]
+
+
+@pytest.mark.asyncio
+async def test_prefix_compact_skips_archive_when_nothing_to_compress(tmp_path):
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    context = _context(tmp_path, recall_config=CompressionRecallConfig(enabled=True))
+    span = PrefixCompactSpan(preserved_prefix=[], messages_to_compress=[], protected_tail=[])
+
+    archive = await compressor._archive_compressed_messages(
+        context=context,
+        original_messages=[],
+        span=span,
+    )
+
+    assert archive is None
+    assert list(tmp_path.rglob("compression_recall")) == []
+
+
+@pytest.mark.asyncio
+async def test_prefix_compact_keeps_messages_when_recall_archive_fails(tmp_path):
+    blocking_workspace = tmp_path / "workspace-file"
+    blocking_workspace.write_text("not a directory", encoding="utf-8")
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
+    compressor._compression_executor = executor
+    context = _context(blocking_workspace, recall_config=CompressionRecallConfig(enabled=True))
+    messages = [
+        UserMessage(content="Historical request"),
+        AssistantMessage(content="historical work " * 600),
+        UserMessage(content="Current task"),
+    ]
+    window = ContextWindow(system_messages=[], context_messages=messages, tools=[])
+
+    event, updated = await compressor.on_get_context_window(context, window)
+
+    assert event is None
+    assert updated.context_messages == messages
+    context.set_messages.assert_not_called()
+    assert all("COMPRESSION_RECALL" not in str(message.content) for message in updated.context_messages)

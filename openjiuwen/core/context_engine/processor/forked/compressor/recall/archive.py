@@ -6,8 +6,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +24,37 @@ ARCHIVE_SCHEMA_VERSION = 1
 DEFAULT_CHUNK_SIZE_TOKENS = 3_000
 DEFAULT_CHUNK_OVERLAP_TOKENS = 300
 RECALL_DIR_NAME = "compression_recall"
+# CreateDirectory keeps 12 characters under MAX_PATH for an 8.3 name. 247 stays
+# on the safe side of the 248-character documented limit. File paths exclude the
+# terminating NUL, so the usable file limit is 259.
+WINDOWS_DIRECTORY_MAX_CHARS = 247
+WINDOWS_FILE_MAX_CHARS = 259
+_ID_ATTEMPTS = 8
+_TEMP_TOKEN_BYTES = 4
+_COLLISION_TOKEN_BYTES = 2
+_FALLBACK_ID_BYTES = 8
+_ARCHIVE_FILENAMES = ("turns.jsonl", "raw_messages.json", "manifest.json")
+
+
+class ArchiveError(OSError):
+    """Raised when a compression archive cannot be written."""
+
+
+def directory_matches_memory_id(name: str, memory_id: str) -> bool:
+    """True for a pure memory-id directory or a legacy ``memory_id_<slug>`` directory."""
+    return name == memory_id or name.startswith(f"{memory_id}_")
+
+
+def _exceeds_windows_path_budget(path: Path, *, kind: str) -> bool:
+    return len(str(path)) > _windows_path_limit(kind)
+
+
+def _windows_path_limit(kind: str) -> int:
+    if kind == "directory":
+        return WINDOWS_DIRECTORY_MAX_CHARS
+    if kind == "file":
+        return WINDOWS_FILE_MAX_CHARS
+    raise ValueError(f"unknown path kind: {kind}")
 
 
 @dataclass(frozen=True)
@@ -42,7 +73,7 @@ class _Turn:
     messages: list[BaseMessage]
 
 
-def archive_compression_messages(  # pylint: disable=too-many-locals
+def archive_compression_messages(
     *,
     context: ModelContext,
     processor_type: str,
@@ -55,6 +86,32 @@ def archive_compression_messages(  # pylint: disable=too-many-locals
     """Atomically archive the exact messages replaced by one compression."""
     if chunk_overlap_tokens >= chunk_size_tokens:
         raise ValueError("chunk_overlap_tokens must be smaller than chunk_size_tokens")
+    try:
+        return _archive_compression_messages(
+            context=context,
+            processor_type=processor_type,
+            original_messages=original_messages,
+            messages_to_compress=messages_to_compress,
+            preceding_messages=preceding_messages,
+            chunk_size_tokens=chunk_size_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
+        )
+    except ArchiveError:
+        raise
+    except Exception as exc:
+        raise ArchiveError("compression archive failed") from exc
+
+
+def _archive_compression_messages(  # pylint: disable=too-many-locals
+    *,
+    context: ModelContext,
+    processor_type: str,
+    original_messages: list[BaseMessage],
+    messages_to_compress: list[BaseMessage],
+    preceding_messages: list[BaseMessage],
+    chunk_size_tokens: int,
+    chunk_overlap_tokens: int,
+) -> CompressionArchive:
     workspace_dir = _context_value(context, "workspace_dir")
     session_id = _context_value(context, "session_id")
     context_id = _context_value(context, "context_id")
@@ -63,30 +120,41 @@ def archive_compression_messages(  # pylint: disable=too-many-locals
     if not session_id:
         raise OSError("compression recall requires a session id")
 
-    recall_root = _recall_root(Path(workspace_dir), session_id)
-    _validate_archive_root(Path(workspace_dir), recall_root)
-    recall_root.mkdir(parents=True, exist_ok=True)
-    _validate_archive_root(Path(workspace_dir), recall_root)
-    memory_id = _new_memory_id(recall_root)
+    workspace = Path(workspace_dir)
+    recall_root = _recall_root(workspace, session_id)
+    _validate_archive_root(workspace, recall_root)
     fallback_query = _latest_real_user_content(preceding_messages)
     turns = _group_turns(messages_to_compress, fallback_query=fallback_query)
     archive_query = _latest_non_empty_query(turns) or fallback_query
-    directory_name = f"{memory_id}_{_query_slug(archive_query)}"
-    final_path = recall_root / directory_name
-    temporary_path = recall_root / f".{directory_name}.{uuid.uuid4().hex}.tmp"
+    turn_records, chunk_files = _prepare_turn_files(
+        turns,
+        chunk_size_tokens=chunk_size_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+    )
+    memory_id = _new_memory_id(recall_root)
+    temp_token = _allocate_temp_token(recall_root, memory_id)
+    _ensure_paths_fit(
+        _layout_entries(
+            recall_root,
+            memory_id,
+            temp_token,
+            [filename for filename, _markdown in chunk_files],
+        )
+    )
 
+    final_path = recall_root / memory_id
+    temporary_path = recall_root / f".{memory_id}.{temp_token}.tmp"
     try:
+        recall_root.mkdir(parents=True, exist_ok=True)
+        _validate_archive_root(workspace, recall_root)
         chunks_dir = temporary_path / "chunks"
         chunks_dir.mkdir(parents=True)
-        turn_records = _write_turns(
-            turns,
-            chunks_dir,
-            chunk_size_tokens=chunk_size_tokens,
-            chunk_overlap_tokens=chunk_overlap_tokens,
-        )
+        for filename, markdown in chunk_files:
+            (chunks_dir / filename).write_text(markdown, encoding="utf-8")
         _write_json_lines(temporary_path / "turns.jsonl", turn_records)
         _write_json(
-            temporary_path / "raw_messages.json", [_message_to_json(message) for message in messages_to_compress]
+            temporary_path / "raw_messages.json",
+            [_message_to_json(message) for message in messages_to_compress],
         )
         _write_json(
             temporary_path / "manifest.json",
@@ -96,6 +164,7 @@ def archive_compression_messages(  # pylint: disable=too-many-locals
                 "session_id": session_id,
                 "context_id": context_id,
                 "processor_type": processor_type,
+                "archive_query": archive_query,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "source_message_count": len(messages_to_compress),
                 "original_context_message_count": len(original_messages),
@@ -123,37 +192,30 @@ def delete_compression_archive(archive: CompressionArchive) -> None:
         resolved_path.relative_to(resolved_root)
     except ValueError as exc:
         raise OSError("compression recall archive path escapes the recall root") from exc
-    if not resolved_path.name.startswith(f"{archive.memory_id}_"):
+    if not directory_matches_memory_id(resolved_path.name, archive.memory_id):
         raise OSError("compression recall archive directory does not match the memory id")
     shutil.rmtree(resolved_path, ignore_errors=True)
 
 
-def _write_turns(
+def _prepare_turn_files(
     turns: list[_Turn],
-    chunks_dir: Path,
     *,
     chunk_size_tokens: int,
     chunk_overlap_tokens: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
     records: list[dict[str, Any]] = []
+    files: list[tuple[str, str]] = []
     for turn in turns:
-        body = _render_turn(turn.messages)
-        bodies = _split_text(body, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
+        bodies = _split_text(
+            _render_turn(turn.messages),
+            chunk_size_tokens=chunk_size_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
+        )
         chunk_paths: list[str] = []
         for chunk_index, chunk_body in enumerate(bodies):
-            chunk_id = f"{turn.turn_id}_chunk_{chunk_index:03d}"
-            filename = f"{chunk_id}_{_chunk_slug(chunk_body)}.md"
-            relative_path = f"chunks/{filename}"
-            chunk_paths.append(relative_path)
-            markdown = (
-                "---\n"
-                f"turn_id: {turn.turn_id}\n"
-                f"chunk_id: {chunk_id}\n"
-                f"chunk_index: {chunk_index}\n"
-                "---\n\n"
-                f"{chunk_body.rstrip()}\n"
-            )
-            (chunks_dir / filename).write_text(markdown, encoding="utf-8")
+            filename = f"{turn.turn_id}_chunk_{chunk_index:03d}.md"
+            chunk_paths.append(f"chunks/{filename}")
+            files.append((filename, _chunk_markdown(turn.turn_id, chunk_index, chunk_body)))
         records.append(
             {
                 "turn_id": turn.turn_id,
@@ -162,7 +224,18 @@ def _write_turns(
                 "chunk_paths": chunk_paths,
             }
         )
-    return records
+    return records, files
+
+
+def _chunk_markdown(turn_id: str, chunk_index: int, body: str) -> str:
+    return (
+        "---\n"
+        f"turn_id: {turn_id}\n"
+        f"chunk_id: {turn_id}_chunk_{chunk_index:03d}\n"
+        f"chunk_index: {chunk_index}\n"
+        "---\n\n"
+        f"{body.rstrip()}\n"
+    )
 
 
 def _group_turns(messages: list[BaseMessage], *, fallback_query: str) -> list[_Turn]:
@@ -292,44 +365,71 @@ def _validate_archive_root(workspace_dir: Path, recall_root: Path) -> None:
 
 def _new_memory_id(recall_root: Path) -> str:
     try:
-        candidate = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     except Exception:
-        return uuid.uuid4().hex
-    if any(recall_root.glob(f"{candidate}_*")):
-        return uuid.uuid4().hex
-    return candidate
+        return _allocate_hex_id(recall_root, _FALLBACK_ID_BYTES)
+    if not _memory_id_taken(recall_root, base):
+        return base
+    for _ in range(_ID_ATTEMPTS):
+        candidate = f"{base}-{secrets.token_hex(_COLLISION_TOKEN_BYTES)}"
+        if not _memory_id_taken(recall_root, candidate):
+            return candidate
+    raise ArchiveError("compression archive could not allocate a memory id")
 
 
-def _query_slug(query: str) -> str:
-    return _text_slug(query, max_chars=10, fallback="no-query")
+def _allocate_hex_id(recall_root: Path, nbytes: int) -> str:
+    for _ in range(_ID_ATTEMPTS):
+        candidate = secrets.token_hex(nbytes)
+        if not _memory_id_taken(recall_root, candidate):
+            return candidate
+    raise ArchiveError("compression archive could not allocate a memory id")
 
 
-# Bare role headers emitted by _render_turn carry no content hint on their own,
-# so _chunk_slug skips them in favor of the first real content line.
-_BARE_SECTION_HEADERS = {"user", "assistant", "assistant reasoning"}
+def _allocate_temp_token(recall_root: Path, memory_id: str) -> str:
+    for _ in range(_ID_ATTEMPTS):
+        token = secrets.token_hex(_TEMP_TOKEN_BYTES)
+        if not (recall_root / f".{memory_id}.{token}.tmp").exists():
+            return token
+    raise ArchiveError("compression archive could not allocate a temporary directory")
 
 
-def _chunk_slug(body: str) -> str:
-    """Summarize a chunk body for its filename so browsers can gauge the content.
-
-    Uses the first meaningful line (Markdown heading markers stripped): headers
-    with a payload like ``## Tool Call: read_file`` are informative as-is, bare
-    role headers (``## User``) are skipped, and a window-cut fragment is
-    acceptable for a rough hint.
-    """
-    for line in body.splitlines():
-        # Token-window cuts can split a multi-byte character at the boundary,
-        # leaving replacement chars (�) at the start of a line — strip them.
-        text = line.strip().lstrip("#").strip().strip("�").strip()
-        if text and text.lower() not in _BARE_SECTION_HEADERS:
-            return _text_slug(text, max_chars=40, fallback="empty")
-    return "empty"
+def _memory_id_taken(recall_root: Path, memory_id: str) -> bool:
+    if not recall_root.is_dir():
+        return False
+    for path in recall_root.iterdir():
+        if not path.is_dir() or path.is_symlink() or path.name.startswith("."):
+            continue
+        if directory_matches_memory_id(path.name, memory_id):
+            return True
+    return False
 
 
-def _text_slug(text: str, *, max_chars: int, fallback: str) -> str:
-    compact = re.sub(r"\s+", "_", text.strip())[:max_chars]
-    safe = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "-", compact).strip("-._")
-    return safe or fallback
+def _layout_entries(
+    recall_root: Path,
+    memory_id: str,
+    temp_token: str,
+    chunk_filenames: list[str],
+) -> list[tuple[Path, str]]:
+    final_dir = recall_root / memory_id
+    temporary_dir = recall_root / f".{memory_id}.{temp_token}.tmp"
+    entries: list[tuple[Path, str]] = []
+    for directory in (final_dir, temporary_dir):
+        entries.append((directory, "directory"))
+        entries.append((directory / "chunks", "directory"))
+        for filename in _ARCHIVE_FILENAMES:
+            entries.append((directory / filename, "file"))
+        for filename in chunk_filenames:
+            entries.append((directory / "chunks" / filename, "file"))
+    return entries
+
+
+def _ensure_paths_fit(entries: list[tuple[Path, str]]) -> None:
+    for path, kind in entries:
+        if _exceeds_windows_path_budget(path, kind=kind):
+            limit = _windows_path_limit(kind)
+            raise ArchiveError(
+                f"compression archive path exceeds the Windows {kind} limit ({limit}): {path}"
+            )
 
 
 def _safe_filename_part(value: str) -> str:
@@ -362,10 +462,9 @@ def _content_to_query_text(content: Any) -> str:
     """Extract user-visible text from structured content for query labeling.
 
     User messages may carry multimodal parts (``[{"type": "text", "text": ...}]``);
-    flattening those with :func:`_content_to_text` yields a JSON blob whose leading
-    characters are ``[{"type":`` — useless as an archive directory name or a BM25
-    recall query. Text-bearing parts are joined; anything else yields an empty
-    string so callers fall back to ``no-query`` instead of JSON noise.
+    flattening those with :func:`_content_to_text` yields a JSON blob, which is
+    not a useful recall query. Text-bearing parts are joined; anything else
+    yields an empty string.
     """
     if isinstance(content, str) or content is None:
         return _strip_channel_envelope(_content_to_text(content))
@@ -391,10 +490,10 @@ def _strip_channel_envelope(text: str) -> str:
 
     Channels may deliver user text as ``你收到一条消息：\\n{"content": "...", ...}``.
     Indexed as-is, the envelope metadata (source, timezone, timestamp) dilutes
-    BM25 turn matching and yields useless archive slugs, while the real query
-    lives in the envelope's ``content`` field. Only unwrap when the payload is
-    clearly a JSON object with a non-empty string ``content``; a message whose
-    own first line starts with ``{`` is treated as genuine user text.
+    BM25 turn matching, while the real query lives in the envelope's ``content``
+    field. Unwrap only when the payload is a JSON object with a non-empty string
+    ``content``; a message whose own first line starts with ``{`` is treated as
+    genuine user text.
     """
     stripped = text.strip()
     head, sep, payload = stripped.partition("\n")

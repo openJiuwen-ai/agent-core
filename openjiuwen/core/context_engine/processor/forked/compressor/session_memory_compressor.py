@@ -14,6 +14,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     get_session_memory_runtime,
 )
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import ArchiveError
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
     resolve_context_max,
@@ -72,11 +73,20 @@ class SessionMemoryCompressor(ContextProcessor):
         if len(new_messages) > len(original_messages):
             return None, context_window
 
-        archive = await self._archive_replaced_messages(
-            context=context,
-            original_messages=original_messages,
-            messages_to_compress=original_messages[: len(original_messages) - len(preserved_messages)],
-        )
+        try:
+            archive = await self._archive_replaced_messages(
+                context=context,
+                original_messages=original_messages,
+                messages_to_compress=original_messages[: len(original_messages) - len(preserved_messages)],
+            )
+        except ArchiveError as exc:
+            logger.error(
+                "[%s] skipping compression to preserve messages: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+            return None, context_window
         if archive is not None:
             memory_message.content = self._with_recall_marker(memory_message.content, archive.memory_id)
 
@@ -98,11 +108,11 @@ class SessionMemoryCompressor(ContextProcessor):
         original_messages: list[BaseMessage],
         messages_to_compress: list[BaseMessage],
     ) -> Any | None:
-        """Dump the messages replaced by the session memory block for later recall.
+        """Archive messages replaced by the session memory block.
 
-        Mirrors ``PrefixCompactProcessor._archive_compressed_messages``: gated on
-        the engine-wide ``CompressionRecallConfig`` and best-effort — an archive
-        failure must never block the compression itself.
+        Returns ``None`` when recall is disabled or there is nothing to archive.
+        ``ArchiveError`` propagates so the caller can skip replacement and keep
+        the original messages.
         """
         get_recall_config = getattr(context, "compression_recall_config", None)
         recall_config = get_recall_config() if callable(get_recall_config) else None
@@ -114,25 +124,16 @@ class SessionMemoryCompressor(ContextProcessor):
             archive_compression_messages,
         )
 
-        try:
-            return await asyncio.to_thread(
-                archive_compression_messages,
-                context=context,
-                processor_type=self.processor_type(),
-                original_messages=original_messages,
-                messages_to_compress=messages_to_compress,
-                preceding_messages=[],
-                chunk_size_tokens=recall_config.chunk_size_tokens,
-                chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[%s] compression recall archive failed; continuing without a recall marker: %s",
-                self.processor_type(),
-                exc,
-                exc_info=True,
-            )
-            return None
+        return await asyncio.to_thread(
+            archive_compression_messages,
+            context=context,
+            processor_type=self.processor_type(),
+            original_messages=original_messages,
+            messages_to_compress=messages_to_compress,
+            preceding_messages=[],
+            chunk_size_tokens=recall_config.chunk_size_tokens,
+            chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
+        )
 
     @staticmethod
     def _with_recall_marker(content: str, memory_id: str) -> str:
