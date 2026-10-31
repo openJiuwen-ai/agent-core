@@ -192,6 +192,56 @@ async def test_build_policy_user_reads_same_snapshot_and_appends() -> None:
     assert "team_role" in {s.name for s in output.sections}
 
 
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_build_policy_complete_replacement() -> None:
+    """A short-circuited handler replaces the default sections entirely.
+
+    The handler never calls next_handler, so CORE does not run and the
+    default sections are never built — the output contains only the
+    replacement set.
+    """
+    core_ran = False
+
+    async def replace_entire_policy(event, ops, next_handler):
+        del ops
+        # Intentionally not calling next_handler: the default chain is
+        # skipped, CORE does not execute, and the output below is final.
+        return TeamPolicyBuildOutput(
+            sections=(
+                PromptSection(name="my-plugin.custom_role", content={"cn": "自定义角色"}, priority=11),
+                PromptSection(name="my-plugin.custom_rules", content={"cn": "自定义规则"}, priority=12),
+            ),
+        )
+
+    bus = await _ready_bus()
+    bus.register_event_handler(
+        TEAM_BUILD_POLICY,
+        replace_entire_policy,
+        match_pattern={},
+        handler_level=HandlerLevel.USER,
+    )
+    build_input = TeamPolicyBuildInput(
+        team_name="research-team",
+        role=TeamRole.TEAMMATE,
+        member_name="researcher",
+    )
+    with bind_policy_context_scope(TeamPolicyContext(language="cn")), bind_policy_loader_scope(
+        load_template,
+    ):
+        output = await bus.trigger(
+            Event(TEAM_BUILD_POLICY, build_input),
+            SessionContext(session_id="s1"),
+        )
+    assert isinstance(output, TeamPolicyBuildOutput)
+    section_names = {s.name for s in output.sections}
+    # Only the replacement set is present; none of the default sections.
+    assert section_names == {"my-plugin.custom_role", "my-plugin.custom_rules"}
+    assert "team_role" not in section_names
+    assert "team_dispatch" not in section_names
+    assert not core_ran
+
+
 # ---------------------------------------------------------------------------
 # Event-level validators
 # ---------------------------------------------------------------------------
