@@ -19,6 +19,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     invalidate_session_memory_anchor,
 )
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
 from openjiuwen.core.context_engine.processor.compressor.util import (
     FullCompactStateReinjector,
@@ -1256,13 +1257,9 @@ class FullCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _message_to_text(message: BaseMessage) -> str:
-        content = getattr(message, "content", "")
-        if isinstance(content, str):
-            return content
-        try:
-            return json.dumps(content, ensure_ascii=False)
-        except TypeError:
-            return str(content)
+        # Summaries are text: image payloads become short placeholders here so
+        # the full-compact request never carries base64 pixels.
+        return sanitize_content_for_text(getattr(message, "content", ""))
 
     @staticmethod
     def _estimate_message_tokens(message: BaseMessage) -> int:

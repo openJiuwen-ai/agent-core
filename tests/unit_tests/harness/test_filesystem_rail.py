@@ -247,13 +247,15 @@ def test_sys_operation_rail_keeps_native_multimodal_without_complete_vision_conf
     asyncio.run(_run())
 
 
-def test_sys_operation_rail_prefers_complete_registered_vision_tool(tmp_path):
+def test_sys_operation_rail_auto_mode_prefers_registered_vision_tool(tmp_path):
+    """auto（None，探针未回）时 vision 工具抢占 read_file 内联。"""
+
     async def _run():
         vision_tool = None
         await Runner.start()
         try:
             card = SysOperationCard(
-                id="test_sys_operation_rail_prefers_complete_registered_vision_tool",
+                id="test_sys_operation_rail_auto_mode_prefers_vision_tool",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(work_dir=str(tmp_path)),
             )
@@ -271,7 +273,10 @@ def test_sys_operation_rail_prefers_complete_registered_vision_tool(tmp_path):
                 agent_id="vision-agent",
             )
             Runner.resource_mgr.add_tool(vision_tool)
-            agent = _Agent(registered_cards={"visual_question_answering": vision_tool.card})
+            agent = _Agent(
+                enable_read_image_multimodal=None,
+                registered_cards={"visual_question_answering": vision_tool.card},
+            )
 
             rail.init(agent)
 
@@ -289,12 +294,61 @@ def test_sys_operation_rail_prefers_complete_registered_vision_tool(tmp_path):
     asyncio.run(_run())
 
 
-def test_sys_operation_rail_prefers_complete_vision_config(tmp_path):
+def test_sys_operation_rail_native_model_beats_registered_vision_tool(tmp_path):
+    """主模型已确认支持看图时直接内联，vision 工具不抢占。"""
+
+    async def _run():
+        vision_tool = None
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_native_model_beats_vision_tool",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            vision_tool = VisualQuestionAnsweringTool(
+                vision_model_config=VisionModelConfig(
+                    api_key="key",
+                    base_url="https://vision.example/v1",
+                    model="vision-model",
+                ),
+                agent_id="vision-agent",
+            )
+            Runner.resource_mgr.add_tool(vision_tool)
+            agent = _Agent(
+                enable_read_image_multimodal=True,
+                registered_cards={"visual_question_answering": vision_tool.card},
+            )
+
+            rail.init(agent)
+
+            read_tool = next(
+                tool for tool in rail.tools if isinstance(tool, ReadFileTool)
+            )
+            assert read_tool.enable_image_multimodal is True
+        finally:
+            rail.uninit(agent)
+            if vision_tool is not None:
+                Runner.resource_mgr.remove_tool(vision_tool.card.id)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_auto_mode_prefers_complete_vision_config(tmp_path):
+    """auto（None，未解析）时完整 vision 配置抢占 read_file 内联。"""
+
     async def _run():
         await Runner.start()
         try:
             card = SysOperationCard(
-                id="test_sys_operation_rail_prefers_complete_vision_config",
+                id="test_sys_operation_rail_auto_mode_prefers_vision_config",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(work_dir=str(tmp_path)),
             )
@@ -304,6 +358,7 @@ def test_sys_operation_rail_prefers_complete_vision_config(tmp_path):
             rail = SysOperationRail()
             rail.set_sys_operation(sys_operation)
             agent = _Agent(
+                enable_read_image_multimodal=None,
                 vision_model_config=VisionModelConfig(
                     api_key="key",
                     base_url="https://vision.example/v1",
@@ -317,6 +372,45 @@ def test_sys_operation_rail_prefers_complete_vision_config(tmp_path):
                 tool for tool in rail.tools if isinstance(tool, ReadFileTool)
             )
             assert read_tool.enable_image_multimodal is False
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_native_model_beats_complete_vision_config(tmp_path):
+    """主模型已确认支持看图时直接内联，vision 配置不抢占。"""
+
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_native_model_beats_vision_config",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent(
+                enable_read_image_multimodal=True,
+                vision_model_config=VisionModelConfig(
+                    api_key="key",
+                    base_url="https://vision.example/v1",
+                    model="vision-model",
+                ),
+            )
+
+            rail.init(agent)
+
+            read_tool = next(
+                tool for tool in rail.tools if isinstance(tool, ReadFileTool)
+            )
+            assert read_tool.enable_image_multimodal is True
         finally:
             rail.uninit(agent)
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)

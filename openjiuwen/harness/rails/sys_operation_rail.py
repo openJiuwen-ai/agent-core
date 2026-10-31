@@ -59,6 +59,12 @@ class SysOperationRail(DeepAgentRail):
             lang,
             agent_id,
             enable_image_multimodal=enable_read_image_multimodal,
+            # 运行时按当前模型能力重判（deep_config 会被模型切换更新），
+            # init 值仅作 resolver 失败时的回退。
+            image_multimodal_resolver=lambda: should_enable_read_image_multimodal(
+                agent,
+                self._enable_read_image_multimodal,
+            ),
         )
         write_tool = WriteFileTool(self.sys_operation, lang, agent_id)
         edit_tool = EditFileTool(self.sys_operation, lang, agent_id)

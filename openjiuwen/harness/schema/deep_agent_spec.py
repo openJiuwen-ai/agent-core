@@ -464,6 +464,10 @@ class DeepAgentSpec(BaseModel):
     ``None`` leaves it to the runtime probe; set it explicitly to skip that
     probe entirely (an agent that never reads images should say ``False``).
     """
+    max_image_bytes_per_request: Optional[int] = None
+    """Per-request image byte budget; oldest images are evicted to text when exceeded."""
+    max_images_per_request: Optional[int] = None
+    """Per-request image count budget; oldest images are evicted to text when exceeded."""
     enable_sys_operation: bool = True
     """Whether this agent gets a sys_operation (filesystem / shell / code).
 
@@ -598,6 +602,8 @@ class DeepAgentSpec(BaseModel):
             vision_model_config=vision_config,
             audio_model_config=audio_config,
             enable_read_image_multimodal=self.enable_read_image_multimodal,
+            max_image_bytes_per_request=self.max_image_bytes_per_request,
+            max_images_per_request=self.max_images_per_request,
             enable_sys_operation=self.enable_sys_operation,
             enable_task_planning=self.enable_task_planning,
             restrict_to_work_dir=self.restrict_to_sandbox,

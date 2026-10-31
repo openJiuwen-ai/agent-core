@@ -265,6 +265,8 @@ def resolve_deep_agent_parts(
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_read_image_multimodal: Optional[bool] = None,
+    max_image_bytes_per_request: Optional[int] = None,
+    max_images_per_request: Optional[int] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
@@ -307,9 +309,13 @@ def resolve_deep_agent_parts(
     resolved_language = resolve_language(language)
     vision_tools_enabled = is_vision_model_config_complete(vision_model_config)
 
-    effective_enable_read_image_multimodal = (
-        False if vision_tools_enabled else enable_read_image_multimodal
-    )
+    # Vision tools only take over in auto mode (None). An explicit
+    # enable_read_image_multimodal=True means the main model is confirmed
+    # image-capable and must keep native inline despite vision tools.
+    if enable_read_image_multimodal is None and vision_tools_enabled:
+        effective_enable_read_image_multimodal = False
+    else:
+        effective_enable_read_image_multimodal = enable_read_image_multimodal
 
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
@@ -400,6 +406,8 @@ def resolve_deep_agent_parts(
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
         enable_read_image_multimodal=effective_enable_read_image_multimodal,
+        max_image_bytes_per_request=max_image_bytes_per_request,
+        max_images_per_request=max_images_per_request,
         enable_async_subagent=enable_async_subagent,
         enable_subagent_runtime=enable_subagent_runtime,
         add_general_purpose_agent=add_general_purpose_agent,
@@ -553,6 +561,8 @@ def create_deep_agent(
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_read_image_multimodal: Optional[bool] = None,
+    max_image_bytes_per_request: Optional[int] = None,
+    max_images_per_request: Optional[int] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
@@ -655,6 +665,8 @@ def create_deep_agent(
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
         enable_read_image_multimodal=enable_read_image_multimodal,
+        max_image_bytes_per_request=max_image_bytes_per_request,
+        max_images_per_request=max_images_per_request,
         enable_task_planning=enable_task_planning,
         restrict_to_work_dir=restrict_to_work_dir,
         default_mode=default_mode,

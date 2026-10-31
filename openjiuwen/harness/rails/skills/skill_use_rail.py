@@ -709,6 +709,10 @@ class SkillUseRail(DeepAgentRail):
                         language=lang,
                         agent_id=agent_id,
                         enable_image_multimodal=enable_read_image_multimodal,
+                        # 运行时按当前模型能力重判，init 值仅作回退。
+                        image_multimodal_resolver=(
+                            lambda: should_enable_read_image_multimodal(agent)
+                        ),
                     ),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),

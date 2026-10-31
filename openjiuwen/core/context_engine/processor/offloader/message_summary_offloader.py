@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.foundation.llm import (
     AssistantMessage, BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
 )
@@ -326,6 +327,8 @@ class MessageSummaryOffloader(MessageOffloader):
                 tool_content = json.dumps(message.content, ensure_ascii=False)
             except TypeError:
                 tool_content = str(message.content)
+        # 摘要是文字：图片 base64 / data URL 不能随摘要请求带走，替换成占位符。
+        tool_content = sanitize_content_for_text(tool_content)
         compression_result = await self._compress_with_fallback(
             step=step,
             function_call=function_call,
@@ -505,12 +508,8 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         for message in reversed(context_messages):
             if message.role == "user":
-                if isinstance(message.content, str):
-                    return message.content
-                try:
-                    return json.dumps(message.content, ensure_ascii=False)
-                except TypeError:
-                    return str(message.content)
+                # task 描述是文字：user 消息里若含图片 base64，替换成占位符。
+                return sanitize_content_for_text(message.content)
         return ""
 
     async def _get_step_from_chain_precise(self, context_messages: list[BaseMessage]) -> str:

@@ -452,7 +452,7 @@ class DialogueCompressor(ContextProcessor):
             parts.append(f"tool_calls={tool_call_names}")
         if isinstance(message, ToolMessage):
             parts.append(f"tool_call_id={message.tool_call_id}")
-        parts.append(f"content={message.content}")
+        parts.append(f"content={message_to_text(message)}")
         return " | ".join(parts)
 
     async def _build_json_replacements(
