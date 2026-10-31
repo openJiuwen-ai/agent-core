@@ -1,6 +1,6 @@
 # EventBus handler_ids 限定派发特性设计
 
-建档日期：2026-10-28。主责契约：[S_01](../specs/S_01_events-contract.md)。计划条目 EV-06，配套 JiuwenSwarm Server PR06 的 session.start；本文件在实现前建档，当前机制已实现并完成下述验证。
+建档日期：2026-10-28。主责契约：[S_01](../specs/S_01_events-contract.md)。计划条目 EV-07，配套 JiuwenSwarm Server PR06 的 session.start；本文件在实现前建档，当前机制已实现并完成下述验证。
 
 ## 1. 范围、状态与依据
 
@@ -51,6 +51,10 @@ Protocol 与真实 Bus 同步增加仅关键字可选参数；_match_handlers �
 注销不打断已开始调用，新注册不进入已有快照。白名单不缓存、不持久化；调用方应从当前 Runtime 重新获取 ID。Core 不负责包代次与重新激活策略。
 
 ## 6. 验收与未决问题
+
+2026-10-31 合并交付调整：Core !110 合并最新目标分支 `bdde48a8`，保留其已合入的 EV-06 / F_06 包信息能力；本项待合入的编号改为 EV-07 / F_07，`handler_ids` 代码和公开语义不变。Server 原 !91 的消费者与文档、结束、关联及解除能力一起整理到 [Server !99](https://gitcode.com/huenrui_/jiuwenswarm/merge_requests/99)，保留四个提交；合并顺序仍为先 Core !110，再 Server，不能只合入 Server。
+
+本次 Windows / Python 3.11.15 的 Events、Extension、callback 回归 **587 项通过、1 项跳过**，包括目标分支新增的包信息能力与原 handler_ids 用例；符号链接用例因当前环境权限跳过。命令和报告位于 `D:\work_space\.codex-temp\consolidate-server-prs-20261031\core-command.json`、`core-regression.xml`。本环境未提供 make，本轮未执行 make check；本次不以历史静态检查、真实模型或远端 CI 记录代替当前执行结果。
 
 | 输入与操作 | 预期与证据 |
 | --- | --- |
