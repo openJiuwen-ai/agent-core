@@ -11,6 +11,51 @@ from pydantic_core import PydanticCustomError
 from .protocol import Digest, Identifier, InvocationRef, Nonnegative, ProtocolModel, Reason
 
 
+def _is_session_output_path(path: str | None, session_id: str | None, file_name: str | None) -> bool:
+    """Return whether a source file path points to this Session's final output file."""
+    if path is None or session_id is None or file_name is None:
+        return False
+
+    parts = path.split("/")
+    if len(parts) != 4:
+        return False
+    return all(
+        (
+            parts[0] == "sessions",
+            parts[1] == session_id,
+            parts[2] == "output",
+            parts[3] == file_name,
+            parts[3] not in ("", ".", ".."),
+            not any(part in (".", "..") for part in parts),
+            not any(char in path for char in ("\\", "\x00")),
+        )
+    )
+
+
+def _is_safe_file_name(file_name: str | None) -> bool:
+    """Return whether a value is a plain filename rather than a path or special name."""
+    if file_name is None:
+        return False
+    return not any(char in file_name for char in ("/", "\\", "\x00", ":", "<", ">", '"', "|", "?", "*"))
+
+
+def _is_current_session_import_path(path: str, session_id: str) -> bool:
+    """Return whether an imported file path stays within the current Session."""
+    parts = path.split("/")
+    if len(parts) != 4:
+        return False
+    return all(
+        (
+            parts[0] == "sessions",
+            parts[1] == session_id,
+            parts[2] in ("output", "imports"),
+            parts[3] not in ("", ".", ".."),
+            not any(char in path for char in ("\\", "\x00", ":")),
+            not any(char in parts[3] for char in ("<", ">", '"', "|", "?", "*")),
+        )
+    )
+
+
 class GroupMessage(ProtocolModel):
     """One group message as authorized for this Session; recalled or unavailable messages carry no body."""
 
@@ -43,11 +88,18 @@ class GroupMessage(ProtocolModel):
 
 
 class GroupMessageQuery(ProtocolModel):
-    """Bounded search over the bound Agent's currently authorized groups."""
+    """Bounded search over authorized group messages and final Session artifacts."""
 
     query: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     keywords: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")], ...],
+        Field(max_length=16),
+    ] = ()
+    content_types: Annotated[
+        tuple[Literal["messages", "files", "online_docs"], ...], Field(min_length=1, max_length=3)
+    ] = ("messages", "files", "online_docs")
+    platforms: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")], ...],
         Field(max_length=16),
     ] = ()
     since: AwareDatetime | None = None
@@ -84,13 +136,26 @@ class GroupMessageQuery(ProtocolModel):
         has_query_criterion = self.query is not None or bool(self.keywords)
         has_time_criterion = self.since is not None or self.until is not None
         has_sender_criterion = self.sender_id is not None
-        if not any((has_query_criterion, has_time_criterion, has_sender_criterion)):
+        if not any(
+            (
+                has_query_criterion,
+                has_time_criterion,
+                has_sender_criterion,
+                self.group_ids,
+                self.group_names,
+                self.platforms,
+            )
+        ):
             raise PydanticCustomError(
                 "persistent_context",
-                "group search requires query, keywords, a time range, or sender",
+                "group search requires a group, query, keywords, a time range, or sender",
             )
         if self.since is not None and self.until is not None and self.since > self.until:
             raise PydanticCustomError("persistent_context", "group search time range is reversed")
+        if len(set(self.content_types)) != len(self.content_types):
+            raise PydanticCustomError("persistent_context", "content_types must not contain duplicates")
+        if self.sender_id is not None and "messages" not in self.content_types:
+            raise PydanticCustomError("persistent_context", "sender_id only applies to message searches")
         return self
 
 
@@ -123,15 +188,75 @@ class GroupMessageSearchHit(ProtocolModel):
 
     group_id: Identifier
     group_name: Annotated[str, Field(min_length=1, max_length=512)]
+    platform: Identifier | None = None
+    platform_chat_id: Identifier | None = None
     message_ref: Identifier
     message: GroupMessage
 
 
+class GroupArtifactSearchHit(ProtocolModel):
+    """A final file or online-document link from one authorized group Session.
+
+    ``source_file_path`` is a host-only locator retained in the private approval snapshot.
+    ``imported_path`` is populated only after the exact artifact is approved and staged in
+    the current Session; the tool must never render the source locator to the model.
+    """
+
+    group_id: Identifier
+    group_name: Annotated[str, Field(min_length=1, max_length=512)]
+    platform: Identifier | None = None
+    platform_chat_id: Identifier | None = None
+    artifact_id: Identifier
+    artifact_kind: Literal["file", "online_doc"]
+    title: Annotated[str, Field(min_length=1, max_length=1024)]
+    file_name: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    file_size: Nonnegative | None = None
+    file_digest: Annotated[str, Field(pattern=r"^sha256:[a-f0-9]{64}$")] | None = None
+    source_session_id: Identifier | None = None
+    source_file_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    url: Annotated[str, Field(max_length=4096)] | None = None
+    snippet: Annotated[str, Field(max_length=4096)] | None = None
+    created_at: AwareDatetime
+    imported_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+
+    @model_validator(mode="after")
+    def validate_artifact(self) -> Self:
+        """Require a complete file reference or a validated online document link."""
+        if self.artifact_kind == "file":
+            file_metadata = (
+                self.file_name,
+                self.file_size,
+                self.file_digest,
+                self.source_session_id,
+                self.source_file_path,
+            )
+            if any(value is None for value in file_metadata) or self.url is not None:
+                raise PydanticCustomError("persistent_context", "file artifact reference is incomplete")
+            if not _is_session_output_path(self.source_file_path, self.source_session_id, self.file_name):
+                raise PydanticCustomError("persistent_context", "file artifact path is outside Session output")
+            if not _is_safe_file_name(self.file_name):
+                raise PydanticCustomError("persistent_context", "file artifact name is not a filename")
+        else:
+            if self.url is None:
+                raise PydanticCustomError("persistent_context", "online document reference is incomplete")
+            file_metadata = (
+                self.file_name,
+                self.source_file_path,
+                self.file_size,
+                self.file_digest,
+                self.source_session_id,
+            )
+            if any(value is not None for value in file_metadata):
+                raise PydanticCustomError("persistent_context", "online document reference is incomplete")
+        return self
+
+
 class GroupMessageSearchResult(InvocationRef):
-    """Search completeness is independent of the current group's scan cursor."""
+    """Group-content search result; messages and artifacts keep separate typed collections."""
 
     status: Literal["found", "empty", "incomplete", "forbidden", "unavailable", "failed"]
     hits: Annotated[tuple[GroupMessageSearchHit, ...], Field(max_length=500)] = ()
+    artifacts: Annotated[tuple[GroupArtifactSearchHit, ...], Field(max_length=500)] = ()
     next_cursor: Identifier | None = None
     query_complete: bool = Field(strict=True)
     reason: Reason | None = None
@@ -142,15 +267,32 @@ class GroupMessageSearchResult(InvocationRef):
         complete = self.status in ("found", "empty")
         if self.query_complete != complete or (complete and self.next_cursor is not None):
             raise PydanticCustomError("persistent_context", "search status and completeness disagree")
-        if self.status == "found" and not self.hits:
+        if self.status == "found" and not (self.hits or self.artifacts):
             raise PydanticCustomError("persistent_context", "found search requires hits")
-        if self.status == "empty" and self.hits:
+        if self.status == "empty" and (self.hits or self.artifacts):
             raise PydanticCustomError("persistent_context", "empty search cannot contain hits")
         if not complete and self.reason is None:
             raise PydanticCustomError("persistent_context", "unfinished search requires a reason")
-        if self.status in ("forbidden", "unavailable", "failed") and (self.hits or self.next_cursor is not None):
+        has_search_payload = bool(self.hits or self.artifacts or self.next_cursor is not None)
+        if self.status in ("forbidden", "unavailable", "failed") and has_search_payload:
             raise PydanticCustomError("persistent_context", "failed search cannot expose hits or cursor")
+        for artifact in self.artifacts:
+            if artifact.imported_path is None:
+                continue
+            if artifact.artifact_kind != "file" or not _is_current_session_import_path(
+                artifact.imported_path, self.session_id
+            ):
+                raise PydanticCustomError("persistent_context", "imported file must stay in the current Session")
+            parts = artifact.imported_path.split("/")
+            if parts[2] == "output" and (
+                artifact.source_session_id != self.session_id or artifact.source_file_path != artifact.imported_path
+            ):
+                raise PydanticCustomError("persistent_context", "same-Session output path does not match its source")
         return self
+
+
+# Keep the descriptive content name available while preserving the PA-23 public class.
+GroupContentSearchResult = GroupMessageSearchResult
 
 
 class MaterialQuery(ProtocolModel):

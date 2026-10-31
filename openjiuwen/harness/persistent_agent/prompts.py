@@ -90,3 +90,29 @@ WINDOW_MANAGEMENT_PROMPT = {
         "information as fact."
     ),
 }
+
+WINDOW_MANAGEMENT_FALLBACK_PROMPT = {
+    "cn": (
+        "# 上下文管理\n\n"
+        "主动换窗策略当前已关闭，请勿尝试主动切换窗口或调用 new_context。"
+        "每轮完整 ReAct 处理结束、准备进行下一次模型调用时，Persistent Agent 会在安全边界检查当前窗口用量。"
+        "若超过模型上下文窗口的 80%，系统会自动整理交接并创建新窗口；新窗口候选内容最多占上下文窗口的 40%。"
+        "容量兜底由系统管理。\n\n"
+        "换窗只整理工作记忆，不会重置任务、工作空间、文件或已完成的操作。旧窗口会归档。"
+        "需要核对旧话题、原始讨论、工具结果或决策依据时，使用 search_session_history 检索相关历史；"
+        "围绕具体问题查证必要信息，不必重新加载整个历史过程。"
+    ),
+    "en": (
+        "# Context management\n\n"
+        "Proactive window switching is currently disabled. Do not try to switch windows proactively or call "
+        "new_context. "
+        "After a complete ReAct iteration, Persistent Agent checks context usage at the safe boundary before the "
+        "next model call. When usage exceeds 80% of the model's context window, the system automatically prepares "
+        "a handoff and creates a new window; the candidate input for the new window is capped at 40% of the "
+        "context window. This capacity fallback is managed by the system.\n\n"
+        "Switching windows only organizes working memory. It does not reset the task, workspace, files, or "
+        "completed operations. Previous windows are archived. Use search_session_history to verify an earlier "
+        "topic, original discussion, tool result, or decision basis. Search for the information needed to answer "
+        "a specific question rather than reloading the entire history."
+    ),
+}

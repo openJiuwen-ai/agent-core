@@ -129,8 +129,7 @@ def test_search_filters_preserve_exact_values_and_reject_identity():
     assert query.group_ids == ("group-b",) and query.group_names == ("项目群",)
     with pytest.raises(ValidationError):
         GroupMessageQuery(query="决定", agent_id="other")
-    with pytest.raises(ValidationError):
-        GroupMessageQuery(group_ids=["group-b"])
+    assert GroupMessageQuery(group_ids=["group-b"]).group_ids == ("group-b",)
     with pytest.raises(ValidationError):
         GroupMessageQuery(query="决定", group_names=[" "])
 

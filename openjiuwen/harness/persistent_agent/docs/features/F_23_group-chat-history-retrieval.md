@@ -242,3 +242,36 @@ agent-core 组件测试可以用模拟 `GroupChatPort` 验证工具参数、调�
 2. 建立实际持久群消息数据源和当前 Agent—群授权事实源；记录历史覆盖起点、删除 / 撤回状态、Bot 被移出或解绑后的失效规则。权限查询失败不能解释为空授权列表。
 3. 实现精确 ID / 群名解析及同名消歧、字面子串查询、稳定排序分页；游标绑定 Agent / 查询 / 授权范围，每页重验授权。无权和不存在目标使用相同的安全不可用语义。
 4. 使用真实保存的消息验证私聊查群 B、群 A 查群 B、多群部分失败、分页撤权、已撤回正文不可读、排队触发补读；确认普通个人版不接入这条链。上述均未在本次 agent-core 本地测试中完成。
+
+## 10. 消息、文件与在线文档统一检索迁移（2026-10-29）
+
+已将原 `huenrui_agent-core` 中的 Session 产物搜索扩展迁入 `C:/yzj/files/open_source/agent-core_3.24`，与 JiuwenSwarm 当前 editable 依赖对齐。迁移采用增量合并，保留目标仓库的多关键词去重、逐来源群审批、原生中断 owner / kind、审批恢复、拒绝处理和默认关闭的主动换窗开关。
+
+本次涉及 `schema/context.py`、`tools/group_history.py`、`ports.py`、公开懒导出及工作空间 scope 校验。`content_types` 支持消息、最终文件与在线文档单独或组合搜索；批准前候选留在宿主，批准后跨 Session 文件复制到目标 Session 的 `imports/`，Core 校验导入路径并隐藏来源磁盘定位信息。完整契约见 [S_09 §4.3](../specs/S_09_group-chat-and-knowledge.md#43-消息与-session-最终产物的统一检索)。
+
+Core 定向回归：190 passed、1 skipped；新增回归入口为 `tests/unit_tests/harness/persistent_agent/test_group_artifacts.py`。这只证明组件契约和本地审批衔接，不宣称真实飞书端到端验证，也不将 CLI 直读审批或 Bash 沙箱列为本次迁移结果。
+
+跨仓本地验证补充：在 `C:/yzj/files/open_source/jiuwenclaw_4.21/jiuwenclaw/.venv` 中运行分享服务、owner 恢复流程与真实 Core 原生中断测试，55 passed。覆盖文件 / 在线文档候选审批前不返回、批准后释放及文件导入调用；模拟文件后端不代替真实文件复制或飞书端到端测试。同步修正宿主释放结果的 InvocationRef，确保恢复后的 Execution 身份来自当前可信上下文。该虚拟环境实际导入 `agent-core_3.24`，并确认 `ACTIVE_WINDOW_SWITCH_ENABLED=False`。
+
+## 11. 原 Bash 业务分享中断恢复（2026-10-29）
+
+JiuwenSwarm 将匹配到的敏感 CLI 读取接入宿主分享服务，并保持原 Bash 调用。`PersistentGroupShareRail` 同时识别 `search_group_messages` 和 `bash`，但仍只消费 owner=`persistent_agent.group_share`、kind=`group_share` 的确认。批准由原工具调用宿主释放获批冻结结果；拒绝通常跳过对应调用。宿主明确标记 `origin=cli_group_read` 的 Bash 在拒绝后仍重入宿主冻结释放，使当前群结果不被外群拒绝一并丢弃；不会执行原 shell、重搜或重新发起同一审批。普通 Bash 工具权限与完全访问策略没有授予跨群分享权。
+
+Core 不解析 CLI、不调用平台，也不持有宿主预览或授权表；这些由 `C:/yzj/files/open_source/jiuwenclaw_4.21/jiuwenclaw` 的 F_21_03 §12 维护。Core 的 `test_group_sharing.py`、`test_group_artifacts.py`、`test_group_history.py` 和 `test_entries.py` 本地执行 236 passed；原 Bash 拒绝在修改 rail 前会重复暂停，修正后批准／拒绝均闭环。真实飞书平台联调尚未验收，主动换窗常量仍为默认关闭。
+
+## 12. 群过滤与宿主文件来源 preflight（2026-10-30）
+
+同日用户澄清：已在目标群共享的文件应在该群直接可读。宿主已撤销按最早来源追溯缓存并重复审批的部分；当前群已登记副本不影响本节的 Core preflight 接线，首次跨群读取仍须审批。当前规则见 JiuwenSwarm F_21_03 §14。
+
+用户真实复测暴露了仅按群找文件被拒绝、CLI 显示时间不兼容，以及旧缓存绕过业务审批的问题。Core 将 `group_ids`／`group_names` 纳入合法有界查询条件，保持完全空查询无效；工具说明同步平台 ID 和仅按群列产物的用法。平台 ID 解析、精确时间补读和原文件来源追溯由宿主实现，不在 Core 猜测。
+
+`PersistentGroupShareRail` 通过可选宿主 `prepare_tool_call` 检查文件读取、登记和 Bash 的跨群来源；与默认／完全访问的普通工具权限分离。宿主需要审批时使用原生 `_raise_interrupt` 暂停回调，不能裸抛 ToolInterruptException 后被框架忽略；恢复时重新核验已决记录和精确冻结对象。宿主可返回已获准 imports 位置以代替原 Bash。无该可选钩子的宿主保持原行为。契约见 S_09 §8，宿主设计和边界见 JiuwenSwarm F_21_03 §13。
+
+实际验证：Core 的 `test_group_history.py`、`test_group_artifacts.py`、`test_group_sharing.py`、`test_entries.py`、`test_protocol.py` 共 360 passed；宿主单元及真实 Core／SQLite 的跨权限恢复组合合计 288 passed，外部模型与平台使用替身。没有重启服务或进行真实群消息投递，主动换窗开关仍为 False。
+
+
+## 13. 平台范围与来源标识（2026-10-30）
+
+GroupMessageQuery 增加可选 platforms（默认空元组，最多 16 项；小写平台标识），可以单独作为有界搜索条件。GroupMessageSearchHit 与 GroupArtifactSearchHit 增加可选 platform、platform_chat_id；旧结果允许缺省。Core 只校验和呈现通用来源信息，不管理平台绑定、应用凭据或群成员授权。
+
+宿主负责按平台约束实际过滤授权来源并消歧，不能仅把平台写入模型提示。消息／产物的字段可随获批结果展示；文件原 Session 定位符仍从模型展示中移除。回归入口：`test_platform_search.py`，并运行 persistent_agent 全目录回归。

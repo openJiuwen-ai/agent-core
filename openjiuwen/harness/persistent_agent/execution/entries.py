@@ -30,7 +30,7 @@ from ..schema.build_context import PersistentBuildContext
 from ..schema.events import EVENT_MAX_BYTES, AgentEvent, EventType
 from ..schema.protocol import TEXT_MAX_CHARS
 from ..schema.request import ConfirmReply, RequestInput
-from ..schema.spec import PersistentAgentSpec
+from ..schema.spec import ACTIVE_WINDOW_SWITCH_ENABLED, PersistentAgentSpec
 from . import handoff, seams
 from .binding import InvocationState, abort_bound, close_bound, stream_bound
 from .continuation import require_recovery_ref
@@ -487,14 +487,17 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
                 started["decision_event_id"] = decision_event_id
             await control.emitter.emit(EventType.EXECUTION_STARTED, started)
             record = await _load(context, store)
-            window_ready = all((
-                "window_management" in spec.enabled_features,
-                context.execution.recovery_ref is None,
-                record.waiting is None,
-            ))
+            window_ready = all(
+                (
+                    "window_management" in spec.enabled_features,
+                    context.execution.recovery_ref is None,
+                    record.waiting is None,
+                )
+            )
             is_direct = request.kind == "direct_message"
             is_human_group = request.kind == "group_message" and request.source.sender_kind == "human"
-            if window_ready and (is_direct or is_human_group):
+            should_judge_window = ACTIVE_WINDOW_SWITCH_ENABLED and window_ready and (is_direct or is_human_group)
+            if should_judge_window:
                 history = window_messages(context.session)
                 if history_preview(history)["recent"]:
                     await judge_window(spec, context, request.text, history, control.emitter)
@@ -545,8 +548,9 @@ def _native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, w
         request = waiting_requests.get(response.tool_call_id)
         call_id = response.tool_call_id
         if request is None:
-            matches = [(key, item) for key, item in waiting_requests.items()
-                       if item.interrupt_id == response.tool_call_id]
+            matches = [
+                (key, item) for key, item in waiting_requests.items() if item.interrupt_id == response.tool_call_id
+            ]
             if len(matches) == 1:
                 call_id, request = matches[0]
         if request is None:

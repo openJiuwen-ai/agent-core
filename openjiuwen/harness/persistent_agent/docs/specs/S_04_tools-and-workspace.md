@@ -35,7 +35,7 @@ WorkspaceReadScope 与 WorkspaceWriteScope 为宿主按 Execution 返回的不�
 | workspace_root、allowed_roots | 实际根与宿主授予的可读根；字符串被规范化为 Path，根目录本身不是授权 |
 | private_sessions_root、current_session_root | 可选私有范围根；保护其他 Session 草稿，当前 Session 范围仍由宿主授予 |
 | source_ref、policy_revision | 稳定来源及当前执行策略关联，必须非空；策略修订须匹配 ExecutionContext |
-| host_wide | 显式宿主级授权；读写 scope 的该值必须与 full_access Spec 匹配；default / automatic 不得授予此标志 |
+| host_wide | 显式宿主级授权；仅 full_access Spec 可接受此标志；full_access 也可由宿主收窄为当前 Session 的 host_wide=false scope；default / automatic 不得授予此标志 |
 | reason | 可选诊断；不能把宿主异常或实际主机路径直接暴露给模型 |
 
 读取成功沿用 Harness 内容 / 列表数据，并附逻辑路径、source_refs、version、status、completeness、next_cursor。version 是本次 stat 元数据观察得到的不透明摘要，可能为空；不是文件内容哈希、不可变快照或防并发变更的凭证。路径和版本只说明此次读取观察，不授予下一次使用权限。
@@ -118,3 +118,7 @@ S_07 负责能力装配和 owner；S_08 负责读取工具与 `share_file` 的�
 | 收尾读取、摘要与整批准备 | [test_handoff.py](../../../../../tests/unit_tests/harness/persistent_agent/test_handoff.py) |
 
 这些检查定位 agent-core 组件；外层公开导入、真实宿主范围、OS 级隔离及跨仓联调须另行验证，证据见 F_14 和唯一开发计划。
+
+### Session 产物检索迁移补充（2026-10-29）
+
+`permission_profile=full_access` 只允许宿主提供 host-wide scope，不强制宿主扩大范围。群消息宿主可以继续返回 `host_wide=false` 并指定当前 Session 根，Core 仍执行 Session 路径边界检查；default / automatic 接收 host-wide scope 继续拒绝。跨 Session 最终产物通过 `search_group_messages` 审批后由宿主复制到当前 Session 的 `imports/`，不借此开放其他 Session 草稿或输出目录的普通文件访问权。统一搜索契约见 [S_09 §4.3](S_09_group-chat-and-knowledge.md#43-消息与-session-最终产物的统一检索)。

@@ -13,6 +13,10 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 
+
+# Code-level switch for model-initiated window changes. Capacity fallback is independent.
+ACTIVE_WINDOW_SWITCH_ENABLED: bool = False
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -222,7 +226,7 @@ class PersistentAgentSpec(DeepAgentSpec):
             parts.tool_instances.append(tool)
             parts.tool_cards.append(tool.card)
             parts.config.tools = list(parts.tool_cards)
-            parts.rails.append(PersistentGroupShareRail())
+            parts.rails.append(PersistentGroupShareRail(context.execution, context.ports.group_chat))
         from ..execution.session_state import WindowStore
         from ..tools.session_history import SEARCH_TOOL_NAME as SESSION_HISTORY_TOOL_NAME
         from ..tools.session_history import PersistentSessionHistorySearchTool
@@ -253,10 +257,11 @@ class PersistentAgentSpec(DeepAgentSpec):
                     StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
                     error_msg=f"{NEW_CONTEXT_TOOL_NAME} is reserved for Persistent window management",
                 )
-            tool = PersistentNewContextTool(context.binding.control)
-            parts.tool_instances.append(tool)
-            parts.tool_cards.append(tool.card)
-            parts.config.tools = list(parts.tool_cards)
+            if ACTIVE_WINDOW_SWITCH_ENABLED:
+                tool = PersistentNewContextTool(context.binding.control)
+                parts.tool_instances.append(tool)
+                parts.tool_cards.append(tool.card)
+                parts.config.tools = list(parts.tool_cards)
         # Inert until an execution entry attaches its emitter to this binding.
         parts.rails.append(PersistentModelCallRail(context.binding))
         if self.continuation_chain_limit is not None:

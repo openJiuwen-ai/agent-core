@@ -21,6 +21,15 @@ def api():
     return import_module("openjiuwen.harness.persistent_agent")
 
 
+@pytest.fixture
+def enable_active_window_switch(monkeypatch):
+    for module_name in (
+        "openjiuwen.harness.persistent_agent.schema.spec",
+        "openjiuwen.harness.persistent_agent.factory",
+    ):
+        monkeypatch.setattr(import_module(module_name), "ACTIVE_WINDOW_SWITCH_ENABLED", True)
+
+
 class Port:
     async def record(self, *args):
         raise AssertionError("construction must not record events")
@@ -131,9 +140,12 @@ def test_session_history_search_rejects_name_collision(api):
         api.create_persistent_agent(spec, context=context_for(api, spec))
 
 
-def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(api):
+def test_new_context_tool_is_disabled_by_default(api):
     from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
     from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
+    from openjiuwen.harness.persistent_agent.schema.spec import ACTIVE_WINDOW_SWITCH_ENABLED
+
+    assert ACTIVE_WINDOW_SWITCH_ENABLED is False
 
     default_spec = DeepAgentSpec(
         card=AgentCard(id="business-agent", name="test"),
@@ -143,7 +155,7 @@ def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(ap
     )
     assert all(card.name != "new_context" for card in default_spec.resolve_parts().tool_cards)
 
-    enabled_spec = spec_for(
+    spec = spec_for(
         api,
         enabled_features={"construction", "window_management"},
         model=ModelSpec(
@@ -155,21 +167,16 @@ def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(ap
         model_input_limit_tokens=800,
         capacity_safety_margin_tokens=50,
     )
-    context = context_for(api, enabled_spec)
-    agent = api.create_persistent_agent(enabled_spec, context=context)
+    context = context_for(api, spec)
+    agent = api.create_persistent_agent(spec, context=context)
     try:
-        assert agent.ability_manager.get("new_context") is not None
-        assert all(
-            card.name != "new_context"
-            for card in DeepAgentSpec(
-                card=enabled_spec.card,
-                enable_sys_operation=False,
-                enable_task_loop=False,
-                auto_create_workspace=False,
-            )
-            .resolve_parts()
-            .tool_cards
-        )
+        assert agent.ability_manager.get("new_context") is None
+        section = agent.system_prompt_builder.get_section("persistent_context_management")
+        assert section is not None
+        assert "主动换窗策略当前已关闭" in section.content["cn"]
+        assert "80%" in section.content["cn"]
+        assert "40%" in section.content["cn"]
+        assert "search_session_history" in section.content["cn"]
     finally:
         agent.ability_manager.teardown_tools()
 
@@ -207,7 +214,7 @@ def test_window_management_constructs_without_legacy_capacity_requirements(api, 
     context = context_for(api, published)
     agent = api.create_persistent_agent(published, context=context)
     try:
-        assert agent.ability_manager.get("new_context") is not None
+        assert agent.ability_manager.get("new_context") is None
         assert published.fingerprint() == before
         for name, value in legacy_fields.items():
             assert getattr(published, name) == value
@@ -455,7 +462,9 @@ def test_factory_applies_runtime_prompt_addendum_without_changing_spec_identity(
 
 @pytest.mark.parametrize("language,other_language", [("cn", "en"), ("en", "cn")])
 @pytest.mark.parametrize("addendum", [None, "Host execution context"])
-def test_window_management_guidance_reaches_react_in_the_selected_language(api, language, other_language, addendum):
+def test_window_management_fallback_guidance_reaches_react_in_the_selected_language(
+    api, language, other_language, addendum,
+):
     spec = spec_for(
         api, system_prompt="Agent identity", language=language,
         enabled_features={"construction", "window_management"},
@@ -469,6 +478,12 @@ def test_window_management_guidance_reaches_react_in_the_selected_language(api, 
         assert set(section.content) == {"cn", "en"}
         assert all(text.strip() for text in section.content.values())
         assert section.content[language] != section.content[other_language]
+        assert "当前已关闭" in section.content["cn"]
+        assert "currently disabled" in section.content["en"]
+        assert "80%" in section.content["cn"]
+        assert "40%" in section.content["cn"]
+        assert "80%" in section.content["en"]
+        assert "40%" in section.content["en"]
         for builder in (agent.system_prompt_builder, agent.react_agent.system_prompt_builder):
             rendered = builder.build()
             assert section.content[language] in rendered
@@ -483,7 +498,7 @@ def test_window_management_guidance_reaches_react_in_the_selected_language(api, 
         agent.ability_manager.teardown_tools()
 
 
-def test_model_facing_window_tool_and_system_share_the_same_transition_policy(api):
+def test_model_facing_window_tool_and_system_share_the_same_transition_policy(api, enable_active_window_switch):
     spec = spec_for(api, enabled_features={"construction", "window_management"})
     agent = api.create_persistent_agent(spec, context=context_for(api, spec))
     try:
