@@ -484,6 +484,15 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
             "a fresh launch."
         ),
     )
+    executor: Optional[str] = Field(
+        default=None,
+        description=(
+            "Member name currently hosting the run, leader included (the "
+            "relaunch host when resumed). The single attribution key: narration "
+            "routing, completion injections and resume handoff all read it. "
+            "None only when no team context is available (or on legacy events)."
+        ),
+    )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
     script_path: Optional[str] = Field(
