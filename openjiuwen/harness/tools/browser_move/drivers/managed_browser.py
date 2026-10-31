@@ -245,7 +245,7 @@ class ManagedBrowserDriver:
             return False
         return False
 
-    def start(self, timeout_s: float = 20.0, kill_existing: bool = False) -> str:
+    def start(self, timeout_s: float = 30.0, kill_existing: bool = False) -> str:
         if self._process is not None and self._process.poll() is None:
             if self._is_endpoint_ready():
                 return self.cdp_endpoint

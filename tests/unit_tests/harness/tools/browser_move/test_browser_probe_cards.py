@@ -132,6 +132,7 @@ def test_browser_probe_cards_tool_reports_runtime_error() -> None:
 def test_runtime_probe_cards_uses_code_executor_and_parses_json() -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = AsyncMock(
         return_value={
             "content": [
@@ -159,9 +160,22 @@ def test_runtime_probe_cards_uses_code_executor_and_parses_json() -> None:
     assert result["cards"][0]["title"] == "Book"
 
 
+def test_runtime_probe_cards_returns_when_runtime_not_started() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+
+    result = _run(runtime.probe_cards())
+
+    assert result["ok"] is False
+    assert result["error"] == "browser_runtime_not_started"
+    assert result["cards"] == []
+    runtime.ensure_runtime_ready.assert_not_called()
+
+
 def test_runtime_probe_cards_handles_missing_code_executor() -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = None
 
     result = _run(runtime.probe_cards())
@@ -264,6 +278,7 @@ def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, mo
 
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = AsyncMock(
         return_value={
             "result": (
@@ -438,6 +453,7 @@ def test_runtime_probe_cards_records_rejected_cache_attempt(tmp_path, monkeypatc
 
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = AsyncMock(
         return_value={
             "content": [

@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
@@ -468,6 +470,121 @@ def test_ensure_managed_driver_started_replaces_stale_driver() -> None:
 
         assert getattr(service, "_managed_driver") is new_driver
         new_driver.start.assert_called_once()
+
+    _run(_test())
+
+
+def test_ensure_runtime_ready_shares_one_attempt() -> None:
+    async def _test():
+        service = _make_service()
+        calls = 0
+
+        async def _slow() -> None:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+            service.started = True
+
+        setattr(service, "_ensure_runtime_ready_body", _slow)
+        await asyncio.gather(
+            service.ensure_runtime_ready(),
+            service.ensure_runtime_ready(),
+        )
+
+        assert calls == 1
+        assert service.started is True
+
+    _run(_test())
+
+
+def test_ensure_runtime_ready_follower_joins_the_open_attempt() -> None:
+    async def _test():
+        service = _make_service()
+        calls = 0
+
+        async def _slow() -> None:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.15)
+            service.started = True
+
+        setattr(service, "_ensure_runtime_ready_body", _slow)
+
+        async def _follow() -> None:
+            await asyncio.sleep(0.1)
+            await service.ensure_runtime_ready()
+
+        await asyncio.gather(service.ensure_runtime_ready(), _follow())
+
+        assert calls == 1
+        assert service.started is True
+
+    _run(_test())
+
+
+def test_mcp_register_timeout_does_not_mark_started(monkeypatch) -> None:
+    async def _test():
+        service = _make_service()
+
+        async def _hang() -> None:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service."
+            "BROWSER_MCP_REGISTER_TIMEOUT_S",
+            0.05,
+        )
+        monkeypatch.setattr(service, "_ensure_managed_driver_started", AsyncMock(return_value=False))
+        monkeypatch.setattr(service, "_ensure_screenshots_dir", lambda: None)
+        monkeypatch.setattr(service, "_register_playwright_mcp", _hang)
+
+        with patch("openjiuwen.harness.tools.browser_move.playwright_runtime.service.shutil.which", return_value="npx"):
+            with pytest.raises(RuntimeError, match="browser_runtime_not_started"):
+                await service.ensure_runtime_ready()
+
+        assert service.started is False
+
+    _run(_test())
+
+
+def test_refresh_timeout_drops_binding_and_retries(monkeypatch) -> None:
+    async def _test():
+        service = _make_service()
+        service.started = True
+        service._inject_cdp_endpoint("http://127.0.0.1:9333")
+        service._registered_cdp_endpoint = "http://127.0.0.1:9333"
+        driver_calls = 0
+        refresh_calls = 0
+
+        async def _driver() -> bool:
+            nonlocal driver_calls
+            driver_calls += 1
+            return driver_calls == 1
+
+        async def _refresh() -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                await asyncio.sleep(30)
+
+        monkeypatch.setattr(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service."
+            "BROWSER_RUNTIME_READY_TIMEOUT_S",
+            0.05,
+        )
+        monkeypatch.setattr(service, "_ensure_managed_driver_started", _driver)
+        monkeypatch.setattr(service, "_refresh_mcp_server_binding", _refresh)
+
+        with pytest.raises(RuntimeError, match="browser_runtime_not_started"):
+            await service.ensure_runtime_ready()
+
+        assert service.started is True
+        assert service._registered_cdp_endpoint == ""
+
+        await service.ensure_runtime_ready()
+
+        assert refresh_calls == 2
+        assert service.started is True
 
     _run(_test())
 

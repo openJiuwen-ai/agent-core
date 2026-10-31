@@ -31,7 +31,21 @@ from .agents import build_browser_worker_agent
 from .config import BrowserInstanceConfig, BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
 from .profiles import BrowserProfile, BrowserProfileStore
 
+
+def _observe_runtime_ready_task(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    task.exception()
+
+
 MAX_ITERATION_MESSAGE = "Max iterations reached without completion"
+# Chrome CDP wait, and an already-started MCP rebind, each get this long.
+# The two steps do not share one clock.
+BROWSER_RUNTIME_READY_TIMEOUT_S = 30.0
+# First `npx -y @playwright/mcp@latest` has to finish in this one attempt.
+# Cancelling earlier leaves the npm cache empty, so the next turn starts over.
+BROWSER_MCP_REGISTER_TIMEOUT_S = 300.0
+BROWSER_RUNTIME_NOT_STARTED = "browser_runtime_not_started"
 _ctx_observer_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "playwright_runtime_observer_session_id",
     default="",
@@ -145,6 +159,8 @@ class BrowserService:
         self._cancel_store: BaseKVStore = cancel_store or InMemoryKVStore()
 
         self.started = False
+        self._runtime_ready_lock = asyncio.Lock()
+        self._runtime_ready_task: Optional[asyncio.Task[None]] = None
         self._browser_agent: Optional[ReActAgent] = None
         self._locks: Dict[str, asyncio.Lock] = {}
         self._sessions: set[str] = set()
@@ -459,7 +475,11 @@ class BrowserService:
         kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
 
         driver = ManagedBrowserDriver(profile=profile)
-        endpoint = await asyncio.to_thread(driver.start, 20.0, kill_existing)
+        endpoint = await asyncio.to_thread(
+            driver.start,
+            BROWSER_RUNTIME_READY_TIMEOUT_S,
+            kill_existing,
+        )
         self._inject_cdp_endpoint(endpoint)
         profile.cdp_url = endpoint
         self._profile_store.upsert_profile(profile, select=True)
@@ -657,11 +677,38 @@ class BrowserService:
         return sid
 
     async def ensure_runtime_ready(self) -> None:
+        """Start or refresh the browser runtime.
+
+        Concurrent callers on this service await the same attempt. Chrome and an
+        already-started MCP rebind each get 30 seconds, one after the other.
+        The first MCP registration, including the npx download, uses a longer
+        timeout so that attempt can finish.
+        """
+        task = await self._claim_runtime_ready_attempt()
+        await task
+
+    async def _claim_runtime_ready_attempt(self) -> asyncio.Task[None]:
+        async with self._runtime_ready_lock:
+            current = self._runtime_ready_task
+            if current is not None and not current.done():
+                return current
+            task = asyncio.create_task(
+                self._run_runtime_ready_attempt(),
+                name="browser-runtime-ready",
+            )
+            task.add_done_callback(_observe_runtime_ready_task)
+            self._runtime_ready_task = task
+            return task
+
+    async def _run_runtime_ready_attempt(self) -> None:
+        await self._ensure_runtime_ready_body()
+
+    async def _ensure_runtime_ready_body(self) -> None:
         if self.started:
             browser_rebound = await self._ensure_managed_driver_started()
             configured_endpoint = self._configured_cdp_endpoint()
             if browser_rebound or configured_endpoint != self._registered_cdp_endpoint:
-                await self._refresh_mcp_server_binding()
+                await self._rebind_started_mcp()
                 self._browser_agent = None
             return
 
@@ -674,8 +721,18 @@ class BrowserService:
 
         await self._ensure_managed_driver_started()
         self._ensure_screenshots_dir()
-        await Runner.start()
+        try:
+            await asyncio.wait_for(
+                self._register_playwright_mcp(),
+                timeout=BROWSER_MCP_REGISTER_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(BROWSER_RUNTIME_NOT_STARTED) from exc
+        self.started = True
+        self._start_heartbeat()
 
+    async def _register_playwright_mcp(self) -> None:
+        await Runner.start()
         register_result = await Runner.resource_mgr.add_mcp_server(self.mcp_cfg, tag="browser.service")
         if register_result is not None and not getattr(register_result, "is_ok", lambda: False)():
             if hasattr(register_result, "error") and callable(register_result.error):
@@ -686,10 +743,7 @@ class BrowserService:
                 error_value = getattr(register_result, "value", register_result)
             if "already exist" not in str(error_value):
                 raise RuntimeError(f"Failed to register Playwright MCP server: {error_value}")
-
         self._registered_cdp_endpoint = self._configured_cdp_endpoint()
-        self.started = True
-        self._start_heartbeat()
 
     async def ensure_started(self) -> None:
         await self.ensure_runtime_ready()
@@ -765,6 +819,27 @@ class BrowserService:
             server_id=server_resource_id,
             ignore_exception=True,
         )
+
+    async def _rebind_started_mcp(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self._refresh_mcp_server_binding(),
+                timeout=BROWSER_RUNTIME_READY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as exc:
+            self._drop_mcp_binding()
+            raise RuntimeError(BROWSER_RUNTIME_NOT_STARTED) from exc
+        except asyncio.CancelledError:
+            self._drop_mcp_binding()
+            raise
+        except Exception:
+            self._drop_mcp_binding()
+            raise
+
+    def _drop_mcp_binding(self) -> None:
+        """Forget a binding that was removed or never finished registering."""
+        self._registered_cdp_endpoint = ""
+        self._browser_agent = None
 
     async def _refresh_mcp_server_binding(self) -> None:
         await self._remove_registered_mcp_server()
