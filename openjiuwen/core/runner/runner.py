@@ -189,7 +189,10 @@ class _RunnerImpl(_TeamRunnerMixin):
             # non-None group here still corresponds to a live owner; a
             # foreign live owner is only a concern for cross-loop driving,
             # which sync callers cannot do.
-            return state.group if (state := self._root_state) is not None else None
+            state = self._root_state
+            if state is None:
+                return None
+            return state.group
         state = self._root_state
         if state is None or not _is_live_task_on_running_loop(state.owner):
             return None
