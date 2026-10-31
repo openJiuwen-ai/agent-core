@@ -1,4 +1,5 @@
 from typing import AsyncIterator
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +19,42 @@ from tests.unit_tests.core.workflow.mock_nodes import (ComputeComponent2,
                                                        Node1, StreamCompNode)
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_end_collect_preserves_falsy_values_without_template():
+    session = MagicMock(spec=Session)
+    result: dict[str, list[dict[str, object]]] = await End().collect(
+        {"nested": {"zero": 0, "false": False, "empty": ""}, "items": [0, False, ""], "missing": None},
+        session,
+        None,
+    )
+
+    assert result == {
+        "output": [
+            {"nested.zero": 0},
+            {"nested.false": False},
+            {"nested.empty": ""},
+            {"items[0]": 0},
+            {"items[1]": False},
+            {"items[2]": ""},
+        ]
+    }
+
+
+async def test_end_transform_preserves_falsy_values_without_template():
+    session = MagicMock(spec=Session)
+    chunks: AsyncIterator[dict[str, dict[str, object]]] = End().transform(
+        {"zero": 0, "false": False, "empty": "", "missing": None},
+        session,
+        None,
+    )
+    result = [chunk async for chunk in chunks]
+
+    assert result == [
+        {"output": {"zero": 0}},
+        {"output": {"false": False}},
+        {"output": {"empty": ""}},
+    ]
 
 
 class MockStreamCmp(WorkflowComponent):

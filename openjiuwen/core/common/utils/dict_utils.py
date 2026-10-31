@@ -47,7 +47,8 @@ def extract_leaf_nodes(data: Any, current_path: Optional[List[str]] = None) -> L
 
     This function walks nested dictionaries and lists and returns a list
     of tuples where each tuple contains the path (as a list of keys/indexes)
-    and the leaf value.
+    and the leaf value. None values and empty dictionaries/lists are omitted;
+    other falsy values, such as 0, False, and an empty string, are preserved.
 
     Args:
         data: The nested data structure (dicts/lists/values).
@@ -61,7 +62,7 @@ def extract_leaf_nodes(data: Any, current_path: Optional[List[str]] = None) -> L
         >>> extract_leaf_nodes({'a': [1, {'b': 2}]})
         [(['a', '[0]'], 1), (['a', '[1]', 'b'], 2)]
     """
-    if not data:
+    if data is None:
         return []
     if current_path is None:
         current_path = []
