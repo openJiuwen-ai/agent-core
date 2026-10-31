@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from openjiuwen.agent_teams.workflow.engine import journal as journal_mod
 from openjiuwen.agent_teams.workflow.engine import run_workflow
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
@@ -309,3 +310,132 @@ def test_resume_still_hits_when_isolation_untouched(tmp_path):
     asyncio.run(_relaunch())
     # Same script, same keys/sigs → A is a hit and never reaches the backend.
     assert backend2.executed == ["B"]
+
+
+def _wal_run_records(journal_path: str) -> list[dict]:
+    """Run-level records (``pause`` / ``seal`` / ``args``) in the WAL, append order."""
+    wal = Path(f"{journal_path}.wal")
+    if not wal.exists():
+        return []
+    records: list[dict] = []
+    for line in wal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        if rec.get("type") not in ("pause", "seal"):
+            continue  # call records carry a structural key, not a run record
+        records.append(rec)
+    return records
+
+
+def _hold_run_records(record_type: str) -> tuple[asyncio.Event, "journal_mod.Journal._append_wal"]:
+    """Patch ``Journal._append_wal`` to hold ``record_type`` open and signal it.
+
+    Returns ``(started, patched)``; the caller installs ``patched`` (and restores
+    the original afterwards) and waits on ``started`` before cancelling — the
+    run task is then deterministically suspended inside the record write, which
+    is exactly where a controller stop's pending cancellation lands.
+    """
+    started = asyncio.Event()
+    orig = journal_mod.Journal._append_wal
+
+    async def _hold(self, record):
+        if record.get("type") == record_type:
+            started.set()
+            await asyncio.sleep(0.1)
+        return await orig(self, record)
+
+    return started, _hold
+
+
+@pytest.mark.parametrize("cancels", [1, 2])
+def test_stop_seal_survives_cancel_during_seal_write(tmp_path, monkeypatch, cancels):
+    """A stop whose seal write is cancelled mid-flight still seals the WAL.
+
+    The controller's three-step abort cancels the engine task after setting the
+    abort signal; when the pre-journal guard has already raised
+    ``WorkflowAborted(stop)`` the pending cancellation lands on the seal-write
+    await inside the exception handler (a member teardown may cancel a second
+    time mid-write). The seal must still reach the WAL — otherwise a same-run_id
+    relaunch replays the terminated run's cache instead of forcing a fresh id.
+    """
+    script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
+    journal_path = str(tmp_path / "j.jsonl")
+    backend = _GatedBackend()
+    b_gate = backend.gate("B")
+    ev = AbortSignal()
+
+    async def _scenario() -> None:
+        started, patched = _hold_run_records("seal")
+        monkeypatch.setattr(journal_mod.Journal, "_append_wal", patched)
+        task = asyncio.create_task(
+            run_workflow(script, backend=backend, journal_path=journal_path, abort_event=ev)
+        )
+        await backend.started["B"].wait()  # A journaled, B in flight
+        ev.set("stop")
+        b_gate.set()  # B returns → pre-journal guard raises WorkflowAborted(stop)
+        await started.wait()  # engine is suspended inside the seal write
+        for _ in range(cancels):
+            task.cancel()
+        with pytest.raises(WorkflowAborted):
+            await task
+
+    asyncio.run(_scenario())
+    seals = [rec for rec in _wal_run_records(journal_path) if rec.get("type") == "seal"]
+    assert [rec.get("terminal_status") for rec in seals] == ["stopped"]
+
+
+def test_pause_record_survives_cancel_during_write(tmp_path, monkeypatch):
+    """A pause interrupted by a cancellation still writes its pause record."""
+    script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
+    journal_path = str(tmp_path / "j.jsonl")
+    backend = _GatedBackend()
+    b_gate = backend.gate("B")
+    ev = AbortSignal()
+
+    async def _scenario() -> None:
+        started, patched = _hold_run_records("pause")
+        monkeypatch.setattr(journal_mod.Journal, "_append_wal", patched)
+        task = asyncio.create_task(
+            run_workflow(script, backend=backend, journal_path=journal_path, abort_event=ev)
+        )
+        await backend.started["B"].wait()
+        ev.set("pause")
+        b_gate.set()
+        await started.wait()
+        task.cancel()
+        with pytest.raises(WorkflowAborted):
+            await task
+
+    asyncio.run(_scenario())
+    pauses = [rec for rec in _wal_run_records(journal_path) if rec.get("type") == "pause"]
+    assert [rec.get("pause_reason") for rec in pauses] == ["pause"]
+
+
+def test_stop_cancel_while_call_in_flight_still_seals(tmp_path):
+    """Regression: cancel-first (no checkpoint reached) seals via the CancelledError path.
+
+    The task is suspended at the backend call when ``cancel()`` bites, so the
+    engine unwinds through ``except asyncio.CancelledError`` — the branch that
+    pre-dated the shielded writes. Its seal must keep landing.
+    """
+    script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
+    journal_path = str(tmp_path / "j.jsonl")
+    backend = _GatedBackend()
+    b_gate = backend.gate("B")
+    ev = AbortSignal()
+
+    async def _scenario() -> None:
+        task = asyncio.create_task(
+            run_workflow(script, backend=backend, journal_path=journal_path, abort_event=ev)
+        )
+        await backend.started["B"].wait()
+        ev.set("stop")
+        task.cancel()  # cancel while B is suspended at the gate
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_scenario())
+    seals = [rec for rec in _wal_run_records(journal_path) if rec.get("type") == "seal"]
+    assert [rec.get("terminal_status") for rec in seals] == ["stopped"]
