@@ -61,6 +61,16 @@ _DB_RETRY_BASE_DELAY = 0.5
 # means the driver is stuck, and a loud TimeoutError beats an eternal hang.
 _DB_SESSION_WATCHDOG_SECONDS = 30.0
 
+# Errors ``retry_on_transient`` backs off on: SQLite contention
+# (``OperationalError``), write-pool checkout timeouts (``SATimeoutError``)
+# and the ``DbSessions`` watchdog (builtin ``TimeoutError``). Callers that
+# degrade on exhaustion catch this same tuple.
+_TRANSIENT_DB_ERRORS = (OperationalError, SATimeoutError, TimeoutError)
+# Each watchdog hit already cost ``_DB_SESSION_WATCHDOG_SECONDS``, and a
+# wedged driver rarely recovers within seconds, so retry it only once instead
+# of the full ``_DB_RETRY_ATTEMPTS`` (bounds the worst case at ~2x watchdog).
+_WATCHDOG_RETRY_ATTEMPTS = 2
+
 
 class DbSessions:
     """Read/write session provider with process-wide write serialisation.
@@ -91,6 +101,11 @@ class DbSessions:
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+
+    @property
+    def write_locked(self) -> bool:
+        """Whether a ``write()`` block currently holds the write lock (diagnostics)."""
+        return self._write_lock.locked()
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -203,11 +218,12 @@ async def retry_on_transient(
 ) -> _T:
     """Run a write ``op`` with back-off on transient DB errors, raising on exhaustion.
 
-    Same back-off as ``retry_on_locked`` but for callers that cannot degrade:
-    retries ``OperationalError`` / ``SATimeoutError`` *plus* the
-    ``DbSessions.write()`` watchdog ``TimeoutError`` (as
-    ``create_cur_session_tables`` does), and re-raises the last error once
-    the budget is spent instead of returning a fallback value.
+    Same back-off as ``retry_on_locked`` but for callers that cannot degrade
+    on their own: retries every error in ``_TRANSIENT_DB_ERRORS`` (including
+    the ``DbSessions.write()`` watchdog ``TimeoutError``) and re-raises the
+    last error once the budget is spent instead of returning a fallback
+    value. Watchdog hits get a smaller budget (``_WATCHDOG_RETRY_ATTEMPTS``)
+    because each one already waited out the full watchdog.
 
     Args:
         op: Zero-arg coroutine factory performing one write attempt; it must
@@ -217,25 +233,27 @@ async def retry_on_transient(
     Returns:
         The ``op`` result.
     """
-    transient = (OperationalError, SATimeoutError, TimeoutError)
-    for attempt in range(_DB_RETRY_ATTEMPTS - 1):
+    attempt = 0
+    watchdog_hits = 0
+    while True:
         try:
             return await op()
-        except transient as e:
-            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+        except _TRANSIENT_DB_ERRORS as e:
+            attempt += 1
+            if isinstance(e, TimeoutError):
+                watchdog_hits += 1
+            if attempt >= _DB_RETRY_ATTEMPTS or watchdog_hits >= _WATCHDOG_RETRY_ATTEMPTS:
+                team_logger.error("%s failed after %d attempts: %s", label, attempt, e)
+                raise
+            delay = _DB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
             team_logger.warning(
                 "%s hit a transient DB error (%s); retrying in %ss (attempt %d)",
                 label,
                 type(e).__name__,
                 delay,
-                attempt + 1,
+                attempt,
             )
             await asyncio.sleep(delay)
-    try:
-        return await op()
-    except transient as e:
-        team_logger.error("%s failed after %d attempts: %s", label, _DB_RETRY_ATTEMPTS, e)
-        raise
 
 
 def _get_table_names(sync_conn) -> list[str]:
@@ -879,12 +897,12 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
 
     The session_id is obtained from context via get_session_id().
 
-    Retries on transient errors: SQLite write contention
-    (``OperationalError``) and pool-exhaustion (``SATimeoutError``) as
-    ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
+    Retries on transient errors via ``retry_on_transient``: SQLite write
+    contention (``OperationalError``) and pool-exhaustion (``SATimeoutError``)
+    as ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
     ``TimeoutError`` raised by ``DbSessions.write()`` when the driver thread
-    is wedged (e.g. multi-process binds racing the file lock at startup). A
-    failed retry budget does not raise: ``create_cur_session_tables`` returns
+    is wedged (e.g. multi-process binds racing the file lock at startup; at
+    most one watchdog retry). A failed retry budget does not raise: ``create_cur_session_tables`` returns
     ``None`` on success-or-give-up and ``bind_session`` does not inspect the
     return, so a bind-time DDL hiccup degrades to a logged warning rather than
     crashing the member — the session's tables either got created/migrated on
@@ -902,7 +920,7 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
 
     try:
         await retry_on_transient(_ddl_once, label=f"create_cur_session_tables(session={session_id})")
-    except (OperationalError, SATimeoutError, TimeoutError):
+    except _TRANSIENT_DB_ERRORS:
         # Budget exhausted (already logged) — do not crash the member. A
         # subsequent DAO write will either succeed on its own (tables are
         # idempotent under checkfirst) or raise the real error in-band where

@@ -122,45 +122,34 @@ class OrgDbContext:
 
     def __init__(self, db: TeamDatabase) -> None:
         self.db = db
-        self._sessions: DbSessions | None = None
 
     async def initialize(self) -> DbSessions:
-        """Bind to the database's shared ``DbSessions`` and ensure the org schema.
+        """Ensure the org schema on the database's shared ``DbSessions``.
 
         Reuses ``TeamDatabase.sessions`` instead of building a second provider:
         a second ``DbSessions`` carries a second write lock, so org writes would
-        race the DAO writes for the same small write pool.
-
-        Binds once: later calls return the bound provider while the database
-        still holds it, rebind when the database was reinitialized elsewhere,
-        and refuse to reopen a database that was closed under this context
-        (a stale org store must not resurrect engines and the checkpointer).
+        race the DAO writes for the same small write pool. A closed database is
+        never reopened: ``TeamDatabase.initialize()`` raises once it was closed.
         """
-        if self._sessions is not None:
-            current = self.db.sessions
-            if current is self._sessions:
-                return current
-            if current is None:
-                raise_error(
-                    StatusCode.AGENT_TEAM_STATE_INVALID,
-                    reason="TeamDatabase was closed; organization store is no longer usable",
-                )
-            await _ensure_org_schema(current)
-            self._sessions = current
-            return current
         await self.db.initialize()
-        sessions = self.db.sessions
-        if sessions is None:
-            raise RuntimeError("TeamDatabase is not initialized")
+        sessions = self.sessions
         await _ensure_org_schema(sessions)
-        self._sessions = sessions
         return sessions
 
     @property
     def sessions(self) -> DbSessions:
-        if self._sessions is None:
-            raise RuntimeError("OrgDbContext is not initialized")
-        return self._sessions
+        """Return the database's current provider; never cached here.
+
+        Reading it through ``TeamDatabase`` on every access means a holder can
+        never keep writing on a provider (and write lock) the database dropped.
+        """
+        sessions = self.db.sessions
+        if sessions is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_STATE_INVALID,
+                reason="TeamDatabase is not initialized or was closed",
+            )
+        return sessions
 
 
 def json_dumps(value: Any) -> str | None:

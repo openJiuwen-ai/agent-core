@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from openjiuwen.agent_teams.spawn.shared_resources import (
     cleanup_shared_resources,
     get_shared_db,
@@ -9,6 +11,7 @@ from openjiuwen.agent_teams.spawn.shared_resources import (
 class _DummyTeamDatabase:
     def __init__(self, config):
         self.config = config
+        self.closed = False
 
 
 def _config(db_type: str, connection_string: str = "") -> SimpleNamespace:
@@ -24,6 +27,21 @@ def test_get_shared_db_reuses_same_non_memory_config(monkeypatch):
         db1 = get_shared_db(cfg1)
         db2 = get_shared_db(cfg2)
         assert db1 is db2
+    finally:
+        cleanup_shared_resources()
+
+
+def test_get_shared_db_replaces_closed_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed TeamDatabase refuses to reinitialize, so the cache must not hand it out."""
+    monkeypatch.setattr("openjiuwen.agent_teams.tools.database.TeamDatabase", _DummyTeamDatabase)
+    cleanup_shared_resources()
+    try:
+        cfg = _config("sqlite", "team_data/team.db")
+        closed_db = get_shared_db(cfg)
+        closed_db.closed = True
+        fresh_db = get_shared_db(cfg)
+        assert fresh_db is not closed_db
+        assert get_shared_db(cfg) is fresh_db
     finally:
         cleanup_shared_resources()
 

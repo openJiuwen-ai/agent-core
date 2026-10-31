@@ -67,7 +67,10 @@ def _get_shared_db_instance(config: Any) -> "TeamDatabase":
     db_type = config.db_type
     conn_str = config.connection_string
     key = f"{db_type}::{conn_str}"
-    if key not in _db_instances:
+    cached = _db_instances.get(key)
+    # A closed TeamDatabase is terminal (it refuses to reinitialize), so a
+    # closed cache entry is replaced instead of handed out forever.
+    if cached is None or cached.closed:
         from openjiuwen.agent_teams.tools.database import TeamDatabase
 
         _db_instances[key] = TeamDatabase(config)

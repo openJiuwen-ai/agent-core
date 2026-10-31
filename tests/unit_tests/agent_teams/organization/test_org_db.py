@@ -1,7 +1,11 @@
 # coding: utf-8
 
+from pathlib import Path
+from typing import Any
+
 import pytest
 from sqlalchemy import event, inspect
+from sqlalchemy.engine import Connection, ExecutionContext
 
 from openjiuwen.agent_teams.organization.db import OrgDbContext, json_dumps, json_loads
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
@@ -192,23 +196,37 @@ def _record_schema_statements(db: TeamDatabase) -> list[tuple[str, bool]]:
     Hooks the SQL boundary (``before_cursor_execute``) instead of patching the
     module under test: each entry is ``(statement, write_lock_held)`` for DDL
     and schema introspection (``CREATE`` / ``ALTER`` / ``PRAGMA`` /
-    ``sqlite_master``), which is what the org schema ensure issues.
+    ``sqlite_master``), which is what the org schema ensure issues. Callers run
+    no concurrent writers, so a held lock can only belong to the DDL itself.
     """
     assert db.engine is not None and db.sessions is not None
     sessions = db.sessions
     recorded: list[tuple[str, bool]] = []
 
-    def _on_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+    def _on_execute(
+        conn: Connection,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: ExecutionContext | None,
+        executemany: bool,
+    ) -> None:
         upper = statement.lstrip().upper()
         if upper.startswith(("CREATE", "ALTER", "PRAGMA")) or "SQLITE_MASTER" in upper:
-            recorded.append((statement, sessions._write_lock.locked()))
+            recorded.append((statement, sessions.write_locked))
 
     event.listen(db.engine.sync_engine, "before_cursor_execute", _on_execute)
     return recorded
 
 
+async def _table_names(db: TeamDatabase) -> set[str]:
+    assert db.engine is not None
+    async with db.engine.connect() as conn:
+        return await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+
+
 @pytest.mark.asyncio
-async def test_org_db_context_reuses_team_database_sessions():
+async def test_org_db_context_reuses_team_database_sessions() -> None:
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
     sessions = await OrgDbContext(db).initialize()
     # One provider (one write lock) for org + DAO writes; a second DbSessions
@@ -219,7 +237,7 @@ async def test_org_db_context_reuses_team_database_sessions():
 
 
 @pytest.mark.asyncio
-async def test_org_static_ddl_runs_under_team_database_write_lock(tmp_path):
+async def test_org_static_ddl_runs_under_team_database_write_lock(tmp_path: Path) -> None:
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db")))
     await db.initialize()
     recorded = _record_schema_statements(db)
@@ -235,7 +253,7 @@ async def test_org_static_ddl_runs_under_team_database_write_lock(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_find_organization_ids_runs_static_ddl_once_per_database():
+async def test_find_organization_ids_runs_static_ddl_once_per_database() -> None:
     from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
@@ -250,76 +268,74 @@ async def test_find_organization_ids_runs_static_ddl_once_per_database():
 
 
 @pytest.mark.asyncio
-async def test_org_static_ddl_reruns_after_database_reinitialize():
-    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    await OrgDbContext(db).initialize()
-    await db.close()
-    await db.initialize()
-    recorded = _record_schema_statements(db)
-    # A reinitialized :memory: database is empty, so the schema must be rebuilt.
-    await OrgDbContext(db).initialize()
+async def test_org_static_ddl_runs_for_each_new_database() -> None:
+    first = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await OrgDbContext(first).initialize()
+    await first.close()
+    # The "schema ready" mark belongs to one provider: a new database (a new,
+    # empty :memory: store) must build the org tables again.
+    second = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await second.initialize()
+    recorded = _record_schema_statements(second)
+    await OrgDbContext(second).initialize()
     assert any("CREATE TABLE" in stmt.upper() and "org_info" in stmt for stmt, _ in recorded)
-    async with db.engine.connect() as conn:
-        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
-    assert "org_info" in table_names
-    await db.close()
+    assert "org_info" in await _table_names(second)
+    await second.close()
 
 
 @pytest.mark.asyncio
-async def test_bound_org_context_does_not_reopen_closed_database():
+async def test_org_context_does_not_reopen_closed_database() -> None:
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    context = OrgDbContext(db)
-    await context.initialize()
+    bound = OrgDbContext(db)
+    await bound.initialize()
     await db.close()
-    # A stale org store must fail loudly instead of resurrecting engines and
-    # the background checkpointer of a database that was shut down.
+    # Neither a held org store nor a fresh lookup (team.list polling builds a
+    # new context per call) may resurrect engines and the checkpointer.
     with pytest.raises(BaseError, match="closed"):
-        await context.initialize()
+        await bound.initialize()
+    with pytest.raises(BaseError, match="closed"):
+        _ = bound.sessions
+    with pytest.raises(BaseError, match="closed"):
+        await OrgTaskManager.find_organization_ids_for_team(db, "team-a")
     assert db.engine is None
     assert db.sessions is None
 
 
 @pytest.mark.asyncio
-async def test_bound_org_context_rebinds_after_database_reinitialize():
-    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    context = OrgDbContext(db)
-    stale = await context.initialize()
-    await db.close()
-    await db.initialize()
-    fresh = await context.initialize()
-    assert fresh is db.sessions and fresh is not stale
-    async with db.engine.connect() as conn:
-        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
-    assert "org_info" in table_names
-    await db.close()
-
-
-@pytest.mark.asyncio
-async def test_team_database_close_drops_shared_sessions():
+async def test_closed_team_database_refuses_reinitialize() -> None:
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
     await db.initialize()
-    stale = db.sessions
-    assert stale is not None
+    assert db.sessions is not None
     await db.close()
-    # A provider bound to the disposed engine must not leak out of close().
+    # A provider bound to the disposed engine must not leak out of close(),
+    # and closing is terminal: build a new TeamDatabase to reuse the storage.
     assert db.sessions is None
-    await db.initialize()
-    assert db.sessions is not None and db.sessions is not stale
-    await db.close()
+    with pytest.raises(BaseError, match="closed"):
+        await db.initialize()
+    assert db.engine is None
 
 
 @pytest.mark.asyncio
-async def test_team_database_hides_sessions_until_initialize_completes(monkeypatch):
+async def test_failed_initialize_releases_engines_and_hides_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     from openjiuwen.agent_teams.team_workspace import session_file_store
 
-    def _failing_file_store(*args, **kwargs):
+    original_file_store = session_file_store.SessionFileStore
+
+    def _failing_file_store(*args: Any, **kwargs: Any) -> Any:
         raise OSError("session file store unavailable")
 
     monkeypatch.setattr(session_file_store, "SessionFileStore", _failing_file_store)
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
     with pytest.raises(OSError):
         await db.initialize()
-    # A half-initialized database must not hand out its provider; otherwise a
-    # retried initialize() would leave two providers (two write locks) alive.
+    # A half-initialized database must neither hand out its provider (a retry
+    # would leave two write locks alive) nor keep the pools it just built.
     assert db.sessions is None
+    assert db.engine is None and db.read_engine is None
+    # The failure is not a close: once the cause is gone a retry succeeds.
+    monkeypatch.setattr(session_file_store, "SessionFileStore", original_file_store)
+    await db.initialize()
+    assert db.sessions is not None
     await db.close()
