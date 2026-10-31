@@ -9,13 +9,13 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
   Exact normalized equality is always a hit. The scan is O(n) in bank size
-  (capped by ``max_facts`` / ``max_tips``); a process-local embedding cache
+  without a fixed record-count cap; a process-local embedding cache
   makes repeat adds CPU-only when a provider is set. Cold cache fills with
-  batched ``embed_documents``, not one RPC per row. n<=400 is a linear
-  scan; an ANN index is not used.
+  batched ``embed_documents``, not one RPC per row. Dedup uses a linear
+  scan; an ANN index is not used for dedup.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
-  The cache is an LRU capped at ``max_facts + max_tips + 100`` and is pruned
-  when records leave the bank (retire / delete / cap / reload).
+  The cache is an LRU sized to the current FACT/TIP count plus 100 query
+  entries and is pruned when records leave the bank (retire / delete / reload).
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
   ``last_injected_at``, ``inject_hits``) for Auto-dream prune, plus
   ``form_checked`` on tips after the LLM form/over-generic pass. Consult
@@ -210,7 +210,7 @@ _EMBED_DOC_BATCH = 32
 _EMBED_PROBE_TEXT = "ttse"
 _EMBED_PROBE_RETRY_S = 300.0
 
-# Headroom above max_facts+max_tips for in-flight query texts (consult / dedup).
+# Headroom above the current bank size for in-flight query texts (consult / dedup).
 _EMBED_CACHE_SLACK = 100
 
 
@@ -261,7 +261,7 @@ def shared_store(
     on the same lists.
 
     Empty ``store_path`` is not cached. Two configs that normalize to the same
-    path share one object; knobs on the second config (caps, dedup, RPS, …)
+    path share one object; knobs on the second config (dedup, RPS, …)
     are ignored except that a missing embedding provider may be backfilled,
     and a different embedding fingerprint replaces the provider and rebuilds ANN.
     """
@@ -619,7 +619,7 @@ class TTSERecordStore:
             self._emb_last_call_at = time.monotonic()
 
     def _embedding_cache_limit(self) -> int:
-        return max(int(self._config.max_facts) + int(self._config.max_tips) + _EMBED_CACHE_SLACK, 1)
+        return len(self.facts) + len(self.tips) + _EMBED_CACHE_SLACK
 
     def _cached_embedding(self, key: str) -> Optional[List[float]]:
         vec = self._emb_cache.get(key)
@@ -774,8 +774,7 @@ class TTSERecordStore:
 
         Cosine match when an embedding provider is available; otherwise
         substring match (reference behavior). Exact normalized equality is
-        always treated as a duplicate. Scans are O(n) in ``store`` (n capped
-        by max_facts/max_tips).
+        always treated as a duplicate. Scans are O(n) in ``store``.
         """
         n = _norm(text)
         if not n:
@@ -883,7 +882,7 @@ class TTSERecordStore:
     # Mutation
     # ------------------------------------------------------------------
 
-    async def _add(self, store: List[Dict[str, Any]], text: str, cap: int) -> Optional[str]:
+    async def _add(self, store: List[Dict[str, Any]], text: str) -> Optional[str]:
         """Add or merge a rule.
 
         Returns ``"added"`` for a new rule, ``"merged"`` when an existing rule's
@@ -904,13 +903,10 @@ class TTSERecordStore:
                 return "merged"
             store.append(_new_record(text))
             store.sort(key=lambda x: -x.get("count", 0))
-            if len(store) > cap:
-                del store[cap:]
-                self._drop_stale_embeddings()
             return "added"
 
     async def add_fact(self, text: str) -> bool:
-        result = await self._add(self.facts, text, self._config.max_facts)
+        result = await self._add(self.facts, text)
         if result is not None:
             await self.save()
         if result == "added":
@@ -943,7 +939,7 @@ class TTSERecordStore:
         return new_count
 
     async def add_tip(self, text: str) -> bool:
-        result = await self._add(self.tips, text, self._config.max_tips)
+        result = await self._add(self.tips, text)
         if result is not None:
             await self.save()
         if result == "added":
@@ -969,16 +965,12 @@ class TTSERecordStore:
     ) -> Dict[str, Any]:
         """Insert a record without online dedup (used by dream MERGE/REWRITE)."""
         store = self.facts if rtype == "fact" else self.tips
-        cap = self._config.max_facts if rtype == "fact" else self._config.max_tips
         record = _new_record(text, count=count)
         if category is not None:
             record["category"] = normalize_category(category) or OTHER_CATEGORY
         async with self._lock:
             store.append(record)
             store.sort(key=lambda x: -x.get("count", 0))
-            if len(store) > cap:
-                del store[cap:]
-                self._drop_stale_embeddings()
         if save:
             await self.save()
         return record

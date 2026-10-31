@@ -386,10 +386,10 @@ def test_shared_store_same_path_is_one_object(tmp_path):
 def test_shared_store_second_config_same_path_is_ignored(tmp_path):
     reset_shared_stores()
     path = str(tmp_path / "bank.json")
-    first = shared_store(TTSEConfig(store_path=path, max_facts=3))
-    second = shared_store(TTSEConfig(store_path=path, max_facts=99))
+    first = shared_store(TTSEConfig(store_path=path, dedup_threshold=0.8))
+    second = shared_store(TTSEConfig(store_path=path, dedup_threshold=0.99))
     assert first is second
-    assert first._config.max_facts == 3
+    assert first._config.dedup_threshold == 0.8
     reset_shared_stores()
 
 

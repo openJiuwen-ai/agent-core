@@ -305,10 +305,10 @@ class TTSEIndex:
         orig_reload = store.reload
         orig_add_fn: List[Any] = []
 
-        async def _add(bucket: List[Dict[str, Any]], text: str, cap: int):
+        async def _add(bucket: List[Dict[str, Any]], text: str):
             track = "tip" if bucket is store.tips else "fact"
             before = list(bucket)
-            result = await orig_add_fn[0](bucket, text, cap)
+            result = await orig_add_fn[0](bucket, text)
             if result == "added":
                 await self._diff(store, track, before, bucket)
             return result

@@ -55,6 +55,36 @@ from openjiuwen.agent_evolving.ttse.prompts import ExistingBank, InduceTaskEvide
 _POLICY = LLMInvokePolicy(attempt_timeout_secs=5, total_budget_secs=10, max_attempts=1)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rtype", ["fact", "tip"])
+@pytest.mark.parametrize("direct", [False, True])
+async def test_bank_retains_records_beyond_former_limit(tmp_path, rtype, direct):
+    path = tmp_path / "bank.json"
+    track = "facts" if rtype == "fact" else "tips"
+    bank = {"facts": [], "tips": [], "retired": []}
+    existing = {f"existing rule {i:04d}" for i in range(400)}
+    bank[track] = [{"text": text, "count": 10} for text in sorted(existing)]
+    path.write_text(json.dumps(bank), encoding="utf-8")
+    store = TTSERecordStore(TTSEConfig(store_path=str(path)))
+
+    text = "fresh observation beyond the former capacity"
+    if direct:
+        await store.add_record_direct(rtype, text)
+    else:
+        add = store.add_fact if rtype == "fact" else store.add_tip
+        assert await add(text)
+        assert not await add(text)
+
+    expected = existing | {text}
+    assert {record["text"] for record in getattr(store, track)} == expected
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert {record["text"] for record in persisted[track]} == expected
+    reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    assert {record["text"] for record in getattr(reloaded, track)} == expected
+    record = next(record for record in getattr(reloaded, track) if record["text"] == text)
+    assert record["count"] == (1 if direct else 2)
+
+
 class ScriptedLLM:
     def __init__(self, handler: Callable[[str], object]):
         self.handler = handler
