@@ -18,6 +18,7 @@ import threading
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -72,6 +73,7 @@ from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     _canonical_graph_pair,
     build_symphony_execution_graph,
 )
+from openjiuwen.symphony import GraphArtifactStore
 from openjiuwen.symphony.interfaces.llm import SymphonyLLM
 from openjiuwen.symphony.observation import GraphSnapshotRef
 
@@ -152,6 +154,104 @@ _SUMMARY_SECRET_CLI = re.compile(
 
 CaptureMode: TypeAlias = Literal["agent", "team"]
 GraphSnapshotProvider: TypeAlias = Callable[[], Mapping[str, Any]]
+
+
+class PublishedCapabilitySnapshotProvider:
+    """Freeze identities from the currently published Symphony graph version."""
+
+    def __init__(self, graph_dir: str | Path) -> None:
+        self._graph_dir = Path(graph_dir)
+
+    def snapshot_capabilities(self) -> tuple[CapabilityIdentity, ...]:
+        store = GraphArtifactStore(self._graph_dir)
+        try:
+            artifact = store.current_artifact()
+            if artifact is None:
+                return ()
+            graph = store.read(artifact.version)
+        except (OSError, ValueError):
+            return ()
+        identities: list[CapabilityIdentity] = []
+        capabilities = graph.get("capabilities")
+        for raw in capabilities if isinstance(capabilities, list) else ():
+            if not isinstance(raw, dict):
+                continue
+            capability_type = _snapshot_text(
+                raw.get("capability_type") or raw.get("type")
+            )
+            capability_id = _snapshot_text(raw.get("capability_id") or raw.get("id"))
+            capability_name = _snapshot_text(raw.get("name") or capability_id)
+            version = _snapshot_text(raw.get("version"))
+            description = _snapshot_optional_text(raw.get("description"))
+            inputs = _snapshot_ports(raw.get("inputs"))
+            outputs = _snapshot_ports(raw.get("outputs"))
+            if capability_type not in {"skill", "tool", "subagent"}:
+                continue
+            if not capability_id:
+                continue
+            if not capability_name:
+                continue
+            if not version:
+                continue
+            if description is None:
+                continue
+            if inputs is None:
+                continue
+            if outputs is None:
+                continue
+            identities.append(
+                CapabilityIdentity(
+                    capability_id=capability_id,
+                    capability_type=capability_type,
+                    capability_name=capability_name,
+                    version=version,
+                    description=description,
+                    inputs=inputs,
+                    outputs=outputs,
+                )
+            )
+        return tuple(
+            sorted(
+                identities, key=lambda item: (item.capability_type, item.capability_id)
+            )
+        )
+
+
+def _snapshot_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) and value == value.strip() else ""
+
+
+def _snapshot_optional_text(value: Any) -> str | None:
+    if value is None or value == "":
+        return ""
+    return _snapshot_text(value) or None
+
+
+def _snapshot_ports(value: Any) -> tuple[Mapping[str, Any], ...] | None:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        return None
+    ports: list[Mapping[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            return None
+        name = _snapshot_text(raw.get("name"))
+        port_type = _snapshot_text(raw.get("type"))
+        if not name or not port_type:
+            return None
+        port: dict[str, Any] = {"name": name, "type": port_type}
+        if "required" in raw:
+            if not isinstance(raw["required"], bool):
+                return None
+            port["required"] = raw["required"]
+        description = _snapshot_optional_text(raw.get("description"))
+        if description is None:
+            return None
+        if description:
+            port["description"] = description
+        ports.append(port)
+    return tuple(ports)
 
 
 @runtime_checkable
@@ -2129,6 +2229,7 @@ class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphE
 __all__ = [
     "CaptureMode",
     "GraphSnapshotProvider",
+    "PublishedCapabilitySnapshotProvider",
     "SymphonyEvolutionSubmitCallback",
     "SymphonyGraphEvolutionInput",
     "SymphonyGraphEvolutionRail",

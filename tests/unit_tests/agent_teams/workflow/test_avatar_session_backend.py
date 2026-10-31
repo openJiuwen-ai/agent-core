@@ -1310,7 +1310,7 @@ def test_agent_session_picks_expert_spec_and_prepends_persona(monkeypatch):
     expert_spec = DeepAgentSpec(tools=[], agent_template_spec={"agent_card": {"id": "clip", "name": "clip"}})
     entry = SwarmflowExpertEntry("clip", "视频镜头师", "PERSONA", expert_spec, None)
 
-    def _gate(opts):
+    async def _gate(opts):
         return entry if opts.get("agent_template") == "clip" else None
 
     async def scenario():

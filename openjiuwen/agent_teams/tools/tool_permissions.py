@@ -11,12 +11,14 @@ import re
 LEADER_ONLY_TOOLS: set[str] = {
     "build_team",  # Create a new team
     "clean_team",  # Clean up a team
-    "spawn_teammate",  # Spawn an ordinary LLM teammate
+    "spawn_teammate",  # Spawn an AI teammate (local LLM, or a third-party CLI agent)
     "spawn_human_agent",  # Spawn a human member with an avatar (HITT)
     "spawn_passive_human",  # Spawn a passive human member, no avatar (HITT)
     "spawn_bridge_agent",  # Spawn a bridge to a remote agent
-    "spawn_external_cli",  # Spawn a third-party CLI agent teammate
     "set_member_model",  # Switch an external CLI member's built-in model / effort
+    "spawn_expert",  # Spawn a teammate from an installed expert template (gated by an expert catalog)
+    "view_experts",  # Browse installed single experts (gated by an expert catalog)
+    "view_expert_groups",  # Browse installed expert groups and their members (gated by an expert catalog)
     "shutdown_member",  # Shutdown a team member
     "approve_plan",  # Approve or reject a member's plan
     "approve_tool",  # Approve or reject a teammate tool call
@@ -49,6 +51,10 @@ LEADER_ONLY_TOOLS: set[str] = {
     "org_create_summary_execution",
 }
 
+# Leader tools over the host's expert catalog; registered together, only when
+# the host injected a catalog (``create_team_tools(expert_catalog=...)``).
+EXPERT_TOOLS: frozenset[str] = frozenset({"view_experts", "view_expert_groups", "spawn_expert"})
+
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: set[str] = {
     "claim_task",  # Claim or complete a task
@@ -80,6 +86,8 @@ MEMBER_ONLY_TOOLS_SCHEDULED: set[str] = {
     "member_complete_task",  # Complete a task assigned to you
     "submit_plan",  # Submit a plan before executing in plan_mode
     "verify_task",  # Pass/fail a task in the verify gate (reviewer-guarded)
+    "create_task",  # Split your executing task into subtasks (gated by max_subtask_depth, F_128)
+    "update_task",  # Edit / confirm / cancel the subtasks of your own task (same gate, F_129)
 }
 
 # All tools available to leader. Dispatch-invariant: the leader's tool *names*

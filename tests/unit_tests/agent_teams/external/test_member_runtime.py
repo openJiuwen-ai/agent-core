@@ -13,6 +13,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
 from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.team_context import ClaimedNotice
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.external.member_runtime import (
     ExternalHarnessMemberRuntime,
@@ -1104,16 +1105,53 @@ async def test_activity_sink_drops_idless_and_unparsable_tool_events() -> None:
 
 
 
+class _OneShotNoticeTracker:
+    """A task notice tracker with one notice to give, claimed at most once."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.claimed = False
+        self.released = 0
+        self.persists = 0
+
+    async def claim(self, session: Any) -> ClaimedNotice | None:
+        if self.claimed or session is None:
+            return None
+        self.claimed = True
+        return ClaimedNotice(text=self.text, entries=("t1",))
+
+    def release(self, notice: ClaimedNotice) -> None:
+        _ = notice
+        self.claimed = False
+        self.released += 1
+
+    async def persist(self, session: Any) -> None:
+        _ = session
+        self.persists += 1
+
+    async def announce(self, session: Any, send: Any) -> bool:
+        notice = await self.claim(session)
+        if notice is None:
+            return False
+        try:
+            await send(notice.text)
+        except BaseException:
+            self.release(notice)
+            raise
+        await self.persist(session)
+        return True
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_review_pass_notice_rides_once_and_is_recorded_as_its_own_input() -> None:
-    """F_119: the outcome tracker's notice joins the next send, then is committed."""
+    """F_119: the outcome tracker's notice joins the next send, claimed once."""
     harness = _FakeHarness()
     runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
     recorder = _RecordingTrajectoryRecorder()
     runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
     notice = '<team-event kind="task-verified">\ndone\n</team-event>'
-    tracker = _OneShotTeamContextTracker(notice)
+    tracker = _OneShotNoticeTracker(notice)
     runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
     await runtime.start(team_session=_FakeTeamSession())
 
@@ -1125,4 +1163,87 @@ async def test_review_pass_notice_rides_once_and_is_recorded_as_its_own_input() 
     assert inputs[0] == ("input", ("turn-1", "next task"))
     assert ("input", ("turn-1", notice)) in inputs
     assert sum(1 for call in inputs if call[1][1] == notice) == 1
-    assert tracker.commits == 1
+    assert tracker.persists == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_edit_announcement_is_sent_on_its_own_and_once() -> None:
+    """F_129: TASK_UPDATED makes the runtime send the tracker's notice now, as a steer."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    notice = '<team-event kind="task-revised">\nt1 r0 → r1\n</team-event>'
+    runtime.bind_task_outcome_tracker(_OneShotNoticeTracker(notice))  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    await runtime.announce_task_revisions()
+    await runtime.announce_task_revisions()
+    await runtime.stop()
+
+    assert len(harness.send_calls) == 1
+    assert "t1 r0 → r1" in json.dumps(harness.send_calls[0][0].content, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_a_failure_after_delivery_keeps_the_claim() -> None:
+    """Only the delivery itself gives the claim back; recording the input happens after."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    tracker = _OneShotNoticeTracker('<team-event kind="task-revised">\nt1\n</team-event>')
+    runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    def _broken_record(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("recorder down")
+
+    runtime._record_input = _broken_record  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await runtime.announce_task_revisions()
+    await runtime.stop()
+
+    assert len(harness.send_calls) == 1
+    assert tracker.released == 0 and tracker.claimed
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_a_delivered_notice_is_recorded_even_if_announce_fails_after() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    notice = '<team-event kind="task-revised">\nt1\n</team-event>'
+
+    class _PersistFails(_OneShotNoticeTracker):
+        async def persist(self, session: Any) -> None:
+            raise RuntimeError("state unreadable")
+
+    runtime.bind_task_outcome_tracker(_PersistFails(notice))  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    with pytest.raises(RuntimeError):
+        await runtime.announce_task_revisions()
+    await runtime.stop()
+
+    assert ("input", ("turn-1", notice)) in [call for call in recorder.calls if call[0] == "input"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_a_failed_send_gives_the_notice_back() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    tracker = _OneShotNoticeTracker('<team-event kind="task-revised">\nt1\n</team-event>')
+    runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("provider down")
+
+    harness.send = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await runtime.send("next task")
+    await runtime.stop()
+
+    assert tracker.released == 1 and not tracker.claimed

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
-    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate, MemberBuiltinModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -73,6 +73,19 @@ from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+def _with_member_config(
+    agent_template: Optional["MemberAgentTemplate"],
+    member_config: Optional[ExternalCliAgentSpec],
+) -> Optional["MemberAgentTemplate"]:
+    """Store an external member's launch config inside its template record."""
+    if member_config is None:
+        return agent_template
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
+
+    record = agent_template or MemberAgentTemplate()
+    return record.model_copy(update={"external_cli": member_config.model_dump(mode="json", by_alias=True)})
 
 
 @dataclass
@@ -123,6 +136,8 @@ class TeamBackend:
         current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
+        enable_member_messaging: bool = False,
+        max_subtask_depth: int = 0,
         enable_fork: bool = False,
         evolution_enabled: bool = True,
         member_workspace_prefix: bool = True,
@@ -190,6 +205,15 @@ class TeamBackend:
             enable_task_verification: Spec-level "verification expected"
                 ceiling (F_62); ``build_team`` may override the runtime
                 instance flag, mirroring ``enable_hitt``.
+            enable_member_messaging: Whether scheduled-dispatch members may
+                message each other directly
+                (``TeamAgentSpec.enable_member_messaging``, F_126). Static,
+                no ``build_team`` override; the tool factory reads it to pick
+                the member ``send_message`` variant.
+            max_subtask_depth: How deep scheduled-dispatch members may split
+                their task into subtasks (``TeamAgentSpec.max_subtask_depth``,
+                F_128); ``0`` keeps ``create_task`` leader-only. Static, no
+                ``build_team`` override.
             enable_fork: Spec-level context-inheritance capability gate
                 (``TeamAgentSpec.enable_fork``). When False the
                 ``checkpoint`` tool is not wired and ``spawn_teammate``
@@ -288,6 +312,12 @@ class TeamBackend:
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
         self._enable_task_verification: bool = enable_task_verification
+        # Peer messaging under scheduled dispatch (F_126): static spec gate,
+        # read by the tool factory and the prompt builders.
+        self._enable_member_messaging: bool = enable_member_messaging
+        # Member subtasks under scheduled dispatch (F_128): static spec gate
+        # and depth ceiling in one value.
+        self._max_subtask_depth: int = max_subtask_depth
         # Evolution-mechanism master switch (TeamAgentSpec.evolution_enabled),
         # immutable from spec: off means the write side never writes workspace
         # files and the manager carries no cache (the read side falls back to
@@ -476,6 +506,35 @@ class TeamBackend:
         of its description.
         """
         return self._enable_fork
+
+    def member_messaging_enabled(self) -> bool:
+        """Whether scheduled-dispatch members may message each other directly.
+
+        Straight from ``TeamAgentSpec.enable_member_messaging`` (F_126) and
+        meaningful only under scheduled dispatch: autonomous members reach
+        their peers regardless, so consumers combine it with the dispatch
+        mode they were built for. Single gate signal for the member
+        ``send_message`` variant and the messaging prose of the scheduled
+        dispatch prompts.
+        """
+        return self._enable_member_messaging
+
+    def subtask_depth_limit(self) -> int:
+        """How deep scheduled-dispatch members may nest subtasks (``0`` = off).
+
+        Straight from ``TeamAgentSpec.max_subtask_depth`` (F_128); the member
+        ``create_task`` checks a split against it.
+        """
+        return self._max_subtask_depth
+
+    def member_subtasks_enabled(self) -> bool:
+        """Whether scheduled-dispatch members may split their task (F_128).
+
+        Single gate signal for the member ``create_task``, the subtask prose
+        of the scheduled dispatch prompts and the leader policy disclosure.
+        Meaningful only under scheduled dispatch.
+        """
+        return self._max_subtask_depth > 0
 
     def bind_group_session(self, session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id.strip():
@@ -751,6 +810,7 @@ class TeamBackend:
         builtin_model: Optional["MemberBuiltinModel"] = None,
         permissions_override: Optional[dict[str, str]] = None,
         lifetime: str | None = None,
+        agent_template: Optional["MemberAgentTemplate"] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -791,6 +851,9 @@ class TeamBackend:
                 (``"shutdown"`` / ``"dormant"``, F_118). None = resident.
                 Persisted in ``options`` so the scheduler's retirement scan
                 and the member's own settle read the same fact.
+            agent_template: Expert template the member is spawned from
+                (``spawn_expert``): reference, version and the capability
+                snapshot / external CLI config the member is rebuilt from.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -825,6 +888,7 @@ class TeamBackend:
             worktree_isolation=isolation,
             permissions_override=permissions_override,
             lifetime=lifetime,
+            agent_template=agent_template,
         )
 
         # Resolve the latest identity from the evolvable md before writing the
@@ -916,29 +980,52 @@ class TeamBackend:
     async def startup(
         self,
         on_created: Callable[[str], Awaitable[None]],
+        *,
+        include_idle_task_scoped: bool = False,
     ) -> list[str]:
-        """Start all unstarted members.
+        """Start all unstarted members that have something to do.
 
         Finds every member whose status is UNSTARTED and starts
         each via startup_member (which uses STARTING CAS guard).
         On spawn failure, startup_member rolls back STARTING→UNSTARTED
         and re-raises.
 
+        A task-scoped member (``options.lifetime`` set) with no open task
+        is left UNSTARTED: it exists only for its task, so starting it
+        with an empty board just runs one idle round before the scheduler
+        retires it — for ``lifetime="shutdown"`` for good, which strands
+        any task the leader hands it later. It stays assignable; the
+        scheduler's start handoff, or a message addressed to it
+        (``wake_member``), brings it up when there is work. A broadcast
+        addresses it too, so broadcast paths pass
+        ``include_idle_task_scoped=True``.
+
         Args:
             on_created: Callback that receives a member_name and
                 launches the corresponding agent process.
+            include_idle_task_scoped: Also start task-scoped members that
+                have no open task (the start is for a broadcast they must read).
 
         Returns:
             List of member_names that were started.
         """
+        from openjiuwen.agent_teams.tools.member_options import get_member_lifetime
+
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
+        open_counts: dict[str, int] | None = None
         started: list[str] = []
         for member in unstarted:
+            if not include_idle_task_scoped and get_member_lifetime(member) is not None:
+                if open_counts is None:
+                    open_counts = await self.task_manager.open_task_counts_by_assignee()
+                if not open_counts.get(member.member_name):
+                    team_logger.debug("Skip starting task-scoped member {} with no open task", member.member_name)
+                    continue
             await self.startup_member(member.member_name, on_created)
             started.append(member.member_name)
         return started
 
-    async def autostart_unstarted(self) -> list[str]:
+    async def autostart_unstarted(self, *, include_idle_task_scoped: bool = False) -> list[str]:
         """Start every UNSTARTED member using the injected spawn callback.
 
         The shared entry point for the auto-start funnel: work that is about
@@ -954,13 +1041,52 @@ class TeamBackend:
         repeated calls idempotent: whoever gets there second finds nothing in
         UNSTARTED and does nothing.
 
+        Args:
+            include_idle_task_scoped: Passed to ``startup``; broadcast paths set
+                it so task-scoped members with no open task still read the
+                broadcast.
+
         Returns:
             The member names started by this call; empty when there was
             nothing to start or this backend does not own spawning.
         """
         if not self.is_leader or self._on_member_started is None:
             return []
-        return await self.startup(on_created=self._on_member_started)
+        return await self.startup(
+            on_created=self._on_member_started,
+            include_idle_task_scoped=include_idle_task_scoped,
+        )
+
+    async def wake_member(self, member_name: str) -> bool:
+        """Bring up one named member so the message just addressed to it gets read.
+
+        The single-recipient counterpart of ``autostart_unstarted``, for mail
+        the leader did not send itself (member to member, F_126): an UNSTARTED
+        recipient is started, an ERROR / DORMANT one is recovered — the same
+        rules the leader's own ``send_message`` applies to its direct
+        recipients. A member that is already running is left alone after one
+        status read, so the common case writes nothing.
+
+        Leader-only; each branch is gated on its own callback — starting needs
+        the spawn callback, recovering needs the restart callback. The status
+        is read once and handed to the recovery step; the CAS in
+        ``startup_member`` / ``_recover_from`` settles races with the other
+        startup paths.
+
+        Args:
+            member_name: The recipient to bring up.
+
+        Returns:
+            True when this call started or recovered the member.
+        """
+        if not self.is_leader:
+            return False
+        status = await self.get_member_status(member_name)
+        if status == MemberStatus.UNSTARTED.value:
+            if self._on_member_started is None:
+                return False
+            return await self.startup_member(member_name, self._on_member_started)
+        return await self._recover_from(member_name, status)
 
     async def startup_member(
         self,
@@ -1026,11 +1152,17 @@ class TeamBackend:
         Returns:
             True when this call restarted the member, otherwise False.
         """
-        if not self.is_leader or self._on_member_restarted is None:
-            return False
-
         current = await self.db.member.get_member_status(self.team_name, member_name)
-        if current is None:
+        return await self._recover_from(member_name, current)
+
+    async def _recover_from(self, member_name: str, current: str | None) -> bool:
+        """Claim ``member_name`` out of its already-read status ``current`` and restart it.
+
+        Shared by ``recover_member`` and ``wake_member`` so a caller that has
+        just read the status does not read it a second time. The CAS still
+        guards against the status having moved since that read.
+        """
+        if not self.is_leader or self._on_member_restarted is None or current is None:
             return False
         try:
             source = MemberStatus(current)
@@ -2565,6 +2697,14 @@ class TeamBackend:
         """``(member_name, status, lifetime)`` for live members carrying a retirement policy."""
         return await self.db.member.list_retirable_members(self.team_name)
 
+    async def list_retired_members(self) -> set[str]:
+        """Names of members that left the team for good (``SHUTDOWN``).
+
+        No startup path brings a ``SHUTDOWN`` member back, so work still
+        assigned to one has nobody to run it until the leader reassigns it.
+        """
+        return await self.db.member.list_shutdown_members(self.team_name)
+
     async def delete_unstarted_member(self, member_name: str) -> bool:
         """Roll back an inline member that never left UNSTARTED (F_118).
 
@@ -2577,6 +2717,8 @@ class TeamBackend:
         deleted = await self.db.member.delete_unstarted_member(member_name, self.team_name)
         if not deleted:
             return False
+        # An external-CLI member also left its CLI kind mapping behind.
+        self._external_cli_specs.pop(member_name, None)
         if self._spec_evolution_enabled and self.workspace_cache is not None:
             from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
 
@@ -3049,11 +3191,14 @@ class TeamBackend:
         display_name: str,
         cli_agent: str,
         desc: str = "",
-        prompt: str,
+        prompt: str = "",
         model_name: Optional[str] = None,
         allocation: Optional["Allocation"] = None,
         fallback_allocation: Optional["Allocation"] = None,
         builtin_model: Optional["MemberBuiltinModel"] = None,
+        member_config: Optional[ExternalCliAgentSpec] = None,
+        agent_template: Optional["MemberAgentTemplate"] = None,
+        lifetime: str | None = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -3071,8 +3216,9 @@ class TeamBackend:
                 ``agent_teams/external/cli_agent/adapters.py``.
             desc: Public description stored on the member row (roster view).
                 Optional; defaults to empty.
-            prompt: Private system prompt the CLI adopts to act as this
-                member. Required.
+            prompt: Private working agreement of this member, delivered like
+                a native teammate's. Optional; without it the member works
+                from the team policy alone.
             model_name: Optional model-name hint; passed to the pool allocator
                 to select a matching model endpoint.
             allocation: Optional pool allocation for this member; persisted as a
@@ -3083,6 +3229,16 @@ class TeamBackend:
             builtin_model: Built-in CLI model (and effort) resolved through
                 ``resolve_builtin_model``; mutually exclusive with
                 ``allocation`` because it runs on the CLI's own login.
+            member_config: Launch config this member actually runs with (an
+                expert template's config merged over the declared kind
+                config). The capability ceiling is unchanged — ``cli_agent``
+                must still be declared; ``None`` uses the declared config.
+            agent_template: Expert template reference persisted with the
+                member; ``member_config`` is stored in it so the member is
+                rebuilt with the same config on restart and cold recovery.
+            lifetime: Retirement policy of a task-scoped member declared
+                inline by scheduled ``create_task`` (F_118); ``None`` keeps
+                the member resident.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown, its
@@ -3095,8 +3251,6 @@ class TeamBackend:
             missing_sdk_requirement,
         )
 
-        if not prompt:
-            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
         # Capability ceiling: the CLI kind must be pre-declared in
         # ``TeamAgentSpec.external_cli_agents`` (all launch knowledge is
         # static there; the spawn call only names the kind).
@@ -3141,6 +3295,8 @@ class TeamBackend:
             allocation=allocation,
             fallback_allocation=fallback_allocation,
             builtin_model=builtin_model,
+            lifetime=lifetime,
+            agent_template=_with_member_config(agent_template, member_config),
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

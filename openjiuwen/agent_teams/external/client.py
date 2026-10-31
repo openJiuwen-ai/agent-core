@@ -26,7 +26,7 @@ from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.format import render_messages, render_task_board
 from openjiuwen.agent_teams.i18n import set_language
 from openjiuwen.agent_teams.inbound_render import render_clock
-from openjiuwen.agent_teams.message_template import expand_message, task_links
+from openjiuwen.agent_teams.message_template import expand_message, revision_getters, task_links
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
@@ -224,6 +224,8 @@ class ExternalTeamClient:
             is_leader=self.is_leader,
             db=db,
             messager=self._messager,
+            enable_member_messaging=self._descriptor.enable_member_messaging,
+            max_subtask_depth=self._descriptor.max_subtask_depth,
         )
         from types import SimpleNamespace
 
@@ -455,7 +457,7 @@ class ExternalTeamClient:
         now_ms = get_current_time()
         parts: list[str] = []
         if view.messages:
-            bodies = await self._expand_template_bodies(view.messages)
+            bodies = await self._expand_template_bodies(view.messages, observe=mark_read)
             # The messages carry absolute send times only; the clock anchor
             # in front lets the reader tell how long ago each was sent.
             parts.append(render_clock(now=format_absolute_time(now_ms)))
@@ -476,13 +478,19 @@ class ExternalTeamClient:
             parts.append(board)
         return "\n\n".join(parts) if parts else "(inbox empty)"
 
-    async def _expand_template_bodies(self, messages: list[TeamMessageBase]) -> dict[str, str]:
+    async def _expand_template_bodies(self, messages: list[TeamMessageBase], *, observe: bool) -> dict[str, str]:
         """Render the framework template messages in a batch (F_63).
 
         An external member reaches the same shared DB as an in-process one, so
         it renders the same document from the same template against the same
         task rows — the pull path must not degrade to a blank body just because
         the framework stores the message as a template plus refs.
+
+        Args:
+            messages: The pulled messages.
+            observe: Whether this pull consumes the messages. Only a consuming
+                read records a shown task revision as seen (F_129); a peek
+                leaves the revision unseen, like it leaves the message unread.
         """
         db = self._require_db()
 
@@ -495,6 +503,7 @@ class ExternalTeamClient:
         async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
             return await task_links(db, task_id)
 
+        snapshot_getter, subtasks_getter = revision_getters(db, self.team_name)
         bodies: dict[str, str] = {}
         for msg in messages:
             expanded = await expand_message(
@@ -503,9 +512,15 @@ class ExternalTeamClient:
                 member_getter=_get_member,
                 language=self._descriptor.language or "cn",
                 task_links_getter=_get_links,
+                revision_snapshot_getter=snapshot_getter,
+                subtasks_getter=subtasks_getter,
             )
             if expanded.is_template:
                 bodies[msg.message_id] = expanded.body
+            # The pulled inbox is what the member reads; a handoff that showed
+            # its task's content counts as seen (F_129).
+            if observe and expanded.shown_revision is not None and self._tasks is not None:
+                await self._tasks.observe_revision(*expanded.shown_revision)
         return bodies
 
     @_bind_client_session

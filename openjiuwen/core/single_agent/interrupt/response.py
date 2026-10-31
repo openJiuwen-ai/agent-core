@@ -24,6 +24,7 @@ class InterruptKind:
     ASK_USER = "ask_user"
     SKILL_EVOLUTION_APPROVAL = "skill_evolution_approval"
     TEAM_TOOL_APPROVAL = "team_tool_approval"
+    CLIENT_TOOL = "client_tool"
 
 
 def new_interrupt_id() -> str:
@@ -64,6 +65,28 @@ def interrupt_kind_of(request: InterruptRequest) -> str:
     kind only in ``metadata["interrupt_kind"]``.
     """
     return request.interrupt_kind or request.metadata.get("interrupt_kind", "")
+
+
+# Owner key of the interrupts the ability manager raises for client tools.
+CLIENT_TOOL_INTERRUPT_OWNER = "openjiuwen.client_tool"
+
+
+class ClientToolRequest(InterruptRequest):
+    """Interrupt request asking the connected client to run a client tool call.
+
+    Raised by the ability manager for a ``ToolCard(execution="client")`` call
+    once every ``before_tool_call`` rail let it through. ``arguments`` are the
+    final arguments (after any rail rewrote them) and are the arguments the
+    answer is completed with; ``client_request`` is what
+    ``ClientTool.build_request`` returned. Answer it with a ``ClientToolResult``
+    (or a string / dict in that shape).
+    """
+
+    interrupt_kind: str = InterruptKind.CLIENT_TOOL
+    interrupt_owner: str = CLIENT_TOOL_INTERRUPT_OWNER
+    tool_name: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    client_request: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallInterruptRequest(InterruptRequest):

@@ -48,12 +48,17 @@ def _tracker(completed: list) -> tuple[TaskOutcomeTracker, _TaskManager]:
     return TaskOutcomeTracker(team_backend=backend, member_name="dev-1"), manager
 
 
+async def _text(tracker: TaskOutcomeTracker, session: "_Session | None" = None) -> str | None:
+    notice = await tracker.claim(session if session is not None else _Session())
+    return notice.text if notice is not None else None
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_only_reviewed_completions_are_announced():
     tracker, manager = _tracker([_task("a", reviewers=("v1",)), _task("b", reviewers=())])
 
-    text = await tracker.pending_text(_Session())
+    text = await _text(tracker)
 
     assert text is not None
     assert '<team-event kind="task-verified">' in text
@@ -64,27 +69,46 @@ async def test_only_reviewed_completions_are_announced():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_commit_records_the_announcement_once():
+async def test_a_claim_is_announced_once_and_persisted():
     tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
     session = _Session()
 
-    assert await tracker.pending_text(session)
-    await tracker.commit(session)
+    assert await _text(tracker, session)
+    assert await _text(tracker, session) is None
+    await tracker.persist(session)
+    await tracker.persist(session)
 
     assert session.state[TASK_OUTCOME_STATE_KEY] == ["a"]
     assert session.commits == 1
-    assert await tracker.pending_text(session) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_uncommitted_announcement_is_offered_again():
-    """Delivery failed (no commit): the next input carries the notice again."""
+async def test_a_released_claim_is_offered_again():
+    """Delivery failed: the claim is given back and the next input carries the notice."""
     tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
     session = _Session()
 
-    assert await tracker.pending_text(session)
-    assert await tracker.pending_text(session)
+    notice = await tracker.claim(session)
+    tracker.release(notice)
+
+    assert await _text(tracker, session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_a_passed_review_never_goes_out_on_its_own():
+    """F_119: a passed review must not wake its author, so announce sends and claims nothing."""
+    tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
+    session = _Session()
+    sent: list[str] = []
+
+    async def _send(text: str) -> None:
+        sent.append(text)
+
+    assert await tracker.announce(session, _send) is False
+    assert sent == []
+    assert await _text(tracker, session)
 
 
 @pytest.mark.asyncio
@@ -93,12 +117,12 @@ async def test_later_passes_are_announced_without_repeating_earlier_ones():
     completed = [_task("a", reviewers=("v1",))]
     tracker, _manager = _tracker(completed)
     session = _Session()
-    await tracker.pending_text(session)
-    await tracker.commit(session)
+    await tracker.claim(session)
+    await tracker.persist(session)
 
     completed.append(_task("b", reviewers=("v1",)))
-    text = await tracker.pending_text(session)
-    await tracker.commit(session)
+    text = await _text(tracker, session)
+    await tracker.persist(session)
 
     assert "- b · title-b" in text
     assert "title-a" not in text
@@ -107,12 +131,26 @@ async def test_later_passes_are_announced_without_repeating_earlier_ones():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_commit_without_pending_text_is_a_no_op():
+async def test_a_checkpointed_baseline_is_honoured_after_a_restart():
+    session = _Session()
+    session.state[TASK_OUTCOME_STATE_KEY] = ["a"]
+    tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
+
+    assert await _text(tracker, session) is None
+    await tracker.persist(session)
+
+    assert session.commits == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_persist_without_claims_is_a_no_op():
     tracker, _manager = _tracker([])
     session = _Session()
 
-    assert await tracker.pending_text(session) is None
-    await tracker.commit(session)
+    assert await _text(tracker, session) is None
+    await tracker.persist(session)
+    await tracker.persist(None)
 
     assert session.commits == 0
     assert TASK_OUTCOME_STATE_KEY not in session.state
@@ -120,23 +158,22 @@ async def test_commit_without_pending_text_is_a_no_op():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_disabled_without_backend_session_or_member():
-    assert await TaskOutcomeTracker(team_backend=None, member_name="dev-1").pending_text(_Session()) is None
+async def test_disabled_without_session_backend_or_member():
     tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
-    assert await tracker.pending_text(None) is None
+    assert await tracker.claim(None) is None
+    assert await _text(TaskOutcomeTracker(team_backend=None, member_name="dev-1")) is None
     backend = SimpleNamespace(task_manager=_TaskManager([_task("a", reviewers=("v1",))]))
-    assert await TaskOutcomeTracker(team_backend=backend, member_name=None).pending_text(_Session()) is None
+    assert await _text(TaskOutcomeTracker(team_backend=backend, member_name=None)) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_notice_follows_the_runtime_language():
-    tracker, _manager = _tracker([_task("a", reviewers=("v1",))])
     previous = get_language()
     try:
         set_language("cn")
-        assert "已通过验收" in await tracker.pending_text(_Session())
+        assert "已通过验收" in await _text(_tracker([_task("a", reviewers=("v1",))])[0])
         set_language("en")
-        assert "passed review" in await tracker.pending_text(_Session())
+        assert "passed review" in await _text(_tracker([_task("a", reviewers=("v1",))])[0])
     finally:
         set_language(previous)

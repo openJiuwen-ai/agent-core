@@ -10,6 +10,7 @@ import contextlib
 from typing import (
     TYPE_CHECKING,
     Any,
+    Awaitable,
     Callable,
     Optional,
 )
@@ -17,11 +18,13 @@ from typing import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliAgentSpec,
     ExternalCliModelConfig,
     TeamRole,
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_agent_template,
     get_member_builtin_model,
     get_member_fallback_model_ref,
     get_member_model_ref,
@@ -38,6 +41,17 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
     from openjiuwen.core.session.stream.base import OutputSchema
+
+
+def _template_fields(record: object) -> tuple[dict | None, ExternalCliAgentSpec | None]:
+    """Capability snapshot / external CLI config of a member spawned from an expert template."""
+    template = get_member_agent_template(record)
+    if template is None:
+        return None, None
+    external_cli = None
+    if template.external_cli:
+        external_cli = ExternalCliAgentSpec.model_validate(template.external_cli)
+    return template.snapshot, external_cli
 
 
 class SpawnManager:
@@ -270,7 +284,18 @@ class SpawnManager:
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
 
-    async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
+    async def restart_teammate(
+        self,
+        member_name: str,
+        max_retries: int = 3,
+        *,
+        on_failed: Callable[[Exception], Awaitable[None]] | None = None,
+    ) -> bool:
+        """Re-spawn a teammate, retrying spawn failures.
+
+        ``on_failed`` receives the last spawn error once every attempt has
+        failed; the error itself is still swallowed and ``False`` returned.
+        """
         await self.cleanup_teammate(member_name)
 
         # After cleanup, the previous execution context is gone. Reset
@@ -304,6 +329,7 @@ class SpawnManager:
         initial_message = None
         spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
 
+        last_error: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
@@ -318,6 +344,7 @@ class SpawnManager:
                 team_logger.info("Teammate {} restarted successfully", member_name)
                 return True
             except Exception as e:
+                last_error = e
                 team_logger.error("Restart attempt {} for {} failed: {}", attempt, member_name, e)
                 if attempt < max_retries:
                     await asyncio.sleep(2**attempt)
@@ -326,6 +353,8 @@ class SpawnManager:
             team_name = self._configurator.team_name
             if team_name:
                 await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
+        if on_failed is not None and last_error is not None:
+            await on_failed(last_error)
         return False
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:
@@ -504,6 +533,7 @@ class SpawnManager:
                 fallback_member_model = candidates[0].to_team_model_config()
 
         permissions_override = get_member_permissions_override(teammate)
+        agent_template_spec, template_external_cli = _template_fields(teammate)
         builtin = get_member_builtin_model(teammate)
         builtin_model = (
             ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
@@ -535,6 +565,8 @@ class SpawnManager:
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,
+            agent_template_spec=agent_template_spec,
+            template_external_cli=template_external_cli,
         )
 
     async def publish_restart_event(self, member_name: str, restart_count: int) -> None:

@@ -27,6 +27,7 @@ from openjiuwen.core.session import SubWorkflowSession
 from openjiuwen.core.session import RouterSession
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.session.constants import SINGLE_COMPONENT_EXECUTION_KEY
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec, ExceptionConfig
@@ -68,6 +69,9 @@ async def execute_single_component(
         parent=None,
         session_id=session.get_session_id()
     )
+    # 单组件直调不经过 Pregel 图引擎,中断状态只存 io 侧、无图侧快照;
+    # 标记供 InteractiveInput 恢复校验(checkpointer)跳过图侧快照检查。
+    workflow_session.config().set_envs({SINGLE_COMPONENT_EXECUTION_KEY: True})
     await workflow_session.checkpointer().pre_workflow_execute(workflow_session, inputs)
     # 2. Create NodeSession
     node_session = NodeSession(workflow_session, component_id, type(executor).__name__)

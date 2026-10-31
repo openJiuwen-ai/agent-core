@@ -38,9 +38,9 @@ def _git(cwd: str, *args: str) -> None:
 def _init_git_repo(repo_path: str) -> None:
     """Initialize a minimal git repo with one commit and an origin/main ref.
 
-    ``GitBackend._resolve_base`` looks up ``origin/<default-branch>`` to pick
-    the base for the new worktree branch, so we need to populate that ref
-    locally even though there is no real remote.
+    ``GitBackend._resolve_base`` bases new worktrees on the checked-out local
+    branch; the ``origin/main`` ref only serves remote-first resolution
+    (``GitBackend(remote_base=True)``), which reads it without a real remote.
     """
     os.makedirs(repo_path, exist_ok=True)
     _git(repo_path, "init", "--quiet")

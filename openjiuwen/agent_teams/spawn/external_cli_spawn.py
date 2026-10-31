@@ -99,13 +99,22 @@ def _external_cli_config_for_member(
     spec: "TeamAgentSpec",
     member_name: str | None,
     cli_agent: str | None,
+    template_config: "ExternalCliAgentSpec | None" = None,
 ) -> "ExternalCliAgentSpec | None":
-    """Prefer a predefined member's config, then the dynamic kind config."""
+    """Pick the launch config of one external CLI member.
+
+    In order: a predefined member's own config; the config persisted on the
+    member row by ``spawn_expert`` (``template_config``, read back into
+    ``TeamRuntimeContext.template_external_cli``); the team's declared config
+    for the CLI kind.
+    """
     from openjiuwen.agent_teams.schema.team import ExternalCliMemberSpec
 
     for member in spec.predefined_members:
         if isinstance(member, ExternalCliMemberSpec) and member.member_name == member_name:
             return member.external_cli
+    if template_config is not None:
+        return template_config
     return next(
         (entry for entry in spec.external_cli_agents if entry.cli_agent == cli_agent),
         None,
@@ -166,6 +175,8 @@ async def _build_member_system_prompt(
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
         dispatch_mode=spec.dispatch_mode,
+        member_messaging=spec.enable_member_messaging,
+        member_subtasks=spec.max_subtask_depth > 0,
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
@@ -446,7 +457,7 @@ async def external_cli_spawn(
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent)
+    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent, ctx.template_external_cli)
 
     # When the pool allocator assigned a model to this member, convert it to
     # an ExternalCliModelConfig, filtering by provider compatibility: Claude
@@ -597,12 +608,11 @@ async def external_cli_spawn(
             team_name,
         ),
     )
-    if spec.dispatch_mode == "scheduled" and teammate_backend is not None:
-        from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+    from openjiuwen.agent_teams.team_context import build_task_event_tracker
 
-        runtime.bind_task_outcome_tracker(
-            TaskOutcomeTracker(team_backend=teammate_backend, member_name=member_name),
-        )
+    runtime.bind_task_outcome_tracker(
+        build_task_event_tracker(spec.dispatch_mode, team_backend=teammate_backend, member_name=member_name),
+    )
     from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
     if isinstance(runtime, ExternalHarnessMemberRuntime):

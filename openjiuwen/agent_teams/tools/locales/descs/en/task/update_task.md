@@ -4,7 +4,7 @@ Update task content, dependencies, assignee, or cancel tasks (Leader only).
 
 **Update task content:**
 - Adjust task scope or add details based on member feedback
-- Pass title and/or content to update. If the task is being executed by a member, ownership is unchanged; the system tells that member to re-read the latest content via view_task and continue (the assignee is no longer cancelled or reset)
+- Pass title and/or content to update; every edit bumps the task's revision. If the task has an executor, ownership is unchanged and the executor is guaranteed to learn of the edit (even if it is down at the time), and must have seen the latest revision before it can submit. Pass a `change_note` — one or two sentences on what changed and why — to hand the executor that explanation with the edit. The result reports the new revision; a task's unfinished subtasks become stale and are reviewed by the parent's owner
 
 **Assign / reassign a task:**
 - Set assignee to a member name to assign the task

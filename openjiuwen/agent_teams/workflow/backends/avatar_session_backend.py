@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
@@ -216,7 +216,7 @@ class AvatarSessionManager:
         skill_visibility_fn: Callable[[Any, str], Any] | None = None,
         external_cli_agents: Sequence[Any] = (),
         gate_agent_type: Callable[[str], Any] | None = None,
-        gate_agent_template: Callable[[dict], Any] | None = None,
+        gate_agent_template: Callable[[dict], Awaitable[Any]] | None = None,
         external_cwd: Callable[[str, Any], str | None] | None = None,
         team_backend: Any = None,
         progress_sink: Any = None,
@@ -321,7 +321,7 @@ class AvatarSessionManager:
         gate = self._gate_agent_template
         if kind != "human" and opts.get("agent_template") and gate is None:
             raise BackendError("this backend has no expert gate; agent_template is unavailable")
-        expert = gate(opts) if (kind != "human" and gate is not None) else None
+        expert = await gate(opts) if (kind != "human" and gate is not None) else None
         if kind == "human":
             base = self._human_base_spec
         elif expert is not None:

@@ -84,6 +84,7 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
@@ -111,6 +112,26 @@ class TeamRuntimeManager:
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
         self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
+
+    @staticmethod
+    def set_expert_catalog(catalog: "ExpertCatalog | None") -> None:
+        """Inject the host's expert locating protocol (``None`` removes it).
+
+        Leaders assembled afterwards get ``view_experts`` /
+        ``view_expert_groups`` / ``spawn_expert``; without a catalog the three
+        tools are not registered. The catalog is process-scoped (see
+        ``openjiuwen.agent_teams.experts.catalog``).
+        """
+        from openjiuwen.agent_teams.experts.catalog import set_process_expert_catalog
+
+        set_process_expert_catalog(catalog)
+
+    @staticmethod
+    def expert_catalog() -> "ExpertCatalog | None":
+        """The injected expert catalog, or ``None``."""
+        from openjiuwen.agent_teams.experts.catalog import get_process_expert_catalog
+
+        return get_process_expert_catalog()
 
     @property
     def pool(self) -> TeamRuntimePool:

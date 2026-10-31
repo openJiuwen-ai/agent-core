@@ -320,3 +320,52 @@ async def test_broadcast_leaves_dormant_members_asleep(db):
     assert result.success, result.error
     on_restarted.assert_not_awaited()
     assert (await db.member.get_member("sleepy", TEAM_NAME)).status == MemberStatus.DORMANT.value
+
+
+async def _idle_task_scoped_member(db: TeamDatabase, member_name: str) -> TeamBackend:
+    """A leader backend over the team plus an UNSTARTED task-scoped member with no open task."""
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        on_member_started=on_created,
+    )
+    result = await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        lifetime="shutdown",
+    )
+    assert result.ok
+    return backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_direct_message_starts_idle_task_scoped_recipient(db):
+    """The roster-wide start skips an idle task-scoped member; naming it in a message still starts it."""
+    backend = await _idle_task_scoped_member(db, "tmp-1")
+    send = _send_tool(create_team_tools(role="leader", agent_team=backend, lang="cn"))
+
+    result = await send.invoke({"to": "tmp-1", "content": "please check"})
+
+    assert result.success
+    started = [call.args[0] for call in backend._on_member_started.await_args_list]
+    assert "tmp-1" in started
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_starts_idle_task_scoped_member(db):
+    """A broadcast addresses every member, the idle task-scoped one included."""
+    backend = await _idle_task_scoped_member(db, "tmp-1")
+    send = _send_tool(create_team_tools(role="leader", agent_team=backend, lang="cn"))
+
+    result = await send.invoke({"to": "*", "content": "status, everyone"})
+
+    assert result.success
+    started = [call.args[0] for call in backend._on_member_started.await_args_list]
+    assert "tmp-1" in started

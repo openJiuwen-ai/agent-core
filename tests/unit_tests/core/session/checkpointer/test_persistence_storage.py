@@ -6,10 +6,17 @@ from unittest.mock import Mock
 import pytest
 
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore, BasedKVStorePipeline
-from openjiuwen.core.session.checkpointer.persistence import AgentTeamStorage, AgentStorage
+from openjiuwen.core.graph.store import create_state
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session.checkpointer.persistence import (
+    AgentTeamStorage,
+    AgentStorage,
+    PersistenceCheckpointer,
+)
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.internal.agent_team import AgentTeamSession
+from openjiuwen.core.session.internal.workflow import WorkflowSession
 from openjiuwen.core.session.state.agent_state import StateCollection
 
 
@@ -127,3 +134,62 @@ async def test_persistence_storage_recover_nonexistent_is_noop():
     await storage.recover(session)
 
     assert session.state().get_state() == {"global_state": {}, "agent_state": {}}
+
+
+@pytest.mark.asyncio
+async def test_pre_workflow_interactive_resume_without_checkpoint_raises():
+    """修复6：InteractiveInput 恢复但无任何 checkpoint → 显式抛错。
+
+    此前 recover() 静默返回，图从 start 节点全新起跑并在首个节点以
+    难以定位的校验错误崩溃（如 Message content=None）。
+    """
+    kv_store = MockKVStore()
+    checkpointer = PersistenceCheckpointer(kv_store)
+    parent = AgentSession(session_id="session-resume", config=Config())
+    session = WorkflowSession(
+        workflow_id="wf-1", parent=parent, session_id="session-resume"
+    )
+
+    with pytest.raises(Exception, match="no workflow checkpoint"):
+        await checkpointer.pre_workflow_execute(session, InteractiveInput())
+
+
+@pytest.mark.asyncio
+async def test_pre_workflow_interactive_resume_with_unresumable_graph_raises():
+    """修复6：workflow state 存在但 graph checkpoint 缺失/空 → 显式抛错。"""
+    kv_store = MockKVStore()
+    checkpointer = PersistenceCheckpointer(kv_store)
+    parent = AgentSession(session_id="session-resume2", config=Config())
+    session = WorkflowSession(
+        workflow_id="wf-2", parent=parent, session_id="session-resume2"
+    )
+    session.state().update({"k": "v"})
+    await checkpointer._workflow_storage.save(session)
+
+    with pytest.raises(Exception, match="graph checkpoint"):
+        await checkpointer.pre_workflow_execute(session, InteractiveInput())
+
+
+@pytest.mark.asyncio
+async def test_pre_workflow_interactive_resume_with_resumable_graph_recovers():
+    """正例：io 侧与图侧快照齐备且图可续跑 → recover 正常执行不抛错。"""
+    kv_store = MockKVStore()
+    checkpointer = PersistenceCheckpointer(kv_store)
+    parent = AgentSession(session_id="session-resume3", config=Config())
+    session = WorkflowSession(
+        workflow_id="wf-3", parent=parent, session_id="session-resume3"
+    )
+    session.state().update({"k": "v"})
+    # update 仅暂存到 _updates，save 读取的是已提交的 _state，
+    # 必须先 commit 才会随快照落盘。
+    session.state().commit()
+    await checkpointer._workflow_storage.save(session)
+    await checkpointer._graph_state.save(
+        "session-resume3",
+        "wf-3",
+        create_state("wf-3", 3, {"chan": "value"}),
+    )
+
+    await checkpointer.pre_workflow_execute(session, InteractiveInput())
+
+    assert session.state().get("k") == "v"

@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_
 from openjiuwen.agent_teams.i18n import STRINGS
 from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.workflow.backends.expert_specs import bound_group_expert_loader
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
@@ -758,6 +759,9 @@ class SwarmflowTool(AsyncTool):
                 ),
                 expert_specs=get_swarmflow_expert_specs(
                     getattr(self._parent_agent, "build_context", None)
+                ),
+                expert_loader=bound_group_expert_loader(
+                    getattr(self._parent_agent, "build_context", None), self._worker_base_spec
                 ),
                 team_backend=self._team_backend,
             )

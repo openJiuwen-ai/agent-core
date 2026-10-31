@@ -467,7 +467,7 @@ class ExternalCliAgentSpec(BaseModel):
     builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
     """Models the CLI offers on its own login that the leader may pick.
 
-    Non-empty enables ``spawn_external_cli(builtin_model=..., effort=...)`` and
+    Non-empty enables ``spawn_teammate``'s ``external_cli.builtin_model`` / ``effort`` and
     the ``set_member_model`` tool for members of this kind; empty keeps the
     member on ``model_config`` / the pool / the CLI default. Valid for Claude,
     Codex and third-party harness providers (whose card must declare
@@ -563,6 +563,18 @@ class TeamSpec(BaseModel):
     Carried on the runtime spec so paths that only see a
     ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
     tool set and prompt as in-process members.
+    """
+    enable_member_messaging: bool = False
+    """Scheduled peer messaging — mirrors ``TeamAgentSpec.enable_member_messaging``.
+
+    Carried for the same reason as ``dispatch_mode``: an external CLI member's
+    ``send_message`` variant has to match the prompt it was spawned with.
+    """
+    max_subtask_depth: int = 0
+    """Member subtask ceiling — mirrors ``TeamAgentSpec.max_subtask_depth`` (F_128).
+
+    Carried for the same reason as ``enable_member_messaging``: an external CLI
+    member's tool set has to match the prompt it was spawned with.
     """
     teammate_mode: str = "build_mode"
     """How teammates execute tasks — mirrors ``TeamAgentSpec.teammate_mode``.
@@ -700,6 +712,21 @@ class TeamRuntimeContext(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template_spec: Optional[dict[str, Any]] = None
+    """Capability snapshot of a member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.snapshot`` by
+    ``build_context_from_db``. When the member has no ``agents[<member>]``
+    spec of its own, ``AgentConfigurator.resolve_agent_spec`` applies it to
+    the ``teammate`` base spec (``apply_template_snapshot``).
+    """
+    template_external_cli: Optional[ExternalCliAgentSpec] = None
+    """Launch config of an external-CLI member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.external_cli``; the
+    external CLI spawn path prefers it over the team's declared config for
+    the same CLI kind.
+    """
 
 
 __all__ = [

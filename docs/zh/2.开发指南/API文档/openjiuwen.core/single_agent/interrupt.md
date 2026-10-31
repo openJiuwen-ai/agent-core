@@ -18,15 +18,25 @@
 
 ## class InterruptKind
 
-中断类型常量（普通字符串，第三方 Rail 可自定义取值）：`PERMISSION="permission"`、`CONFIRM="confirm"`、`ASK_USER="ask_user"`、`SKILL_EVOLUTION_APPROVAL="skill_evolution_approval"`、`TEAM_TOOL_APPROVAL="team_tool_approval"`、`UNDECLARED=""`。
+中断类型常量（普通字符串，第三方 Rail 可自定义取值）：`PERMISSION="permission"`、`CONFIRM="confirm"`、`ASK_USER="ask_user"`、`SKILL_EVOLUTION_APPROVAL="skill_evolution_approval"`、`TEAM_TOOL_APPROVAL="team_tool_approval"`、`CLIENT_TOOL="client_tool"`、`UNDECLARED=""`。
 
 `APPROVAL_INTERRUPT_KINDS` 为按“批准/拒绝”答复的类型集合，`is_approval_kind(kind)` 判断某类型是否属于该集合。集合包含 `UNDECLARED`：未声明类型的中断可以按类型出现之前所有中断的方式，以 `approved` 形状答复。各宿主对未声明类型保持各自原来的处理：CLI 询问 allow / always / reject，native harness 把宿主的答复原样交回。
 
 `interrupt_kind_of(request)` 返回请求的类型。升级前持久化的技能进化审批只在 `metadata["interrupt_kind"]` 中带类型，也能读出。
 
+## class ClientToolRequest
+
+客户端执行工具（`ToolCard(execution="client")`）暂停时的中断请求，继承自[InterruptRequest](#class-interruptrequest)，`interrupt_kind` 固定为 `client_tool`。
+
+* **tool_name**(str)：工具名称。
+* **arguments**(dict)：各 Rail 改写后的最终参数。
+* **client_request**(dict)：`ClientTool.build_request` 生成的客户端请求。
+
+以 `ClientToolResult`（见 openjiuwen.core.foundation.tool 文档“客户端执行的工具”）、同形 dict 或字符串回答，结果作为该工具调用的正常输出。
+
 ## 回答中断
 
-`result["state"]` 中每项的 `payload` 为 `InteractionOutput(id, value)`。Agent 中断时 `value` 为 `ToolCallInterruptRequest`，按 `interrupt_id` 回答。工作流 `session.interact` 的交互值不是 `InterruptRequest`，没有 `interrupt_id` 和类型，用 `update(payload.id, 回答)` 回答。
+`result["state"]` 中每项的 `payload` 为 `InteractionOutput(id, value)`。Agent 中断时 `value` 为 `ToolCallInterruptRequest`，按 `interrupt_id` 回答；客户端工具的中断也是 `ToolCallInterruptRequest`，类型为 `client_tool`，带 `ClientToolRequest` 的 `arguments` 与 `client_request` 字段。工作流 `session.interact` 的交互值不是 `InterruptRequest`，没有 `interrupt_id` 和类型，用 `update(payload.id, 回答)` 回答。
 
 ```python
 from openjiuwen.core.session import InteractiveInput
@@ -44,7 +54,9 @@ for item in result["state"]:
         answers.update(item.payload.id, "用户的回答")
         continue
     kind = interrupt_kind_of(request)
-    if is_approval_kind(kind):             # 含未声明类型（CLI 的做法）
+    if kind == "client_tool":              # 客户端执行后的结果
+        answers.answer(request.interrupt_id, {"content": "done"})
+    elif is_approval_kind(kind):             # 含未声明类型（CLI 的做法）
         answers.answer(request.interrupt_id, interrupt_answer(kind, approved=True))
     else:                                   # ask_user 等：用户的回答
         answers.answer(request.interrupt_id, "蓝色")
@@ -57,6 +69,7 @@ for item in result["state"]:
 | `permission`、`confirm`、`team_tool_approval`、未声明（`""`） | `{"approved": bool, "feedback": str, "auto_confirm": bool}`，见下文 `auto_confirm` 说明 |
 | `skill_evolution_approval` | `{"action": "allow_once" \| "allow_always" \| "reject", "feedback": str}` |
 | `ask_user` | `{"answers": {问题: 答案}}`，或答案文本 |
+| `client_tool` | `ClientToolResult`（或其 dict 形状：`status`、`content`、`is_error`、`data`），或结果文本 |
 
 `auto_confirm=True` 表示批准并记住，此后同样的调用不再询问。对 `permission` 中断，`persist_allow` 决定记住多久：`"persist_allow": False` 只在本会话内记住；不带该字段时永久记住，写入权限规则（兼容旧宿主）。其他类型只在本会话内记住。
 
@@ -71,7 +84,7 @@ for item in result["state"]:
 
 非审批类型只接受 `text`，原样返回。对非审批类型传 `approved`，或 `approved` 和 `text` 都不传，抛 `ValueError`。
 
-* `InteractiveInput.answer(interrupt_id, value)`：回答指定中断，只有发起该中断的 Rail 收到答复。`interrupt_id` 为空时报错。
+* `InteractiveInput.answer(interrupt_id, value)`：回答指定中断，只有发起该中断的 Rail（或客户端工具）收到答复。`interrupt_id` 为空时报错。
 * `InteractiveInput.update(tool_call_id, value)`：兼容旧方式。Agent 恢复时把它换算成对该工具调用当前等待的中断的答复（只换算这一次，此后 Agent 内部只按 `interrupt_id` 认答复）。
 * `pending_interrupts(state)`：列出会话中 `ToolInterruptionState` 里暂停的中断，每项为 `PendingInterrupt(interrupt_id, tool_call_id, kind)`（含子 Agent 内的中断）。
 * `match_answers(user_input, pending)`：按 Agent 恢复时的同一规则换算一次恢复输入，返回 `MatchedAnswers(answers, unmatched)`：`answers` 为 `{interrupt_id: 答复}`（按 interrupt_id 或 tool_call_id 回答都计入），`unmatched` 为不对应任何暂停中断的键（过期答复）。

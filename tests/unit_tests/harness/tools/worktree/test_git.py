@@ -11,11 +11,38 @@ from openjiuwen.harness.tools.worktree.git import (
     count_commits_since,
     find_git_root,
     get_current_branch,
+    get_default_branch,
     read_worktree_head_sha,
     rev_parse,
     status_porcelain,
 )
 from tests.test_logger import logger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "symbolic,current,available,expected",
+    [
+        ("origin/release", "experiment", {"release"}, "release"),
+        ("origin/main", "experiment", {"develop"}, "develop"),
+        (None, "feature", {"feature", "main"}, "main"),
+        (None, "release", {"release"}, "release"),
+        (None, "experiment", set(), "main"),
+    ],
+)
+async def test_default_branch_validates_remote_refs(monkeypatch, symbolic, current, available, expected):
+    """Missing or dangling origin/HEAD must not hide a develop-only clone."""
+    async def run_git(args, *, cwd=None, check=False):
+        if args[0] == "symbolic-ref":
+            return GitResult(0 if symbolic else 1, symbolic or "", "")
+        if args[:2] == ["rev-parse", "--abbrev-ref"]:
+            return GitResult(0, current, "")
+        ref = args[-1].removesuffix("^{commit}")
+        name = ref.removeprefix("refs/remotes/origin/").removeprefix("origin/")
+        return GitResult(0, "a" * 40, "") if name in available else GitResult(128, "", "bad ref")
+
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.git._run_git", run_git)
+    assert await get_default_branch("repo") == expected
 
 
 class TestGitError:

@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_workflow_section,
     load_template,
 )
+from openjiuwen.agent_teams.experts.bound_group import BoundAgentGroup
 from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -517,6 +518,14 @@ class _FakeTeamBackend:
         """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
 
+    def member_messaging_enabled(self) -> bool:
+        """The rail probes this at init to gate the scheduled messaging rule (F_126)."""
+        return False
+
+    def member_subtasks_enabled(self) -> bool:
+        """The rail probes this at init to gate the scheduled subtask rule (F_128)."""
+        return False
+
     def fork_enabled(self) -> bool:
         """Whether the team's fork capability is on (gates the identity block)."""
         return self._fork_enabled
@@ -604,6 +613,24 @@ class TestTeamPolicyRailStaticSections:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_leader_rail_names_the_bound_group_only_under_scheduled_dispatch(self):
+        rendered: dict[str, str | None] = {}
+        for dispatch_mode in ("scheduled", "autonomous"):
+            builder = SystemPromptBuilder(language="cn")
+            rail = _leader_rail(dispatch_mode=dispatch_mode, bound_group_name="designer")
+            rail.init(_StubAgent(builder))
+            await rail.before_model_call(_StubContext())
+            section = builder.get_all_sections().get(TeamSectionName.BOUND_GROUP)
+            rendered[dispatch_mode] = section.render("cn") if section is not None else None
+
+        assert rendered["autonomous"] is None, "autonomous dispatch keeps the unscoped expert view"
+        text = rendered["scheduled"]
+        assert "`designer`" in text
+        assert 'spawn_expert(expert=<成员名>, group="designer")' in text
+        assert "{{" not in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_teammate_rail_omits_leader_only_sections(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
@@ -624,6 +651,132 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.LIFECYCLE not in sections
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
+
+
+class TestTeamPolicyRailFrameworkBootstrap:
+    """A framework-built team's leader (F_122): prebuilt opening in the prefix,
+    the policy delivered as a ``<team-policy>`` block ahead of the first input."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_prefix_is_prebuilt_opening_plus_extra(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+
+        rail = _leader_rail(dispatch_mode="scheduled", bootstrap_mode="framework", base_prompt="Stay sharp")
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        sections = builder.get_all_sections()
+        assert set(sections) == {TeamSectionName.PREBUILT, TeamSectionName.EXTRA}
+        opening = sections[TeamSectionName.PREBUILT].render("cn")
+        # The team exists: no routing to build_team, and no policy in the prefix.
+        assert "调用 `build_team`" not in opening
+        assert "没有 `build_team` 这一步" in opening
+        assert "任务下发（调度指派模式）" not in builder.build()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_receives_the_policy_ahead_of_its_first_input(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Generic team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+
+        batch = ["research the market"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+        await rail.on_user_message(ctx)
+
+        # Team context, then the policy, then the roster, then the clock — all
+        # ahead of what the user typed.
+        delivered = batch[0]
+        assert "<team-context>" in delivered
+        assert "<team-policy>" in delivered
+        assert delivered.index("<team-context>") < delivered.index("<team-policy>")
+        assert delivered.index("<team-policy>") < delivered.index('<team-event kind="roster">')
+        assert batch[-1] == "research the market"
+        expected = build_leader_policy_disclosure(
+            lifecycle="temporary",
+            dispatch_mode="scheduled",
+            language="cn",
+        )
+        assert expected in delivered
+        assert "任务下发（调度指派模式）" in delivered
+
+        # Delivered once: the next input carries no second copy.
+        second = ["and the competitors"]
+        ctx.inputs = UserMessageInputs(parts=second, source="query")
+        await rail.on_user_message(ctx)
+        assert "<team-policy>" not in "\n".join(second)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_framework_leader_policy_rides_the_attachment_lane(self):
+        """With the production attachment manager the policy is in the registered snapshot."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Generic team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _AttachmentStubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["ship it"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        snapshot = await _sync_attachments(agent, ctx)
+
+        assert batch[-1] == "ship it"
+        assert "<team-policy>" not in "\n".join(batch)
+        assert snapshot is not None
+        assert "<team-policy>" in snapshot.content
+        assert "<team-context>" in snapshot.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_bootstrap_mode_delivers_no_policy_block(self):
+        """The default lane is untouched: policy comes from build_team, not the tracker."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["go"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        await rail.before_model_call(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
+        assert TeamSectionName.BOOTSTRAP in builder.get_all_sections()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_teammate_never_gets_a_policy_block(self):
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="dev1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["hello"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
 
 
 class TestTeamPolicyRailTeamContext:
@@ -1716,11 +1869,15 @@ class TestTeamPolicyRailSteeringQuota:
 class _OutcomeTaskManager:
     """Answers the outcome tracker's board query with fixed completed rows."""
 
-    def __init__(self, completed: list) -> None:
+    def __init__(self, completed: list, edited: list | None = None) -> None:
         self.completed = completed
+        self.edited = edited or []
 
     async def get_tasks_by_assignee(self, member_name: str, status: str | None = None) -> list:
         return list(self.completed)
+
+    async def unseen_edits(self, member_name: str) -> list:
+        return list(self.edited)
 
 
 def _verified_task(task_id: str):
@@ -1734,6 +1891,8 @@ def _teammate_rail(
     *,
     role: TeamRole = TeamRole.TEAMMATE,
 ) -> tuple[TeamPolicyRail, _FakeTeamBackend]:
+    from openjiuwen.agent_teams.team_context import build_task_event_tracker
+
     backend = _FakeTeamBackend(self_member_name="dev1")
     backend.task_manager = _OutcomeTaskManager([_verified_task("done-1")])
     rail = TeamPolicyRail(
@@ -1742,6 +1901,8 @@ def _teammate_rail(
         language="cn",
         dispatch_mode=dispatch_mode,
         team_backend=backend,
+        # What the configurator injects: the member's own tracker.
+        task_event_tracker=build_task_event_tracker(dispatch_mode, team_backend=backend, member_name="dev1"),
     )
     return rail, backend
 
@@ -1797,6 +1958,54 @@ async def test_autonomous_and_leader_rails_carry_no_outcome_notice():
     assert "task-verified" not in leader_msg.content
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_rail_borrows_the_members_tracker_so_an_edit_is_told_once():
+    """F_129: the rail and the edit event share the TeamAgent-owned tracker."""
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.team_context import TASK_REVISION_STATE_KEY, TaskRevisionTracker
+
+    edited = SimpleNamespace(
+        task_id="t1",
+        title="build",
+        revision=1,
+        observed_revision=0,
+        change_notes='[{"revision": 1, "note": "tightened criteria", "by": "leader"}]',
+    )
+    backend = _FakeTeamBackend(self_member_name="dev1")
+    backend.task_manager = _OutcomeTaskManager([], edited=[edited])
+    shared = TaskRevisionTracker(team_backend=backend, member_name="dev1")
+
+    def _rail() -> TeamPolicyRail:
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            language="cn",
+            dispatch_mode="autonomous",
+            team_backend=backend,
+            task_event_tracker=shared,
+        )
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        return rail
+
+    ctx = _StubContext()
+    first = await _admit(_rail(), ctx, "a mail")
+    # A rebuilt rail borrows the same tracker: nothing left to tell.
+    second = await _admit(_rail(), ctx, "another mail")
+
+    assert '<team-event kind="task-revised">' in first.content and "tightened criteria" in first.content
+    assert "task-revised" not in second.content
+    assert ctx.session.get_state(TASK_REVISION_STATE_KEY) == ["t1@1"]
+
+    edited.revision = 2
+    assert (await shared.claim(ctx.session)) is not None  # the edit event's path claims r2 first
+    third = await _admit(_rail(), ctx, "a third mail")
+    assert "task-revised" not in third.content
+    await shared.persist(ctx.session)  # the claiming path persists its own claim
+    assert ctx.session.get_state(TASK_REVISION_STATE_KEY) == ["t1@2"]
+
+
 
 @pytest.mark.asyncio
 @pytest.mark.level0
@@ -1844,3 +2053,79 @@ async def test_clock_anchor_follows_superseded_board_pruning():
     assert old_board not in batch
     assert batch[-1] == new_board
     assert sum(1 for part in batch if _CLOCK_PATTERN.fullmatch(part)) == 1
+
+
+@pytest.mark.level1
+def test_policy_rail_takes_the_bound_group_only_with_the_expert_catalog():
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.rails.elements import _expert_scope_group
+    from openjiuwen.agent_teams.rails.team_context import ExpertBinding, TeamHandleKey
+
+    binding = ExpertBinding(bound_group=BoundAgentGroup(name="designer"))
+    with_catalog = SimpleNamespace(
+        extras={TeamHandleKey.EXPERT_CATALOG: object(), TeamHandleKey.EXPERT_BINDING: binding},
+    )
+    without_catalog = SimpleNamespace(extras={TeamHandleKey.EXPERT_BINDING: binding})
+
+    assert _expert_scope_group(with_catalog) == "designer"
+    assert _expert_scope_group(without_catalog) is None, "the section names expert tools that are not wired"
+
+
+@pytest.mark.level1
+def test_policy_rail_factory_borrows_the_injected_task_tracker():
+    """The configurator-owned tracker rides extras; each rebuilt rail borrows it (F_129)."""
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.rails.elements import build_team_policy_rail
+    from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+    from openjiuwen.agent_teams.team_context import TaskRevisionTracker
+
+    backend = _FakeTeamBackend(self_member_name="dev1")
+    backend.workspace_cache = None
+    shared = TaskRevisionTracker(team_backend=backend, member_name="dev1")
+    context = SimpleNamespace(role="teammate", member_name="dev1", language="cn", extras={})
+    inject_team_handles(context.extras, team_backend=backend, task_event_tracker=shared)
+
+    first = build_team_policy_rail({"dispatch_mode": "autonomous"}, context)
+    second = build_team_policy_rail({"dispatch_mode": "autonomous"}, context)
+
+    assert first is not second
+    assert first._outcome_tracker is shared and second._outcome_tracker is shared
+
+
+@pytest.mark.level1
+def test_a_teammate_rail_without_an_injected_tracker_announces_nothing():
+    """No rail-owned fallback: a second tracker would repeat what the runtime announced."""
+    backend = _FakeTeamBackend(self_member_name="dev1")
+    rail = TeamPolicyRail(
+        role=TeamRole.TEAMMATE,
+        member_name="dev1",
+        language="cn",
+        dispatch_mode="autonomous",
+        team_backend=backend,
+    )
+
+    assert rail._outcome_tracker is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_the_inner_agent_gets_the_very_session_the_native_holds():
+    """The rail and the TeamHarness share one baseline only if both see one session object (F_129)."""
+    from openjiuwen.core.session.agent import create_agent_session
+    from openjiuwen.core.single_agent import AgentCard
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.schema.config import DeepAgentConfig
+    from tests.unit_tests.harness.test_deep_agent import FakeReactAgent
+
+    agent = DeepAgent(AgentCard(name="deep", description="t")).configure(
+        DeepAgentConfig(enable_task_loop=False, language="cn")
+    )
+    fake = FakeReactAgent()
+    agent.set_react_agent(fake, initialized=True)
+    session = create_agent_session(card=agent.card)
+
+    await agent.invoke("hello", session)
+
+    assert fake.invoke_calls[0]["session"] is session

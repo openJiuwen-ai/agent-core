@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TaskRevisionTracker
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -39,6 +40,10 @@ class PrivateAgentResources:
     worktree_manager: Optional["WorktreeManager"] = None
     memory_manager: Optional["TeamMemoryManager"] = None
     model_allocator: Optional["ModelAllocator"] = None  # leader-only
+    # The member's next-input task notice tracker (F_119 / F_129), non-leader
+    # in-process members only. Built once and borrowed by every rebuilt
+    # TeamPolicyRail, so the handler and the rail share one baseline.
+    task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None
 
 
 __all__ = ["PrivateAgentResources"]

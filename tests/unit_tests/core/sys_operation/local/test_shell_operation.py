@@ -1,11 +1,12 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import os
 import pathlib
 import platform
 import shutil
 import tempfile
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -15,11 +16,43 @@ from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
+    SysOperation,
     SysOperationCard,
 )
 from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
+from openjiuwen.core.sys_operation.local.utils import AsyncProcessHandler, OperationUtils
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 from openjiuwen.core.sys_operation.shell import ShellType
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("requested", "expected"), [(900, 900), (None, 300)])
+async def test_execution_budget_is_not_replaced_by_hidden_shell_cap(
+        sys_op: SysOperation,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+        requested: int | None,
+        expected: int,
+) -> None:
+    """Both execution modes preserve explicit budgets and the default for None."""
+    monkeypatch.setenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "1")
+    observed: list[int] = []
+    create_handler = OperationUtils.create_handler
+
+    def record_handler(**kwargs: Any) -> AsyncProcessHandler:
+        observed.append(kwargs["timeout"])
+        return create_handler(**kwargs)
+
+    monkeypatch.setattr(OperationUtils, "create_handler", record_handler)
+    if stream:
+        results = [result async for result in sys_op.shell().execute_cmd_stream("echo completed", timeout=requested)]
+        assert results
+        assert all(result.code == StatusCode.SUCCESS.code for result in results)
+    else:
+        result = await sys_op.shell().execute_cmd("echo completed", timeout=requested)
+        assert result.code == StatusCode.SUCCESS.code
+    assert observed == [expected]
 
 
 @pytest.fixture

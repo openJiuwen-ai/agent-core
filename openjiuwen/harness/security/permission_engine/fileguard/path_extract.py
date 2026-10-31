@@ -169,9 +169,18 @@ def _index_in_quoted_span(index: int, spans: tuple[tuple[int, int], ...]) -> boo
 
 
 def _strip_separator_residue(token: str) -> str:
-    """Drop a shell separator glued onto an unquoted path token (``file;``)."""
-    stripped = _SEPARATOR_RESIDUE_RE.sub("", token)
-    return stripped if stripped else token
+    """Drop an unquoted shell separator glued onto a path (``file;``).
+
+    The caller passes the raw token. A separator inside quotes, or one escaped
+    with a backslash, is part of the filename and is kept.
+    """
+    text = token.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    if len(text) >= 2 and text[-1] in ";|&" and text[-2] == "\\":
+        return text[:-2] + text[-1]
+    stripped = _SEPARATOR_RESIDUE_RE.sub("", text)
+    return stripped if stripped else text
 
 
 def _ampersand_is_redirect(command: str, index: int) -> bool:
@@ -220,18 +229,19 @@ def _collect_ps_path_tokens(tokens: list[str]) -> list[str]:
     first_positional = True
     idx = 1
     while idx < len(tokens):
-        raw = tokens[idx].strip().strip('"').strip("'")
+        original = tokens[idx].strip()
+        raw = original.strip('"').strip("'")
         flag = raw.lower().split(":")[0]
         if flag in _PS_PATH_FLAGS:
             if idx + 1 < len(tokens):
-                out.append(tokens[idx + 1].strip().strip('"').strip("'"))
+                out.append(tokens[idx + 1].strip())
                 idx += 2
                 continue
         if raw.startswith("-"):
             idx += 1
             continue
         if first_positional and raw:
-            out.append(raw)
+            out.append(original)
             first_positional = False
         idx += 1
     return out
@@ -285,7 +295,7 @@ def _path_aware_one_segment(
     path_tokens: list[tuple[Path, int]] = []
 
     def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
-        tok = _strip_separator_residue(tok.strip().strip('"').strip("'"))
+        tok = _strip_separator_residue(tok)
         if not tok or _UNEXPANDED_VAR_RE.search(tok):
             return
         if require_path_shape and not _looks_like_path(tok):
@@ -304,8 +314,7 @@ def _path_aware_one_segment(
             return
 
     for idx, tok in enumerate(tokens[1:]):
-        tok = tok.strip().strip('"').strip("'")
-        if not tok or _is_shell_flag_token(tok, cmd0=cmd0):
+        if not tok.strip() or _is_shell_flag_token(tok, cmd0=cmd0):
             continue
         _append_path_token(tok, idx, require_path_shape=True)
 
@@ -388,7 +397,7 @@ def extract_shell_path_accesses(
     results: list[tuple[Path, FileAction]] = []
 
     def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
-        tok = _strip_separator_residue(tok.strip().strip('"').strip("'"))
+        tok = _strip_separator_residue(tok)
         if redirect:
             if not _looks_like_redirect_target(tok):
                 return None
@@ -431,7 +440,7 @@ def extract_shell_path_accesses(
     if len(tokens) >= 2:
         cmd0 = _basename_lower(tokens[0])
         if cmd0 in _INTERPRETER_BASENAMES:
-            script_tok = tokens[1].strip('"').strip("'")
+            script_tok = tokens[1].strip()
             if script_tok and not script_tok.startswith("-"):
                 rp = _resolve(script_tok)
                 if rp is not None:

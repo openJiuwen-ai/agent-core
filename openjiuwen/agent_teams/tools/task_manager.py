@@ -63,6 +63,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
+from openjiuwen.agent_teams.tools.database.graph import TASK_TERMINAL_STATUSES, stale_against
 from openjiuwen.agent_teams.tools.models import TeamTaskReviewVoteBase
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
@@ -179,8 +180,15 @@ class TeamTaskManager:
             return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
         return TaskOpResult.success()
 
-    async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
+    async def add_graph(self, specs: list[TaskGraphSpec], *, suspend_parent: str | None = None) -> TaskGraphResult:
         """Create a batch of tasks and their dependency edges atomically.
+
+        ``suspend_parent`` names the caller's ``IN_PROGRESS`` task when a
+        member splits it into subtasks (F_128): in the same transaction the
+        parent gains a ``depends_on`` edge to every new task and parks at
+        ``BLOCKED``, freeing its owner's active slot. The dependency refresh
+        returns it to ``PENDING`` once every subtask is terminal, and the
+        scheduler resumes it from there.
 
         The whole batch flows through a single ``mutate_dependency_graph``
         call, so ``depends_on`` edges may reference tasks created later in
@@ -230,15 +238,21 @@ class TeamTaskManager:
                     assignee=spec.assignee,
                     reviewer=json.dumps(list(spec.reviewer)) if spec.reviewer else None,
                     max_review_rounds=spec.max_review_rounds,
+                    parent_task_id=spec.parent_task_id,
+                    created_by=spec.created_by,
+                    parent_revision=spec.parent_revision,
                 )
             )
             edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
             edges.extend((dependent_id, task_id) for dependent_id in spec.depended_by)
+            if suspend_parent:
+                edges.append((suspend_parent, task_id))
 
         mutation = await self.db.task.mutate_dependency_graph(
             team_name=self.team_name,
             new_tasks=new_tasks,
             add_edges=edges,
+            suspend_parent=(suspend_parent, self.member_name) if suspend_parent else None,
         )
         if not mutation.ok:
             return TaskGraphResult.fail(mutation.reason)
@@ -258,6 +272,8 @@ class TeamTaskManager:
                 content=node.content,
                 status=status,
                 assignee=node.assignee,
+                parent_task_id=node.parent_task_id,
+                created_by=node.created_by,
             )
             if await self._start_human_assigned_task_if_ready(task):
                 task = await self.get(node.task_id) or task
@@ -342,6 +358,11 @@ class TeamTaskManager:
         for dep in all_deps:
             if not dep.resolved:
                 unresolved_by_task[dep.task_id].append(dep.depends_on_task_id)
+        revisions = {task.task_id: task.revision or 0 for task in tasks}
+        # A filtered list may leave a parent out; its revision still decides staleness.
+        missing_parents = {task.parent_task_id for task in tasks if task.parent_task_id} - revisions.keys()
+        if missing_parents:
+            revisions.update(await self.db.task.get_task_revisions(self.team_name, list(missing_parents)))
         summaries = [
             TaskSummary(
                 task_id=task.task_id,
@@ -349,6 +370,8 @@ class TeamTaskManager:
                 status=task.status,
                 assignee=task.assignee,
                 blocked_by=unresolved_by_task.get(task.task_id, []),
+                parent_task_id=task.parent_task_id,
+                stale_against=stale_against(task, revisions.get(task.parent_task_id or "")),
                 updated_at=task.updated_at,
             )
             for task in tasks
@@ -375,6 +398,9 @@ class TeamTaskManager:
         blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
 
         blocks = await self.db.task.get_dependent_task_ids(task_id)
+        subtask_rows = await self.db.task.get_subtasks(self.team_name, task_id)
+        subtasks = [row.task_id for row in subtask_rows]
+        stale_subtasks = [row.task_id for row in subtask_rows if stale_against(row, task.revision or 0) is not None]
 
         return TaskDetail(
             task_id=task.task_id,
@@ -389,6 +415,10 @@ class TeamTaskManager:
             note=task.note,
             blocked_by=blocked_by,
             blocks=blocks,
+            parent_task_id=task.parent_task_id,
+            subtasks=subtasks,
+            stale_subtasks=stale_subtasks,
+            revision=task.revision or 0,
             updated_at=task.updated_at,
         )
 
@@ -1321,7 +1351,11 @@ class TeamTaskManager:
         }
 
     async def cancel(self, task_id: str) -> Optional[TeamTaskBase]:
-        """Cancel a task and notify any tasks unblocked as a side effect.
+        """Cancel a task, and its unfinished subtasks after it (F_128).
+
+        Notifies any tasks unblocked as a side effect. The drained check runs
+        once, after the whole cascade, so cancelling the last parent on the
+        board publishes ``TASK_LIST_DRAINED`` a single time.
 
         Args:
             task_id: Task identifier.
@@ -1330,6 +1364,13 @@ class TeamTaskManager:
             The cancelled task, or ``None`` if the task is missing or
             the transition is invalid.
         """
+        task = await self._cancel_with_subtasks(task_id)
+        if task is not None:
+            await self._maybe_publish_task_list_drained()
+        return task
+
+    async def _cancel_with_subtasks(self, task_id: str) -> Optional[TeamTaskBase]:
+        """Cancel one task, then recurse into its unfinished subtasks; no drained check."""
         result = await self.db.task.cancel_task(task_id)
         if result is None:
             return None
@@ -1345,7 +1386,12 @@ class TeamTaskManager:
             error_label=f"Task cancelled event for {task_id}",
         )
         await self._handle_unblocked_tasks(unblocked_tasks)
-        await self._maybe_publish_task_list_drained()
+        # Subtasks only exist to feed their parent (F_128). Cancelling the
+        # parent first matters: a subtask cancelled first would resolve the
+        # parent's last edge and let the scheduler resume a task that is
+        # about to be cancelled.
+        for subtask_id in await self.open_subtask_ids(task_id):
+            await self._cancel_with_subtasks(subtask_id)
         return task
 
     async def cancel_all_tasks(
@@ -1461,11 +1507,14 @@ class TeamTaskManager:
             error_label=f"Task list drained event for team {self.team_name}",
         )
 
-    async def list_tasks(self, status: Optional[str] = None) -> List[TeamTaskBase]:
+    async def list_tasks(self, status: Optional[str] = None, *, with_content: bool = True) -> List[TeamTaskBase]:
         """List all tasks for the team
 
         Args:
             status: Optional status filter
+            with_content: Load each task body. ``False`` skips the session-file
+                reads and leaves ``content`` as the stored placeholder; for
+                board scans that only need ids / status / assignee.
 
         Returns:
             List of TeamTask objects
@@ -1477,7 +1526,7 @@ class TeamTaskManager:
             # Get all tasks
             all_tasks = task_manager.list_tasks()
         """
-        return await self.db.task.get_team_tasks(self.team_name, status)
+        return await self.db.task.get_team_tasks(self.team_name, status, hydrate=with_content)
 
     async def get_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get task dependencies
@@ -1504,6 +1553,15 @@ class TeamTaskManager:
         """Non-terminal task count per assignee (absent = none open). See F_118."""
         return await self.db.task.open_task_counts_by_assignee(self.team_name)
 
+    async def board_counts(self) -> tuple[int, int]:
+        """``(total, non_terminal)`` task counts for the board, in one aggregate query. See B_09."""
+        return await self.db.task.count_tasks_terminality(self.team_name)
+
+    async def has_open_tasks(self) -> bool:
+        """Whether any task on the board is non-terminal. See B_09."""
+        _, non_terminal = await self.board_counts()
+        return non_terminal > 0
+
     async def get_tasks_by_assignee(self, member_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member
 
@@ -1521,27 +1579,42 @@ class TeamTaskManager:
         task_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None,
+        *,
+        change_note: Optional[str] = None,
+        parent_revision: Optional[int] = None,
     ) -> TaskOpResult:
-        """Update task title / content.
+        """Update task title / content, bumping its revision (F_129).
 
-        Publishes ``TASK_UPDATED`` on success, carrying the post-write
-        status so a consumer whose view missed a transition can resync
-        from the event itself. Does not bump the task's ``updated_at``
-        column — that timestamp tracks status transitions only.
+        Publishes ``TASK_UPDATED`` when the edit actually changed the task,
+        carrying the post-write status and revision so a consumer whose view
+        missed a transition can resync from the event itself. Does not bump
+        the task's ``updated_at`` column — that timestamp tracks status
+        transitions only.
 
         Args:
             task_id: Task identifier.
             title: Optional new title.
             content: Optional new content.
+            change_note: What changed and why, stored against the new
+                revision and shown to the assignee with the revision (D8).
+            parent_revision: Re-align a subtask with its parent's revision
+                (the subtask owner's review, D5).
 
         Returns:
-            ``TaskOpResult`` describing the outcome.
+            ``TaskOpResult``; ``data`` carries ``revision`` and ``revised``.
         """
         task = await self.get(task_id)
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        updated = await self.db.task.update_task(task_id, title=title, content=content)
+        updated = await self.db.task.update_task(
+            task_id,
+            title=title,
+            content=content,
+            change_note=change_note,
+            changed_by=self.member_name,
+            parent_revision=parent_revision,
+        )
         if updated is None:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
@@ -1549,13 +1622,16 @@ class TeamTaskManager:
                 f"(in-review tasks are locked)"
             )
 
-        team_logger.info(f"Task {task_id} updated")
+        revised = (updated.revision or 0) != (task.revision or 0)
+        if not revised:
+            return TaskOpResult.success({"revision": updated.revision, "revised": False})
+        team_logger.info(f"Task {task_id} updated to revision {updated.revision}")
 
-        # A claimed task stays claimed on edit; carry the assignee so its
-        # dispatcher tells it to re-read the revised content (on_task_updated)
-        # instead of the old reset-to-pending + cancel_member. The status rides
-        # the post-write row read inside the DAO's write transaction, so it is
-        # the committed state at update time rather than a re-query.
+        # Carry the assignee and the post-write status / revision. The status
+        # rides the post-write row read inside the DAO's write transaction, so
+        # it is the committed state at update time rather than a re-query.
+        # Whether and how the assignee is told is the consumer's: under
+        # scheduled dispatch the scheduler pushes the revision (F_129).
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -1565,6 +1641,7 @@ class TeamTaskManager:
                         task_id=task_id,
                         member_name=updated.assignee,
                         status=updated.status,
+                        revision=updated.revision,
                     )
                 ),
             )
@@ -1572,7 +1649,7 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task updated event for {task_id}: {e}")
 
-        return TaskOpResult.success()
+        return TaskOpResult.success({"revision": updated.revision, "revised": True})
 
     async def set_reviewer(self, task_id: str, reviewer_entries: list[dict]) -> TaskOpResult:
         """Set a task's verify-gate reviewers (Leader only).
@@ -1651,6 +1728,43 @@ class TeamTaskManager:
         )
         return TaskOpResult.success()
 
+    async def observe_revision(self, task_id: str, revision: int) -> None:
+        """Record that this member, the task's assignee, was shown ``revision`` (F_129).
+
+        Called where the framework hands the assignee the task content: a
+        templated handoff delivery, the self claim notice, the assignee's own
+        ``view_task(get)``. Best-effort: a failure only means the assignee is
+        told about the revision once more.
+        """
+        try:
+            await self.db.task.observe_revision(task_id, self.member_name, revision)
+        except Exception as e:
+            team_logger.error(f"Failed to record observed revision {revision} of task {task_id}: {e}")
+
+    async def unseen_revisions(self) -> list[tuple[str, str, str, bool, int]]:
+        """Assigned, unfinished tasks whose assignee has not seen the current revision (F_129)."""
+        return await self.db.task.get_unseen_revisions(self.team_name)
+
+    async def unseen_edits(self, member_name: str) -> list[TeamTaskBase]:
+        """``member_name``'s working tasks edited since it last saw them, bodies unread (F_129)."""
+        return await self.db.task.get_unseen_edits(self.team_name, member_name)
+
+    async def open_subtask_ids(self, task_id: str) -> list[str]:
+        """Return the non-terminal direct subtasks of a task (F_128)."""
+        rows = await self.db.task.get_subtask_statuses(self.team_name, task_id)
+        return [sub_id for sub_id, status in rows if status not in TASK_TERMINAL_STATUSES]
+
+    async def task_depth(self, task: TeamTaskBase) -> int:
+        """Subtask nesting depth: 0 for a top-level task, parent's + 1 otherwise (F_128)."""
+        depth = 0
+        seen: set[str] = {task.task_id}
+        parent_id = task.parent_task_id
+        while parent_id and parent_id not in seen:
+            depth += 1
+            seen.add(parent_id)
+            parent_id = await self.db.task.get_parent_task_id(parent_id)
+        return depth
+
     async def get_other_active_task_id(self, member_name: str, exclude_task_id: str) -> str | None:
         """Return the task_id of a member's active task other than
         ``exclude_task_id``, or None.
@@ -1705,13 +1819,11 @@ class TeamTaskManager:
             return owner_result
 
         # Entry gate mirrors ``assign``: plan-mode owners land in the plan
-        # gate and must get approval before executing.
+        # gate and must get approval before executing. A parent resuming
+        # after its subtasks (F_128) had its plan approved on first start.
         member = await self.db.member.get_member(member_name, self.team_name)
-        entry_status = (
-            TaskStatus.PLANNING
-            if member is not None and member.mode == MemberMode.PLAN_MODE.value
-            else TaskStatus.IN_PROGRESS
-        )
+        plan_gate = member is not None and member.mode == MemberMode.PLAN_MODE.value and not task.resume_pending
+        entry_status = TaskStatus.PLANNING if plan_gate else TaskStatus.IN_PROGRESS
 
         # Idempotent re-start: already at its entry gate for its owner -> no-op.
         if task.status == entry_status.value:
@@ -1780,6 +1892,15 @@ class TeamTaskManager:
         old_assignee = task.assignee
         if not old_assignee:
             return TaskOpResult.fail(f"Task {task_id} has no current assignee to reassign from")
+
+        # A BLOCKED parent waiting on its subtasks is half done, its work in
+        # the current owner's hands (F_128) — the same reason the two gates
+        # are not reassignable (F_82). An ordinary BLOCKED task never started.
+        if task.status == TaskStatus.BLOCKED.value and await self.open_subtask_ids(task_id):
+            return TaskOpResult.fail(
+                f"Task {task_id} is suspended while its subtasks run under {old_assignee}; "
+                "wait for the subtasks to finish, or cancel them first"
+            )
 
         swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
         if not swapped:

@@ -73,8 +73,8 @@ def _init_git_repo(path: str) -> None:
         f.write("hello\n")
     _git(path, "add", "README.md")
     _git(path, "commit", "--quiet", "-m", "init")
-    # ``GitBackend._resolve_base`` looks up ``origin/<default>``;
-    # create the ref by pointing origin/main at HEAD locally.
+    # Remote-first resolution (``GitBackend(remote_base=True)``) looks up
+    # ``origin/<default>``; create the ref by pointing origin/main at HEAD locally.
     _git(path, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 

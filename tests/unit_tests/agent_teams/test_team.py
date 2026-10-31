@@ -1619,6 +1619,131 @@ async def test_autostart_unstarted_noop_for_teammate(db, message_bus):
     on_created.assert_not_awaited()
 
 
+async def _task_scoped_backend(
+    db: TeamDatabase,
+    message_bus: Messager,
+    team_id: str,
+    on_created: AsyncMock,
+) -> TeamBackend:
+    """A leader backend holding UNSTARTED ``dev-1`` (resident) and ``tmp-1`` (lifetime=shutdown)."""
+    await db.team.create_team(team_name=team_id, display_name=team_id, leader_member_name="leader1")
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card = AgentCard(name="Dev", description="dev", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+    await backend.spawn_member(member_name="tmp-1", display_name="Tmp 1", agent_card=card, lifetime="shutdown")
+    return backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_skips_task_scoped_member_without_open_task(db, message_bus):
+    """A task-scoped member whose only task was cancelled is not woken just to be retired."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    on_created = AsyncMock()
+    backend = await _task_scoped_backend(db, message_bus, "skip_scoped_team", on_created)
+    graph = await backend.task_manager.add_graph([TaskGraphSpec(title="T", content="c", task_id="t1", assignee="tmp-1")])
+    assert graph.ok
+    await db.task.cancel_task("t1")
+
+    started = await backend.autostart_unstarted()
+
+    assert started == ["dev-1"]
+    on_created.assert_awaited_once_with("dev-1")
+    assert await backend.get_member_status("tmp-1") == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_for_a_broadcast_starts_idle_task_scoped_member(db, message_bus):
+    """A broadcast is addressed to the idle task-scoped member too, so it is started to read it."""
+    on_created = AsyncMock()
+    backend = await _task_scoped_backend(db, message_bus, "broadcast_scoped_team", on_created)
+
+    started = await backend.autostart_unstarted(include_idle_task_scoped=True)
+
+    assert sorted(started) == ["dev-1", "tmp-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_starts_task_scoped_member_with_open_task(db, message_bus):
+    """A task-scoped member with work on the board starts like any other."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    on_created = AsyncMock()
+    backend = await _task_scoped_backend(db, message_bus, "start_scoped_team", on_created)
+    graph = await backend.task_manager.add_graph([TaskGraphSpec(title="T", content="c", task_id="t1", assignee="tmp-1")])
+    assert graph.ok
+
+    started = await backend.autostart_unstarted()
+
+    assert sorted(started) == ["dev-1", "tmp-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_wake_member_starts_unstarted_member_skipped_by_autostart(db, message_bus):
+    """A message addressed by name still brings up the member the roster-wide start left alone."""
+    on_created = AsyncMock()
+    backend = await _task_scoped_backend(db, message_bus, "wake_scoped_team", on_created)
+    assert await backend.autostart_unstarted() == ["dev-1"]
+
+    assert await backend.wake_member("tmp-1") is True
+    on_created.assert_awaited_with("tmp-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_wake_member_recovers_without_spawn_callback(db, message_bus):
+    """Recovering an ERROR member needs only the restart callback."""
+    team_id = "wake_restart_only_team"
+    await db.team.create_team(team_name=team_id, display_name=team_id, leader_member_name="leader1")
+    on_restarted = AsyncMock(return_value=True)
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_restarted=on_restarted,
+    )
+    card = AgentCard(name="Dev", description="dev", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card, status=MemberStatus.ERROR)
+
+    assert await backend.wake_member("dev-1") is True
+    on_restarted.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_list_retired_members_returns_only_shutdown(db, message_bus):
+    """Only SHUTDOWN counts as retired (DORMANT can still be woken), whatever the lifetime."""
+    team_id = "retired_list_team"
+    await db.team.create_team(team_name=team_id, display_name=team_id, leader_member_name="leader1")
+    backend = TeamBackend(team_name=team_id, member_name="leader1", db=db, messager=message_bus, is_leader=True)
+    card = AgentCard(name="Dev", description="dev", version="1.0.0")
+    await backend.spawn_member(member_name="gone", display_name="Gone", agent_card=card, status=MemberStatus.SHUTDOWN)
+    await backend.spawn_member(
+        member_name="scoped",
+        display_name="Scoped",
+        agent_card=card,
+        status=MemberStatus.SHUTDOWN,
+        lifetime="shutdown",
+    )
+    await backend.spawn_member(member_name="napping", display_name="Nap", agent_card=card, status=MemberStatus.DORMANT)
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    assert await backend.list_retired_members() == {"gone", "scoped"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_autostart_unstarted_noop_without_callback(db, message_bus):

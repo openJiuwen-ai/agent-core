@@ -248,6 +248,7 @@ async def run_swarmflow(
     external_cli_agents: Sequence[Any] = (),
     team_backend: Any = None,
     expert_specs: Mapping[str, Any] | None = None,
+    expert_loader: Any = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -297,6 +298,8 @@ async def run_swarmflow(
             pool miss.
         expert_specs: AgentGroup expert table for ``agent_template`` picks; empty
             when none bound.
+        expert_loader: On-demand loader for bound-group members missing from
+            ``expert_specs`` (``BoundGroupExpertLoader``), or ``None``.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -345,6 +348,7 @@ async def run_swarmflow(
         external_cli_agents=external_cli_agents,
         team_backend=team_backend,
         expert_specs=expert_specs,
+        expert_loader=expert_loader,
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)

@@ -37,6 +37,11 @@ class _FakeRuntime:
     def __init__(self) -> None:
         self.stopped = False
         self.team_context_tracker: Any = None
+        self.task_outcome_tracker: Any = None
+
+    def bind_task_outcome_tracker(self, tracker: Any) -> None:
+        """Record the next-input task notice tracker (F_119 / F_129)."""
+        self.task_outcome_tracker = tracker
 
     async def start(self, *, team_session: Any | None = None) -> None:
         """Start fake runtime."""

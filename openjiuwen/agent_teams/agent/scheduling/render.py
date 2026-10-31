@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 # Template keys, i.e. ``prompts/<lang>/<key>.md`` basenames.
 _TASK_START = "scheduler_task_start"
 _TASK_START_PLAN = "scheduler_task_start_plan"
+_TASK_RESUME = "scheduler_task_resume"
+_TASK_REVISED = "scheduler_task_revised"
+_SUBTASK_REVIEW = "scheduler_subtask_review"
 _REVIEW_REQUEST = "scheduler_review_request"
 _REVIEW_PREVIOUS_FEEDBACK = "scheduler_review_previous_feedback"
 _REVIEW_SUBMISSION_NOTE = "scheduler_review_submission_note"
@@ -45,13 +48,32 @@ _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
 
 
-_TASK_START_TEMPLATES = frozenset({_TASK_START, _TASK_START_PLAN})
+_TASK_START_TEMPLATES = frozenset({_TASK_START, _TASK_START_PLAN, _TASK_RESUME})
 
 
-def meta_task_start(task) -> dict:
-    """Delivery payload for the assignee's start instruction (plan gate aware)."""
-    template = _TASK_START_PLAN if task.status == TaskStatus.PLANNING.value else _TASK_START
+def meta_task_start(task, *, resume: bool = False) -> dict:
+    """Delivery payload for the assignee's start instruction (plan gate aware).
+
+    ``resume`` marks a parent started again after its subtasks finished
+    (F_128): its owner continues the task instead of beginning it.
+    """
+    if resume:
+        template = _TASK_RESUME
+    elif task.status == TaskStatus.PLANNING.value:
+        template = _TASK_START_PLAN
+    else:
+        template = _TASK_START
     return build_meta(template, refs={"task": task.task_id})
+
+
+def meta_task_revised(task_id: str) -> dict:
+    """Delivery payload pushing an edited task's latest content to its executor (F_129)."""
+    return build_meta(_TASK_REVISED, refs={"task": task_id})
+
+
+def meta_subtask_review(task_id: str) -> dict:
+    """Delivery payload asking a suspended parent's owner to review its subtasks (F_129)."""
+    return build_meta(_SUBTASK_REVIEW, refs={"task": task_id})
 
 
 def is_task_start_meta(meta: dict | None, task_id: str) -> bool:
@@ -60,8 +82,8 @@ def is_task_start_meta(meta: dict | None, task_id: str) -> bool:
     The handoff backstop (B_06) asks the mailbox "did this owner ever get a
     start instruction for this task?"; the template keys stay private to this
     module, so the question is answered here rather than by string-matching
-    in the scheduler. Either start template counts — a plan-gate start is
-    still the owner's start.
+    in the scheduler. Every start template counts — a plan-gate start or a
+    resume after subtasks is still the owner's start.
     """
     if not meta:
         return False
@@ -160,6 +182,17 @@ def render_leader_escalation_no_vote(task, *, reviewer: str, runs: int) -> str:
         round=task.review_round,
         reviewer=reviewer,
         runs=runs,
+    )
+
+
+def render_leader_escalation_retired_owner(task, *, owner: str) -> str:
+    """Escalation injected into the leader when an open task's owner has shut down."""
+    return t(
+        "scheduler.leader_escalation_retired_owner",
+        task_id=task.task_id,
+        title=task.title,
+        owner=owner,
+        status=task.status,
     )
 
 

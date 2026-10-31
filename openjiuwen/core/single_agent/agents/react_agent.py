@@ -72,10 +72,13 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.state import (
+    DEFERRED_TOOL_IMAGES_KEY,
     INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    TOOL_CALLS_STILL_PAUSED_KEY,
     BaseInterruptionState,
     ToolInterruptionState,
 )
@@ -1972,6 +1975,27 @@ class ReActAgent(BaseAgent):
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
+            # Backfill latency onto usage_metadata so tracer consumers
+            # (OtelRail after_model_call -> on_llm_end) can stamp TTFT /
+            # inter-token latency on the LLM span (#1833); perf_metrics alone
+            # only reaches the UI stream channel below.
+            #
+            # **写语义明确的字段，不再复用 `first_token_time`**：该字段在既有契约里是
+            # 「首 token 时刻」（与 `request_start_time` 同族的时间戳字符串），而这里要说
+            # 的是「等了多久」。此前把 `ttft_ms/1000` 写进去，OTel 侧当秒数解析（自洽），
+            # 任何按字段名理解的下游（studio 侧、其他 provider 回填）会把 `0.35` 当成
+            # 绝对时间戳。`ttft_seconds` 承载相对延迟（GenAI semconv 的
+            # `gen_ai.response.time_to_first_chunk` 单位是秒），`first_token_time` 保持原义。
+            if "ttft_ms" in perf_metrics:
+                ai_message.usage_metadata.ttft_seconds = round(
+                    perf_metrics["ttft_ms"] / 1000, 6
+                )
+            # 总时延一并回填（单位秒，与 ttft_seconds 对齐）：只回填 TTFT 会让 span 出现
+            # 「TTFT 有、total latency 为 0」的半缺失状态。
+            ai_message.usage_metadata.total_latency = round(call_latency / 1000, 6)
+            if "tpot_ms" in perf_metrics:
+                ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
+
             await session.write_stream(
                 OutputSchema(
                     type="llm_usage",
@@ -1991,6 +2015,21 @@ class ReActAgent(BaseAgent):
         finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
         usage = getattr(message, "usage_metadata", None)
         code = int(getattr(usage, "code", 0) or 0)
+        content = getattr(message, "content", "")
+        no_answer = not getattr(message, "tool_calls", None) and not (isinstance(content, str) and content.strip())
+        if finish_reason in {"length", "max_tokens"} and no_answer:
+            # A reasoning model can spend its whole output budget thinking and stop
+            # before any answer or tool call. Treating that as the final answer
+            # would end the turn with an empty "successful" result.
+            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+            raise_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=(
+                    f"model hit its output limit (finish_reason={finish_reason}, output_tokens={output_tokens}) "
+                    "before producing an answer or a tool call"
+                ),
+                details={"finish_reason": finish_reason, "output_tokens": output_tokens},
+            )
         if finish_reason not in {"error", "failed"} and code == 0:
             return
         error_message = str(getattr(usage, "err_msg", "") or getattr(message, "content", "") or "")
@@ -2355,7 +2394,7 @@ class ReActAgent(BaseAgent):
         )
 
         tool_names = {call.id: call.name for call in tool_calls}
-        for tool_result, tool_message in results:
+        for _, tool_message in results:
             if tool_message is not None:
                 await context.add_messages(tool_message)
                 if cast(ReActAgentConfig, self._config).on_max_iterations != "error":
@@ -2363,11 +2402,29 @@ class ReActAgent(BaseAgent):
                     observation["name"] = observation.get("name") or tool_names.get(tool_message.tool_call_id)
                     ctx.extra.setdefault("_iteration_observations", []).append(observation)
 
-        multimodal_message = self._build_multimodal_tool_results_message(tool_result for tool_result, _ in results)
+        await self._add_tool_result_images(ctx, results, context)
+        return results
+
+    async def _add_tool_result_images(self, ctx: AgentCallbackContext, results: list, context: ModelContext) -> None:
+        """Give the model the images of tool results in one user message after the tool messages.
+
+        While a call of this assistant turn is still paused, hold them back: a
+        user message must not come between the tool messages of one turn.
+        """
+        image_items = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
+        for tool_result, _ in results:
+            image_items.extend(self._iter_multimodal_image_items(tool_result))
+        turn_paused = bool(ctx.extra.get(TOOL_CALLS_STILL_PAUSED_KEY)) or any(
+            isinstance(tool_result, ToolInterruptException) or self._hitl_handler.is_sub_agent_interrupt(tool_result)
+            for tool_result, _ in results
+        )
+        if turn_paused:
+            if image_items:
+                ctx.extra[DEFERRED_TOOL_IMAGES_KEY] = image_items
+            return
+        multimodal_message = self._build_multimodal_message_from_items(image_items)
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
-
-        return results
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -2376,31 +2433,36 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
+        return ReActAgent._build_multimodal_message_from_items(
+            item for tool_result in tool_results for item in ReActAgent._iter_multimodal_image_items(tool_result)
+        )
+
+    @staticmethod
+    def _build_multimodal_message_from_items(image_items: Any) -> Optional[UserMessage]:
         content: List[dict[str, Any]] = []
         loaded_paths: List[str] = []
         shown_once: set[int] = set()
 
-        for tool_result in tool_results:
-            for item in ReActAgent._iter_multimodal_image_items(tool_result):
-                source = str(item.get("source") or "tool")
-                source_path = str(item.get("source_path") or "unknown image")
-                data_url = item["data_url"]
-                loaded_paths.append(source_path)
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"Image loaded from {source}: {source_path}",
-                    }
-                )
-                image_part = {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                    },
+        for item in image_items:
+            source = str(item.get("source") or "tool")
+            source_path = str(item.get("source_path") or "unknown image")
+            data_url = item["data_url"]
+            loaded_paths.append(source_path)
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Image loaded from {source}: {source_path}",
                 }
-                if item.get("keep_in_context") is False:
-                    shown_once.add(id(image_part))
-                content.append(image_part)
+            )
+            image_part = {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                },
+            }
+            if item.get("keep_in_context") is False:
+                shown_once.add(id(image_part))
+            content.append(image_part)
 
         if not content:
             return None
@@ -3102,6 +3164,8 @@ class ReActAgent(BaseAgent):
 
                         finish = ctx.consume_force_finish()
                         if finish:
+                            # The turn ends here; images held for its paused calls go with it.
+                            ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None)
                             await self.context_engine.save_contexts(session)
                             invoke_inputs.result = finish.result
                             break
@@ -3114,6 +3178,8 @@ class ReActAgent(BaseAgent):
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if hitl_interrupt:
+                            # Images of the calls that finished wait for the paused ones.
+                            hitl_interrupt.deferred_tool_images = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
                             await self._commit_interrupt(
                                 hitl_interrupt, context, session, invoke_inputs, sub_agent_outputs
                             )
@@ -3258,8 +3324,7 @@ class ReActAgent(BaseAgent):
         try:
             answer = await self._call_model(ctx, context, None)
             finish = ctx.consume_force_finish()
-            # A rail or callback that already decided the result owns that result.
-            if finish is not None and isinstance(finish.result, dict):
+            if finish is not None:
                 return finish.result
             if isinstance(answer, dict):
                 return answer

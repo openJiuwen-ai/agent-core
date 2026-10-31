@@ -74,6 +74,7 @@ from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
 )
 from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
     GraphSnapshotProvider,
+    PublishedCapabilitySnapshotProvider,
     SymphonyEvolutionSubmitCallback,
     SymphonyGraphEvolutionInput,
     SymphonyGraphEvolutionRail,
@@ -92,6 +93,7 @@ from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
 __all__ = [
+    "PublishedCapabilitySnapshotProvider",
     "EVOLUTION_REVIEW_AGENT_NAME",
     "EvolutionApprovalRuntime",
     "EvolutionHostEventMeta",

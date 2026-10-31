@@ -54,9 +54,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "时间未知",
         # schema/blueprint.py
         "blueprint.default_desc": "天才项目管理专家",
+        "blueprint.generic_team_display_name": "通用协作团队",
+        "blueprint.generic_team_desc": (
+            "不限定领域的通用任务协作团队：由 Leader 按任务动态组建承担者，"
+            "任务完成后成员按退场策略关闭或休眠。"
+        ),
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
+        "team.member_startup_failed": (
+            "[成员启动失败] 成员 {member_name} 未能成功启动。原因：{reason}。"
+            "任务已分派或看板显示进行中不代表该成员正在执行；请核对真实成员状态并处理启动故障，"
+            "不要仅等待其交付。本通知不代表任务完成、已取消或自动重试成功。"
+        ),
         "team.shutdown_human_active_tasks": (
             "人类成员 {member_name} 仍持有 {count} 个活跃任务 [{task_ids}]，不允许非强制关闭。"
             "请先通过 send_message 与成员协商是否同意强制关闭并取消任务。"
@@ -222,10 +232,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
             "不要再为它提交结果；新任务指派给你时会另行通知开工，无需轮询看板。"
         ),
-        "dispatcher.task_content_updated_to_self": (
-            "[任务变更] 你正在执行的任务 [{task_id}] 的内容已被更新。请通过 view_task "
-            "重新查看最新要求后继续执行（任务仍归你，无需重新认领）。"
-        ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 "
@@ -280,8 +286,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.reviewer_nudge": (
             "[调度器] 本轮验收已进行 {elapsed} 分钟，请加快进度，尽快完成验收并调用 verify_task 投票。"
         ),
+        "scheduler.leader_escalation_retired_owner": (
+            "[调度器·需你处置] 任务 [{task_id}]「{title}」的承担者 {owner} 已退出团队（shut_down），"
+            "无法再被拉起，任务停在 {status}，没有人在做。"
+            "请用 spawn_teammate 新建成员后 update_task 改派，或改派给其他在队成员，或取消该任务。"
+        ),
         "scheduler.leader_all_done": (
-            "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
+            "[调度器] 任务看板上已没有未终结的任务（共 {count} 个任务）。这只表示看板清空，不代表目标已经达成。"
+            "先对照用户目标检查是否还有剩余工作（返工、新一轮检视或验证、下一阶段等）：有就用 create_task 建任务。"
+            "注意：send_message 或拉起成员不会让工作进入看板，调度器看不到它，不会派发验收，也不会在它完成后提醒你；"
+            "只靠拉起、没有任务的成员会一直空闲。"
+            "确认目标全部达成后，再汇总团队执行结果，向用户交付最终结论。"
             "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
         ),
         "scheduler.inspector_avg_line": (
@@ -315,11 +330,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
-            "所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"
+            "任务看板上已没有未完成的任务。这只表示看板清空，不代表目标已经达成。"
+            "先对照用户目标检查是否还有剩余工作：有就用 create_task 建任务；"
+            "确认目标全部达成后，再汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"
             "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
         ),
         "dispatcher.all_done_temporary": (
-            "所有任务已完成。请汇总团队工作成果，"
+            "任务看板上已没有未完成的任务。这只表示看板清空，不代表目标已经达成。"
+            "先对照用户目标检查是否还有剩余工作：有就用 create_task 建任务；"
+            "确认目标全部达成后，再汇总团队工作成果，"
             "然后依次调用 shutdown_member 关闭所有成员，"
             "等待所有成员状态转为 shutdown 后，"
             "调用 clean_team 解散团队。"
@@ -424,6 +443,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "team_context.task_verified_intro": (
             "你此前提交的以下任务已通过验收并完成，无需再做任何事，也不要为此联系 leader："
         ),
+        # team_context.py TaskRevisionTracker (F_129): an edit the member was
+        # down for rides its next input.
+        "team_context.task_revised_intro": (
+            "你名下的以下任务在你上次查看后被修改过（任务仍归你，无需重新认领）。请先用 "
+            "view_task(action='get', task_id=...) 查看最新要求，按需调整后继续；提交前必须看过最新版本："
+        ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
         "workflow.phase": "编排 [{run_id}] 进入阶段：{phase}",
@@ -515,6 +540,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "unknown time",
         # schema/blueprint.py
         "blueprint.default_desc": "Genius project management expert",
+        "blueprint.generic_team_display_name": "General Collaboration Team",
+        "blueprint.generic_team_desc": (
+            "A domain-agnostic collaboration team: the leader assembles assignees per task; "
+            "members retire or go dormant once their tasks close."
+        ),
         # tools/team.py
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
@@ -612,6 +642,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "Progress: {attempt}/{max_attempts}. Reason: {reason_message}. "
             "Diagnostics: http_status={http_status}, sdk_error_code={sdk_error_code}. "
             "The round stays open and member status is unchanged; awaiting the next SDK result. {summary}"
+        ),
+        "team.member_startup_failed": (
+            "[member startup failed] Member {member_name} could not start."
+            "Reason: {reason}. An assignment or in-progress board row does not prove execution. "
+            "Check actual member state and address the startup failure rather than only waiting for delivery. "
+            "This notification does not mean task completion, cancellation, or a successful retry."
         ),
         "reliability.external_runtime_failed": (
             "[external runtime failed] Member {member_name} ({agent_kind}, model {model}, phase {phase}) finally "
@@ -713,11 +749,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "Stop working on it now and do not submit results for it; a new task assigned "
             "to you arrives with its own start notice, so there is no need to poll the board."
         ),
-        "dispatcher.task_content_updated_to_self": (
-            "[Task Updated] The content of task [{task_id}] you are working on has changed. "
-            "Call view_task to re-read the latest requirements, then continue (the task is "
-            "still yours — no need to re-claim)."
-        ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[Plan Approved] Your execution plan for task [{task_id}] was approved. "
@@ -781,8 +812,19 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Scheduler] This review has been running for {elapsed} minutes. Please speed up, finish the "
             "review and call verify_task to vote as soon as you can."
         ),
+        "scheduler.leader_escalation_retired_owner": (
+            "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" is assigned to {owner}, who has "
+            "left the team (shut_down) and cannot be started again; the task stays {status} with nobody "
+            "working on it. Spawn a new member with spawn_teammate and reassign the task "
+            "via update_task, reassign it to another live member, or cancel it."
+        ),
         "scheduler.leader_all_done": (
-            "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
+            "[Scheduler] No task on the board is open any more ({count} task(s) total). An empty board does "
+            "not mean the goal is reached. First check the user's goal for remaining work (a rework, another "
+            "review or verification round, the next phase): if any is left, open it with create_task. "
+            "send_message or starting a member does not put the work on the board: the scheduler cannot see "
+            "it, dispatches no review for it and will not tell you when it finishes, and a member started "
+            "without a task stays idle. Once the goal is fully reached, summarize "
             "the team's results and deliver the final conclusion to the user. Do not send members a wrap-up "
             "or stand-by notice — they idle on their own when there is no new work, and a broadcast only wakes "
             "each of them for a round."
@@ -816,13 +858,17 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
-            "All tasks are complete. Please summarize this round's results. "
+            "No task on the board is open any more. An empty board does not mean the goal is reached. "
+            "First check the user's goal for remaining work: if any is left, open it with create_task. "
+            "Once the goal is fully reached, summarize this round's results. "
             "The team remains running and awaits new task instructions. "
             "Do not send members a wrap-up or stand-by notice — they idle on their own when there is no "
             "new work, and a broadcast only wakes each of them for a round."
         ),
         "dispatcher.all_done_temporary": (
-            "All tasks are complete. Summarize the team's work, "
+            "No task on the board is open any more. An empty board does not mean the goal is reached. "
+            "First check the user's goal for remaining work: if any is left, open it with create_task. "
+            "Once the goal is fully reached, summarize the team's work, "
             "then call shutdown_member for each member in turn, "
             "wait until all members reach status shutdown, "
             "and finally call clean_team to disband the team."
@@ -939,6 +985,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "team_context.task_verified_intro": (
             "These tasks you submitted earlier have passed review and are completed. "
             "Nothing more is needed — do not contact the leader about them:"
+        ),
+        "team_context.task_revised_intro": (
+            "These tasks of yours were edited after you last read them (they are still yours — no need to "
+            "re-claim). Read the latest requirements with view_task(action='get', task_id=...), adjust as "
+            "needed and continue; you must have read the latest revision before submitting:"
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (

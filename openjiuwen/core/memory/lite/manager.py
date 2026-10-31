@@ -100,6 +100,8 @@ EMBEDDING_CACHE_TABLE = "embedding_cache"
 SESSION_DIRTY_DEBOUNCE_MS = 5000
 
 INDEX_CACHE: Dict[str, 'MemoryIndexManager'] = {}
+# Upper bound for joining the watchdog observer threads on close.
+_OBSERVER_JOIN_TIMEOUT_S = 5.0
 
 # Module-level lock shared across all initialize() calls in this process so the
 # rebuild (clear tables + reindex) is serialized per-process — distinct from the
@@ -1654,7 +1656,8 @@ class MemoryIndexManager:
         if self._file_observer:
             try:
                 self._file_observer.stop()
-                self._file_observer.join()
+                # Joining waits on the emitter threads; keep that off the loop.
+                await asyncio.to_thread(self._file_observer.join, _OBSERVER_JOIN_TIMEOUT_S)
             except Exception:
                 logger.warning("File observer stopped")
 
@@ -1676,6 +1679,36 @@ def clear_memory_manager_cache() -> None:
     如需彻底释放，改用 aclose_memory_manager_cache()。
     """
     INDEX_CACHE.clear()
+
+
+async def aclose_memory_managers_for(agent_id: str, workspace: "Workspace") -> int:
+    """Close every cached manager one agent opened on one workspace.
+
+    A manager runs a watchdog ``Observer`` (one thread plus one per watched
+    directory), a SQLite connection and timers for as long as it stays in
+    ``INDEX_CACHE``. Rails only fetch it, so without this an in-process team
+    keeps every retired member's manager alive until the process exits.
+    Called from the member's permanent teardown.
+
+    Args:
+        agent_id: The agent card id the managers were opened with.
+        workspace: The agent's workspace; matched by root path.
+
+    Returns:
+        The number of managers closed.
+    """
+    root = str(workspace.root_path) if workspace is not None and workspace.root_path else ""
+    owned = [
+        mgr
+        for mgr in list(INDEX_CACHE.values())
+        if mgr.agent_id == agent_id and str(mgr.workspace.root_path or "") == root
+    ]
+    for mgr in owned:
+        try:
+            await mgr.close()
+        except Exception as e:
+            logger.warning(f"close memory manager for {agent_id} failed: {e}")
+    return len(owned)
 
 
 async def aclose_memory_manager_cache() -> None:

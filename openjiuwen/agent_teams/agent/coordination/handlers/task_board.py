@@ -155,6 +155,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
             # dispatch loop. Same exception discipline as
             # ``MessageHandler._notify_human_agent_inbound``.
             title = ""
+            task = None
             try:
                 task = await self._infra.task_manager.get(payload.task_id)
                 if task is not None:
@@ -205,6 +206,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
             is_self_human,
         )
         await self._round.deliver_input(content)
+        if task is not None:
+            # The notice carried the task body (a human reads it on its own
+            # screen): that revision is now seen (F_129).
+            await self._infra.task_manager.observe_revision(task.task_id, int(task.revision or 0))
 
     async def _notify_passive_assignment(self, payload) -> None:
         """Relay a foreign claim targeting a passive human member as a bus message.
@@ -325,13 +330,16 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._round.deliver_input(content)
 
     async def on_task_updated(self, event: EventMessage) -> None:
-        """A task's content was edited; tell its assignee to re-read if me.
+        """A task's content was edited; if it is mine, have my notice tracker speak now.
 
-        ``member_name`` carries the current owner (the task stays CLAIMED on
-        edit). When it targets self, steer the member to re-read the revised
-        content via view_task and continue — it keeps the task. For any other
-        member, fall through to the board handler (leader observes; an edit
-        does not grow the claimable pool, so teammates are not nudged).
+        ``member_name`` carries the current owner (the task keeps its owner on
+        edit). When it targets self, the member is told through its task notice
+        tracker — the one source of the edit notice (F_129), which renders the
+        revision range and the edit notes and asks it to re-read the task. This
+        event only asks for that notice early; it renders nothing itself, so
+        the notice can never arrive twice. For any other member, fall through
+        to the board handler (leader observes; an edit does not grow the
+        claimable pool, so teammates are not nudged).
 
         A human-agent's claimed task is leader-immutable (edit is refused
         upstream), so an update never targets a human avatar — no HITT branch.
@@ -344,17 +352,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
             await self.on_task_board_event(event)
             return
         await self._poll.resume_polls()
-        content = render_event(
-            kind="task-updated",
-            body=t("dispatcher.task_content_updated_to_self", task_id=payload.task_id),
-            task_id=payload.task_id,
-        )
         team_logger.info(
             "[{}] received TASK_UPDATED for self, task_id={}",
             member_name,
             payload.task_id,
         )
-        await self._round.deliver_input(content)
+        await self._round.announce_task_revisions()
 
     async def on_task_plan_decision(self, event: EventMessage) -> None:
         """Notify a member when the leader approves or rejects its plan."""
@@ -689,9 +692,10 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
     event-driven side is therefore only:
 
     * the targeted ownership steers inherited from the base class
-      (``TASK_CLAIMED`` / ``TASK_REVOKED`` / ``TASK_CANCELLED`` /
-      ``TASK_UPDATED`` — the leader's ``update_task`` works the same in both
-      modes), and
+      (``TASK_CLAIMED`` / ``TASK_REVOKED`` / ``TASK_CANCELLED`` — the
+      leader's ``update_task`` works the same in both modes; an edit, in
+      contrast, reaches the assignee as the scheduler's revision mail,
+      F_129), and
     * keeping periodic polling alive on board churn.
 
     The verify-gate self-steers and the idle-agent board surveys of the base
@@ -710,6 +714,11 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         TeamEvent.TASK_SUBMITTED_FOR_REVIEW: "on_task_board_event",
         TeamEvent.TASK_VERIFIED: "on_task_board_event",
         TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
+        # An edited task reaches its assignee as the scheduler's revision mail
+        # carrying the new content (F_129); a "re-read and continue" steer next
+        # to it would double-deliver, and would send a suspended parent's
+        # owner back to work on the parent.
+        TeamEvent.TASK_UPDATED: "on_task_board_event",
     }
 
     # No claimable pool here: a member that loses a task waits for the next

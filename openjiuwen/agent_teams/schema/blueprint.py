@@ -250,6 +250,15 @@ class TeamAgentSpec(BaseModel):
     """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
+    agent_group_name: Optional[str] = None
+    """Name of the AgentGroup this team was assembled from, if any.
+
+    Set by the host that seeds ``predefined_members`` / ``agents[<member>]``
+    from an AgentGroup package. ``spawn_expert`` uses it to spawn further
+    instances of a bound member from the team's own assembled spec (its
+    ``agents[<member>].agent_template_spec`` and predefined persona) instead
+    of re-reading the package from disk.
+    """
     external_cli_agents: list[ExternalCliAgentSpec] = []
     """Static launch configs for external CLI agents (claudecode / codex / ...).
 
@@ -361,6 +370,54 @@ class TeamAgentSpec(BaseModel):
     reviewer). The reviewer machinery itself (column, guards, voting) is
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
+    """
+    enable_member_messaging: bool = False
+    """Let scheduled-dispatch members message each other directly.
+
+    Scheduled dispatch narrows a member's ``send_message`` to the leader and
+    the user, so the leader routes every exchange. When True, members keep
+    the full reach an autonomous member has — point-to-point, multicast and
+    broadcast to peers — while ``"leader"`` stays a valid role recipient.
+    Prompts and the tool description follow the same flag. Static
+    configuration; ignored under ``dispatch_mode="autonomous"``, where
+    members already reach each other. See F_126.
+    """
+    max_subtask_depth: int = Field(default=0, ge=0)
+    """Let scheduled-dispatch members split their task into subtasks.
+
+    ``0`` (default) keeps ``create_task`` leader-only. A positive value gives
+    scheduled members a ``create_task`` that parks their executing task at
+    ``BLOCKED`` until the new subtasks finish, and caps how deep subtasks may
+    nest (a leader task is depth 0, its subtasks depth 1, ...). Static
+    configuration, no ``build_team`` override; ignored under
+    ``dispatch_mode="autonomous"``. See F_128.
+    """
+    bootstrap_mode: Literal["leader", "framework"] = "leader"
+    """Who materializes the team row, and how the leader receives its policy.
+
+    ``"leader"`` (default): the leader calls the ``build_team`` tool, which
+    creates the team and discloses the collaboration policy in its result
+    (F_76). ``"framework"``: the leader's coordination kernel builds the team
+    itself on ``start()`` when no team row exists yet, the leader's tool set
+    carries no ``build_team``, and the policy reaches the leader through the
+    ``TeamContextTracker`` as a ``<team-policy>`` block ahead of its first
+    input. Only valid together with ``dispatch_mode="scheduled"`` — the
+    task-driven handoffs are what make a pre-built, memberless team usable.
+    See F_122.
+    """
+    team_display_name: str | None = None
+    """Team label written to the team row by a framework bootstrap.
+
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``, where the leader names the
+    team in its ``build_team`` call.
+    """
+    team_desc: str | None = None
+    """Team description written to the team row by a framework bootstrap.
+
+    Lands in ``team_card.md`` and in the team info every member reads.
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``.
     """
     default_max_review_rounds: int = 3
     """Default per-task review-round ceiling (scheduled dispatch).
@@ -716,6 +773,23 @@ class TeamAgentSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_bootstrap_mode(self) -> "TeamAgentSpec":
+        """Reject a framework bootstrap outside scheduled dispatch (F_122).
+
+        A framework-built team starts with no members; only the scheduling
+        runtime turns ``create_task`` into member handoffs, so under
+        autonomous dispatch the pre-built team would sit idle while its
+        leader lacks the ``build_team`` call that normally hands it the
+        policy. Failing here keeps that combination from ever being built.
+        """
+        if self.bootstrap_mode == "framework" and self.dispatch_mode != "scheduled":
+            raise ValueError(
+                "bootstrap_mode='framework' requires dispatch_mode='scheduled'; "
+                f"got dispatch_mode={self.dispatch_mode!r}",
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_steer_batch_size(self) -> "TeamAgentSpec":
         """Reject a steering batch that would consume nothing (F_78).
 
@@ -812,6 +886,8 @@ class TeamAgentSpec(BaseModel):
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
+            enable_member_messaging=self.enable_member_messaging,
+            max_subtask_depth=self.max_subtask_depth,
             teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,

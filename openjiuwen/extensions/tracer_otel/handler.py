@@ -329,17 +329,21 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
     otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
     otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
-    # Streaming / reasoning latency. first_token_time is declared on
-    # UsageMetadata (no producer yet — parsed whenever it carries a number);
-    # the *_ms keys are schema-transparent: raw-dict callers and future
-    # UsageMetadata fields flow through unchanged. All parses are guarded —
-    # a malformed value skips its attribute; it must never raise and abort
-    # the span finalization that follows in on_llm_end.
-    first_token_time = str(usage.get("first_token_time") or "")
-    if first_token_time:
+    # Streaming / reasoning latency. TTFT comes from the semantically explicit
+    # `ttft_seconds` field; `first_token_time` is kept as a **legacy fallback**
+    # only — by contract it is a "first token instant" (timestamp string, same
+    # family as `request_start_time`), so a non-numeric value simply skips the
+    # attribute. The *_ms keys are schema-transparent: raw-dict callers and
+    # future UsageMetadata fields flow through unchanged. All parses are
+    # guarded — a malformed value skips its attribute; it must never raise and
+    # abort the span finalization that follows in on_llm_end.
+    ttft_seconds = usage.get("ttft_seconds")
+    if ttft_seconds is None:
+        ttft_seconds = usage.get("first_token_time") or ""
+    if ttft_seconds != "":
         try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(first_token_time))
-        except ValueError:
+            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
+        except (TypeError, ValueError):
             pass
     inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:

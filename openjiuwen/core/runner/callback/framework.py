@@ -954,6 +954,8 @@ class AsyncCallbackFramework:
                 ci for ci in self._callbacks[event] if ci.callback != callback_to_remove
             ]
             self._callback_filters.pop(callback_to_remove, None)
+            # Drop stale metrics so statistics/state reflect only live callbacks
+            self._metrics.pop(f"{event}:{getattr(callback_to_remove, '__name__', '')}", None)
 
             if event in self._chains:
                 self._chains[event].remove(callback_to_remove)
@@ -1023,6 +1025,10 @@ class AsyncCallbackFramework:
 
                 # Clear callbacks
                 del self._callbacks[event]
+
+            # Drop metrics recorded for this event so they don't leak after unregister
+            for _k in [k for k in self._metrics if k.split(":", 1)[0] == event]:
+                self._metrics.pop(_k, None)
 
             # Remove chain if exists
             if event in self._chains:
@@ -1782,7 +1788,7 @@ class AsyncCallbackFramework:
             *args: Arguments to pass to hooks
             **kwargs: Keyword arguments to pass to hooks
         """
-        for hook in self._hooks[event][hook_type]:
+        for hook in self._hooks.get(event, {}).get(hook_type, []):
             try:
                 if asyncio.iscoroutinefunction(hook):
                     await hook(*args, **kwargs)

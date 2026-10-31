@@ -827,6 +827,9 @@ def auto_harness_run(
         request = AutoHarnessRunRequest.from_kwargs(kwargs)
         exit_code = asyncio.run(_run_auto_harness(opts, request))
         ctx.exit(exit_code)
+    except (OSError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        ctx.exit(1)
     except KeyboardInterrupt:
         pass
 

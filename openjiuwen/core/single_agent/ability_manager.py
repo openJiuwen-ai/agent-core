@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import traceback
@@ -12,15 +13,29 @@ from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable
 
 import anyio
+import jsonschema
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
+from openjiuwen.core.foundation.tool.base import render_tool_output
+from openjiuwen.core.foundation.tool.client import (
+    ClientTool,
+    ClientToolContext,
+    ClientToolResult,
+    ClientToolStatus,
+    ClientToolUnavailable,
+    as_client_tool_output,
+    client_tool_unavailable_output,
+    default_client_output,
+    is_client_tool,
+)
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
 from openjiuwen.core.session.agent import Session
@@ -37,8 +52,13 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.response import CLIENT_TOOL_INTERRUPT_OWNER, ClientToolRequest
 from openjiuwen.core.session.agent import create_agent_session
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPT_AUTO_CONFIRM_KEY,
+    RESUME_INTERRUPT_ANSWERS_KEY,
+    InterruptAnswer,
+)
 from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 
 # Ability type definition
@@ -571,7 +591,7 @@ class AbilityManager:
     def _resolve_call_timeout(
             tool_card: Optional[ToolCard],
     ) -> Optional[float]:
-        """Resolve the per-call timeout for ``tool.invoke``.
+        """Resolve the card-level fallback budget for ``tool.invoke``.
 
         Override order:
 
@@ -582,12 +602,10 @@ class AbilityManager:
 
         ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
         is retried on failure is owned by ``ToolCallResilienceRail``; the
-        call-level timeout applies uniformly. An exempt (``None``) result
-        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
-        site to prevent indefinite hangs.
-
-        Returning ``None`` means the caller passes it to
-        ``anyio.fail_after(None)``, which is a no-op deadline.
+        card-level timeout applies uniformly. At the call site, an exempt
+        (``None``) result falls back to ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT``.
+        The tool's ``get_call_timeout`` hook then resolves the final budget
+        from this fallback and the invocation inputs.
         """
         properties = getattr(tool_card, "properties", None) if tool_card else None
         if not isinstance(properties, dict):
@@ -605,6 +623,22 @@ class AbilityManager:
         except (TypeError, ValueError):
             return DEFAULT_TOOL_CALL_TIMEOUT
         return value if value > 0 else None
+
+    @staticmethod
+    def _resolve_invocation_timeout(
+            tool: Any,
+            tool_args: Any,
+            default_timeout: float,
+    ) -> float:
+        """Apply the tool's input-aware ``get_call_timeout`` hook to the card budget.
+
+        ``Runner.resource_mgr`` may hand back any object exposing ``invoke``
+        (third-party or duck-typed tools); only ``Tool`` subclasses carry the
+        hook, so everything else keeps the card-level budget unchanged.
+        """
+        if not isinstance(tool, Tool):
+            return default_timeout
+        return tool.get_call_timeout(tool_args, default_timeout=default_timeout)
 
     @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
@@ -1133,14 +1167,14 @@ class AbilityManager:
                     ctx.steering_queue
                 )
             tool_contexts.append(tool_ctx)
-            call_coros.append(
-                self._railed_execute_single_tool_call(
-                    ctx=tool_ctx,
-                    tool_call=single_tool_call,
-                    session=session,
-                    tag=tag,
-                )
+            # An answered client call passed its before_tool_call rails when it paused.
+            answered_client_call = is_client_tool(self._tools.get(single_tool_call.name)) and (
+                self._client_answer(tool_ctx, single_tool_call) is not None
             )
+            execute_call = (
+                self._finish_client_tool_call if answered_client_call else self._railed_execute_single_tool_call
+            )
+            call_coros.append(execute_call(ctx=tool_ctx, tool_call=single_tool_call, session=session, tag=tag))
 
         results = []
         scheduled_tasks: List[asyncio.Task] = []
@@ -1341,12 +1375,16 @@ class AbilityManager:
             if ctx.inputs.tool_args is not None:
                 tool_call.arguments = ctx.inputs.tool_args
 
-        result, tool_msg = await self._execute_single_tool_call(
-            tool_call=tool_call,
-            session=session,
-            tag=tag,
-            callback_context=ctx,
-        )
+        if is_client_tool(self._tools.get(tool_call.name)):
+            # Every before_tool_call rail let the call through: hand it to the client.
+            result, tool_msg = await self._pause_client_tool_call(ctx, tool_call, session, tag)
+        else:
+            result, tool_msg = await self._execute_single_tool_call(
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+                callback_context=ctx,
+            )
 
         if isinstance(ctx.inputs, ToolCallInputs):
             ctx.inputs.tool_call = tool_call
@@ -1356,6 +1394,119 @@ class AbilityManager:
             ctx.inputs.tool_msg = tool_msg
 
         return result, tool_msg
+
+    async def _pause_client_tool_call(
+            self,
+            ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+    ) -> Tuple[Any, ToolMessage]:
+        """Pause a client tool call with a ``client_tool`` interrupt carrying its final arguments.
+
+        Arguments that do not match the card's input schema end the call with
+        a tool error naming the failing JSON path, so the client only ever
+        receives valid input. ``build_request`` can refuse the call with
+        ``ClientToolUnavailable``, which ends the call with that tool error
+        instead.
+        """
+        try:
+            arguments, repaired_arguments = self._parse_tool_arguments_with_repair(tool_call.arguments)
+        except ValueError as exc:
+            raise self._build_execution_error(tool_call, str(exc)) from exc
+        if repaired_arguments is not None:
+            tool_call.arguments = repaired_arguments
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise self._build_execution_error(
+                tool_call, f"Client tool '{tool_call.name}' arguments must be a JSON object"
+            )
+        card = self._tools[tool_call.name]
+        schema = card.input_params if isinstance(card.input_params, dict) else SchemaUtils.get_schema_dict(
+            card.input_params
+        )
+        try:
+            jsonschema.validate(arguments, schema)
+        except jsonschema.ValidationError as exc:
+            raise self._build_execution_error(
+                tool_call, f"Client tool '{tool_call.name}' arguments are invalid at {exc.json_path}: {exc.message}"
+            ) from exc
+
+        client_request: Dict[str, Any] = {}
+        client_tool = self._client_tool(card, tag)
+        if client_tool is not None:
+            context = ClientToolContext(tool_call=tool_call, session=session, agent=ctx.agent, callback_context=ctx)
+            try:
+                client_request = await _maybe_await(client_tool.build_request(arguments, context))
+            except ClientToolUnavailable as exc:
+                logger.info("Client tool '%s' (%s) not sent to the client: %s", tool_call.name, tool_call.id, exc)
+                output = client_tool_unavailable_output(exc)
+                return output, ToolMessage(
+                    content=self._render_tool_result(client_tool, tool_call, output),
+                    tool_call_id=tool_call.id,
+                )
+        request = ClientToolRequest(
+            message=f"Run `{tool_call.name}` on the client and send back its result.",
+            payload_schema=ClientToolResult.model_json_schema(),
+            tool_name=tool_call.name,
+            arguments=arguments,
+            client_request=client_request,
+        )
+        raise ToolInterruptException(request=request, tool_call=tool_call)
+
+    @rail(after=AgentCallbackEvent.AFTER_TOOL_CALL, on_exception=AgentCallbackEvent.ON_TOOL_EXCEPTION)
+    async def _finish_client_tool_call(
+            self,
+            ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+    ) -> Tuple[Any, ToolMessage]:
+        """Finish a paused client tool call with the client's answer.
+
+        Its ``before_tool_call`` rails ran when the call paused and do not run
+        again: like a server tool that was already running when a rule
+        changed, the call keeps its result and the rule applies to later
+        calls. ``after_tool_call`` sees the result, success or failure. Plain
+        text sent instead of an answer cancels the call so the conversation
+        can go on.
+        """
+        answer = self._client_answer(ctx, tool_call)
+        if answer.unaddressed:
+            result = ClientToolResult(
+                status=ClientToolStatus.CANCELLED,
+                content=f"The user sent a message instead: {answer.value}",
+            )
+        else:
+            result = ClientToolResult.coerce(answer.value)
+
+        client_tool = self._client_tool(self._tools[tool_call.name], tag)
+        if client_tool is not None:
+            context = ClientToolContext(tool_call=tool_call, session=session, agent=ctx.agent, callback_context=ctx)
+            # Complete with the arguments the client was asked to run.
+            raw_output = await _maybe_await(client_tool.complete(answer.request.arguments, result, context))
+            output = as_client_tool_output(raw_output, result, tool_name=tool_call.name)
+            content = self._render_tool_result(client_tool, tool_call, output)
+        else:
+            output = default_client_output(result, tool_name=tool_call.name)
+            content = render_tool_output(output)
+        logger.info("Client tool '%s' (%s) finished: status=%s", tool_call.name, tool_call.id, result.status.value)
+        tool_msg = ToolMessage(content=content, tool_call_id=tool_call.id)
+        ctx.inputs.tool_result = output
+        ctx.inputs.tool_msg = tool_msg
+        return output, tool_msg
+
+    @staticmethod
+    def _client_tool(card: ToolCard, tag=None) -> Optional[ClientTool]:
+        """The ``ClientTool`` behind a client tool card; ``None`` for a card-only client tool."""
+        from openjiuwen.core.runner import Runner
+        tool = Runner.resource_mgr.get_tool(tool_id=card.id or card.name, tag=tag)
+        return tool if isinstance(tool, ClientTool) else None
+
+    @staticmethod
+    def _client_answer(ctx: AgentCallbackContext, tool_call: ToolCall) -> Optional[InterruptAnswer]:
+        return ctx.extra.get(RESUME_INTERRUPT_ANSWERS_KEY, {}).get(tool_call.id, {}).get(CLIENT_TOOL_INTERRUPT_OWNER)
 
     async def _run_workflow(
             self,
@@ -1441,6 +1592,7 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
+                call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
                 invoke_kwargs = {"session": session}
                 # The fixed progressive ``tool_call`` wrapper needs the active
                 # callback context to dispatch its discovered target through
@@ -1579,14 +1731,13 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
-            # Resolve timeout from the tool's own card so non-idempotent
-            # tools are exempt on this path too (Layer 0 reads
-            # ``ToolCard.idempotent``); the name kwarg is no longer used.
+            # Use the same card policy and input-aware budget as registered tools.
             call_timeout = self._resolve_call_timeout(tool.card)
             # Global hard limit: even exempt tools (None) get a ceiling.
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
+                call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
                 with anyio.fail_after(call_timeout):
                     result = await tool.invoke(tool_args, session=session)
             except TimeoutError as e:
@@ -1643,3 +1794,9 @@ class AbilityManager:
             if tool_name.startswith(model_prefix):
                 return mcp_server.server_id, tool_name.removeprefix(model_prefix)
         return None
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value

@@ -252,8 +252,10 @@ def flatten_filter(xs: Sequence) -> list:
     return out
 
 
-__all__ = [
-    # script-facing primitives (the contract)
+#: Script-facing primitives (the contract). Besides ``from swarmflow import ...``,
+#: the loader pre-binds these into every workflow module's namespace, so a script
+#: that forgets the import still runs instead of dying on a ``NameError``.
+SCRIPT_PRIMITIVES: tuple[str, ...] = (
     "agent",
     "agent_session",
     "human_session",
@@ -274,6 +276,11 @@ __all__ = [
     "budget",
     "compact",
     "flatten_filter",
+)
+
+__all__ = [
+    # script-facing primitives (the contract)
+    *SCRIPT_PRIMITIVES,
     # provider seam (custom engines / tests)
     "Provider",
     "BudgetView",

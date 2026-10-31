@@ -87,3 +87,38 @@ class TestSessionStore:
         assert data["model"] == "gpt-4o"
         assert "created_at" in data
         datetime.fromisoformat(data["created_at"])
+
+
+class TestSessionStoreCorruptFiles:
+    """A single damaged file must not break the /sessions listing."""
+
+    def test_non_object_json_is_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "bad.json").write_text("[]", encoding="utf-8")
+        store = SessionStore(store_dir=tmp_path)
+
+        assert store.list_sessions() == []
+
+    def test_non_utf8_file_is_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "bad.json").write_bytes(b"\xff\xfe")
+        store = SessionStore(store_dir=tmp_path)
+
+        assert store.list_sessions() == []
+
+    def test_wrong_field_types_are_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "bad.json").write_text(
+            '{"session_id": 1, "model": "m", "created_at": "t"}',
+            encoding="utf-8",
+        )
+        store = SessionStore(store_dir=tmp_path)
+
+        assert store.list_sessions() == []
+
+    def test_good_sessions_still_listed_next_to_damaged_ones(self, tmp_path: Path) -> None:
+        store = SessionStore(store_dir=tmp_path)
+        store.new_session("s1", "gpt-4o")
+        store.add_message("user", "hi")
+        (tmp_path / "bad.json").write_text("[]", encoding="utf-8")
+
+        sessions = store.list_sessions()
+
+        assert [session["id"] for session in sessions] == ["s1"]

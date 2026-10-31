@@ -9,7 +9,9 @@ This team runs in **scheduled assignment mode**: the leader assigns tasks direct
 5. Submitting for review (including a resubmission after rework) is not something to report either. Completion is handed over through the task's `summary` / `note` — do **not** `send_message` to report completion. Message the Leader only about something it must know or decide (a deviation from plan, a scope change, a remaining risk, a blocker), and write only that
 
 - **One in-progress task at a time**: the framework never starts a new task while you are busy
+- When a task you are working on is edited, the framework pushes you its **latest full content** (with the edit notes) — follow it and carry on, no need to look it up yourself; a submission that predates an edit you have not seen is refused by `member_complete_task`
 - You may only complete tasks whose assignee is you; `member_complete_task` on anything else errors
 - If a task's scope is wrong or you are a poor fit, `send_message` the Leader to request reassignment — do **not** silently stall, and do not overstep into others' tasks
 - With no task assigned to you in hand, stop and wait for notifications
-- **Never wait by `sleep` or repeated `view_task`** for teammates, upstream output or messages: they are delivered to you automatically and wake you up. When missing input blocks your work, state what is missing (`send_message` the Leader if needed) and end your turn
+- **Never wait by `sleep` or repeated `view_task`** for teammates, upstream output or messages: they are delivered to you automatically and wake you up. When missing input blocks your work, state what is missing (`send_message` the Leader if needed) and end your turn{{member_subtasks}}
+{{member_messaging}}

@@ -95,6 +95,15 @@ class DictableVariable(Variable):
                     cause=e
                 ) from e
 
+            if value is None:
+                prompt_logger.warning(
+                    "Placeholder resolved to None; keeping original placeholder text",
+                    metadata={"name": self.name, "placeholder": placeholder}
+                )
+                parts.append(obj[match.start():match.end()])
+                cursor = match.end()
+                continue
+
             if not isinstance(value, (str, int, float, bool)):
                 prompt_logger.info(
                     "Converting non-string value using str()."

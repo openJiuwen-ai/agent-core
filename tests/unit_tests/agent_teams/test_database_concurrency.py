@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked, retry_on_transient
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -445,6 +445,118 @@ async def test_retry_on_locked_recovers_after_transient_pool_timeout(monkeypatch
     result = await retry_on_locked(op, on_locked_result="fallback", label="test_op")
     assert result == "delivered"
     assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_retries_watchdog_timeout_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``DbSessions`` watchdog ``TimeoutError`` is transient and retried."""
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("DbSessions.write() exceeded the watchdog")
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_caps_watchdog_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each watchdog hit already waited the full watchdog, so it is retried only once.
+
+    Keeps a wedged driver from stalling a caller (e.g. leader activation) for
+    ``_DB_RETRY_ATTEMPTS`` full watchdog periods before the error surfaces.
+    """
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(f"DbSessions.write() exceeded the watchdog (attempt {calls})")
+
+    with pytest.raises(TimeoutError, match=f"attempt {engine_module._WATCHDOG_RETRY_ATTEMPTS}"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == engine_module._WATCHDOG_RETRY_ATTEMPTS
+    assert engine_module._WATCHDOG_RETRY_ATTEMPTS < engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_last_error_after_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike ``retry_on_locked`` there is no fallback: the last error propagates."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise SATimeoutError(f"QueuePool limit reached (attempt {calls})")
+
+    with pytest.raises(SATimeoutError, match=f"attempt {engine_module._DB_RETRY_ATTEMPTS}"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_retries_lock_contention(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``database is locked`` is contention: backing off lets the other writer finish."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("database is locked"))
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_permanent_operational_error_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent ``OperationalError`` is not retried: back-off would only stall every caller."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("disk I/O error"))
+
+    with pytest.raises(OperationalError, match="disk I/O error"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == 1
 
 
 @pytest.mark.asyncio

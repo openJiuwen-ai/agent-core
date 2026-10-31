@@ -1,6 +1,6 @@
 # Agent Teams Workflow（Swarmflow 编排）
 
-用一个 swarmflow 脚本（普通 Python 模块，`META={...}` + `async def run(args)`，用 `agent()`/`parallel()`/`pipeline()`/`phase()` 等原语）声明式编排多 agent 工作流，底层复用 agent_teams 基础设施。设计来龙去脉见 `docs/features/F_27`，运行时契约见 `docs/specs/S_18`。
+用一个 swarmflow 脚本（普通 Python 模块，`META={...}` + `async def run(args)`，用 `agent()`/`parallel()`/`pipeline()`/`phase()` 等原语）声明式编排多 agent 工作流，底层复用 agent_teams 基础设施。设计来龙去脉见 `.agents/agent-docs/features/agent_teams/F_27`，运行时契约见 `.agents/agent-docs/specs/agent_teams/S_18`。
 
 ## 模块地图
 
@@ -27,6 +27,7 @@ workflow/
 │   ├── activity_emitter.py      # 共享 emitter 工厂：truncate_activity_content（ACTIVITY_CONTENT_LIMIT=65536 防护上限 + …(truncated)）+ build_activity_event（结构化 AGENT_ACTIVITY 形状）——worker rail / avatar rail / external runtime 三处共用（F_112）
 │   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）；有 agent_id 的 avatar 挂 SwarmflowActivityRail，活动事件带当前轮 correlation_id（F_112）
 │   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）；workflow_budget 非 None 时同时记 session 级 + per-run 级两层（F_87）
+│   ├── expert_specs.py          # agent_template 专家表：derive_swarmflow_expert_specs（宿主组装进 spec 的绑定团成员）+ BoundGroupExpertLoader / bound_group_expert_loader（spec 里没有的绑定团成员经专家目录按需加载、run 内缓存，调度模式团队从空名册起步时用，F_125 决策 15）；TeamWorkerBackend._gate_agent_template 为 async
 │   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
 │   # StructuredOutputTool 已下沉到 tools/structured_output_tool.py（通用工具，tiny_agent 也复用）；backends/__init__ 仍 re-export
 ├── schema.py            # 4 层 WorkflowRun → PhaseRecord → AgentActivity{agent_id,prompt,activity,outcome}；AGENT_ACTIVITY 按 agent_id 归位（无则回退 label），见 F_112

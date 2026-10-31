@@ -1236,6 +1236,7 @@ async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inli
         (_inline("Bad_Name"), None, "member.Invalid member_name"),
         (_inline(DEV_1), None, "already exists"),
         (_inline("api-dev", "forever"), None, "lifetime"),
+        (_inline("api-dev", isolation="sandbox"), None, "member.isolation must be 'worktree'"),
         ({"member_name": "api-dev", "display_name": "x", "lifetime": "shutdown"}, None, "member.desc"),
     ],
 )
@@ -1280,6 +1281,59 @@ async def test_scheduled_create_task_rolls_back_inline_members_when_graph_fails(
     assert not await backend.member_exists("m-a")
     assert not await backend.member_exists("m-b")
     assert await backend.task_manager.get("a") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_inline_member_takes_worktree_isolation(db):
+    """``isolation`` reaches the roster row exactly as spawn_teammate's does, validator included."""
+    from openjiuwen.agent_teams.tools.member_options import get_member_worktree
+
+    validate = AsyncMock()
+    backend = TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        dispatch_mode="scheduled",
+        validate_worktree_isolation=validate,
+    )
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+    member_schema = create_task.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]
+    assert member_schema["properties"]["isolation"]["enum"] == ["worktree"]
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "t1", "title": "t", "content": "c", "member": _inline("api-dev", isolation="worktree")},
+                {"task_id": "t2", "title": "t", "content": "c", "member": _inline("doc-dev")},
+            ]
+        }
+    )
+
+    assert result.success, result.error
+    validate.assert_awaited_once_with("api-dev")
+    assert get_member_worktree(await db.member.get_member("api-dev", TEAM_NAME)).isolation == "worktree"
+    assert get_member_worktree(await db.member.get_member("doc-dev", TEAM_NAME)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_scheduled_create_task_inline_isolation_fails_without_worktree_support(db):
+    """No validator means no worktree support: the batch fails and leaves nothing behind."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    node = {"task_id": "t1", "title": "t", "content": "c", "member": _inline("api-dev", isolation="worktree")}
+    result = await create_task.invoke({"tasks": [node]})
+
+    assert not result.success
+    assert "worktree isolation is unavailable" in result.error
+    assert not await backend.member_exists("api-dev")
+    assert await backend.task_manager.get("t1") is None
 
 
 @pytest.mark.asyncio
@@ -1429,3 +1483,45 @@ async def test_shutdown_member_lifetime_prose_follows_dispatch_mode(db, lang):
     assert "{{" not in autonomous
     assert "DORMANT" in scheduled
     assert "lifetime=dormant" in scheduled
+
+
+# ---------------------------------------------------------------------------
+# Framework bootstrap drops build_team (F_122)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_drops_build_team_for_the_leader(db):
+    """A framework-built team already exists: the leader holds no ``build_team``."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    leader_default = _tool_names(create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled"))
+    leader_framework = _tool_names(
+        create_team_tools(
+            role="leader",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert "build_team" in leader_default
+    assert "build_team" not in leader_framework
+    # Only build_team goes; the rest of the leader surface is untouched.
+    assert leader_default - leader_framework == {"build_team"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_leaves_member_tools_alone(db):
+    """Members never had ``build_team``; the bootstrap mode does not touch their set."""
+    backend = _backend(db, DEV_1, False, dispatch_mode="scheduled")
+    default = _tool_names(create_team_tools(role="teammate", agent_team=backend, dispatch_mode="scheduled"))
+    framework = _tool_names(
+        create_team_tools(
+            role="teammate",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert default == framework

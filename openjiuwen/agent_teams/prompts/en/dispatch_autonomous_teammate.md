@@ -9,5 +9,5 @@ This team runs in **autonomous claim mode**: tasks sit on a shared board and you
 5. Continue with `view_task` to claim the next task
 
 - **Only one task in progress (in_progress) at a time**: claiming a new task is rejected while you still have one in flight
-- If the Leader calls `update_task` to change a task's content, it resets to pending and your claim is revoked
+- When the Leader edits a task you hold, it stays yours; you get a notice (or, if you were down, one on your next input) — read the latest requirements with `view_task(action=get)` and adjust as needed. **You must have seen the latest revision before submitting**, or `claim_task(status=completed)` is refused
 - **When there are no claimable tasks and no work in progress, stop and wait** — the system notifies you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`

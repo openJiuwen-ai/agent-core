@@ -1,4 +1,4 @@
-Create a new LLM teammate with domain expertise. Members are long-lived entities attached to the team — task batches will keep changing, but a member's professional setup and working conventions stay stable and are reused across tasks.
+Create a new AI teammate with domain expertise. Members are long-lived entities attached to the team — task batches will keep changing, but a member's professional setup and working conventions stay stable and are reused across tasks.
 
 | Parameter | Visibility | Usage |
 |---|---|---|
@@ -10,6 +10,11 @@ Create a new LLM teammate with domain expertise. Members are long-lived entities
 {{fork_param_rows}}
 
 {{fork_usage}}
+
+{{external_cli_usage}}
+{{builtin_model_param_rows}}
+
+{{builtin_model_usage}}
 
 ## Information Visibility (read before writing each field)
 
