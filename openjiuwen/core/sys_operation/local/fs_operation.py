@@ -269,6 +269,17 @@ class FsOperation(BaseFsOperation):
             async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
                 if mode == "bytes":
                     final_content = await self._read_bytes(file_path, validated_params.chunk_size)
+                elif (
+                        validated_params.head is None
+                        and validated_params.tail is None
+                        and validated_params.line_range is None
+                ):
+                    # Whole-file read: one executor round trip and no per-line
+                    # generator bookkeeping, which keeps multi-MB reads fast
+                    # even when the event loop is congested.
+                    final_content = await FsOperation._read_full_text(
+                        file_path, validated_params.encoding
+                    )
                 else:
                     # Line-based operations - lines already contain original line endings
                     lines = []
@@ -1399,16 +1410,12 @@ class FsOperation(BaseFsOperation):
         if start <= 0 or end <= 0 or start > end:
             return
 
-        current_line = 1
-
         async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
             content = await f.read()
-            for line in content.splitlines(True):
-                if current_line >= start and current_line <= end:
-                    yield line
-                elif current_line > end:
-                    break
-                current_line += 1
+        # splitlines() and slicing run in C; iterating the same lines with a
+        # Python counter would dominate the cost on large files.
+        for line in content.splitlines(True)[start - 1:end]:
+            yield line
 
     @staticmethod
     async def _read_tail(
@@ -1485,6 +1492,12 @@ class FsOperation(BaseFsOperation):
             yield line
 
     @staticmethod
+    async def _read_full_text(file_path: pathlib.Path, encoding: str) -> str:
+        """Read the whole file with a single executor round trip."""
+        async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
+            return await f.read()
+
+    @staticmethod
     async def _read_full(file_path: pathlib.Path, encoding: str):
         """
         Read the full file as a generator.
@@ -1497,8 +1510,13 @@ class FsOperation(BaseFsOperation):
             Lines from the file (with original line endings)
         """
         async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
-            async for line in f:
-                yield line
+            # Single executor round trip: read the whole file in one go and
+            # split in memory. Iterating aiofiles line-by-line crosses into
+            # the thread pool once per line, which turns a multi-MB read into
+            # tens of seconds and lets event-loop congestion multiply it.
+            content = await f.read()
+        for line in content.splitlines(True):
+            yield line
 
     @staticmethod
     async def _read_text_content(read_params: _ReadParams):
