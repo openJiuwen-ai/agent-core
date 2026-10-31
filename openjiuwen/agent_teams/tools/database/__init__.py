@@ -206,6 +206,17 @@ class TeamDatabase:
             except Exception as e:
                 team_logger.warning("Background WAL checkpoint failed: %s", e)
 
+    @property
+    def sessions(self) -> Optional[DbSessions]:
+        """Return the shared ``DbSessions`` (one write lock) once initialized.
+
+        Other stores on this database (e.g. organization tables) must reuse
+        this provider instead of building their own ``DbSessions``: a second
+        instance carries a second write lock, so its writes would race the
+        DAO writes for the small write pool.
+        """
+        return self._sessions
+
     async def create_cur_session_tables(self) -> None:
         """Create dynamic tables for current session.
 
@@ -299,6 +310,7 @@ class TeamDatabase:
             self.read_engine = None
             self.session_local = None
             self.read_session_local = None
+            self._sessions = None
             self._initialized = False
             self.team = None
             self.member = None

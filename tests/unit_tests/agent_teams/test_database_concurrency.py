@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked, retry_on_transient
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -445,6 +445,47 @@ async def test_retry_on_locked_recovers_after_transient_pool_timeout(monkeypatch
     result = await retry_on_locked(op, on_locked_result="fallback", label="test_op")
     assert result == "delivered"
     assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_retries_watchdog_timeout(monkeypatch) -> None:
+    """A ``DbSessions`` watchdog ``TimeoutError`` is transient and retried."""
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < engine_module._DB_RETRY_ATTEMPTS:
+            raise TimeoutError("DbSessions.write() exceeded the watchdog")
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_last_error_after_exhaustion(monkeypatch) -> None:
+    """Unlike ``retry_on_locked`` there is no fallback: the last error propagates."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise SATimeoutError(f"QueuePool limit reached (attempt {calls})")
+
+    with pytest.raises(SATimeoutError, match=f"attempt {engine_module._DB_RETRY_ATTEMPTS}"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == engine_module._DB_RETRY_ATTEMPTS
 
 
 @pytest.mark.asyncio

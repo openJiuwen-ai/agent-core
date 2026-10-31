@@ -182,3 +182,99 @@ async def test_ensure_org_task_columns_normalizes_legacy_terminal_statuses():
     assert data["t-cancelled"] == ("FAILED", "CANCELLED", 10)
     assert data["t-expired"] == ("FAILED", "EXPIRED", 20)
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_org_db_context_reuses_team_database_sessions():
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    sessions = await OrgDbContext(db).initialize()
+    # One provider (one write lock) for org + DAO writes; a second DbSessions
+    # would race the DAO writes for the small write pool.
+    assert sessions is db.sessions
+    assert await OrgDbContext(db).initialize() is sessions
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_org_static_ddl_waits_for_team_database_write_lock(tmp_path):
+    import asyncio
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db")))
+    await db.initialize()
+    assert db.sessions is not None
+
+    async with db.sessions.write():
+        pending = asyncio.create_task(OrgDbContext(db).initialize())
+        # Let the task run until it blocks; it must block on the held write
+        # lock, not finish the DDL through a second write-pool connection.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not pending.done()
+        async with db.read_engine.connect() as conn:
+            table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+        assert "org_info" not in table_names
+    assert await asyncio.wait_for(pending, timeout=5) is db.sessions
+    async with db.read_engine.connect() as conn:
+        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+    assert "org_info" in table_names
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_team_database_close_drops_shared_sessions():
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await db.initialize()
+    stale = db.sessions
+    assert stale is not None
+    await db.close()
+    # A provider bound to the disposed engine must not leak out of close().
+    assert db.sessions is None
+    await db.initialize()
+    assert db.sessions is not None and db.sessions is not stale
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_find_organization_ids_runs_static_ddl_once_per_database(monkeypatch):
+    from openjiuwen.agent_teams.organization import db as org_db
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    calls: list[int] = []
+    original = org_db.ensure_org_static_tables
+
+    def tracked_ensure_org_static_tables(sync_conn) -> None:
+        calls.append(1)
+        original(sync_conn)
+
+    monkeypatch.setattr(org_db, "ensure_org_static_tables", tracked_ensure_org_static_tables)
+    # Each lookup builds a fresh OrgDbContext (team.list polling path); the
+    # schema check must not rerun per call.
+    for _ in range(3):
+        assert await OrgTaskManager.find_organization_ids_for_team(db, "team-a") == []
+    assert len(calls) == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_org_static_ddl_reruns_after_database_reinitialize(monkeypatch):
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    calls: list[int] = []
+    original = org_db.ensure_org_static_tables
+
+    def tracked_ensure_org_static_tables(sync_conn) -> None:
+        calls.append(1)
+        original(sync_conn)
+
+    monkeypatch.setattr(org_db, "ensure_org_static_tables", tracked_ensure_org_static_tables)
+    await OrgDbContext(db).initialize()
+    await db.close()
+    # A reinitialized :memory: database is empty, so the schema must be rebuilt.
+    await OrgDbContext(db).initialize()
+    assert len(calls) == 2
+    async with db.engine.connect() as conn:
+        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+    assert "org_info" in table_names
+    await db.close()

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import weakref
 from typing import Any
 
 from sqlalchemy import inspect
@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.organization.schema import (
     org_static_tables,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
-from openjiuwen.agent_teams.tools.database.engine import DbSessions
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_transient
 
 _ORG_TASK_NEW_COLUMNS = (
     ("aggregation_json", "TEXT"),
@@ -77,29 +77,65 @@ def _ensure_org_summary_execution_columns(sync_conn) -> None:
         sync_conn.exec_driver_sql("ALTER TABLE org_summary_execution ADD COLUMN updated_at BIGINT NOT NULL DEFAULT 0")
 
 
+# ``DbSessions`` providers whose database already has the org static schema.
+# Keyed by the provider rather than the ``TeamDatabase``: ``close()`` +
+# ``initialize()`` builds a fresh provider over a fresh engine (a new
+# ``:memory:`` database has no tables), so the mark must not survive it.
+_ORG_SCHEMA_READY: weakref.WeakSet[DbSessions] = weakref.WeakSet()
+
+
+async def _ensure_org_schema(sessions: DbSessions) -> None:
+    """Create / migrate the org static tables once per ``DbSessions``.
+
+    The DDL runs inside ``sessions.write()`` so it serialises with every DAO
+    write of the same ``TeamDatabase``. A bare ``engine.begin()`` bypassed that
+    lock: concurrent org lookups (``team.list`` polling, leader activation)
+    each held a write-pool connection while parked on the SQLite file lock and
+    exhausted the 2-connection pool (``QueuePool limit of size 2``).
+
+    Must not be called from inside an open ``sessions.write()`` block: the
+    write lock is non-reentrant, so the first call on a fresh database would
+    deadlock. Org stores call ``initialize()`` before opening their writes.
+    Transient errors are retried; once the budget is spent the last error is
+    raised, since org reads and writes cannot work without these tables.
+    """
+    if sessions in _ORG_SCHEMA_READY:
+        return
+
+    async def _ddl_once() -> None:
+        async with sessions.write() as session:
+            # Re-check under the lock: a writer queued ahead may have done it.
+            if sessions in _ORG_SCHEMA_READY:
+                return
+            conn = await session.connection()
+            await conn.run_sync(ensure_org_static_tables)
+            await session.commit()
+        _ORG_SCHEMA_READY.add(sessions)
+
+    await retry_on_transient(_ddl_once, label="ensure_org_static_tables")
+
+
 class OrgDbContext:
     """Shared org DB bootstrap for task pool and message service."""
 
     def __init__(self, db: TeamDatabase) -> None:
         self.db = db
         self._sessions: DbSessions | None = None
-        self._initialized = False
-        self._init_lock = asyncio.Lock()
 
     async def initialize(self) -> DbSessions:
-        if self._initialized and self._sessions is not None:
-            return self._sessions
-        async with self._init_lock:
-            if self._initialized and self._sessions is not None:
-                return self._sessions
-            await self.db.initialize()
-            if self.db.session_local is None or self.db.engine is None:
-                raise RuntimeError("TeamDatabase is not initialized")
-            self._sessions = DbSessions(self.db.session_local, self.db.read_session_local)
-            async with self.db.engine.begin() as conn:
-                await conn.run_sync(ensure_org_static_tables)
-            self._initialized = True
-            return self._sessions
+        """Bind to the database's shared ``DbSessions`` and ensure the org schema.
+
+        Reuses ``TeamDatabase.sessions`` instead of building a second provider:
+        a second ``DbSessions`` carries a second write lock, so org writes would
+        race the DAO writes for the same small write pool.
+        """
+        await self.db.initialize()
+        sessions = self.db.sessions
+        if sessions is None:
+            raise RuntimeError("TeamDatabase is not initialized")
+        await _ensure_org_schema(sessions)
+        self._sessions = sessions
+        return sessions
 
     @property
     def sessions(self) -> DbSessions:

@@ -52,6 +52,10 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与
   DAO 写同锁串行；经 `engine.begin()` 直连会绕过锁、并发 bind 占满写池（F_83）。
   DROP 路径（`drop_cur_session_tables`）暂未收编，见 F_83 已知遗留。
+  **同库的其它存储也复用这一个 provider**：组织层 `OrgDbContext` 经
+  `TeamDatabase.sessions` 拿到同一个 `DbSessions`，`org_*` 静态表 DDL 在 `write()` 内执行、
+  每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，写操作会和 DAO 写争池
+  （B_20261031_1134_org-ddl-bypasses-write-lock）。
 - **PRAGMA（`engine.py` `_attach_sqlite_pragmas`）** —— 文件后端 SQLite 跑
   `journal_mode=WAL`（数据库级，首次连接时设一次）+ `synchronous=NORMAL` +
   `wal_autocheckpoint`（连接级，每次连接都设）。NORMAL 是安全、高吞吐的 WAL 搭配；

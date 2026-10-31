@@ -9,14 +9,14 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 272 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 273 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 199 |
+| [agent_teams](#module-2) | 200 |
 | [agent_teams/workflow](#module-3) | 15 |
 | [extensions/observability](#module-4) | 2 |
 | [harness](#module-5) | 54 |
@@ -204,6 +204,7 @@ generated: true
 | [B_08_single-branch-worktree-startup-failure](bugfix/agent_teams/B_08_single-branch-worktree-startup-failure.md) | B | 单分支仓库的 worktree 基线失效导致调查成员未启动 | MengHan18 | openjiuwen/agent_teams | — | 待核实 |
 | [B_09_all-done-prompt-stalls-remaining-work](bugfix/agent_teams/B_09_all-done-prompt-stalls-remaining-work.md) | B | 看板清空的收尾提示让 leader 停止建任务，且之后再清空不再提示 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [B_10_task-assigned-to-retired-member-stalls](bugfix/agent_teams/B_10_task-assigned-to-retired-member-stalls.md) | B | 任务派给已退役的任务级成员后整夜无人执行 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
+| [B_20261031_1134_org-ddl-bypasses-write-lock](bugfix/agent_teams/B_20261031_1134_org-ddl-bypasses-write-lock.md) | B | 组织表 DDL 绕过写锁导致团队激活写池耗尽 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/organization/db.py, openjiuwen/agent_teams/tools/database/__init__.py, openjiuwen/agent_teams/tools/database/engine.py, tests/unit_tests/agent_teams/organization/test_org_db.py, tests/unit_tests/agent_teams/test_database_concurrency.py | 无独立 D：普通缺陷修复，沿用 F_83（DDL 走写锁）与 tools/AGENTS.md「数据库并发」的既有契约，无独立设计 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | openjiuwen/agent_teams | — | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | openjiuwen/agent_teams | — | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | openjiuwen/agent_teams | — | — |

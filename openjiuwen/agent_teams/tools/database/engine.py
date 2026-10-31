@@ -196,6 +196,48 @@ async def retry_on_locked(
     return on_locked_result
 
 
+async def retry_on_transient(
+    op: Callable[[], Awaitable[_T]],
+    *,
+    label: str,
+) -> _T:
+    """Run a write ``op`` with back-off on transient DB errors, raising on exhaustion.
+
+    Same back-off as ``retry_on_locked`` but for callers that cannot degrade:
+    retries ``OperationalError`` / ``SATimeoutError`` *plus* the
+    ``DbSessions.write()`` watchdog ``TimeoutError`` (as
+    ``create_cur_session_tables`` does), and re-raises the last error once
+    the budget is spent instead of returning a fallback value.
+
+    Args:
+        op: Zero-arg coroutine factory performing one write attempt; it must
+            exit its ``async with write()`` block before returning.
+        label: Human-readable operation name for logs.
+
+    Returns:
+        The ``op`` result.
+    """
+    transient = (OperationalError, SATimeoutError, TimeoutError)
+    for attempt in range(_DB_RETRY_ATTEMPTS - 1):
+        try:
+            return await op()
+        except transient as e:
+            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+            team_logger.warning(
+                "%s hit a transient DB error (%s); retrying in %ss (attempt %d)",
+                label,
+                type(e).__name__,
+                delay,
+                attempt + 1,
+            )
+            await asyncio.sleep(delay)
+    try:
+        return await op()
+    except transient as e:
+        team_logger.error("%s failed after %d attempts: %s", label, _DB_RETRY_ATTEMPTS, e)
+        raise
+
+
 def _get_table_names(sync_conn) -> list[str]:
     """Return all table names currently present in the database."""
     return list(inspect(sync_conn).get_table_names())
