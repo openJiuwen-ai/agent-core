@@ -57,6 +57,7 @@ _AUTO_COMPRESSION_FALLBACK_ERROR_KINDS = {
     CompressionErrorKind.TIMEOUT,
     CompressionErrorKind.SERVER_UNSTABLE,
     CompressionErrorKind.EMPTY_RESPONSE,
+    CompressionErrorKind.UNKNOWN,
 }
 
 
