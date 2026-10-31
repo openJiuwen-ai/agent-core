@@ -141,6 +141,8 @@ def evolve_one_target(
     pairs = replay_batch(backend, train_tasks, board.skill, board.memory)
     fails, wins = split_fail_win(pairs)
     evolve_skill = target == "skill"
+    # 已采纳经验的去重交给 Reflect LLM（prompt 注入 CUR_DOC + 防重复指令），
+    # 生成端再由 dedup.filter_duplicate_edits 做确定性兜底。
     edits = backend.reflect(
         fails,
         wins,
