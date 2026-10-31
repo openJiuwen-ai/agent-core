@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: xinyang_bali
+author_email: 835397263@qq.com
 generated: true
 ---
 
@@ -9,15 +9,15 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 268 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 276 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_evolving/ttse](#module-2) | 1 |
-| [agent_teams](#module-3) | 193 |
+| [agent_evolving/ttse](#module-2) | 3 |
+| [agent_teams](#module-3) | 199 |
 | [agent_teams/workflow](#module-4) | 15 |
 | [extensions/observability](#module-5) | 2 |
 | [harness](#module-6) | 55 |
@@ -38,6 +38,8 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261029_1036_ttse-consult-prerequisites](features/F_20261029_1036_ttse-consult-prerequisites.md) | F | TTSE 经验检索前置提示词约束 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/render.py, openjiuwen/agent_evolving/ttse/consult.py | 无独立 D：根据用户明确要求加强复杂任务及使用 skill 前的经验检索提示词，属于局部提示词调整，无独立设计。 |
+| [F_20261031_1022_ttse-unbounded-bank](features/F_20261031_1022_ttse-unbounded-bank.md) | F | 移除 TTSE 经验库条数上限 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py, tests/unit_tests/agent_evolving/ttse/test_ttse_core.py, tests/unit_tests/agent_evolving/ttse/test_ttse_dream.py, tests/unit_tests/harness/rails/evolution/test_ttse_rail.py | 无独立 D：用户明确要求取消 max_facts 和 max_tips 上限，属于局部配置和写入策略调整，无独立设计。 |
+| [S_01_ttse-bank](specs/agent_evolving/S_01_ttse-bank.md) | S | TTSE 经验库容量与写入契约 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py | — |
 
 <a id="module-3"></a>
 
