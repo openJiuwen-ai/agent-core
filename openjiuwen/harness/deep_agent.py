@@ -66,6 +66,7 @@ from openjiuwen.harness.image_modality_probe import (
     schedule_image_support_probe,
 )
 from openjiuwen.harness.rails import DeepAgentRail
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
@@ -905,6 +906,19 @@ class DeepAgent(BaseAgent):
             react_config.sys_operation_id = cfg.sys_operation.id
 
         react_config.parallel_tool_calls = cfg.parallel_tool_calls
+
+        # Native image input policy: resolve the main model's image capability
+        # at call time so model switches are honored, and carry the per-request
+        # image budget down to the send path (stripping + oldest-image eviction).
+        react_config.image_input_supported_resolver = (
+            lambda: should_enable_read_image_multimodal(self)
+        )
+        react_config.max_image_bytes_per_request = getattr(
+            cfg, "max_image_bytes_per_request", None
+        )
+        react_config.max_images_per_request = getattr(
+            cfg, "max_images_per_request", None
+        )
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)

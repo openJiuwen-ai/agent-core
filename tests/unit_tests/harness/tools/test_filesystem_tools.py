@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import io
 import os
 import base64
 import json
@@ -123,6 +124,63 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "native image multimodal input is disabled" in read_res.data["content"]
 
 
+@pytest.mark.asyncio
+async def test_read_file_image_resolver_overrides_init_flag(sys_op, temp_dir):
+    """运行时 resolver 覆盖 init 值：切模型后 read_file 内联行为跟随模型能力。"""
+
+    file_path = os.path.join(temp_dir, "resolver_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    state = {"enabled": False}
+    read_tool = ReadFileTool(
+        sys_op,
+        enable_image_multimodal=True,
+        image_multimodal_resolver=lambda: state["enabled"],
+    )
+
+    disabled_res = await read_tool.invoke({"file_path": file_path})
+    assert disabled_res.success is True
+    assert disabled_res.data["multimodal"] == []
+    assert "native image multimodal input is disabled" in disabled_res.data["content"]
+
+    state["enabled"] = True
+    enabled_res = await read_tool.invoke({"file_path": file_path})
+    assert enabled_res.success is True
+    assert enabled_res.data["multimodal"][0]["type"] == "image"
+    assert enabled_res.data["multimodal"][0]["data_url"].startswith("data:image/")
+
+
+@pytest.mark.asyncio
+async def test_read_file_image_resolver_failure_falls_back_to_init_flag(
+    sys_op, temp_dir
+):
+    """resolver 抛异常时回退 init 值，read_file 不因此失败。"""
+
+    file_path = os.path.join(temp_dir, "resolver_fail_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    def _broken_resolver():
+        raise RuntimeError("model probe unavailable")
+
+    read_tool = ReadFileTool(
+        sys_op,
+        enable_image_multimodal=True,
+        image_multimodal_resolver=_broken_resolver,
+    )
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+    assert read_res.success is True
+    assert read_res.data["multimodal"][0]["type"] == "image"
+
+
 def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir):
     """Slide→layout→master inheritance：版式/母版上的图片要归属到使用它们的页。"""
     import zipfile as _zipfile
@@ -153,41 +211,25 @@ def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir
     assert "未挂载" not in hint
 
 
-def test_estimate_base64_tokens_matches_actual_encoding():
-    for length in (0, 1, 2, 3, 4, 5, 100, 1000, 123457):
-        data = b"a" * length
-        actual_tokens = max(1, int(len(base64.b64encode(data)) * 0.125))
-        assert ReadFileTool._estimate_base64_tokens(length) == actual_tokens
-
-
-def test_compress_image_does_not_mutate_source():
-    img = Image.new("RGB", (500, 500), color="red")
-    original_size = img.size
-
-    result = ReadFileTool._compress_image(img, size=(100, 100), quality=50)
-
-    assert result is not None
-    assert img.size == original_size, "compression tiers must not mutate the shared source image"
-
-
 @pytest.mark.asyncio
-async def test_read_file_image_compresses_large_image_with_single_decode_and_encode(sys_op, temp_dir):
+async def test_read_file_image_compresses_large_image_within_budget(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
     file_path = os.path.join(temp_dir, "large_noise.png")
 
     # Random noise compresses poorly, guaranteeing the payload busts the
-    # token budget and forces the aggressive-compression fallback tiers.
+    # token budget and forces the shared shrink pipeline to downscale.
     width = height = 1800
     noise = Image.frombytes("RGB", (width, height), os.urandom(width * height * 3))
     noise.save(file_path, format="PNG")
     raw_size = os.path.getsize(file_path)
 
-    with patch("PIL.Image.open", wraps=Image.open) as open_spy, \
-         patch("openjiuwen.harness.tools.filesystem.base64.b64encode", wraps=base64.b64encode) as encode_spy:
+    with patch(
+        "openjiuwen.harness.tools.filesystem.base64.b64encode",
+        wraps=base64.b64encode,
+    ) as encode_spy:
         read_res = await read_tool.invoke({"file_path": file_path})
 
     assert read_res.success is True
-    assert open_spy.call_count == 1, "image bytes must be decoded exactly once"
     assert encode_spy.call_count == 1, "the final payload must be base64-encoded exactly once"
 
     data_url = read_res.data["multimodal"][0]["data_url"]
@@ -195,7 +237,9 @@ async def test_read_file_image_compresses_large_image_with_single_decode_and_enc
     encoded_payload = data_url.split(",", 1)[1]
     decoded = base64.b64decode(encoded_payload)
     assert len(decoded) < raw_size
-    assert ReadFileTool._estimate_base64_tokens(len(decoded)) <= ReadFileTool.MAX_TOKENS
+    assert len(decoded) <= read_tool._image_byte_budget()
+    with Image.open(io.BytesIO(decoded)) as shrunk:
+        assert max(shrunk.size) <= 1536
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,92 @@ from enum import Enum
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.content_sanitize import sanitize_value_for_text
 from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+
+# Summaries must describe images as text: the compression model receives no
+# base64 pixels. A single screenshot priced as text would balloon the summary
+# request by tens of thousands of tokens of noise the summarizer cannot use.
+_SUMMARY_IMAGE_NOTE = (
+    "[Image attached: its visual payload is excluded from this summary request. "
+    "Summarize it from the surrounding text and any image reference lines.]"
+)
+
+_IMAGE_BLOCK_TYPES = ("image", "image_url", "input_image")
+
+
+def _is_image_content_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    block_type = str(block.get("type") or "").strip().lower()
+    if block_type in _IMAGE_BLOCK_TYPES:
+        return True
+    return "image_url" in block or "image" in block
+
+
+def _image_block_summary_text(block: dict) -> str:
+    """Write an image block as text, keeping stamped dimensions when present."""
+
+    width = block.get("width")
+    height = block.get("height")
+    if isinstance(width, int) and width > 0 and isinstance(height, int) and height > 0:
+        return (
+            f"[Image attached ({width}x{height} px): its visual payload is excluded "
+            "from this summary request. Summarize it from the surrounding text and "
+            "any image reference lines.]"
+        )
+    return _SUMMARY_IMAGE_NOTE
+
+
+def _content_images_as_text(content: Any) -> tuple[Any, bool]:
+    """Return content with image blocks/data URLs swapped for text, plus a changed flag."""
+
+    if isinstance(content, str):
+        # Fast bail: a data URL cannot hide in a string without "base64".
+        if "base64" not in content.lower():
+            return content, False
+        sanitized = sanitize_value_for_text(content)
+        return sanitized, sanitized != content
+    if not isinstance(content, list):
+        return content, False
+    parts: list[Any] = []
+    changed = False
+    for block in content:
+        if _is_image_content_block(block):
+            parts.append({"type": "text", "text": _image_block_summary_text(block)})
+            changed = True
+        else:
+            parts.append(block)
+    if not changed:
+        return content, False
+    return parts, True
+
+
+def _message_images_as_text(message: BaseMessage) -> BaseMessage:
+    """Copy *message* with its images written as text; the original stays untouched.
+
+    History keeps its base64 blocks (they are re-used by later vision-capable
+    requests); only the summary request carries the text stand-in.
+    """
+
+    if isinstance(message, dict):
+        new_content, changed = _content_images_as_text(message.get("content"))
+        if not changed:
+            return message
+        clone = dict(message)
+        clone["content"] = new_content
+        return clone
+    new_content, changed = _content_images_as_text(getattr(message, "content", None))
+    if not changed:
+        return message
+    model_copy = getattr(message, "model_copy", None)
+    if callable(model_copy):
+        return model_copy(update={"content": new_content})
+    clone = message.__class__.__new__(message.__class__)
+    clone.__dict__.update(message.__dict__)
+    clone.content = new_content
+    return clone
 
 
 class CompressionErrorKind(str, Enum):
@@ -148,14 +232,18 @@ class CompressionExecutor:
         which is correct for a direct model call.  A ReAct agent receives the
         prompt through ``agent.invoke`` instead, so agent executors need the
         system/context prefix without duplicating the prompt.
+
+        Images are written as text: the summary request carries no base64
+        pixels (bloat for the compression model, unusable as summary input).
+        Message copies are returned; persisted history keeps its image blocks.
         """
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
             keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
             context_messages = context_messages[:keep_count]
         return [
-            *list(request.system_messages or []),
-            *context_messages,
+            _message_images_as_text(message)
+            for message in [*list(request.system_messages or []), *context_messages]
         ]
 
     @staticmethod

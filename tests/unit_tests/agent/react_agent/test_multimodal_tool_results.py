@@ -1,5 +1,8 @@
 # coding: utf-8
 
+from types import SimpleNamespace
+
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -158,3 +161,97 @@ def test_react_agent_does_not_treat_audio_error_as_image_unsupported() -> None:
     exc = RuntimeError("Error code: 400 - Only text and image_url are supported.")
 
     assert ReActAgent._is_image_input_unsupported_error(exc) is False
+
+
+def _img_block(b64: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+
+
+def _txt_block(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def _policy_agent(supported=None, max_bytes=None, max_images=None) -> SimpleNamespace:
+    config = SimpleNamespace(
+        image_input_supported_resolver=(
+            (lambda: supported) if supported is not None else None
+        ),
+        max_image_bytes_per_request=max_bytes,
+        max_images_per_request=max_images,
+    )
+    return SimpleNamespace(_config=config)
+
+
+def test_react_agent_content_block_is_image() -> None:
+    assert ReActAgent._content_block_is_image(_img_block("aaa")) is True
+    assert ReActAgent._content_block_is_image({"type": "image"}) is True
+    assert ReActAgent._content_block_is_image(_txt_block("hi")) is False
+
+
+def test_react_agent_image_block_byte_size() -> None:
+    assert ReActAgent._image_block_byte_size(_img_block("abc")) == 2
+    assert ReActAgent._image_block_byte_size(_txt_block("hi")) == 0
+
+
+def test_react_agent_strips_image_blocks_non_destructively() -> None:
+    message = UserMessage(content=[_txt_block("query"), _img_block("abc")])
+    messages = [message]
+
+    stripped = ReActAgent._strip_image_blocks(messages)
+
+    assert stripped is not messages
+    assert stripped[0].content[0] == _txt_block("query")
+    assert stripped[0].content[1]["type"] == "text"
+    assert "does not support image input" in stripped[0].content[1]["text"]
+    # Original history keeps its base64.
+    assert message.content[1] == _img_block("abc")
+
+
+def test_react_agent_policy_strips_when_model_cannot_see_images() -> None:
+    agent = _policy_agent(supported=False)
+    message = UserMessage(content=[_txt_block("query"), _img_block("abc")])
+
+    result = ReActAgent._apply_image_input_policy(agent, [message])
+
+    assert result[0].content[1]["type"] == "text"
+    assert message.content[1] == _img_block("abc")
+    assert ReActAgent._messages_contain_image_input(result) is False
+
+
+def test_react_agent_policy_keeps_images_when_model_supports_images() -> None:
+    agent = _policy_agent(supported=True)
+    message = UserMessage(content=[_txt_block("query"), _img_block("abc")])
+    messages = [message]
+
+    result = ReActAgent._apply_image_input_policy(agent, messages)
+
+    assert result is messages
+    assert result[0].content[1] == _img_block("abc")
+
+
+def test_react_agent_evicts_oldest_images_over_count_budget() -> None:
+    agent = _policy_agent(max_images=1)
+    message = UserMessage(content=[
+        _txt_block("a"),
+        _img_block("aaa"),
+        _txt_block("b"),
+        _img_block("bbb"),
+    ])
+
+    ReActAgent._evict_images_over_budget(agent, [message])
+
+    assert message.content[1] == {
+        "type": "text",
+        "text": "[image omitted: per-request image budget exceeded]",
+    }
+    assert message.content[3] == _img_block("bbb")
+
+
+def test_react_agent_does_not_evict_within_budget() -> None:
+    agent = _policy_agent(max_images=2)
+    message = UserMessage(content=[_img_block("aaa"), _img_block("bbb")])
+
+    ReActAgent._evict_images_over_budget(agent, [message])
+
+    assert message.content[0] == _img_block("aaa")
+    assert message.content[1] == _img_block("bbb")
