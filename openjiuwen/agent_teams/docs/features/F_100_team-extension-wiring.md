@@ -3,6 +3,7 @@
 - 日期：2026-10-24
 - 范围：`agent_teams/extensions/`（新包）、`extensions/ops_build_handlers/`（平台目录）、`agent_teams/rails/`、`agent_teams/runtime/`、`agent_teams/tools/`、`agent_teams/spawn/`
 - 需求来源：接入统一扩展框架（`core/events` 的 ExtensionEventBus + `core/extension` 的 Registry）的 Team 扩展机制——两个业务事件（`team.monitor_event` 监控事件通知、`team.build_policy` 协作规则构建）+ 只读 Team Ops 查询，并把各成员的构建与消费接到真实链路；工具扩展复用通用 `tool.call`（harness 侧尚不存在），本仓库无 Team 工具事件
+- 事件契约文档：两个事件的插件侧契约手册（含使用方式与验证）见 core events 侧 [F_07 team.monitor_event](../../../core/events/docs/features/F_07_team-monitor-event.md) 与 [F_08 team.build_policy](../../../core/events/docs/features/F_08_team-build-policy.md)
 
 ## 背景 / Why
 
