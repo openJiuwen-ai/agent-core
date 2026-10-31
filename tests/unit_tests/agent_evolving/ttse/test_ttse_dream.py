@@ -1777,11 +1777,10 @@ async def test_emb_cache_lru_evicts_when_over_limit(tmp_path):
             store_path=str(tmp_path / "bank.json"),
             embedding=emb,
             embedding_max_rps=0,
-            max_facts=1,
-            max_tips=0,
         ),
         embedding=emb,
     )
+    await store.add_record_direct("fact", "retained fact", save=False)
     limit = store._embedding_cache_limit()
     assert limit == 101
     for i in range(limit + 10):
@@ -1789,6 +1788,12 @@ async def test_emb_cache_lru_evicts_when_over_limit(tmp_path):
     assert len(store._emb_cache) == limit
     assert "query-0" not in store._emb_cache
     assert f"query-{limit + 9}" in store._emb_cache
+
+    await store.add_record_direct("tip", "another retained rule", save=False)
+    assert "query-10" in store._emb_cache
+    await store.embedding_of("new query after bank growth")
+    assert len(store._emb_cache) == limit + 1
+    assert "query-11" in store._emb_cache
 
 
 @pytest.mark.asyncio
@@ -1801,7 +1806,7 @@ async def test_emb_cache_drops_deleted_and_reloaded_texts(tmp_path):
         }
     )
     store = TTSERecordStore(
-        TTSEConfig(store_path=str(path), embedding=emb, embedding_max_rps=0, max_facts=10, max_tips=10),
+        TTSEConfig(store_path=str(path), embedding=emb, embedding_max_rps=0),
         embedding=emb,
     )
     await store.add_fact("keep me")
