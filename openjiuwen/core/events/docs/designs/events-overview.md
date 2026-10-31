@@ -312,6 +312,7 @@ Core 已有[当前单智能体 Session](../../../session/agent.py)，EventBus �
 | [公共契约 S-01](../specs/S_01_events-contract.md) | 事件、Handler、Build、Ops、SessionContext、错误和生命周期的精确公共契约 |
 | [详细架构](events-architecture.md) | 机制细节、跨模块关系和历史方案；当前仍需同步一次性 Build 与共享 Builder 生命周期 |
 | [EV-01 公共契约](../features/F_01_ev01-public-contract.md) | 公共模型、Protocol、错误码和导出的实现取舍与证据 |
+| [EV-06 AgentRuntime 与业务事件](../features/F_06_ev06-agent-runtime-business-events.md) | CORE 通过 `AgentRuntime` 执行真实 Agent 业务、Ops 嵌套触发及业务 EventType 示例 |
 | [EV-02 EventBus 引擎](../features/F_02_ev02-event-bus-engine.md) | 注册、匹配、三层链、EventNext 和快照语义 |
 | [EV-03 Builder/Ops](../features/F_03_ev03-builder-ops.md) | Builder、独立 Ops、动态能力和上下文隔离 |
 | [EV-04 Build 与业务调用集成](../features/F_04_ev04-event-bus-integration.md) | builtin 自动注册、显式 Build、逐 Handler Ops 和集成验证 |

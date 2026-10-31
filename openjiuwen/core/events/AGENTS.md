@@ -39,7 +39,8 @@
 | [详细架构](docs/designs/events-architecture.md) | 注册与执行机制、Ops 按需构建及名词/动词能力、上下文与状态隔离、故障责任、验证归属及待确认事项 |
 | [S_01 Events 公共契约规约](docs/specs/S_01_events-contract.md) | 公共模型、接口协议、错误码、Builder/Ops 边界和基础生命周期语义 |
 | [Events 特性开发计划](docs/designs/events-development-plan.md) | 4 个实际工作项、原 EV 子验收组及 M-01～M-02 的依赖、负责人、进度和验收入口 |
-| [F_01 EV-08 公共契约](docs/features/F_01_ev08-public-contract.md) | EV-08 的落地步骤、错误码号段和测试设计 |
+| [F_01 EV-01 公共契约](docs/features/F_01_ev01-public-contract.md) | 公共模型、Protocol、错误码和导出的实现取舍与证据 |
+| [F_06 EV-06 AgentRuntime 与业务事件](docs/features/F_06_ev06-agent-runtime-business-events.md) | CORE 经 Runtime 执行业务、Ops 嵌套触发及 `tool.register` / `tool.call` 接入方案 |
 
 具体实现方案和验证记录在开工前按实际特性建立，不为填满目录创建空文档。
 

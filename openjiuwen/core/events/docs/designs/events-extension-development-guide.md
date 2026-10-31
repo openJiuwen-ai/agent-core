@@ -27,7 +27,7 @@ flowchart TD
     BUS --> TRIGGER
 ```
 
-精确公共接口以 [S_01 Events 公共契约](../specs/S_01_events-contract.md)为准，整体架构见[事件机制详细架构](events-architecture.md)。
+精确公共接口以 [S_01 Events 公共契约](../specs/S_01_events-contract.md)为准，整体架构见[事件机制详细架构](events-architecture.md)。CORE Handler 执行业务 Agent、Ops 嵌套触发及 `tool.register` / `tool.call` 模式见 [F_06 EV-06](../features/F_06_ev06-agent-runtime-business-events.md)。
 
 ## 2. 初始化与预置注册
 
