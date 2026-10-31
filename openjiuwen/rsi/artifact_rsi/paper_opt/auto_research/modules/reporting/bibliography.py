@@ -237,7 +237,7 @@ def _extract_html_metadata(path: Path) -> CitationMetadata:
 def _extract_pdf_metadata(path: Path) -> CitationMetadata:
     try:
         from pypdf import (
-            PdfReader,  # optional dependency — see pyproject.toml [paper_writing]
+            PdfReader,  # declared in pyproject.toml; import stays lazy and best-effort
         )
     except ImportError:
         return CitationMetadata()
