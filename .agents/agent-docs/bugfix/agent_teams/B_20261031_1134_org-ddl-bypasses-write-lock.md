@@ -57,14 +57,23 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
 
 修复：
 
-- `TeamDatabase` 新增只读属性 `sessions`，暴露其共享的 `DbSessions`；`close()` 同时把它清为
-  `None`，避免把绑定在已释放 engine 上的 provider 暴露出去。
+- `TeamDatabase` 新增只读属性 `sessions`，暴露其共享的 `DbSessions`。`initialize()` 在最后一步
+  （置 `_initialized` 之前）才发布它：初始化中途失败时外部拿不到半成品 provider，否则重试
+  `initialize()` 又会造出第二个 provider（第二把写锁）。`close()` 同时把它清为 `None`，避免把绑定在
+  已释放 engine 上的 provider 暴露出去。
 - `OrgDbContext.initialize` 改为复用 `db.sessions`，不再新建 provider，组织写与 DAO 写共用一把写锁。
+  它只绑定一次：之后数据库仍持有同一个 provider 就直接返回，不再每次调用 `db.initialize()`；数据库被
+  别处重新初始化（provider 换了）就重新绑定并检查建表；数据库在绑定后被关闭（`db.sessions` 为
+  `None`）则抛 `AGENT_TEAM_STATE_INVALID`，不重新打开。否则一个还被引用的旧组织存储会在关库后悄悄
+  重建 engine 和后台 WAL checkpoint 任务，没人再去回收。关库期间并发的组织调用也落在这个分支，报错
+  信息明确，不再误报"未初始化"。
 - 组织静态表 DDL 移入 `sessions.write()`（取得写锁后再复查一次）。
 - `engine.py` 新增 `retry_on_transient`：与 `retry_on_locked` 用同一套退避参数，但额外重试
   `DbSessions.write()` 看门狗的 `TimeoutError`（与 `create_cur_session_tables` 一致），且重试预算
   耗尽时抛出最后一次的原始异常，不返回兜底值。组织 DDL 用它：组织读写离不开这些表，不能像会话建表
-  那样降级为告警。
+  那样降级为告警。`create_cur_session_tables` 原有的手写重试循环也改为调用它（失败时仍只记日志、
+  不抛出，行为不变），重试逻辑从三份收敛为两份；`retry_on_locked` 返回兜底值、异常范围更窄，语义不同，
+  保持不动。
 - 写锁不可重入，因此 `_ensure_org_schema` 不能在已打开的 `sessions.write()` 内调用。核查
   `task_pool.py` / `message_service.py`：所有写方法都是先 `await self.initialize()` 再进入
   `_write()`，不存在这种调用路径；只在 docstring 写明约束，不加运行时防护。
@@ -78,6 +87,8 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
   schema，耦合方向反了；按 provider 记标记无需任何清理。
 - 只把 `find_organization_ids_for_team` 改为复用缓存的 context：只解决第 3 点，DDL 仍绕过写锁、
   组织写仍是第二把锁，池耗尽依旧可能发生。
+- 把组织表 DDL 挪进 `TeamDatabase.initialize`，让它排在写队列最前面：会让工具层的数据库依赖组织层
+  的表结构，依赖方向反了。代价是冷启动后第一次组织操作要排在已有写操作后面，每个库只发生一次，可接受。
 - 调大 `write_pool_size`：掩盖锁绕过问题，SQLite 仍只能有一个写者，多出的连接只会在文件锁上排队。
 
 ## 回归证据与适用范围
@@ -85,22 +96,32 @@ sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, conne
 候选：`fix/org-db-shared-write-lock`（基于 upstream/develop `0e79fb153`），本地 macOS、Python 3.13，
 使用 swarm 的 `.venv`。
 
-- `tests/unit_tests/agent_teams/organization/test_org_db.py` 新增 5 条：
+- `tests/unit_tests/agent_teams/organization/test_org_db.py` 新增 9 条。断言都挂在 SQL 边界上：用
+  `before_cursor_execute` 事件记录写 engine 上下发的建表 / 表结构查询语句，以及执行时写锁是否被持有；
+  不 mock 被测模块的函数，也不统计内部调用次数。
   - `test_org_db_context_reuses_team_database_sessions`：组织 context 拿到的就是 `db.sessions`。
-  - `test_org_static_ddl_waits_for_team_database_write_lock`：文件 SQLite 下持有 `db.sessions.write()`
-    时，组织初始化任务让出事件循环后仍未完成、`org_info` 表尚不存在；释放锁后完成且表已建好。
-    断言不依赖睡眠时长，旧实现在任何机器上都会失败。
-  - `test_find_organization_ids_runs_static_ddl_once_per_database`：连续 3 次查询只跑 1 次 DDL。
-  - `test_org_static_ddl_reruns_after_database_reinitialize`：`close()` 再初始化后 DDL 重跑、表存在。
+  - `test_org_static_ddl_runs_under_team_database_write_lock`：文件 SQLite 新库上，每条
+    `CREATE TABLE org_*` 执行时共享写锁都处于持有状态。与运行快慢无关。
+  - `test_find_organization_ids_runs_static_ddl_once_per_database`：首次建表后再查询 3 次，不再下发任何
+    建表或表结构查询语句。
+  - `test_org_static_ddl_reruns_after_database_reinitialize`：`close()` 再初始化后重新下发
+    `CREATE TABLE org_info`，表存在。
+  - `test_bound_org_context_does_not_reopen_closed_database`：已绑定的 context 遇到已关闭的库时报错，
+    `db.engine` 与 `db.sessions` 仍为 `None`。
+  - `test_bound_org_context_rebinds_after_database_reinitialize`：库被重新初始化后重新绑定到新 provider，
+    表已建好。
   - `test_team_database_close_drops_shared_sessions`：`close()` 后 `db.sessions` 为 `None`，重新初始化
     得到新的 provider。
+  - `test_team_database_hides_sessions_until_initialize_completes`：`SessionFileStore` 构造失败导致
+    `initialize()` 中途抛错时，`db.sessions` 仍为 `None`。
 - `tests/unit_tests/agent_teams/test_database_concurrency.py` 新增 2 条：`retry_on_transient` 重试
   看门狗 `TimeoutError` 后成功；预算耗尽时抛出最后一次的原始异常。
-- 只把 `organization/db.py` 换回旧实现时，前三条失败；修复后 `test_org_db.py` +
-  `test_database_concurrency.py` 39 passed。
-- organization、runtime 与引用 `DbSessions` / 会话建表 / 重试的测试文件：507 passed；
-  `test_runner_team_runtime.py` 62 passed。
-- `tests/unit_tests/agent_teams` 全量：4106 passed / 36 skipped / 2 xfailed / 1 failed。失败的
+- 把 `organization/db.py` 换回修复前版本：上面 5 条组织测试失败。只去掉"绑定一次"逻辑：
+  `test_bound_org_context_does_not_reopen_closed_database` 失败。保留共享 provider、只把 DDL 改回直连
+  `engine.begin()`：`test_org_static_ddl_runs_under_team_database_write_lock` 单独失败，说明锁测试
+  不再依赖其它断言。
+- 修复后 `test_org_db.py` + `test_database_concurrency.py` + `test_db_sessions_watchdog.py`：46 passed。
+- `tests/unit_tests/agent_teams` 全量：4109 passed / 36 skipped / 2 xfailed / 1 failed。失败的
   `agent/test_member_activity.py::test_observe_member_status_emits_after_the_debounce` 在不含本次任何
   改动的基线上同样失败（4099 passed / 1 failed），与本修复无关。
 - 另：`test_database.py::TestTeamDatabaseInit::test_postgresql_initialize_uses_asyncpg_engine` 在与

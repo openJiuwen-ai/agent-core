@@ -19,6 +19,8 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_transient
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 
 _ORG_TASK_NEW_COLUMNS = (
     ("aggregation_json", "TEXT"),
@@ -128,7 +130,24 @@ class OrgDbContext:
         Reuses ``TeamDatabase.sessions`` instead of building a second provider:
         a second ``DbSessions`` carries a second write lock, so org writes would
         race the DAO writes for the same small write pool.
+
+        Binds once: later calls return the bound provider while the database
+        still holds it, rebind when the database was reinitialized elsewhere,
+        and refuse to reopen a database that was closed under this context
+        (a stale org store must not resurrect engines and the checkpointer).
         """
+        if self._sessions is not None:
+            current = self.db.sessions
+            if current is self._sessions:
+                return current
+            if current is None:
+                raise_error(
+                    StatusCode.AGENT_TEAM_STATE_INVALID,
+                    reason="TeamDatabase was closed; organization store is no longer usable",
+                )
+            await _ensure_org_schema(current)
+            self._sessions = current
+            return current
         await self.db.initialize()
         sessions = self.db.sessions
         if sessions is None:

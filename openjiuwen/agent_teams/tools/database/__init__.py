@@ -146,7 +146,6 @@ class TeamDatabase:
             # writes through the same lock. Reads go to the reader factory
             # (a separate pool for file-backed SQLite) — see DbSessions.
             sessions = DbSessions(self.session_local, self.read_session_local)
-            self._sessions = sessions
             # Bind-time session-table DDL runs under the same write lock: the
             # engine-level variant (``engine.begin()``) bypassed it and could
             # hold both write-pool connections during concurrent binds.
@@ -165,6 +164,10 @@ class TeamDatabase:
 
             self._maybe_start_checkpointer()
 
+            # Publish the provider only once every step above succeeded: a
+            # half-initialized database must not hand it out, or a retried
+            # initialize() would build a second provider (a second write lock).
+            self._sessions = sessions
             self._initialized = True
             team_logger.info("Team database initialized")
 

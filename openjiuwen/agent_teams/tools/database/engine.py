@@ -900,36 +900,15 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
             await _ensure_session_tables(session)
             await session.commit()
 
-    last_err: BaseException | None = None
-    for attempt in range(_DB_RETRY_ATTEMPTS):
-        try:
-            await _ddl_once()
-            team_logger.info("Session tables ready for session %s", session_id)
-            return
-        except (OperationalError, SATimeoutError, TimeoutError) as e:
-            last_err = e
-            if attempt >= _DB_RETRY_ATTEMPTS - 1:
-                break
-            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
-            team_logger.warning(
-                "create_cur_session_tables hit a transient DB error (%s); "
-                "retrying in %ss (attempt %d)",
-                type(e).__name__,
-                delay,
-                attempt + 1,
-            )
-            await asyncio.sleep(delay)
-
-    # Budget exhausted — do not crash the member. A subsequent DAO write will
-    # either succeed on its own (tables are idempotent under checkfirst) or
-    # raise the real error in-band where the caller can handle it.
-    team_logger.error(
-        "create_cur_session_tables failed after %d attempts for session %s: %s",
-        _DB_RETRY_ATTEMPTS,
-        session_id,
-        last_err,
-    )
-    return
+    try:
+        await retry_on_transient(_ddl_once, label=f"create_cur_session_tables(session={session_id})")
+    except (OperationalError, SATimeoutError, TimeoutError):
+        # Budget exhausted (already logged) — do not crash the member. A
+        # subsequent DAO write will either succeed on its own (tables are
+        # idempotent under checkfirst) or raise the real error in-band where
+        # the caller can handle it.
+        return
+    team_logger.info("Session tables ready for session %s", session_id)
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

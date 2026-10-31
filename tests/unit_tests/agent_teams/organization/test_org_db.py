@@ -1,12 +1,13 @@
 # coding: utf-8
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import event, inspect
 
 from openjiuwen.agent_teams.organization.db import OrgDbContext, json_dumps, json_loads
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.organization.schema import ORG_STATIC_TABLE_NAMES
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.mark.asyncio
@@ -184,6 +185,28 @@ async def test_ensure_org_task_columns_normalizes_legacy_terminal_statuses():
     await db.close()
 
 
+
+def _record_schema_statements(db: TeamDatabase) -> list[tuple[str, bool]]:
+    """Record every schema statement on the writer engine with the write-lock state.
+
+    Hooks the SQL boundary (``before_cursor_execute``) instead of patching the
+    module under test: each entry is ``(statement, write_lock_held)`` for DDL
+    and schema introspection (``CREATE`` / ``ALTER`` / ``PRAGMA`` /
+    ``sqlite_master``), which is what the org schema ensure issues.
+    """
+    assert db.engine is not None and db.sessions is not None
+    sessions = db.sessions
+    recorded: list[tuple[str, bool]] = []
+
+    def _on_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+        upper = statement.lstrip().upper()
+        if upper.startswith(("CREATE", "ALTER", "PRAGMA")) or "SQLITE_MASTER" in upper:
+            recorded.append((statement, sessions._write_lock.locked()))
+
+    event.listen(db.engine.sync_engine, "before_cursor_execute", _on_execute)
+    return recorded
+
+
 @pytest.mark.asyncio
 async def test_org_db_context_reuses_team_database_sessions():
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
@@ -196,25 +219,76 @@ async def test_org_db_context_reuses_team_database_sessions():
 
 
 @pytest.mark.asyncio
-async def test_org_static_ddl_waits_for_team_database_write_lock(tmp_path):
-    import asyncio
-
+async def test_org_static_ddl_runs_under_team_database_write_lock(tmp_path):
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db")))
     await db.initialize()
-    assert db.sessions is not None
+    recorded = _record_schema_statements(db)
 
-    async with db.sessions.write():
-        pending = asyncio.create_task(OrgDbContext(db).initialize())
-        # Let the task run until it blocks; it must block on the held write
-        # lock, not finish the DDL through a second write-pool connection.
-        for _ in range(20):
-            await asyncio.sleep(0)
-        assert not pending.done()
-        async with db.read_engine.connect() as conn:
-            table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
-        assert "org_info" not in table_names
-    assert await asyncio.wait_for(pending, timeout=5) is db.sessions
-    async with db.read_engine.connect() as conn:
+    await OrgDbContext(db).initialize()
+
+    org_creates = [lock_held for stmt, lock_held in recorded if "CREATE TABLE" in stmt.upper() and "org_" in stmt]
+    assert org_creates, "org static tables should be created on a fresh database"
+    # Every org DDL statement must run while the shared write lock is held,
+    # i.e. serialised with DAO writes rather than on a bare engine.begin().
+    assert all(org_creates), recorded
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_find_organization_ids_runs_static_ddl_once_per_database():
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    assert await OrgTaskManager.find_organization_ids_for_team(db, "team-a") == []
+    recorded = _record_schema_statements(db)
+    # Each lookup builds a fresh OrgDbContext (team.list polling path); once
+    # the schema is ensured no further DDL / introspection hits the database.
+    for _ in range(3):
+        assert await OrgTaskManager.find_organization_ids_for_team(db, "team-a") == []
+    assert recorded == []
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_org_static_ddl_reruns_after_database_reinitialize():
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await OrgDbContext(db).initialize()
+    await db.close()
+    await db.initialize()
+    recorded = _record_schema_statements(db)
+    # A reinitialized :memory: database is empty, so the schema must be rebuilt.
+    await OrgDbContext(db).initialize()
+    assert any("CREATE TABLE" in stmt.upper() and "org_info" in stmt for stmt, _ in recorded)
+    async with db.engine.connect() as conn:
+        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+    assert "org_info" in table_names
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_bound_org_context_does_not_reopen_closed_database():
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    context = OrgDbContext(db)
+    await context.initialize()
+    await db.close()
+    # A stale org store must fail loudly instead of resurrecting engines and
+    # the background checkpointer of a database that was shut down.
+    with pytest.raises(BaseError, match="closed"):
+        await context.initialize()
+    assert db.engine is None
+    assert db.sessions is None
+
+
+@pytest.mark.asyncio
+async def test_bound_org_context_rebinds_after_database_reinitialize():
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    context = OrgDbContext(db)
+    stale = await context.initialize()
+    await db.close()
+    await db.initialize()
+    fresh = await context.initialize()
+    assert fresh is db.sessions and fresh is not stale
+    async with db.engine.connect() as conn:
         table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
     assert "org_info" in table_names
     await db.close()
@@ -235,46 +309,17 @@ async def test_team_database_close_drops_shared_sessions():
 
 
 @pytest.mark.asyncio
-async def test_find_organization_ids_runs_static_ddl_once_per_database(monkeypatch):
-    from openjiuwen.agent_teams.organization import db as org_db
-    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+async def test_team_database_hides_sessions_until_initialize_completes(monkeypatch):
+    from openjiuwen.agent_teams.team_workspace import session_file_store
 
+    def _failing_file_store(*args, **kwargs):
+        raise OSError("session file store unavailable")
+
+    monkeypatch.setattr(session_file_store, "SessionFileStore", _failing_file_store)
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    calls: list[int] = []
-    original = org_db.ensure_org_static_tables
-
-    def tracked_ensure_org_static_tables(sync_conn) -> None:
-        calls.append(1)
-        original(sync_conn)
-
-    monkeypatch.setattr(org_db, "ensure_org_static_tables", tracked_ensure_org_static_tables)
-    # Each lookup builds a fresh OrgDbContext (team.list polling path); the
-    # schema check must not rerun per call.
-    for _ in range(3):
-        assert await OrgTaskManager.find_organization_ids_for_team(db, "team-a") == []
-    assert len(calls) == 1
-    await db.close()
-
-
-@pytest.mark.asyncio
-async def test_org_static_ddl_reruns_after_database_reinitialize(monkeypatch):
-    from openjiuwen.agent_teams.organization import db as org_db
-
-    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    calls: list[int] = []
-    original = org_db.ensure_org_static_tables
-
-    def tracked_ensure_org_static_tables(sync_conn) -> None:
-        calls.append(1)
-        original(sync_conn)
-
-    monkeypatch.setattr(org_db, "ensure_org_static_tables", tracked_ensure_org_static_tables)
-    await OrgDbContext(db).initialize()
-    await db.close()
-    # A reinitialized :memory: database is empty, so the schema must be rebuilt.
-    await OrgDbContext(db).initialize()
-    assert len(calls) == 2
-    async with db.engine.connect() as conn:
-        table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
-    assert "org_info" in table_names
+    with pytest.raises(OSError):
+        await db.initialize()
+    # A half-initialized database must not hand out its provider; otherwise a
+    # retried initialize() would leave two providers (two write locks) alive.
+    assert db.sessions is None
     await db.close()
