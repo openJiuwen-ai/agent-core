@@ -261,12 +261,13 @@ def _resolve_shell_operand(tok: str, cwd: Path, shell_type: str, *, bare: bool =
         except (ValueError, IndexError):
             return None
     tok = tok.strip().strip('"').strip("'")
-    if not tok or _UNEXPANDED_VAR_RE.search(tok) or (
-        shell_type == "cmd" and re.search(r"%[^%\r\n]+%", tok)
-    ):
+    if not tok or _UNEXPANDED_VAR_RE.search(tok):
         return None
-    if not quoted and shell_type in {"bash", "sh"} and (tok == "~" or tok.startswith("~/")):
-        tok = str(Path(os.environ.get("HOME") or Path.home()) / tok[2:])
+    if shell_type == "cmd" and re.search(r"%[^%\r\n]+%", tok):
+        return None
+    if not quoted and shell_type in {"bash", "sh"}:
+        if tok == "~" or tok.startswith("~/"):
+            tok = str(Path(os.environ.get("HOME") or Path.home()) / tok[2:])
     msys = _MSYS_DRIVE_RE.match(tok) if os.name == "nt" and shell_type in {"bash", "sh"} else None
     if not bare and not msys and not _looks_like_path(tok):
         return None
@@ -332,9 +333,12 @@ def _interpreter_operands(tokens: list[str]) -> list[str]:
         option, equals, value = tok.partition("=")
         if cmd in {"powershell", "pwsh"}:
             option = option.lower()
-        if option in inline or (
-            cmd in {"bash", "sh", "dash", "zsh", "fish"} and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", tok)
-        ) or (cmd.startswith("py") and re.fullmatch(r"-[bBdEhiIOPqRsSuvVx]*[cm].*", tok)):
+        inline_shell = (
+            cmd in {"bash", "sh", "dash", "zsh", "fish"}
+            and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", tok)
+        )
+        inline_python = cmd.startswith("py") and re.fullmatch(r"-[bBdEhiIOPqRsSuvVx]*[cm].*", tok)
+        if option in inline or inline_shell or inline_python:
             break  # Code strings / modules are not literal script paths.
         if option in values | loads:
             if not equals:
