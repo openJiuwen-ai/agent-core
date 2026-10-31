@@ -57,10 +57,14 @@ rebuild 会交叉写同一批字段，存在半清理状态窗口。
    task 不能 cancel，cancel 的调度本身依赖 loop 活着）。
 4. 安全门禁整改（2026-10-31）：兜底 drain 的 `except asyncio.CancelledError: pass`
    触发仓库 semgrep 规则 `no-except-pass`（`.semgrep/no-silent-except.yml`，ERROR 级），
-   流水线安全扫描阶段因此拒绝本修复的历代版本（!2323、!3490、!3495 同位点）。改为
+   流水线安全扫描阶段因此拒绝本修复的历代版本（!2323、!3490、#3495 同位点）。改为
    `runner_logger.debug`（RUNNER_STOP 事件、绑定 runner_id），沿用仓库对预期取消的记录
    惯例（如 `spawn/process_manager.py` 健康检查取消），语义不变——drain 结果不得掩盖
    stop 结果，也不把预期取消误报为错误。
+5. 静态检查整改（2026-10-31）：`get_root_task_group` 同步分支的条件表达式使用海象运算符
+   `(state := self._root_state)`，命中 CI codecheck（华为编码规范规则集_安全增强）
+   规则 G.OPR.04"不建议使用海象运算符"（级别：一般）。改为普通赋值加判空（与下方
+   async 路径同款写法），语义不变；全文件已无海象运算符残留。
 
 ## 验证
 
