@@ -247,6 +247,40 @@ class TeamMonitor:
                 )
         return [MessageInfo.from_internal(r) for r in rows]
 
+    async def get_message(self, message_id: str) -> MessageInfo | None:
+        """Query a single message by ID (primary-key point query).
+
+        Unlike ``get_messages`` this never scans the whole mailbox — it is
+        the right call when the caller already holds a ``message_id`` (e.g.
+        resolving a monitor event's content) and only needs that one row.
+
+        Two scoping policies are applied identically to ``get_messages``:
+
+        - Team scope: the session message table mixes rows from every team
+          of the session (``team_name`` column), so a row whose
+          ``team_name`` is not this monitor's team reads as absent —
+          a monitor bound to one team must never hand out another team's
+          message content.
+        - ``hide_dm``: a non-broadcast message reads as absent when
+          ``hide_dm`` is on.
+
+        Args:
+            message_id: Message identifier.
+
+        Returns:
+            MessageInfo or None if not found, owned by another team, or
+            hidden by ``hide_dm``.
+        """
+        with self._bound_session():
+            row = await self._db.message.get_message(message_id)
+        if row is None:
+            return None
+        if row.team_name != self._team_name:
+            return None
+        if self._hide_dm and not row.broadcast:
+            return None
+        return MessageInfo.from_internal(row)
+
     # ------------------------------------------------------------------
     # Event stream
     # ------------------------------------------------------------------
