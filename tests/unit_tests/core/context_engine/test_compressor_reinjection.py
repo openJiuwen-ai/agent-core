@@ -326,6 +326,62 @@ def test_current_default_targets_tool_results_before_trailing_internal_user():
     assert span.protected_tail == []
 
 
+def test_round_never_compresses_the_in_flight_user_turn_with_zero_keep_recent():
+    """The current user request is not completed history.
+
+    ``RoundLevelCompressor`` builds a cross-round checkpoint whose wrapper
+    explicitly says it is *not* a new user request. If the newest real user
+    message is folded into that checkpoint (as it was with
+    ``keep_recent_messages=0``), the next model call has no user request left
+    to answer — it only sees the checkpoint. Keep the in-flight turn raw.
+    """
+    compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=0))
+    window_messages = [
+        UserMessage(content="<system-reminder>runtime state</system-reminder>"),
+        UserMessage(content='你收到一条消息： {"type": "user input", "content": "分析这段视频"}'),
+    ]
+
+    span = compressor._build_span(window_messages)
+
+    assert span.messages_to_compress == window_messages[:1]
+    assert span.protected_tail == window_messages[1:]
+
+
+def test_round_keeps_current_turn_after_completed_history_with_zero_keep_recent():
+    compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=0))
+    window_messages = [
+        UserMessage(content="Historical request"),
+        AssistantMessage(content="historical answer"),
+        UserMessage(content='你收到一条消息： {"type": "user input", "content": "Current task"}'),
+        AssistantMessage(content="current work"),
+    ]
+
+    span = compressor._build_span(window_messages)
+
+    assert span.messages_to_compress == window_messages[:2]
+    assert span.protected_tail == window_messages[2:]
+
+
+@pytest.mark.asyncio
+async def test_round_skips_when_only_prefix_before_latest_user_is_compressible():
+    """A fresh session whose only compressible span is the prompt-attachment
+    prefix must not trigger a summary that replaces the user's request."""
+    compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=0))
+    _attach_executor(compressor, "compact state")
+    compressor._count_context_window_tokens = MagicMock(return_value=190_000)
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="<system-reminder>runtime state</system-reminder>"),
+            UserMessage(content='你收到一条消息： {"type": "user input", "content": "' + ("视频二进制" * 100_000) + '"}'),
+        ]
+    )
+
+    should_run = await compressor.trigger_get_context_window(context, window)
+
+    assert should_run is False
+
+
 @pytest.mark.asyncio
 async def test_round_reinjects_all_state_except_tool_result_hint_after_compression(tmp_path):
     compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=1))
@@ -347,6 +403,10 @@ async def test_round_reinjects_all_state_except_tool_result_hint_after_compressi
     )
     window = _context_window(
         [
+            # A completed earlier round is compressible; the in-flight round
+            # (from the latest real user message onward) stays raw.
+            UserMessage(content="Earlier completed request"),
+            AssistantMessage(content="earlier answer " * 5000),
             UserMessage(content="Original request"),
             AssistantMessage(content="work " * 5000),
             AssistantMessage(content="protected tail"),

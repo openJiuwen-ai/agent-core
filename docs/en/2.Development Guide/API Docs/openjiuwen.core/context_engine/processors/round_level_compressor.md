@@ -2,10 +2,10 @@
 
 ## class openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor.RoundLevelCompressorConfig
 
-Configuration class for `RoundLevelCompressor`. When the context token count reaches a given ratio of the context capacity, only the most recent `keep_recent_messages` messages are kept, and all earlier history messages are compressed by an LLM into a single `<memory_block_round>` cross-round checkpoint summary message.
+Configuration class for `RoundLevelCompressor`. When the context token count reaches a given ratio of the context capacity, only the most recent `keep_recent_messages` messages are kept, and all earlier history messages are compressed by an LLM into a single `<memory_block_round>` cross-round checkpoint summary message. The in-flight user turn (from the latest real user message onward) is always kept uncompressed.
 
 * **trigger_context_ratio** (float, optional): Triggers compression when the context token count reaches this ratio of the context capacity. Range (0, 1). Default value: `0.8`.
-* **keep_recent_messages** (int, optional): Number of most recent messages kept uncompressed. Default value: `4`.
+* **keep_recent_messages** (int, optional): Number of most recent messages kept uncompressed. Default value: `4`. Even when set to `0`, the in-flight user turn is kept so an unanswered user request is never folded into the checkpoint.
 * **min_target_context_ratio** (float, optional): Skips compression when the compressible messages' token count is below this ratio of the context capacity. Range [0, 1). Default value: `0.1`.
 * **model** (ModelRequestConfig | None, optional): Model request configuration used to perform compression. Default value: `None`.
 * **model_client** (ModelClientConfig | None, optional): Model service configuration used to perform compression. Default value: `None`.
@@ -20,7 +20,7 @@ Configuration class for `RoundLevelCompressor`. When the context token count rea
 RoundLevelCompressor(config: RoundLevelCompressorConfig)
 ```
 
-`RoundLevelCompressor` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor). When the context window is being materialized, it checks whether the context token count reaches `trigger_context_ratio`; if so, it compresses all history messages except the most recent `keep_recent_messages` ones into a cross-round checkpoint summary (which may cover long-running project state, prior decisions, current goals, completed and unfinished work, etc.), embedding a meaning note and a conflict policy. Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
+`RoundLevelCompressor` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor). When the context window is being materialized, it checks whether the context token count reaches `trigger_context_ratio`; if so, it compresses all history messages except the most recent `keep_recent_messages` ones into a cross-round checkpoint summary (which may cover long-running project state, prior decisions, current goals, completed and unfinished work, etc.), embedding a meaning note and a conflict policy. The compressible range stops at the latest real user message, so the in-flight user turn stays raw and the next model call still has an explicit user request to answer. Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
 
 **Parameters**:
 
