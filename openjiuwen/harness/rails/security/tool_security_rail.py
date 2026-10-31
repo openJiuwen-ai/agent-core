@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import inspect
 import json
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY, RESUME_ORIGINAL_TOOL_CALLS_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
@@ -230,12 +230,25 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if not isinstance(auto_confirm_config, dict):
                 auto_confirm_config = {}
 
-        decision = await self.resolve_interrupt(
-            ctx=ctx,
-            tool_call=tool_call,
-            user_input=user_input,
-            auto_confirm_config=auto_confirm_config,
-        )
+        original_calls = ctx.extra.get(RESUME_ORIGINAL_TOOL_CALLS_KEY, {})
+        permission_call = original_calls.get(tool_call_id, tool_call)
+        execution_inputs = ctx.inputs
+        if permission_call is not tool_call:
+            # Keep the same context so host control signals still reach the
+            # caller; only the permission view of the inputs is temporary.
+            ctx.inputs = copy(execution_inputs)
+            ctx.inputs.tool_call = permission_call
+            ctx.inputs.tool_args = self.parse_tool_args(permission_call)
+        try:
+            decision = await self.resolve_interrupt(
+                ctx=ctx,
+                tool_call=permission_call,
+                user_input=user_input,
+                auto_confirm_config=auto_confirm_config,
+            )
+        finally:
+            if permission_call is not tool_call:
+                ctx.inputs = execution_inputs
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
