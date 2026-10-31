@@ -86,6 +86,12 @@ _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
 _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
+# Trailer of the harness shell tools' output (bash/_output.py, powershell/_output.py).
+_EXIT_CODE_PATTERN = re.compile(r"Exit Code: (-?\d+)")
+# Uncaught-crash footers that still mean failure when a pipe or ``&`` hides the
+# crashed process's exit code (``python x.py | sort`` exits 0).
+_CRASH_PATTERN = re.compile(r"Traceback \(most recent call last\)|Node\.js v\d+\.\d+\.\d+")
+_FAILED_RESULT_PATTERN = re.compile(r"^\s*success=False\b")
 _USER_FEEDBACK_PROMPT_CN = (
     "判断以下用户消息是否包含对当前 skill 的被动纠正或可沉淀的改进反馈。\n"
     "只有当用户消息明确指出 agent 的理解、步骤、顺序或工具使用需要调整时，"
@@ -144,6 +150,11 @@ _DATA_FETCH_TOOLS = frozenset(
     }
 )
 
+# Tools that return a skill's own text (SKILL.md and its files).  Skill
+# documentation routinely mentions errors and failures, so a successful load
+# is never an execution failure.
+_SKILL_LOAD_TOOLS = frozenset({"skill_tool"})
+
 # Tools that execute inline code or shell commands.
 _CODE_EXEC_TOOLS = frozenset(
     {
@@ -181,6 +192,14 @@ def is_tool_execution_failure(content: str, tool_name: str = "") -> Optional[str
     if name in _DATA_FETCH_TOOLS:
         return None
     text = content or ""
+    if name in _SKILL_LOAD_TOOLS and not _FAILED_RESULT_PATTERN.search(text):
+        return None
+    exit_codes = _EXIT_CODE_PATTERN.findall(text)
+    if exit_codes and int(exit_codes[-1]) == 0:
+        # The shell tool reports the command's own status; a clean exit whose
+        # output merely mentions "error"/"failed" is not a failure.
+        crash = _CRASH_PATTERN.search(text)
+        return _extract_around_match(text, crash) if crash else None
     match = _FAILURE_KEYWORDS.search(text)
     if not match:
         return None
@@ -477,7 +496,7 @@ class ConversationSignalDetector:
                 active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
 
                 if tool_call_id and tool_call_id in pending_scripts:
-                    has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
+                    has_failure = bool(is_tool_execution_failure(content, str(tool_name or ""))) if content else False
                     if not has_failure:
                         signals.append(
                             make_evolution_signal(
