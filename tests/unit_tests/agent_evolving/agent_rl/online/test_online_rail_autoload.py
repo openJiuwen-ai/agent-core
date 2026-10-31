@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import Mock
 
 import pytest
 
@@ -99,9 +100,34 @@ def test_create_deep_agent_does_not_queue_factory_rails_twice(monkeypatch):
     assert len(rails) == 1
 
 
+def test_create_deep_agent_does_not_warn_when_online_training_is_disabled(monkeypatch):
+    from openjiuwen.core.foundation.llm.model import Model
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+    from openjiuwen.harness import factory
+    from openjiuwen.harness.factory import create_deep_agent
+
+    monkeypatch.delenv("USE_RL_ONLINE_RAIL", raising=False)
+    warning = Mock()
+    monkeypatch.setattr(factory.logger, "warning", warning)
+
+    create_deep_agent(
+        Model(
+            ModelClientConfig(
+                api_key="EMPTY",
+                api_base="http://gateway.local/v1",
+                client_provider=ProviderType.OpenAI,
+            ),
+            model_config=ModelRequestConfig(model="test-model"),
+        ),
+        enable_security_rail=False,
+    )
+
+    warning.assert_not_called()
+
+
 def test_legacy_factory_entry_selects_sft_online_rail(monkeypatch):
-    from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import build_online_rail_from_env
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rail import SFTOnlineRail
+    from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import build_online_rail_from_env
     from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 
     _enable_online_training(monkeypatch, backend="SFT")
