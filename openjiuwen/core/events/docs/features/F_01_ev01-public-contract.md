@@ -11,7 +11,7 @@
 | 设计依据 | [概览](../designs/events-overview.md)、[架构](../designs/events-architecture.md)、[S_01](../specs/S_01_events-contract.md) |
 | 关联 feature | 无已建立的前置或替代 feature。EV-01、EV-04、EV-05、EV-06 将消费本契约 |
 | 验证摘要 | 2026-10-19：契约单测 8 passed；本特性源文件在 `--follow-imports=silent` 下 mypy 通过。未跑 `make test`。按计划直接 mypy 会带出仓库既有错误。详见第 7 节 |
-| Refs | 无关联 issue / PR。差异对照见 [ExtensionEventBus 事件机制设计 v2](../../../../../../.cursor/plans/ExtensionEventBus%20事件机制设计_v2.md)，不得照抄 |
+| Refs | 无关联 issue / PR。差异对照见 [ExtensionEventBus 事件机制设计 v2](../../../../../../.cursor/plans/扩展性-ExtensionEventBus事件机制设计-v2.md)，不得照抄 |
 
 验收 ID `EV-08-V-01`～`EV-08-V-04` 的通过条件以开发计划为准。本文展开方案、实施位置和技术验证记录。
 
