@@ -754,12 +754,26 @@ class FileGuardChecker:
         guard = cfg.get("file_guard") or {}
         workspace = guard.get("workspace") or {}
         layer = composition.get("workspace_layer", SOURCE_USER)
-        return bool(
-            targets and self._effective.enabled and self._effective.mode == "native"
-            and composition.get("schema_version") == 2
-            and layer in self._effective.source_order and workspace.get("write") == "allow"
-            and all(self._resolve_one(target, "write")[0] == PermissionLevel.ALLOW for target in targets)
-        )
+        root = self._effective.workspace_root
+        if root is None:
+            return False
+        try:
+            return bool(
+                targets
+                and self._effective.enabled
+                and self._effective.mode == "native"
+                and composition.get("schema_version") == 2
+                and layer in self._effective.source_order
+                and workspace.get("write") == "allow"
+                and all(
+                    target.is_absolute()
+                    and root in target.resolve().parents
+                    and self._resolve_one(target, "write")[0] == PermissionLevel.ALLOW
+                    for target in targets
+                )
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     def collect_ask_accesses(
         self,

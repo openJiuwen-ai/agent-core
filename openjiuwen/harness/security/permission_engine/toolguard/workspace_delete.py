@@ -68,7 +68,8 @@ def literal_delete_operands(command: str, dialect: DeleteDialect) -> tuple[str, 
     tokens: list[str] = []
     cursor = 0
     for match in _TOKEN.finditer(text):
-        if text[cursor : match.start()].strip(" "):
+        start = match.start()
+        if text[cursor:start].strip(" "):
             return None
         token = match.group()
         if token[0] in {"'", '"'}:
@@ -160,19 +161,15 @@ def validate_delete_metadata(config: Mapping[str, Any]) -> None:
     metadata = composition.get("workspace_delete_defaults")
     if metadata is None:
         return
-    if (
-        composition.get("schema_version") != 2
-        or not isinstance(metadata, dict)
-        or set(metadata)
-        != {
-            "schema_version",
-            "rules",
-            "tools",
-        }
-        or type(metadata["schema_version"]) is not int
-        or metadata["schema_version"] != 1
-    ):
+    if composition.get("schema_version") != 2 or not isinstance(metadata, dict):
         raise ValueError("invalid workspace delete default metadata")
+    if set(metadata) != {"schema_version", "rules", "tools"}:
+        raise ValueError("invalid workspace delete default metadata")
+    if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
+        raise ValueError("invalid workspace delete default metadata")
+    rules = config.get("rules", [])
+    if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+        raise ValueError("invalid workspace delete rules")
     order = composition.get("source_order", [])
     layers = composition.get("tool_layers")
     if not isinstance(layers, dict) or set(layers) != set(order):
@@ -184,11 +181,10 @@ def validate_delete_metadata(config: Mapping[str, Any]) -> None:
         ):
             raise ValueError("invalid workspace delete tool contribution")
     for section, key, allowed in (("rules", "id", {"user"}), ("tools", "name", {"user", "builtin"})):
-        entries = metadata.get(section)
-        if not isinstance(entries, list):
+        if not isinstance(metadata[section], list):
             raise ValueError("invalid workspace delete default records")
         seen = set()
-        for entry in entries:
+        for entry in metadata[section]:
             if not isinstance(entry, dict) or set(entry) != {"layer", key}:
                 raise ValueError("invalid workspace delete default record")
             layer, name = entry["layer"], entry[key]
@@ -199,10 +195,7 @@ def validate_delete_metadata(config: Mapping[str, Any]) -> None:
             seen.add((layer, name))
             if section == "tools" and name not in layers[layer]:
                 raise ValueError("missing workspace delete default tool")
-            if (
-                section == "rules"
-                and sum(rule.get("layer") == layer and rule.get("id") == name for rule in config.get("rules", [])) != 1
-            ):
+            if section == "rules" and sum(rule.get("layer") == layer and rule.get("id") == name for rule in rules) != 1:
                 raise ValueError("missing workspace delete default rule")
     fallbacks = composition.get("tool_fallbacks", {})
     if not isinstance(fallbacks, dict) or any(

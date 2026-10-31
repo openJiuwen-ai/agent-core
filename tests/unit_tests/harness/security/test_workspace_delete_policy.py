@@ -1,10 +1,15 @@
 """A scoped native delete grant still runs every existing guard."""
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from openjiuwen.harness.security.permission_engine.core import PermissionEngine, prepare_permissions_for_engine
+from openjiuwen.harness.security.permission_engine.fileguard.file_guard import (
+    FileGuardChecker,
+    normalize_path_guard_config,
+)
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import LocalDeleteExecution
 
@@ -207,3 +212,31 @@ def test_malformed_default_metadata_is_rejected_at_ingest(invalid):
     cfg["composition"]["workspace_delete_defaults"] = invalid
     with pytest.raises(ValueError, match="workspace delete"):
         prepare_permissions_for_engine(cfg)
+
+
+@pytest.mark.parametrize("rules", [None, "invalid", {}, [None], ["invalid"]])
+def test_delete_metadata_rejects_malformed_rules_with_a_configuration_error(rules):
+    cfg = config()
+    cfg["rules"] = rules
+    with pytest.raises(ValueError, match="workspace delete"):
+        prepare_permissions_for_engine(cfg)
+
+
+@pytest.mark.parametrize("target", ["outside", "root", "traversal", "relative", "no-root"])
+def test_workspace_delete_predicate_requires_a_bound_root_and_contained_targets(tmp_path, target):
+    cfg = config()
+    cfg["file_guard"]["defaults"]["write"] = "allow"
+    root = tmp_path / "workspace"
+    root.mkdir()
+    checker = FileGuardChecker(
+        normalize_path_guard_config(cfg, workspace_root=None if target == "no-root" else root),
+        cfg,
+    )
+    targets = {
+        "outside": tmp_path / "outside",
+        "root": root,
+        "traversal": root / ".." / "outside",
+        "relative": Path("file.txt"),
+        "no-root": root / "file.txt",
+    }
+    assert not checker.allows_workspace_delete([root / "inside.txt", targets[target]])

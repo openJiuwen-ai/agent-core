@@ -651,11 +651,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         # inspected directory into the actual call so a later
                         # cd cannot move the authorized relative operation.
                         tool_args = {**tool_args, "workdir": str(execution.cwd)}
+                        serialized = json.dumps(tool_args, ensure_ascii=False)
                         if tool_call is not None:
-                            tool_call.arguments = json.dumps(tool_args, ensure_ascii=False)
+                            tool_call.arguments = serialized
                         inputs = getattr(ctx, "inputs", None)
                         if hasattr(inputs, "tool_args"):
-                            inputs.tool_args = dict(tool_args)
+                            inputs.tool_args = serialized
                 result = await self._engine.check_permission(
                     tool_name=normalized_name,
                     tool_args=tool_args,

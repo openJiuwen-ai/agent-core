@@ -519,6 +519,7 @@ def _evaluate_single_invocation(
         if ctx.baseline_level is not None:
             return ctx.baseline_level, ctx.baseline_rule or f"{_MR}:tools"
         if ctx.workspace_delete_fallback:
+            # A verified workspace grant is explicit local policy, not an unmatched command.
             return PermissionLevel.ALLOW, f"{_MR}:workspace_delete"
         if ctx.permission_config.get("defer_unmatched", False):
             return PermissionLevel.UNDETERMINED, f"{_MR}:unmatched"
