@@ -47,7 +47,6 @@ __all__ = [
     "TaskMemoryService",
     "AddMemoryRequest",
     "ContextEvolvingReActAgent",
-    "create_memory_agent_config",
     "MemoryAgentConfigInput",
     "SummarizeTrajectoriesInput",
     "summarize_trajectories",
