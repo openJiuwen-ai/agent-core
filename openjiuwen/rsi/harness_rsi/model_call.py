@@ -132,6 +132,8 @@ def model_output_has_mojibake(raw: str) -> bool:
 
 def is_retryable_model_call_failure(exc: BaseException) -> bool:
     """Return whether ``exc`` represents a transient model-service failure."""
+    if not isinstance(exc, Exception):
+        return False
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, RetryableModelOutputError)):
         return True
     message = str(exc).lower()
