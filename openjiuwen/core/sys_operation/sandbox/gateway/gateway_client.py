@@ -6,6 +6,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.sys_operation.config import GatewayInvokeRequest, SandboxCreateRequest, SandboxGatewayConfig
 from openjiuwen.core.sys_operation.result.base_result import BaseResult
+from openjiuwen.core.sys_operation.sandbox.fallback_audit import emit_fallback_audit
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxGateway, GatewayResponse, SandboxEndpoint
 
 
@@ -30,7 +31,9 @@ class SandboxGatewayClient:
         A trusted ``runtime_guard`` launcher callback may use this before dispatch.
         Preparation never executes the requested tool operation.
         """
-        provider = await self._gateway._get_or_create_provider(self._config, self._isolation_key, op_type)
+        provider = await self._gateway.get_or_create_provider(
+            config=self._config, isolation_key=self._isolation_key, op_type=op_type,
+        )
         check = getattr(provider, "_assert_policy_ready", None)
         if check is not None:
             check()
@@ -39,24 +42,46 @@ class SandboxGatewayClient:
             await prepare()
         return provider
 
+    def _launcher_extra_params(self) -> dict:
+        return getattr(getattr(self._config, "launcher_config", None), "extra_params", None) or {}
+
     async def _local_target(self, op_type: str, method: str, params: dict):
-        extra = self._config.launcher_config.extra_params or {}
+        extra = self._launcher_extra_params()
         guard = extra.get("runtime_guard")
         if guard is None:
             return None
-        work_config = await guard(self, op_type, method=method, params=params)
-        if work_config is None:
-            return None
-        from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
+        try:
+            work_config = await guard(self, op_type, method=method, params=params)
+            if work_config is None:
+                return None
+            from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
 
-        if not isinstance(work_config, LocalWorkConfig):
-            raise TypeError("runtime_guard must return LocalWorkConfig or None")
-        if self._local_operation is None:
-            self._local_operation = SysOperation(SysOperationCard(mode=OperationMode.LOCAL, work_config=work_config))
-        return getattr(getattr(self._local_operation, op_type)(), method)
+            if not isinstance(work_config, LocalWorkConfig):
+                raise TypeError("runtime_guard must return LocalWorkConfig or None")
+            if self._local_operation is None:
+                self._local_operation = SysOperation(SysOperationCard(
+                    mode=OperationMode.LOCAL, work_config=work_config,
+                ))
+            return getattr(getattr(self._local_operation, op_type)(), method)
+        except Exception as exc:
+            self._audit_runtime_fallback(op_type, method, params, action="reject", reason=str(exc))
+            raise
+
+    def _audit_runtime_fallback(self, op_type: str, method: str, params: dict, *, action: str, reason: str) -> None:
+        inline = None
+        if op_type == "shell":
+            command = params.get("command")
+            inline = "\n" not in command.strip() if isinstance(command, str) else None
+        elif op_type == "code":
+            options = params.get("options")
+            inline = not bool(options.get("force_file", False)) if isinstance(options, dict) else True
+        emit_fallback_audit(
+            domain="sandbox", op=f"{op_type}.{method}", policy="runtime_guard", inline=inline,
+            provider_policy=self._launcher_extra_params().get("fallback_policy"), action_taken=action, reason=reason,
+        )
 
     def _record_error(self, error: Exception) -> None:
-        observer = (self._config.launcher_config.extra_params or {}).get("runtime_error_handler")
+        observer = self._launcher_extra_params().get("runtime_error_handler")
         if observer is not None:
             try:
                 observer(error)
@@ -70,6 +95,10 @@ class SandboxGatewayClient:
         """Send an invoke request through the gateway full-chain routing."""
         local = await self._local_target(op_type, method, params)
         if local is not None:
+            self._audit_runtime_fallback(
+                op_type, method, params, action="local_fallback",
+                reason="host runtime_guard authorized local execution",
+            )
             return await local(**params)
         request = GatewayInvokeRequest(
             op_type=op_type, method=method, params=params, isolation_key=self._isolation_key,
@@ -87,6 +116,10 @@ class SandboxGatewayClient:
         """Send a streaming invoke request through the gateway full-chain routing."""
         local = await self._local_target(op_type, method, params)
         if local is not None:
+            self._audit_runtime_fallback(
+                op_type, method, params, action="local_fallback",
+                reason="host runtime_guard authorized local execution",
+            )
             async for item in local(**params):
                 yield item
             return

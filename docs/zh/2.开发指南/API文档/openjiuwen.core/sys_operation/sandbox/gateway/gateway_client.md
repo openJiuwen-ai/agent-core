@@ -26,6 +26,17 @@ class SandboxGatewayClient(
 `create=False` 只检查阻断。该机制同样作用于流式调用，网关不会重试已经发送的操作。
 可选同步 `runtime_error_handler(error)` 仅记录发送后的错误，不改变执行结果；未提供回调时原行为不变。
 
+`runtime_guard` 是可信宿主的执行模式授权入口，**不受 provider 的 `fallback_policy` 二次裁决**。
+该策略只控制 provider 内部的单次命令失败兜底；例如宿主可保留 `fallback_policy="never"` 来禁止命令重放，
+同时由自身的 `auto_fallback` 开关决定准备失败后是否切换本地模式。宿主必须先校验该开关、策略屏障及清理结果，
+仅在允许本地执行时返回 `LocalWorkConfig`，否则返回 `None` 或抛错。
+网关在本地操作开始前及 guard 拒绝时，均通过与 JiuwenBox provider 共用的 `set_fallback_audit_hook` 发出事件：
+`policy="runtime_guard"`、`provider_policy`、`op="<op_type>.<method>"`、`inline`、`action_taken` 和 `reason`。
+审计 hook 异常不改变执行结果；已发送的命令不会因此重试。
+
+`prepare()` 对 JiuwenBox 的 `provisioning` 相位等待至 `ready`，等待期限取客户端读取超时（未设时 30 秒）；
+超时返回错误，不把仍在创建的实例当作可重建对象，也不授权本地执行。
+
 ```python
 async invoke(op_type: str, method: str, **params) -> Any
 ```

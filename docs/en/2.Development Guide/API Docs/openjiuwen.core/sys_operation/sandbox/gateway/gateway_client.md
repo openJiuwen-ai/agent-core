@@ -28,6 +28,19 @@ Dispatched operations are never retried by the gateway. An optional synchronous
 `runtime_error_handler(error)` observes dispatched errors without changing results.
 Without these callbacks, existing routing is unchanged.
 
+`runtime_guard` is a trusted host execution-mode authorization, independent of provider `fallback_policy`.
+That policy controls provider-side fallback for individual failed commands. A host can keep
+`fallback_policy="never"` to prevent command replay while using its own `auto_fallback` setting to
+authorize local mode after preparation fails. The host must check its setting, policy barriers and
+cleanup results before returning `LocalWorkConfig`; otherwise it must return `None` or raise.
+Before local execution and on guard rejection, the gateway emits through the same
+`set_fallback_audit_hook` as the JiuwenBox provider, with `policy="runtime_guard"`, `provider_policy`,
+`op="<op_type>.<method>"`, `inline`, `action_taken` and `reason`. Audit failures never change results
+or cause dispatched commands to be retried.
+
+For JiuwenBox, `prepare()` polls `provisioning` until `ready`, bounded by the client read timeout
+(30 seconds when unset). Expiry raises an error without recreating an in-progress instance or authorizing local execution.
+
 ```python
 async invoke(op_type: str, method: str, **params) -> Any
 ```

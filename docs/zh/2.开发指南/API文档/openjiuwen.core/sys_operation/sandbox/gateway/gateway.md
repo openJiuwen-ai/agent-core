@@ -97,6 +97,14 @@ async handle_stream_request(
 
 **AsyncIterator**，流式调用结果。
 
+### async get_or_create_provider
+
+```python
+async get_or_create_provider(config: SandboxGatewayConfig, isolation_key: Optional[str], op_type: str) -> Any
+```
+
+获取缓存的 provider，或解析端点后创建 provider，供客户端执行发送前准备检查；不调用工具操作。
+
 ### async get_sandbox
 
 ```python

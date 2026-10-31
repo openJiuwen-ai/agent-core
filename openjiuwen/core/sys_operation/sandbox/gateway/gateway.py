@@ -114,6 +114,12 @@ class SandboxGateway:
             raise AttributeError(f"Method '{request.method}' not found on provider")
         return handler(**request.params)
 
+    async def get_or_create_provider(
+            self, config: SandboxGatewayConfig, isolation_key: Optional[str], op_type: str,
+    ) -> Any:
+        """Resolve a provider for host readiness checks without dispatching an operation."""
+        return await self._get_or_create_provider(config=config, isolation_key=isolation_key, op_type=op_type)
+
     async def _get_or_create_provider(
             self,
             config: SandboxGatewayConfig,
