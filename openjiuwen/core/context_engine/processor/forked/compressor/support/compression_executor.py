@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.content_sanitize import sanitize_value_for_text
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 
@@ -167,15 +168,42 @@ class CompressionExecutor:
         which is correct for a direct model call.  A ReAct agent receives the
         prompt through ``agent.invoke`` instead, so agent executors need the
         system/context prefix without duplicating the prompt.
+
+        Image base64 payloads in multimodal list content are replaced with short
+        placeholders (via ``sanitize_value_for_text``) on a per-message copy:
+        compression summaries need only text, not image pixels, so base64 is dead
+        weight that bloats the request body (gateway 413) and yields saved=0%.
+        Original messages are never mutated.
         """
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
             keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
             context_messages = context_messages[:keep_count]
         return [
-            *list(request.system_messages or []),
-            *context_messages,
+            *CompressionExecutor._strip_image_payloads(list(request.system_messages or [])),
+            *CompressionExecutor._strip_image_payloads(context_messages),
         ]
+
+    @staticmethod
+    def _strip_image_payloads(messages: list[BaseMessage]) -> list[BaseMessage]:
+        """Return copies of *messages* with image base64 payloads replaced.
+
+        Only list content (multimodal blocks) is sanitized; string content is
+        already handled by token-side sanitization and is left as-is. Messages
+        without image payloads keep their original object reference.
+        """
+        stripped: list[BaseMessage] = []
+        for message in messages:
+            content = getattr(message, "content", None)
+            if not isinstance(content, list):
+                stripped.append(message)
+                continue
+            new_content = sanitize_value_for_text(content)
+            if new_content is content or new_content == content:
+                stripped.append(message)
+                continue
+            stripped.append(message.model_copy(update={"content": new_content}))
+        return stripped
 
     @staticmethod
     def build_messages(request: CompressionRequest) -> list[BaseMessage]:
