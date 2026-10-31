@@ -116,6 +116,11 @@ _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
 # it answers (multimodal item ``"keep_in_context": False``).
 _IMAGE_PARTS_SHOWN_ONCE_METADATA = "_openjiuwen_image_parts_shown_once"
 _IMAGE_SHOWN_ONCE_NOTE = "This image was shown once and is no longer attached."
+_OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens"})
+_TRUNCATED_TOOL_ARGS_MESSAGE = (
+    "Tool arguments were cut off because the response hit the output limit; the tool was not run. "
+    "Retry with shorter arguments or split the call."
+)
 # Above this, the per-stage breakdown of invoke preparation is reported at INFO
 # so a slow start shows up without having to enable debug logging. Preparation
 # loads interruption state and builds the prompt, which is normal work worth a
@@ -2014,7 +2019,7 @@ class ReActAgent(BaseAgent):
         code = int(getattr(usage, "code", 0) or 0)
         content = getattr(message, "content", "")
         no_answer = not getattr(message, "tool_calls", None) and not (isinstance(content, str) and content.strip())
-        if finish_reason in {"length", "max_tokens"} and no_answer:
+        if finish_reason in _OUTPUT_LIMIT_FINISH_REASONS and no_answer:
             # A reasoning model can spend its whole output budget thinking and stop
             # before any answer or tool call. Treating that as the final answer
             # would end the turn with an empty "successful" result.
@@ -2365,16 +2370,26 @@ class ReActAgent(BaseAgent):
         tool_calls: List,
         session: Optional[Session],
         context: ModelContext,
+        *,
+        finish_reason: Optional[str] = None,
     ) -> list:
         """Execute tool calls in parallel and commit tool messages into context.
 
         Returns:
-            List of (tool_result, tool_message) tuples from ability_manager
+            List of (tool_result, tool_message) tuples, one per tool call, in order
         """
         if not tool_calls:
             return []
 
-        for tool_call in tool_calls:
+        truncated = str(finish_reason or "").strip().lower() in _OUTPUT_LIMIT_FINISH_REASONS
+        cut_off = [truncated and not self._is_complete_json_arguments(call.arguments) for call in tool_calls]
+        runnable = [call for call, skip in zip(tool_calls, cut_off) if not skip]
+
+        for tool_call, skip in zip(tool_calls, cut_off):
+            if skip:
+                logger.warning("Skipping tool %s: arguments cut off by the output limit", tool_call.name)
+                tool_call.arguments = "{}"
+                continue
             log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
             tool_name = str(tool_call.name or "")
             is_browser_tool = self._is_browser_tool_name(tool_name)
@@ -2383,12 +2398,20 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
-        results = await self.ability_manager.execute(
-            ctx=ctx,
-            tool_call=tool_calls,
-            session=session,
-            parallel_tool_calls=self._config.parallel_tool_calls,
+        executed = iter(
+            await self.ability_manager.execute(
+                ctx=ctx,
+                tool_call=runnable,
+                session=session,
+                parallel_tool_calls=self._config.parallel_tool_calls,
+            )
+            if runnable
+            else []
         )
+        results = [
+            (None, ToolMessage(content=_TRUNCATED_TOOL_ARGS_MESSAGE, tool_call_id=call.id)) if skip else next(executed)
+            for call, skip in zip(tool_calls, cut_off)
+        ]
 
         tool_names = {call.id: call.name for call in tool_calls}
         for _, tool_message in results:
@@ -2422,6 +2445,16 @@ class ReActAgent(BaseAgent):
         multimodal_message = self._build_multimodal_message_from_items(image_items)
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
+
+    @staticmethod
+    def _is_complete_json_arguments(arguments: Any) -> bool:
+        if not isinstance(arguments, str):
+            return True
+        try:
+            json.loads(arguments)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -3145,7 +3178,9 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = result
                             break
 
-                        results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                        results = await self._execute_tool_call(
+                            ctx, ai_message.tool_calls, session, context, finish_reason=ai_message.finish_reason
+                        )
 
                         finish = ctx.consume_force_finish()
                         if finish:
