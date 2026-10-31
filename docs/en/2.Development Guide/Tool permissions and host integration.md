@@ -28,6 +28,18 @@ uv run python examples/permissions/permission_demo.py
 
 Public API surface: `openjiuwen.harness.security`.
 
+Native FileGuard extracts Shell paths per segment: `cd child && node a.js` checks the script's `exec` permission
+under the changed directory. Bare script names, common interpreter options and Node file preload options are supported.
+Redirects use their segment's directory. On Windows Bash/Sh, `/e/code/x` maps to `E:/code/x`; `auto` reuses
+the executor's shell selection predicates, so cmd switches `/b`, `/s` and `/d` are not drive roots.
+Bash/Sh expands unquoted `~`; unresolved variables are not literal directories. Only a single valid `cd` operand
+advances cwd. Conditional branches and pipelines retain possible directories and can be more conservative than
+execution. Extraction is bounded to 128 cwd candidates and 1024 segment/cwd checks, shared across literal Bash/Sh
+`-c` recursion (maximum depth 4); a child shell does not change its parent's cwd. Limits raise a tagged framework
+error that `check_permission()` converts to DENY with rule `file_guard:analysis_limit`. Operands following unknown
+options are conservatively checked as possible scripts. Dynamic inline code, module resolution and file access
+inside scripts still require appropriate runtime protection.
+
 ---
 
 ## 2. Enabling on DeepAgent
