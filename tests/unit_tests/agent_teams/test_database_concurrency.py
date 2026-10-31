@@ -514,6 +514,53 @@ async def test_retry_on_transient_raises_last_error_after_exhaustion(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_retry_on_transient_retries_lock_contention(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``database is locked`` is contention: backing off lets the other writer finish."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("database is locked"))
+        return "ready"
+
+    assert await retry_on_transient(op, label="test_op") == "ready"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_transient_raises_permanent_operational_error_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent ``OperationalError`` is not retried: back-off would only stall every caller."""
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> None:
+        nonlocal calls
+        calls += 1
+        raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError("disk I/O error"))
+
+    with pytest.raises(OperationalError, match="disk I/O error"):
+        await retry_on_transient(op, label="test_op")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
     """The batch mark-read API marks a whole mailbox drain in one call."""
     db = file_db

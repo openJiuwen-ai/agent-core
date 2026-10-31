@@ -1,12 +1,18 @@
 # coding: utf-8
 
+import asyncio
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import event, inspect
-from sqlalchemy.engine import Connection, ExecutionContext
+from sqlalchemy.engine import Connection, Engine, ExecutionContext
+from sqlalchemy.exc import OperationalError
 
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.organization.db import OrgDbContext, json_dumps, json_loads
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.organization.schema import ORG_STATIC_TABLE_NAMES
@@ -189,7 +195,6 @@ async def test_ensure_org_task_columns_normalizes_legacy_terminal_statuses():
     await db.close()
 
 
-
 def _record_schema_statements(db: TeamDatabase) -> list[tuple[str, bool]]:
     """Record every schema statement on the writer engine with the write-lock state.
 
@@ -317,25 +322,93 @@ async def test_closed_team_database_refuses_reinitialize() -> None:
     assert db.engine is None
 
 
+@contextmanager
+def _record_disposed_engines() -> Iterator[list[Engine]]:
+    """Record every engine disposed while the block runs (SQL-boundary event)."""
+    disposed: list[Engine] = []
+
+    def _on_dispose(engine: Engine) -> None:
+        disposed.append(engine)
+
+    event.listen(Engine, "engine_disposed", _on_dispose)
+    try:
+        yield disposed
+    finally:
+        event.remove(Engine, "engine_disposed", _on_dispose)
+
+
+@contextmanager
+def _foreign_write_lock(db_path: Path) -> Iterator[None]:
+    """Hold SQLite's write lock on ``db_path`` from a foreign connection (another process's writer)."""
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute("BEGIN EXCLUSIVE")
+        yield
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 @pytest.mark.asyncio
-async def test_failed_initialize_releases_engines_and_hides_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openjiuwen.agent_teams.team_workspace import session_file_store
-
-    original_file_store = session_file_store.SessionFileStore
-
-    def _failing_file_store(*args: Any, **kwargs: Any) -> Any:
-        raise OSError("session file store unavailable")
-
-    monkeypatch.setattr(session_file_store, "SessionFileStore", _failing_file_store)
-    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
-    with pytest.raises(OSError):
-        await db.initialize()
-    # A half-initialized database must neither hand out its provider (a retry
-    # would leave two write locks alive) nor keep the pools it just built.
-    assert db.sessions is None
-    assert db.engine is None and db.read_engine is None
-    # The failure is not a close: once the cause is gone a retry succeeds.
-    monkeypatch.setattr(session_file_store, "SessionFileStore", original_file_store)
+async def test_failed_static_ddl_disposes_the_engines_it_built(tmp_path: Path) -> None:
+    db_path = tmp_path / "team.db"
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(db_path), db_timeout=0))
+    with _foreign_write_lock(db_path), _record_disposed_engines() as disposed:
+        with pytest.raises(OperationalError, match="locked"):
+            await db.initialize()
+    # The engines never reached TeamDatabase, so initialize_engine itself must
+    # dispose both pools; a polling caller would otherwise leak a pair per try.
+    assert len(set(map(id, disposed))) == 2
+    assert db.sessions is None and db.engine is None
+    # The failure is not a close: once the lock is gone a retry succeeds.
     await db.initialize()
     assert db.sessions is not None
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initialize_releases_engines_and_hides_sessions(tmp_path: Path) -> None:
+    db_path = tmp_path / "team.db"
+    config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(db_path), db_timeout=0)
+    seed = TeamDatabase(config)
+    await seed.initialize()
+    await seed.close()
+
+    db = TeamDatabase(config)
+    token = set_session_id("cancelled_init_session")
+    try:
+        # Static tables exist (read-only checks pass the foreign lock); the
+        # bind-time session-table DDL then backs off on the lock, which is
+        # where the caller gives up and cancels.
+        with _foreign_write_lock(db_path), _record_disposed_engines() as disposed:
+            init_task = asyncio.create_task(db.initialize())
+            while db.engine is None and not init_task.done():
+                await asyncio.sleep(0.01)
+            init_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await init_task
+    finally:
+        reset_session_id(token)
+    # A half-initialized database must neither hand out its provider (a retry
+    # would leave two write locks alive) nor keep the pools it just built.
+    assert len(set(map(id, disposed))) == 2
+    assert db.sessions is None
+    assert db.engine is None and db.read_engine is None
+    await db.initialize()
+    assert db.sessions is not None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_inflight_initialize_and_releases_it(tmp_path: Path) -> None:
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db")))
+    init_task = asyncio.create_task(db.initialize())
+    # Let initialize() take the init lock and park on its first DB round-trip.
+    await asyncio.sleep(0)
+    assert not init_task.done()
+    await db.close()
+    await init_task
+    # The in-flight initialize must not publish engines after close() returned.
+    assert db.closed
+    assert db.engine is None and db.read_engine is None
+    assert db.sessions is None

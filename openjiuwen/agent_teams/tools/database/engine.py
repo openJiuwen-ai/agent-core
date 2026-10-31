@@ -61,11 +61,16 @@ _DB_RETRY_BASE_DELAY = 0.5
 # means the driver is stuck, and a loud TimeoutError beats an eternal hang.
 _DB_SESSION_WATCHDOG_SECONDS = 30.0
 
-# Errors ``retry_on_transient`` backs off on: SQLite contention
+# Error types ``retry_on_transient`` may back off on: SQLite contention
 # (``OperationalError``), write-pool checkout timeouts (``SATimeoutError``)
 # and the ``DbSessions`` watchdog (builtin ``TimeoutError``). Callers that
-# degrade on exhaustion catch this same tuple.
+# degrade on failure catch this same tuple. Only contention-flavoured
+# ``OperationalError``s are retried (see ``_is_transient_db_error``).
 _TRANSIENT_DB_ERRORS = (OperationalError, SATimeoutError, TimeoutError)
+# SQLite messages that mark an ``OperationalError`` as contention
+# ("database is locked", "database table is locked", SQLITE_BUSY wording);
+# anything else (disk I/O error, malformed image, no such table) is permanent.
+_TRANSIENT_OPERATIONAL_MARKERS = ("locked", "busy")
 # Each watchdog hit already cost ``_DB_SESSION_WATCHDOG_SECONDS``, and a
 # wedged driver rarely recovers within seconds, so retry it only once instead
 # of the full ``_DB_RETRY_ATTEMPTS`` (bounds the worst case at ~2x watchdog).
@@ -211,6 +216,14 @@ async def retry_on_locked(
     return on_locked_result
 
 
+def _is_transient_db_error(e: BaseException) -> bool:
+    """Whether ``e`` is worth a retry: contention or a timeout, not a permanent failure."""
+    if isinstance(e, OperationalError):
+        message = str(e.orig if e.orig is not None else e).lower()
+        return any(marker in message for marker in _TRANSIENT_OPERATIONAL_MARKERS)
+    return isinstance(e, (SATimeoutError, TimeoutError))
+
+
 async def retry_on_transient(
     op: Callable[[], Awaitable[_T]],
     *,
@@ -219,11 +232,14 @@ async def retry_on_transient(
     """Run a write ``op`` with back-off on transient DB errors, raising on exhaustion.
 
     Same back-off as ``retry_on_locked`` but for callers that cannot degrade
-    on their own: retries every error in ``_TRANSIENT_DB_ERRORS`` (including
-    the ``DbSessions.write()`` watchdog ``TimeoutError``) and re-raises the
-    last error once the budget is spent instead of returning a fallback
-    value. Watchdog hits get a smaller budget (``_WATCHDOG_RETRY_ATTEMPTS``)
-    because each one already waited out the full watchdog.
+    on their own: retries lock contention, pool checkout timeouts and the
+    ``DbSessions.write()`` watchdog ``TimeoutError``, and re-raises the last
+    error once the budget is spent instead of returning a fallback value.
+    A permanent ``OperationalError`` (disk I/O error, malformed image, ...)
+    is raised on the first attempt: backing off cannot fix it and would only
+    stall every caller. Watchdog hits get a smaller budget
+    (``_WATCHDOG_RETRY_ATTEMPTS``) because each one already waited out the
+    full watchdog.
 
     Args:
         op: Zero-arg coroutine factory performing one write attempt; it must
@@ -240,6 +256,9 @@ async def retry_on_transient(
             return await op()
         except _TRANSIENT_DB_ERRORS as e:
             attempt += 1
+            if not _is_transient_db_error(e):
+                team_logger.error("%s hit a non-retryable DB error: %s", label, e)
+                raise
             if isinstance(e, TimeoutError):
                 watchdog_hits += 1
             if attempt >= _DB_RETRY_ATTEMPTS or watchdog_hits >= _WATCHDOG_RETRY_ATTEMPTS:
@@ -853,11 +872,20 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
         )
 
     # DDL + migrations run on the writer engine (they are writes).
-    async with write_engine.begin() as conn:
-        await conn.run_sync(_create_static_tables)
-        await conn.run_sync(_ensure_team_member_role_column)
-        await conn.run_sync(_ensure_team_member_options_column)
-        await conn.run_sync(_ensure_team_info_capability_columns)
+    try:
+        async with write_engine.begin() as conn:
+            await conn.run_sync(_create_static_tables)
+            await conn.run_sync(_ensure_team_member_role_column)
+            await conn.run_sync(_ensure_team_member_options_column)
+            await conn.run_sync(_ensure_team_info_capability_columns)
+    except BaseException:
+        # The engines never reach the caller, so nobody else can dispose them:
+        # a failed DDL (e.g. ``database is locked``) retried by a poller would
+        # otherwise leak a writer + reader pool per attempt.
+        if read_engine is not write_engine:
+            await read_engine.dispose()
+        await write_engine.dispose()
+        raise
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 

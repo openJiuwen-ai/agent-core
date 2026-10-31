@@ -325,10 +325,15 @@ class TeamDatabase:
         reopening, so a stale holder (e.g. an organization store) cannot
         silently resurrect engines and the background checkpointer after
         shutdown. Build a new ``TeamDatabase`` to use the storage again.
+
+        Runs under ``_init_lock``: an ``initialize()`` already in flight
+        finishes first and its engines are then released here, instead of
+        being published after this close returned.
         """
-        self._closed = True
-        had_engine = self.engine is not None
-        await self._release_engines()
+        async with self._init_lock:
+            self._closed = True
+            had_engine = self.engine is not None
+            await self._release_engines()
         if had_engine:
             team_logger.info("Team database closed")
         from openjiuwen.agent_teams.organization.pool import remove_process_org_managers_for_db

@@ -57,7 +57,10 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，写操作会和 DAO 写争池
   （B_20261031_1134_org-ddl-bypasses-write-lock）。
 - **`TeamDatabase` 生命周期** —— `sessions` 只在 `initialize()` 全部完成后才发布，中途失败会
-  释放已建好的 engine 再抛出，可以重试。**`close()` 是终态**：之后 `initialize()` 抛
+  释放已建好的 engine 再抛出，可以重试；`initialize_engine` 自己的静态表 DDL 失败时也会先
+  dispose 刚建的读写 engine 再抛出（engine 还没交给调用方，别人没法释放）。`close()` 持
+  `_init_lock` 执行，正在进行的 `initialize()` 先跑完、再由 close 统一释放，不会在 close 返回
+  之后才发布 engine。**`close()` 是终态**：之后 `initialize()` 抛
   `AGENT_TEAM_STATE_INVALID`，不会重新打开，任何还持有它的对象（如组织存储）都无法悄悄重建
   engine 和后台 checkpointer；要再用同一份存储就新建实例。`get_shared_db` 遇到已关闭
   （`closed`）的缓存实例会换一个新的，不会把死实例一直发下去；缓存 key 对文件 SQLite 做
@@ -75,8 +78,9 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
 - **`retry_on_locked`（`engine.py`）** —— 对瞬时 `database is locked` 做有界退避；
   sleep 跑在 session 块之外，因此重试永远不会占住一条已 checkout 的连接。一旦写被串行化
   就很少见 —— 只在 WAL-checkpoint 边界或有外部进程碰同一文件时出现。
-  **`retry_on_transient`** 是不能降级的写操作用的变体：重试 `_TRANSIENT_DB_ERRORS`
-  （`OperationalError` / 池超时 / `DbSessions.write()` 看门狗 `TimeoutError`），预算耗尽时抛出最后
+  **`retry_on_transient`** 是不能降级的写操作用的变体：只重试锁冲突类 `OperationalError`
+  （消息含 `locked` / `busy`）、池超时和 `DbSessions.write()` 看门狗 `TimeoutError`；disk I/O
+  error、库文件损坏这类永久错误第一次就抛出，不退避。预算耗尽时抛出最后
   一次的原始异常，不返回兜底值。看门狗超时每次已经等满 30 秒，所以最多只重试 1 次
   （`_WATCHDOG_RETRY_ATTEMPTS`），最坏约 2 个看门狗周期。组织表 DDL 用它；
   `create_cur_session_tables` 也用它，但捕获同一个元组后只记日志、不抛出。
