@@ -38,8 +38,12 @@ def build_error_response(message, sender_id, error):
         message_id=message.message_id,
         payload={},
         result_type=ResultType.ERROR,
-        error_code=error.error_code,
-        error_msg=error.message,
+        # BaseError exposes the numeric StatusCode as ``code`` and the rendered
+        # text as ``message``; there is no ``error_code`` attribute. Using the
+        # latter raised AttributeError while building the error reply, so the
+        # client never received a structured failure.
+        error_code=getattr(error, "code", getattr(error, "error_code", 0)),
+        error_msg=getattr(error, "message", str(error)),
         sender_id=sender_id,
         receiver_id=message.sender_id,
         seq=0,
