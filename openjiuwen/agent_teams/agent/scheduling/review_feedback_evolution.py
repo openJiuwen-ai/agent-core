@@ -38,6 +38,12 @@ RailProvider = Callable[[], Any | None]
 EventSink = Callable[[str, Sequence[Any]], Awaitable[None]]
 BoolProvider = Callable[[], bool]
 FloatProvider = Callable[[], float]
+# Optional structured-attribution observer. Receives the normalized
+# ``ReviewFeedbackAttribution`` plus the task identity right after the
+# attributor returns; a product runtime may journal it, audit it, or feed
+# domain-specific traceability. The coordinator awaits it defensively:
+# sink failures are logged and never gate the evolution pipeline.
+AttributionSink = Callable[[Any, str, int], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,7 @@ class ReviewFeedbackEvolutionCoordinator:
         team_rail_provider: RailProvider,
         skill_create_rail_provider: RailProvider | None = None,
         event_sink: EventSink | None = None,
+        attribution_sink: AttributionSink | None = None,
         enabled: bool | BoolProvider = True,
         min_confidence: float | FloatProvider = 0.7,
     ) -> None:
@@ -91,6 +98,7 @@ class ReviewFeedbackEvolutionCoordinator:
         self._team_rail_provider = team_rail_provider
         self._skill_create_rail_provider = skill_create_rail_provider
         self._event_sink = event_sink
+        self._attribution_sink = attribution_sink
         self._enabled = enabled
         self._min_confidence = min_confidence
         self._processed: set[tuple[str, int, str]] = set()
@@ -174,6 +182,13 @@ class ReviewFeedbackEvolutionCoordinator:
                 attribution.confidence,
                 attribution.reason,
             )
+            if self._attribution_sink is not None:
+                try:
+                    await self._attribution_sink(attribution, task_id, review_round)
+                except Exception as exc:  # noqa: BLE001 - the sink is advisory
+                    logger.warning(
+                        "[ReviewFeedbackEvolution] attribution sink failed: %s", exc
+                    )
 
             threshold = self._confidence_threshold()
             if attribution.classification == ReviewFeedbackClassification.NEW_SKILL_PATTERN:

@@ -249,6 +249,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         session_id: str,
         team_id: str,
         min_confidence: float = 0.7,
+        attribution_sink: Any | None = None,
     ) -> None:
         """Attach reviewer-feedback evolution to this standard team Rail.
 
@@ -256,6 +257,11 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         until the team finishes. Terminal aggregation then reuses this mounted
         Rail's ordinary Team Skill optimizer, persistence, pending-event, and
         approval path.
+
+        ``attribution_sink`` is an optional async observer receiving
+        ``(attribution, task_id, review_round)`` right after each attribution;
+        product runtimes use it for durable audit journals. It is advisory:
+        sink failures are logged and never block the evolution pipeline.
         """
         from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
             ReviewFeedbackEvolutionCoordinator,
@@ -267,6 +273,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             team_rail_provider=lambda: self,
             skill_create_rail_provider=lambda: self._review_feedback_skill_create_rail,
             event_sink=self._relay_review_feedback_events,
+            attribution_sink=attribution_sink,
             min_confidence=min_confidence,
         )
 
