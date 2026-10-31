@@ -80,6 +80,28 @@ def apply_context(ctx: dict, deltas: list[MessageDelta]) -> dict:
 
 # --- state track ---
 
+# StateDelta uses dotted paths on the wire. Escape the separator inside a key
+# so a legitimate state key such as "a.b" cannot be restored as {"a":{"b":...}}.
+_PATH_TILDE = "~0"
+_PATH_DOT = "~1"
+
+
+def _escape_key(key: Any) -> str:
+    return str(key).replace("~", _PATH_TILDE).replace(".", _PATH_DOT)
+
+
+def _join_path(prefix: str, key: Any) -> str:
+    escaped = _escape_key(key)
+    return f"{prefix}.{escaped}" if prefix else escaped
+
+
+def _split_path(path: str) -> list[str]:
+    return [
+        segment.replace(_PATH_DOT, ".").replace(_PATH_TILDE, "~")
+        for segment in path.split(".")
+    ]
+
+
 def diff_state(old: dict, new: dict) -> StateDelta:
     """Recursively diff two kv dicts into a flat set map + removed paths."""
     set_flat: dict[str, Any] = {}
@@ -90,7 +112,7 @@ def diff_state(old: dict, new: dict) -> StateDelta:
 
 def _diff_into(old: dict, new: dict, prefix: str, set_flat: dict, removed: list) -> None:
     for key, new_value in new.items():
-        path = f"{prefix}.{key}" if prefix else key
+        path = _join_path(prefix, key)
         if key not in old:
             set_flat[path] = new_value
             continue
@@ -101,16 +123,16 @@ def _diff_into(old: dict, new: dict, prefix: str, set_flat: dict, removed: list)
             set_flat[path] = new_value
     for key in old:
         if key not in new:
-            removed.append(f"{prefix}.{key}" if prefix else key)
+            removed.append(_join_path(prefix, key))
 
 
 def apply_state(state: dict, delta: StateDelta) -> dict:
     """Apply a StateDelta onto a kv dict; returns a new dict. None stays a value."""
     result = deepcopy(state)
     for path, value in delta.set.items():
-        _set_path(result, path.split("."), deepcopy(value))
+        _set_path(result, _split_path(path), deepcopy(value))
     for path in delta.removed:
-        _del_path(result, path.split("."))
+        _del_path(result, _split_path(path))
     return result
 
 
