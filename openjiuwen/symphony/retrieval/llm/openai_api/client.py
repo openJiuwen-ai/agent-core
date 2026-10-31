@@ -97,8 +97,10 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
             ) from exc
         chunks: list[str] = []
         usage: dict[str, Any] | None = None
+        truncated = False
         try:
             for chunk in stream:
+                truncated = truncated or self._has_length_finish_reason(chunk)
                 chunk_usage = self._usage_to_dict(getattr(chunk, "usage", None))
                 if chunk_usage:
                     usage = chunk_usage
@@ -120,6 +122,8 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
             self._emit_io(
                 "LLM RESPONSE", {"model": model, "content": "".join(chunks), "stream": True, "usage": usage or {}}
             )
+        if truncated:
+            raise LLMRequestError("OpenAI-compatible streaming response was truncated (finish_reason=length)")
 
     def complete(
         self,
@@ -164,6 +168,8 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
         results = self._extract_completion_contents(response)
         if self._log_io:
             self._emit_io("LLM RESPONSE", {"model": model, "stream": False, "choices": results})
+        if self._has_length_finish_reason(response):
+            raise LLMRequestError("OpenAI-compatible completion response was truncated (finish_reason=length)")
         return results
 
     def extra_body_from_generation_config(self, config: GenerationConfig | None) -> dict[str, Any]:
@@ -226,6 +232,15 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
                 content = str(getattr(message, "content", "") or "")
             results.append(content)
         return results
+
+    @staticmethod
+    def _has_length_finish_reason(response: Any) -> bool:
+        choices = response.get("choices") if isinstance(response, Mapping) else getattr(response, "choices", None)
+        return any(
+            (choice.get("finish_reason") if isinstance(choice, Mapping) else getattr(choice, "finish_reason", None))
+            == "length"
+            for choice in choices or []
+        )
 
     @staticmethod
     def _usage_to_dict(usage: Any) -> dict[str, Any]:
