@@ -45,7 +45,7 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 
 from .categories import OTHER_CATEGORY, normalize_category

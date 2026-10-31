@@ -352,6 +352,8 @@ def create_ttse_consult_tool(
     max_rules: int = 40,
     default_top_k: int = DEFAULT_TOP_K,
     rrf_k: int = DEFAULT_RRF_K,
+    description: str | None = None,
+    category_description: str | None = None,
 ) -> Any:
     """Build the rail-owned consult tool bound to ``store``."""
     from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
@@ -367,21 +369,22 @@ def create_ttse_consult_tool(
             rrf_k=rrf_k,
         )
 
+    category_text = category_description or (
+        "One catalog id, several related ids separated by commas, "
+        f"or `{CONSULT_ALL_CATEGORY}` to search the whole bank. "
+        f"`{CONSULT_ALL_CATEGORY}` is not a stored class and must "
+        "not be mixed with catalog ids."
+    )
     card = ToolCard(
         id=TTSE_CONSULT_TOOL_NAME,
         name=TTSE_CONSULT_TOOL_NAME,
-        description=_CONSULT_DESCRIPTION,
+        description=description or _CONSULT_DESCRIPTION,
         input_params={
             "type": "object",
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": (
-                        "One catalog id, several related ids separated by commas, "
-                        f"or `{CONSULT_ALL_CATEGORY}` to search the whole bank. "
-                        f"`{CONSULT_ALL_CATEGORY}` is not a stored class and must "
-                        "not be mixed with catalog ids."
-                    ),
+                    "description": category_text,
                 },
                 "query": {
                     "type": "string",
@@ -404,6 +407,8 @@ def create_ttse_consult_tools(
     max_rules: int = 40,
     default_top_k: int = DEFAULT_TOP_K,
     rrf_k: int = DEFAULT_RRF_K,
+    description: str | None = None,
+    category_description: str | None = None,
 ) -> List[Any]:
     return [
         create_ttse_consult_tool(
@@ -412,6 +417,8 @@ def create_ttse_consult_tools(
             max_rules=max_rules,
             default_top_k=default_top_k,
             rrf_k=rrf_k,
+            description=description,
+            category_description=category_description,
         )
     ]
 

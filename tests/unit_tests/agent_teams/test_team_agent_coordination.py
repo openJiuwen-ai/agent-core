@@ -3589,6 +3589,81 @@ async def test_drained_callback_failure_is_isolated():
     healthy.assert_awaited_once()
 
 
+def _completion_handler(*, lifecycle: str = "persistent"):
+    from openjiuwen.agent_teams.agent.coordination.handlers.team_completion import TeamCompletionHandler
+
+    host = MagicMock()
+    host.has_in_flight_round.return_value = False
+    host.is_agent_running.return_value = False
+    host.has_pending_interrupt.return_value = False
+    host.conclude_completed_round = AsyncMock()
+    blueprint = MagicMock()
+    blueprint.role = TeamRole.LEADER
+    blueprint.lifecycle = lifecycle
+    blueprint.team_spec = None
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.is_team_completed = AsyncMock(return_value=TeamCompletionSnapshot(member_count=2, task_count=3))
+    infra = MagicMock()
+    infra.team_backend = backend
+    infra.messager = AsyncMock()
+    return TeamCompletionHandler(host, blueprint, infra, MagicMock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_accepted_callback_runs_before_conclude_and_not_on_drain():
+    """Acceptance callbacks fire on the poll rising edge, ahead of pause."""
+    handler = _completion_handler()
+    order: list[str] = []
+    drain = AsyncMock()
+
+    async def accepted() -> None:
+        order.append("accepted")
+
+    async def conclude(member_count: int, task_count: int) -> None:
+        del member_count, task_count
+        order.append("conclude")
+
+    handler._lifecycle.conclude_completed_round = conclude
+    handler.register_completion_callback(drain)
+    handler.register_team_completed_callback(accepted)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+    await handler.on_poll_task(event)
+
+    drain.assert_not_awaited()
+    assert order == ["accepted", "conclude"]
+    assert handler._team_completed_emitted is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_accepted_callback_failure_still_concludes():
+    """A failing acceptance callback does not block pause or re-enter the edge."""
+    handler = _completion_handler()
+    order: list[str] = []
+
+    async def failing() -> None:
+        order.append("fail")
+        raise RuntimeError("boom")
+
+    async def conclude(member_count: int, task_count: int) -> None:
+        del member_count, task_count
+        order.append("conclude")
+
+    handler._lifecycle.conclude_completed_round = conclude
+    handler.register_team_completed_callback(failing)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+    await handler.on_poll_task(event)
+
+    assert order == ["fail", "conclude"]
+    assert handler._team_completed_emitted is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_register_team_completion_callbacks_wires_skill_rail():

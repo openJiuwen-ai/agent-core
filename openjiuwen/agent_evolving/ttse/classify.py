@@ -16,7 +16,7 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
     LLMInvokePolicy,
     invoke_text_with_retry,
 )
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.foundation.llm.model import Model
 
 from .categories import (

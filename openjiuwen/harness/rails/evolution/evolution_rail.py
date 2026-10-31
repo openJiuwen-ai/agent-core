@@ -309,6 +309,7 @@ class _InvokeCapture:
     member_id: str | None
     team_id: str | None = None
     context_token: Any = None
+    hold_across_invokes: bool = False
 
 
 class _TeamTrajectoryCaptureMixin:
@@ -537,6 +538,16 @@ class EvolutionRail(DeepAgentRail):
             raise ValueError("trajectory session_id is required")
         member_id, team_id, trace_id = self._capture_route(ctx)
         scope_key = self._scope_key(session_id=session_id, member_id=member_id, team_id=team_id)
+        if self._hold_subscription_across_invokes() and trace_id:
+            existing = self._find_active_capture(scope_key)
+            if existing is not None and existing.hold_across_invokes:
+                existing.context_token = self._invoke_capture.set(existing)
+                try:
+                    await self._on_before_invoke(ctx)
+                except Exception:
+                    self._detach_invoke_capture(existing)
+                    raise
+                return
         subscription = self._trajectory_span_processor.subscribe(
             include_span_categories=self._subscription_categories(),
             trace_id=trace_id,
@@ -547,6 +558,7 @@ class EvolutionRail(DeepAgentRail):
             session_id=session_id,
             member_id=member_id,
             team_id=team_id,
+            hold_across_invokes=bool(self._hold_subscription_across_invokes() and trace_id),
         )
         capture.context_token = self._invoke_capture.set(capture)
         with self._subscription_lock:
@@ -627,7 +639,10 @@ class EvolutionRail(DeepAgentRail):
                     await self._on_after_evolution_triggered(trajectory, ctx)
         finally:
             if capture is not None:
-                self._unsubscribe_capture(capture)
+                if capture.hold_across_invokes and not self._release_held_subscription():
+                    self._detach_invoke_capture(capture)
+                else:
+                    self._unsubscribe_capture(capture)
 
     # ---- Trajectory helper methods ----
 
@@ -641,6 +656,30 @@ class EvolutionRail(DeepAgentRail):
         if session is not None and hasattr(session, "get_session_id"):
             return str(session.get_session_id())
         return inputs.conversation_id or ""
+
+    def _hold_subscription_across_invokes(self) -> bool:
+        """Keep one trace subscription open between invokes. Default is one invoke."""
+
+        return False
+
+    def _release_held_subscription(self) -> bool:
+        """Return whether the held subscription should close after this invoke."""
+
+        return False
+
+    def _detach_invoke_capture(self, capture: _InvokeCapture) -> None:
+        """Leave a held subscription active and drop only this invoke's context."""
+
+        if self._invoke_capture.get() is not capture:
+            return
+        if capture.context_token is not None:
+            try:
+                self._invoke_capture.reset(capture.context_token)
+            except ValueError:
+                self._invoke_capture.set(None)
+            capture.context_token = None
+        else:
+            self._invoke_capture.set(None)
 
     @staticmethod
     def _subscription_categories() -> Collection[str]:
