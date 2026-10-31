@@ -56,6 +56,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.ci
     merge_citation_metadata,
     normalize_doi,
     resolve_citation,
+    split_author_field,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
     CitationMetadata,
@@ -193,7 +194,7 @@ class _CitationMetaParser(HTMLParser):
             return
         key = name or property_name
         if key in ("citation_author", "dc.creator", "author"):
-            self.authors.append(content)
+            self.authors.extend(split_author_field(content))
         elif key == "citation_title" and self.title is None:
             self.title = content
         elif (
@@ -247,7 +248,11 @@ def _extract_pdf_metadata(path: Path) -> CitationMetadata:
     except Exception:  # noqa: BLE001 - best-effort metadata extraction, never fatal
         return CitationMetadata()
     author_field = str(info.get("/Author") or "").strip()
-    authors = [a.strip() for a in re.split(r",| and ", author_field) if a.strip()] if author_field else []
+    if ";" in author_field:
+        # "A; B; C" -- commas may then be "Last, First" inside one name.
+        authors = split_author_field(author_field)
+    else:
+        authors = [a.strip() for a in re.split(r",| and ", author_field) if a.strip()] if author_field else []
     year = None
     match = re.search(r"(19|20)\d{2}", str(info.get("/CreationDate") or ""))
     if match:

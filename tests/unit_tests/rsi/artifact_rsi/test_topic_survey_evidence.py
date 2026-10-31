@@ -26,6 +26,8 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.ar
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.citations import (
     doi_from_url,
+    extract_html_citation_metadata,
+    merge_citation_metadata,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
     CitationMetadata,
@@ -356,3 +358,70 @@ def test_reporting_bounds_large_html_evidence(tmp_path):
     assert evidence is not None
     assert "Detailed source evidence: source.html" in evidence
     assert evidence.count("visible text") <= 600
+
+
+def test_merge_citation_metadata_keeps_first_author_list():
+    supplied = CitationMetadata(authors=["Ada Lovelace", "Charles Babbage"])
+    packed = CitationMetadata(authors=["Ada Lovelace; Charles Babbage"], year="1843")
+    reordered = CitationMetadata(authors=["Lovelace, Ada"], doi="10.1234/example")
+
+    merged = merge_citation_metadata(supplied, packed, reordered)
+
+    assert merged.authors == ["Ada Lovelace", "Charles Babbage"]
+    # Other fields are still filled from later candidates.
+    assert merged.year == "1843"
+    assert merged.doi == "10.1234/example"
+
+
+def test_html_aggregate_author_meta_is_split(tmp_path):
+    source_path = tmp_path / "source.html"
+    source_path.write_text(
+        "<html><head><meta name='author' content='Ada Lovelace; Charles Babbage'></head></html>",
+        encoding="utf-8",
+    )
+
+    assert extract_html_citation_metadata(source_path).authors == ["Ada Lovelace", "Charles Babbage"]
+
+
+def test_pdf_packed_author_string_is_not_appended_to_supplied_authors(tmp_path):
+    pypdf = pytest.importorskip("pypdf")
+    set_project_root(tmp_path)
+    try:
+        topic = "Citation evidence test"
+        source_path = survey_directory(topic) / "sources" / "source.pdf"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        # A packed, ";"-separated /Author value, as seen on real arXiv PDFs.
+        writer.add_metadata({"/Author": "Ada Lovelace; Charles Babbage"})
+        with source_path.open("wb") as handle:
+            writer.write(handle)
+        draft = TopicSurveyDraft(
+            short_summary="summary",
+            key_findings=["finding"],
+            open_problems=["problem"],
+            sources=[
+                SurveySource(
+                    title="Citation source",
+                    url="https://example.test/paper.pdf",
+                    source_type="paper",
+                    local_path=source_path.relative_to(tmp_path).as_posix(),
+                    summary="summary",
+                    abstract="abstract",
+                    key_findings=["finding"],
+                    citation=CitationMetadata(
+                        authors=["Ada Lovelace", "Charles Babbage"],
+                        year="1843",
+                        doi="10.1234/example",
+                    ),
+                    retrieval_mode="downloaded_pdf",
+                )
+            ],
+        )
+        output = write_survey_artifacts(topic, draft)
+
+        bibliography = build_bibliography(tmp_path / output.research_summary_path, network_enabled=False)
+    finally:
+        set_project_root(None)
+
+    assert "author = {Ada Lovelace and Charles Babbage}," in bibliography.bib_text

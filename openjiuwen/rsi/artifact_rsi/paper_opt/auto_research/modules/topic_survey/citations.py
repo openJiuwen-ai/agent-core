@@ -38,6 +38,17 @@ def normalize_year(value: str | int | None) -> str | None:
     return match.group(1) if match else None
 
 
+def split_author_field(value: str | None) -> list[str]:
+    """Split one author metadata value into individual names.
+
+    ``citation_author`` carries one name per tag, but other sources pack every
+    author into a single ``;``-separated value (a PDF ``/Author`` entry, an
+    aggregate ``<meta name="author">``). A single name never contains ``;``,
+    so splitting on it is safe for both shapes.
+    """
+    return [part.strip() for part in str(value or "").split(";") if part.strip()]
+
+
 def doi_from_url(url: str) -> str | None:
     decoded = unquote(str(url or ""))
     try:
@@ -73,7 +84,7 @@ class _CitationMetaParser(HTMLParser):
             return
         key = name or property_name
         if key in {"citation_author", "dc.creator", "author"}:
-            self.authors.append(content)
+            self.authors.extend(split_author_field(content))
         elif (
             key
             in {
@@ -156,10 +167,15 @@ def merge_citation_metadata(*items: CitationMetadata) -> CitationMetadata:
     venue: str | None = None
     doi: str | None = None
     for item in items:
-        for author in item.authors:
-            cleaned = author.strip()
-            if cleaned and cleaned not in authors:
-                authors.append(cleaned)
+        # The author list is taken whole from the first candidate that has
+        # one. Unioning lists across candidates re-appends the same people
+        # whenever two sources format the names differently -- e.g. the
+        # supplied per-author list followed by a PDF's packed "/Author" string.
+        if not authors:
+            for author in item.authors:
+                cleaned = author.strip()
+                if cleaned and cleaned not in authors:
+                    authors.append(cleaned)
         year = year or normalize_year(item.year)
         venue = venue or (item.venue.strip() if item.venue and item.venue.strip() else None)
         doi = doi or normalize_doi(item.doi)
@@ -232,6 +248,7 @@ __all__ = [
     "extract_metadata_evidence",
     "extract_html_citation_metadata",
     "merge_citation_metadata",
+    "split_author_field",
     "normalize_doi",
     "normalize_year",
     "resolve_citation",
