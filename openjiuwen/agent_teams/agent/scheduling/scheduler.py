@@ -137,6 +137,19 @@ class TeamScheduler:
         # active task on every wake; after a restart each pair costs exactly
         # one query to re-learn.
         self._handoff_known: set[tuple[str, str]] = set()
+        # Members this process retired by policy into SHUTDOWN (lifetime
+        # "shutdown"). Only their stranded tasks are escalated: an open task
+        # on one was handed over after it left. A leader restart forgets them,
+        # so their stranded tasks are then skipped without a word.
+        self._policy_retired: set[str] = set()
+        # (task_id, owner) pairs already escalated to the leader because the
+        # owner was retired by policy. Pruned each scan to the pairs still
+        # stranded, so a reassigned or finished task drops out.
+        self._stranded_escalated: set[tuple[str, str]] = set()
+        # (task_id, revision) pairs whose revision mail this process sent
+        # (F_129). The mailbox delivery records the revision as seen, which
+        # ends the condition; this only stops a re-send before that delivery.
+        self._revision_pushed: set[tuple[str, int]] = set()
         self._all_done_announced = False
         self._review_feedback_dispatched: set[tuple[str, int]] = set()
         self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
@@ -216,17 +229,72 @@ class TeamScheduler:
     # ------------------------------------------------------------------
 
     async def _scan(self) -> None:
-        """Run the four reconcile passes to a bounded fixpoint."""
+        """Run the five reconcile passes to a bounded fixpoint.
+
+        The retired roster is read once per scan: no pass brings a
+        ``SHUTDOWN`` member back, so it cannot change between passes. The
+        stranded pairs the passes run into replace the escalation memo at the
+        end, so it never outgrows the tasks still stranded.
+        """
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
+        await self._rearm_all_done(task_manager)
+        retired = await self._retired_members()
+        stranded: set[tuple[str, str]] = set()
         for _ in range(_MAX_SCAN_PASSES):
-            acted = await self._reconcile_starts(task_manager)
-            acted = await self._reconcile_handoffs(task_manager) or acted
+            acted = await self._reconcile_starts(task_manager, retired, stranded)
+            acted = await self._reconcile_handoffs(task_manager, retired, stranded) or acted
             acted = await self._reconcile_reviews(task_manager) or acted
             acted = await self._reconcile_retirements(task_manager) or acted
+            acted = await self._reconcile_revisions(task_manager) or acted
             if not acted:
-                return
+                break
+        self._stranded_escalated &= stranded
+
+    async def _rearm_all_done(self, task_manager) -> None:
+        """Re-arm the wrap-up once the board holds open work again.
+
+        A drained board is not a finished goal: the leader may open a rework
+        or a new review round after the wrap-up. Those tasks must drain into
+        a wrap-up of their own, so any non-terminal task clears the
+        once-only flag. The board is probed (one aggregate COUNT) only while
+        the flag is set.
+        """
+        if not self._all_done_announced:
+            return
+        if await task_manager.has_open_tasks():
+            self._all_done_announced = False
+            team_logger.info("[scheduler] board reopened after wrap-up, all-done re-armed")
+
+    async def _reconcile_revisions(self, task_manager) -> bool:
+        """Push an edited task's latest content to an executor that has not seen it (F_129).
+
+        Level-triggered off the board: a task whose ``revision`` is ahead of
+        the revision its assignee was shown gets one mail, whatever happened
+        to the edit event. An executing task gets the revision itself; a
+        parent suspended on its subtasks gets a review request, since its
+        owner must check the subtasks against the new content rather than
+        resume the parent. A task not started yet gets nothing — its start
+        handoff renders the current revision. The mail is a durable mailbox
+        row that also starts an offline owner, and delivering it records the
+        revision as seen, which ends the condition.
+        """
+        acted = False
+        for task_id, status, owner, resume_pending, revision in await task_manager.unseen_revisions():
+            if (task_id, revision) in self._revision_pushed:
+                continue
+            if status in (TaskStatus.PLANNING.value, TaskStatus.IN_PROGRESS.value):
+                meta = render.meta_task_revised(task_id)
+            elif status == TaskStatus.BLOCKED.value and resume_pending:
+                meta = render.meta_subtask_review(task_id)
+            else:
+                continue
+            if await self._send_as_leader(owner, meta):
+                self._revision_pushed.add((task_id, revision))
+                team_logger.info("[scheduler] pushed revision %s of task %s to %s", revision, task_id, owner)
+                acted = True
+        return acted
 
     async def _reconcile_retirements(self, task_manager) -> bool:
         """Request retirement of task-scoped members whose board is empty (F_118).
@@ -276,6 +344,8 @@ class TeamScheduler:
                     result.reason,
                 )
                 continue
+            if lifetime == "shutdown":
+                self._policy_retired.add(member_name)
             team_logger.info(
                 "[scheduler] retirement requested for %s (lifetime=%s, was %s)",
                 member_name,
@@ -285,20 +355,77 @@ class TeamScheduler:
             acted = True
         return acted
 
-    async def _reconcile_starts(self, task_manager) -> bool:
-        """Start each idle member's earliest assigned PENDING task."""
-        pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value)
+    async def _retired_members(self) -> set[str]:
+        """Names of ``SHUTDOWN`` members; empty without a team backend."""
+        backend = self._infra.team_backend
+        if backend is None:
+            return set()
+        return await backend.list_retired_members()
+
+    async def _skip_retired_owner(self, task, retired: set[str], stranded: set[tuple[str, str]]) -> bool:
+        """Whether ``task``'s owner has shut down; escalate it to the leader when unexpected.
+
+        No startup path brings a ``SHUTDOWN`` member back, so the start and
+        handoff scans leave its tasks alone — starting one would only park it
+        ``IN_PROGRESS`` with nobody running it, and the owner has no runtime
+        for its own stale sweep. Each such (task, owner) pair is added to
+        ``stranded``. Whether the leader needs telling depends on who retired
+        the owner:
+
+        * the scheduler, by policy (``_policy_retired``) — it does so only once
+          the member's board is empty, so an open task on it was handed over
+          after it left; nobody expects it, the leader is told once per pair;
+        * the leader, through ``shutdown_member`` — that tool's contract
+          leaves the leftovers to the leader, so no escalation, which also
+          keeps a teardown that shuts members down before ``clean_team`` quiet.
+
+        A reassignment makes a new pair; a leader restart forgets the policy
+        retirements and skips their tasks without a word.
+        """
+        owner = task.assignee
+        if owner not in retired:
+            return False
+        pair = (task.task_id, owner)
+        stranded.add(pair)
+        if owner not in self._policy_retired or pair in self._stranded_escalated:
+            return True
+        self._stranded_escalated.add(pair)
+        team_logger.warning(
+            "[scheduler] task %s (%s) is assigned to shut-down member %s; escalating to the leader",
+            task.task_id,
+            task.status,
+            owner,
+        )
+        await self._host.deliver_input(
+            render.render_leader_escalation_retired_owner(task, owner=owner),
+            use_steer=False,
+        )
+        return True
+
+    async def _reconcile_starts(self, task_manager, retired: set[str], stranded: set[tuple[str, str]]) -> bool:
+        """Start each idle member's earliest assigned PENDING task.
+
+        Owners in ``retired`` are skipped (see ``_skip_retired_owner``): their
+        tasks stay ``PENDING`` until the leader reassigns them.
+        """
+        pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value, with_content=False)
         queue_by_member: dict[str, list] = {}
         for task in pending:
-            if task.assignee:
-                queue_by_member.setdefault(task.assignee, []).append(task)
+            if not task.assignee or await self._skip_retired_owner(task, retired, stranded):
+                continue
+            queue_by_member.setdefault(task.assignee, []).append(task)
 
         acted = False
         for member_name, queue in queue_by_member.items():
-            candidate = min(queue, key=lambda task: (task.updated_at or 0, task.task_id))
+            # A parent back from its subtasks (F_128) goes first: its owner
+            # may have picked up other work while it was parked, and the
+            # half-done task should not queue behind fresh ones.
+            resumable = [task for task in queue if task.resume_pending]
+            candidate = min(resumable or queue, key=lambda task: (task.updated_at or 0, task.task_id))
             busy_task_id = await task_manager.get_other_active_task_id(member_name, candidate.task_id)
             if busy_task_id:
                 continue
+            resume = bool(candidate.resume_pending)
             result = await task_manager.start_task(candidate.task_id)
             if not result.ok:
                 # Lost a race or the member turned busy — the next wake retries.
@@ -312,11 +439,11 @@ class TeamScheduler:
             started = await task_manager.get(candidate.task_id)
             if started is None:
                 continue
-            await self._send_task_start(started)
+            await self._send_task_start(started, resume=resume)
             acted = True
         return acted
 
-    async def _reconcile_handoffs(self, task_manager) -> bool:
+    async def _reconcile_handoffs(self, task_manager, retired: set[str], stranded: set[tuple[str, str]]) -> bool:
         """Hand every active task to an owner that never received its start.
 
         The start scan hands a task over exactly when it flips it out of
@@ -336,18 +463,23 @@ class TeamScheduler:
         startup). Missing → send the same start message the start scan would
         have sent, which also lazily starts the owner. Idempotent via the
         mailbox itself plus the in-process ``_handoff_known`` memo; a
-        restarted leader re-learns each pair with one mailbox read.
+        restarted leader re-learns each pair with one mailbox read. Owners in
+        ``retired`` are skipped — no handoff can start them (see
+        ``_skip_retired_owner``); that check runs before the memo, so an
+        owner that leaves after its handoff landed is still caught.
         """
         message_manager = self._infra.message_manager
         if message_manager is None:
             return False
         active: list[Any] = []
         for status in (TaskStatus.PLANNING.value, TaskStatus.IN_PROGRESS.value):
-            active.extend(await task_manager.list_tasks(status=status))
+            active.extend(await task_manager.list_tasks(status=status, with_content=False))
         acted = False
         for task in active:
             owner = task.assignee
-            if not owner or (task.task_id, owner) in self._handoff_known:
+            if not owner or await self._skip_retired_owner(task, retired, stranded):
+                continue
+            if (task.task_id, owner) in self._handoff_known:
                 continue
             if await self._owner_has_start_handoff(message_manager, owner, task.task_id):
                 self._handoff_known.add((task.task_id, owner))
@@ -376,12 +508,20 @@ class TeamScheduler:
                 return True
         return False
 
-    async def _send_task_start(self, task) -> bool:
-        """Send the owner its start handoff and remember that it is in the mailbox."""
+    async def _send_task_start(self, task, *, resume: bool = False) -> bool:
+        """Send the owner its start handoff and remember that it is in the mailbox.
+
+        ``resume`` is read off the row before ``start_task`` consumes it
+        (F_128). The handoff backstop never passes it: an active task missing
+        its handoff has a new owner, who begins the task rather than resumes.
+        """
         owner = task.assignee
-        sent = await self._send_as_leader(owner, render.meta_task_start(task))
+        sent = await self._send_as_leader(owner, render.meta_task_start(task, resume=resume))
         if sent:
             self._handoff_known.add((task.task_id, owner))
+            # The handoff renders the task as it stands at delivery, so it
+            # already carries this revision: no separate revision mail (F_129).
+            self._revision_pushed.add((task.task_id, int(getattr(task, "revision", 0) or 0)))
         return sent
 
     async def _reconcile_reviews(self, task_manager) -> bool:
@@ -389,7 +529,9 @@ class TeamScheduler:
         backend = self._infra.team_backend
         if backend is not None and not backend.task_verification_enabled():
             return False
-        in_review = await task_manager.list_tasks(status=TaskStatus.IN_REVIEW.value)
+        # Scanned without bodies: only reviewer dispatch and fail feedback
+        # read ``content``, and they re-read the one task they act on.
+        in_review = await task_manager.list_tasks(status=TaskStatus.IN_REVIEW.value, with_content=False)
         now_ms = get_current_time()
         acted = False
         for task in in_review:
@@ -409,7 +551,10 @@ class TeamScheduler:
                 if reviewer in tally["voted"] or dispatch_key in self._review_dispatched:
                     continue
                 self._review_dispatched.add(dispatch_key)
-                await self._dispatch_to_reviewer(reviewer, task)
+                # Reviewer dispatch re-reads the one task it acts on with its
+                # body — board scans stay body-free (``with_content=False``).
+                full_task = await self._with_content(task_manager, task)
+                await self._dispatch_to_reviewer(reviewer, full_task)
 
             verdict = settle_review_tally(tally)
             if verdict == VERDICT_PASS:
@@ -424,6 +569,7 @@ class TeamScheduler:
                     )
                     acted = True
             elif verdict == VERDICT_FAIL:
+                task = await self._with_content(task_manager, task)
                 if await self._settle_fail_or_escalate(task_manager, task, tally):
                     team_logger.info(
                         "[judge-fail] task=%s round=%d tally(pass=%d fail=%d total=%d)",
@@ -437,6 +583,11 @@ class TeamScheduler:
             else:
                 await self._handle_undecided(task, tally, now_ms)
         return acted
+
+    @staticmethod
+    async def _with_content(task_manager, task):
+        """Re-read one scanned task with its body; fall back to the scan row."""
+        return await task_manager.get(task.task_id) or task
 
     async def _settle_pass(self, task_manager, task) -> bool:
         result = await task_manager.settle_review(task.task_id, "pass")
@@ -1002,24 +1153,28 @@ class TeamScheduler:
         Also the all-done fallback for leader-settled boards: the drained
         event a leader-local settle publishes is self-filtered off the bus,
         so a zero-remaining digest announces the wrap-up directly.
+
+        A member's subtask (F_128) gets no digest of its own: its result goes
+        back to the parent's owner through the resume handoff, and the leader
+        hears about the work once, from the parent. It still counts toward
+        the all-done check.
         """
         if task.task_id in self._digested_tasks:
             return
         self._digested_tasks.add(task.task_id)
-        tasks = await task_manager.list_tasks()
-        terminal = (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value)
-        remaining = sum(1 for row in tasks if row.status not in terminal)
-        await self._host.deliver_input(
-            render.render_leader_task_done(task, verified=verified),
-            use_steer=False,
-        )
-        if remaining == 0 and tasks and not self._all_done_announced:
-            self._all_done_announced = True
+        total, remaining = await task_manager.board_counts()
+        if not getattr(task, "parent_task_id", None):
             await self._host.deliver_input(
-                render.render_leader_all_done(len(tasks)),
+                render.render_leader_task_done(task, verified=verified),
                 use_steer=False,
             )
-        if remaining == 0 and tasks:
+        if remaining == 0 and total and not self._all_done_announced:
+            self._all_done_announced = True
+            await self._host.deliver_input(
+                render.render_leader_all_done(total),
+                use_steer=False,
+            )
+        if remaining == 0 and total:
             await self._dispatch_team_review_feedback()
 
     async def _digest_completion(self, event: EventMessage, *, verified: bool) -> None:
@@ -1045,8 +1200,19 @@ class TeamScheduler:
         await self._digest_task_done(task_manager, task, verified=verified)
 
     async def _announce_all_done(self, event: EventMessage) -> None:
-        """Inject the final all-terminal digest into the leader, once."""
+        """Inject the final all-terminal digest into the leader, once.
+
+        The drained event can reach the bus loop after the leader has already
+        opened new work; the board is re-checked so a stale event never tells
+        the leader an open board is empty (B_09). The check runs before the
+        flag test on purpose: right after a reopen the flag can still be set
+        until the next scan re-arms it, and a stale event in that window must
+        not reach the once-only team review feedback either.
+        """
         payload = event.get_payload()
+        task_manager = self._infra.task_manager
+        if task_manager is not None and await task_manager.has_open_tasks():
+            return
         if not self._all_done_announced:
             self._all_done_announced = True
             await self._host.deliver_input(

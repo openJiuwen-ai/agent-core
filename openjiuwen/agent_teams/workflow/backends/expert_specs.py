@@ -102,4 +102,95 @@ def derive_swarmflow_expert_specs(
     return experts
 
 
-__all__ = ["SwarmflowExpertEntry", "derive_swarmflow_expert_specs"]
+class BoundGroupExpertLoader:
+    """Loads members of the team's bound AgentGroup as swarmflow experts on demand.
+
+    The expert table only holds bound members the host assembled into the
+    team spec. A host may leave them out — a scheduled team bound to a group
+    starts with an empty roster and spawns experts as tasks need them — so an
+    ``agent_template`` pick that misses the table is loaded here through the
+    host catalog and the core AgentGroup loader, assembled on the worker base
+    spec exactly as ``derive_swarmflow_expert_specs`` assembles a table entry.
+    """
+
+    def __init__(self, *, catalog: Any, group: str, worker_base_spec: Any) -> None:
+        """Bind the loader to one bound group.
+
+        Args:
+            catalog: The host ``ExpertCatalog``.
+            group: The bound AgentGroup's name (``TeamAgentSpec.agent_group_name``).
+            worker_base_spec: The swarmflow worker base spec (teammate spec plus
+                observability rails), the base every expert worker derives from.
+        """
+        self._catalog = catalog
+        self._worker_base_spec = worker_base_spec
+        self.group = group
+
+    async def load(self, member: str) -> SwarmflowExpertEntry | None:
+        """Assemble one member as an expert entry.
+
+        Returns:
+            The entry, or ``None`` when ``member`` is the group's leader or not
+            one of its members.
+
+        Raises:
+            ValueError: The group is not installed or cannot be loaded, or the
+                member declares a runtime core cannot map.
+        """
+        from openjiuwen.agent_teams.experts.agent_group import LEADER_MEMBER, aload_agent_group_package
+        from openjiuwen.agent_teams.experts.template_member import compose_template_member
+        from openjiuwen.agent_teams.external.manifest import external_cli_agent_spec_from_template
+        from openjiuwen.harness.resources import read_agent_template_card
+
+        if member == LEADER_MEMBER:
+            return None
+        location = await self._catalog.locate_group(self.group)
+        package = await aload_agent_group_package(location.path)
+        template = package.templates.get(member)
+        if template is None:
+            return None
+        base = self._worker_base_spec
+        card = await read_agent_template_card(package.package_dir / "agents" / member / "manifest.json")
+        display_name = card.display_label(base.language) or template.agent_card.name or member
+        composed = compose_template_member(base, template)
+        external_cli = external_cli_agent_spec_from_template(template)
+        if external_cli is not None:
+            return SwarmflowExpertEntry(
+                member_name=member,
+                display_name=display_name,
+                persona=composed.persona,
+                spec=None,
+                external_cli=external_cli,
+            )
+        return SwarmflowExpertEntry(
+            member_name=member,
+            display_name=display_name,
+            persona=composed.persona,
+            spec=composed.spec.model_copy(update={"tools": []}),
+            external_cli=None,
+        )
+
+
+def bound_group_expert_loader(context: Any, worker_base_spec: Any) -> BoundGroupExpertLoader | None:
+    """The on-demand loader for the leader's bound AgentGroup, or ``None``.
+
+    Present only when the host injected an expert catalog (the same signal
+    the leader's expert tools ride), the team is bound to a group and a worker
+    base spec exists to assemble on.
+    """
+    from openjiuwen.agent_teams.rails.team_context import get_expert_binding, get_expert_catalog
+
+    catalog = get_expert_catalog(context)
+    binding = get_expert_binding(context)
+    bound = binding.bound_group if binding is not None else None
+    if catalog is None or bound is None or worker_base_spec is None:
+        return None
+    return BoundGroupExpertLoader(catalog=catalog, group=bound.name, worker_base_spec=worker_base_spec)
+
+
+__all__ = [
+    "BoundGroupExpertLoader",
+    "SwarmflowExpertEntry",
+    "bound_group_expert_loader",
+    "derive_swarmflow_expert_specs",
+]

@@ -1688,8 +1688,32 @@ async def test_workflow_cancel():
         assert True
 
     from openjiuwen.core.session.checkpointer import CheckpointerFactory
-    session_exist = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
-    assert session_exist is False
+    checkpointer = CheckpointerFactory.get_checkpointer()
+    session_exist = await checkpointer.session_exists(session_id)
+    # 取消不等于正常完成:执行开始时创建的 workflow store 不得被清除。
+    # 若取消被误判为正常完成,store 会被 pop 掉,session_exists 为 False。
+    assert session_exist is True
+
+    # 取消分支按图侧快照分流(2026-10-26 检视评审):全新执行的中途取消
+    # 图侧无快照(Pregel run_step 仅 except Exception,CancelledError 绕过
+    # _save_state_on_error),既不落盘 io 侧孤儿快照也不清除现场,保留
+    # 可重跑语义。固化两点:
+    # 1) 图侧快照确实不存在;
+    # 2) 随后以 InteractiveInput resume 仍被前置校验显式拒绝(io 侧亦无
+    #    快照),而非静默全新起跑或假称可从中断节点续跑。
+    assert checkpointer._graph_store.store_ck.get(session_id) is None
+    with pytest.raises(BaseError, match="interactive resume requested"):
+        await flow.invoke(
+            InteractiveInput(), create_workflow_session(session_id=session_id)
+        )
+
+    # 检视意见修复后恢复的可重跑语义:普通输入重新执行不再被
+    # "workflow state exists but non-interactive input and cleanup is
+    # disabled" 拒绝(此前孤儿 io 快照导致该 session 只能 release)。
+    rerun = await flow.invoke(
+        {"inputs": {"a": 1, "b": 2}}, create_workflow_session(session_id=session_id)
+    )
+    assert rerun.state == WorkflowExecutionState.COMPLETED
 
 
 async def test_questioner_context_sharing():

@@ -32,6 +32,9 @@ from openjiuwen.harness.tools.worktree.git import (
 from openjiuwen.harness.tools.worktree.models import WorktreeConfig, WorktreeCreateResult
 from openjiuwen.harness.tools.worktree.slug import worktree_branch_name
 
+# Conventional default branch names, probed in this order.
+_DEFAULT_BRANCH_NAMES = ("main", "master", "develop")
+
 
 @runtime_checkable
 class WorktreeBackend(Protocol):
@@ -98,13 +101,23 @@ class GitBackend:
 
     Implements the full creation flow:
     1. Fast recovery check (read HEAD without subprocess)
-    2. Conditional fetch (skip if origin ref exists locally)
+    2. Base resolution (local-first; remote-first on remote worktree nodes)
     3. git worktree add -B
     4. Optional sparse checkout
     """
 
-    def __init__(self, config: WorktreeConfig | None = None):
+    def __init__(self, config: WorktreeConfig | None = None, *, remote_base: bool = False):
+        """Create a git worktree backend.
+
+        Args:
+            config: Worktree configuration.
+            remote_base: Resolve the base from ``origin/<default>`` (fetching
+                it when missing) instead of local branches. Only for a remote
+                worktree node, whose framework-owned clone never advances its
+                local branches.
+        """
         self._config = config or WorktreeConfig()
+        self.remote_base = remote_base
 
     async def create(
         self,
@@ -151,7 +164,7 @@ class GitBackend:
             repo_root,
             wt_path,
             wt_branch,
-            base_branch,
+            base_sha or base_branch,
             no_checkout=bool(sparse),
         )
 
@@ -212,7 +225,43 @@ class GitBackend:
         return await read_worktree_head_sha(worktree_path) is not None
 
     async def _resolve_base(self, repo_root: str) -> tuple[str, str | None]:
-        """Resolve the base branch and SHA for new worktree.
+        """Resolve the base ref and SHA for a new worktree, local state first.
+
+        Order: the checked-out local branch, then a local default branch
+        (main/master/develop), then an existing ``origin/<default>`` ref, then
+        a detached HEAD. No fetch: the worktree branches from what the user
+        has locally, unpushed commits included. Remote worktree nodes use
+        :meth:`_resolve_remote_base` instead.
+
+        Args:
+            repo_root: Repository root directory.
+
+        Returns:
+            Tuple of (base_ref, sha_or_none).
+        """
+        if self.remote_base:
+            return await self._resolve_remote_base(repo_root)
+
+        current = await get_current_branch(repo_root)
+        local_names = dict.fromkeys(name for name in (current, *_DEFAULT_BRANCH_NAMES) if name)
+        candidates = [(name, f"refs/heads/{name}") for name in local_names]
+        candidates += [(f"origin/{name}", f"refs/remotes/origin/{name}") for name in _DEFAULT_BRANCH_NAMES]
+        for display, ref in candidates:
+            sha = await rev_parse(f"{ref}^{{commit}}", repo_root)
+            if sha:
+                return display, sha
+
+        sha = await rev_parse("HEAD", repo_root)
+        if sha:
+            return "HEAD", sha
+
+        # Unborn repository: create a real empty base commit so git worktree can
+        # branch from HEAD without consuming staged or untracked user files.
+        sha = await create_empty_initial_commit(repo_root)
+        return "HEAD", sha
+
+    async def _resolve_remote_base(self, repo_root: str) -> tuple[str, str | None]:
+        """Resolve the base from the remote default branch (remote worktree nodes).
 
         Optimization: skip fetch if origin/<default> already exists locally.
         Saves 6-8s on large repos.
@@ -235,7 +284,8 @@ class GitBackend:
         fetched = await fetch_ref(repo_root, default_branch)
         if fetched:
             sha = await rev_parse(origin_ref, repo_root)
-            return origin_ref, sha
+            if sha:
+                return origin_ref, sha
 
         # Last resort: use current HEAD
         sha = await rev_parse("HEAD", repo_root)

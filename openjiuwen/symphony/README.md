@@ -285,6 +285,15 @@ symlink、junction 或其他 reparse point，并排除凭据、版本控制和�
 `enable_llm_evaluation` 时，调用方必须显式注入实现 `SymphonyLLM.invoke(...)` 的对象；缺少模型时返回
 明确配置错误，不会默认判定通过。
 
+`FingerprintSettings.llm_max_tokens` 默认是 `2048`，允许设置正整数或 `None`；`None` 表示提取调用
+不传 `max_tokens`，沿用注入模型的配置。`FingerprintService` 和 `CapabilityFingerprintExtractor` 可传入
+`model_response_observer`。同步或异步 observer 在模型调用结束、请求的 thinking 兼容作用域恢复后接收
+`observer(response, "fingerprint_extraction", "capability_extraction")`；与编排一致，三个参数按位置传入，
+不要求回调形参使用特定名称；observer 异常只记日志。
+若响应的 `finish_reason` 为 `length`，会先通知 observer，再以 `MODEL_CALL_FAILED` 中止构建，
+不会解析或修复截断内容，也不会替换已有指纹、提取缓存或关联构图产物。默认提取协议为
+`symphony-capability-extraction-v3`，旧协议的提取缓存会重新计算。
+
 ### 能力评估
 
 `EvaluationSuite` 支持注册同步或异步 evaluator。内置静态指标包括结构规范性、描述质量和分类一致性；

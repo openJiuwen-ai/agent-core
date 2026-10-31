@@ -35,6 +35,7 @@ from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.fork import ForkContext
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.interaction.payload import GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
@@ -181,6 +182,10 @@ class TeamAgent(BaseAgent):
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
         self._named_checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
+        # Local startup diagnostics, not persisted task/member state: members
+        # whose current startup failure the leader has already been told about.
+        # One notice per failure episode, cleared when the member starts.
+        self._member_startup_failures: set[str] = set()
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -528,6 +533,19 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
+    async def announce_task_revisions(self) -> None:
+        """Have the member runtime deliver its pending task edit notice now (F_129).
+
+        The member's task notice tracker is the only source of the notice; a
+        ``TASK_UPDATED`` event only asks the runtime to speak early. A runtime
+        without the capability gets no early notice — the next input carries it.
+        """
+        from openjiuwen.agent_teams.agent.member_runtime import TaskNoticeAwareRuntime
+
+        harness = self.harness
+        if isinstance(harness, TaskNoticeAwareRuntime):
+            await harness.announce_task_revisions()
+
     async def deliver_input(
         self,
         content: Any,
@@ -686,7 +704,7 @@ class TeamAgent(BaseAgent):
         self._configurator.setup_infra(
             spec,
             ctx,
-            on_teammate_created=self._on_teammate_created,
+            on_teammate_created=self._start_teammate_runtime,
             on_teammate_restarted=self._restart_teammate_runtime,
             on_teammate_stopped=self._stop_teammate_runtime,
             on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
@@ -1462,8 +1480,6 @@ class TeamAgent(BaseAgent):
                                 # creator's context. Falling back to full keeps the
                                 # behaviour consistent with the leader notification.
                                 ckpt_idx = None
-                                from openjiuwen.agent_teams.i18n import t
-
                                 await self._notify_fork_name_not_found(
                                     teammate_id,
                                     fork_value,
@@ -1606,8 +1622,6 @@ class TeamAgent(BaseAgent):
         exist, so a naming mismatch (missing name, or a name whose creator
         does not match ``fork_source``) is no longer silent.
         """
-        from openjiuwen.agent_teams.i18n import t
-
         available = ", ".join(sorted(self._named_checkpoints)) or "（无）"
         try:
             await self.message_manager.send_message(
@@ -1785,6 +1799,44 @@ class TeamAgent(BaseAgent):
             fork_from=fork_from,
         )
 
+    async def _report_member_startup_failure(self, member_name: str, error: Exception) -> None:
+        """Notify the leader once per failure episode of ``member_name``, without raising.
+
+        The episode, not the error text, is the dedup key: the notice wakes the
+        leader, and its round-idle reconcile retries the start. Keying on text
+        would let any error carrying a timestamp, path or duration re-notify on
+        every retry and keep the leader looping.
+        """
+        if member_name in self._member_startup_failures:
+            return
+        if self.harness is None:
+            # deliver_input would drop the notice silently; leave the episode
+            # open so the next failure is reported once the runtime exists.
+            team_logger.warning("Leader runtime unavailable; startup failure of {} not notified", member_name)
+            return
+        reason = f"{type(error).__name__}: {error}"[:1200]
+        self._member_startup_failures.add(member_name)
+        try:
+            await self.deliver_input(t("team.member_startup_failed", member_name=member_name, reason=reason))
+        except Exception:
+            self._member_startup_failures.discard(member_name)
+            team_logger.error("Failed to notify leader of member startup failure: {}", member_name, exc_info=True)
+
+    async def _start_teammate_runtime(self, member_name: str) -> None:
+        """Spawn a teammate for the startup funnel, reporting a failed spawn to the leader.
+
+        Every startup path (send_message, create_task, interact, scheduler,
+        peer wake-up, round-idle reconcile) spawns through this callback, so
+        the notice names the member that actually failed. The error is
+        re-raised so ``startup_member`` rolls the CAS back.
+        """
+        try:
+            await self._on_teammate_created(member_name)
+        except Exception as exc:
+            await self._report_member_startup_failure(member_name, exc)
+            raise
+        self._member_startup_failures.discard(member_name)
+
     async def auto_start_member(self, member_name: str) -> bool:
         """Start an UNSTARTED member or recover an ERROR member.
 
@@ -1795,7 +1847,7 @@ class TeamAgent(BaseAgent):
         if backend is None or not backend.is_leader:
             return False
         try:
-            started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
+            started = await backend.startup_member(member_name, on_created=self._start_teammate_runtime)
             if not started:
                 started = await backend.recover_member(member_name)
         except Exception as exc:
@@ -1806,8 +1858,19 @@ class TeamAgent(BaseAgent):
         return started
 
     async def _restart_teammate_runtime(self, member_name: str) -> bool:
-        """Replace a failed teammate runtime without replaying its first prompt."""
-        return await self._spawn_manager.restart_teammate(member_name)
+        """Replace a failed teammate runtime without replaying its first prompt.
+
+        A restart that exhausts its retries is reported to the leader like a
+        failed first start; ``restart_teammate`` itself swallows the error.
+        """
+
+        async def report(error: Exception) -> None:
+            await self._report_member_startup_failure(member_name, error)
+
+        restarted = await self._spawn_manager.restart_teammate(member_name, on_failed=report)
+        if restarted:
+            self._member_startup_failures.discard(member_name)
+        return restarted
 
     async def _stop_teammate_runtime(self, member_name: str) -> None:
         """Remove a failed teammate's stale runtime handle."""
@@ -1834,6 +1897,10 @@ class TeamAgent(BaseAgent):
     async def auto_start_all(self) -> list[str]:
         """Start all UNSTARTED members via TeamBackend.startup.
 
+        Only the interact broadcast (``@all`` / untargeted operator message)
+        calls this, so task-scoped members with no open task are started too:
+        the broadcast is addressed to them as well.
+
         Best-effort: failure is logged but does not raise.
         Returns list of member names that were started.
         """
@@ -1841,7 +1908,7 @@ class TeamAgent(BaseAgent):
         if backend is None or not backend.is_leader:
             return []
         try:
-            started = await backend.startup(on_created=self._on_teammate_created)
+            started = await backend.startup(on_created=self._start_teammate_runtime, include_idle_task_scoped=True)
             if started:
                 team_logger.info("Auto-started members via interact broadcast: {}", started)
             return started

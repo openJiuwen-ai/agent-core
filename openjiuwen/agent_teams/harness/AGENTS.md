@@ -11,7 +11,7 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 harness/
 ├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs
 ├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
-├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
+├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）；实现 TaskNoticeAwareRuntime：运行周期内用当前子 session 与 configurator 经 `build(task_event_tracker=...)` 交给它的任务告知 tracker 发修改告知（F_129）
 ├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
 ├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
 ├── turn.py            # MemberTurn + resolve_member_turn：成员轨迹 turn 身份（持久化在 session state，无 OTel 依赖）
@@ -56,8 +56,8 @@ user turn）。
 `await`）。tool 阶段的 pause 经 `PAUSING` 过渡态等待边界，ack 延迟到 `_on_round_done` resolve。
 
 该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
-TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
-与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
+TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../../../.agents/agent-docs/specs/agent_teams/S_18_harness-interaction-contract.md)
+与 [`F_60`](../../../.agents/agent-docs/features/agent_teams/F_60_native-harness-pause-abort-resume.md)。
 
 ## 轨迹 turn（`turn.py`）
 
@@ -78,8 +78,8 @@ v2 event 再从 span 父链继承。外部 CLI 成员（`external/member_runtime
 ## 异步工具框架（`async_tools.py`）
 
 照搬 Claude Code 两段式范式的通用异步后台工具框架，**限定在 NativeHarness 范围、零
-TeamAgent 依赖**。详见 `docs/features/F_35`（起步版）、`F_41`（统一 ID + 管控工具 + 磁盘溢写）
-与 `docs/specs/S_20`。
+TeamAgent 依赖**。详见 `.agents/agent-docs/features/agent_teams/F_35`（起步版）、`F_41`（统一 ID + 管控工具 + 磁盘溢写）
+与 `.agents/agent-docs/specs/agent_teams/S_20`。
 
 **两段式（强约束下的唯一可行解）**：openjiuwen 工具循环与 Anthropic API 一样强配对——
 每个 `tool_call` 必产生紧随的 `ToolMessage`，`invoke` 同步阻塞、不可挂起 `tool_result`。
@@ -151,4 +151,4 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 恢复后 start 保持 IDLE、resume 延续原 Turn 和 queued receipt；不序列化活跃后台执行。
 统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
 装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
-见 [F_97](../docs/features/F_97_native-harness-protocol-adapter.md)。
+见 [F_97](../../../.agents/agent-docs/features/agent_teams/F_97_native-harness-protocol-adapter.md)。

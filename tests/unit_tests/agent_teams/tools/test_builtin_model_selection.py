@@ -25,7 +25,7 @@ from openjiuwen.agent_teams.tools.member_options import (
     promote_member_fallback_model,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.team_tools import SetMemberModelTool, SpawnExternalCliTool, create_team_tools
+from openjiuwen.agent_teams.tools.team_tools import SetMemberModelTool, SpawnTeammateTool, create_team_tools
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from tests.test_logger import logger
 
@@ -68,14 +68,20 @@ def _backend(db: TeamDatabase, *specs: ExternalCliAgentSpec) -> TeamBackend:
     )
 
 
+_EXTERNAL_CLI_ARGS = ("fallback_model_name", "builtin_model", "effort")
+
+
 async def _spawn(backend: TeamBackend, **inputs: object) -> object:
-    tool = SpawnExternalCliTool(backend, make_translator("en"))
+    """spawn_teammate on the claude CLI; the external_cli fields may be given flat."""
+    tool = SpawnTeammateTool(backend, make_translator("en"))
+    external_cli: dict[str, object] = {"fallback_model_name": None}
+    external_cli.update({key: inputs.pop(key) for key in _EXTERNAL_CLI_ARGS if key in inputs})
     values: dict[str, object] = {
         "member_name": "claude-1",
         "display_name": "Claude One",
-        "prompt": "worker",
+        "desc": "worker",
         "cli_agent": "claude",
-        "fallback_model_name": None,
+        "external_cli": external_cli,
     }
     values.update(inputs)
     return await tool.invoke(values)
@@ -168,15 +174,15 @@ async def test_a_builtin_name_in_model_name_is_redirected_to_builtin_model(db: T
 async def test_unallocatable_model_name_lists_the_pool_and_the_catalog(db: TeamDatabase) -> None:
     backend = _backend(db, _claude_spec())
     backend.get_model_pool = lambda: [_pool_entry("claude-3-7-sonnet")]
-    tool = SpawnExternalCliTool(backend, make_translator("en"), model_config_allocator=lambda name, **kwargs: None)
+    tool = SpawnTeammateTool(backend, make_translator("en"), model_config_allocator=lambda name, **kwargs: None)
 
     result = await tool.invoke(
         {
             "member_name": "claude-1",
             "display_name": "Claude One",
-            "prompt": "worker",
+            "desc": "worker",
             "cli_agent": "claude",
-            "fallback_model_name": None,
+            "external_cli": {"fallback_model_name": None},
             "model_name": "gpt-4o",
         }
     )
@@ -198,14 +204,14 @@ async def test_model_name_failure_without_a_catalog_mentions_no_builtin_models(d
 @pytest.mark.asyncio
 async def test_builtin_parameters_and_prose_follow_the_catalog_gate(db: TeamDatabase) -> None:
     t = make_translator("en")
-    enabled = SpawnExternalCliTool(_backend(db, _claude_spec()), t)
-    properties = enabled.card.input_params["properties"]
+    enabled = SpawnTeammateTool(_backend(db, _claude_spec()), t)
+    properties = enabled.card.input_params["properties"]["external_cli"]["properties"]
     assert {"builtin_model", "effort"} <= set(properties)
     assert '"name": "sonnet"' in properties["builtin_model"]["description"]
     assert "Built-in models" in enabled.card.description
 
-    disabled = SpawnExternalCliTool(_backend(db, ExternalCliAgentSpec(cli_agent="claude")), t)
-    assert "builtin_model" not in disabled.card.input_params["properties"]
+    disabled = SpawnTeammateTool(_backend(db, ExternalCliAgentSpec(cli_agent="claude")), t)
+    assert "builtin_model" not in disabled.card.input_params["properties"]["external_cli"]["properties"]
     assert "builtin_model" not in disabled.card.description
     assert "\n\n\n" not in disabled.card.description
 

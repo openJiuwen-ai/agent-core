@@ -412,6 +412,13 @@ class RedisCheckpointer(Checkpointer):
         logger.info(f"workflow: {workflow_id} create or restore checkpoint from "
                     f"session: {session.session_id()}")
         if isinstance(inputs, InteractiveInput):
+            # 修复6 统一前置校验：InteractiveInput 恢复必须有可恢复的
+            # checkpoint，否则静默全新起跑难定位崩溃（此前仅 Persistence
+            # 后端校验）。本地无 Redis 环境未跑集成测试，行为与
+            # Persistence/InMemory 共用基类同一实现。
+            await self.validate_interactive_resume(
+                session, self._workflow_storage, self._graph_state, "redis"
+            )
             await self._workflow_storage.recover(session, inputs)
         else:
             # Check if workflow state exists

@@ -202,6 +202,9 @@ class TeamWorkerBackend(AgentBackend):
             ``None`` (tests / a backend without a team) leaves the pool empty.
         expert_specs: AgentGroup members a script may pick via ``agent_template``
             (member name → ``SwarmflowExpertEntry``). Empty when no group is bound.
+        expert_loader: Loads a bound-group member on demand when ``expert_specs``
+            has no entry for it (``BoundGroupExpertLoader``); ``None`` when the
+            team is not bound to a group or no catalog is wired.
     """
 
     #: Options this backend understands beyond the engine's own set.
@@ -227,6 +230,7 @@ class TeamWorkerBackend(AgentBackend):
         external_cli_agents: Sequence[Any] = (),
         team_backend: Any = None,
         expert_specs: Mapping[str, Any] | None = None,
+        expert_loader: Any = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -251,6 +255,7 @@ class TeamWorkerBackend(AgentBackend):
         self._workflow_name = workflow_name
         self._external_cli_agents: tuple[Any, ...] = tuple(external_cli_agents)
         self._expert_specs: dict[str, Any] = dict(expert_specs or {})
+        self._expert_loader = expert_loader
         self._run_prefix = self._run_id_prefix(run_id)
         self._worktrees = SwarmflowWorkerWorktrees(
             team_name=team_name,
@@ -289,7 +294,7 @@ class TeamWorkerBackend(AgentBackend):
         # like agent_type: a bad member name is a script error, not a retry.
         # It runs FIRST so a script naming both knobs is told they are mutually
         # exclusive, instead of hearing about whichever CLI it also named.
-        expert = self._gate_agent_template(opts)
+        expert = await self._gate_agent_template(opts)
         expert_kw = {"expert": expert} if expert is not None else {}
         # Gate before any resource is touched: a bad agent_type is a script
         # error; the engine still retries it (cheap, deterministic) before
@@ -650,8 +655,12 @@ class TeamWorkerBackend(AgentBackend):
             )
         return next(e for e in self._external_cli_agents if e.cli_agent == agent_type)
 
-    def _gate_agent_template(self, opts: dict) -> Any | None:
+    async def _gate_agent_template(self, opts: dict) -> Any | None:
         """Resolve ``opts["agent_template"]`` against the bound AgentGroup, or None.
+
+        A member missing from the expert table is loaded on demand through the
+        expert loader (and cached for the rest of the run) when the team is
+        bound to a group whose members the host left out of the spec.
 
         Raises a non-retryable ``BackendError`` for a prefixed name, an unknown
         member, a missing group, a clash with ``agent_type`` (the template owns
@@ -673,6 +682,8 @@ class TeamWorkerBackend(AgentBackend):
                 retryable=False,
             )
         entry = self._expert_specs.get(name)
+        if entry is None and self._expert_loader is not None:
+            entry = await self._load_bound_expert(name)
         if entry is None:
             if name == "leader":
                 # The Leader already drives the conversation that launched this
@@ -684,6 +695,8 @@ class TeamWorkerBackend(AgentBackend):
                 )
             if self._expert_specs:
                 hint = f"available members: {sorted(self._expert_specs)}"
+            elif self._expert_loader is not None:
+                hint = f"it is not a member of the bound AgentGroup '{self._expert_loader.group}'"
             else:
                 hint = "no AgentGroup is bound to this session; bind one (agent_group_name) before using agent_template"
             raise BackendError(
@@ -696,6 +709,20 @@ class TeamWorkerBackend(AgentBackend):
                 "swarmflow does not run external-runtime experts yet",
                 retryable=False,
             )
+        return entry
+
+    async def _load_bound_expert(self, name: str) -> Any | None:
+        """Load one bound-group member on demand and cache it; ``None`` when it is not a member."""
+        try:
+            entry = await self._expert_loader.load(name)
+        except (OSError, ValueError) as exc:
+            raise BackendError(
+                f"agent_template {name!r}: the bound AgentGroup '{self._expert_loader.group}' "
+                f"cannot be loaded: {exc}",
+                retryable=False,
+            ) from exc
+        if entry is not None:
+            self._expert_specs[name] = entry
         return entry
 
     def describe_agent_template(self, opts: dict) -> str | None:

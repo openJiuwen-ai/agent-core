@@ -1202,6 +1202,62 @@ def test_agent_template_without_bound_group_explains_binding():
         asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
 
 
+class _FakeExpertLoader:
+    """Stands in for BoundGroupExpertLoader: serves ``entries`` and counts loads."""
+
+    group = "designer"
+
+    def __init__(self, entries=None, error=None):
+        self.entries = dict(entries or {})
+        self.error = error
+        self.loads: list[str] = []
+
+    async def load(self, member):
+        self.loads.append(member)
+        if self.error is not None:
+            raise self.error
+        return self.entries.get(member)
+
+
+def _loader_backend(loader, **experts):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    return _RecordingBackend(
+        model=None, worker_base_spec=DeepAgentSpec(tools=[]), run_id="r1", expert_specs=experts, expert_loader=loader
+    )
+
+
+def test_agent_template_loads_a_bound_member_missing_from_the_table_once():
+    loader = _FakeExpertLoader({"clip": _expert()})
+    backend = _loader_backend(loader)
+    for key in ("k1", "k2"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key=key))
+    assert [call["kw"]["expert"].member_name for call in backend.calls] == ["clip", "clip"]
+    assert loader.loads == ["clip"], "a loaded member is cached for the rest of the run"
+    assert backend.describe_agent_template({"agent_template": "clip"}) == "display-clip"
+
+
+def test_agent_template_prefers_the_table_over_the_loader():
+    loader = _FakeExpertLoader({"clip": _expert(persona="FROM-DISK")})
+    backend = _loader_backend(loader, clip=_expert(persona="FROM-SPEC"))
+    asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert backend.calls[0]["kw"]["expert"].persona == "FROM-SPEC"
+    assert loader.loads == []
+
+
+def test_agent_template_loader_failures_reject_before_launch():
+    unknown = _loader_backend(_FakeExpertLoader())
+    with pytest.raises(BackendError, match="not a member of the bound AgentGroup 'designer'") as exc:
+        asyncio.run(unknown.run("p", {"label": "x", "agent_template": "scene"}, None, call_key="k"))
+    assert exc.value.retryable is False
+
+    broken = _loader_backend(_FakeExpertLoader(error=ValueError("agent_group package not installed: designer")))
+    with pytest.raises(BackendError, match="cannot be loaded: agent_group package not installed") as exc:
+        asyncio.run(broken.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert exc.value.retryable is False
+    assert unknown.calls == [] and broken.calls == []
+
+
 def test_agent_template_external_member_is_not_supported_yet():
     backend = _expert_backend(writer=_expert("writer", external=True))
     with pytest.raises(BackendError, match="external runtime"):

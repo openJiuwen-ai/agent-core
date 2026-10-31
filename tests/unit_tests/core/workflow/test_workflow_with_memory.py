@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, BaseMessage
 from openjiuwen.core.memory.long_term_memory import MemInfo, MemResult, MemoryType
 from openjiuwen.core.session import WorkflowSession, NodeSession
@@ -69,6 +70,18 @@ class MockContext:
     """Mock class for ModelContext."""
 
     pass
+
+
+@pytest.fixture(autouse=True)
+def fresh_mock_memory():
+    """Drop the cached MockMemory so each test gets a fresh instance.
+
+    LongTermMemory uses the Singleton metaclass, so error flags set by one
+    test would otherwise leak into whichever test runs next.
+    """
+    Singleton._instances.pop(MockMemory, None)
+    yield
+    Singleton._instances.pop(MockMemory, None)
 
 
 @pytest.fixture

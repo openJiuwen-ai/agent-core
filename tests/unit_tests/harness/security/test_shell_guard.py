@@ -193,6 +193,26 @@ def test_extract_semicolon_chain_does_not_keep_separator_on_path(tmp_path: Path)
     assert all(path.name != "1" for path, _ in accesses)
 
 
+def test_extract_keeps_protected_semicolon_in_filename(tmp_path: Path) -> None:
+    commands = (
+        'rm -rf "~/Desktop/backup;"',
+        "rm -rf '~/Desktop/backup;'",
+        "rm -rf ~/Desktop/backup\\;",
+        'cat "./backup;"',
+        'Set-Content -Path "C:/Users/hanzhibin/Desktop/backup;" -Value x',
+    )
+    for command in commands:
+        accesses = extract_shell_path_accesses(command, tmp_path)
+        assert any(path.name == "backup;" for path, _action in accesses), (
+            command,
+            [(path.name, action) for path, action in accesses],
+        )
+
+    plain = extract_shell_path_accesses("rm -rf ~/Desktop/backup;", tmp_path)
+    assert any(path.name == "backup" for path, _action in plain)
+    assert all(path.name != "backup;" for path, _action in plain)
+
+
 def test_extract_does_not_split_semicolon_inside_quotes(tmp_path: Path) -> None:
     accesses = extract_shell_path_accesses(
         "echo 'keep;together' && ls ~/Desktop/a4p_scratch444.txt",

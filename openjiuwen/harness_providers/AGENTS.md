@@ -36,11 +36,11 @@ The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `d
 `native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
 its implementation stays in the team package and reuses NativeHarness manifest construction.
 
-Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, feature
-`openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, third-party
-provider packages `openjiuwen/harness/docs/features/F_07_third-party-harness-provider-packages.md`, team wiring
-`openjiuwen/agent_teams/docs/specs/S_27_external-harness-member-runtime.md` and
-`openjiuwen/agent_teams/docs/features/F_96_protocol-harness-providers-and-member-migration.md`.
+Design records: spec `.agents/agent-docs/specs/harness/S_19_harness-providers.md`, feature
+`.agents/agent-docs/features/harness/F_03_harness-providers-and-manifest-factory.md`, third-party
+provider packages `.agents/agent-docs/features/harness/F_07_third-party-harness-provider-packages.md`, team wiring
+`.agents/agent-docs/specs/agent_teams/S_27_external-harness-member-runtime.md` and
+`.agents/agent-docs/features/agent_teams/F_96_protocol-harness-providers-and-member-migration.md`.
 
 ## Invariants
 
@@ -151,11 +151,14 @@ provider packages `openjiuwen/harness/docs/features/F_07_third-party-harness-pro
    `interrupt=True` stop the turn, `updated_arguments` denies the call,
    ALLOW_FOR_SESSION with `provider_data.persist_allow=True` allows
    permanently), else a `UserInputRequest` with allow / allow_always / deny
-   choices translated by `interrupt_answer` (no word denies); other kinds,
+   choices translated by `interrupt_answer` (no word denies); `client_tool`
+   becomes `DynamicToolCallRequest` under DYNAMIC_TOOL_CALL, else the call
+   ends with a tool error, and client calls are asked last; other kinds,
    undeclared ones included, get the content as is. A workflow interaction
    is no interrupt request: its `request_id` is its own id (`interrupt_id`
    and `kind` empty) and it is answered by that id. As before, every host
-   with an interaction handler is asked, whatever it declared.
+   with an interaction handler is asked approvals and questions, whatever it
+   declared.
    An auto-approving `HarnessIOAdapter` still surfaces approvals that carry
    an `interrupt_id`, and matches `update(tool_call_id)` answers to them.
 7. **The IO adapter is the only DeepAgent-facing projection.** `HarnessIOAdapter`

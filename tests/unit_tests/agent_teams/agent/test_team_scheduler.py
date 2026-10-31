@@ -129,6 +129,11 @@ def _build_scheduler(
     )
     spec.agents = None
     infra.team_backend = AsyncMock(team_name=TEAM)
+
+    async def _retired_members() -> set[str]:
+        return await db.member.list_shutdown_members(TEAM)
+
+    infra.team_backend.list_retired_members = AsyncMock(side_effect=_retired_members)
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
     if review_feedback_rail is not None:
@@ -413,6 +418,33 @@ async def test_review_fail_dispatches_aggregated_feedback_to_mounted_rail(db, bu
     assert payload["review_round"] == 1
     assert payload["session_id"] == "sched_session"
     assert "broken build" in payload["feedback"]
+    # The scan reads the board without bodies; the fail path re-reads the task.
+    assert payload["task_content"] == "c"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_board_scan_skips_task_bodies_but_reviewer_gets_one(db, bus, monkeypatch):
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    dispatched = AsyncMock()
+    monkeypatch.setattr(scheduler, "_dispatch_to_reviewer", dispatched)
+    hydrated: list[int] = []
+    original = db.task._hydrate_rows
+
+    def counting(rows):
+        hydrated.append(len(rows))
+        return original(rows)
+
+    monkeypatch.setattr(db.task, "_hydrate_rows", counting)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    hydrated.clear()
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert hydrated == [], "board scans must not dereference task bodies"
+    reviewer, task = dispatched.await_args.args
+    assert reviewer == "rev-1"
+    assert task.content == "c"
 
 
 @pytest.mark.asyncio
@@ -737,6 +769,72 @@ async def test_task_list_drained_announces_once(db, bus):
     assert len(host.leader_inputs) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_board_reopened_after_wrap_up_announces_again(db, bus):
+    """Work opened after the wrap-up drains into a wrap-up of its own."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    author = _reviewer_mgr(db, bus, "dev-1")
+    assert (await author.complete("a")).ok
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1")))
+
+    # A rework opened after the wrap-up: the scan sees open work again.
+    await tm.add_graph([TaskGraphSpec(title="rework", content="c", task_id="b", assignee="dev-1")])
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await author.complete("b")).ok
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="b", member_name="dev-1")))
+
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    wrap_ups = [
+        text
+        for text in host.leader_inputs
+        if text in (render.render_leader_all_done(1), render.render_leader_all_done(2))
+    ]
+    assert wrap_ups == [render.render_leader_all_done(1), render.render_leader_all_done(2)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_scan_on_a_drained_board_keeps_the_wrap_up_once(db, bus):
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    author = _reviewer_mgr(db, bus, "dev-1")
+    assert (await author.complete("a")).ok
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1")))
+    count = len(host.leader_inputs)
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    await scheduler.on_event(EventMessage.from_event(TaskListDrainedEvent(team_name=TEAM, task_count=1)))
+
+    assert len(host.leader_inputs) == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_late_drained_event_on_a_reopened_board_sends_no_wrap_up(db, bus):
+    """A drained event processed after the leader opened new work is stale."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await scheduler.activate()
+    await tm.add_graph([TaskGraphSpec(title="rework", content="c", task_id="b", assignee="dev-1")])
+
+    await scheduler.on_event(EventMessage.from_event(TaskListDrainedEvent(team_name=TEAM, task_count=1)))
+
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    wrap_up = render.render_leader_all_done(1)
+    assert wrap_up not in host.leader_inputs
+
+    # The stale event must not consume the wrap-up: b still drains into one.
+    author = _reviewer_mgr(db, bus, "dev-1")
+    assert (await author.complete("b")).ok
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="b", member_name="dev-1")))
+    assert host.leader_inputs.count(wrap_up) == 1
+
+
 # ---------------------------------------------------------------------------
 # settle_review_tally — pure math (F_73)
 # ---------------------------------------------------------------------------
@@ -1012,6 +1110,145 @@ async def test_handoff_to_dormant_member_wakes_it_through_auto_start(db, bus):
 
     assert (await tm.get("z")).status == TaskStatus.IN_PROGRESS.value
     assert host.started_members == ["dev-1"]
+
+
+# ---------------------------------------------------------------------------
+# Stranded tasks: open work owned by a member that has shut down
+# ---------------------------------------------------------------------------
+
+
+async def _shut_down(db: TeamDatabase, member_name: str, *, lifetime: str | None = None) -> None:
+    """Force ``member_name`` to SHUTDOWN, as the leader's ``shutdown_member`` would.
+
+    The fixture seeds a non-canonical "READY", so no CAS path applies.
+    ``lifetime`` makes the member task-scoped.
+    """
+    from openjiuwen.agent_teams.tools.models import TeamMember
+
+    options = json.dumps({"lifetime": lifetime}) if lifetime else None
+    async with db.session_local() as session:
+        await session.execute(
+            update(TeamMember)
+            .where(TeamMember.team_name == TEAM, TeamMember.member_name == member_name)
+            .values(status=MemberStatus.SHUTDOWN.value, options=options)
+        )
+        await session.commit()
+
+
+async def _retire_by_policy(scheduler: TeamScheduler, db: TeamDatabase, member_name: str) -> None:
+    """Run the retirement scan on an idle ``lifetime="shutdown"`` member and let it settle into SHUTDOWN."""
+    from openjiuwen.agent_teams.tools.team import MemberOpResult
+
+    backend = scheduler._infra.team_backend
+    backend.list_retirable_members = AsyncMock(return_value=[(member_name, "ready", "shutdown")])
+
+    async def _request(name: str):
+        await _shut_down(db, name, lifetime="shutdown")
+        return MemberOpResult.success()
+
+    backend.shutdown_member = AsyncMock(side_effect=_request)
+    scheduler._infra.message_manager.members_with_unread = AsyncMock(return_value=set())
+    assert await scheduler._reconcile_retirements(scheduler._infra.task_manager)
+    backend.list_retirable_members = AsyncMock(return_value=[])
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
+async def test_pending_task_of_policy_retired_owner_is_not_started_and_escalated_once(db, bus):
+    """No startup path brings a SHUTDOWN owner back: keep the task PENDING and tell the leader once."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await _retire_by_policy(scheduler, db, "dev-1")
+    await tm.add_graph([TaskGraphSpec(title="orphan", content="c", task_id="a", assignee="dev-1")])
+
+    await scheduler.activate()
+    for _ in range(2):
+        await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert (await tm.get("a")).status == TaskStatus.PENDING.value
+    assert _dm_targets(mm) == []
+    assert host.started_members == []
+    assert len(host.leader_inputs) == 1
+    assert "[a]" in host.leader_inputs[0] and "dev-1" in host.leader_inputs[0]
+    assert "spawn_teammate" in host.leader_inputs[0] and "spawn_expert" not in host.leader_inputs[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
+async def test_only_lifetime_shutdown_retirements_are_recorded_as_policy(db, bus):
+    """A dormant lifetime settles DORMANT, so a later SHUTDOWN of it is the leader's doing."""
+    scheduler, backend, _tm = _retirement_scheduler(
+        db, bus, candidates=[("dev-1", "ready", "dormant"), ("dev-2", "ready", "shutdown")]
+    )
+
+    await scheduler.activate()
+
+    assert scheduler._policy_retired == {"dev-2"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lifetime", [None, "shutdown"])
+async def test_open_tasks_of_a_member_the_leader_shut_down_are_not_escalated(db, bus, lifetime):
+    """The leader's own shutdown_member leaves leftovers to the leader, task-scoped or not: skip, stay quiet."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1"),
+            TaskGraphSpec(title="two", content="c", task_id="b", assignee="dev-1"),
+        ]
+    )
+    await scheduler.activate()
+    host.leader_inputs.clear()
+
+    await _shut_down(db, "dev-1", lifetime=lifetime)
+    scheduler._handoff_known.clear()
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert (await tm.get("b")).status == TaskStatus.PENDING.value
+    assert [target for target, _ in _dm_targets(mm)] == ["dev-1"]
+    assert host.leader_inputs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
+async def test_reassigning_stranded_task_to_a_live_member_starts_it(db, bus):
+    """Once the leader reassigns, the start scan picks the task up and the escalation memo lets go."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await _retire_by_policy(scheduler, db, "dev-1")
+    await tm.add_graph([TaskGraphSpec(title="orphan", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert scheduler._stranded_escalated == {("a", "dev-1")}
+
+    assert (await tm.reassign("a", "dev-2")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert (await tm.get("a")).status == TaskStatus.IN_PROGRESS.value
+    assert _dm_targets(mm) == [("dev-2", {"template": "scheduler_task_start", "refs": {"task": "a"}})]
+    assert host.started_members == ["dev-2"]
+    assert scheduler._stranded_escalated == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_active_task_whose_handoff_landed_is_escalated_when_its_owner_is_retired(db, bus):
+    """The retired check runs before the handoff memo: a known handoff does not hide a stranded task."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert (await tm.get("a")).status == TaskStatus.IN_PROGRESS.value
+    assert ("a", "dev-1") in scheduler._handoff_known
+    host.leader_inputs.clear()
+
+    await _shut_down(db, "dev-1", lifetime="shutdown")
+    scheduler._policy_retired.add("dev-1")
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert [target for target, _ in _dm_targets(mm)] == ["dev-1"]
+    assert len(host.leader_inputs) == 1
+    assert "dev-1" in host.leader_inputs[0]
 
 
 # ---------------------------------------------------------------------------

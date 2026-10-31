@@ -62,6 +62,21 @@ _DB_RETRY_BASE_DELAY = 0.5
 # means the driver is stuck, and a loud TimeoutError beats an eternal hang.
 _DB_SESSION_WATCHDOG_SECONDS = 30.0
 
+# Error types ``retry_on_transient`` may back off on: SQLite contention
+# (``OperationalError``), write-pool checkout timeouts (``SATimeoutError``)
+# and the ``DbSessions`` watchdog (builtin ``TimeoutError``). Callers that
+# degrade on failure catch this same tuple. Only contention-flavoured
+# ``OperationalError``s are retried (see ``_is_transient_db_error``).
+_TRANSIENT_DB_ERRORS = (OperationalError, SATimeoutError, TimeoutError)
+# SQLite messages that mark an ``OperationalError`` as contention
+# ("database is locked", "database table is locked", SQLITE_BUSY wording);
+# anything else (disk I/O error, malformed image, no such table) is permanent.
+_TRANSIENT_OPERATIONAL_MARKERS = ("locked", "busy")
+# Each watchdog hit already cost ``_DB_SESSION_WATCHDOG_SECONDS``, and a
+# wedged driver rarely recovers within seconds, so retry it only once instead
+# of the full ``_DB_RETRY_ATTEMPTS`` (bounds the worst case at ~2x watchdog).
+_WATCHDOG_RETRY_ATTEMPTS = 2
+
 
 class DbSessions:
     """Read/write session provider with process-wide write serialisation.
@@ -92,6 +107,11 @@ class DbSessions:
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+
+    @property
+    def write_locked(self) -> bool:
+        """Whether a ``write()`` block currently holds the write lock (diagnostics)."""
+        return self._write_lock.locked()
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -195,6 +215,65 @@ async def retry_on_locked(
             )
             await asyncio.sleep(delay)
     return on_locked_result
+
+
+def _is_transient_db_error(e: BaseException) -> bool:
+    """Whether ``e`` is worth a retry: contention or a timeout, not a permanent failure."""
+    if isinstance(e, OperationalError):
+        message = str(e.orig if e.orig is not None else e).lower()
+        return any(marker in message for marker in _TRANSIENT_OPERATIONAL_MARKERS)
+    return isinstance(e, (SATimeoutError, TimeoutError))
+
+
+async def retry_on_transient(
+    op: Callable[[], Awaitable[_T]],
+    *,
+    label: str,
+) -> _T:
+    """Run a write ``op`` with back-off on transient DB errors, raising on exhaustion.
+
+    Same back-off as ``retry_on_locked`` but for callers that cannot degrade
+    on their own: retries lock contention, pool checkout timeouts and the
+    ``DbSessions.write()`` watchdog ``TimeoutError``, and re-raises the last
+    error once the budget is spent instead of returning a fallback value.
+    A permanent ``OperationalError`` (disk I/O error, malformed image, ...)
+    is raised on the first attempt: backing off cannot fix it and would only
+    stall every caller. Watchdog hits get a smaller budget
+    (``_WATCHDOG_RETRY_ATTEMPTS``) because each one already waited out the
+    full watchdog.
+
+    Args:
+        op: Zero-arg coroutine factory performing one write attempt; it must
+            exit its ``async with write()`` block before returning.
+        label: Human-readable operation name for logs.
+
+    Returns:
+        The ``op`` result.
+    """
+    attempt = 0
+    watchdog_hits = 0
+    while True:
+        try:
+            return await op()
+        except _TRANSIENT_DB_ERRORS as e:
+            attempt += 1
+            if not _is_transient_db_error(e):
+                team_logger.error("%s hit a non-retryable DB error: %s", label, e)
+                raise
+            if isinstance(e, TimeoutError):
+                watchdog_hits += 1
+            if attempt >= _DB_RETRY_ATTEMPTS or watchdog_hits >= _WATCHDOG_RETRY_ATTEMPTS:
+                team_logger.error("%s failed after %d attempts: %s", label, attempt, e)
+                raise
+            delay = _DB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            team_logger.warning(
+                "%s hit a transient DB error (%s); retrying in %ss (attempt %d)",
+                label,
+                type(e).__name__,
+                delay,
+                attempt,
+            )
+            await asyncio.sleep(delay)
 
 
 def _get_table_names(sync_conn) -> list[str]:
@@ -508,6 +587,30 @@ def _ensure_dynamic_table_indexes(
                 sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN summary TEXT')
                 team_logger.info("Migrated task table %s: added summary column", table_name)
 
+            # F_128: member subtasks — parent link + creator.
+            if "parent_task_id" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN parent_task_id TEXT')
+                team_logger.info("Migrated task table %s: added parent_task_id column", table_name)
+            if "created_by" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN created_by TEXT')
+                team_logger.info("Migrated task table %s: added created_by column", table_name)
+            if "resume_pending" not in task_columns:
+                sync_conn.exec_driver_sql(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN resume_pending BOOLEAN NOT NULL DEFAULT 0'
+                )
+                team_logger.info("Migrated task table %s: added resume_pending column", table_name)
+
+            # F_129: task versioning + edit notes.
+            for column in ("revision", "observed_revision", "parent_revision"):
+                if column not in task_columns:
+                    sync_conn.exec_driver_sql(
+                        f'ALTER TABLE "{table_name}" ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0'
+                    )
+                    team_logger.info("Migrated task table %s: added %s column", table_name, column)
+            if "change_notes" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN change_notes TEXT')
+                team_logger.info("Migrated task table %s: added change_notes column", table_name)
+
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
             # is executing it"; map them uniformly. Distinguishing an unapproved
@@ -791,11 +894,20 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
         )
 
     # DDL + migrations run on the writer engine (they are writes).
-    async with write_engine.begin() as conn:
-        await conn.run_sync(_create_static_tables)
-        await conn.run_sync(_ensure_team_member_role_column)
-        await conn.run_sync(_ensure_team_member_options_column)
-        await conn.run_sync(_ensure_team_info_capability_columns)
+    try:
+        async with write_engine.begin() as conn:
+            await conn.run_sync(_create_static_tables)
+            await conn.run_sync(_ensure_team_member_role_column)
+            await conn.run_sync(_ensure_team_member_options_column)
+            await conn.run_sync(_ensure_team_info_capability_columns)
+    except BaseException:
+        # The engines never reach the caller, so nobody else can dispose them:
+        # a failed DDL (e.g. ``database is locked``) retried by a poller would
+        # otherwise leak a writer + reader pool per attempt.
+        if read_engine is not write_engine:
+            await read_engine.dispose()
+        await write_engine.dispose()
+        raise
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
@@ -835,14 +947,16 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
 
     The session_id is obtained from context via get_session_id().
 
-    Retries on transient errors: SQLite write contention
-    (``OperationalError``) and pool-exhaustion (``SATimeoutError``) as
-    ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
+    Retries on transient errors via ``retry_on_transient``: SQLite write
+    contention (``OperationalError``) and pool-exhaustion (``SATimeoutError``)
+    as ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
     ``TimeoutError`` raised by ``DbSessions.write()`` when the driver thread
-    is wedged (e.g. multi-process binds racing the file lock at startup). A
-    Returns ``True`` when the tables are ready and ``False`` when no session
-    is bound or the retry budget is exhausted. Callers that start a session
-    runtime must check the result before proceeding.
+    is wedged (e.g. multi-process binds racing the file lock at startup; at
+    most one watchdog retry). A failed retry budget does not raise here:
+    ``create_cur_session_tables`` returns ``True`` when the tables are ready
+    and ``False`` when no session is bound or the retry budget is exhausted.
+    Callers that start a session runtime must check the result before
+    proceeding — ``session_manager`` aborts the bind on ``False``.
     """
     session_id = get_session_id()
     if not session_id:
@@ -854,36 +968,16 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
             await _ensure_session_tables(session)
             await session.commit()
 
-    last_err: BaseException | None = None
-    for attempt in range(_DB_RETRY_ATTEMPTS):
-        try:
-            await _ddl_once()
-            team_logger.info("Session tables ready for session %s", session_id)
-            return True
-        except (OperationalError, SATimeoutError, TimeoutError) as e:
-            last_err = e
-            if attempt >= _DB_RETRY_ATTEMPTS - 1:
-                break
-            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
-            team_logger.warning(
-                "create_cur_session_tables hit a transient DB error (%s); "
-                "retrying in %ss (attempt %d)",
-                type(e).__name__,
-                delay,
-                attempt + 1,
-            )
-            await asyncio.sleep(delay)
-
-    # Budget exhausted — do not crash the member. A subsequent DAO write will
-    # either succeed on its own (tables are idempotent under checkfirst) or
-    # raise the real error in-band where the caller can handle it.
-    team_logger.error(
-        "create_cur_session_tables failed after %d attempts for session %s: %s",
-        _DB_RETRY_ATTEMPTS,
-        session_id,
-        last_err,
-    )
-    return False
+    try:
+        await retry_on_transient(_ddl_once, label=f"create_cur_session_tables(session={session_id})")
+    except _TRANSIENT_DB_ERRORS:
+        # Budget exhausted (already logged by retry_on_transient) — report it
+        # via the ``False`` contract: callers that start a session runtime
+        # (``session_manager``) abort the bind instead of letting a member run
+        # against tables that never got created.
+        return False
+    team_logger.info("Session tables ready for session %s", session_id)
+    return True
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

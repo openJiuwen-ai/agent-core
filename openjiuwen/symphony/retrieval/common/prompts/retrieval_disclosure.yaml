@@ -61,9 +61,7 @@ progressive_system_prompt:
 
     {structure_block}
 
-
-
-
+    {candidate_block}
 
     # 输出 id 说明：
 

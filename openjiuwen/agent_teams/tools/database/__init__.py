@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.tools.database.config import (
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
+    SqlEngines,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
@@ -77,6 +78,8 @@ from openjiuwen.agent_teams.tools.models import (
 from openjiuwen.agent_teams.tools.models import (
     TeamTaskDependencyBase as TeamTaskDependencyBase,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -104,6 +107,8 @@ class TeamDatabase:
         # with DAO writes instead of bypassing the lock (engine.begin()).
         self._sessions: Optional[DbSessions] = None
         self._initialized = False
+        # Set by close(); a closed database is never reopened (see close()).
+        self._closed = False
         self._init_lock = asyncio.Lock()
         # Background WAL checkpointer task (file-backed SQLite +
         # wal_checkpoint_interval_s > 0 only); None otherwise.
@@ -135,38 +140,55 @@ class TeamDatabase:
         async with self._init_lock:
             if self._initialized:
                 return
+            if self._closed:
+                raise_error(
+                    StatusCode.AGENT_TEAM_STATE_INVALID,
+                    reason="TeamDatabase was closed; create a new instance instead of reinitializing it",
+                )
             engines = await _initialize_engine(self.config)
             self.engine = engines.write_engine
             self.read_engine = engines.read_engine
             self.session_local = engines.write_session_local
             self.read_session_local = engines.read_session_local
-
-            # One DbSessions (one write lock) shared by every DAO: SQLite's
-            # write lock is database-wide, so all four tables must serialise
-            # writes through the same lock. Reads go to the reader factory
-            # (a separate pool for file-backed SQLite) — see DbSessions.
-            sessions = DbSessions(self.session_local, self.read_session_local)
-            self._sessions = sessions
-            # Bind-time session-table DDL runs under the same write lock: the
-            # engine-level variant (``engine.begin()``) bypassed it and could
-            # hold both write-pool connections during concurrent binds.
-            if get_session_id():
-                await _create_cur_session_tables(sessions)
-            # message/task ``content`` spills to session files (DB keeps the
-            # ``#file#`` placeholder, DAOs derive the path from the row and
-            # dereference on read).
-            from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
-
-            file_store = SessionFileStore()
-            self.team = TeamDao(sessions)
-            self.member = MemberDao(sessions)
-            self.task = TaskDao(sessions, file_store=file_store)
-            self.message = MessageDao(sessions, file_store=file_store)
-
-            self._maybe_start_checkpointer()
-
-            self._initialized = True
+            try:
+                await self._wire_up(engines)
+            except BaseException:
+                # Do not leak the pools just built: a retried initialize()
+                # creates fresh engines and would orphan these.
+                await self._release_engines()
+                raise
             team_logger.info("Team database initialized")
+
+    async def _wire_up(self, engines: SqlEngines) -> None:
+        """Create the shared ``DbSessions`` and DAOs on freshly built engines."""
+        # One DbSessions (one write lock) shared by every DAO: SQLite's
+        # write lock is database-wide, so all four tables must serialise
+        # writes through the same lock. Reads go to the reader factory
+        # (a separate pool for file-backed SQLite) — see DbSessions.
+        sessions = DbSessions(engines.write_session_local, engines.read_session_local)
+        # Bind-time session-table DDL runs under the same write lock: the
+        # engine-level variant (``engine.begin()``) bypassed it and could
+        # hold both write-pool connections during concurrent binds.
+        if get_session_id():
+            await _create_cur_session_tables(sessions)
+        # message/task ``content`` spills to session files (DB keeps the
+        # ``#file#`` placeholder, DAOs derive the path from the row and
+        # dereference on read).
+        from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
+
+        file_store = SessionFileStore()
+        self.team = TeamDao(sessions)
+        self.member = MemberDao(sessions)
+        self.task = TaskDao(sessions, file_store=file_store)
+        self.message = MessageDao(sessions, file_store=file_store)
+
+        self._maybe_start_checkpointer()
+
+        # Publish the provider only once every step above succeeded: a
+        # half-initialized database must not hand it out, or a retried
+        # initialize() would build a second provider (a second write lock).
+        self._sessions = sessions
+        self._initialized = True
 
     def _maybe_start_checkpointer(self) -> None:
         """Start the background WAL checkpointer when configured.
@@ -205,6 +227,22 @@ class TeamDatabase:
                 raise
             except Exception as e:
                 team_logger.warning("Background WAL checkpoint failed: %s", e)
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` ran; a closed database never reinitializes."""
+        return self._closed
+
+    @property
+    def sessions(self) -> Optional[DbSessions]:
+        """Return the shared ``DbSessions`` (one write lock) once initialized.
+
+        Other stores on this database (e.g. organization tables) must reuse
+        this provider instead of building their own ``DbSessions``: a second
+        instance carries a second write lock, so its writes would race the
+        DAO writes for the small write pool.
+        """
+        return self._sessions
 
     async def create_cur_session_tables(self) -> bool:
         """Create dynamic tables for current session.
@@ -281,7 +319,29 @@ class TeamDatabase:
         return cleanup_success
 
     async def close(self) -> None:
-        """Close the database engine(s) and release all connections."""
+        """Close the database engine(s) and release all connections.
+
+        Closing is terminal: a later ``initialize()`` raises instead of
+        reopening, so a stale holder (e.g. an organization store) cannot
+        silently resurrect engines and the background checkpointer after
+        shutdown. Build a new ``TeamDatabase`` to use the storage again.
+
+        Runs under ``_init_lock``: an ``initialize()`` already in flight
+        finishes first and its engines are then released here, instead of
+        being published after this close returned.
+        """
+        async with self._init_lock:
+            self._closed = True
+            had_engine = self.engine is not None
+            await self._release_engines()
+        if had_engine:
+            team_logger.info("Team database closed")
+        from openjiuwen.agent_teams.organization.pool import remove_process_org_managers_for_db
+
+        remove_process_org_managers_for_db(self)
+
+    async def _release_engines(self) -> None:
+        """Stop the checkpointer, dispose the engine(s) and reset runtime state."""
         if self._checkpoint_task is not None:
             self._checkpoint_task.cancel()
             try:
@@ -295,19 +355,16 @@ class TeamDatabase:
             if self.read_engine is not None and self.read_engine is not self.engine:
                 await self.read_engine.dispose()
             await self.engine.dispose()
-            self.engine = None
-            self.read_engine = None
-            self.session_local = None
-            self.read_session_local = None
-            self._initialized = False
-            self.team = None
-            self.member = None
-            self.task = None
-            self.message = None
-            team_logger.info("Team database closed")
-        from openjiuwen.agent_teams.organization.pool import remove_process_org_managers_for_db
-
-        remove_process_org_managers_for_db(self)
+        self.engine = None
+        self.read_engine = None
+        self.session_local = None
+        self.read_session_local = None
+        self._sessions = None
+        self._initialized = False
+        self.team = None
+        self.member = None
+        self.task = None
+        self.message = None
 
     async def _ensure_initialized(self) -> None:
         """Initialize on first call; idempotent thereafter."""

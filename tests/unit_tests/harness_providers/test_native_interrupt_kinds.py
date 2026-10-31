@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
+from openjiuwen.core.foundation.tool import ClientTool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt import InterruptKind, interrupt_answer
@@ -26,6 +27,8 @@ from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness_protocol import (
+    DynamicToolCallRequest,
+    DynamicToolCallResponse,
     HarnessContext,
     HarnessInput,
     HostCapability,
@@ -50,7 +53,7 @@ from tests.unit_tests.fixtures.deep_agent_interrupts import (
 )
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response, create_tool_call_response
 
-ALL_CAPS = frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL})
+ALL_CAPS = frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL, HostCapability.DYNAMIC_TOOL_CALL})
 
 
 class Host:
@@ -75,6 +78,15 @@ def allow(request):
         return ToolApprovalResponse(request_id=request.request_id, decision=ToolApprovalDecision.ALLOW)
     return UserInputResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED,
                              content="yes")
+
+
+class ClipboardTool(ClientTool):
+    def __init__(self):
+        super().__init__(ToolCard(id="read_clipboard", name="read_clipboard", description="d",
+                                  input_params={"type": "object", "properties": {}, "required": []}))
+
+    def build_request(self, arguments, context):
+        return {"action": "read_clipboard"}
 
 
 @pytest_asyncio.fixture
@@ -115,7 +127,7 @@ async def _turn(tmp_path, host: Host, capabilities, *, tools=(), rails=(), permi
 
 
 def test_card_declares_the_optional_host_capabilities_it_uses():
-    assert {HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL} <= (
+    assert {HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL, HostCapability.DYNAMIC_TOOL_CALL} <= (
         DeepAgentHarness.card.optional_host_capabilities
     )
 
@@ -202,6 +214,69 @@ async def test_abort_or_interrupt_stops_the_turn_with_the_ask_pending(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_client_tool_runs_through_a_dynamic_tool_call(tmp_path, runner):
+    host = Host(lambda r: DynamicToolCallResponse(request_id=r.request_id,
+                                                  status=InteractionResponseStatus.COMPLETED,
+                                                  result="Meeting at 3 pm"))
+    _, llm = await _turn(tmp_path, host, ALL_CAPS, tools=[ClipboardTool()],
+                         first_call=create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c"))
+
+    [request] = host.requests
+    assert isinstance(request, DynamicToolCallRequest)
+    assert request.call_id == "call_c" and request.tool_name == "read_clipboard"
+    assert request.provider_data["client_request"] == {"action": "read_clipboard"}
+    assert tool_results_seen(llm) == [("call_c", "Meeting at 3 pm")]
+
+
+@pytest.mark.asyncio
+async def test_client_tool_cancelled_by_the_host_is_a_cancelled_tool_error(tmp_path, runner):
+    host = Host(lambda r: DynamicToolCallResponse(request_id=r.request_id,
+                                                  status=InteractionResponseStatus.CANCELLED))
+    result, llm = await _turn(tmp_path, host, ALL_CAPS, tools=[ClipboardTool()],
+                              first_call=create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c"))
+
+    [(_, content)] = tool_results_seen(llm)
+    assert "was cancelled" in content
+    assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_client_tool_without_dynamic_tool_calls_fails_clearly(tmp_path, runner):
+    host = Host(allow)
+    _, llm = await _turn(tmp_path, host, {HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL},
+                         tools=[ClipboardTool()],
+                         first_call=create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c"))
+
+    assert host.requests == []
+    [(_, content)] = tool_results_seen(llm)
+    assert "cannot run client tools" in content
+
+
+@pytest.mark.asyncio
+async def test_a_client_result_of_null_completes_the_call(tmp_path, runner):
+    host = Host(lambda r: DynamicToolCallResponse(request_id=r.request_id,
+                                                  status=InteractionResponseStatus.COMPLETED, result=None))
+    result, llm = await _turn(tmp_path, host, ALL_CAPS, tools=[ClipboardTool()],
+                              first_call=create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c"))
+
+    assert result.stop_reason == "answer" and result.final_output == "done"
+    assert [call for call, _ in tool_results_seen(llm)] == ["call_c"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "is_error"), [(InteractionResponseStatus.FAILED, False),
+                                                  (InteractionResponseStatus.DECLINED, True)])
+async def test_a_failed_client_call_is_an_error_not_a_cancellation(tmp_path, runner, status, is_error):
+    host = Host(lambda r: DynamicToolCallResponse(request_id=r.request_id, status=status, is_error=is_error,
+                                                  error_message="no native tool gateway is available"))
+    _, llm = await _turn(tmp_path, host, ALL_CAPS, tools=[ClipboardTool()],
+                         first_call=create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c"))
+
+    [(_, content)] = tool_results_seen(llm)
+    assert content == "no native tool gateway is available"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("content", [None, ""])
 async def test_an_approval_answered_with_nothing_is_rejected(tmp_path, runner, content):
     tool = CountingTool("doc_tool")
@@ -211,6 +286,27 @@ async def test_an_approval_answered_with_nothing_is_rejected(tmp_path, runner, c
                 first_call=create_tool_call_response("doc_tool", "{}", tool_call_id="call_t"))
 
     assert tool.invoke_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_approval_stops_the_turn_before_the_client_runs_anything(tmp_path, runner):
+    def reply(request):
+        if isinstance(request, DynamicToolCallRequest):
+            return DynamicToolCallResponse(request_id=request.request_id,
+                                           status=InteractionResponseStatus.COMPLETED, result="pasted")
+        return ToolApprovalResponse(request_id=request.request_id, decision=ToolApprovalDecision.ABORT)
+
+    host = Host(reply)
+    both = create_tool_call_response("read_clipboard", "{}", tool_call_id="call_c")
+    both.tool_calls.append(create_tool_call_response("doc_tool", "{}", tool_call_id="call_p").tool_calls[0])
+    result, _ = await _turn(tmp_path, host, ALL_CAPS, tools=[ClipboardTool(), CountingTool("doc_tool")],
+                            permissions=ask_permissions("doc_tool"), first_call=both)
+
+    assert [type(request) for request in host.requests] == [ToolApprovalRequest]
+    assert result.stop_reason == "interrupt"
+    assert sorted(item["kind"] for item in result.provider_data["pending_interrupts"]) == [
+        InterruptKind.CLIENT_TOOL, InterruptKind.PERMISSION
+    ]
 
 
 ASK_ARGS = json.dumps({"questions": [{"header": "Color", "question": "Which color?", "options": []}]})

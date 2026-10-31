@@ -33,7 +33,11 @@ from typing import (
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
 from openjiuwen.agent_teams.inbound_render import render_clock
-from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.team_context import (
+    TaskOutcomeTracker,
+    TaskRevisionTracker,
+    TeamContextTracker,
+)
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
@@ -238,7 +242,7 @@ class ExternalHarnessMemberRuntime:
         self._team_context_tracker = team_context_tracker
         # Scheduled dispatch only (F_119): review passes folded into the next
         # message. Bound after construction, like the team-context tracker.
-        self._task_outcome_tracker: TaskOutcomeTracker | None = None
+        self._task_outcome_tracker: TaskOutcomeTracker | TaskRevisionTracker | None = None
         self._resume_external_backend = resume_external_backend
         self._require_checkpoint = require_checkpoint
         self._seed_checkpoint = seed_checkpoint
@@ -339,8 +343,8 @@ class ExternalHarnessMemberRuntime:
     def bind_team_context_tracker(self, tracker: TeamContextTracker | None) -> None:
         self._team_context_tracker = tracker
 
-    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | None) -> None:
-        """Bind the tracker that folds untold review passes into the next message."""
+    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | TaskRevisionTracker | None) -> None:
+        """Bind the tracker that folds untold task facts (review passes / missed edits) into the next message."""
         self._task_outcome_tracker = tracker
 
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
@@ -570,22 +574,28 @@ class ExternalHarnessMemberRuntime:
             # an in-process member.
             clock = render_clock(now=format_absolute_time(get_current_time()))
             external_input = _prepend_context(external_input, clock)
-            pending_outcome = await self._pending_task_outcome()
-            if pending_outcome:
-                external_input = _prepend_context(external_input, pending_outcome)
+            tracker = self._task_outcome_tracker
+            pending_outcome = await tracker.claim(self._member_session) if tracker is not None else None
+            if pending_outcome is not None:
+                external_input = _prepend_context(external_input, pending_outcome.text)
             pending_context = await self._pending_team_context()
             if pending_context:
                 external_input = _prepend_context(external_input, pending_context)
-            receipt = await self._adapter.send(external_input, immediate=immediate)
+            try:
+                receipt = await self._adapter.send(external_input, immediate=immediate)
+            except BaseException:
+                if pending_outcome is not None:
+                    tracker.release(pending_outcome)
+                raise
             # Every part is recorded, and the message first so it is the one
             # the turn states as its input. A provider splits the delivery into
             # a message per block, so the combined text would match none of
             # them and the turn would read as if nobody had said anything.
             self._record_input(receipt, delivered_text)
             self._record_input(receipt, clock)
-            if pending_outcome:
-                self._record_input(receipt, pending_outcome)
-                await self._commit_task_outcome()
+            if pending_outcome is not None:
+                self._record_input(receipt, pending_outcome.text)
+                await tracker.persist(self._member_session)
             if pending_context:
                 self._record_input(receipt, pending_context)
                 await self._commit_team_context()
@@ -599,6 +609,29 @@ class ExternalHarnessMemberRuntime:
             receipt = await self._adapter.send(pending, immediate=False)
             self._record_input(receipt, pending)
             await self._commit_team_context()
+
+    async def announce_task_revisions(self) -> None:
+        """Send the pending task edit notice as a message of its own (F_129).
+
+        Steers a busy member, like the edit would; a no-op when the tracker
+        has nothing new.
+        """
+        if self._task_outcome_tracker is None:
+            return
+        delivered: tuple[Any, str] | None = None
+
+        async def _send(text: str) -> None:
+            # Delivery only: what is raised here gives the claim back.
+            nonlocal delivered
+            delivered = (await self._adapter.send(text, immediate=True), text)
+
+        async with self._context_delivery_lock:
+            try:
+                await self._task_outcome_tracker.announce(self._member_session, _send)
+            finally:
+                # A delivered notice is the turn's input, whatever failed after it.
+                if delivered is not None:
+                    self._record_input(*delivered)
 
     async def abort(self, *, immediate: bool = False) -> None:
         await self._adapter.abort(immediate=immediate)
@@ -938,16 +971,6 @@ class ExternalHarnessMemberRuntime:
         if self._team_context_tracker is None or self._member_session is None:
             return
         await self._team_context_tracker.commit(self._member_session)
-
-    async def _pending_task_outcome(self) -> str | None:
-        if self._task_outcome_tracker is None or self._member_session is None:
-            return None
-        return await self._task_outcome_tracker.pending_text(self._member_session)
-
-    async def _commit_task_outcome(self) -> None:
-        if self._task_outcome_tracker is None or self._member_session is None:
-            return
-        await self._task_outcome_tracker.commit(self._member_session)
 
     # ------------------------------------------------------------------
     # MemberRuntime: interrupt helpers and no-op hooks
