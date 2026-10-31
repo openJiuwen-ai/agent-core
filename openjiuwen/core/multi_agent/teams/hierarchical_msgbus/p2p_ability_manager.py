@@ -165,12 +165,27 @@ class P2PAbilityManager(AbilityManager):
         tool_call: ToolCall,
         session: Session,
         tag=None,
+        callback_context: Optional[AgentCallbackContext] = None,
     ) -> Tuple[Any, ToolMessage]:
-        """Route AgentCard calls via P2P send; delegate all others to super()."""
+        """Route AgentCard calls via P2P send; delegate all others to super().
+
+        Args:
+            tool_call:        The tool call to execute.
+            session:          Current agent session.
+            tag:              Optional resource tag forwarded to the base class.
+            callback_context: Callback context for the tool call, forwarded to
+                              the base class so that tools opting into
+                              ``accepts_tool_callback_context`` still receive it.
+        """
         tool_name = tool_call.name
 
         if tool_name not in self._agents:
-            return await super()._execute_single_tool_call(tool_call, session, tag)
+            return await super()._execute_single_tool_call(
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+                callback_context=callback_context,
+            )
 
         import json as _json
 
