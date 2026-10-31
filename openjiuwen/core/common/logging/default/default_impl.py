@@ -347,6 +347,15 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
 
         # Add console handler
         if "console" in output:
+            # Windows stdio often stays on a legacy code page (cp1252/GBK), which
+            # cannot encode Chinese log messages from AgentOS / CLI.
+            if sys.platform == "win32":
+                reconfigure = getattr(sys.stdout, "reconfigure", None)
+                if callable(reconfigure):
+                    try:
+                        reconfigure(encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
             stream_handler = logging.StreamHandler(stream=sys.stdout)
             stream_handler.addFilter(ContextFilter(self.log_type))
             stream_handler.setFormatter(self._get_formatter())
