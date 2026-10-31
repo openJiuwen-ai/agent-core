@@ -211,7 +211,7 @@ async def terminate(
     if write_error_stream:
         await emit_stream_error(ctx, message)
     try:
-        ctx.request_force_finish({"output": message, "result_type": "error"})
+        ctx.request_force_finish({"output": message, "message": message, "result_type": "error"})
     except Exception:
         logger.error("terminate failed", exc_info=True)
 
