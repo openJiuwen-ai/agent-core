@@ -151,9 +151,11 @@ reporting:
   # 3 rounds — real isolation, but real added turns on top of the
   # write/repair loop.
   max_iterations: 120
-  # Per-completion timeout (seconds), overriding the shared
+  # Per-model-call timeout (seconds), overriding the shared
   # openjiuwen.timeout default for this module only (see agent.py's
-  # _setting). Bumped from the global 600s default: a real run with many
+  # _setting). It bounds each call to the provider, not the whole session —
+  # the session is bounded by max_iterations above. Bumped from the global
+  # 600s default: a real run with many
   # variants and a large evidence set hit `completion_timeout` while
   # generating/expanding the ~2000-3000 word Method section, and a
   # paper-reviewer subagent reading the entire assembled draft is itself a
