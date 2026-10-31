@@ -76,13 +76,18 @@ class _FileReadState:
     is_partial: bool  # True if only a subset of lines was read (offset > 0 or explicit limit)
     content: Optional[str] = None
     # Cumulative coverage tracking for WriteFileTool's full-file overwrite guard.
-    # total_lines: total line count of the file, counted once on first read and cached
-    #              (re-counted after the file is detected stale).
+    # total_lines: total line count of the file. Valid only when total_lines_known
+    #              is True (a count of 0 is a legitimate value for an empty file).
+    # total_lines_known: True == total_lines is exact; False == a count was
+    #              attempted but could not be obtained (too large / timed out), so
+    #              it is not retried on every read; None == not attempted yet.
+    #              Any read that reaches EOF still resolves the total exactly.
     # read_ranges: list of 1-indexed inclusive [start, end] line intervals that have
     #              been read, merged on each read. When the union of ranges covers
     #              [1, total_lines], the file is "logically fully read" even via
     #              partial reads — at which point write_file is allowed.
     total_lines: int = 0
+    total_lines_known: Optional[bool] = None
     read_ranges: list = None  # list of (start, end) tuples; None == not yet tracking
 
 
@@ -95,6 +100,9 @@ class _ReadStateRecord:
     is_partial: bool
     offset: int = 0
     line_count: int = 0
+    # Exact total line count derivable from this read alone (the read reached
+    # EOF), so bookkeeping does not need a separate whole-file pass.
+    inferred_total: Optional[int] = None
 
 
 @dataclass
@@ -373,6 +381,15 @@ class ReadFileTool(Tool):
     MAX_LINES_TO_READ: int = 2000
     MAX_SIZE_BYTES: int = 256 * 1024   # 256 KB
     MAX_TOKENS: int = 25_000
+    # Bookkeeping budget for the read-state registry. Counting lines is only
+    # needed to prove "the whole file was read" before an overwrite; it must
+    # never sit on the critical path of a read. Normal large files are still
+    # counted (the full read is a single pass now) so the coverage-based
+    # overwrite path keeps working; only pathological sizes are skipped, and a
+    # slow count is abandoned after the timeout. Both degradations leave
+    # total_lines unknown, which keeps WriteFileTool's conservative refusal.
+    EAGER_COUNT_MAX_BYTES: int = 64 * 1024 * 1024   # 64 MB
+    STATE_INIT_TIMEOUT: float = 2.0
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
@@ -530,7 +547,8 @@ class ReadFileTool(Tool):
     async def _read_raw_text_for_edit_state(self, file_path: str) -> Optional[_RawTextState]:
         """Read raw text content for EditFileTool stale-write checks."""
         try:
-            res = await self.operation.fs().read_file(file_path)
+            # Pure read of metadata/content: skip the cross-process read lock.
+            res = await self.operation.fs().read_file(file_path, only_read=True)
             if res.code != StatusCode.SUCCESS.code:
                 return None
             content = res.data.content if res.data else ""
@@ -540,6 +558,38 @@ class ReadFileTool(Tool):
             return _RawTextState(content=normalized, line_count=self._raw_line_count(normalized))
         except Exception:
             return None
+
+    async def _resolve_total_lines(
+            self, file_path: str, size_bytes: int
+    ) -> Tuple[int, Optional[_RawTextState], bool]:
+        """Try to count the file's lines without blocking the read path.
+
+        Returns ``(total_lines, raw_state, known)``. Large files are not counted
+        eagerly and a slow count is abandoned after a short budget; in both cases
+        ``known`` is False and the result is cached so the count is not retried
+        on every read. Recovery does not depend on this helper: any read that
+        reaches EOF reports the exact total via ``inferred_total``.
+        """
+        if size_bytes > self.EAGER_COUNT_MAX_BYTES:
+            logger.debug(
+                "skip eager line count for large file",
+                extra={"file_path": file_path, "size_bytes": size_bytes},
+            )
+            return 0, None, False
+        try:
+            raw_state = await asyncio.wait_for(
+                self._read_raw_text_for_edit_state(file_path),
+                timeout=self.STATE_INIT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "line count timed out; read state degraded",
+                extra={"file_path": file_path, "timeout_s": self.STATE_INIT_TIMEOUT},
+            )
+            return 0, None, False
+        if raw_state is None:
+            return 0, None, False
+        return raw_state.line_count, raw_state, True
 
     async def _record_read_state(
             self,
@@ -572,14 +622,21 @@ class ReadFileTool(Tool):
         ):
             existing = None
 
-        # total_lines: cached on first read (or after a stale reset). Counting
-        # reads the whole file once (content stays out of the agent context);
-        # the cost is paid only once per file per modification.
-        total_lines = existing.total_lines if (existing and existing.total_lines) else 0
+        # total_lines: prefer the exact total this read can infer from reaching
+        # EOF (free, and it is the recovery path when counting was degraded).
+        # Otherwise reuse the cache; a previous degraded attempt (known=False)
+        # is not retried on every read, but a later EOF read still recovers it.
+        total_lines, total_known = 0, False
+        existing_known = existing.total_lines_known if existing else None
         raw_state = None
-        if not total_lines:
-            raw_state = await self._read_raw_text_for_edit_state(file_path)
-            total_lines = raw_state.line_count if raw_state else 0
+        if existing is not None and existing_known:
+            total_lines, total_known = existing.total_lines, True
+        elif record.inferred_total is not None:
+            total_lines, total_known = record.inferred_total, True
+        elif existing is None or existing_known is None:
+            total_lines, raw_state, total_known = await self._resolve_total_lines(
+                file_path, record.size_bytes
+            )
 
         # Map this read to a 1-indexed closed interval [start_line, end_line].
         # offset is 0-based lines-skipped, so the first line returned is line
@@ -592,7 +649,7 @@ class ReadFileTool(Tool):
             read_ranges = _merge_range(read_ranges, (start_line, end_line))
 
         is_logically_complete = (
-            total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
+            total_known and total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
         )
 
         # Full-file content snapshot for stale re-check: only keep it once the
@@ -607,6 +664,7 @@ class ReadFileTool(Tool):
             is_partial=record.is_partial,
             content=raw_state.content if raw_state else None,
             total_lines=total_lines,
+            total_lines_known=total_known,
             read_ranges=read_ranges,
         )
 
@@ -614,11 +672,19 @@ class ReadFileTool(Tool):
     # Per-type readers
     # ------------------------------------------------------------------
 
-    async def _read_text(self, file_path: str, offset: int, limit: int, apply_size_cap: bool = True) -> str:
+    async def _read_text(
+            self, file_path: str, offset: int, limit: int, apply_size_cap: bool = True
+    ) -> Tuple[str, int, Optional[int]]:
         """Read `limit` lines starting after skipping `offset` lines (0-based skip).
 
         apply_size_cap: apply MAX_SIZE_BYTES check only when reading without an explicit
         user-supplied limit (mirrors TS: maxSizeBytes is passed only when limit is None).
+
+        Returns ``(rendered, line_count, inferred_total)``. ``inferred_total`` is the
+        exact total line count when this read reached EOF (a short page); when the
+        read lands at or past EOF it is the offset, which is a safe upper bound for
+        the completeness check. Callers can record it without a second whole-file
+        pass. Otherwise it is None.
         """
         start = max(0, offset) + 1    # convert 0-based skip to 1-indexed start line
         end = start + max(0, limit) - 1
@@ -643,18 +709,35 @@ class ReadFileTool(Tool):
             raise MaxFileReadTokenExceededError(tokens, self.MAX_TOKENS)
 
         rendered = self._cat_n(content)
+        content_line_count = len(content.splitlines()) if content else 0
+        # A page shorter than the requested limit is the last page, which pins
+        # the exact total line count.
+        inferred_total = (
+            offset + content_line_count
+            if content_line_count < max(0, limit)
+            else None
+        )
 
         # Empty file or offset beyond end-of-file: return an explicit warning string.
         if not content.strip():
             if offset == 0:
-                return "Warning: the file exists but the contents are empty."
+                return (
+                    "Warning: the file exists but the contents are empty.",
+                    0,
+                    inferred_total,
+                )
             else:
                 return (
                     f"Error: The file exists but no content was returned at offset {offset}. "
-                    "Use a smaller offset or read from the beginning."
+                    "Use a smaller offset or read from the beginning.",
+                    0,
+                    # No content at all: every line before `offset` exists, so the
+                    # offset is a safe upper bound. A blank-lines page keeps its
+                    # exact total (short page) and is otherwise unknown.
+                    offset if content_line_count == 0 else inferred_total,
                 )
 
-        return rendered
+        return rendered, content_line_count, inferred_total
 
     async def _read_notebook(self, file_path: str) -> str:
         res = await self.operation.fs().read_file(file_path)
@@ -972,6 +1055,8 @@ class ReadFileTool(Tool):
                 ),
             )
 
+        text_line_count: Optional[int] = None
+        inferred_total: Optional[int] = None
         try:
             if self._is_pdf(file_path):
                 rendered = await self._read_pdf(file_path, pages)
@@ -982,7 +1067,7 @@ class ReadFileTool(Tool):
             else:
                 # MAX_SIZE_BYTES cap only applies when no explicit limit was given
                 # (mirrors TS: maxSizeBytes passed only when limit is undefined).
-                rendered = await self._read_text(
+                rendered, text_line_count, inferred_total = await self._read_text(
                     file_path, offset, limit, apply_size_cap=not user_supplied_limit
                 )
         except MaxFileReadTokenExceededError as exc:
@@ -997,7 +1082,11 @@ class ReadFileTool(Tool):
             content = rendered
             result_data = {"content": content}
 
-        line_count = len(content.splitlines()) if content else 0
+        line_count = (
+            text_line_count
+            if text_line_count is not None
+            else (len(content.splitlines()) if content else 0)
+        )
 
         # Populate read registry for EditFileTool pre-read validation and
         # WriteFileTool cumulative coverage tracking.
@@ -1009,6 +1098,7 @@ class ReadFileTool(Tool):
                 is_partial=user_supplied_limit or offset > 0,
                 offset=offset,
                 line_count=line_count,
+                inferred_total=inferred_total,
             ),
         )
 
@@ -1142,6 +1232,7 @@ class WriteFileTool(Tool):
                     ranges = read_state.read_ranges if read_state else None
                     is_logically_complete = (
                         read_state is not None
+                        and read_state.total_lines_known
                         and read_state.total_lines > 0
                         and ranges is not None
                         and _ranges_cover(ranges, 1, read_state.total_lines)
@@ -1158,14 +1249,25 @@ class WriteFileTool(Tool):
                             resume_offset = _first_unread_offset(ranges)
                             # Lines read so far = sum of interval lengths in ranges.
                             lines_read = sum(e - s + 1 for s, e in (ranges or []))
-                            msg = (
-                                f"Error: File has not been fully read yet. "
-                                f"You have read {lines_read} of {read_state.total_lines} lines. "
-                                f"Continue with read_file offset={resume_offset} before writing."
-                                f"until the whole file is covered, then write. "
-                                f"A full-file overwrite cannot use partial reads — "
-                                f"it would lose the unread content."
-                            )
+                            if read_state.total_lines_known:
+                                msg = (
+                                    f"Error: File has not been fully read yet. "
+                                    f"You have read {lines_read} of "
+                                    f"{read_state.total_lines} lines. "
+                                    f"Continue with read_file offset={resume_offset} before writing."
+                                    f"until the whole file is covered, then write. "
+                                    f"A full-file overwrite cannot use partial reads — "
+                                    f"it would lose the unread content."
+                                )
+                            else:
+                                msg = (
+                                    f"Error: File has not been fully read yet. "
+                                    f"You have read {lines_read} lines; the file's total "
+                                    "length is not known yet. Read through to the last page "
+                                    "of the file so the total is determined, then cover any "
+                                    "remaining lines. A full-file overwrite cannot use "
+                                    "partial reads."
+                                )
                         return ToolOutput(success=False, error=msg)
 
                     old_content, encoding = await self._read_existing_text(path)
