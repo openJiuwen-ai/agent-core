@@ -16,7 +16,7 @@ from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 from .execution.binding import InvocationState
 from .execution.session_state import offloading_processors
 from .schema.build_context import PersistentBuildContext
-from .schema.spec import PersistentAgentSpec
+from .schema.spec import ACTIVE_WINDOW_SWITCH_ENABLED, PersistentAgentSpec
 
 
 def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBuildContext) -> DeepAgent:
@@ -59,12 +59,18 @@ def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBui
                     error_msg="Persistent runtime system prompt builder unavailable",
                 )
             if manage_windows:
-                from .prompts import WINDOW_MANAGEMENT_PROMPT
+                from .prompts import WINDOW_MANAGEMENT_FALLBACK_PROMPT, WINDOW_MANAGEMENT_PROMPT
+
+                window_prompt = (
+                    WINDOW_MANAGEMENT_PROMPT
+                    if ACTIVE_WINDOW_SWITCH_ENABLED
+                    else WINDOW_MANAGEMENT_FALLBACK_PROMPT
+                )
 
                 builder.add_section(
                     PromptSection(
                         name="persistent_context_management",
-                        content=dict(WINDOW_MANAGEMENT_PROMPT),
+                        content=dict(window_prompt),
                         priority=12,
                     )
                 )

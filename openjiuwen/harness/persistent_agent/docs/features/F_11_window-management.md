@@ -1,5 +1,16 @@
 # F_11 上下文窗口管理设计方案
 
+## 2026-10-29 当前运行策略：主动换窗关闭，容量兜底保留
+
+agent-core 当前将 `schema.spec.ACTIVE_WINDOW_SWITCH_ENABLED` 设为 `False`。此开关只控制模型主动换窗：
+请求入口不再调用 `judge_window`，业务模型不注册 `new_context`，系统提示明确告知主动换窗已关闭；历史窗口检索指引仍保留。
+
+`window_management` 启用时，`WindowSwitchManager` 和框架内部容量检查仍照常运行。完整 ReAct 轮次结束、即将进行下一次模型调用时，
+若上下文用量超过模型窗口的 80%，系统仍会在安全边界准备交接并自动切换；新窗口候选内容上限仍为 40%，归档、恢复和历史检索行为不变。
+将该代码常量改为 `True` 并重新加载服务，可恢复入口判断、`new_context` 和主动换窗提示。
+
+验证记录：`test_construction.py`、`test_entries.py` 与 `test_window_management.py` 共 335 项通过；JiuwenSwarm 虚拟环境导入路径指向 `agent-core_3.24`，读到主动开关 `False`、兜底阈值 `0.8`、新窗口上限 `0.4`。当前已运行的服务需重启后才会加载此代码。
+
 ## 2026-10-25 已确认增量：入口与执行中共用 new_context 工具
 
 用户确认采用真实工具调用方案：独立入口模型仅开放已有 `new_context` 的 ToolInfo，

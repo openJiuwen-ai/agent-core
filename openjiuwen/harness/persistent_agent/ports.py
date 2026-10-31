@@ -78,16 +78,23 @@ class BudgetPort(Protocol):
         ...
 
 
-class GroupMessageApprovalRequired(Exception):
-    """Host-private candidates need owner consent before sharing to this destination.
+class GroupContentApprovalRequired(Exception):
+    """Host-private candidates need owner approval before sharing to this destination.
 
-    ``approval_id`` is opaque correlation, never an authorization token. Do not
-    attach candidates or previews; the host must reauthorize every resumed read.
+    Never attach candidates or previews. ``approval_id`` is an opaque correlation
+    identifier, not a permission token; the host must reauthorize on resume.
     """
 
-    def __init__(self, message: str = "跨群消息分享需要所有者批准。", *, approval_id: str | None = None) -> None:
+    def __init__(self, message: str = "跨群内容分享需要所有者批准。", *, approval_id: str | None = None) -> None:
         super().__init__(message)
         self.approval_id = approval_id
+
+
+class GroupMessageApprovalRequired(GroupContentApprovalRequired):
+    """Compatibility signal for hosts that gate message-only searches."""
+
+    def __init__(self, message: str = "跨群消息分享需要所有者批准。", *, approval_id: str | None = None) -> None:
+        super().__init__(message, approval_id=approval_id)
 
 
 class GroupChatPort(Protocol):
@@ -115,6 +122,19 @@ class GroupChatPort(Protocol):
         filter means all retained history, not proof of history before collection began. Bind cursors
         to the Agent, query and authorization scope; never trust a model-supplied cursor as permission.
         Reasons must be safe for the model; unavailable targets must not disclose their existence.
+        Raise GroupContentApprovalRequired when messages or artifacts are held privately by the host
+        pending owner approval. Return no candidate content or preview before sharing is authorized.
+        A resumed call repeats the original query; recheck authorization and the host approval.
+        """
+        ...
+
+    async def search_content(self, execution: ExecutionContext, query: GroupMessageQuery) -> GroupMessageSearchResult:
+        """Search selected messages, final Session files and registered online-document links.
+
+        ``content_types`` selects messages, files and online documents; omitted values search all types.
+        ``query`` and ``keywords`` are case-insensitive literal OR terms. File results are restricted to
+        final outputs and must be staged in the current Session only after approval. Every cross-group
+        source is approved separately for this exact destination; never return candidates before approval.
         """
         ...
 
