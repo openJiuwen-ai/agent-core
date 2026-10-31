@@ -20,10 +20,15 @@ from typing import (
 from openjiuwen.core.common.logging.events import (
     BaseLogEvent,
     create_log_event,
+    EventStatus,
     LogEventType,
     LogLevel,
 )
 from openjiuwen.core.common.logging.utils import get_session_id
+
+# Levels at which the record already reports a failure, so a ``success`` status
+# in the payload beside it contradicts the record it belongs to.
+_FAILURE_LOG_LEVELS = frozenset({LogLevel.ERROR, LogLevel.CRITICAL})
 
 
 def resolve_log_type_label(log_type: str) -> str:
@@ -133,10 +138,19 @@ class StructuredLoggerMixin:
         event: Optional[BaseLogEvent] = None,
         **kwargs: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Build a structured event payload for backends that support it."""
+        """Build a structured event payload for backends that support it.
+
+        ``BaseLogEvent.status`` defaults to ``SUCCESS`` and callers rarely
+        override it, so reconcile the status with the emitting level the same
+        way the level itself is reconciled: log analysis reads the payload, and
+        ``status: success`` beside an ``ERROR`` record contradicts it.
+        """
         if event is not None:
             if event.log_level != log_level:
                 event.log_level = log_level
+
+            if event.status is EventStatus.SUCCESS and log_level in _FAILURE_LOG_LEVELS:
+                event.status = EventStatus.FAILURE
 
             if msg and msg.strip():
                 event.message = self._sanitize_message(msg)
@@ -147,6 +161,9 @@ class StructuredLoggerMixin:
 
         if event_type is None:
             return None
+
+        if "status" not in kwargs and log_level in _FAILURE_LOG_LEVELS:
+            kwargs["status"] = EventStatus.FAILURE
 
         if "trace_id" not in kwargs:
             trace_id = get_session_id()
