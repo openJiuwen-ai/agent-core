@@ -924,7 +924,7 @@ class AbilityManager:
                 config=ctx.config,
                 session=session,
                 context=ctx.context,
-                extra=ctx.extra,
+                extra=dict(ctx.extra),
             )
             # Propagate steering queue so after_tool_call
             # rails can push_steering() on the same queue.
@@ -956,7 +956,8 @@ class AbilityManager:
             # Execute all tool calls in sequence.
             for task in tasks:
                 try:
-                    result = await task
+                    # Preserve sequence while isolating ContextVars on cancellation.
+                    result = await asyncio.create_task(task)
                 except Exception as e:
                     result = e
                 results.append(result)
