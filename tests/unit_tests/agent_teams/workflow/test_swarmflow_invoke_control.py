@@ -132,6 +132,22 @@ async def test_resume_on_unregistered_run_still_reports_not_found():
 
 
 @pytest.mark.asyncio
+async def test_control_miss_error_is_readable():
+    """A control miss renders its own reason, not the generic async-tool
+    fallback. The losing caller of a double resume must be able to tell what
+    happened instead of seeing "Failed to launch async tool"."""
+    class _Ctl(_FakeController):
+        async def resume(self, run_id): return False
+    tool = _make_tool(_Ctl())
+    out = await tool.invoke({"resume_id": "wf_cold", "action": "resume"})
+    assert not out.success
+    assert "no live control handle" in out.error
+    rendered = tool.render_for_llm(out)
+    assert rendered == out.error
+    assert "Failed to launch async tool" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_stop_on_paused_run_announces_stopped():
     """A paused run has already unwound: the controller only drops its ticket
     and the engine never emits WORKFLOW_STOPPED. The tool must announce it so
