@@ -73,13 +73,36 @@ class TestRenderStream:
         monkeypatch.setattr(
             module,
             "sys",
-            type("FakeSys", (), {"stdout": stdout})(),
+            type("FakeSys", (), {"platform": "linux", "stdout": stdout})(),
         )
 
         module._write_terminal("中文🙂")
 
         assert stdout.writes == ["中文🙂"]
         assert stdout.flush_count == 1
+
+    def test_write_terminal_forces_utf8_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows should write UTF-8 bytes even if stdout.encoding is legacy."""
+
+        module = sys.modules[render_stream.__module__]
+        written: list[bytes] = []
+
+        class FakeStdout:
+            encoding = "cp1252"
+            errors = "strict"
+
+        monkeypatch.setattr(
+            module,
+            "sys",
+            type("FakeSys", (), {"platform": "win32", "stdout": FakeStdout()})(),
+        )
+        monkeypatch.setattr(module.os, "write", lambda _fd, data: written.append(data))
+
+        module._write_terminal("中文")
+
+        assert written == ["中文".encode("utf-8")]
 
     @pytest.mark.asyncio
     async def test_unicode_stream_uses_stdout_text_stream(
