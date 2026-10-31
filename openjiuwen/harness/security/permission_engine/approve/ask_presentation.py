@@ -9,8 +9,8 @@ not change the permission decision or remembered authorization scope.
 
 from __future__ import annotations
 
-import re
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,7 +83,7 @@ _RULE_RISK_LABELS = {
 }
 
 # Composed policies label rule hits by source; keep legacy rules[...] support.
-_RULE_ID_RE = re.compile(r"(?:builtin|rules|user|cloud)\[([^\]]+)\]")
+_RULE_ID_RE = re.compile(r"(?:(?:builtin|user|cloud)(?:_group)?|rules)\[([^\]]+)\]")
 _FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,15}$")
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
 _ACTION_RANK = {"write": 0, "delete": 0, "exec": 1, "read": 2}

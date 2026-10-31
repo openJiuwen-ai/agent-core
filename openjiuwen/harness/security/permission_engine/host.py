@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
 from openjiuwen.harness.security.permission_engine.models import PermissionConfirmResponse, PermissionResult
+from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import LocalDeleteExecution
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,7 @@ class ToolPermissionHost:
     不写 YAML（无 Host demo 可依赖进程内 ``update_config``）。
     """
 
-    resolve_workspace_dir: Callable[[], Path] | None = None
+    resolve_workspace_dir: Callable[[], Path | None] | None = None
     """外部路径校验用的 workspace 根目录。"""
 
     resolve_immutable_control_roots: Callable[[], list[Path]] | None = None
@@ -141,6 +142,23 @@ class ToolPermissionHost:
 
     on_permission_evaluated: PermissionEvaluatedHook | None = None
     """Optional policy resolution/observation hook; cloud protocols belong to the host."""
+
+    permissions_snapshot_required: bool | Callable[[], bool] = False
+    """Reject a tool check if its required live snapshot is unavailable.
+
+    Default False preserves legacy static fallback. Managed hosts may opt in
+    to prevent a failed refresh from silently retaining an older policy view.
+    """
+
+    resolve_shell_execution: Callable[
+        [Any, Any, dict[str, Any]], LocalDeleteExecution | None | Awaitable[LocalDeleteExecution | None]
+    ] | None = None
+    """Optional host verification of the actual registered executor and cwd.
+
+    Receives callback context, raw ToolCall and decoded args. A configured hook
+    replaces native inference: None/failure keeps ordinary policy, without
+    falling back to a less-specific executor. Model fields are not proof.
+    """
 
 
 __all__ = [

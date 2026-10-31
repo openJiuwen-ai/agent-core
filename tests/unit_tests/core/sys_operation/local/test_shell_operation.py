@@ -178,14 +178,14 @@ async def test_shell_cwd(sys_op, work_dir):
     if platform.system() == "Darwin":
         assert subdir in res.data.stdout.strip()
     else:
-        assert subdir == res.data.stdout.strip()
+        assert pathlib.Path(subdir).resolve() == pathlib.Path(res.data.stdout.strip()).resolve()
 
     # default workdir
     res = await sys_op.shell().execute_cmd(command=cmd)
     if platform.system() == "Darwin":
         assert work_dir in res.data.stdout.strip()
     else:
-        assert work_dir == res.data.stdout.strip()
+        assert pathlib.Path(work_dir).resolve() == pathlib.Path(res.data.stdout.strip()).resolve()
 
 
 @pytest.mark.asyncio

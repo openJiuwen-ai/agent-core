@@ -7,13 +7,17 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from dataclasses import dataclass, replace
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
-from openjiuwen.harness.security.permission_engine.policy_sources import SOURCE_BUILTIN, SOURCE_USER
+from openjiuwen.harness.security.permission_engine.policy_sources import (
+    SOURCE_BUILTIN,
+    SOURCE_BUILTIN_GROUP,
+    SOURCE_USER,
+)
 from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import shell_builtin_rules_enabled
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
@@ -85,6 +89,7 @@ class _TieredInvocationContext:
     permission_config: Mapping[str, Any]
     source_order: tuple[str, ...]
     source_rules: dict[str, list[dict[str, Any]]]
+    workspace_delete_fallback: bool = False
 
 
 def _parse_level(value: str) -> PermissionLevel:
@@ -513,6 +518,9 @@ def _evaluate_single_invocation(
             return selected
         if ctx.baseline_level is not None:
             return ctx.baseline_level, ctx.baseline_rule or f"{_MR}:tools"
+        if ctx.workspace_delete_fallback:
+            # A verified workspace grant is explicit local policy, not an unmatched command.
+            return PermissionLevel.ALLOW, f"{_MR}:workspace_delete"
         if ctx.permission_config.get("defer_unmatched", False):
             return PermissionLevel.UNDETERMINED, f"{_MR}:unmatched"
         default = ctx.defaults_cfg.get("*")
@@ -713,6 +721,7 @@ def evaluate_tiered_policy(
         permission_config: Mapping[str, Any],
         tool_name: str,
         tool_args: dict[str, Any],
+        *, workspace_delete_fallback: bool = False,
 ) -> tuple[PermissionLevel, str]:
     """返回 (最终权限, matched_rule 摘要).
 
@@ -745,6 +754,7 @@ def evaluate_tiered_policy(
     } if composed else {}
     if composed and not shell_builtin_rules_enabled(permission_config):
         source_rules[SOURCE_BUILTIN] = []
+        source_rules[SOURCE_BUILTIN_GROUP] = []
     builtin_rules = [r for r in dict_rules if r.get("layer") == SOURCE_BUILTIN]
     if not shell_builtin_rules_enabled(permission_config):
         builtin_rules = []
@@ -783,6 +793,7 @@ def evaluate_tiered_policy(
         permission_config=permission_config,
         source_order=source_order,
         source_rules=source_rules,
+        workspace_delete_fallback=workspace_delete_fallback,
     )
     strict_merge = strict_tool_command_merge_enabled(permission_config) and shell_parse is not None
     # No tool baseline or defaults may turn a missing command policy into ALLOW.

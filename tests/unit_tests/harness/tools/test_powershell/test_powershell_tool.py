@@ -9,16 +9,17 @@ import shutil
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import PowerShellTool
+
+pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
 
 
 def _mock_result(*, stdout: str = "", stderr: str = "", exit_code: int = 0) -> SimpleNamespace:
@@ -104,7 +105,7 @@ class TestPowerShellToolHistoryPath(unittest.TestCase):
             set_workspace(workspace)
             tool = PowerShellTool(MagicMock(), agent_id="a")
             path = tool._build_history_path(session)
-            assert path.startswith(workspace)
+            assert Path(path).is_relative_to(Path(workspace).resolve())
             assert ".agent_history" in path
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
