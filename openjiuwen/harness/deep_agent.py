@@ -242,7 +242,40 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
 
 _ROUND_BOUNDARY = object()
 
+#: Hard per-round execution deadline for scheduled (cron) runs.
+#:
+#: Cron-triggered sessions have no operator on the other end: a runaway loop
+#: there is never noticed or interrupted by a human, and the scheduler keeps
+#: waiting on the round. The host may leave ``completion_timeout`` unset
+#: (jiuwenswarm's ``react.completion_timeout: null`` deliberately avoids
+#: silently truncating user tasks), so cron runs need their own bounded
+#: default. A configured timeout still applies; this value is only a ceiling.
+CRON_ROUND_TIMEOUT_SECONDS: float = 600.0
+
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
+
+
+def _run_kind_value(run_kind: Any) -> str:
+    """Normalise a ``RunKind`` member or raw string to its lowercase value."""
+    value = getattr(run_kind, "value", run_kind)
+    return str(value or "").strip().lower()
+
+
+def resolve_round_timeout(
+    configured_timeout: Optional[float],
+    run_kind: Any,
+) -> Optional[float]:
+    """Resolve the per-round wait budget.
+
+    Scheduled runs are capped at :data:`CRON_ROUND_TIMEOUT_SECONDS`; a smaller
+    operator-configured timeout still wins, and ``None`` falls back to the cron
+    default. Non-scheduled runs are unchanged (``None`` means no limit).
+    """
+    if _run_kind_value(run_kind) != RunKind.CRON.value:
+        return configured_timeout
+    if configured_timeout is None:
+        return CRON_ROUND_TIMEOUT_SECONDS
+    return min(float(configured_timeout), CRON_ROUND_TIMEOUT_SECONDS)
 
 
 def _bind_inner_react_max_iterations(
@@ -2858,6 +2891,25 @@ class DeepAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[AutoInvoke] auto-invoke failed: {e}", exc_info=True)
 
+    @staticmethod
+    async def _kill_round_shell_processes(session: Session) -> None:
+        """Kill shell subprocesses left behind by a timed-out round."""
+        try:
+            from openjiuwen.core.sys_operation.shell_process_registry import (
+                kill_shell_processes_for_session_tree,
+            )
+
+            session_id = session.get_session_id()
+            killed = kill_shell_processes_for_session_tree(session_id)
+            if killed:
+                logger.warning(
+                    "[DeepAgent] round timeout killed %s shell process(es) session_id=%s",
+                    killed,
+                    session_id,
+                )
+        except Exception:  # noqa: BLE001 - cleanup must not mask the timeout result
+            logger.exception("[DeepAgent] failed to kill shell processes after round timeout")
+
     async def _run_task_loop(
         self, ctx: AgentCallbackContext, session: Session,
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -2878,7 +2930,12 @@ class DeepAgent(BaseAgent):
             )
 
         coordinator, controller = await self._setup_task_loop(session)
-        timeout = self._deep_config.completion_timeout if self._deep_config else 600.0
+        configured_timeout = self._deep_config.completion_timeout if self._deep_config else 600.0
+        timeout = resolve_round_timeout(configured_timeout, modified.run_kind)
+        if timeout != configured_timeout:
+            self._log_loop(
+                f"round timeout={timeout} (cron deadline, configured={configured_timeout})"
+            )
 
         # Only bind if session_id changed
         session_id = session.get_session_id()
@@ -2943,6 +3000,13 @@ class DeepAgent(BaseAgent):
                     turn_number=modified.turn_number,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
+
+                if result.get("error") == "completion_timeout":
+                    # The timeout path cancels the scheduler task, but a shell
+                    # subprocess started by the round is not owned by that task.
+                    # Kill the round's shell tree explicitly so a leaked
+                    # ``sleep``/build process cannot outlive the deadline.
+                    await self._kill_round_shell_processes(session)
 
                 result_type = result.get("result_type", "N/A")
                 output_preview = str(result.get("output", ""))[:200]
@@ -3626,12 +3690,17 @@ class DeepAgent(BaseAgent):
                         task_id=task_id,
                         turn_number=invoke_inputs.turn_number,
                     )
-                    timeout = (
+                    configured_timeout = (
                         self._deep_config.completion_timeout
                         if self._deep_config
                         else 600.0
                     )
+                    timeout = resolve_round_timeout(
+                        configured_timeout, invoke_inputs.run_kind
+                    )
                     result = await controller.wait_round_completion(timeout=timeout)
+                    if result.get("error") == "completion_timeout":
+                        await self._kill_round_shell_processes(session)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
                 next_work = (

@@ -20,6 +20,7 @@ from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.scheduled_session_guard import scheduled_session_guard
 from openjiuwen.harness.tools.shell.bash._output import (
     CommandOutput,
     render_partial_on_failure,
@@ -189,6 +190,10 @@ class BashTool(Tool):
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
+        cron_guard = scheduled_session_guard(p.command)
+        if cron_guard is not None:
+            return ToolOutput(success=False, error=cron_guard)
+
         if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
             guard = self._guard(p)
             if guard is not None:
@@ -289,6 +294,11 @@ class BashTool(Tool):
 
         if not p.command:
             yield ToolOutput(success=False, error="command cannot be empty")
+            return
+
+        cron_guard = scheduled_session_guard(p.command)
+        if cron_guard is not None:
+            yield ToolOutput(success=False, error=cron_guard)
             return
 
         current_cwd = get_cwd()
