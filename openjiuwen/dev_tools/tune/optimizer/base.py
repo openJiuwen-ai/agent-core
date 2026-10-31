@@ -1,28 +1,25 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from abc import abstractmethod
-from typing import Dict, Optional, Any, List, Callable
 import threading
+from abc import abstractmethod
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import agent_logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, agent_logger
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.core.session.agent import Session
-from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.base import EvaluatedCase
+from openjiuwen.dev_tools.tune.utils import TuneUtils
 
 
 class BaseOptimizer:
-    def __init__(self,
-                 parameters: Optional[Dict[str, LLMCall]] = None,
-                 **kwargs
-                 ):
+    def __init__(self, parameters: Optional[Dict[str, LLMCall]] = None, **kwargs):
         self._parameters: Dict[str, TextualParameter] = {}
         self._history = OptimizeHistory()
         self._bad_cases: List[EvaluatedCase] = []
@@ -48,27 +45,26 @@ class BaseOptimizer:
         for name, llm_call in parameters.items():
             if not llm_call:
                 raise build_error(
-                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
-                    error_msg=f"cannot bind a None parameter of {name}"
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR, error_msg=f"cannot bind a None parameter of {name}"
                 )
             self._parameters[name] = TextualParameter(llm_call)
         self._history = OptimizeHistory()
         self._bad_cases: List[EvaluatedCase] = []
 
-    def backward(self,
-                 evaluated_cases: List[EvaluatedCase],
-                 ):
+    def backward(
+        self,
+        evaluated_cases: List[EvaluatedCase],
+    ):
         self._validate_parameters()
         self._get_bad_cases(evaluated_cases)
         try:
             self._backward(evaluated_cases)
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             raise build_error(
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR,
-                error_msg=f"{str(e)}",
-                cause=e
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
             ) from e
 
     def update(self):
@@ -81,26 +77,24 @@ class BaseOptimizer:
                     metadata={
                         "llm_call_name": name,
                         "frozen_system_prompt": param.llm_call.get_freeze_system_prompt(),
-                        "system_prompt_content": str(param.llm_call.get_system_prompt().content)
+                        "system_prompt_content": str(param.llm_call.get_system_prompt().content),
                     },
-                    event_type=LogEventType.AGENT_START
+                    event_type=LogEventType.AGENT_START,
                 )
                 agent_logger.info(
                     "LLM call basic user prompt info",
                     metadata={
                         "llm_call_name": name,
                         "frozen_system_prompt": param.llm_call.get_freeze_user_prompt(),
-                        "system_prompt_content": str(param.llm_call.get_user_prompt().content)
+                        "system_prompt_content": str(param.llm_call.get_user_prompt().content),
                     },
-                    event_type=LogEventType.AGENT_START
+                    event_type=LogEventType.AGENT_START,
                 )
             self._history.clear_history()
         except Exception as e:
             self._history.clear_history()
             raise build_error(
-                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR,
-                error_msg=f"{str(e)}",
-                cause=e
+                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
             ) from e
 
     @abstractmethod
@@ -108,25 +102,21 @@ class BaseOptimizer:
         pass
 
     @abstractmethod
-    def _backward(self,
-                 evaluated_cases: List[EvaluatedCase],
-                 ):
+    def _backward(
+        self,
+        evaluated_cases: List[EvaluatedCase],
+    ):
         pass
 
     def parameters(self) -> Dict[str, "TextualParameter"]:
         return self._parameters
 
-    async def trace_callback(self,
-                             llm_call_id: str,
-                             node_input: Dict[str, str],
-                             output: BaseMessage,
-                             session: Session
-                             ):
+    async def trace_callback(self, llm_call_id: str, node_input: Dict[str, str], output: BaseMessage, session: Session):
         trace_node = TraceNode(
             case_id=session.get_session_id(),
             llm_call_id=llm_call_id,
             inputs=node_input,
-            outputs=TuneUtils.get_output_string_from_message(output)
+            outputs=TuneUtils.get_output_string_from_message(output),
         )
         self._history.add_history(session.get_session_id(), trace_node)
 
@@ -141,16 +131,14 @@ class BaseOptimizer:
 
     def _validate_parameters(self):
         if not self._parameters:
-            raise build_error(
-                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
-                error_msg="cannot optimize empty parameters"
-            )
+            raise build_error(StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR, error_msg="cannot optimize empty parameters")
 
 
 class TextualParameter:
     def __init__(self, llm_call: LLMCall):
         self.llm_call = llm_call
         self.gradients: Dict[str, str] = {}
+        self.candidates: Dict[str, List[str]] = {}
         self.description: str = ""
 
     def set_gradient(self, name: str, gradient: str):
@@ -158,6 +146,19 @@ class TextualParameter:
 
     def get_gradient(self, name: str) -> Optional[str]:
         return self.gradients.get(name)
+
+    def set_candidates(self, name: str, candidates: List[str]):
+        """Record every candidate value an optimizer considered for ``name``.
+
+        ``gradients`` holds only the single value ``update()`` will apply;
+        this holds the full pool (e.g. every candidate prompt a multi-candidate
+        optimizer generated) so a caller like ``Trainer.search_prompt_candidates``
+        can evaluate more than just the winner.
+        """
+        self.candidates[name] = list(candidates)
+
+    def get_candidates(self, name: str) -> List[str]:
+        return list(self.candidates.get(name, []))
 
     def set_description(self, description: str):
         self.description = description
