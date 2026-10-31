@@ -20,6 +20,12 @@ class SandboxGatewayClient(
 
 ### async invoke
 
+宿主可在 launcher 的 `extra_params` 中传入可信的异步回调 `runtime_guard(client, op_type, *, method, params)`。
+回调返回 `None` 时继续沙箱执行，返回 `LocalWorkConfig` 时本次操作使用对应本地后端，异常则阻断。
+回调可调用 `await client.prepare(op_type, create=True)` 在命令发送前检查生命周期阻断并准备实例；
+`create=False` 只检查阻断。该机制同样作用于流式调用，网关不会重试已经发送的操作。
+可选同步 `runtime_error_handler(error)` 仅记录发送后的错误，不改变执行结果；未提供回调时原行为不变。
+
 ```python
 async invoke(op_type: str, method: str, **params) -> Any
 ```

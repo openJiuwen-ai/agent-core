@@ -20,6 +20,14 @@ Sandbox gateway client, the main interface for users to operate sandbox. Support
 
 ### async invoke
 
+A host may supply a trusted async `runtime_guard(client, op_type, *, method, params)` in launcher `extra_params`.
+Return `None` to continue in the sandbox, `LocalWorkConfig` to use its local backend, or raise to block.
+The guard may use `await client.prepare(op_type, create=True)` to check lifecycle barriers and prepare
+an instance before dispatch; `create=False` only checks barriers. Streaming uses the same guard.
+Dispatched operations are never retried by the gateway. An optional synchronous
+`runtime_error_handler(error)` observes dispatched errors without changing results.
+Without these callbacks, existing routing is unchanged.
+
 ```python
 async invoke(op_type: str, method: str, **params) -> Any
 ```
