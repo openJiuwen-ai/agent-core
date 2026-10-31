@@ -52,6 +52,19 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与
   DAO 写同锁串行；经 `engine.begin()` 直连会绕过锁、并发 bind 占满写池（F_83）。
   DROP 路径（`drop_cur_session_tables`）暂未收编，见 F_83 已知遗留。
+  **同库的其它存储也复用这一个 provider**：组织层 `OrgDbContext` 不缓存 provider，每次都经
+  `TeamDatabase.sessions` 读取同一个 `DbSessions`；`org_*` 静态表 DDL 在 `write()` 内执行、
+  每个 provider 只做一次。新建第二个 `DbSessions` 就等于第二把写锁，写操作会和 DAO 写争池
+  （B_20261031_1134_org-ddl-bypasses-write-lock）。
+- **`TeamDatabase` 生命周期** —— `sessions` 只在 `initialize()` 全部完成后才发布，中途失败会
+  释放已建好的 engine 再抛出，可以重试；`initialize_engine` 自己的静态表 DDL 失败时也会先
+  dispose 刚建的读写 engine 再抛出（engine 还没交给调用方，别人没法释放）。`close()` 持
+  `_init_lock` 执行，正在进行的 `initialize()` 先跑完、再由 close 统一释放，不会在 close 返回
+  之后才发布 engine。**`close()` 是终态**：之后 `initialize()` 抛
+  `AGENT_TEAM_STATE_INVALID`，不会重新打开，任何还持有它的对象（如组织存储）都无法悄悄重建
+  engine 和后台 checkpointer；要再用同一份存储就新建实例。`get_shared_db` 遇到已关闭
+  （`closed`）的缓存实例会换一个新的，不会把死实例一直发下去；缓存 key 对文件 SQLite 做
+  `expanduser().resolve()`，同一个库文件的不同写法共用一个实例（一个文件只有一把写锁）。
 - **PRAGMA（`engine.py` `_attach_sqlite_pragmas`）** —— 文件后端 SQLite 跑
   `journal_mode=WAL`（数据库级，首次连接时设一次）+ `synchronous=NORMAL` +
   `wal_autocheckpoint`（连接级，每次连接都设）。NORMAL 是安全、高吞吐的 WAL 搭配；
@@ -65,6 +78,12 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
 - **`retry_on_locked`（`engine.py`）** —— 对瞬时 `database is locked` 做有界退避；
   sleep 跑在 session 块之外，因此重试永远不会占住一条已 checkout 的连接。一旦写被串行化
   就很少见 —— 只在 WAL-checkpoint 边界或有外部进程碰同一文件时出现。
+  **`retry_on_transient`** 是不能降级的写操作用的变体：只重试锁冲突类 `OperationalError`
+  （消息含 `locked` / `busy`）、池超时和 `DbSessions.write()` 看门狗 `TimeoutError`；disk I/O
+  error、库文件损坏这类永久错误第一次就抛出，不退避。预算耗尽时抛出最后
+  一次的原始异常，不返回兜底值。看门狗超时每次已经等满 30 秒，所以最多只重试 1 次
+  （`_WATCHDOG_RETRY_ATTEMPTS`），最坏约 2 个看门狗周期。组织表 DDL 用它；
+  `create_cur_session_tables` 也用它，但捕获同一个元组后只记日志、不抛出。
 - **索引方案（按 session 的动态表）** —— 索引是查询驱动的，以压低 INSERT 写放大
   （每个二级索引对每行都是一次 B-tree 写）。任何动态表上都没有 `team_name` 索引：
   它们按 session 物理分区，因此 `team_name` 基数约为 1，在那建索引只会增加写成本。
