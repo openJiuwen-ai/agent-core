@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail as Rail
 from openjiuwen.harness.tools.subagent import task_tool as task_module
@@ -136,6 +137,7 @@ async def test_task_tool_generic_exception_returns_facts_and_one_focused_resume(
         browser_query=query, affinity_enabled=False,
     )
     result = output.data["browser_result"]
+    assert output.success is True and output.error is None
     assert result["status"] == "partial" and result["retryable"]
     assert "3 items" in str(result["observations"])
     assert result["execution"]["business_effects"][0]["executed"] is True
@@ -145,6 +147,64 @@ async def test_task_tool_generic_exception_returns_facts_and_one_focused_resume(
     assert resumed.record["deadline_at"] == deadline and resumed.record["resume_count"] == 1
     assert "never blindly replay" in resumed.task_description
     child.post_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,code,success,retryable", [
+    (KeyError("missing execution state"), "browser_execution_error", False, False),
+    (TypeError("result serialization failed"), "browser_execution_error", False, False),
+    (RuntimeError("invalid api key"), "browser_execution_error", False, False),
+    (RuntimeError(DISCONNECT), "model_transport_interrupted", True, True),
+    (RuntimeError(REPEAT), "model_repeated_output", True, False),
+])
+async def test_task_invoke_distinguishes_execution_errors_without_losing_facts(
+    monkeypatch, error, code, success, retryable,
+):
+    _, state = cart_session()
+    child = Session(session_id="review-child")
+    child.update_state({KEY: state})
+    child.pre_run = AsyncMock()
+    child.post_run = AsyncMock()
+    parent = Session(session_id="review-parent")
+    subagent = SimpleNamespace(card=SimpleNamespace(id="browser", name="browser"),
+                               invoke=AsyncMock(side_effect=error))
+    agent = MagicMock()
+    agent.create_subagent.return_value = subagent
+    tool = TaskTool(ToolCard(name="task_tool"), agent)
+    monkeypatch.setattr(task_module.kv_cache_subagent_lifecycle, "affinity_enabled", lambda _: False)
+    monkeypatch.setattr(task_module, "create_agent_session", lambda **_: child)
+    prepare, cleanup = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(task_module, "prepare_subagent_task_resources", prepare)
+    monkeypatch.setattr(task_module, "cleanup_subagent_task_resources", cleanup)
+
+    output = await tool.invoke(
+        {"subagent_type": "browser_agent", "task_description": state["task"]}, session=parent,
+    )
+    assert output.success is success
+    result = output.data["browser_result"]
+    assert result["terminal_reason"] == code
+    assert result["status"] == "partial" and result["retryable"] is retryable
+    assert result["current_page"]["url"] == "https://shop.test/cart"
+    assert "3 items" in str(result["observations"])
+    assert result["execution"]["business_effects"][0]["executed"] is True
+    saved = tool._load_browser_query_records(parent)[output.data["query_id"]]
+    assert saved["browser_result"] == result and saved["retryable"] is retryable
+    rendered = json.loads(tool.render_for_llm(output))["browser_orchestration"]
+    assert rendered["browser_result"] == result
+    if success:
+        assert output.error is None and "error" not in rendered
+    else:
+        assert "browser_execution_error" in output.error
+        assert rendered["success"] is False and rendered["error"] == output.error
+        denied = await tool.invoke({"subagent_type": "browser_agent", "task_description": "Read the cart only",
+                                    "resume_task_id": output.data["resume_task_id"]}, session=parent)
+        assert denied.data["code"] == "browser_query_resume_not_allowed"
+        assert denied.data["browser_result"]["observations"] == result["observations"]
+    subagent.invoke.assert_awaited_once()  # No replay of the ACKed mutation, even on error.
+    prepare.assert_awaited_once()
+    cleanup.assert_awaited_once()
+    child.post_run.assert_awaited_once()
+    assert not tool._active_browser_queries
 
 
 @pytest.mark.parametrize("boundary", ["deadline", "repeat", "fatal", "resume_limit"])
@@ -180,7 +240,7 @@ def test_outer_failure_keeps_previous_facts_and_explains_query_denial():
 
 def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_result():
     child, _ = cart_session()
-    parent = _FakeSession("parent")
+    parent = Session(session_id="parent")
     tool = TaskTool(ToolCard(name="task_tool"), MagicMock())
     query = tool._prepare_browser_query(parent, "parent", "Read cart", "")
     previous = Rail.interrupted_task_result(child, "model_transport_interrupted")["authoritative_browser_result"]
@@ -192,6 +252,7 @@ def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_resul
         browser_query=query, subagent=SimpleNamespace(card=SimpleNamespace(id="browser")),
     )
     retained = output.data["browser_result"]
+    assert output.success is False and "browser_execution_error" in output.error
     assert retained["observations"] == previous["observations"]
     assert retained["execution"] == previous["execution"]
     assert retained["observation_excerpt"] == previous["observation_excerpt"]

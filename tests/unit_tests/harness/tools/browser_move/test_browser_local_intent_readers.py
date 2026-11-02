@@ -240,6 +240,19 @@ def test_fixed_reader_scope_semantics_preserve_menu_and_both_thresholds():
 
 
 @pytest.mark.parametrize("role", ["checkbox", "switch"])
+@pytest.mark.parametrize("guard_state", ["missing", None, {}])
+def test_aria_toggle_without_node_guard_is_omitted_before_checked_lookup(role, guard_state):
+    item = control("toggle", "Selected filter", 1, tag="div", checked=False)
+    item["role"] = role
+    if guard_state == "missing":
+        item["decision_state"].pop("node_guard")
+    else:
+        item["decision_state"]["node_guard"] = guard_state
+    menu = build_menu([item], "Toggle the selected filter", limit=30)
+    assert not any(step.get("target_id") == "toggle" for step in menu.steps.values())
+
+
+@pytest.mark.parametrize("role", ["checkbox", "switch"])
 @pytest.mark.parametrize("checked,guard_value,accepted", [
     (False, "false", True), (True, "true", True), (False, None, False),
     (False, "true", False), (None, "mixed", False),

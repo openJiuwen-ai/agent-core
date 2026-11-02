@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（9 文件）、`openjiuwen/harness/tools/cua/`、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-10-29 |
+| 最近一次修订日期 | 2026-11-02 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary、F_20_react-iteration-limit、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -584,7 +584,10 @@ For parents with a configured browser subagent, ContextProcessorRail reuses the 
 protected task-tool/argument pattern for this already bounded result. Other subagent results
 and whole-context compression remain unchanged; caller processor configs are not mutated.
 An independently cloned browser model defaults to max_tokens=8192 only if no total output
-limit is configured. Explicit provider-native limits and reasoning budgets are respected;
+limit is configured. The `max_tokens`, `max_completion_tokens` and `max_output_tokens` aliases
+are checked both on the request config and in its `extra_body` mapping. Any non-null explicit
+limit prevents default injection; empty/null entries alone are not a configured limit.
+Explicit provider-native limits and reasoning budgets are respected;
 the parent descriptor is not mutated. Client first/idle waits and task deadline still own
 timeouts. A token limit is not a whole-stream timer and does not replay browser mutations.
 

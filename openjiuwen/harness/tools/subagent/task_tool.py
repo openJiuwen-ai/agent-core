@@ -914,6 +914,14 @@ class TaskTool(Tool):
             )
         data["query_id"] = browser_query.record["query_id"]
         self._save_browser_result(parent_session, browser_query, browser_result)
+        if browser_result.get("terminal_reason") == "browser_execution_error":
+            # Fact retention does not turn an unexpected execution failure into a
+            # successful tool call. Keep the same payload for the parent and rails.
+            return ToolOutput(
+                success=False, data=data,
+                error=("browser_execution_error: unexpected browser subagent failure; "
+                       "observations and execution receipts are preserved."),
+            )
         return ToolOutput(success=True, data=data, error=None)
 
     def _record_browser_execution_failure(
@@ -1130,13 +1138,18 @@ class TaskTool(Tool):
                     self._save_browser_result(parent_session, browser_query, result["authoritative_browser_result"])
                 raise
             except Exception as exc:
+                succeeded = False
                 if browser_query is not None:
                     from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 
                     failure = BrowserRuntimeRail.model_failure_details(exc)
                     reason = failure["code"] if failure["code"] != "model_error" else "browser_execution_error"
-                    logger.warning("[TaskTool] Browser interrupted: code=%s exception_type=%s",
-                                   reason, type(exc).__name__)
+                    if reason == "browser_execution_error":
+                        logger.error("[TaskTool] Browser execution failed: exception_type=%s",
+                                     type(exc).__name__, exc_info=True)
+                    else:
+                        logger.warning("[TaskTool] Browser interrupted: code=%s exception_type=%s",
+                                       reason, type(exc).__name__)
                     result = BrowserRuntimeRail.interrupted_task_result(child_session, reason, failure=failure)
                     return self._build_task_output(
                         result, normalized_type=normalized_type, sub_session_id=sub_session_id,
@@ -1309,6 +1322,8 @@ class TaskTool(Tool):
             return answer or "Subagent finished without output."
         browser_result = orchestration.get("browser_result")
         if isinstance(browser_result, dict):
+            if not output.success:
+                orchestration.update(success=False, error=output.error)
             # The runtime's output already wraps this same result. Plain legacy answers
             # are retained once, explicitly as worker text rather than execution truth.
             if answer and not self._extract_browser_result({}, answer) and not browser_result.get("summary"):

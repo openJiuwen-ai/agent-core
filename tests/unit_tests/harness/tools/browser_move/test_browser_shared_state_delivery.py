@@ -326,6 +326,14 @@ const page={url:()=>data.change==='url'?'https://example.test/other':'https://ex
     ({}, 8192), ({'max_tokens': 2048}, 2048), ({'max_tokens': 32768}, 32768),
     ({'max_completion_tokens': 4096}, None), ({'max_output_tokens': 4096}, None),
     ({'reasoning': ReasoningConfig(mode='enabled', budget_tokens=12000)}, 13024),
+    ({'extra_body': {'max_tokens': 2048}}, None),
+    ({'extra_body': {'max_completion_tokens': 2048}}, None),
+    ({'extra_body': {'max_output_tokens': 2048}}, None),
+    ({'max_tokens': 4096, 'extra_body': {'max_tokens': 2048}}, 4096),
+    ({'extra_body': {}}, 8192),
+    ({'extra_body': {'max_tokens': None}}, 8192),
+    ({'extra_body': {'max_tokens': 2048},
+      'reasoning': ReasoningConfig(mode='enabled', budget_tokens=12000)}, None),
 ])
 def test_browser_uses_existing_output_budget_without_mutating_parent_or_explicit_limits(configuration, expected):
     parent = SimpleNamespace(model_config=ModelRequestConfig(model='test', **configuration), model_client_config=None)
@@ -334,5 +342,6 @@ def test_browser_uses_existing_output_budget_without_mutating_parent_or_explicit
     assert browser.model_config.max_tokens == expected
     assert parent.model_config.model_dump() == before
     assert browser.model_config.reasoning == parent.model_config.reasoning
+    assert getattr(browser.model_config, 'extra_body', None) == getattr(parent.model_config, 'extra_body', None)
     for key in ('max_completion_tokens', 'max_output_tokens'):
         assert getattr(browser.model_config, key, None) == getattr(parent.model_config, key, None)

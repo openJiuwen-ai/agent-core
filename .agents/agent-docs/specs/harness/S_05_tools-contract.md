@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-27 |
+| 最近一次修订日期 | 2026-11-02 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
@@ -623,6 +623,14 @@ limits; exhausted repeated-output recovery and fatal errors retain facts without
 another retry layer. Pending anomaly-rail retries keep their ownership. Neither an ACK nor
 an unknown write is replayed automatically. Resume denial describes this query's constraint,
 not global backend availability.
+
+An unknown exception escaping browser subagent execution is a tool failure, even when
+the retained task facts describe partial progress. TaskTool returns `success=False` with
+`browser_execution_error`, preserves the same observations/journal in data and query state,
+and includes the failure flag and error in its model-facing renderer. It logs the exception
+traceback and does not grant another resume. Classified model/transport interruptions keep
+their existing structured partial-result and bounded recovery semantics; cancellation still
+propagates. Fact retention and tool success are separate decisions.
 
 Terminal source excerpts deduplicate retained records and cover source/scope diversity
 within the existing size limit. They retain raw recall references and source region; absence

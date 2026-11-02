@@ -11,6 +11,7 @@ from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
@@ -45,7 +46,7 @@ async def test_bounded_browser_delivery_stays_inline_without_protecting_other_su
     output = json.dumps({'browser_result': result})
     data = TaskTool._build_result_data({'authoritative_browser_result': result}, output, agent_id='browser',
                                      subagent_type='browser_agent', sub_session_id='child')
-    rendered = TaskTool.render_for_llm(TaskTool.__new__(TaskTool), SimpleNamespace(data=data))
+    rendered = TaskTool.render_for_llm(TaskTool.__new__(TaskTool), ToolOutput(success=True, data=data))
     assert all(rendered.count(f'SOURCE_{i}:') == 1 for i in range(20))
     assert 'resume_context' not in rendered
     message = ToolMessage(content=rendered, tool_call_id='browser-result')

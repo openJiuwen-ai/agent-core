@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
@@ -317,8 +318,11 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
 
     # Use the existing provider request budget, never a second runtime timer.
     # Explicit caller/provider limits take precedence, including their native aliases.
-    output_limits = [getattr(browser_model_config, key, None)
-                     for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")]
+    limit_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+    output_limits = [getattr(browser_model_config, key, None) for key in limit_keys]
+    extra_body = getattr(browser_model_config, "extra_body", None)
+    if isinstance(extra_body, Mapping):
+        output_limits.extend(extra_body.get(key) for key in limit_keys)
     if all(value is None for value in output_limits):
         reasoning = getattr(browser_model_config, "reasoning", None)
         budget = (reasoning.get("budget_tokens", reasoning.get("max_tokens")) if isinstance(reasoning, dict)
