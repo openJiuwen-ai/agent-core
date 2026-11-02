@@ -64,6 +64,61 @@ Symphony 不隐式猜测或扫描应用目录、不读取应用配置、不注�
 如果配方名称与成员重名，渲染的根名称追加 `-pack`，避免成员目录覆盖或自引用。
 Core 只评审和生成临时产物，用户确认、实时成员状态重验及安装由宿主完成。
 
+## 目标配置与配置树
+
+`config.py` 定义多层 Pydantic 目标配置，尚未接入现有 Runtime。全部字段、默认值和中文说明可在
+[用户配置树](config.tree.txt) 中查看；该文档完整展开 `SymphonyConfig` 支持的所有配置输入。
+
+公共入口分为 `capability`、`storage`、`retrieval`、`orchestration`、`flow`、`experience` 六组。
+扫描和指纹策略归入 `capability`，对象发现和工具交互归入 `retrieval.discovery`、`retrieval.toolkit`。
+仅对象目录、对象类型和产物目录必填，其余参数可以按需覆盖，未填写的子项自动补全：
+
+```python
+from openjiuwen.symphony.config import SymphonyConfig
+
+config = SymphonyConfig.model_validate({
+    "capability": {"root": "./capabilities", "type": "expert"},
+    "storage": {"artifact_root": "./.symphony"},
+    "retrieval": {
+        "build": {
+            "request": {"max_concurrency": 4},
+            "dynamic": {"rebalance_interval": 80},
+            "task": {"allow_fallback_tree": False},
+            "output": {"show_tree": False},
+        },
+        "search": {"top_k": 5, "traversal": {"max_parallel_branches": 1}},
+    },
+    "flow": {"acceptance": {"min_successes": 2}},
+})
+```
+
+树深度和分支数位于 `retrieval.build.structure`，构建请求预算位于 `retrieval.build.request`；
+动态树的重平衡和扩展倍率位于 `retrieval.build.dynamic`，共用上述树结构，派生阈值由后续运行层计算。
+回退树开关位于 `retrieval.build.task.allow_fallback_tree`，详细输出、分类树展示和 HTML 预览位于 `retrieval.build.output`。
+检索超时位于 `retrieval.search.generation.request_timeout_seconds`。
+指纹提取开关统一使用 `capability.fingerprint.extraction.llm_enabled`，关系共识使用
+`orchestration.build.matching.require_consensus`。原目标配置中的对应扁平路径会按未知字段报错。
+构建和检索策略直接使用公共配置树；`config.py` 不再为旧入口的默认差异声明同义包装或解析快照。
+旧业务模块继续保留原定义，独立模型后端、协议及其他独立用途的参数保留为内部参考。
+构造配置不会启动任何服务。
+
+在仓库根目录激活已有 Python 环境后运行：
+
+```bash
+python scripts/export_symphony_config.py
+```
+
+脚本直接读取 Pydantic 字段元数据，生成带 `#` 注释的 `config.tree.txt`。内容相同时不重写文件。
+如需查看有独立用途的内部模型，运行：
+
+```bash
+python scripts/export_symphony_config.py --include-internal
+```
+
+内部参考默认保存到同目录的 `config.reference.txt`，用户配置树保持独立。两种模式均支持
+`--output <路径>`。每次修改配置后按 [模块开发约定](AGENTS.md) 自动生成默认用户配置树，
+生成文件与配置一起交付，配置测试会验证文档是否与模型一致。
+
 ## 架构总览
 
 Symphony 的核心结构是“检索用树，编排用图”。能力指纹作为检索和编排共享的语义视图：

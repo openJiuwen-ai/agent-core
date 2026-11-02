@@ -1,12 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Symphony 目标配置，尚未接入运行链路。
 
-公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration
-组合子模型。其他模型集中描述内部模块的纯配置，不自动成为 Runtime 的输入。
+公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration、
+flow、experience 组合可调策略；子配置均有默认值，仅对象目录、类型和产物目录必填。
+协议身份、模型后端及具有独立用途的算法和调用参数仍单独定义；解析设置仅由原运行模块维护。
+公共树模型与内部模型分别登记；便利导出只保留核心配置类，供验证和文档读取完整登记。
 现有模块配置仍是运行行为的依据；本文件不读取环境、扫描目录或创建模型客户端。
 
-字段的中文 title、description 和约束用于后续生成配置文档。旧入口默认值不同的
-配置族分别保留；配置中的 capability 命名不修改现有产物字段或工具标识。
+字段的中文 title、description 和约束用于后续生成配置文档。同义策略只在公共树定义一次；
+旧入口的不同默认值由原业务模块保留，配置中的 capability 命名不修改现有产物字段或工具标识。
 客户端实例、线程池、取消/进度回调、扫描结果和前缀缓存句柄属于运行参数，
 不进入这些可序列化模型。文件中的路径只保存文本，不检查存在性或解析绝对路径。
 """
@@ -14,7 +16,7 @@
 from __future__ import annotations
 
 from pathlib import PurePath
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue
 
@@ -49,87 +51,7 @@ class SymphonyConfigModel(BaseModel):
     )
 
 
-# 公共配置：沿用已确认的 Runtime 配置草案，不提前绑定现有服务。
-class CapabilityConfig(SymphonyConfigModel):
-    """一个 Runtime 所管理的对象定义集合；不同类型使用独立集合。"""
-
-    root: ConfigPath = Field(
-        title="对象根目录", description="静态对象定义所在目录；相对路径的解析由后续 Runtime 接入负责。",
-        examples=["./capabilities"],
-    )
-    type: CapabilityType = Field(
-        title="对象类型", description="对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。",
-        examples=["skill", "expert"],
-    )
-
-
-class StorageConfig(SymphonyConfigModel):
-    """Runtime 产物存储位置；路径检查和目录创建由后续运行层负责。"""
-
-    artifact_root: ConfigPath = Field(
-        title="产物根目录", description="保存 inventory、缓存、tree 和 graph 的根目录；模型校验不会创建目录。",
-        examples=["./.symphony"],
-    )
-
-
-class RetrievalBuildConfig(SymphonyConfigModel):
-    """公共树构建策略；默认值来自现有索引 toolkit 的构建入口。"""
-
-    max_depth: PositiveInt = Field(6, title="分类树深度", description="分类树最大深度，与文件目录扫描深度无关。")
-    branching_factor: Annotated[int, Field(ge=2)] = Field(
-        128, title="分类分支上限", description="每个分类节点的最大分支数；公共入口至少允许两个分支。",
-    )
-    max_concurrency: PositiveInt = Field(
-        2, title="构建并发上限", description="单次树构建最多并发的模型请求数，映射旧 max_workers。",
-    )
-    request_timeout_seconds: PositiveFloat = Field(
-        420.0, title="构建请求超时", description="单次模型请求超时，单位秒；不限制整个构建任务时长。",
-    )
-
-
-class RetrievalSearchConfig(SymphonyConfigModel):
-    """公共自然语言检索策略；候选上限采用 toolkit 默认值，并行度采用渐进检索默认值。"""
-
-    top_k: PositiveInt = Field(
-        10, title="候选数量上限", description="每次检索最多返回的对象数；可在调用时覆盖，不影响已有索引。",
-        examples=[5, 10],
-    )
-    max_parallel_branches: PositiveInt = Field(
-        3, title="并行分支上限", description="一次查询最多并行探索的树分支数；1 表示串行。",
-    )
-    request_timeout_seconds: PositiveFloat = Field(
-        120.0, title="检索请求超时", description="单次检索模型请求超时，单位秒。",
-    )
-
-
-class RetrievalConfig(SymphonyConfigModel):
-    """公共检索配置；树构建和查询分别配置，启用不会自动构建索引。"""
-
-    enabled: bool = Field(True, title="启用检索", description="允许使用检索入口；独立于编排开关。")
-    build: RetrievalBuildConfig = Field(
-        default_factory=RetrievalBuildConfig, title="索引构建", description="显式构建分类树时使用的策略。",
-    )
-    search: RetrievalSearchConfig = Field(
-        default_factory=RetrievalSearchConfig, title="候选检索", description="查询已有分类树时使用的默认策略。",
-    )
-
-
-class OrchestrationBuildConfig(SymphonyConfigModel):
-    """公共图构建策略；统一并发上限是目标选择，不改变现有独立指纹服务的默认并发。"""
-
-    extraction_mode: Literal["metadata", "llm"] = Field(
-        "metadata", title="语义提取方式",
-        description="metadata 使用确定性元数据提取；llm 追加模型语义提取。关系构图仍需要模型。",
-    )
-    max_concurrency: PositiveInt = Field(
-        1, title="构图并发上限",
-        description="目标单次图构建各阶段共用的模型请求上限；独立指纹配置仍保留并发 4。",
-    )
-    require_consensus: bool = Field(
-        True, title="要求关系共识", description="沿用当前 Core 的两次关系判定一致性要求。",
-    )
-
-
+# 公共规划策略；关系阈值统一由所属 orchestration 配置提供。
 class OrchestrationPlanConfig(SymphonyConfigModel):
     """公共规划策略；生成计划，不执行对象。"""
 
@@ -140,34 +62,6 @@ class OrchestrationPlanConfig(SymphonyConfigModel):
     max_depth: PositiveInt = Field(4, title="规划展开深度", description="规划搜索深度，与分类树或目录扫描深度无关。")
     dynamic_graph_enabled: bool = Field(
         False, title="使用动态观测", description="规划时是否使用已有图观测结果；不表示自动执行或自动构图。",
-    )
-
-
-class OrchestrationConfig(SymphonyConfigModel):
-    """公共编排配置；关系阈值同时用于图构建和规划。"""
-
-    enabled: bool = Field(True, title="启用编排", description="允许使用编排入口；启用本身不触发构图。")
-    min_edge_confidence: Probability = Field(
-        0.7, title="最低关系置信度", description="构图接纳关系和规划使用关系的共同阈值，取值范围 0 到 1。",
-    )
-    build: OrchestrationBuildConfig = Field(
-        default_factory=OrchestrationBuildConfig, title="图构建", description="显式构建关系图时的策略。",
-    )
-    plan: OrchestrationPlanConfig = Field(
-        default_factory=OrchestrationPlanConfig, title="计划生成", description="使用已有图生成编排计划时的策略。",
-    )
-
-
-class SymphonyConfig(SymphonyConfigModel):
-    """Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。"""
-
-    capability: CapabilityConfig = Field(title="对象集合", description="显式声明对象目录和类型。")
-    storage: StorageConfig = Field(title="产物存储", description="显式声明本集合的产物根目录。")
-    retrieval: RetrievalConfig = Field(
-        default_factory=RetrievalConfig, title="检索能力", description="分类树构建和候选检索的默认配置。",
-    )
-    orchestration: OrchestrationConfig = Field(
-        default_factory=OrchestrationConfig, title="编排能力", description="关系图构建和计划生成的默认配置。",
     )
 
 
@@ -254,8 +148,8 @@ class FingerprintProtocolConfig(SymphonyConfigModel):
     )
 
 
-class FingerprintConfig(SymphonyConfigModel):
-    """独立指纹纯配置，分组对应现有 FingerprintSettings；不挂载到公共 Runtime 配置。"""
+class FingerprintPolicyConfig(SymphonyConfigModel):
+    """用户可调指纹策略；协议身份由内部服务维护。"""
 
     extraction: FingerprintExtractionConfig = Field(
         default_factory=FingerprintExtractionConfig, title="语义提取", description="对象元数据与模型提取策略。",
@@ -266,25 +160,13 @@ class FingerprintConfig(SymphonyConfigModel):
     cache: FingerprintCacheConfig = Field(
         default_factory=FingerprintCacheConfig, title="缓存策略", description="独立指纹缓存的开关。",
     )
-    protocol: FingerprintProtocolConfig = Field(
-        default_factory=FingerprintProtocolConfig, title="协议身份", description="指纹协议版本及附加签名输入。",
-    )
 
 
 # 独立模块：保留 orchestration/config.py、discovery/config.py、experience/models.py 的默认值。
-class GraphPlanningConfig(OrchestrationPlanConfig):
-    """现有内部规划器的配置族，额外保留构图和规划共用的阈值。"""
-
-    min_edge_confidence: Probability = Field(
-        0.7, title="最低关系置信度", description="现有内部规划入口使用的关系置信度阈值。",
-    )
-
-
-class GraphMatchingConfig(SymphonyConfigModel):
-    """现有关系匹配的内部默认值，来自 orchestration.service 的配置归一化。"""
+class GraphMatchingPolicyConfig(SymphonyConfigModel):
+    """关系匹配策略；公共入口统一使用所属构图任务的并发上限。"""
 
     batch_size: PositiveInt = Field(12, title="关系匹配批量", description="单批关系匹配的处理数量。")
-    max_concurrency: PositiveInt = Field(1, title="关系匹配并发", description="关系匹配请求并发上限。")
     require_consensus: bool = Field(True, title="关系共识要求", description="是否要求两次关系判定一致。")
     max_candidates_per_capability_relation: PositiveInt = Field(
         32, title="单对象关系候选上限", description="每个对象关系允许保留的候选数，原字段含 skill 命名。",
@@ -311,7 +193,7 @@ class FlowNarrativeConfig(SymphonyConfigModel):
 
 
 class FlowConfig(SymphonyConfigModel):
-    """对应现有 SymphonyFlowConfig 的独立配置，未接入新 Runtime 配置树。"""
+    """组合能力包沉淀策略，默认值对应现有 SymphonyFlowConfig；配置构造不启动服务。"""
 
     enabled: bool = Field(True, title="启用经验沉淀", description="是否启用 Flow 的经验沉淀与能力包处理。")
     acceptance: FlowAcceptanceConfig = Field(
@@ -449,12 +331,11 @@ class CapabilityProfilesConfig(SymphonyConfigModel):
     rule_limit: Annotated[int, Field(ge=40)] = Field(120, title="选择规则长度", description="单条画像选择规则的字符数上限。")
 
 
-class TreePromptConfig(SymphonyConfigModel):
-    """树构建的提示确定性、协议和缓存观测设置。"""
+class TreePromptPolicyConfig(SymphonyConfigModel):
+    """用户可调的提示确定性、结构发现种子和缓存观测策略。"""
 
     deterministic: bool = Field(True, title="确定性提示", description="是否使用稳定排序和确定性提示构造。")
     discovery_seed: int = Field(42, title="结构发现种子", description="分类结构发现过程的随机种子。")
-    fingerprint_version: str = Field("v1", title="提示指纹版本", description="提示指纹协议标识。", min_length=1)
     cache_observability: bool = Field(True, title="缓存观测", description="是否记录树构建缓存的观测信息。")
 
 
@@ -473,81 +354,16 @@ class TreeIncrementalConfig(SymphonyConfigModel):
     )
 
 
-class TreeRequestConfig(SymphonyConfigModel):
-    """底层 TreeBuildConfig 的请求默认值：单并发、180 秒超时、分类批量 20。"""
-
-    max_concurrency: PositiveInt = Field(1, title="树构建并发", description="底层树构建模型请求的并发上限。")
-    caching: bool = Field(False, title="树构建缓存", description="是否启用底层树构建缓存。")
-    max_retries: NonNegativeInt = Field(2, title="最大重试次数", description="模型请求失败后的最多重试次数。")
-    timeout_seconds: PositiveFloat = Field(180.0, title="请求超时", description="单次模型请求超时，单位秒。")
-    context_window: NonNegativeInt = Field(0, title="构建上下文窗口", description="上下文 token 预算；0 表示未显式指定。")
-    max_output_tokens: NonNegativeInt = Field(0, title="构建输出预算", description="模型输出 token 上限；0 表示未显式指定。")
-    classification_batch_limit: PositiveInt = Field(20, title="分类批量上限", description="每次分类请求处理的最多对象数。")
-
-
-class IndexRequestConfig(TreeRequestConfig):
-    """索引工作流及 toolkit 的请求默认值，保留与底层树构建入口的差异。"""
+class IndexRequestConfig(SymphonyConfigModel):
+    """统一索引构建请求策略，默认并发 2、超时 420 秒、分类批量 32。"""
 
     max_concurrency: PositiveInt = Field(2, title="索引构建并发", description="索引构建模型请求的并发上限。")
+    caching: bool = Field(False, title="树构建缓存", description="是否启用底层树构建缓存。")
+    max_retries: NonNegativeInt = Field(2, title="最大重试次数", description="模型请求失败后的最多重试次数。")
     timeout_seconds: PositiveFloat = Field(420.0, title="索引请求超时", description="单次索引构建模型请求超时，单位秒。")
+    context_window: NonNegativeInt = Field(0, title="构建上下文窗口", description="上下文 token 预算；0 表示未显式指定。")
+    max_output_tokens: NonNegativeInt = Field(0, title="构建输出预算", description="模型输出 token 上限；0 表示未显式指定。")
     classification_batch_limit: PositiveInt = Field(32, title="索引分类批量", description="索引分类请求处理的最多对象数。")
-
-
-class TreeBuildConfig(SymphonyConfigModel):
-    """底层分类树构建配置，对应 retrieval/build/tree/schema.py 的配置族。"""
-
-    request: TreeRequestConfig = Field(
-        default_factory=TreeRequestConfig, title="请求策略", description="底层构建的并发、重试、上下文和批量限制。",
-    )
-    postprocess: TreePostprocessConfig = Field(
-        default_factory=TreePostprocessConfig, title="树后处理", description="分类树后处理策略。",
-    )
-    equivalence: TreeEquivalenceConfig = Field(
-        default_factory=TreeEquivalenceConfig, title="等价分组", description="等价对象分组策略。",
-    )
-    profiles: CapabilityProfilesConfig = Field(
-        default_factory=CapabilityProfilesConfig, title="对象画像", description="对象画像和选择规则提取策略。",
-    )
-    prompt: TreePromptConfig = Field(
-        default_factory=TreePromptConfig, title="提示策略", description="构建提示的确定性与身份设置。",
-    )
-
-
-class IndexTreeBuildConfig(TreeBuildConfig):
-    """索引工作流使用的树构建配置，默认请求预算与底层入口分别保留。"""
-
-    request: IndexRequestConfig = Field(
-        default_factory=IndexRequestConfig, title="索引请求策略", description="索引工作流和 toolkit 使用的请求预算。",
-    )
-
-
-class TreeStructureConfig(SymphonyConfigModel):
-    """底层树管理器的结构设置，默认分支数保留为 8。"""
-
-    branching_factor: PositiveInt = Field(8, title="底层分支上限", description="底层树管理器每个节点的最大分支数。")
-    max_depth: PositiveInt = Field(6, title="底层树深度", description="底层分类树的最大深度。")
-    root_categories: dict[str, JsonValue] | None = Field(
-        None, title="已解析根分类", description="已归一化的根分类映射；None 表示由构建过程发现分类。",
-    )
-
-
-class IndexTreeStructureConfig(SymphonyConfigModel):
-    """索引入口的树结构设置；根分类可传 JSON 数据或配置文件路径文本。"""
-
-    branching_factor: PositiveInt = Field(128, title="索引分支上限", description="索引入口每个分类节点的最大分支数。")
-    max_depth: PositiveInt = Field(6, title="索引树深度", description="索引分类树的最大深度。")
-    root_categories: RootCategoryInput = Field(
-        None, title="根分类输入", description="根分类列表或配置文件路径文本；模型本身不读取路径。",
-    )
-
-
-class TreeManagerConfig(SymphonyConfigModel):
-    """底层树管理器配置，由结构和构建策略组合。"""
-
-    structure: TreeStructureConfig = Field(
-        default_factory=TreeStructureConfig, title="树结构", description="底层分类树结构设置。",
-    )
-    build: TreeBuildConfig = Field(default_factory=TreeBuildConfig, title="树构建", description="底层分类树构建策略。")
 
 
 class TreeExpansionConfig(SymphonyConfigModel):
@@ -562,107 +378,36 @@ class TreeExpansionConfig(SymphonyConfigModel):
 
 
 class DynamicTreeConfig(SymphonyConfigModel):
-    """动态树配置，保留原有可修改配置和派生阈值的行为。"""
+    """动态树调整策略；结构统一由 retrieval.build.structure 提供，派生阈值留给运行层计算。"""
 
     model_config = ConfigDict(frozen=False, validate_assignment=True)
-    structure: TreeStructureConfig = Field(
-        default_factory=TreeStructureConfig, title="动态树结构", description="动态树的分支、深度和根分类。",
-    )
     rebalance_interval: PositiveInt = Field(50, title="重平衡间隔", description="触发结构重平衡的操作计数间隔。")
     expansion: TreeExpansionConfig = Field(
         default_factory=TreeExpansionConfig, title="派生阈值", description="容量、扩展和采样阈值的倍率。",
     )
 
-    @property
-    def max_capabilities_per_node(self) -> int:
-        """单节点容量，保持现有向下取整规则。"""
-        return int(self.structure.branching_factor * self.expansion.max_capabilities_per_node)
-
-    @property
-    def expand_threshold(self) -> int:
-        """节点扩展阈值。"""
-        return int(self.structure.branching_factor * self.expansion.expand_threshold)
-
-    @property
-    def early_stop_capability_count(self) -> int:
-        """提前停止阈值。"""
-        return int(self.structure.branching_factor * self.expansion.early_stop)
-
-    @property
-    def lazy_split_threshold(self) -> int:
-        """延迟拆分阈值。"""
-        return int(self.max_capabilities_per_node * self.expansion.lazy_split)
-
-    @property
-    def classification_batch_size(self) -> int:
-        """分类批量派生值。"""
-        return int(self.structure.branching_factor * self.expansion.classification_batch)
-
-    @property
-    def structure_sample_size(self) -> int:
-        """结构采样数量派生值。"""
-        return int(self.structure.branching_factor * self.expansion.structure_sample)
-
-
-class TreeBuildSettings(SymphonyConfigModel):
-    """已解析树构建设置；由管理器配置生成，保持与原内部派生设置相同的值。"""
-
-    model_config = ConfigDict(frozen=False, validate_assignment=True)
-    manager: TreeManagerConfig = Field(title="管理器配置", description="本次构建采用的底层树管理器配置。")
-    llm_seed: int | None = Field(title="模型随机种子", description="调用方显式提供的模型随机种子，可为 None。")
-    postprocess: TreePostprocessConfig = Field(title="已解析后处理", description="本次构建独立保存的后处理设置。")
-    equivalence: TreeEquivalenceConfig = Field(title="已解析等价分组", description="本次构建独立保存的等价分组设置。")
-    profiles: CapabilityProfilesConfig = Field(title="已解析对象画像", description="本次构建独立保存的对象画像设置。")
-    prompt: TreePromptConfig = Field(title="已解析提示策略", description="本次构建独立保存的提示与缓存观测设置。")
-    max_consecutive_failures: PositiveInt = Field(5, title="连续失败上限", description="允许的最大连续构建失败次数。")
-
-    @classmethod
-    def from_manager_config(cls, manager_config: TreeManagerConfig, *, llm_seed: int | None) -> Self:
-        """仅组合已校验的管理器配置，不持有线程、模型客户端或统计状态。"""
-        build = manager_config.build
-        return cls(
-            manager=manager_config,
-            llm_seed=llm_seed,
-            postprocess=build.postprocess.model_copy(deep=True),
-            equivalence=build.equivalence.model_copy(deep=True),
-            profiles=build.profiles.model_copy(deep=True),
-            prompt=build.prompt.model_copy(deep=True),
-        )
-
 
 class IndexTaskConfig(SymphonyConfigModel):
-    """toolkit 索引任务整体时限；不与单请求超时混用。"""
+    """索引任务的整体时限、回退与失败处理；不与单请求超时混用。"""
 
     total_timeout_seconds: Annotated[float, Field(ge=0)] = Field(
         0.0, title="构建总时限", description="整个索引任务的时限，单位秒；0 表示未配置总时限。",
     )
-
-
-class IndexOutputConfig(SymphonyConfigModel):
-    """toolkit 索引输出与失败处理策略。"""
-
-    generate_tree_html: bool = Field(False, title="生成树预览", description="是否生成分类树 HTML 预览产物。")
     preserve_previous_index_on_failure: bool = Field(
         True, title="失败保留旧索引", description="构建失败时是否保留上一次成功发布的索引。",
     )
     strict_failure: bool = Field(False, title="严格失败模式", description="是否按现有 toolkit 的严格失败方式报告错误。")
+    allow_fallback_tree: bool = Field(True, title="允许回退分类树", description="是否允许沿用现有工作流的回退树策略。")
 
 
-class CapabilityIndexBuildConfig(SymphonyConfigModel):
-    """agent toolkit 的索引构建配置，分组覆盖原 SkillIndexBuildConfig 的纯配置字段。"""
+class IndexOutputConfig(SymphonyConfigModel):
+    """索引构建过程与产物的展示设置，分别控制详细输出、分类树展示和 HTML 预览。"""
 
-    structure: IndexTreeStructureConfig = Field(
-        default_factory=IndexTreeStructureConfig, title="索引结构", description="分类树深度、分支和根分类输入。",
-    )
-    build: IndexTreeBuildConfig = Field(
-        default_factory=IndexTreeBuildConfig, title="构建策略", description="模型请求、后处理、等价分组和对象画像。",
-    )
-    incremental: TreeIncrementalConfig = Field(
-        default_factory=TreeIncrementalConfig, title="增量更新", description="增量构建的变化比例和分类置信度策略。",
-    )
-    task: IndexTaskConfig = Field(default_factory=IndexTaskConfig, title="任务时限", description="索引任务的整体时限。")
-    output: IndexOutputConfig = Field(
-        default_factory=IndexOutputConfig, title="输出策略", description="索引预览和失败处理设置。",
+    generate_tree_html: bool = Field(False, title="生成树预览", description="是否生成分类树 HTML 预览产物。")
+    verbose: bool = Field(False, title="详细构建输出", description="是否显示现有构建过程的详细信息。")
+    show_tree: bool = Field(True, title="显示分类树", description="是否显示构建后的分类树；区别于生成 HTML 预览文件。")
+    display_capability_root: ConfigPath | None = Field(
+        None, title="展示对象目录", description="输出展示使用的对象目录文本；不影响扫描根目录。",
     )
 
 
@@ -801,55 +546,6 @@ class LLMGenerationConfig(SymphonyConfigModel):
     )
 
 
-class IndexArtifactConfig(SymphonyConfigModel):
-    """索引工作流的输出设置，区别于 toolkit 的任务失败策略。"""
-
-    generate_tree_html: bool = Field(False, title="生成分类树预览", description="是否输出分类树 HTML 预览。")
-    allow_fallback_tree: bool = Field(True, title="允许回退分类树", description="是否允许沿用现有工作流的回退树策略。")
-
-
-class IndexBuildConfig(SymphonyConfigModel):
-    """现有工作流 BuildConfig 的纯配置部分，不含 llm_openai_client 实例。"""
-
-    method: Literal[4] = Field(4, title="索引构建方式", description="保留现有 BuildMethod.TREE 的编码 4。")
-    model: RetrievalModelConfig = Field(
-        default_factory=RetrievalModelConfig, title="工作流模型参数", description="模型名称、服务地址和可选种子等纯参数。",
-    )
-    structure: IndexTreeStructureConfig = Field(
-        default_factory=IndexTreeStructureConfig, title="工作流树结构", description="树深度、分支和根分类输入。",
-    )
-    build: IndexTreeBuildConfig = Field(
-        default_factory=IndexTreeBuildConfig, title="工作流构建策略", description="索引工作流的模型请求和分类构建策略。",
-    )
-    incremental: TreeIncrementalConfig = Field(
-        default_factory=TreeIncrementalConfig, title="工作流增量策略", description="增量更新的变化比例和置信度阈值。",
-    )
-    artifacts: IndexArtifactConfig = Field(
-        default_factory=IndexArtifactConfig, title="工作流产物策略", description="预览和回退树设置。",
-    )
-
-
-class ResolvedIndexTreeStructureConfig(SymphonyConfigModel):
-    """工作流已解析的树结构；根分类必须已加载为数据，不再接受文件路径。"""
-
-    branching_factor: PositiveInt = Field(title="已解析分支上限", description="归一化后的分类节点分支上限。")
-    max_depth: PositiveInt = Field(title="已解析树深度", description="归一化后的分类树深度。")
-    root_categories: list[str | dict[str, JsonValue]] | None = Field(
-        title="已解析根分类", description="已加载的根分类列表，或表示自动发现的 None。",
-    )
-
-
-class ResolvedIndexBuildConfig(SymphonyConfigModel):
-    """工作流归一化后的纯配置；各组必须由调用方提供，不执行配置文件加载。"""
-
-    method: Literal[4] = Field(title="已解析构建方式", description="已经确认的树索引构建编码 4。")
-    model: RetrievalModelConfig = Field(title="已解析模型参数", description="归一化后的模型纯数据参数。")
-    structure: ResolvedIndexTreeStructureConfig = Field(title="已解析树结构", description="已经加载根分类的结构设置。")
-    build: IndexTreeBuildConfig = Field(title="已解析构建策略", description="归一化后的请求和分类构建策略。")
-    incremental: TreeIncrementalConfig = Field(title="已解析增量策略", description="归一化后的增量更新策略。")
-    artifacts: IndexArtifactConfig = Field(title="已解析产物策略", description="归一化后的产物设置。")
-
-
 # 原检索默认码表按既有顺序保存，避免配置模型反向导入检索实现模块。
 # 来源：retrieval/search/runtime/codebooks.py；与旧码表的逐项一致性由配置测试保护。
 _DEFAULT_COMPACT_CODES = tuple((
@@ -904,22 +600,16 @@ class RetrievalRenderConfig(SymphonyConfigModel):
     )
 
 
-class DisclosureConfig(RetrievalRenderConfig):
-    """底层树片段展示配置，保留与独立检索服务不同的深度、阈值和空码表。"""
+class AgenticRenderConfig(RetrievalRenderConfig):
+    """工具浏览复用检索渲染字段，保留一层展示、空码表和片段展开阈值。"""
 
     compact_codes_enabled: bool = Field(False, title="片段紧凑编码", description="是否为片段候选使用紧凑编码。")
     compact_codebook: list[str] = Field(
         default_factory=list, title="片段编码表", description="片段展示的自定义码表；默认由运行过程决定编码。",
     )
     flatten_tree: bool = Field(False, title="片段展平", description="是否将展示片段展开为平面内容。")
-    max_exposure_depth: NonNegativeInt = Field(2, title="片段展示深度", description="一次最多展示的片段树层数。")
-    exposure_threshold: NonNegativeInt = Field(12, title="片段展开阈值", description="片段节点展开的候选数量阈值。")
-
-
-class AgenticRenderConfig(DisclosureConfig):
-    """agent toolkit 的树浏览提示设置，默认只展示一层。"""
-
     max_exposure_depth: NonNegativeInt = Field(1, title="工具浏览深度", description="一次工具浏览最多展示的树层数。")
+    exposure_threshold: NonNegativeInt = Field(12, title="片段展开阈值", description="片段节点展开的候选数量阈值。")
 
 
 class LogitSelectionConfig(SymphonyConfigModel):
@@ -955,10 +645,13 @@ class RetrievalGenerationConfig(SymphonyConfigModel):
     )
 
 
-class ProgressiveRetrieverConfig(SymphonyConfigModel):
-    """底层渐进检索配置，候选上限保留为 5，不与公共检索服务的 10 合并。"""
+class RetrievalSearchConfig(SymphonyConfigModel):
+    """公共自然语言检索策略；模型实例由 Runtime 注入，配置只控制检索行为。"""
 
-    top_k: PositiveInt = Field(5, title="底层候选上限", description="底层渐进检索最多返回的候选数量。")
+    top_k: PositiveInt = Field(
+        10, title="候选数量上限", description="每次检索最多返回的对象数；可在调用时覆盖，不影响已有索引。",
+        examples=[5, 10],
+    )
     traversal: RetrievalTraversalConfig = Field(
         default_factory=RetrievalTraversalConfig, title="分支遍历", description="渐进检索的分支探索策略。",
     )
@@ -968,27 +661,6 @@ class ProgressiveRetrieverConfig(SymphonyConfigModel):
     generation: RetrievalGenerationConfig = Field(
         default_factory=RetrievalGenerationConfig, title="候选选择", description="渐进检索的生成或打分策略。",
     )
-    llm: LLMClientConfig = Field(
-        default_factory=OpenAIClientConfig, title="检索模型后端", description="独立检索器的模型后端纯配置。",
-    )
-
-
-class RetrieverConfig(SymphonyConfigModel):
-    """独立检索服务的初始化配置，保留服务入口候选上限为 10。"""
-
-    top_k: PositiveInt = Field(10, title="服务候选上限", description="独立检索服务最多返回的候选数量。")
-    traversal: RetrievalTraversalConfig = Field(
-        default_factory=RetrievalTraversalConfig, title="服务遍历策略", description="服务内部的分支探索策略。",
-    )
-    render: RetrievalRenderConfig = Field(
-        default_factory=RetrievalRenderConfig, title="服务提示渲染", description="服务内部的树展示和编码设置。",
-    )
-    generation: RetrievalGenerationConfig = Field(
-        default_factory=RetrievalGenerationConfig, title="服务候选选择", description="服务内部的生成或打分设置。",
-    )
-    llm: LLMClientConfig = Field(
-        default_factory=OpenAIClientConfig, title="服务模型后端", description="独立检索服务的模型后端纯配置。",
-    )
 
 
 class RetrievalRequestConfig(SymphonyConfigModel):
@@ -996,16 +668,6 @@ class RetrievalRequestConfig(SymphonyConfigModel):
 
     top_k: PositiveInt | None = Field(
         None, title="本次候选上限", description="覆盖本次查询返回数量；None 表示沿用检索器配置。",
-    )
-
-
-class RuntimeRetrieverConfig(SymphonyConfigModel):
-    """检索服务内部已解析配置族；本文件不执行服务到运行配置的转换。"""
-
-    top_k: PositiveInt = Field(10, title="内部结果数量", description="独立服务当前使用的结果数量上限。")
-    progressive: ProgressiveRetrieverConfig = Field(
-        default_factory=ProgressiveRetrieverConfig, title="渐进检索设置",
-        description="保留原内部默认对象；服务接入阶段再显式同步本次 top_k。",
     )
 
 
@@ -1058,50 +720,185 @@ class ScoreTruncationConfig(SymphonyConfigModel):
     )
 
 
-class TreeBuildOptions(SymphonyConfigModel):
-    """原 build_tree 关键字选项中的纯配置；对象列表、客户端与进度数据仍属于调用参数。"""
+# 公共组合在子模型定义之后声明，默认工厂不需要运行模块或前向引用修复。
+class CapabilityConfig(SymphonyConfigModel):
+    """一个 Runtime 所管理的对象定义集合及扫描、指纹策略；不同类型使用独立集合。"""
 
-    dynamic: DynamicTreeConfig | None = Field(None, title="动态树设置", description="可选的动态树配置。")
-    manager: TreeManagerConfig | None = Field(None, title="树管理器设置", description="可选的底层树管理器配置。")
-    model: RetrievalModelConfig | None = Field(
-        None, title="树模型参数", description="可选的模型纯数据覆盖；None 表示不提供本次模型参数覆盖。",
+    root: ConfigPath = Field(
+        title="对象根目录", description="静态对象定义所在目录；相对路径的解析由后续 Runtime 接入负责。",
+        examples=["./capabilities"],
     )
-    max_concurrency: PositiveInt | None = Field(None, title="本次构建并发", description="可选的单次构建并发覆盖。")
-    verbose: bool = Field(False, title="详细构建输出", description="是否显示现有构建过程的详细信息。")
-    show_tree: bool = Field(True, title="显示分类树", description="是否显示构建后的分类树。")
-    display_capability_root: ConfigPath | None = Field(
-        None, title="展示对象目录", description="输出展示使用的对象目录文本；不影响扫描根目录。",
+    type: CapabilityType = Field(
+        title="对象类型", description="对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。",
+        examples=["skill", "expert"],
     )
-    capability_type: str = Field("skill", title="构建对象标签", description="底层树构建的对象类型标签。", min_length=1)
+    scan: DirectoryScanConfig = Field(
+        default_factory=DirectoryScanConfig, title="目录扫描", description="目录深度、资源预算和入口文档解析限制。",
+    )
+    fingerprint: FingerprintPolicyConfig = Field(
+        default_factory=FingerprintPolicyConfig, title="指纹策略", description="对象指纹的提取、评估和缓存策略。",
+    )
 
 
-# 显式登记模型，后续文档工具可分别导出公共配置树和独立内部配置。
-# 类型定义是唯一字段说明来源；注册表只维护覆盖范围，不重复维护字段或默认值。
-CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    CapabilityConfig, StorageConfig, RetrievalBuildConfig, RetrievalSearchConfig, RetrievalConfig,
-    OrchestrationBuildConfig, OrchestrationPlanConfig, OrchestrationConfig, SymphonyConfig,
-    ScanLimitsConfig, ManifestParseConfig, DirectoryScanConfig,
-    FingerprintExtractionConfig, FingerprintEvaluationConfig, FingerprintCacheConfig,
-    FingerprintProtocolConfig, FingerprintConfig,
-    GraphPlanningConfig, GraphMatchingConfig, FlowAcceptanceConfig, FlowNarrativeConfig, FlowConfig,
-    DiscoveryBudgetConfig, DiscoveryOutputConfig, DiscoveryPromptConfig, DiscoveryConfig,
-    ExperienceClusteringConfig, ExperienceExecutionConfig, ExperiencePatternConfig, ExperienceBankBuildConfig,
-    TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptConfig,
-    TreeIncrementalConfig, TreeRequestConfig, IndexRequestConfig, TreeBuildConfig, IndexTreeBuildConfig,
-    TreeStructureConfig, IndexTreeStructureConfig, TreeManagerConfig, TreeExpansionConfig,
-    DynamicTreeConfig, TreeBuildSettings, IndexTaskConfig, IndexOutputConfig,
-    CapabilityIndexBuildConfig, CapabilityIndexStorageConfig, OneShotTreeBuildConfig,
+class StorageConfig(SymphonyConfigModel):
+    """Runtime 产物存储位置；路径检查和目录创建由后续运行层负责。"""
+
+    artifact_root: ConfigPath = Field(
+        title="产物根目录", description="保存 inventory、缓存、tree 和 graph 的根目录；模型校验不会创建目录。",
+        examples=["./.symphony"],
+    )
+
+
+class RetrievalTreeStructureConfig(SymphonyConfigModel):
+    """公共分类树结构；沿用索引入口默认值，并保持分支数至少为 2 的约束。"""
+
+    branching_factor: Annotated[int, Field(ge=2)] = Field(
+        128, title="分类分支上限", description="每个分类节点的最大分支数；公共入口至少允许两个分支。",
+    )
+    max_depth: PositiveInt = Field(6, title="索引树深度", description="索引分类树的最大深度。")
+    root_categories: RootCategoryInput = Field(
+        None, title="根分类输入", description="根分类列表或配置文件路径文本；模型本身不读取路径。",
+    )
+
+
+class RetrievalBuildConfig(SymphonyConfigModel):
+    """公共分类树构建策略；直接组合各子策略，默认值沿用索引 toolkit 入口。"""
+
+    structure: RetrievalTreeStructureConfig = Field(
+        default_factory=RetrievalTreeStructureConfig, title="树结构", description="分类树深度、分支和根分类输入。",
+    )
+    dynamic: DynamicTreeConfig = Field(
+        default_factory=DynamicTreeConfig, title="动态树调整",
+        description="重平衡间隔和扩展倍率；共用 structure 的树结构，不执行派生阈值计算。",
+    )
+    request: IndexRequestConfig = Field(
+        default_factory=IndexRequestConfig, title="构建请求", description="模型请求的并发、超时、重试和分类批量。",
+    )
+    postprocess: TreePostprocessConfig = Field(
+        default_factory=TreePostprocessConfig, title="树后处理", description="分类完成后的后处理策略。",
+    )
+    equivalence: TreeEquivalenceConfig = Field(
+        default_factory=TreeEquivalenceConfig, title="等价分组", description="父分类内的等价对象分组策略。",
+    )
+    profiles: CapabilityProfilesConfig = Field(
+        default_factory=CapabilityProfilesConfig, title="对象画像", description="对象画像和选择规则提取设置。",
+    )
+    prompt: TreePromptPolicyConfig = Field(
+        default_factory=TreePromptPolicyConfig, title="构建提示", description="提示确定性、结构发现种子和缓存观测。",
+    )
+    incremental: TreeIncrementalConfig = Field(
+        default_factory=TreeIncrementalConfig, title="增量更新", description="变化比例、分类置信度和结构不均衡策略。",
+    )
+    task: IndexTaskConfig = Field(
+        default_factory=IndexTaskConfig, title="构建任务", description="整体时限、回退和失败处理；区别于单次请求超时。",
+    )
+    output: IndexOutputConfig = Field(
+        default_factory=IndexOutputConfig, title="产物展示", description="构建输出、分类树展示和预览产物设置。",
+    )
+
+
+class RetrievalConfig(SymphonyConfigModel):
+    """公共检索配置；构建、查询、发现和工具交互分别配置，启用不会自动构建索引。"""
+
+    enabled: bool = Field(True, title="启用检索", description="允许使用检索入口；独立于编排开关。")
+    build: RetrievalBuildConfig = Field(
+        default_factory=RetrievalBuildConfig, title="索引构建", description="显式构建分类树时使用的策略。",
+    )
+    search: RetrievalSearchConfig = Field(
+        default_factory=RetrievalSearchConfig, title="候选检索", description="查询已有分类树时使用的默认策略。",
+    )
+    discovery: DiscoveryConfig = Field(
+        default_factory=DiscoveryConfig, title="对象发现", description="对象发现的候选、输出和提示预算。",
+    )
+    toolkit: AgenticRetrievalConfig = Field(
+        default_factory=AgenticRetrievalConfig, title="工具交互", description="工具浏览、请求预算和工具标识；区别于自然语言检索。",
+    )
+
+
+class OrchestrationBuildConfig(SymphonyConfigModel):
+    """公共关系图构建策略；提取方式由 capability.fingerprint 配置，匹配共识只有一个配置位置。"""
+
+    max_concurrency: PositiveInt = Field(
+        1, title="构图并发上限",
+        description="目标单次图构建各阶段共用的模型请求上限；指纹阶段取此值与提取并发上限的较小值。",
+    )
+    matching: GraphMatchingPolicyConfig = Field(
+        default_factory=GraphMatchingPolicyConfig, title="关系匹配", description="关系批量、共识要求和候选数量上限。",
+    )
+
+
+class OrchestrationConfig(SymphonyConfigModel):
+    """公共编排配置；关系阈值同时用于图构建和规划。"""
+
+    enabled: bool = Field(True, title="启用编排", description="允许使用编排入口；启用本身不触发构图。")
+    min_edge_confidence: Probability = Field(
+        0.7, title="最低关系置信度", description="构图接纳关系和规划使用关系的共同阈值，取值范围 0 到 1。",
+    )
+    build: OrchestrationBuildConfig = Field(
+        default_factory=OrchestrationBuildConfig, title="图构建", description="显式构建关系图时的策略。",
+    )
+    plan: OrchestrationPlanConfig = Field(
+        default_factory=OrchestrationPlanConfig, title="计划生成", description="使用已有图生成编排计划时的策略。",
+    )
+
+
+class ExperienceConfig(SymphonyConfigModel):
+    """经验库策略；仅声明构建参数，不自动评估轨迹、创建经验库或触发构建。"""
+
+    build: ExperienceBankBuildConfig = Field(
+        default_factory=ExperienceBankBuildConfig, title="经验构建", description="经验记录的聚类、构建执行和模式提炼策略。",
+    )
+
+
+class SymphonyConfig(SymphonyConfigModel):
+    """Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。"""
+
+    capability: CapabilityConfig = Field(title="对象集合", description="显式声明对象目录、类型及预处理策略。")
+    storage: StorageConfig = Field(title="产物存储", description="显式声明本集合的产物根目录。")
+    retrieval: RetrievalConfig = Field(
+        default_factory=RetrievalConfig, title="检索能力", description="分类树构建、候选检索、对象发现和工具交互的默认配置。",
+    )
+    orchestration: OrchestrationConfig = Field(
+        default_factory=OrchestrationConfig, title="编排能力", description="关系图构建和计划生成的默认配置。",
+    )
+    flow: FlowConfig = Field(
+        default_factory=FlowConfig, title="组合能力沉淀", description="能力包接纳与叙述策略；配置存在或启用不表示服务已启动。",
+    )
+    experience: ExperienceConfig = Field(
+        default_factory=ExperienceConfig, title="经验库", description="经验库构建的默认配置；不隐式读取或写入经验。",
+    )
+
+
+# 登记范围用于 Schema 覆盖和文档；只有根模型可达的配置属于公共树。
+PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
+    SymphonyConfig, CapabilityConfig, DirectoryScanConfig, ScanLimitsConfig, ManifestParseConfig,
+    FingerprintPolicyConfig, FingerprintExtractionConfig, FingerprintEvaluationConfig, FingerprintCacheConfig,
+    StorageConfig, RetrievalConfig, RetrievalBuildConfig, RetrievalTreeStructureConfig, IndexRequestConfig,
+    DynamicTreeConfig, TreeExpansionConfig,
+    TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,
+    TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
+    RetrievalSearchConfig, RetrievalTraversalConfig, RetrievalRenderConfig, RetrievalGenerationConfig, LogitSelectionConfig,
+    DiscoveryConfig, DiscoveryBudgetConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,
+    AgenticRetrievalConfig, AgenticRenderConfig, AgenticRequestConfig, RetrievalToolNamesConfig,
+    OrchestrationConfig, OrchestrationBuildConfig, GraphMatchingPolicyConfig, OrchestrationPlanConfig,
+    FlowConfig, FlowAcceptanceConfig, FlowNarrativeConfig,
+    ExperienceConfig, ExperienceBankBuildConfig, ExperienceClusteringConfig, ExperienceExecutionConfig, ExperiencePatternConfig,
+)
+
+INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
+    FingerprintProtocolConfig,
+    CapabilityIndexStorageConfig, OneShotTreeBuildConfig,
     RetrievalModelConfig, OpenAIClientConfig, VLLMClientConfig, TransformersParallelismConfig,
     TransformersOptimizationConfig, TransformersClientConfig, DistributedGenerationConfig,
     TrieConstraintConfig, GenerationConstraintsConfig, LLMGenerationConfig,
-    IndexArtifactConfig, IndexBuildConfig, ResolvedIndexTreeStructureConfig, ResolvedIndexBuildConfig,
-    RetrievalTraversalConfig, RetrievalRenderConfig, DisclosureConfig, AgenticRenderConfig,
-    LogitSelectionConfig, RetrievalGenerationConfig, ProgressiveRetrieverConfig, RetrieverConfig,
-    RetrievalRequestConfig, RuntimeRetrieverConfig, AgenticRequestConfig, RetrievalToolNamesConfig,
-    AgenticRetrievalConfig, ScoreTruncationConfig, TreeBuildOptions,
+    RetrievalRequestConfig, ScoreTruncationConfig,
 )
 
-__all__ = ["CONFIG_MODELS", "SymphonyConfigModel", "CapabilityType", "LLMClientConfig"] + [
-    model.__name__ for model in CONFIG_MODELS
-]
+CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + INTERNAL_CONFIG_MODELS
 
+# 保留核心配置类的便利导出；子模型可通过嵌套字典配置，内部工具显式读取登记表。
+__all__ = [
+    "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig", "RetrievalSearchConfig",
+    "RetrievalConfig", "OrchestrationBuildConfig", "OrchestrationPlanConfig", "OrchestrationConfig",
+    "FlowConfig", "ExperienceConfig", "SymphonyConfig",
+]
