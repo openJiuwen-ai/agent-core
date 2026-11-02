@@ -1,7 +1,7 @@
 ---
 title: 故障修复 B索引
-author: ShowHsiang
-author_email: xiangxiaoneng@h-partners.com
+author: alan_cheng
+author_email: chengshuo5@huawei.com
 generated: true
 ---
 
