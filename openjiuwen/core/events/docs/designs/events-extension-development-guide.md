@@ -364,6 +364,7 @@ OpsMethod 有两种常见实现：
 - 首次 Build 失败时 Builder 不会保存，宿主修正注册后可以重试。
 - EventBus 不提供并发 Build 保护；宿主必须串行执行 Build。
 - 未知 namespace、未知 method、能力冲突和非法名称都会返回 `EVENTS_OPS_INVALID`。
+- 能力实现较复杂时，把 facade、service 和数据模型放在 `ops_impl/<namespace>/` 子包，`handler_ops` 只做装配；该目录不被 `bootstrap` 自动注册。可参考 `ops_impl/fs/`。
 - OpsMethod 的业务异常和取消会直接传播给调用它的 Handler，EventBus 不自动降级或重试；Handler 未处理的业务异常按 Handler 故障跳过，取消继续向外传播。
 
 ### 5.3 完整示例

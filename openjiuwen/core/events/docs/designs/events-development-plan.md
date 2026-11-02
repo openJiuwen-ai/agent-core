@@ -6,7 +6,7 @@
 - **模块边界：** Events 只提供通用事件机制，不依赖 JiuwenSwarm、具体业务执行器或插件管理实现。
 - **外部范围：** UI 事件名和 payload、AgentServer、插件装卸、WebUI、E2E 环境由 JiuwenSwarm 对端计划维护。
 - **公共契约：** 以 [S_01](../specs/S_01_events-contract.md) 为唯一来源。
-- **维护日期：** 2026-10-31。
+- **维护日期：** 2026-11-02。
 
 每个未完成工作项开工前，在 `docs/features/` 建立对应 feature 文档，记录实现文件、接口影响、验收命令和实际结果。当前状态和证据只在第 4 节维护。
 
@@ -124,22 +124,43 @@
 ### EV-07 业务 EventType 与 AgentRuntime 集成
 
 - **优先级：** P1；在通用 Bus 已可用前提下，把静态 CORE Handler 接到进程内真实 `BaseAgent` 实例，并落地可复制的业务 EventType/Ops 模式。
-- **目标与范围：** CORE Handler 执行时经 `SessionContext.session_id` 与 `get_agent_runtime()` 查询当前 Agent，调用**不再触发同名事件**的内部业务方法；Ops 动词能力继续触发完整嵌套链且 `session_id` 不变。方案细节见 [F_06](../features/F_06_ev06-agent-runtime-business-events.md)。
+- **目标与范围：** CORE Handler 执行时经 `SessionContext.session_id` 与 `get_agent_runtime()` 查询当前 Agent，调用**不再触发同名事件**的内部业务方法；Ops 动词能力继续触发完整嵌套链且 `session_id` 不变。方案细节见 [F_07](../features/F_07_ev07-agent-runtime-business-events.md)。
 - **交付范围：**
   1. 在 `events/builtins`（或经 bootstrap 登记的等价入口）增加至少一组示例业务 EventType（建议 `tool.call`，可选 `tool.register`）：EventType 登记、CORE Handler、Build 链上的 Ops 动词能力、示例 BUILTIN/USER 扩展点说明。
-  2. CORE Handler 统一通过 `get_agent_runtime().get(session_id)` 取得 `BaseAgent`；未绑定或实例已释放时按事件语义失败（明确 StatusCode 或约定返回值，在 F_06 实施时写入 spec/feature，不静默成功）。
+  2. CORE Handler 统一通过 `get_agent_runtime().get(session_id)` 取得 `BaseAgent`；未绑定或实例已释放时按事件语义失败（明确 StatusCode 或约定返回值，在 F_07 实施时写入 spec/feature，不静默成功）。
   3. 嵌套触发路径与 EV-04 动词能力一致：Handler A 经 `ops.*` 触发事件 B 时，B 走完整 USER → BUILTIN → CORE，且 B 的 CORE 能解析到与 A 相同的 `session_id`。
   4. 文档与测试说明 CORE 不得调用会再次 `trigger` 同名 EventType 的公开路径（防递归）。
 - **不交付：** `AgentRuntime` 本身及 DeepAgent bind/unbind（属 `single_agent` / `harness`，可并行）；TeamAgent 全量场景；JiuwenSwarm 插件装卸与 UI 事件；完整业务 EventType 目录。
 - **模块边界：** Events 登记 Handler 与 Ops 能力；对 `BaseAgent` 的内部调用由 harness 或业务模块提供稳定 internal API。Events 不依赖 JiuwenSwarm；允许依赖 `openjiuwen.core.single_agent.agent_runtime` 与已公开的 Agent 能力入口。
-- **开工硬前置：** EV-04、EV-05；[F_06](../features/F_06_ev06-agent-runtime-business-events.md) 已建档；harness 侧 Session bind/unbind 可用于联调（非 Events 模块验收阻塞项）。
+- **开工硬前置：** EV-04、EV-05；[F_07](../features/F_07_ev07-agent-runtime-business-events.md) 已建档；harness 侧 Session bind/unbind 可用于联调（非 Events 模块验收阻塞项）。
 - **验收标准：**
   1. EV-07-V-01：给定已 bind 的 stub `BaseAgent`，示例 EventType 的 CORE Handler 能经 Runtime 调用约定 internal 方法并返回结果。
-  2. EV-07-V-02：未 bind 或 unbind 后，CORE 行为符合 F_06 约定（失败语义一致且有单测）。
+  2. EV-07-V-02：未 bind 或 unbind 后，CORE 行为符合 F_07 约定（失败语义一致且有单测）。
   3. EV-07-V-03：Ops 嵌套 `trigger` 后，内层 CORE 仍解析到同一 `session_id` 的 Agent（回归 EV-04 嵌套语义，含 EV-05 下扩展 Handler 仍被隔离）。
   4. EV-07-V-04：`register_builtins` / bootstrap 后宿主完成 Build，示例动词 Ops 可触发嵌套链且无同名事件递归（单测或集成测覆盖）。
-  5. EV-07-V-05：示例 EventType 的注册、匹配、三层链与 S_01 不变量兼容；新增错误语义如有则同步 S_01 或 F_06 实施记录。
+  5. EV-07-V-05：示例 EventType 的注册、匹配、三层链与 S_01 不变量兼容；新增错误语义如有则同步 S_01 或 F_07 实施记录。
 - **联合交付：** EV-07 可与 M-01 并行推进；M-02 真实工具/能力路径建议在 EV-06 通过后纳入联合场景。
+
+### EV-08 宿主按 Handler ID 限定派发
+
+- **目标与范围：** trigger 增加默认 None 的仅关键字 handler_ids，可消费 Runtime 已公开的注册 ID；候选缩小后仍走原 matcher/层级/容错。
+- **负责人及状态：** 见第 4 节；关联 [F_09](../features/F_09_handler-selection.md) 与 [S_01](../specs/S_01_events-contract.md)。
+- **必要前置：** EV-04/05；已合入 Server !99 的 PR06 / session.start 消费该机制，不把包激活策略放入 Core。
+- **验收：** 省略/空/混合/非法白名单、快照与注销、USER/BUILTIN、Validator/取消/故障隔离、旧调用兼容和真实宿主包定向调用。
+- **边界：** 无业务事件或 Ops，非授权；不改变原 M-01 的 EV-01～05 MVP 里程碑范围。
+
+### EV-12 FS 事件与 `ops.fs` 能力
+
+- **优先级：** P1；为插件提供受控文件访问，复用会话绑定的 Agent 后端。
+- **目标与范围：** 实现 `fs.read`、`fs.write`、`fs.list`、`fs.stat`、`fs.exists`、`fs.ancestors` 六个 CORE 事件，并通过 `ops.build` 注入 `ops.fs.*`。路径解析、沙箱、权限和超时由平台统一处理，不接入 `tool.call`。
+- **交付范围：**
+  1. 六个事件类型、输入/输出 Validator、CORE Handler 与 `ops.fs` 命名空间。
+  2. 通过 `AgentRuntime` 解析当前会话的 Agent，使用其 `deep_config.sys_operation` 执行；未绑定时返回 `denied`。
+  3. 统一工作目录播种与恢复、重入保护、超时预算和失败结果模型。
+- **不交付：** 流式读写、上传下载、`fs.disconnect`、`tool.call` 接入；不修改 `core/sys_operation/`。
+- **开工硬前置：** EV-04、EV-05、EV-07；[F_12](../features/F_12_fs-ops-events.md) 已建档。
+- **验收标准：** 见 [F_12 第 6 节](../features/F_12_fs-ops-events.md#6-验证) 的 FS 专项与 Events 回归结果。
+- **联合交付：** `fs.*` 可作为宿主内置能力独立验收，不改变 M-01 的既有范围；JiuwenSwarm 插件接入由对端计划维护。
 
 ## 3. 依赖关系与开发顺序
 
@@ -151,7 +172,9 @@ flowchart LR
     EV02 --> EV04["EV-04 完整调用链"]
     EV03 --> EV04
     EV04 --> EV05["EV-05 Handler 故障隔离"]
-    EV05 --> EV06["EV-07 AgentRuntime\n与业务 EventType"]
+    EV05 --> EV07["EV-07 AgentRuntime\n与业务 EventType"]
+    EV05 --> EV08["EV-08 宿主限定派发"]
+    EV07 --> EV12["EV-12 FS 事件\n与 ops.fs 能力"]
 
     EV01 --> Contract["M-02-CONTRACT\nUI 事件与 Session 映射"]
     Contract --> Server["M-02-SERVER"]
@@ -162,6 +185,7 @@ flowchart LR
     EV05 -.-> M01{"M-01 EventBus MVP"}
     EV07 -.-> M01
     EV07 -.-> M02
+    EV12 -.-> M02
     M01 ==> M02{"M-02 Swarm 联合验收"}
     Server -.-> M02
     Plugin -.-> M02
@@ -176,9 +200,11 @@ flowchart LR
 3. EV-02 和 EV-03 全部通过后，执行 EV-04 完整调用链集成。
 4. EV-04 只组装已有执行引擎和 Builder/Ops，并补齐跨模块门禁，不重复实现前两项的内部能力。
 5. EV-04 完成后执行 EV-05；先同步失败与输入/输出校验契约，再实现 USER / BUILTIN 固定 skip 与禁止重放，然后可启动 M-01（Fake 业务 CORE）与 EV-06 并行。
-6. EV-06 依赖 EV-04 嵌套 Ops 与 EV-05 故障边界；`AgentRuntime` bind/unbind 在 harness 落地后做联调，不阻塞 Events 侧单测（可用 stub Agent）。
+6. EV-07 依赖 EV-04 嵌套 Ops 与 EV-05 故障边界；`AgentRuntime` bind/unbind 在 harness 落地后做联调，不阻塞 Events 侧单测（可用 stub Agent）。
+7. EV-08 依赖 EV-04 和 EV-05，独立提供 Handler ID 限定派发能力。
+8. EV-12 依赖 EV-07 的 AgentRuntime 与会话绑定，先完成 FS 事件及 `ops.fs`，再扩展其他能力事件族。
 
-建议 EV-02、EV-03、EV-04、EV-05、EV-06 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
+建议 EV-02、EV-03、EV-04、EV-05、EV-06、EV-07、EV-08、EV-12 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
 
 ### 3.2 M-02 如何并行
 
@@ -211,7 +237,9 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-04 完整调用链集成                    | 完成  | 张瑶        | EV-02、EV-03 | EV-04-V-01～08 通过 | builtin 自动注册、外部 Build（只校验结果类型）、状态门禁、Session 规范化、逐 Handler Ops 和 `ExtensionEventBus` 导出已实现；EV-04 集成 5 项、Events 回归 67 项通过；V-02 的异常/取消与 V-06 的跳过不构建、V-08 的异常传播复用 EV-02/EV-03 覆盖，未新增专项用例 |
 | EV-05 扩展 Handler 故障隔离            | 已完成 | 张瑶        | EV-04 | EV-05-V-01～14 已覆盖；Events + callback 468 passed | 外部取消 `trigger()` 未单独覆盖；二期超时/`.catch` 不在范围 |
 | EV-06 Handler 包信息能力              | 已完成 | 李志远 | EV-03、EV-04；Extension 已有加载流程 | 专项 19 passed；两个仓库相关回归各 573 passed、1 skipped；静态检查与文档示例通过，见 [F_06 第 7 节](../features/F_06_ops-package.md#7-验证设计记录与结论) | 不新增业务触发入口；既有符号链接测试因环境权限跳过 |
-| EV-07 AgentRuntime 与业务 EventType | 已完成 | 张瑶        | EV-04、EV-05；F_06 已建档 | EV-06-V-01～05 未执行 | 方案见 F_06；harness `AgentRuntime` bind/unbind 已部分落地，Events builtins 与示例 CORE/Ops 待实现 |
+| EV-07 AgentRuntime 与业务 EventType | 已完成 | 张瑶        | EV-04、EV-05；F_07 已建档 | EV-06-V-01～05 未执行 | 方案见 [F_07](../features/F_07_ev07-agent-runtime-business-events.md)；harness `AgentRuntime` bind/unbind 已部分落地，Events builtins 与示例 CORE/Ops 待实现 |
+| EV-08 宿主限定派发 | 完成 | 刘瑜 | EV-04/05 | Core 595 passed / 1 skipped；已合入 Server 1327 passed / 2 skipped（含 94 项生命周期）；见 [F_09](../features/F_09_handler-selection.md#6-验收与未决问题) | 保留 handler_ids 与 Protocol，兼容目标 AgentRuntime 与包信息能力；本轮未重跑真实模型、浏览器或远端 CI |
+| EV-12 FS 事件与 `ops.fs` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | FS 专项 23 passed；Events 回归 138 passed | 六个 CORE 事件与 `ops.fs` 已实现；方案见 [F_12](../features/F_12_fs-ops-events.md) |
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
 | M-02 Swarm 联合验收                  | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
@@ -240,4 +268,7 @@ git diff --check
 | 2026-10-23 | 1.3 | EV-05 范围对齐 F_05：USER/BUILTIN 统一 skip、input/output Validator、禁止下游重放；同步 S_01、概览、架构与本计划            | 代码与 EV-05-V-01～14 测试尚未执行                                                                     |
 | 2026-10-23 | 1.4 | EV-05 实现并验收：Validator、USER/BUILTIN skip 与禁止重放、`ops.build` 通用 Validator                          | 见 F_05 第 8.2 节；M-01 联合场景待执行                                                                  |
 | 2026-10-30 | 1.5 | 新增 EV-06 包信息读取能力，按 F_06 补齐契约、登记与加载验证，并完成目标仓迁移复核                                                 | 不改变既有联合验收范围；验证边界见 F_06                                                                       |
-| 2026-10-31 | 1.5 | 新增 P1 工作项 EV-07：CORE 经 AgentRuntime 执行业务、示例 EventType/Ops 嵌套模式；与 M-01/M-02 的关系见 §2 EV-07 与 §3.3 | EV-07 代码与 EV-07-V-01～05 待执行；见 [F_06](../features/F_07_ev07-agent-runtime-business-events.md) |
+| 2026-10-31 | 1.5 | 新增 P1 工作项 EV-07：CORE 经 AgentRuntime 执行业务、示例 EventType/Ops 嵌套模式；与 M-01/M-02 的关系见 §2 EV-07 与 §3.3 | EV-07 代码与 EV-07-V-01～05 待执行；见 [F_07](../features/F_07_ev07-agent-runtime-business-events.md) |
+
+| 2026-11-02 | 1.6 | Core !110 集成当前目标分支，保留 AgentRuntime 与 Team 工作项；限定派发顺延为 EV-08 / F_09，修复本计划中 AgentRuntime feature 的旧文件名引用 | 公开 handler_ids 契约保持；本轮验证和 Server !99 消费证据见 F_09 第 6 节 |
+| 2026-11-02 | 1.7 | 新增 EV-12 FS 事件与 `ops.fs` 能力，补齐六事件、会话后端解析、路径与超时边界 | 见 [F_12](../features/F_12_fs-ops-events.md) 第 7 节 |
