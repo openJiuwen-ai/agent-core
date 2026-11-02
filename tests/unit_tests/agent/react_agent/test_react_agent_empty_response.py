@@ -2,7 +2,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    AssistantMessage,
+    UsageMetadata,
+    UserMessage,
+)
 from openjiuwen.core.single_agent.agents.react_agent import (
     EMPTY_RESPONSE_MSG,
     ReActAgent,
@@ -11,9 +16,9 @@ from openjiuwen.core.single_agent.agents.react_agent import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
-def _agent_with_model(*responses: AssistantMessage):
+def _agent_with_model(*responses: AssistantMessage, max_iterations: int = 5):
     agent = ReActAgent(card=AgentCard(name="empty-response-test"))
-    agent.configure(ReActAgentConfig(model_name="fake"))
+    agent.configure(ReActAgentConfig(model_name="fake", max_iterations=max_iterations))
     messages = []
     context = MagicMock()
     context.get_messages.side_effect = lambda **_: list(messages)
@@ -69,7 +74,9 @@ async def test_empty_stop_turn_is_retried_once_and_the_answer_returned() -> None
     assert result["result_type"] == "answer"
     assert result["output"] == "Here is the table."
     assert model.invoke.await_count == 2
-    assert len(_notices(messages)) == 1
+    notices = _notices(messages)
+    assert len(notices) == 1
+    assert notices[0].metadata[OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA] == "empty_response"
 
 
 @pytest.mark.asyncio
@@ -84,6 +91,20 @@ async def test_repeated_empty_turn_ends_with_an_error_not_an_empty_answer() -> N
     assert result["finish_reason"] == "stop"
     assert result["reasoning_present"] is True
     assert model.invoke.await_count == 2
+    assert len(_notices(messages)) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_turn_on_the_last_iteration_errors_without_a_notice() -> None:
+    agent, session, model, messages = _agent_with_model(_empty(), max_iterations=1)
+
+    with patch.object(agent, "_get_llm", return_value=model):
+        result = await agent.invoke({"query": "compile the table"}, session=session)
+
+    assert result["result_type"] == "error"
+    assert result["output"] == EMPTY_RESPONSE_MSG
+    assert model.invoke.await_count == 1
+    assert not _notices(messages)
 
 
 @pytest.mark.asyncio

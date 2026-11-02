@@ -3163,12 +3163,17 @@ class ReActAgent(BaseAgent):
                                 await self.context_engine.save_contexts(session)
                                 continue
                             if isinstance(ai_message.content, str) and not ai_message.content.strip():
-                                await context.add_messages(UserMessage(content=_EMPTY_RESPONSE_NOTICE))
                                 if (
                                     empty_response_retries < EMPTY_RESPONSE_MAX_RETRIES
                                     and iteration + 1 < iteration_limit
                                 ):
                                     empty_response_retries += 1
+                                    await context.add_messages(
+                                        UserMessage(
+                                            content=_EMPTY_RESPONSE_NOTICE,
+                                            metadata={OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "empty_response"},
+                                        )
+                                    )
                                     logger.info(
                                         "[ReActAgent] empty no-tool turn; retry=%s/%s session_id=%s "
                                         "iteration=%s reasoning_present=%s",
