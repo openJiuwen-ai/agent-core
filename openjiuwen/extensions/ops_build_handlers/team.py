@@ -17,6 +17,13 @@ is ``next_handler(event)``'s job). Resource queries take an optional
 bound for the current call — never a guess, so without a bound team the
 caller must pass the name explicitly, even when the session holds only
 one team.
+
+Task and message rows live in per-session dynamic tables, so their query
+methods also take an optional ``session_id``: omitted or ``None`` means
+the calling session; pass it explicitly to read a
+team's records from another session. ``(team_name, session_id)`` is what
+locates one set of dynamic tables, so task and message ids stay
+unambiguous across sessions.
 """
 
 from __future__ import annotations
@@ -124,26 +131,65 @@ def _resolve_team_name(team_name: str | None) -> str:
     return resolved
 
 
+def _page_offset(
+    cursor: str | None,
+    resolved_session: str,
+    resolved_team: str,
+    filters: dict[str, Any],
+) -> int:
+    """Decode the message cursor into its page offset, validating its binding.
+
+    Raises:
+        BaseError: ``AGENT_TEAM_CONFIG_INVALID`` when the cursor is invalid
+            or bound to a different session, team or filters.
+    """
+    if cursor is None:
+        return 0
+    decoded = _decode_cursor(cursor)
+    if decoded.session_id != resolved_session or decoded.team_name != resolved_team:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="message cursor belongs to a different session or team",
+        )
+    if decoded.filters != filters:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="message cursor does not match the current filters",
+        )
+    if decoded.offset < 0:
+        raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="message cursor offset is negative")
+    return decoded.offset
+
+
 async def _resolve_view(
     resolver: TeamResourceResolver,
     ops: EventHandlerOps,
     team_name: str | None,
-) -> tuple[str, TeamReadView]:
-    """Resolve the session's read view for the target team.
+    session_id: str | None = None,
+) -> tuple[str, str, TeamReadView]:
+    """Resolve the read view for the target team.
+
+    Args:
+        ops: The call's ops context; the default session source.
+        team_name: Explicit team name, else the bound current team.
+        session_id: The session whose dynamic tables the view binds;
+            omitted or ``None`` means the calling session. Pass it
+            explicitly to read a team's records from another session.
 
     Raises:
         BaseError: ``AGENT_TEAM_STATE_INVALID`` when the session is
             missing or the team has no row in the database.
     """
-    session_id = _require_session_id(ops)
+    caller_session = _require_session_id(ops)
     resolved_team = _resolve_team_name(team_name)
-    view = await resolver.resolve(session_id, resolved_team)
+    resolved_session = session_id if session_id is not None else caller_session
+    view = await resolver.resolve(resolved_session, resolved_team)
     if view is None:
         raise_error(
             StatusCode.AGENT_TEAM_STATE_INVALID,
             reason=f"team '{resolved_team}' not found",
         )
-    return resolved_team, view
+    return resolved_team, resolved_session, view
 
 
 def _message_filters(
@@ -175,12 +221,12 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
 
     async def info(ops: EventHandlerOps, *, team_name: str | None = None) -> TeamInfo | None:
         """Query the accessible team's info."""
-        _, view = await _resolve_view(resolver, ops, team_name)
+        _, _, view = await _resolve_view(resolver, ops, team_name)
         return await view.team_info()
 
     async def members(ops: EventHandlerOps, *, team_name: str | None = None) -> list[MemberInfo]:
         """Query the team's member roster as read-only views."""
-        _, view = await _resolve_view(resolver, ops, team_name)
+        _, _, view = await _resolve_view(resolver, ops, team_name)
         return list(await view.members())
 
     async def member(
@@ -190,22 +236,33 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         team_name: str | None = None,
     ) -> MemberInfo | None:
         """Query one member of the team; None when not found."""
-        _, view = await _resolve_view(resolver, ops, team_name)
+        _, _, view = await _resolve_view(resolver, ops, team_name)
         return await view.member(member_name)
 
-    async def tasks(ops: EventHandlerOps, *, team_name: str | None = None) -> list[TaskInfo]:
+    async def tasks(
+        ops: EventHandlerOps,
+        *,
+        team_name: str | None = None,
+        session_id: str | None = None,
+    ) -> list[TaskInfo]:
         """Query the team's task list as read-only views."""
-        _, view = await _resolve_view(resolver, ops, team_name)
+        _, _, view = await _resolve_view(resolver, ops, team_name, session_id)
         return list(await view.tasks())
 
-    async def task(ops: EventHandlerOps, task_id: str, *, team_name: str | None = None) -> TaskInfo:
+    async def task(
+        ops: EventHandlerOps,
+        task_id: str,
+        *,
+        team_name: str | None = None,
+        session_id: str | None = None,
+    ) -> TaskInfo:
         """Query one task, validating it belongs to the target team.
 
         Raises:
             BaseError: ``AGENT_TEAM_STATE_INVALID`` when the task does not
                 exist or belongs to another team.
         """
-        resolved_team, view = await _resolve_view(resolver, ops, team_name)
+        resolved_team, _, view = await _resolve_view(resolver, ops, team_name, session_id)
         task_info = await view.task(task_id)
         if task_info is None:
             raise_error(
@@ -224,6 +281,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         task_id: str,
         *,
         team_name: str | None = None,
+        session_id: str | None = None,
     ) -> list[TaskDependencyInfo]:
         """Query one task's direct dependencies.
 
@@ -234,7 +292,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
             BaseError: ``AGENT_TEAM_STATE_INVALID`` when the task or any
                 dependency endpoint is missing or belongs to another team.
         """
-        resolved_team, view = await _resolve_view(resolver, ops, team_name)
+        resolved_team, _, view = await _resolve_view(resolver, ops, team_name, session_id)
         dependencies = await view.task_dependencies(task_id)
         checked: list[TaskDependencyInfo] = []
         for dependency in dependencies:
@@ -264,6 +322,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         limit: int = _MESSAGE_PAGE_LIMIT_DEFAULT,
         cursor: str | None = None,
         team_name: str | None = None,
+        session_id: str | None = None,
     ) -> MessagePage:
         """Query the team's messages with filters, ordering and pagination.
 
@@ -283,26 +342,9 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason=f"limit must be between {_MESSAGE_PAGE_LIMIT_MIN} and {_MESSAGE_PAGE_LIMIT_MAX}",
             )
-        session_id = _require_session_id(ops)
-        resolved_team, view = await _resolve_view(resolver, ops, team_name)
+        resolved_team, resolved_session, view = await _resolve_view(resolver, ops, team_name, session_id)
         filters = _message_filters(from_member_name, to_member_name, broadcast)
-
-        offset = 0
-        if cursor is not None:
-            decoded = _decode_cursor(cursor)
-            if decoded.session_id != session_id or decoded.team_name != resolved_team:
-                raise_error(
-                    StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                    reason="message cursor belongs to a different session or team",
-                )
-            if decoded.filters != filters:
-                raise_error(
-                    StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                    reason="message cursor does not match the current filters",
-                )
-            if decoded.offset < 0:
-                raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="message cursor offset is negative")
-            offset = decoded.offset
+        offset = _page_offset(cursor, resolved_session, resolved_team, filters)
 
         visible = await view.messages()
         if view.hide_dm and to_member_name is not None:
@@ -317,7 +359,12 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         next_cursor = None
         if offset + limit < len(filtered):
             next_cursor = _encode_cursor(
-                _MessageCursor(session_id=session_id, team_name=resolved_team, filters=filters, offset=offset + limit),
+                _MessageCursor(
+                    session_id=resolved_session,
+                    team_name=resolved_team,
+                    filters=filters,
+                    offset=offset + limit,
+                ),
             )
         return MessagePage(items=tuple(page), next_cursor=next_cursor)
 
@@ -326,6 +373,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
         message_id: str,
         *,
         team_name: str | None = None,
+        session_id: str | None = None,
     ) -> MessageInfo:
         """Query one message, validating team ownership and visibility.
 
@@ -334,7 +382,7 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
                 missing, belongs to another team, or is not visible to
                 this caller (e.g. a direct message under hide-dm).
         """
-        resolved_team, view = await _resolve_view(resolver, ops, team_name)
+        resolved_team, _, view = await _resolve_view(resolver, ops, team_name, session_id)
         message_info = await view.message(message_id)
         if message_info is None:
             raise_error(
