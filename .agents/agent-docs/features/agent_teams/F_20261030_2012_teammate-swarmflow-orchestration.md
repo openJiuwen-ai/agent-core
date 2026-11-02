@@ -8,22 +8,6 @@ modules:
 files:
 - openjiuwen/agent_teams/workflow/swarmflow_infra.py
 - openjiuwen/agent_teams/workflow/tool_swarmflow.py
-- openjiuwen/agent_teams/agent/infra.py
-- openjiuwen/agent_teams/agent/agent_configurator.py
-- openjiuwen/agent_teams/agent/team_agent.py
-- openjiuwen/agent_teams/agent/coordination/handlers/workflow.py
-- openjiuwen/agent_teams/spawn/inprocess_spawn.py
-- openjiuwen/agent_teams/harness/team_harness.py
-- openjiuwen/agent_teams/runtime/background_task_controller.py
-- openjiuwen/agent_teams/schema/events.py
-- openjiuwen/agent_teams/schema/blueprint.py
-- openjiuwen/agent_teams/tools/tool_factory.py
-- openjiuwen/agent_teams/tools/tool_permissions.py
-- openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py
-- openjiuwen/agent_teams/workflow/engine/primitives.py
-- openjiuwen/agent_teams/workflow/engine/progress.py
-- openjiuwen/agent_teams/workflow/engine/runner.py
-- openjiuwen/agent_teams/workflow/runner.py
 designs:
 - SDD-0031
 design_note: 设计依据见 SDD-0031
@@ -36,7 +20,7 @@ author_email: xiajing22@huawei.com
 
 | 项 | 值 |
 |---|---|
-| 范围 | 见 frontmatter files（工具开放/归因/叙述路由/human 硬化四主题，18 文件） |
+| 范围 | 工具开放与归因：workflow/swarmflow_infra.py、workflow/tool_swarmflow.py、agent/infra.py、agent/agent_configurator.py、agent/team_agent.py、agent/coordination/handlers/workflow.py；运行与生命周期：spawn/inprocess_spawn.py、harness/team_harness.py、runtime/background_task_controller.py、schema/events.py、schema/blueprint.py、tools/tool_factory.py、tools/tool_permissions.py；workflow 引擎：workflow/backends/avatar_session_backend.py、workflow/engine/primitives.py、workflow/engine/progress.py、workflow/engine/runner.py、workflow/runner.py（共 17 文件；frontmatter files 只登记工具开放核心） |
 | 测试基线 | `tests/unit_tests/agent_teams/` 13 件 153 passed：test_swarmflow_infra、test_teammate_controller_attach、test_swarmflow_owner、test_swarmflow_leader、test_swarmflow_locales、test_tool_factory、test_reply_buffer、test_engine_retryable、test_pause_resume、test_runner、test_swarmflow_invoke_control、test_background_task_controller、test_shutdown_stops_owned_runs |
 | 关联设计 | SDD-0031 |
 
