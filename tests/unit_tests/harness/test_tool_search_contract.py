@@ -350,6 +350,35 @@ async def test_search_result_requires_tool_call_wrapper_and_unknown_name_is_reje
 
 
 @pytest.mark.asyncio
+async def test_sessionless_search_authorizes_wrapper_only_for_current_invocation():
+    rail, agent, manager = _rail_and_agent()
+    rail.seed_cached_tools(all_tool_infos=[
+        ToolInfo(name="cron_create_job", description="Create a calendar reminder", parameters=FULL_SCHEMA)
+    ])
+    search = manager.registered["tool_search"][1]
+    result = await search.invoke({"query": "calendar"}, session=None)
+    assert result.success is True
+
+    wrapper = manager.registered["tool_call"][1]
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=SimpleNamespace(id="sessionless-wrapper"),
+            tool_name="tool_call",
+            tool_args={"name": "cron_create_job", "args": {"when": "tomorrow", "text": "call mom"}},
+        ),
+        session=None,
+    )
+    output = await wrapper.invoke(ctx.inputs.tool_args, session=None, _tool_callback_context=ctx)
+    assert output.success is True
+    assert manager.executed[-1].name == "cron_create_job"
+
+    await rail.after_invoke(ctx)
+    denied = await wrapper.invoke(ctx.inputs.tool_args, session=None, _tool_callback_context=ctx)
+    assert denied.success is False
+
+
+@pytest.mark.asyncio
 async def test_tool_call_preserves_deferred_tool_interrupt(monkeypatch):
     rail, agent, manager = _rail_and_agent()
     rail.seed_cached_tools(all_tool_infos=[

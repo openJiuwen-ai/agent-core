@@ -420,6 +420,7 @@ class DeepAgent(BaseAgent):
             config.progressive_tool_enabled,
             direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES,
         )
+        self.ability_manager.refresh_tool_exposure_policy()
         if config.card is not None:
             self.card = config.card
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))

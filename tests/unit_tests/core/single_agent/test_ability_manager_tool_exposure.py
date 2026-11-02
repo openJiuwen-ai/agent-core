@@ -74,13 +74,27 @@ def test_shared_card_exposure_is_fixed_on_first_registration():
     assert progressive.add(card).added is True
     assert card.exposure is ToolExposure.DEFERRED
 
-    # Exposure belongs to the ToolCard. Reusing the same card instance in a
-    # second manager keeps that registration-time decision; callers that need a
-    # different policy should provide a separate card or an explicit value.
+    # Sharing the card preserves the first registration's exposure.
     normal = AbilityManager(owner_id="normal")
     normal.set_tool_exposure_policy(False)
     assert normal.add(card).added is True
     assert card.exposure is ToolExposure.DEFERRED
+
+
+def test_refresh_policy_updates_implicit_cards_but_preserves_explicit_cards():
+    manager = AbilityManager(owner_id="refresh-agent")
+    implicit = ToolCard(id="implicit", name="implicit")
+    explicit = ToolCard(id="explicit", name="explicit", exposure=ToolExposure.DIRECT)
+    manager.add([implicit, explicit])
+    revision = manager.registry_revision
+
+    manager.set_tool_exposure_policy(True, direct_tool_names={"tool_search"})
+    manager.refresh_tool_exposure_policy()
+
+    assert implicit.exposure is ToolExposure.DEFERRED
+    assert explicit.exposure is ToolExposure.DIRECT
+    assert manager.registry_revision == revision + 1
+
 
 
 def test_tool_card_exposure_marker_uses_public_accessors():

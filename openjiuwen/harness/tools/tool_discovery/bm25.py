@@ -42,7 +42,7 @@ def _tool_text(tool: ToolInfo) -> str:
             str(getattr(tool, "description", "") or ""),
             _parameters_text(getattr(tool, "parameters", None)),
         ]
-    )
+    ).casefold()
 
 
 def _is_tool_name_boundary_char(value: str) -> bool:

@@ -200,6 +200,20 @@ class AbilityManager:
                 if str(name).strip()
             }
 
+    def refresh_tool_exposure_policy(self) -> None:
+        """Reapply a changed policy to cards without explicit exposure values."""
+        for card in self._tools.values():
+            if not card.get_exposure_policy_defaulted():
+                continue
+            resolved = (
+                ToolExposure.DIRECT
+                if card.name in self._direct_tool_names or not self._progressive_tool_enabled
+                else ToolExposure.DEFERRED
+            )
+            if card.exposure != resolved:
+                card.exposure = resolved
+                self._mark_registry_changed()
+
     def _apply_tool_exposure_policy(self, card: ToolCard) -> ToolExposure:
         """Resolve and assign the card's exposure at registration time."""
         name = str(getattr(card, "name", "") or "")
@@ -208,6 +222,7 @@ class AbilityManager:
         if declared_marker is None:
             declared_marker = "exposure" in getattr(card, "model_fields_set", set())
             card.set_exposure_declared(declared_marker)
+            card.set_exposure_policy_defaulted(not declared_marker)
         # Identify an explicitly supplied value before this registration policy
         # mutates the card. The resolved value is stored on ToolCard itself so
         # every later consumer reads the same registration-time decision.
@@ -1234,19 +1249,31 @@ class AbilityManager:
                     # or shared instance would compound the prefix per call).
                     exposed = mcp_tool.model_copy(update={"name": mcp_tool_name})
                     existing_card = self._tools.get(mcp_tool_name)
-                    if existing_card is None or existing_card.id != mcp_tool_id:
-                        # MCP tool cards are materialized lazily when the
-                        # server's schemas are first fetched. Route this path
-                        # through the same registration policy as ordinary
-                        # tools so progressive agents mark them deferred and
-                        # advance the ordinary registry revision through add().
+                    if (
+                        existing_card is None
+                        or existing_card.id != mcp_tool_id
+                        or existing_card.description != exposed.description
+                        or existing_card.input_params != (exposed.parameters or {})
+                    ):
+                        # MCP cards materialize lazily. New cards use normal
+                        # registration; changed schemas replace the cached
+                        # card without triggering add()'s collision guard.
                         existing_card = ToolCard(
                             id=mcp_tool_id,
                             name=mcp_tool_name,
                             description=exposed.description,
                             input_params=exposed.parameters or {},
                         )
-                        self.add(existing_card)
+                        if self._tools.get(mcp_tool_name) is None:
+                            self.add(existing_card)
+                        else:
+                            # A refreshed MCP schema is the same model-facing
+                            # tool, even when its raw server id changed. The
+                            # ordinary add() name-collision guard must not
+                            # discard this replacement.
+                            self._apply_tool_exposure_policy(existing_card)
+                            self._tools[mcp_tool_name] = existing_card
+                            self._mark_registry_changed()
                     tool_infos.append(exposed)
 
         # Last line of defense: never hand a non-LLM-safe name to a provider —

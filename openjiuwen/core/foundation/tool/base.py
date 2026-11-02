@@ -24,6 +24,7 @@ class ToolCard(BaseCard):
     # Registration policy bookkeeping. These private attributes never enter
     # the model-facing ToolInfo/schema.
     _exposure_declared: bool | None = PrivateAttr(default=None)
+    _exposure_policy_defaulted: bool | None = PrivateAttr(default=None)
 
     exposure: ToolExposure = Field(
         default=ToolExposure.DIRECT,
@@ -72,6 +73,13 @@ class ToolCard(BaseCard):
     def set_exposure_declared(self, value: bool | None) -> None:
         """Record that the registration policy has inspected this card."""
         self._exposure_declared = value
+
+    def get_exposure_policy_defaulted(self) -> bool | None:
+        """Whether registration assigned exposure instead of an explicit value."""
+        return self._exposure_policy_defaulted
+
+    def set_exposure_policy_defaulted(self, value: bool) -> None:
+        self._exposure_policy_defaulted = value
 
 
 class _ToolMeta(ABCMeta):

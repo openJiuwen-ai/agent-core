@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel
@@ -67,11 +68,28 @@ class ProgressiveToolRail(DeepAgentRail):
         self._tool_search_index: Optional[BM25ToolIndex] = None
         self._tool_search_index_revision: Optional[int] = None
         self._tool_search_registry: Any = None
+        # Some lightweight invocations do not provide a Session. Keep their
+        # search grants isolated to the current async context instead.
+        self._invoke_discovered_tools: ContextVar[frozenset[str]] = ContextVar(
+            f"progressive_discovered_tools_{id(self)}", default=frozenset()
+        )
 
     def init(self, agent) -> None:
         """Register progressive meta tools to resource manager and ability manager."""
         language = getattr(self._config, "language", "cn") or "cn"
         agent_id = getattr(getattr(agent, "card", None), "id", None)
+        manager = getattr(agent, "ability_manager", None)
+        set_policy = getattr(manager, "set_tool_exposure_policy", None)
+        if callable(set_policy):
+            # A manifest may attach this rail to an existing agent without
+            # setting DeepAgentConfig.progressive_tool_enabled. In that case
+            # the rail itself must activate the registration policy.
+            from openjiuwen.harness.deep_agent import _DEFAULT_DIRECT_TOOL_NAMES
+
+            set_policy(True, direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES)
+            refresh_policy = getattr(manager, "refresh_tool_exposure_policy", None)
+            if callable(refresh_policy):
+                refresh_policy()
 
         tools = [
             ToolSearchTool(
@@ -167,11 +185,13 @@ class ProgressiveToolRail(DeepAgentRail):
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Cache the full registered tool inventory for discovery authorization."""
+        self._invoke_discovered_tools.set(frozenset())
         self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
         self._ensure_initial_deferred_catalog(ctx)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
+        self._invoke_discovered_tools.set(frozenset())
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Update builder sections and filter callable tools for the current turn."""
@@ -415,7 +435,7 @@ class ProgressiveToolRail(DeepAgentRail):
         session: Any = None,
     ) -> List[Dict[str, Any]]:
         """Search BM25 and authorize matching tools for the wrapper call."""
-        query = (query or "").strip().lower()
+        query = (query or "").strip().casefold()
         if not query:
             return []
 
@@ -549,14 +569,12 @@ class ProgressiveToolRail(DeepAgentRail):
 
     def _authorize_discovered_tools(self, session: Any, names: List[str]) -> None:
         """Record search hits as callable through ``tool_call`` for this session."""
-        if session is None:
-            return
         current = self._get_discovered_tools(session)
         self._set_discovered_tools(session, list(dict.fromkeys(current + names)))
 
     def _get_discovered_tools(self, session: Any) -> List[str]:
         if session is None:
-            return []
+            return list(self._invoke_discovered_tools.get())
         state = session.get_state(_DISCOVERED_TOOLS_KEY)
         if isinstance(state, list):
             return [str(item).strip() for item in state if str(item).strip()]
@@ -564,6 +582,7 @@ class ProgressiveToolRail(DeepAgentRail):
 
     def _set_discovered_tools(self, session: Any, names: List[str]) -> None:
         if session is None:
+            self._invoke_discovered_tools.set(frozenset(names))
             return
         session.update_state({
             _DISCOVERED_TOOLS_KEY: list(
@@ -574,7 +593,7 @@ class ProgressiveToolRail(DeepAgentRail):
     def _invalidate_discovered_tools(self, session: Any, names: Set[str]) -> None:
         """Forget search authorizations for changed or removed deferred tools."""
 
-        if session is None or not names:
+        if not names:
             return
         current = self._get_discovered_tools(session)
         retained = [tool_name for tool_name in current if tool_name not in names]
@@ -593,12 +612,9 @@ class ProgressiveToolRail(DeepAgentRail):
         card = ability_manager.get(tool_name) if ability_manager is not None else None
         if not isinstance(card, ToolCard):
             if (
-                ctx.extra.get(_NESTED_TOOL_CALL_KEY)
+                card is not None
+                and ctx.extra.get(_NESTED_TOOL_CALL_KEY)
                 and tool_name in self._get_discovered_tools(session)
-                and tool_name in {
-                    str(getattr(tool, "name", "") or "")
-                    for tool in self._cached_all_tool_infos
-                }
             ):
                 return
             self._reject_tool_call(ctx, f"Unknown tool '{tool_name}'.")
