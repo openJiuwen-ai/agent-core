@@ -851,7 +851,7 @@ async def test_only_assigned_team_can_create_child_tasks(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_root_task_gets_default_summary_team_aggregation(org_manager):
+async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
     manager, _ = org_manager
     creator = OrgTaskCreator(
         creator_type="team_leader",
@@ -889,7 +889,7 @@ async def test_root_task_gets_default_summary_team_aggregation(org_manager):
     assert root.ok and root.task is not None
     assert child.ok and child.task is not None
     assert root.task.aggregation is not None
-    assert root.task.aggregation.mode == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert root.task.aggregation.mode == OrgTaskAggregationMode.HIERARCHICAL
     assert root.task.aggregation.final_output_task_id == "root-task-1"
     assert child.task.aggregation is None
     selected_root = await manager.get_task("root-task-1")
