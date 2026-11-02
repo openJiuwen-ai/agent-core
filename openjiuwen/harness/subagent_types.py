@@ -145,14 +145,20 @@ def apply_subagent_type_enum(card: Any, names: Iterable[str]) -> None:
     properties = params.get("properties")
     if not isinstance(properties, dict):
         return
-    spec = properties.get("subagent_type")
-    if not isinstance(spec, dict):
-        return
+    candidates = [properties.get("subagent_type")]
+    tasks = properties.get("tasks")
+    items = tasks.get("items") if isinstance(tasks, dict) else None
+    nested = items.get("properties") if isinstance(items, dict) else None
+    if isinstance(nested, dict):
+        candidates.append(nested.get("subagent_type"))
     enum_names = [name for name in names if name]
-    if enum_names:
-        spec["enum"] = enum_names
-    else:
-        spec.pop("enum", None)
+    for spec in candidates:
+        if not isinstance(spec, dict):
+            continue
+        if enum_names:
+            spec["enum"] = list(enum_names)
+        else:
+            spec.pop("enum", None)
     card.input_params = params
 
 

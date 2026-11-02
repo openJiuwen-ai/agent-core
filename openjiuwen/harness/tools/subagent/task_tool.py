@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import uuid
+import copy
+import math
+from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
 
@@ -14,7 +15,6 @@ if TYPE_CHECKING:
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.kv_cache import kv_cache_hooks
@@ -23,6 +23,9 @@ from openjiuwen.harness.subagent_lifecycle import (
     prepare_subagent_task_resources,
 )
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.subagent.task_manager import (
+    AsyncSubagentTaskManager, TaskRequest,
+)
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.subagent_types import (
     apply_subagent_type_enum,
@@ -30,33 +33,11 @@ from openjiuwen.harness.subagent_types import (
     listed_subagent_types,
     listed_types_from_parent,
     resolved_type_from_parent,
+    tool_owner_id_of,
 )
-try:
-    from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
-        browser_agent_log_info,
-    )
-except Exception:  # pragma: no cover - browser runtime is optional here
-    browser_agent_log_info = None
-
-
 # Keep the delegation deadline above the browser runtime's 600-second task
 # budget so subagent startup and final response assembly are not cut short.
 DEFAULT_SUBAGENT_TASK_TIMEOUT_S = 1800.0
-
-
-def _summarize_task_description(task_description: Any) -> dict[str, Any]:
-    task_text = str(task_description or "")
-    task_hash = ""
-    if task_text:
-        task_hash = hashlib.sha256(
-            task_text.encode("utf-8", errors="ignore")
-        ).hexdigest()[:12]
-
-    return {
-        "redacted": True,
-        "length": len(task_text),
-        "sha256_12": task_hash,
-    }
 
 
 class TaskTool(Tool):
@@ -64,7 +45,7 @@ class TaskTool(Tool):
 
     This tool creates a new subagent instance, assigns it an independent
     session to prevent context pollution, and returns the subagent's
-    final output after task completion.
+    completed results as they become available.
     """
 
     def __init__(
@@ -84,24 +65,191 @@ class TaskTool(Tool):
         super().__init__(card)
         self.parent_agent = parent_agent
         self.language = language
-        self._pending_subagents: dict[str, tuple[Any, bool]] = {}
+        self.task_manager = AsyncSubagentTaskManager(tool_owner_id_of(parent_agent) or card.id)
+        tracker = getattr(parent_agent, "_track_task_group_tool", None)
+        if callable(tracker):
+            tracker(self)
+
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
+        if not isinstance(inputs, dict):
+            return ToolOutput(success=False, error="invalid_arguments: inputs must be an object")
+        return await self._invoke_group(inputs, **kwargs)
+
+    def parse_group_inputs(self, inputs):
+        """Validate and resolve a group call without submitting or consuming tasks."""
+        action = inputs.get("action")
+        if action not in {"dispatch", "wait", "cancel"}:
+            raise ValueError("invalid_action")
+        if any(key in inputs for key in ("subagent_type", "task_description", "browser_capabilities")):
+            raise ValueError("invalid_arguments: do not mix single-task and action fields")
+        task_ids = inputs.get("task_ids", [])
+        if not isinstance(task_ids, list) or any(not isinstance(key, str) or not key.strip() for key in task_ids):
+            raise ValueError("invalid_arguments: task_ids must be nonempty strings")
+        task_ids = list(dict.fromkeys(task_ids))
+        requests = []
+        if action == "dispatch":
+            tasks = inputs.get("tasks")
+            if not isinstance(tasks, list) or not tasks or len(tasks) + len(task_ids) > 128:
+                raise ValueError("invalid_arguments: a nonempty bounded tasks list is required")
+            for task in tasks:
+                if not isinstance(task, dict):
+                    raise ValueError("invalid_arguments: each task must be an object")
+                kind, description = task.get("subagent_type"), task.get("task_description")
+                for value in (kind, description):
+                    if not isinstance(value, str) or not value.strip():
+                        raise ValueError("invalid_arguments: each task needs a type and description")
+                resolved = self._resolve_requested_type(kind)
+                if isinstance(resolved, ToolOutput):
+                    raise ValueError(str(resolved.error))
+                capabilities = task.get("browser_capabilities")
+                if capabilities is not None:
+                    if (
+                        resolved != "browser_agent"
+                        or not isinstance(capabilities, list)
+                        or any(not isinstance(item, str) for item in capabilities)
+                    ):
+                        raise ValueError("invalid_arguments: invalid browser_capabilities")
+                    capabilities = tuple(capabilities)
+                requests.append(TaskRequest(resolved, description, capabilities))
+        elif "tasks" in inputs or not task_ids or len(task_ids) > 128:
+            raise ValueError("invalid_arguments: wait/cancel requires task_ids and no tasks")
+        timeout = inputs.get("timeout_s")
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise ValueError("invalid_timeout")
+            if not math.isfinite(timeout) or timeout < 0:
+                raise ValueError("invalid_timeout")
+        return action, requests, task_ids, timeout
+
+    async def _invoke_group(self, inputs, **kwargs):
+        started = monotonic()
+        session = kwargs.get("session")
+        if not isinstance(session, Session):
+            raise build_error(StatusCode.TOOL_TASK_TOOL_INVOKED, reason="TaskTool requires a valid session")
+        try:
+            action, requests, task_ids, timeout = self.parse_group_inputs(inputs)
+            call_id = kwargs.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError("invalid_arguments: stable tool_call_id is required")
+            manager = self.task_manager
+            scope = manager.scope_for_session(session.get_session_id())
+            if action == "dispatch":
+                receipt = manager.submit_batch(
+                    scope, call_id, requests, existing_ids=task_ids, executor_factory=self._group_executor
+                )
+                task_ids, submitted = receipt.wait_ids, receipt.submitted
+            else:
+                submitted = []
+            if action == "cancel":
+                states = await manager.cancel(scope, task_ids)
+                manager.mark_delivered(scope, [item["task_id"] for item in states])
+                return ToolOutput(
+                    success=True,
+                    data={
+                        "tasks": states,
+                        "pending_ids": [item["task_id"] for item in states if item["status"] == "cancelling"],
+                    },
+                )
+            await self._resume_group_replies(scope, inputs.get("query"))
+            properties = self.card.properties or {}
+            configured = properties.get("resilience", {}).get("timeout_s", DEFAULT_SUBAGENT_TASK_TIMEOUT_S)
+            wait_limit = max(0, float(configured) - (monotonic() - started) - 5)
+            wait_limit = min(wait_limit, timeout) if timeout is not None else wait_limit
+            result = await manager.wait_any(scope, task_ids, wait_limit)
+            if result.interruptions:
+                return self._group_interrupt(result.interruptions)
+            manager.mark_delivered(scope, [item["task_id"] for item in result.ready])
+            return ToolOutput(
+                success=True,
+                data={
+                    "submitted": submitted,
+                    "ready": result.ready,
+                    "pending_ids": result.pending_ids,
+                    "timed_out": result.timed_out,
+                },
+            )
+        except (ValueError, TypeError) as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    def _group_executor(self, execution):
+        async def execute(query):
+            return await self._execute_subagent_task(execution, query)
+
+        async def cleanup():
+            try:
+                if execution.subagent is not None:
+                    await cleanup_subagent_task_resources(execution.subagent)
+            finally:
+                if execution.affinity_enabled:
+                    await kv_cache_hooks.evict_subagent(
+                        self.parent_agent,
+                        sub_session_id=execution.child_session_id,
+                        parent_session_id=execution.scope.parent_session_id,
+                    )
+
+        return execute, cleanup
+
+    async def _execute_subagent_task(self, execution, query=None):
+        request = execution.request
+        if execution.subagent is None:
+            extras = (
+                {}
+                if request.browser_capabilities is None
+                else {"browser_capabilities": list(request.browser_capabilities)}
+            )
+            execution.subagent = self.parent_agent.create_subagent(
+                request.subagent_type, execution.child_session_id, isolated=True, **extras
+            )
+        if not execution.resources_prepared:
+            await prepare_subagent_task_resources(execution.subagent)
+            execution.resources_prepared = True
+            execution.affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+        child_inputs = {
+            "query": request.task_description if query is None else query,
+            "conversation_id": execution.child_session_id,
+        }
+        if execution.affinity_enabled:
+            child_inputs["parent_session_id"] = execution.scope.parent_session_id
+        result = await execution.subagent.invoke(child_inputs)
+        execution.raw_result = result
+        return result
+
+    async def _resume_group_replies(self, scope, reply):
+        from openjiuwen.core.session import InteractiveInput
+
+        if not isinstance(reply, InteractiveInput):
+            return
+        for record in self.task_manager.interrupted_records(scope):
+            selected = InteractiveInput()
+            for inner_id in (record.execution.raw_result or {}).get("interrupt_ids", []):
+                public_id = f"group:{record.execution.task_id}:{inner_id}"
+                if public_id in reply.user_inputs:
+                    selected.update(inner_id, reply.user_inputs[public_id])
+            if selected.user_inputs:
+                await self.task_manager.resume(scope, record.execution.task_id, selected)
 
     @staticmethod
-    def _build_sub_session_id(
-        parent_session_id: str,
-        subagent_type: str,
-        tool_call_id: Optional[str] = None,
-    ) -> str:
-        normalized_type = str(subagent_type or "").strip()
-        if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
-            # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
-            return f"{parent_session_id}_sub_{normalized_type}"
-        normalized_tool_call_id = str(tool_call_id or "").strip()
-        if normalized_tool_call_id:
-            # The interrupt handler retries the same outer tool call on resume.
-            # Reusing its ID keeps the retry attached to the interrupted child session.
-            return f"{parent_session_id}_sub_{normalized_type}_{normalized_tool_call_id}"
-        return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
+    def _group_interrupt(interruptions):
+        output = {"result_type": "interrupt", "interrupt_ids": [], "state": []}
+        for task_id, raw in interruptions.items():
+            identifiers = {key: f"group:{task_id}:{key}" for key in raw.get("interrupt_ids", [])}
+            output["interrupt_ids"].extend(identifiers.values())
+            for item in raw.get("state", []):
+                item = copy.deepcopy(item)
+                if getattr(item, "payload", None) is not None:
+                    item.payload.id = identifiers.get(item.payload.id, item.payload.id)
+                output["state"].append(item)
+        return output
+
+    async def close_task_groups(
+        self, parent_session_id: str | None = None, *, reason: str = "parent_finished",
+    ) -> dict | None:
+        """Close the matching logical run, including children paused for approval."""
+        scope = self.task_manager.scope_if_active(parent_session_id)
+        if scope is None:
+            return None
+        report = await self.task_manager.close_run(scope, reason)
+        return report
 
     def _resolve_requested_type(self, requested: str) -> str | ToolOutput:
         """Return a registered type name, or a model-visible error output."""
@@ -116,162 +264,6 @@ class TaskTool(Tool):
                 self.language,
             ),
         )
-
-    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
-        """Execute task by delegating to a subagent.
-
-        Args:
-            inputs: input_params containing subagent_type and task description.
-            **kwargs: Additional parameters, including 'session' for parent session context.
-
-        Returns:
-            subagent's final result.
-
-        Raises:
-            ToolError: If subagent creation or execution fails.
-        """
-        parent_session = kwargs.get("session", None)
-        if not isinstance(parent_session, Session):
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason="TaskTool requires a valid session in kwargs",
-            )
-
-        # Parse inputs
-        if isinstance(inputs, dict):
-            subagent_type = inputs.get("subagent_type")
-            task_description = inputs.get("task_description")
-        else:
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Invalid inputs type: {type(inputs)}",
-            )
-
-        if not subagent_type or not task_description:
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason="Both 'subagent_type' and 'task' are required",
-            )
-
-        resolved_type = self._resolve_requested_type(str(subagent_type))
-        if isinstance(resolved_type, ToolOutput):
-            return resolved_type
-        subagent_type = resolved_type
-
-        browser_capabilities: Optional[List[str]] = None
-        if str(subagent_type) == "browser_agent":
-            raw_capabilities = inputs.get("browser_capabilities")
-            if raw_capabilities is None:
-                browser_capabilities = []
-            elif isinstance(raw_capabilities, list) and all(
-                isinstance(capability, str) for capability in raw_capabilities
-            ):
-                browser_capabilities = list(raw_capabilities)
-            else:
-                raise build_error(
-                    StatusCode.TOOL_TASK_TOOL_INVOKED,
-                    reason="'browser_capabilities' must be a list of strings",
-                )
-
-        parent_session_id = parent_session.get_session_id()
-        sub_session_id = self._build_sub_session_id(
-            parent_session_id,
-            str(subagent_type),
-            tool_call_id=kwargs.get("tool_call_id"),
-        )
-        pending_subagent = self._pending_subagents.pop(sub_session_id, None)
-        if pending_subagent is None:
-            logger.info(
-                f"[TaskTool] Creating subagent: {subagent_type}, "
-                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
-            )
-            try:
-                if browser_capabilities is None:
-                    subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
-                else:
-                    subagent = self.parent_agent.create_subagent(
-                        subagent_type,
-                        sub_session_id,
-                        browser_capabilities=browser_capabilities,
-                    )
-            except Exception as exc:
-                logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
-                raise build_error(
-                    StatusCode.TOOL_TASK_TOOL_INVOKED,
-                    reason=f"Subagent {subagent_type} creation failed: {exc}",
-                ) from exc
-            affinity_enabled = False
-            resources_prepared = False
-        else:
-            subagent, affinity_enabled = pending_subagent
-            resources_prepared = True
-            logger.info(
-                f"[TaskTool] Resuming interrupted subagent: {subagent_type}, "
-                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
-            )
-
-        query_summary = _summarize_task_description(task_description)
-        invoke_log = (
-            "[TaskTool] Invoking subagent with isolated session: %s, "
-            "subagent_type=%s, query_summary=%s"
-        )
-        if str(subagent_type) == "browser_agent" and browser_agent_log_info is not None:
-            browser_agent_log_info(invoke_log, sub_session_id, subagent_type, query_summary)
-        else:
-            logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
-
-        succeeded = False
-        interrupted = False
-        try:
-            if not resources_prepared:
-                await prepare_subagent_task_resources(subagent)
-                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
-            if affinity_enabled:
-                kv_cache_hooks.prefetch_sticky_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
-                )
-            # Invoke subagent with isolated session_id
-            query = inputs.get("query")
-            if query is None:
-                query = task_description
-            subagent_inputs = {
-                "query": query,
-                "conversation_id": sub_session_id,
-            }
-            if affinity_enabled:
-                subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
-            succeeded = True
-            if (
-                isinstance(result, dict)
-                and result.get("result_type") == "interrupt"
-                and "interrupt_ids" in result
-            ):
-                interrupted = True
-                self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
-                return result
-            output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
-        except Exception as e:
-            logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent {subagent_type} execution failed: {e}",
-            ) from e
-        finally:
-            if not interrupted:
-                await cleanup_subagent_task_resources(subagent)
-            if affinity_enabled:
-                await kv_cache_hooks.finish_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
-                    succeeded=succeeded,
-                )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
@@ -305,13 +297,14 @@ def create_task_tool(
         **(card.properties if isinstance(card.properties, dict) else {}),
         "resilience": {"timeout_s": DEFAULT_SUBAGENT_TASK_TIMEOUT_S},
     }
+    tool = TaskTool(card=card, parent_agent=parent_agent, language=language)
     config = getattr(parent_agent, "deep_config", None)
     apply_subagent_type_enum(
         card,
         listed_subagent_types(getattr(config, "subagents", None)),
     )
 
-    return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
+    return [tool]
 
 
 __all__ = [

@@ -200,13 +200,32 @@ class EvolveReviewTaskTool(BaseEvolutionTool):
                 raise ValueError("evolution_review_ref is required")
             if self._task_tool.parent_agent is None:
                 raise ValueError("parent_agent is required to run evolve_review_task")
-            return await self._task_tool.invoke(
-                {
+            kwargs.setdefault("tool_call_id", f"evolve-review:{ref}")
+            payload = {
+                "action": "dispatch",
+                "tasks": [{
                     "subagent_type": EVOLUTION_REVIEW_AGENT_NAME,
                     "task_description": self._build_task_description(args, ref),
-                },
-                **kwargs,
-            )
+                }],
+            }
+            if args.get("query") is not None:
+                payload["query"] = args["query"]
+            result = await self._task_tool.invoke(payload, **kwargs)
+            while not isinstance(result, dict) and result.success:
+                data = result.data or {}
+                if data.get("ready"):
+                    record = data["ready"][0]
+                    return ToolOutput(
+                        success=record["status"] == "completed",
+                        data={"output": record["output"], "task_id": record["task_id"]},
+                        error=str(record["error"]) if record.get("error") else None,
+                    )
+                if not data.get("pending_ids"):
+                    break
+                result = await self._task_tool.invoke(
+                    {"action": "wait", "task_ids": data["pending_ids"]}, **kwargs,
+                )
+            return result
         except Exception as exc:
             return self.failure(exc)
 

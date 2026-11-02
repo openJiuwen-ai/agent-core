@@ -70,6 +70,7 @@ class BrowserInstanceConfig:
     """
 
     key: str = ""
+    task_scoped: bool = False  # independent task owns launch identity and cleanup
     driver_mode: str = ""  # "", "managed", "remote", "extension"; "" -> env/default
     managed_port: int = 0  # 0 -> auto-allocate (keyed) or env/default (legacy)
     user_data_dir: str = ""  # "" -> derived from key under mcp_cwd/.browser-profiles
@@ -176,8 +177,13 @@ def build_playwright_mcp_config(
         capabilities_to_enable,
     )
     cwd = resolve_playwright_mcp_cwd()
-    driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
-    extension_mode = driver_mode == "extension" or is_truthy_env(os.getenv("PLAYWRIGHT_MCP_EXTENSION") or "")
+    driver_mode = (
+        (instance.driver_mode if instance else "") or os.getenv("BROWSER_DRIVER") or ""
+    ).strip().lower()
+    explicit_mode = bool(instance and instance.driver_mode)
+    extension_mode = driver_mode == "extension" or (
+        not explicit_mode and is_truthy_env(os.getenv("PLAYWRIGHT_MCP_EXTENSION") or "")
+    )
     timeout_s = resolve_int_env(
         "PLAYWRIGHT_MCP_TIMEOUT_S",
         "BROWSER_TIMEOUT_S",
@@ -217,7 +223,10 @@ def build_playwright_mcp_config(
         # CDP support for official Playwright MCP server. An explicit per-instance
         # cdp_url (remote mode) wins over the shared env endpoint.
         instance_cdp = instance.cdp_url.strip() if instance and instance.cdp_url else ""
-        cdp_endpoint = instance_cdp or first_non_empty_env("PLAYWRIGHT_MCP_CDP_ENDPOINT", "PLAYWRIGHT_CDP_URL")
+        cdp_endpoint = instance_cdp or (
+            "" if explicit_mode and driver_mode == "managed"
+            else first_non_empty_env("PLAYWRIGHT_MCP_CDP_ENDPOINT", "PLAYWRIGHT_CDP_URL")
+        )
         cdp_headers = first_non_empty_env("PLAYWRIGHT_MCP_CDP_HEADERS", "PLAYWRIGHT_CDP_HEADERS")
         cdp_timeout = first_non_empty_env("PLAYWRIGHT_MCP_CDP_TIMEOUT", "PLAYWRIGHT_CDP_TIMEOUT_MS")
         browser_name = first_non_empty_env("PLAYWRIGHT_MCP_BROWSER")
@@ -234,6 +243,24 @@ def build_playwright_mcp_config(
             env_map["PLAYWRIGHT_MCP_CDP_HEADERS"] = cdp_headers
         if cdp_timeout:
             env_map["PLAYWRIGHT_MCP_CDP_TIMEOUT"] = cdp_timeout
+
+    if explicit_mode and driver_mode == "managed":
+        # An owned browser must not reconnect to the host's extension or CDP.
+        env_map.pop("PLAYWRIGHT_MCP_EXTENSION", None)
+        env_map.pop("PLAYWRIGHT_MCP_CDP_ENDPOINT", None)
+        independent_args = []
+        index = 0
+        while index < len(args):
+            value = args[index]
+            if value == "--extension" or value.startswith("--cdp-endpoint="):
+                index += 1
+                continue
+            if value == "--cdp-endpoint":
+                index += 2
+                continue
+            independent_args.append(value)
+            index += 1
+        args = independent_args
 
     params: Dict[str, Any] = {
         "command": command,
