@@ -52,6 +52,9 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         """
         content = event.payload.get("content", "")
         team_logger.info("user_input → deliver_input")
+        note = getattr(self._round, "note_user_input_delivered", None)
+        if callable(note):
+            note()
         await self._round.deliver_input(
             content,
             run_context=event.payload.get("run_context"),
