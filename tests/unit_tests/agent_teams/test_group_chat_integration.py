@@ -262,6 +262,21 @@ async def test_group_runtime_rejects_ordinary_input_without_switching_mode(runti
     assert not GroupConversationLog("group", "session").history_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_group_runtime_delivers_explicit_god_view_privately_to_leader(runtime):
+    from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+
+    result = await runtime.manager.interact(
+        GodViewMessage(body="heartbeat: check progress"), team_name="group", session_id="session",
+    )
+    assert result.ok, result.reason
+    runtime.agent.deliver_input.assert_awaited_once()
+    assert runtime.agent.deliver_input.await_args.args[0] == "heartbeat: check progress"
+    assert runtime.backend.conversation_mode == "group_chat"
+    # A private leader wake is never projected into the public conversation.
+    assert await runtime.db.message.get_team_messages("group", broadcast=True) == []
+    assert not GroupConversationLog("group", "session").history_path.exists()
+
 @pytest.mark.parametrize("incoming,expected", [
     ({"query": {"type": "group_chat", "body": "hello", "client_message_id": "m1"}}, "group_chat"),
     (GroupChatMessage("hello", "m1"), "group_chat"),

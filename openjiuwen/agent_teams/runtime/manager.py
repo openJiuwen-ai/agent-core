@@ -616,7 +616,11 @@ class TeamRuntimeManager:
 
         backend = getattr(entry.agent, "team_backend", None)
         requested_mode = self._conversation_mode(payload)
-        if backend is not None and requested_mode is not None:
+        # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
+        # heartbeat), not a conversation turn, so it does not trip the mode
+        # lock — same as ``deliver_organization_prompt``. Free-form strings
+        # still do: they are user turns in the team conversation mode.
+        if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
             if getattr(backend, "conversation_mode", "team") != requested_mode:
                 return DeliverResult.failure("conversation_mode_mismatch")
 
