@@ -46,13 +46,13 @@ from openjiuwen.agent_teams.extensions.ops import (
 from openjiuwen.agent_teams.extensions.policy import build_default_policy_sections
 from openjiuwen.agent_teams.extensions.resolver import (
     BackendTeamReadView,
-    RuntimePoolResolver,
+    DatabaseResolver,
 )
 
 __all__ = [
     "DEFAULT_MONITOR_EVENT_QUEUE_CAPACITY",
+    "DatabaseResolver",
     "MonitorEventDispatcher",
-    "RuntimePoolResolver",
     "BackendTeamReadView",
     "TaskDependencyInfo",
     "TEAM_BUILD_POLICY",
