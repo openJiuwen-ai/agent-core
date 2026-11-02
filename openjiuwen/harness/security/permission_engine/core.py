@@ -51,6 +51,9 @@ from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules impor
     inline_package_command_rules,
     package_builtin_rules_enabled,
 )
+from openjiuwen.harness.security.permission_engine.toolguard.severity_mapping import (
+    severity_to_action,
+)
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     evaluate_tiered_policy,
     matched_rule_uses_approval_override,
@@ -70,20 +73,12 @@ def _has_builtin_layer(items: Any) -> bool:
     return any(isinstance(item, dict) and item.get("layer") == "builtin" for item in items)
 
 
-# Old swarm product YAML often has severity without action. Map like
-# permission_mode=normal: LOW/MEDIUM→allow, HIGH/CRITICAL→ask.
-_LEGACY_SEVERITY_TO_ACTION = {
-    "LOW": "allow",
-    "MEDIUM": "allow",
-    "HIGH": "ask",
-    "CRITICAL": "ask",
-}
-
-
 def _fill_legacy_host_rule_actions(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Fill missing rule ``action`` from severity + ``permission_mode``."""
     rules = cfg.get("rules")
     if not isinstance(rules, list):
         return cfg
+    mode = cfg.get("permission_mode")
     filled: list[Any] = []
     for rule in rules:
         if not isinstance(rule, dict):
@@ -94,8 +89,7 @@ def _fill_legacy_host_rule_actions(cfg: dict[str, Any]) -> dict[str, Any]:
         if isinstance(action, str) and action.strip():
             filled.append(item)
             continue
-        sev = str(item.get("severity") or "").strip().upper()
-        mapped = _LEGACY_SEVERITY_TO_ACTION.get(sev)
+        mapped = severity_to_action(item.get("severity"), mode)
         if mapped:
             item["action"] = mapped
         filled.append(item)
