@@ -261,7 +261,7 @@ def _log(state: dict[str, Any], entry: dict[str, Any]) -> None:
     )
 
 
-def _never_performed(error: Any) -> bool:
+def action_not_performed(error: Any) -> bool:
     """Playwright failed locator resolution/actionability before sending the action.
 
     Its call log says "performing <action>" only once the action is actually sent to the page; an
@@ -290,7 +290,8 @@ def _never_performed(error: Any) -> bool:
     return waiting and not dispatched
 
 
-def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
+def native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
+    """Recognize undispatched target resolution errors from native action tools."""
     if not tool.endswith(("browser_click", "browser_type", "browser_select_option", "browser_press_key")):
         return False
     # Match the native executor's exact error envelope, not arbitrary page text.
@@ -306,7 +307,7 @@ def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
 
 def _unperformed_diagnostic(error: Any) -> str:
     """Name executor-reported waiting causes without inferring page/business causes."""
-    if not _never_performed(error):
+    if not action_not_performed(error):
         return ""
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error or ""))
     if "strict mode violation" in text:
@@ -357,10 +358,10 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         or result.get("executed") is False
         or not success and result.get("executed") is not True
         and (
-            _native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
+            native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
             or str(getattr(inputs, "tool_name", "")).endswith(
                 ("browser_click", "browser_type", "browser_select_option", "browser_press_key")
-            ) and _never_performed(result.get("error") or result.get("result"))
+            ) and action_not_performed(result.get("error") or result.get("result"))
         )
     )
     executed = False if rejected else True if success else result.get("executed")
@@ -389,7 +390,7 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
             if (
                 uncertain_execution
                 and step.get("op") in {"click", "fill", "type", "select_option", "set_checked", "press", "press_key"}
-                and _never_performed(received.get("error"))
+                and action_not_performed(received.get("error"))
             ):
                 ran = False  # Timed out before the action was sent: not a write, nothing to reconcile.
             step.update(

@@ -332,9 +332,11 @@ class BrowserPolicyModel(Model):
                 local_phase = phase.get("active_phase_contract") or {}
                 if local_phase.get("targets") and not local_phase.get("handoff"):
                     existing = {c.get("target_id") for c in controls}
-                    controls.extend(c for c in current.export_decision_targets(include_current_registry=True)
-                                    if c.get("target_id") not in existing
-                                    and any(same_node(b, c) for b in local_phase["targets"]))
+                    for control in current.export_decision_targets(include_current_registry=True):
+                        if control.get("target_id") in existing:
+                            continue
+                        if any(same_node(binding, control) for binding in local_phase["targets"]):
+                            controls.append(control)
                     # Candidate limits must not evict the LLM's explicit local objects.
                     controls.sort(key=lambda c: not any(same_node(b, c) for b in local_phase["targets"]))
                 omitted = int(snapshot.get("omitted_count") or 0)
@@ -790,7 +792,8 @@ class BrowserPolicyModel(Model):
                     menu.excluded[reason] = menu.excluded.get(reason, 0) + 1
             phase_view = observation.state.get("phase") or {}
             unverified = phase_view.get("missing_conditions") and phase_view.get("status") != "verified"
-            if has_phase_tool and phase_view.get("version") and unverified and not phase_view.get("handoff"):
+            verifiable = has_phase_tool and phase_view.get("version") and unverified
+            if verifiable and not phase_view.get("handoff"):
                 menu.criteria["VERIFY"] = (
                     "READ optional local conditions when fresh facts are needed; this does not certify completion."
                 )
@@ -1292,10 +1295,10 @@ class BrowserPolicyModel(Model):
             if (not receipt.get("success") or not receipt.get("target_key")
                     or receipt.get("operation") not in {"navigate", "select_tab", "click", "press"}):
                 continue
-            if (receipt.get("llm_navigation_call_id") != movement["call_id"]
-                    and receipt.get("source_url") == page.get("url")
-                    and receipt.get("observed_url")
-                    and receipt["observed_url"] != receipt["source_url"]):
+            if (receipt.get("llm_navigation_call_id") == movement["call_id"]
+                    or receipt.get("source_url") != page.get("url")):
+                continue
+            if receipt.get("observed_url") and receipt["observed_url"] != receipt["source_url"]:
                 receipt["reversed_by_llm"] = True
                 return
 
@@ -1310,8 +1313,8 @@ class BrowserPolicyModel(Model):
             return "llm_reversed_navigation"
         if step["op"] != "scroll":
             return ""
-        moves = [r for r in task.receipts if r.get("success") and r.get("operation") not in
-                 READ_PAGE_OPERATIONS | _SCOPED_READ_OPS | {"probe_interactives", "verify"}][-2:]
+        read_ops = READ_PAGE_OPERATIONS | _SCOPED_READ_OPS | {"probe_interactives", "verify"}
+        moves = [r for r in task.receipts if r.get("success") and r.get("operation") not in read_ops][-2:]
         if len(moves) != 2 or any(r.get("operation") != "scroll" for r in moves):
             return ""
         first, last = moves
@@ -1327,8 +1330,9 @@ class BrowserPolicyModel(Model):
                          and r.get("llm_call_id") == llm_call and r.get("scroll_layout") == layout for r in moves)
         round_trip = (abs(positions[0] - positions[3]) <= 2 and abs(positions[1] - positions[2]) <= 2
                       and abs(positions[3] - positions[4]) <= 2)
-        if (same_scope and round_trip and first.get("scroll_direction") == step.get("direction")
-                and first.get("scroll_direction") != last.get("scroll_direction")):
+        repeats_direction = (first.get("scroll_direction") == step.get("direction")
+                             and first.get("scroll_direction") != last.get("scroll_direction"))
+        if same_scope and round_trip and repeats_direction:
             return "scroll_round_trip"
         return ""
 
@@ -1564,6 +1568,10 @@ class BrowserPolicyModel(Model):
         navigated = task.pending.get("navigation_url")
         if success and navigated and navigated not in task.visited_urls:
             task.visited_urls = [*task.visited_urls[-31:], navigated]
+        continuity_fields = (
+            "source_url", "source_document", "llm_call_id", "llm_navigation_call_id",
+            "scroll_from", "scroll_direction", "scroll_layout",
+        )
         receipt = {
             "decision_id": call_id,
             "success": success,
@@ -1578,9 +1586,7 @@ class BrowserPolicyModel(Model):
                 else "dispatched_unknown"
             ),
             "phase_version": task.pending.get("phase_version", 0),
-            **{key: task.pending.get(key) for key in
-               ("source_url", "source_document", "llm_call_id", "llm_navigation_call_id",
-                "scroll_from", "scroll_direction", "scroll_layout")},
+            **{key: task.pending.get(key) for key in continuity_fields},
             "operation": task.pending.get("operation"),
             "target_label": task.pending.get("target_label", ""),
             "target_key": task.pending.get("target_key", ""),

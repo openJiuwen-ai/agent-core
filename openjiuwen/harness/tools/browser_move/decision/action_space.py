@@ -273,11 +273,11 @@ def build_menu(
                     f"SET_CHECKED {name}: {checked} (currently {not checked})",
                     {**base, "op": "set_checked", "checked": checked},
                 )
-            elif (tag != "input" and control.get("clickable") and isinstance(details.get("checked"), bool)
-                  and details["node_guard"].get("checked") in
-                  (details["checked"], str(details["checked"]).lower())):
-                add(f"CLICK {role} {name}: toggle observed checked={details['checked']} "
-                    f"to {not details['checked']}", {**base, "op": "click"})
+            elif tag != "input" and control.get("clickable") and isinstance(details.get("checked"), bool):
+                checked_values = (details["checked"], str(details["checked"]).lower())
+                if details["node_guard"].get("checked") in checked_values:
+                    add(f"CLICK {role} {name}: toggle observed checked={details['checked']} "
+                        f"to {not details['checked']}", {**base, "op": "click"})
         elif (
             control.get("clickable")
             and not control.get("selected")
@@ -408,9 +408,9 @@ def reader_option(step: dict[str, Any]) -> dict[str, Any]:
         return {}
     scope = ("observed_control" if step.get("target_id") else "open_tabs" if op == "tabs" else
              "current_viewport" if step.get("viewport_only") else "current_document")
+    parameter_keys = {"query", "target_id", "viewport_only", "max_cards", "max_items", "include_buttons"}
     return {"choice_kind": "bound_reader_scope", "scope": scope,
-            "parameters": {k: v for k, v in step.items() if k in
-                           {"query", "target_id", "viewport_only", "max_cards", "max_items", "include_buttons"}}}
+            "parameters": {k: v for k, v in step.items() if k in parameter_keys}}
 
 
 def build_request(

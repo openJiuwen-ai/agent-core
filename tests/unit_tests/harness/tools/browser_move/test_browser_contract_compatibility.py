@@ -37,10 +37,10 @@ def test_real_core_output_limit_contract_survives_wrappers(finish, wrapped):
     exception = output_limit_error(finish)
     if wrapped:
         exception = build_error(StatusCode.MODEL_CALL_FAILED, error_msg='SDK envelope', cause=exception)
-    failure = Rail._model_failure_details(exception)
+    failure = Rail.model_failure_details(exception)
     assert failure == {'code': 'model_output_incomplete', 'source': 'model', 'stage': 'output',
                        'retryable': True, 'finish_reason': finish, 'output_tokens': 8192}
-    unrelated = Rail._model_failure_details(RuntimeError('length=8192 in unrelated request'))
+    unrelated = Rail.model_failure_details(RuntimeError('length=8192 in unrelated request'))
     assert unrelated['code'] == 'model_error' and not unrelated['retryable']
 
 
@@ -151,7 +151,7 @@ async def test_primitive_preserves_full_native_preflight_receipt(envelope, error
         result = ToolOutput(success=False, error=error)
     native = SimpleNamespace(invoke=AsyncMock(return_value=result,
                              side_effect=RuntimeError(error) if envelope == 'exception' else None))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=native)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=native)
     session, _ = persistent_session(Rail._build_phase_state('Use observed control'))
     inputs = call('primitive', 'browser_batch_interact')
     inputs.tool_args = {'steps': [{'op': 'click', 'selector': 'button'}]}
@@ -197,8 +197,8 @@ def registered_runtime(monkeypatch, names, allowed=None):
     runtime = BrowserAgentRuntime.__new__(BrowserAgentRuntime)
     runtime._service = SimpleNamespace(mcp_cfg=SimpleNamespace(server_id='test-browser'), allowed_tool_names=allowed)
     runtime.ensure_page_state().advance(url='https://example.test/')
-    runtime._get_playwright_mcp_tool = AsyncMock()
-    runtime._get_playwright_run_code_tool = AsyncMock()
+    runtime.resolve_playwright_tool = AsyncMock()
+    runtime.resolve_playwright_run_code_tool = AsyncMock()
     runtime.call_playwright_tool = AsyncMock(return_value={'ok': True})
     runtime.record_tool_reference_state = MagicMock()
     runtime.capture_browser_metadata = AsyncMock(return_value=({}, 'metadata unavailable'))
@@ -241,7 +241,7 @@ async def test_registry_resolution_failure_after_inventory_check_remains_undispa
     from openjiuwen.harness.tools.browser_move.playwright_runtime import policy_page_action as module
 
     runtime, _ = registered_runtime(monkeypatch, {'browser_tabs'})
-    runtime._get_playwright_mcp_tool.side_effect = RuntimeError('Registered Playwright MCP tool not found: browser_tabs')
+    runtime.resolve_playwright_tool.side_effect = RuntimeError('Registered Playwright MCP tool not found: browser_tabs')
     marked = MagicMock()
     monkeypatch.setattr(module, 'mark_dispatched', marked)
     result = await module.BrowserPageActionTool(runtime).invoke({'generation_id': runtime.generation_id, 'op': 'tabs'})
@@ -332,7 +332,7 @@ async def test_bound_but_not_actionable_target_reports_specific_exclusion_withou
 def test_task_deadline_remains_authoritative_over_wrapped_output_limit():
     error = TimeoutError('browser_task_deadline_exhausted')
     error.__cause__ = output_limit_error()
-    assert Rail._model_failure_details(error) == {
+    assert Rail.model_failure_details(error) == {
         'code': 'task_deadline_exhausted', 'source': 'runtime', 'stage': 'task', 'retryable': False,
     }
 
@@ -346,7 +346,7 @@ async def test_explicit_native_dispatch_cannot_be_erased_by_preflight_like_text(
     native = SimpleNamespace(invoke=AsyncMock(return_value=ToolOutput(
         success=False, error=ZERO, data={'executed': True},
     )))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=native)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=native)
     result = await runtime._run_single_batch_primitive({'op': 'click', 'selector': 'button'})
     assert result['executed'] is None and result['execution_state'] == 'dispatched_unknown'
 

@@ -945,7 +945,7 @@ class BrowserAgentRuntime:
             )
         return payload
 
-    async def _get_playwright_mcp_tool(self, tool_name: str) -> Any:
+    async def resolve_playwright_tool(self, tool_name: str) -> Any:
         """Resolve a registered Playwright MCP tool through Runner.resource_mgr."""
         server_id = str(getattr(self._service.mcp_cfg, "server_id", "") or "").strip()
         server_name = str(getattr(self._service.mcp_cfg, "server_name", "") or "").strip()
@@ -1040,23 +1040,23 @@ class BrowserAgentRuntime:
 
         raise RuntimeError(f"Registered Playwright MCP tool not found: {tool_name}. Tried {', '.join(tried)}")
 
-    async def _get_playwright_run_code_tool(self) -> tuple[Any, str]:
+    async def resolve_playwright_run_code_tool(self) -> tuple[Any, str]:
         """Resolve browser_run_code_unsafe, with browser_run_code as compatibility fallback."""
         try:
-            return await self._get_playwright_mcp_tool("browser_run_code_unsafe"), "browser_run_code_unsafe"
+            return await self.resolve_playwright_tool("browser_run_code_unsafe"), "browser_run_code_unsafe"
         except RuntimeError:
             logger.debug(
                 "browser_run_code_unsafe is unavailable; falling back to browser_run_code",
                 exc_info=True,
             )
 
-        return await self._get_playwright_mcp_tool("browser_run_code"), "browser_run_code"
+        return await self.resolve_playwright_tool("browser_run_code"), "browser_run_code"
 
     async def call_playwright_run_code_unsafe(self, js_code: str) -> Any:
         """Execute a compact runtime RPC over the registered Playwright transport."""
         total_started_at = time.perf_counter()
         resolution_started_at = time.perf_counter()
-        tool, tool_name = await self._get_playwright_run_code_tool()
+        tool, tool_name = await self.resolve_playwright_run_code_tool()
         resolution_elapsed_ms = int(max(0.0, (time.perf_counter() - resolution_started_at) * 1000))
 
         invoke_started_at = time.perf_counter()
@@ -1105,7 +1105,7 @@ class BrowserAgentRuntime:
         self, tool_name: str, inputs: Dict[str, Any], *, resolved_tool: Any = None,
     ) -> Any:
         """Invoke a registered tool; callers may resolve it before marking dispatch."""
-        tool = resolved_tool if resolved_tool is not None else await self._get_playwright_mcp_tool(tool_name)
+        tool = resolved_tool if resolved_tool is not None else await self.resolve_playwright_tool(tool_name)
         result = await tool.invoke(inputs)
 
         success = getattr(result, "success", None)
@@ -1674,7 +1674,7 @@ class BrowserAgentRuntime:
         function = (
             f"(element) => {{element.setAttribute({json.dumps(attribute)}, {json.dumps(marker_value)});return true;}}"
         )
-        tool = await self._get_playwright_mcp_tool("browser_evaluate")
+        tool = await self.resolve_playwright_tool("browser_evaluate")
         result = await tool.invoke(
             {
                 "target": ref_value,
@@ -2070,7 +2070,7 @@ class BrowserAgentRuntime:
         op = str(step.get("op") or "").strip().lower()
         started_at = time.perf_counter()
         try:
-            tool = await self._get_playwright_mcp_tool(tool_name)
+            tool = await self.resolve_playwright_tool(tool_name)
         except RuntimeError:
             logger.debug(
                 "Single-step primitive %s is unavailable; using compact runtime RPC",
@@ -2121,9 +2121,9 @@ class BrowserAgentRuntime:
         # This boundary knows which native executor produced the error. Do not
         # apply native preflight text to arbitrary scripts/compact RPC failures.
         unperformed = not success and not (isinstance(payload, dict) and payload.get("executed") is True) and (
-            execution_journal._native_preflight_failure(tool_name, {"error": error})
+            execution_journal.native_preflight_failure(tool_name, {"error": error})
             or tool_name in {"browser_click", "browser_type", "browser_select_option", "browser_press_key"}
-            and execution_journal._never_performed(error)
+            and execution_journal.action_not_performed(error)
         )
         executed = True if success else False if unperformed else None
         execution_state = ("acknowledged" if success else
@@ -2970,9 +2970,12 @@ class BrowserRuntimeRail(AgentRail):
             return True
         inputs = ctx.inputs
         if isinstance(getattr(inputs, "tools", None), list):
-            inputs.tools = [tool for tool in inputs.tools
-                            if (tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", ""))
-                            != "browser_phase"]
+            recovery_tools = []
+            for tool in inputs.tools:
+                name = tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", "")
+                if name != "browser_phase":
+                    recovery_tools.append(tool)
+            inputs.tools = recovery_tools
         guidance = (
             "The last consecutive browser_phase requests were rejected before dispatch. No page action occurred. "
             "This optional handoff is omitted from this request. Use an ordinary browser tool for the current "
@@ -3008,7 +3011,8 @@ class BrowserRuntimeRail(AgentRail):
             ctx.request_force_finish(self._structured_terminal_result(state))
             return
         response_text = str(getattr(response, "content", "") or "")
-        if not tool_calls and not response_text.strip() and isinstance(state, dict) and state:
+        empty_response = not tool_calls and not response_text.strip()
+        if empty_response and isinstance(state, dict) and state:
             if state.get("status") in _BROWSER_TERMINAL_STATUSES - {"completed"}:
                 ctx.request_force_finish(self._structured_terminal_result(state))
                 return  # Do not relabel a known deadline/interruption as a new model error.
@@ -3149,7 +3153,7 @@ class BrowserRuntimeRail(AgentRail):
         remaining_s = deadline - time.monotonic() if deadline else 0.0
         state = ctx.session.get_state(_BROWSER_PHASE_STATE_KEY) if getattr(ctx, "session", None) is not None else {}
         state = state if isinstance(state, dict) else {}
-        failure = self._model_failure_details(exception)
+        failure = self.model_failure_details(exception)
         # The anomaly rail runs first. Do not replace its bounded repeat/stream
         # recovery with a force-finish or grant another retry after it is exhausted.
         pending_retry = ctx.consume_retry_request()
@@ -3158,18 +3162,19 @@ class BrowserRuntimeRail(AgentRail):
             ctx.request_retry(delay_seconds=pending_retry.delay_seconds)
             return
         retry_budget = ctx.retry_attempt < _BROWSER_MODEL_RETRY_LIMIT and remaining_s > 20.0
-        if (retry_budget and failure["retryable"] and failure["source"] == "upstream"
-                and not unresolved_writes(state) and not (extra or {}).get(MODEL_VISIBLE_OUTPUT_EMITTED_KEY)):
+        retryable_upstream = retry_budget and failure["retryable"] and failure["source"] == "upstream"
+        if (retryable_upstream and not unresolved_writes(state)
+                and not (extra or {}).get(MODEL_VISIBLE_OUTPUT_EMITTED_KEY)):
             ctx.request_retry(delay_seconds=min(0.5, max(0.0, remaining_s - 5.0)))
             return
         ctx.request_force_finish(self._structured_model_failure(ctx, exception))
 
     @staticmethod
     def _is_retryable_model_exception(exception: Exception | None) -> bool:
-        return bool(BrowserRuntimeRail._model_failure_details(exception)["retryable"])
+        return bool(BrowserRuntimeRail.model_failure_details(exception)["retryable"])
 
     @staticmethod
-    def _model_failure_details(exception: Exception | None) -> dict[str, Any]:
+    def model_failure_details(exception: Exception | None) -> dict[str, Any]:
         """Classify wrapper envelopes without making fact retention conditional."""
         message = str(exception or "").lower()
         if "browser_task_deadline_exhausted" in message:
@@ -3182,11 +3187,12 @@ class BrowserRuntimeRail(AgentRail):
             visited.add(id(current))
             details = getattr(current, "details", None)
             if (isinstance(current, BaseError) and current.status == StatusCode.MODEL_CALL_FAILED
-                    and isinstance(details, dict) and details.get("finish_reason") in {"length", "max_tokens"}
-                    and "output_tokens" in details and "provider_code" not in details):
-                return {"code": "model_output_incomplete", "source": "model", "stage": "output",
-                        "retryable": True, "finish_reason": details["finish_reason"],
-                        "output_tokens": details["output_tokens"]}
+                    and isinstance(details, dict)):
+                if (details.get("finish_reason") in {"length", "max_tokens"}
+                        and "output_tokens" in details and "provider_code" not in details):
+                    return {"code": "model_output_incomplete", "source": "model", "stage": "output",
+                            "retryable": True, "finish_reason": details["finish_reason"],
+                            "output_tokens": details["output_tokens"]}
             current = getattr(current, "cause", None) or current.__cause__
         if "llm repeated stream output detected" in message:
             code, source, stage, retryable = "model_repeated_output", "model", "stream", False
@@ -3220,7 +3226,7 @@ class BrowserRuntimeRail(AgentRail):
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
         state = state if isinstance(state, dict) else {}
         evidence_available = self._has_task_evidence(state) or bool(state.get("execution_journal"))
-        failure = self._model_failure_details(exception)
+        failure = self.model_failure_details(exception)
         status = "partial" if evidence_available else "failed"
         terminal = self.interrupted_task_result(session, failure["code"], failure=failure)
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else {}

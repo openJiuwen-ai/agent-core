@@ -178,7 +178,7 @@ async def test_fixed_read_receipt_and_compact_capture_share_one_vm_rpc(monkeypat
     runtime = vm_runtime(monkeypatch)
     runtime.call_playwright_run_code_unsafe = AsyncMock(side_effect=lambda code: execute_vm(code)["result"])
     runtime.registered_playwright_tool_names = lambda: {"browser_run_code_unsafe"}
-    runtime._get_playwright_run_code_tool = AsyncMock()
+    runtime.resolve_playwright_run_code_tool = AsyncMock()
     monkeypatch.setattr(
         "openjiuwen.harness.tools.browser_move.playwright_runtime.policy_page_action.fixed_text_script",
         lambda query="": "async page => ({ok:true,url:page.url(),title:'Fixture',text:'facts'})",

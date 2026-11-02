@@ -124,7 +124,7 @@ class BrowserPageActionTool(Tool):
                 validation = {
                     "missing": sorted(required - set(inputs)), "unexpected": sorted(set(inputs) - required),
                     "required": sorted(required),
-                    "example": {"generation_id": "g1", "op": op, **{k: examples[k] for k in sorted(extra)}},
+                    "example": {"generation_id": "g1", "op": op, **{k: examples.get(k) for k in sorted(extra)}},
                 }
                 raise ValueError("invalid_page_operation_arguments")
             capabilities = page_operation_capabilities(self._runtime)
@@ -176,9 +176,9 @@ class BrowserPageActionTool(Tool):
                 # pre-dispatch; retain the tool name/reason and never guess a tab.
                 resolved = None
                 if op not in FIXED_RPC_OPERATIONS | {"wait"}:
-                    resolved = await self._runtime._get_playwright_mcp_tool(native)
+                    resolved = await self._runtime.resolve_playwright_tool(native)
                 elif op in FIXED_RPC_OPERATIONS:
-                    await self._runtime._get_playwright_run_code_tool()
+                    await self._runtime.resolve_playwright_run_code_tool()
                 with execution_scope(session, callback):
                     dispatched = True
                     mark_dispatched()

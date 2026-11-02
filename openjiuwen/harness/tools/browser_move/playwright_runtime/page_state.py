@@ -728,13 +728,15 @@ class BrowserPageState:
         exported = []
         ids = list(getattr(self, "_decision_target_ids", []))
         document = (self.decision_snapshot.get("page_guard") or {}).get("document")
-        if (include_current_registry and document and self.decision_snapshot.get("capture_id")
-                and not self.decision_snapshot.get("invalidated")):
+        fresh_capture = self.decision_snapshot.get("capture_id") and not self.decision_snapshot.get("invalidated")
+        if include_current_registry and document and fresh_capture:
             # A bounded generic snapshot may omit a separately probed control.
             # Reuse only exact identities observed at this interaction revision.
-            ids.extend(target.target_id for target in self._targets.values()
-                       if target.target_id not in ids and target.observed_revision == self.interaction_revision
-                       and (target.decision_state.get("node_guard") or {}).get("document") == document)
+            for target in self._targets.values():
+                if target.target_id in ids or target.observed_revision != self.interaction_revision:
+                    continue
+                if (target.decision_state.get("node_guard") or {}).get("document") == document:
+                    ids.append(target.target_id)
         for target_id in ids:
             target = self._targets.get(target_id)
             if target is not None and target.generation == self.generation:

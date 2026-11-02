@@ -437,10 +437,11 @@ def source_observations(
         # possibly clipped raw text as complete merely because this projection fits.
         original_length = record.get("raw_text_length") if record.get("raw_text") else len(text)
         truncated = record.get("raw_text_truncated") if record.get("raw_text") else False
+        source_fields = (
+            "content_hash", "variant", "observation_scope", "read_scope", "recall_handle", "observed_at_ms",
+        )
         observations.append({
-            **{key: record[key] for key in
-               ("content_hash", "variant", "observation_scope", "read_scope", "recall_handle", "observed_at_ms")
-               if key in record},
+            **{key: record[key] for key in source_fields if key in record},
             "kind": record.get("kind", "extraction"), "source": source,
             "generation_id": record.get("generation_id") or record.get("generation"),
             "raw_text": text[:SOURCE_TEXT_LIMIT],
@@ -485,6 +486,7 @@ def bounded_source_records(records: list[dict[str, Any]], limit: int) -> list[di
         key = (item.get("source") or item.get("entity_url") or "", item.get("variant") or "default")
         groups.setdefault(key, []).append(index)
     queues = []
+
     def source_priority(indices: list[int]) -> tuple[bool, int]:
         substantive = any(records[i].get("kind") != "page_metadata" for i in indices)
         return substantive, indices[-1]
@@ -492,10 +494,13 @@ def bounded_source_records(records: list[dict[str, Any]], limit: int) -> list[di
     for indices in sorted(groups.values(), key=source_priority, reverse=True)[:limit]:
         content = [i for i in reversed(indices)
                    if records[i].get("kind") in {"page_observation", "card_probe", "ordered_results"}]
-        broad = [i for i in content if not (records[i].get("read_scope") or {}).get("query")
-                 and not (records[i].get("read_scope") or {}).get("target")
-                 and (records[i].get("read_scope") or {}).get("operation")
-                 in {None, "read_text", "snapshot", "probe_cards"}]
+        broad = []
+        for index in content:
+            scope = records[index].get("read_scope") or {}
+            if scope.get("query") or scope.get("target"):
+                continue
+            if scope.get("operation") in {None, "read_text", "snapshot", "probe_cards"}:
+                broad.append(index)
         # The latest broad read represents this source before local diagnostics.
         # Other scopes/updates remain eligible in subsequent round-robin slots.
         queues.append(list(dict.fromkeys([*broad[:1], *content, *reversed(indices)])))

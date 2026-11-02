@@ -436,8 +436,9 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
     source_url = (observation or {}).get("url") or ""
     same_targets = current.get("targets") == target_bindings and current.get("bindings") == bindings
     same_page = current.get("document") == document and current.get("source_url", "") == source_url
-    if (same_intent and same_targets and same_page and previous_specs == next_specs
-            and current.get("read_queries", []) == read_queries and not current.get("handoff")):
+    same_fragment = same_intent and same_targets and same_page
+    same_readers = previous_specs == next_specs and current.get("read_queries", []) == read_queries
+    if same_fragment and same_readers and not current.get("handoff"):
         return  # Repeating metadata is not a new intent or a policy re-entry.
     if current:
         history = state.setdefault("phase_history", [])
@@ -538,13 +539,14 @@ def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> di
                        if b.get("document")}
     if phase.get("document"):
         bound_documents.add(phase["document"])
-    if capture and documents and bound_documents and documents.isdisjoint(bound_documents):
-        require_local_handoff(state, "bound_document_changed")
+    if capture and documents and bound_documents:
+        if documents.isdisjoint(bound_documents):
+            require_local_handoff(state, "bound_document_changed")
     url = observation.get("url") or ""
-    if (capture and url and phase.get("source_url")
-            and urlsplit(url)[:3] != urlsplit(phase["source_url"])[:3]):
-        # Same-page sort/filter/query changes alone do not require another phase.
-        require_local_handoff(state, "local_page_changed")
+    if capture and url and phase.get("source_url"):
+        if urlsplit(url)[:3] != urlsplit(phase["source_url"])[:3]:
+            # Same-page sort/filter/query changes alone do not require another phase.
+            require_local_handoff(state, "local_page_changed")
     if phase and capture and not phase.get("handoff"):
         # Objective-only fragments also belong to an observed page. Missing/partial
         # captures cannot retire them or invent a new binding.

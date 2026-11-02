@@ -227,7 +227,7 @@ async def test_fixed_text_read_joins_existing_evidence_without_cart_mutation():
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(allowed_tool_names=None)
     runtime.registered_playwright_tool_names = lambda: {"browser_run_code_unsafe"}
-    runtime._get_playwright_run_code_tool = AsyncMock()
+    runtime.resolve_playwright_run_code_tool = AsyncMock()
     page = runtime.ensure_page_state()
     page.observe(url="https://shop.test/cart")
     runtime.call_fixed_with_observation = AsyncMock(return_value={

@@ -154,7 +154,7 @@ def test_retained_facts_do_not_override_recovery_limits(boundary):
         state["deadline_at"] = time.time() - 1
     if boundary == "resume_limit":
         state["resume_count"] = 1
-    failure = Rail._model_failure_details(RuntimeError(
+    failure = Rail.model_failure_details(RuntimeError(
         REPEAT if boundary == "repeat" else "bad configuration" if boundary == "fatal" else DISCONNECT))
     result = Rail.interrupted_task_result(session, failure["code"], failure=failure)["authoritative_browser_result"]
     assert not result["retryable"]
@@ -185,7 +185,7 @@ def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_resul
     query = tool._prepare_browser_query(parent, "parent", "Read cart", "")
     previous = Rail.interrupted_task_result(child, "model_transport_interrupted")["authoritative_browser_result"]
     tool._save_browser_result(parent, query, previous)
-    failure = Rail._model_failure_details(RuntimeError("setup failure"))
+    failure = Rail.model_failure_details(RuntimeError("setup failure"))
     result = Rail.interrupted_task_result(None, "browser_execution_error", failure=failure)
     output = tool._build_task_output(
         result, normalized_type="browser_agent", sub_session_id="child", parent_session=parent,

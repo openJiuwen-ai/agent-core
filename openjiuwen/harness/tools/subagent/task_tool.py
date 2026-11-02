@@ -1111,7 +1111,7 @@ class TaskTool(Tool):
                 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 
                 expired = task_timeout is not None and task_timeout.expired()
-                failure = BrowserRuntimeRail._model_failure_details(exc)
+                failure = BrowserRuntimeRail.model_failure_details(exc)
                 reason = "task_deadline_exhausted" if expired else failure["code"]
                 result = BrowserRuntimeRail.interrupted_task_result(
                     child_session, reason, failure=None if expired else failure,
@@ -1133,7 +1133,7 @@ class TaskTool(Tool):
                 if browser_query is not None:
                     from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 
-                    failure = BrowserRuntimeRail._model_failure_details(exc)
+                    failure = BrowserRuntimeRail.model_failure_details(exc)
                     reason = failure["code"] if failure["code"] != "model_error" else "browser_execution_error"
                     logger.warning("[TaskTool] Browser interrupted: code=%s exception_type=%s",
                                    reason, type(exc).__name__)
