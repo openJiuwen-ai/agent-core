@@ -4,6 +4,6 @@ Summary Task {{summary_task_id}} (execution_id={{execution_id}}) returned withou
 
 Do not restart research, create tasks, or repeat drafting. Read the bound accepted sources with `org_summary_get_inputs`, inspect the existing artifacts, and verify the deliverable. Then call `org_summary_complete` with `summary_task_id`, the full report in `output_context.description`, optional `result_uri`, and `output_abstract`.
 
-The current member workspace is `{{workspace_path}}`. Only `read_file`, `org_summary_get_inputs` and `org_summary_complete` are available. Read an already known draft; do not run shell commands, search directories or dispatch internal tasks. `result_uri` is optional: submit compliant full text directly, or explain concrete quality defects and blockers.
+The current member workspace is `{{workspace_path}}`. The only final-file directory is `{{summary_dir}}`. If a final file already exists, pass that same absolute path as `result_uri`. Only `read_file`, `org_summary_get_inputs` and `org_summary_complete` are available. Read an already known draft; do not run shell commands, search directories or dispatch internal tasks. `result_uri` is optional: submit compliant full text directly, or explain concrete quality defects and blockers. Do not write a new file merely to fill `result_uri`.
 
 Use `org_summary_complete`, not `org_update_task(action='complete')`. Writing a file or reaching Team idle is not submission. If submission is impossible, report the concrete blocker; do not claim completion.
