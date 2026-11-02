@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,21 @@ from openjiuwen.agent_evolving.skill_train.sleep.config import SleepConfig
 from openjiuwen.agent_evolving.skill_train.sleep.consolidate import consolidate
 from openjiuwen.agent_evolving.skill_train.sleep.cycle import run_sleep_cycle
 from openjiuwen.agent_evolving.skill_train.sleep.harvest import harvest_otlp_trajectories
+from openjiuwen.agent_evolving.skill_train.sleep.jiuwenswarm_traces import (
+    _completion_messages,
+    _decode_jsonish,
+    _flatten_message_content,
+    _indexed_messages,
+    _packed_messages,
+    _prompt_messages,
+    _spans_look_like_noise,
+    _strip_system_reminder,
+    _trace_files,
+    _unwrap_user_content,
+    has_jiuwenswarm_traces,
+    load_jiuwenswarm_session_digests,
+)
+
 from openjiuwen.agent_evolving.skill_train.sleep.memory import (
     LEARNED_END,
     LEARNED_START,
@@ -27,6 +43,8 @@ from openjiuwen.agent_evolving.skill_train.sleep.mine import assign_splits, mine
 from openjiuwen.agent_evolving.skill_train.sleep.staging import write_staging
 from openjiuwen.agent_evolving.skill_train.sleep.types import EditRecord, SessionDigest, SleepReport, TaskRecord
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+
+_TRACES_LOGGER = "openjiuwen.agent_evolving.skill_train.sleep.jiuwenswarm_traces"
 
 
 def _envelope(content: str, *, source: str = "web", msg_type: str = "user input") -> str:
@@ -257,6 +275,650 @@ def test_harvest_groups_by_trace_id_not_session_attr(tmp_path: Path) -> None:
     by_id = {d.trace_id: d for d in digests}
     assert by_id["1" * 32].user_prompts == ["杭州天气"]
     assert by_id["2" * 32].user_prompts == ["推荐啤酒"]
+
+
+def _jiuwenswarm_llm_record_packed(
+    *,
+    session_id: str,
+    span_id: str,
+    start: int,
+    input_messages: list[dict],
+    output_messages: list[dict] | None = None,
+    trace_id: str = "a" * 32,
+) -> dict:
+    """llm.call record in the newer packed telemetry format.
+
+    Messages live in single JSON attributes (``gen_ai.input.messages`` /
+    ``gen_ai.output.messages``) with ``{role, parts: [{type, content}]}`` bodies
+    instead of the legacy ``langfuse.gen_ai.prompt.<i>.<field>`` index keys.
+    """
+    attributes: dict = {
+        "session.id": session_id,
+        "agentteam.session.id": session_id,
+        "gen_ai.operation.name": "chat",
+        "gen_ai.input.messages": json.dumps(input_messages, ensure_ascii=False),
+    }
+    if output_messages is not None:
+        attributes["gen_ai.output.messages"] = json.dumps(output_messages, ensure_ascii=False)
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": []},
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": trace_id,
+                                "spanId": span_id,
+                                "name": "llm.call",
+                                "startTimeUnixNano": str(start),
+                                "endTimeUnixNano": str(start + 1),
+                                "attributes": attributes_from_map(attributes),
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_harvest_jiuwenswarm_traces_packed_messages(tmp_path: Path) -> None:
+    """Packed-format telemetry must still yield digests and minable tasks.
+
+    Regression for the format break: llm.call spans carrying only
+    ``gen_ai.input.messages`` used to parse to zero prompt messages, so
+    ``_digest_from_trace`` silently dropped every such conversation and new
+    skills never got sleep-training material (``n_tasks: 0``).
+    """
+    traces = tmp_path / "traces-2026-10-29.jsonl"
+    session = "web_wc"
+    records = [
+        _jiuwenswarm_llm_record_packed(
+            session_id=session,
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "system", "parts": [{"type": "text", "content": "be helpful"}]},
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("使用 weather-china 技能 杭州的天气")}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "reasoning", "content": "先加载技能"}]},
+                {"role": "assistant", "parts": [{"type": "text", "content": "杭州今天晴"}]},
+            ],
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=20,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "weather-china"}], {"session": f"session:{session}"}],
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    digest = digests[0]
+    assert digest.user_prompts == ["使用 weather-china 技能 杭州的天气"]
+    assert digest.assistant_finals[-1] == "杭州今天晴"
+    assert "weather-china" in digest.skills_used
+
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    assert tasks[0].intent == "使用 weather-china 技能 杭州的天气"
+    assert tasks[0].skill_hint == "weather-china"
+
+
+def test_prompt_messages_prefers_indexed_over_packed() -> None:
+    """Legacy indexed attributes win when both formats are present."""
+    attrs = {
+        "langfuse.gen_ai.prompt.0.role": "user",
+        "langfuse.gen_ai.prompt.0.content": "老格式消息",
+        "gen_ai.input.messages": json.dumps(
+            [{"role": "user", "parts": [{"type": "text", "content": "新格式消息"}]}],
+            ensure_ascii=False,
+        ),
+    }
+    assert _prompt_messages(attrs) == [{"role": "user", "content": "老格式消息"}]
+
+    attrs.pop("langfuse.gen_ai.prompt.0.role")
+    attrs.pop("langfuse.gen_ai.prompt.0.content")
+    assert _prompt_messages(attrs) == [{"role": "user", "content": "新格式消息"}]
+    assert _prompt_messages({}) == []
+
+
+def test_completion_messages_fallback_order() -> None:
+    """Indexed → packed → langfuse observation output."""
+    packed = json.dumps(
+        [{"role": "assistant", "parts": [{"type": "text", "content": "结构化回复"}]}],
+        ensure_ascii=False,
+    )
+    observation = "兜底回复"
+
+    # packed wins over the observation-output fallback
+    msgs = _completion_messages(
+        {"gen_ai.output.messages": packed, "langfuse.observation.output": observation}
+    )
+    assert msgs == [{"role": "assistant", "content": "结构化回复"}]
+
+    # invalid packed value falls through to the observation output
+    msgs = _completion_messages(
+        {"gen_ai.output.messages": "not-json", "langfuse.observation.output": observation}
+    )
+    assert msgs == [{"role": "assistant", "content": "兜底回复"}]
+
+    assert _completion_messages({}) == []
+
+
+def test_packed_messages_decodes_and_skips_junk() -> None:
+    raw = json.dumps(
+        [
+            {"role": "user", "parts": [{"type": "text", "content": "你好"}]},
+            "junk",
+            {},
+        ],
+        ensure_ascii=False,
+    )
+    assert _packed_messages({"k": raw}, "k") == [{"role": "user", "content": "你好"}]
+
+    # already-decoded list values (attrs may carry lists directly)
+    decoded = [{"role": "user", "parts": [{"type": "text", "content": "列表值"}]}]
+    assert _packed_messages({"k": decoded}, "k") == [{"role": "user", "content": "列表值"}]
+
+    assert _packed_messages({"k": "plain-string"}, "k") == []
+    assert _packed_messages({"k": "{}"}, "k") == []
+    assert _packed_messages({}, "k") == []
+
+
+def test_flatten_message_content_parts() -> None:
+    assert _flatten_message_content({"content": "直接内容"}) == "直接内容"
+    # text parts win over reasoning parts
+    assert (
+        _flatten_message_content(
+            {
+                "parts": [
+                    {"type": "reasoning", "content": "推理过程"},
+                    {"type": "text", "content": "文本回复"},
+                ]
+            }
+        )
+        == "文本回复"
+    )
+    # reasoning-only messages fall back to text-like parts
+    assert (
+        _flatten_message_content({"parts": [{"type": "reasoning", "content": "只有推理"}]})
+        == "只有推理"
+    )
+    assert (
+        _flatten_message_content({"parts": [{"type": "thinking", "content": "思考中"}]})
+        == "思考中"
+    )
+    # non-prose part types never leak, even when they are the only parts
+    assert (
+        _flatten_message_content(
+            {"parts": [{"type": "tool_call", "content": '{"name": "weather-china"}'}]}
+        )
+        == ""
+    )
+    assert _flatten_message_content({"parts": [{"type": "image", "content": "<base64>"}]}) == ""
+    assert (
+        _flatten_message_content({"parts": [{"type": "tool_result", "content": "raw output"}]})
+        == ""
+    )
+    # text-like fallback ignores unrelated part types
+    assert (
+        _flatten_message_content(
+            {
+                "parts": [
+                    {"type": "thinking", "content": "先想一下"},
+                    {"type": "tool_call", "content": '{"name": "skill_tool"}'},
+                    {"type": "image", "content": "<base64>"},
+                ]
+            }
+        )
+        == "先想一下"
+    )
+    assert _flatten_message_content({}) == ""
+    assert _flatten_message_content({"parts": "not-a-list"}) == ""
+
+
+def test_harvest_packed_multiturn_conversation(tmp_path: Path) -> None:
+    """Packed-format multi-turn conversation with a tool turn in between.
+
+    The latest llm.call carries the full history; prompts must not duplicate
+    and the tool turn must attach to the user turn it served.
+    """
+    traces = tmp_path / "traces-2026-10-30.jsonl"
+    session = "web_multi"
+    first_user = _envelope("使用 weather-china 技能 杭州的天气")
+    second_user = _envelope("那明天呢")
+    records = [
+        _jiuwenswarm_llm_record_packed(
+            session_id=session,
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "system", "parts": [{"type": "text", "content": "be helpful"}]},
+                {"role": "user", "parts": [{"type": "text", "content": first_user}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "杭州今天晴"}]},
+            ],
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=20,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "weather-china"}], {"session": f"session:{session}"}],
+        ),
+        # Later call already includes prior history; must not duplicate prompts.
+        _jiuwenswarm_llm_record_packed(
+            session_id=session,
+            span_id="3",
+            start=30,
+            input_messages=[
+                {"role": "system", "parts": [{"type": "text", "content": "be helpful"}]},
+                {"role": "user", "parts": [{"type": "text", "content": first_user}]},
+                {"role": "assistant", "parts": [{"type": "text", "content": "杭州今天晴"}]},
+                {"role": "user", "parts": [{"type": "text", "content": second_user}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "明天多云"}]},
+            ],
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    digest = digests[0]
+    assert digest.user_prompts == ["使用 weather-china 技能 杭州的天气", "那明天呢"]
+    assert digest.assistant_finals == ["杭州今天晴", "明天多云"]
+    assert "skill_tool" in digest.tools_used
+    assert digest.skills_used == ["weather-china"]
+
+    tool_turns = [t for t in digest.turns if t.get("role") == "tool"]
+    assert tool_turns and tool_turns[0]["skills"] == ["weather-china"]
+
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    assert tasks[0].intent == "使用 weather-china 技能 杭州的天气"
+    assert tasks[0].skill_hint == "weather-china"
+
+
+def test_harvest_packed_with_skill_directory_output(tmp_path: Path) -> None:
+    """skill_tool output carrying ``skills/<dir>`` yields the directory slug identity.
+
+    Display names that EvolutionStore rejects (non slug chars) must lose to the
+    ``skills/<dir>`` directory identity extracted from the tool output.
+    """
+    traces = tmp_path / "traces-2026-10-31.jsonl"
+    session = "web_dir"
+    tool_output = json.dumps(
+        {
+            "success": True,
+            "data": {
+                "skill_directory": "E:/office-claw/skills/weather-china",
+                "skill_content": "---\nname: 天气\n---\n查询城市天气",
+            },
+        },
+        ensure_ascii=False,
+    )
+    records = [
+        _jiuwenswarm_llm_record_packed(
+            session_id=session,
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("杭州天气")}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "多云"}]},
+            ],
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=20,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "随便一个显示名"}], {"session": f"session:{session}"}],
+            tool_output=tool_output,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    assert digests[0].skills_used == ["weather-china"]
+
+
+def test_harvest_packed_intent_only_hint(tmp_path: Path) -> None:
+    """No tool usage at all → the hint falls back to the intent's named skill."""
+    traces = tmp_path / "traces-2026-11-01.jsonl"
+    records = [
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_intent",
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("使用 weather-china 技能 杭州的天气")}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "杭州今天晴"}]},
+            ],
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    assert digests[0].skills_used == []
+
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    assert tasks[0].intent == "使用 weather-china 技能 杭州的天气"
+    assert tasks[0].skill_hint == "weather-china"
+
+
+def test_harvest_mixed_formats_in_one_store(tmp_path: Path) -> None:
+    """Legacy indexed and packed formats coexist; each builds its own digest."""
+    traces = tmp_path / "traces-2026-11-02.jsonl"
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id="web_old",
+            span_id="1",
+            start=10,
+            prompt=[{"role": "user", "content": _envelope("老格式问题")}],
+            completion={"role": "assistant", "content": "老格式回复"},
+            trace_id="1" * 32,
+        ),
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_new",
+            span_id="2",
+            start=20,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("新格式问题")}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "新格式回复"}]},
+            ],
+            trace_id="2" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = load_jiuwenswarm_session_digests(tmp_path, project="demo")
+    by_id = {d.trace_id: d for d in digests}
+    assert set(by_id) == {"1" * 32, "2" * 32}
+    assert by_id["1" * 32].user_prompts == ["老格式问题"]
+    assert by_id["1" * 32].assistant_finals == ["老格式回复"]
+    assert by_id["2" * 32].user_prompts == ["新格式问题"]
+    assert by_id["2" * 32].assistant_finals == ["新格式回复"]
+
+
+def test_harvest_packed_trace_id_filter_and_max_sessions(tmp_path: Path) -> None:
+    """trace_id filter narrows to one conversation; max_sessions keeps the recent."""
+    traces = tmp_path / "traces-2026-11-03.jsonl"
+    records = [
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_a",
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("杭州天气")}]},
+            ],
+            trace_id="1" * 32,
+        ),
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_b",
+            span_id="2",
+            start=50,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("上海天气")}]},
+            ],
+            trace_id="2" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    only_second = load_jiuwenswarm_session_digests(tmp_path, project="demo", trace_id="2" * 32)
+    assert [d.trace_id for d in only_second] == ["2" * 32]
+    assert only_second[0].user_prompts == ["上海天气"]
+
+    recent_first = load_jiuwenswarm_session_digests(tmp_path, project="demo", max_sessions=1)
+    assert [d.trace_id for d in recent_first] == ["2" * 32]
+
+
+def test_harvest_packed_logs_drop_reason(tmp_path: Path, caplog) -> None:
+    """Dropped traces explain themselves via debug logs (format-break diagnosability)."""
+    traces = tmp_path / "traces-2026-11-04.jsonl"
+    records = [
+        # prewarm noise → dropped as noise
+        _jiuwenswarm_llm_record_packed(
+            session_id="__prewarm__1",
+            span_id="1",
+            start=10,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("预热")}]},
+            ],
+        ),
+        # system-only prompt → no usable user message → main span missing
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_sys",
+            span_id="2",
+            start=20,
+            trace_id="b" * 32,
+            input_messages=[
+                {"role": "system", "parts": [{"type": "text", "content": "be helpful"}]},
+            ],
+        ),
+        # healthy conversation
+        _jiuwenswarm_llm_record_packed(
+            session_id="web_ok",
+            span_id="3",
+            start=30,
+            trace_id="c" * 32,
+            input_messages=[
+                {"role": "user", "parts": [{"type": "text", "content": _envelope("你好")}]},
+            ],
+            output_messages=[
+                {"role": "assistant", "parts": [{"type": "text", "content": "你好呀"}]},
+            ],
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    with caplog.at_level(logging.DEBUG, logger=_TRACES_LOGGER):
+        digests = load_jiuwenswarm_session_digests(tmp_path, project="demo")
+
+    assert len(digests) == 1
+    assert digests[0].user_prompts == ["你好"]
+    log_text = caplog.text
+    # per-trace drop detail lives at debug level
+    assert "skip trace" in log_text
+    assert "prewarm/heartbeat noise" in log_text
+    assert "no llm.call with a usable prompt" in log_text
+
+    # info level: exactly one compact summary line, no per-trace spam
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=_TRACES_LOGGER):
+        digests = load_jiuwenswarm_session_digests(tmp_path, project="demo")
+    assert len(digests) == 1
+    info_text = caplog.text
+    assert "harvest: kept 1 digest(s), dropped 2 trace(s)" in info_text
+    assert "prewarm/heartbeat noise x1" in info_text
+    assert "skip trace" not in info_text
+
+
+def test_harvest_empty_store_returns_nothing(tmp_path: Path) -> None:
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo")
+    )
+    assert digests == []
+
+
+def test_unwrap_user_content_variants() -> None:
+    assert _unwrap_user_content(_envelope("上海天气")) == "上海天气"
+    # prewarm / heartbeat sources are dropped
+    assert _unwrap_user_content(_envelope("预热", source="__prewarm__web")) is None
+    assert _unwrap_user_content(_envelope("心跳", source="heartbeat")) is None
+    # non-user message types are dropped
+    assert _unwrap_user_content(_envelope("通知", msg_type="agent")) is None
+    # heartbeat task text and internal meta/review briefs never become intents
+    assert _unwrap_user_content("这是一次心跳请求任务") is None
+    assert _unwrap_user_content("You are the skill_train optimizer, do work") is None
+    assert _unwrap_user_content("是否包含对对话中已使用 skill") is None
+    # plain text passes through untouched
+    assert _unwrap_user_content("你好") == "你好"
+    assert _unwrap_user_content("") is None
+    # reminder-only content is empty after stripping
+    assert _unwrap_user_content("<system-reminder>x</system-reminder>") is None
+    # system-reminder inside the envelope content is stripped
+    wrapped = _envelope("<system-reminder>ctx</system-reminder>看天气")
+    assert _unwrap_user_content(wrapped) == "看天气"
+
+
+def test_strip_system_reminder_removes_blocks() -> None:
+    text = "前<system-reminder>hidden</system-reminder>后"
+    assert _strip_system_reminder(text) == "前后"
+    assert _strip_system_reminder("") == ""
+    assert _strip_system_reminder("没有标记") == "没有标记"
+
+
+def test_spans_look_like_noise_detection() -> None:
+    def span_with_session(sid: str) -> dict:
+        return {"name": "llm.call", "attributes": attributes_from_map({"session.id": sid})}
+
+    assert _spans_look_like_noise([span_with_session("__prewarm__abc")]) is True
+    assert _spans_look_like_noise([span_with_session("heartbeat_1")]) is True
+    assert _spans_look_like_noise([span_with_session("web_normal")]) is False
+    assert _spans_look_like_noise([{"name": "llm.call", "attributes": []}]) is False
+
+
+def test_has_jiuwenswarm_traces_and_trace_files(tmp_path: Path) -> None:
+    assert has_jiuwenswarm_traces(tmp_path) is False
+    assert _trace_files(tmp_path) == []
+
+    first = tmp_path / "traces-2026-01-01.jsonl"
+    first.write_text("{}\n", encoding="utf-8")
+    assert has_jiuwenswarm_traces(tmp_path) is True
+    assert [f.name for f in _trace_files(tmp_path)] == ["traces-2026-01-01.jsonl"]
+
+    # direct file path
+    assert has_jiuwenswarm_traces(first) is True
+    assert _trace_files(first) == [first]
+
+    # non-traces files are ignored
+    other = tmp_path / "other.jsonl"
+    other.write_text("{}\n", encoding="utf-8")
+    assert has_jiuwenswarm_traces(other) is False
+
+
+def test_decode_jsonish_variants() -> None:
+    assert _decode_jsonish(42) == 42
+    assert _decode_jsonish(None) is None
+    assert _decode_jsonish('{"a": 1}') == {"a": 1}
+    assert _decode_jsonish(" [1, 2] ") == [1, 2]
+    assert _decode_jsonish("not json") == "not json"
+    assert _decode_jsonish("") == ""
+
+
+def test_indexed_messages_assembly_order() -> None:
+    attrs = {
+        "langfuse.gen_ai.prompt.2.role": "assistant",
+        "langfuse.gen_ai.prompt.2.content": "C",
+        "langfuse.gen_ai.prompt.0.role": "system",
+        "langfuse.gen_ai.prompt.0.content": "A",
+        "langfuse.gen_ai.prompt.1.role": "user",
+        "langfuse.gen_ai.prompt.1.content": "B",
+        "other.attr.0.role": "ignored",
+    }
+    msgs = _indexed_messages(attrs, "langfuse.gen_ai.prompt")
+    assert msgs == [
+        {"role": "system", "content": "A"},
+        {"role": "user", "content": "B"},
+        {"role": "assistant", "content": "C"},
+    ]
+    assert _indexed_messages({}, "langfuse.gen_ai.prompt") == []
+
+
+def test_packed_messages_role_only_and_junk_parts() -> None:
+    raw = json.dumps(
+        [
+            {"role": "assistant"},
+            {
+                "role": "user",
+                "parts": [
+                    "not-a-mapping",
+                    {"type": "text", "content": "ok"},
+                    {"content": "no-type"},
+                ],
+            },
+        ],
+        ensure_ascii=False,
+    )
+    msgs = _packed_messages({"k": raw}, "k")
+    assert msgs == [
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "ok\nno-type"},
+    ]
+
+
+def test_flatten_message_content_multi_text_parts_joined() -> None:
+    assert (
+        _flatten_message_content(
+            {
+                "parts": [
+                    {"type": "text", "content": "第一段"},
+                    {"type": "text", "content": "第二段"},
+                ]
+            }
+        )
+        == "第一段\n第二段"
+    )
+    # non-string content falls back to the parts path
+    assert _flatten_message_content({"content": 7, "parts": None}) == ""
+    assert _flatten_message_content({"content": 7}) == ""
+
+
+def test_prompt_messages_gen_ai_indexed_variant() -> None:
+    attrs = {
+        "gen_ai.prompt.0.role": "user",
+        "gen_ai.prompt.0.content": "老格式",
+    }
+    assert _prompt_messages(attrs) == [{"role": "user", "content": "老格式"}]
+
+
+def test_completion_messages_gen_ai_indexed_variant() -> None:
+    attrs = {
+        "gen_ai.completion.0.role": "assistant",
+        "gen_ai.completion.0.content": "完成",
+    }
+    assert _completion_messages(attrs) == [{"role": "assistant", "content": "完成"}]
 
 
 def test_harvest_ignores_skill_optimizer_meta_user_prompt(tmp_path: Path) -> None:

@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 from openai import OpenAI
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.sys_operation import OperationMode, SysOperation
 from openjiuwen.harness.schema.config import (
     VisionModelConfig,
     is_vision_model_config_complete,
@@ -51,11 +53,19 @@ def _guess_mime_type(file_path: str) -> str:
     return mime_type or "image/jpeg"
 
 
-def _build_image_content(image_path_or_url: str) -> Dict[str, Any]:
-    if SANDBOX_PATH_MARKER in image_path_or_url:
-        raise ValueError(
-            "Vision tools cannot access sandbox-only paths. Use a local path outside the sandbox or an https URL."
-        )
+async def _build_image_content(
+    image_path_or_url: str,
+    operation: Optional[SysOperation] = None,
+) -> Dict[str, Any]:
+    # data URIs are passed through untouched: some callers hand the whole
+    # base64 payload in place of a path.
+    if image_path_or_url.startswith("data:image/"):
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": image_path_or_url,
+            },
+        }
 
     if _is_http_url(image_path_or_url):
         return {
@@ -65,15 +75,33 @@ def _build_image_content(image_path_or_url: str) -> Dict[str, Any]:
             },
         }
 
-    image_path = Path(image_path_or_url).expanduser()
-    if not image_path.exists() or not image_path.is_file():
-        raise FileNotFoundError(
-            f"Image path does not exist or is not a file: {image_path_or_url}"
-        )
+    if operation is not None and operation.mode != OperationMode.LOCAL:
+        # Sandbox mode: the image lives inside the sandbox, which the host
+        # filesystem cannot see. Read it through SysOperation instead.
+        res = await operation.fs().read_file(image_path_or_url, mode="bytes")
+        if res.code != StatusCode.SUCCESS.code:
+            raise RuntimeError(res.message)
+        image_bytes = res.data.content if res.data else b""
+        if not isinstance(image_bytes, bytes):
+            raise RuntimeError("Image content is not bytes")
+    else:
+        # Local mode (PC / SDK callers without an operation): original logic,
+        # kept verbatim.
+        if SANDBOX_PATH_MARKER in image_path_or_url:
+            raise ValueError(
+                "Vision tools cannot access sandbox-only paths. Use a local path outside the sandbox or an https URL."
+            )
 
-    image_bytes = image_path.read_bytes()
+        image_path = Path(image_path_or_url).expanduser()
+        if not image_path.exists() or not image_path.is_file():
+            raise FileNotFoundError(
+                f"Image path does not exist or is not a file: {image_path_or_url}"
+            )
+
+        image_bytes = await asyncio.to_thread(image_path.read_bytes)
+
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-    mime_type = _guess_mime_type(str(image_path))
+    mime_type = _guess_mime_type(image_path_or_url)
     return {
         "type": "image_url",
         "image_url": {
@@ -201,9 +229,10 @@ async def _call_vision_model(
     image_path_or_url: str,
     prompt: str,
     vision_model_config: Optional[VisionModelConfig],
+    operation: Optional[SysOperation] = None,
 ) -> tuple[str, str]:
     config = _require_vision_model_config(vision_model_config)
-    image_content = await asyncio.to_thread(_build_image_content, image_path_or_url)
+    image_content = await _build_image_content(image_path_or_url, operation)
 
     last_error: Exception | None = None
     for attempt in range(1, config.max_retries + 1):
@@ -235,9 +264,11 @@ class ImageOCRTool(Tool):
         language: str = "cn",
         vision_model_config: Optional[VisionModelConfig] = None,
         agent_id: Optional[str] = None,
+        operation: Optional[SysOperation] = None,
     ):
         super().__init__(build_tool_card("image_ocr", "ImageOCRTool", language, agent_id=agent_id))
         self.vision_model_config = vision_model_config
+        self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         _ = kwargs
@@ -249,6 +280,7 @@ class ImageOCRTool(Tool):
                 image_path_or_url,
                 prompt,
                 self.vision_model_config,
+                operation=self.operation,
             )
         except Exception as exc:  # noqa: BLE001
             return ToolOutput(success=False, error=str(exc))
@@ -274,6 +306,7 @@ class VisualQuestionAnsweringTool(Tool):
         language: str = "cn",
         vision_model_config: Optional[VisionModelConfig] = None,
         agent_id: Optional[str] = None,
+        operation: Optional[SysOperation] = None,
     ):
         super().__init__(
             build_tool_card(
@@ -284,6 +317,7 @@ class VisualQuestionAnsweringTool(Tool):
             )
         )
         self.vision_model_config = vision_model_config
+        self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         _ = kwargs
@@ -300,6 +334,7 @@ class VisualQuestionAnsweringTool(Tool):
                     image_path_or_url,
                     ocr_prompt,
                     self.vision_model_config,
+                    operation=self.operation,
                 )
 
             prompt = (
@@ -311,6 +346,7 @@ class VisualQuestionAnsweringTool(Tool):
                 image_path_or_url,
                 prompt,
                 self.vision_model_config,
+                operation=self.operation,
             )
             model = answer_model or model
         except Exception as exc:  # noqa: BLE001
@@ -335,6 +371,7 @@ def create_vision_tools(
     language: str = "cn",
     vision_model_config: Optional[VisionModelConfig] = None,
     agent_id: Optional[str] = None,
+    operation: Optional[SysOperation] = None,
 ) -> list[Tool]:
     if not is_vision_model_config_complete(vision_model_config):
         return []
@@ -343,11 +380,13 @@ def create_vision_tools(
             language=language,
             vision_model_config=vision_model_config,
             agent_id=agent_id,
+            operation=operation,
         ),
         VisualQuestionAnsweringTool(
             language=language,
             vision_model_config=vision_model_config,
             agent_id=agent_id,
+            operation=operation,
         ),
     ]
 
