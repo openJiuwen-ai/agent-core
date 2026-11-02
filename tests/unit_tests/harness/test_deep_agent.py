@@ -1395,6 +1395,31 @@ def test_create_subagent_forwards_multimodal_support_to_browser_factory(tmp_path
     assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is True
 
 
+def test_create_subagent_browser_factory_kwargs_override_inherited_image_support(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+        factory_kwargs={"enable_read_image_multimodal": False},
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = True
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is False
+
+
 def test_create_subagent_forwards_multimodal_support_to_derived_browser_model(tmp_path) -> None:
     parent_model = _create_dummy_model()
     browser_spec = build_browser_agent_config(

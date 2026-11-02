@@ -16,6 +16,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from .browser_capabilities import (
     CORE_BROWSER_CAPABILITY_NAME,
     DEFAULT_BROWSER_CAPABILITIES,
+    POLICY_ONLY_BROWSER_CAPABILITY_NAMES,
 )
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
@@ -38,18 +39,21 @@ from ..utils.env import (
 )
 
 
-PLAYWRIGHT_MCP_CAPABILITY_NAMES: tuple[str, ...] = tuple(
-    capability.name
-    for capability in DEFAULT_BROWSER_CAPABILITIES
-    if capability.name != CORE_BROWSER_CAPABILITY_NAME
-)
+_playwright_mcp_capability_names: list[str] = []
+for capability_spec in DEFAULT_BROWSER_CAPABILITIES:
+    if capability_spec.name == CORE_BROWSER_CAPABILITY_NAME:
+        continue
+    if capability_spec.name in POLICY_ONLY_BROWSER_CAPABILITY_NAMES:
+        continue
+    _playwright_mcp_capability_names.append(capability_spec.name)
+PLAYWRIGHT_MCP_CAPABILITY_NAMES = tuple(_playwright_mcp_capability_names)
 
 
 @dataclass
 class BrowserRunGuardrails:
-    max_steps: int = 20
-    max_failures: int = 2
-    timeout_s: int = 180
+    max_steps: int = DEFAULT_GUARDRAIL_MAX_STEPS
+    max_failures: int = DEFAULT_GUARDRAIL_MAX_FAILURES
+    timeout_s: int = DEFAULT_BROWSER_TIMEOUT_S
     retry_once: bool = True
     resume_on_max_iterations: bool = False
 

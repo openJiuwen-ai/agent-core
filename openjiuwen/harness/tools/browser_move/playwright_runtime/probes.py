@@ -20,6 +20,7 @@ def build_interactive_probe_js(
     max_items: int = 50,
     viewport_only: bool = True,
     query: str = "",
+    generation_id: str = "g0",
 ) -> str:
     """Build browser_run_code JavaScript for compact interactive-element probing."""
 
@@ -27,6 +28,7 @@ def build_interactive_probe_js(
         "max_items": _clamp_int(max_items, default=50, minimum=1, maximum=100),
         "viewport_only": bool(viewport_only),
         "query": str(query or "").strip().lower(),
+        "generation_id": str(generation_id or "g0"),
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
@@ -38,6 +40,7 @@ async (page) => {{
     const maxItems = Math.max(1, Math.min(Number(params.max_items || 50), 100));
     const viewportOnly = params.viewport_only !== false;
     const query = String(params.query || '').trim().toLowerCase();
+    const generationId = String(params.generation_id || 'g0');
 
     const selectors = [
       'button',
@@ -120,6 +123,16 @@ async (page) => {{
       return true;
     }};
 
+    const validateSelectorHint = (el, selector) => {{
+      if (!el || !selector) return '';
+      try {{
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.length === 1 && matches[0] === el ? selector : '';
+      }} catch (_) {{
+        return '';
+      }}
+    }};
+
     const buildSelectorHint = (el) => {{
       const tag = el.tagName.toLowerCase();
 
@@ -128,22 +141,42 @@ async (page) => {{
         el.getAttribute('data-test') ||
         el.getAttribute('data-cy');
       if (testid) {{
-        if (el.getAttribute('data-testid')) return `[data-testid="${{attrEscape(testid)}}"]`;
-        if (el.getAttribute('data-test')) return `[data-test="${{attrEscape(testid)}}"]`;
-        return `[data-cy="${{attrEscape(testid)}}"]`;
+        let candidate = `[data-cy="${{attrEscape(testid)}}"]`;
+        if (el.getAttribute('data-testid')) candidate = `[data-testid="${{attrEscape(testid)}}"]`;
+        if (el.getAttribute('data-test')) candidate = `[data-test="${{attrEscape(testid)}}"]`;
+        const validated = validateSelectorHint(el, candidate);
+        if (validated) return validated;
       }}
 
       const id = el.getAttribute('id');
-      if (id) return `#${{cssEscape(id)}}`;
+      if (id) {{
+        const validated = validateSelectorHint(el, `#${{cssEscape(id)}}`);
+        if (validated) return validated;
+      }}
 
       const aria = el.getAttribute('aria-label');
-      if (aria) return `${{tag}}[aria-label="${{attrEscape(aria)}}"]`;
+      if (aria) {{
+        const validated = validateSelectorHint(
+          el,
+          `${{tag}}[aria-label="${{attrEscape(aria)}}"]`
+        );
+        if (validated) return validated;
+      }}
 
       const name = el.getAttribute('name');
-      if (name) return `${{tag}}[name="${{attrEscape(name)}}"]`;
+      if (name) {{
+        const validated = validateSelectorHint(el, `${{tag}}[name="${{attrEscape(name)}}"]`);
+        if (validated) return validated;
+      }}
 
       const placeholder = el.getAttribute('placeholder');
-      if (placeholder) return `${{tag}}[placeholder="${{attrEscape(placeholder)}}"]`;
+      if (placeholder) {{
+        const validated = validateSelectorHint(
+          el,
+          `${{tag}}[placeholder="${{attrEscape(placeholder)}}"]`
+        );
+        if (validated) return validated;
+      }}
 
       const path = [];
       let node = el;
@@ -162,7 +195,20 @@ async (page) => {{
         depth += 1;
       }}
 
-      return path.join(' > ');
+      return validateSelectorHint(el, path.join(' > '));
+    }};
+
+    const isActionable = (el, rect) => {{
+      if (!el || !rect) return false;
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+      if (el.hasAttribute('inert')) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.pointerEvents === 'none') return false;
+
+      const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+      const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+      const hit = document.elementFromPoint(x, y);
+      return !hit || hit === el || el.contains(hit) || hit.contains(el);
     }};
 
     const elementText = (el) => {{
@@ -305,6 +351,19 @@ async (page) => {{
       if (!queryMatches(searchable)) continue;
 
       const actionLikelihood = classifyActionLikelihood(el, searchable);
+      const selectorHint = buildSelectorHint(el);
+      const actionable = isActionable(el, rect);
+      const matchCount = selectorHint
+        ? document.querySelectorAll(selectorHint).length
+        : 0;
+      const enabled = !(
+        el.disabled ||
+        el.getAttribute('aria-disabled') === 'true' ||
+        el.hasAttribute('inert')
+      );
+      const clickable = Boolean(
+        actionable && enabled && selectorHint && matchCount === 1
+      );
 
       candidates.push({{
         tag,
@@ -319,13 +378,20 @@ async (page) => {{
         placeholder: normalize(placeholder),
         href: normalize(el.getAttribute('href') || '', 180),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+        visible: true,
+        enabled,
+        actionable,
+        clickable,
+        match_count: matchCount,
+        generation_id: generationId,
         bbox: [
           Math.round(rect.x),
           Math.round(rect.y),
           Math.round(rect.width),
           Math.round(rect.height)
         ],
-        selector_hint: buildSelectorHint(el),
+        selector_hint: clickable ? selectorHint : '',
+        selector_hint_validated: clickable,
         score: scoreElement(el, rect, text, name, actionLikelihood)
       }});
     }}
@@ -355,6 +421,7 @@ async (page) => {{
       }},
       query,
       viewport_only: viewportOnly,
+      generation_id: generationId,
       total_candidates: candidates.length,
       returned: elements.length,
       elements,
@@ -373,6 +440,7 @@ def build_card_probe_js(
     query: str = "",
     site_profiles: Optional[List[Dict[str, Any]]] = None,
     selector_cache_records: Optional[List[Dict[str, Any]]] = None,
+    generation_id: str = "g0",
 ) -> str:
     """Build browser_run_code_unsafe JavaScript for compact repeated-card probing."""
 
@@ -383,6 +451,7 @@ def build_card_probe_js(
         "query": str(query or "").strip().lower(),
         "site_profiles": site_profiles or [],
         "selector_cache_records": selector_cache_records or [],
+        "generation_id": str(generation_id or "g0"),
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
@@ -395,6 +464,7 @@ async (page) => {
     const viewportOnly = params.viewport_only !== false;
     const includeButtons = params.include_buttons !== false;
     const query = String(params.query || '').trim().toLowerCase();
+    const generationId = String(params.generation_id || 'g0');
     const host = String(window.location.hostname || '').toLowerCase();
     const path = String(window.location.pathname || '/').toLowerCase();
 
@@ -543,6 +613,84 @@ async (page) => {
       return true;
     };
 
+    const isElementVisible = (el, rect) => {
+      if (!el || !rect || rect.width < 2 || rect.height < 2) return false;
+      const style = window.getComputedStyle(el);
+      if (!style) return false;
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (Number(style.opacity) === 0) return false;
+      if (rect.bottom < 0 || rect.right < 0) return false;
+      if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+      return true;
+    };
+
+    const isEnabled = (el) => {
+      return Boolean(
+        el &&
+        !el.disabled &&
+        el.getAttribute('aria-disabled') !== 'true' &&
+        !el.hasAttribute('inert')
+      );
+    };
+
+    const isActionable = (el, rect) => {
+      if (!isElementVisible(el, rect) || !isEnabled(el)) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.pointerEvents === 'none') return false;
+      const tag = el.tagName.toLowerCase();
+      const role = String(el.getAttribute('role') || '').toLowerCase();
+      const hasActionSemantics = (
+        ['a', 'button', 'input', 'select', 'textarea'].includes(tag) ||
+        ['button', 'link', 'checkbox', 'radio', 'option', 'menuitem'].includes(role) ||
+        el.hasAttribute('onclick') ||
+        el.hasAttribute('tabindex')
+      );
+      if (!hasActionSemantics) return false;
+      const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+      const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+      const hit = document.elementFromPoint(x, y);
+      return !hit || hit === el || el.contains(hit) || hit.contains(el);
+    };
+
+    const selectorMetadata = (selector) => {
+      if (!selector) {
+        return { match_count: 0, visible: false, enabled: false };
+      }
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        const first = matches[0] || null;
+        const rect = first ? first.getBoundingClientRect() : null;
+        return {
+          match_count: matches.length,
+          visible: Boolean(first && isElementVisible(first, rect)),
+          enabled: Boolean(first && isEnabled(first))
+        };
+      } catch (_) {
+        return { match_count: 0, visible: false, enabled: false };
+      }
+    };
+
+    const selectorDescriptor = (selector) => {
+      const metadata = selectorMetadata(selector);
+      return {
+        selector_hint: selector || '',
+        match_count: metadata.match_count,
+        visible: metadata.visible,
+        enabled: metadata.enabled,
+        generation_id: generationId
+      };
+    };
+
+    const validateSelectorHint = (el, selector) => {
+      if (!el || !selector) return '';
+      try {
+        const matches = Array.from(document.querySelectorAll(selector));
+        return matches.length === 1 && matches[0] === el ? selector : '';
+      } catch (_) {
+        return '';
+      }
+    };
+
     const buildSelectorHint = (el) => {
       if (!el || !el.tagName) return '';
 
@@ -553,13 +701,18 @@ async (page) => {
         el.getAttribute('data-test') ||
         el.getAttribute('data-cy');
       if (testid) {
-        if (el.getAttribute('data-testid')) return `[data-testid="${attrEscape(testid)}"]`;
-        if (el.getAttribute('data-test')) return `[data-test="${attrEscape(testid)}"]`;
-        return `[data-cy="${attrEscape(testid)}"]`;
+        let candidate = `[data-cy="${attrEscape(testid)}"]`;
+        if (el.getAttribute('data-testid')) candidate = `[data-testid="${attrEscape(testid)}"]`;
+        if (el.getAttribute('data-test')) candidate = `[data-test="${attrEscape(testid)}"]`;
+        const validated = validateSelectorHint(el, candidate);
+        if (validated) return validated;
       }
 
       const id = el.getAttribute('id');
-      if (id) return `#${cssEscape(id)}`;
+      if (id) {
+        const validated = validateSelectorHint(el, `#${cssEscape(id)}`);
+        if (validated) return validated;
+      }
 
       const stableClasses = normalize(el.getAttribute('class') || '', 160)
         .split(' ')
@@ -571,13 +724,8 @@ async (page) => {
         ? `${tag}${stableClasses.map((item) => `.${cssEscape(item)}`).join('')}`
         : tag;
 
-      try {
-        if (document.querySelectorAll(simple).length === 1) {
-          return simple;
-        }
-      } catch (_) {
-        // Fall through to a full nth-of-type path when a selector cannot be tested.
-      }
+      const validatedSimple = validateSelectorHint(el, simple);
+      if (validatedSimple) return validatedSimple;
 
       const path = [];
       let node = el;
@@ -592,19 +740,22 @@ async (page) => {
           node.getAttribute('data-cy');
 
         if (nodeTestid) {
+          let candidate = `[data-cy="${attrEscape(nodeTestid)}"]`;
           if (node.getAttribute('data-testid')) {
-            path.unshift(`[data-testid="${attrEscape(nodeTestid)}"]`);
+            candidate = `[data-testid="${attrEscape(nodeTestid)}"]`;
           } else if (node.getAttribute('data-test')) {
-            path.unshift(`[data-test="${attrEscape(nodeTestid)}"]`);
-          } else {
-            path.unshift(`[data-cy="${attrEscape(nodeTestid)}"]`);
+            candidate = `[data-test="${attrEscape(nodeTestid)}"]`;
           }
-          break;
+          if (validateSelectorHint(node, candidate)) {
+            path.unshift(candidate);
+            break;
+          }
         }
 
         const nodeId = node.getAttribute('id');
-        if (nodeId) {
-          path.unshift(`#${cssEscape(nodeId)}`);
+        const idCandidate = nodeId ? `#${cssEscape(nodeId)}` : '';
+        if (idCandidate && validateSelectorHint(node, idCandidate)) {
+          path.unshift(idCandidate);
           break;
         }
 
@@ -646,7 +797,7 @@ async (page) => {
         depth += 1;
       }
 
-      return path.join(' > ');
+      return validateSelectorHint(el, path.join(' > '));
     };
 
     const directText = (el) => {
@@ -1109,12 +1260,29 @@ async (page) => {
 
           if (!text) return null;
 
+          const selectorHint = buildSelectorHint(el);
+          const selectorMeta = selectorMetadata(selectorHint);
+          const actionable = isActionable(el, rect);
+          const clickable = Boolean(
+            actionable &&
+            selectorHint &&
+            selectorMeta.match_count === 1 &&
+            selectorMeta.visible &&
+            selectorMeta.enabled
+          );
           return {
             text,
             tag: el.tagName.toLowerCase(),
             role: el.getAttribute('role') || '',
             href: normalize(el.href || el.getAttribute('href') || '', 260),
-            selector_hint: buildSelectorHint(el),
+            selector_hint: clickable ? selectorHint : '',
+            selector_hint_validated: clickable,
+            match_count: selectorMeta.match_count,
+            visible: true,
+            enabled: isEnabled(el),
+            actionable,
+            clickable,
+            generation_id: generationId,
             bbox: [
               Math.round(rect.x),
               Math.round(rect.y),
@@ -1471,9 +1639,37 @@ async (page) => {
 
         if (fieldCount < 2) continue;
 
+        const cardSelectorHint = buildSelectorHint(el);
+        const primaryLinkSelectorHint = primaryLink.selector_hint || '';
+        const cardSelectorMeta = selectorMetadata(cardSelectorHint);
+        const primaryLinkSelectorMeta = selectorMetadata(primaryLinkSelectorHint);
+        const cardActionable = isActionable(el, rect);
+        const cardSelectorValidated = Boolean(
+          cardSelectorHint &&
+          cardSelectorMeta.match_count === 1 &&
+          cardSelectorMeta.visible &&
+          cardSelectorMeta.enabled
+        );
+        const primaryLinkSelectorValidated = Boolean(
+          primaryLinkSelectorHint &&
+          primaryLinkSelectorMeta.match_count === 1 &&
+          primaryLinkSelectorMeta.visible &&
+          primaryLinkSelectorMeta.enabled
+        );
+        const cardClickable = Boolean(
+          cardActionable &&
+          cardSelectorValidated
+        );
         const data = {
           selector_source: selectorSource,
-          selector_hint: buildSelectorHint(el),
+          selector_hint: cardSelectorHint,
+          selector_hint_validated: cardSelectorValidated,
+          match_count: cardSelectorMeta.match_count,
+          visible: true,
+          enabled: isEnabled(el),
+          actionable: cardActionable,
+          clickable: cardClickable,
+          generation_id: generationId,
           title: title.value,
           title_selector_hint: title.selector_hint,
           price: price.value,
@@ -1489,8 +1685,26 @@ async (page) => {
           summary: summary.value,
           summary_selector_hint: summary.selector_hint,
           primary_link: primaryLink.href,
+          href: primaryLink.href,
           primary_link_text: primaryLink.text,
-          primary_link_selector_hint: primaryLink.selector_hint,
+          primary_link_selector_hint: primaryLinkSelectorHint,
+          primary_link_selector_hint_validated: primaryLinkSelectorValidated,
+          primary_link_match_count: primaryLinkSelectorMeta.match_count,
+          primary_link_visible: primaryLinkSelectorMeta.visible,
+          primary_link_enabled: primaryLinkSelectorMeta.enabled,
+          selector_metadata: {
+            root: selectorDescriptor(cardSelectorHint),
+            title: selectorDescriptor(title.selector_hint),
+            price: selectorDescriptor(price.selector_hint),
+            rating: selectorDescriptor(rating.selector_hint),
+            author: selectorDescriptor(author.selector_hint),
+            source: selectorDescriptor(source.selector_hint),
+            summary: selectorDescriptor(summary.selector_hint),
+            primary_link: selectorDescriptor(primaryLinkSelectorHint)
+          },
+          recommended_action: primaryLink.href
+            ? 'navigate_primary_link'
+            : (cardClickable ? 'use_validated_selector' : 'use_actionable_child_control'),
           has_image: imagePresent,
           buttons,
           text_preview: normalize(rootText, 280),
@@ -1747,6 +1961,7 @@ async (page) => {
       },
       query,
       viewport_only: viewportOnly,
+      generation_id: generationId,
       profile_ids: activeProfiles.map((profile) => profile.id || '').filter(Boolean),
       cache_records_used: activeCacheRecords.length,
       selector_source: selectorSource,

@@ -180,6 +180,57 @@ def test_retryable_runtime_error_retries_once() -> None:
         assert restart_calls["count"] == 1
 
 
+def test_retry_attempts_share_one_task_timeout_budget() -> None:
+    service = _make_service(retry_once=True)
+    observed_timeouts: list[float] = []
+    calls = 0
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(**kwargs):
+        nonlocal calls
+        del kwargs
+        calls += 1
+        if calls == 1:
+            return {
+                "ok": False,
+                "final": "### Error\nError: page.goto: Frame has been detached.",
+                "page": {"url": "", "title": ""},
+                "screenshot": None,
+                "error": "tool execution failed",
+            }
+        return {
+            "ok": True,
+            "final": "recovered",
+            "page": {"url": "https://example.com", "title": "Example"},
+            "screenshot": None,
+            "error": None,
+        }
+
+    async def fake_wait_for(awaitable, timeout):
+        observed_timeouts.append(float(timeout))
+        return await awaitable
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ), patch.object(service, "_restart", AsyncMock()), patch.object(
+        asyncio, "wait_for", fake_wait_for
+    ):
+        result = _run(
+            service.run_task(
+                task="Open example",
+                session_id="session-shared-timeout",
+                request_id="req-shared-timeout",
+            )
+        )
+
+    assert result["ok"] is True
+    assert calls == 2
+    assert len(observed_timeouts) == 2
+    assert observed_timeouts[1] <= observed_timeouts[0] <= 30.0
+
+
 def test_max_iteration_failure_preserves_worker_output_without_progress_summary() -> None:
     service = _make_service()
     call_count = {"count": 0}
