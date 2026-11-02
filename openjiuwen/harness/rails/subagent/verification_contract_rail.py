@@ -52,7 +52,8 @@ agent before reporting completion to the user.
 - Infrastructure or configuration changes
 
 **How to spawn:**
-Use task_tool with subagent_type="verification_agent". Pass:
+Use task_tool with action="dispatch" and a tasks item whose subagent_type is "verification_agent".
+Collect its ready result with wait as needed. Pass in task_description:
 1. The original user request (verbatim)
 2. All files changed (full paths)
 3. The approach you took
@@ -64,10 +65,9 @@ report and confirm the output matches what the verifier observed. If every \
 spot-checked command matches, report completion to the user.
 
 **On VERDICT: FAIL**
-Do not report completion. Fix the issue, then re-invoke task_tool with \
-subagent_type="verification_agent". The same verification session will resume \
-(deterministic session ID). Pass the previous FAIL output and describe what \
-you fixed. Repeat until VERDICT: PASS.
+Do not report completion. Fix the issue, then dispatch a new independent verification task.
+Include the original requirements, changed files, previous FAIL report, and what you fixed.
+The new verifier does not inherit the previous task's conversation. Repeat until VERDICT: PASS.
 
 **On VERDICT: PARTIAL**
 Report what was verified and what could not be verified due to environmental \
@@ -89,7 +89,8 @@ _CONTRACT_CN = """\
 - 基础设施或配置变更
 
 **如何启动：**
-使用 task_tool，subagent_type="verification_agent"。传入：
+使用 task_tool，action="dispatch"，在 tasks 中指定 subagent_type="verification_agent"；
+按需使用 wait 收取其 ready 结果。在 task_description 中传入：
 1. 原始用户请求（原文）
 2. 所有已更改的文件（完整路径）
 3. 你采用的实现方式
@@ -100,9 +101,8 @@ _CONTRACT_CN = """\
 若每条抽查命令均匹配，则向用户汇报完成。
 
 **收到 VERDICT: FAIL 时**
-不得汇报完成。修复问题后，再次调用 task_tool，subagent_type="verification_agent"。\
-同一验证会话将继续（确定性会话 ID）。传入之前的 FAIL 输出并说明你修复了什么。\
-重复此过程直到收到 VERDICT: PASS。
+不得汇报完成。修复问题后，派发新的独立验证任务。传入原始需求、修改文件、
+上次 FAIL 报告和本次修复内容；新任务不会继承上次验证的对话。重复此过程直到收到 VERDICT: PASS。
 
 **收到 VERDICT: PARTIAL 时**
 汇报哪些内容已验证，哪些因环境限制（如服务无法启动、工具不可用）未能验证。\
@@ -152,7 +152,7 @@ class VerificationContractRail(DeepAgentRail):
         )
         logger.info("[VerificationContractRail] Initialised")
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:  
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the verification contract section before every model turn.
 
         The section is replaced each call (remove then add) to avoid
