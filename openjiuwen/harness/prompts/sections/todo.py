@@ -40,7 +40,8 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
 - The task's description MUST explicitly list all parallel sub-items, for example:
   "Read and analyse the following 5 papers in parallel: [Paper A, Paper B, Paper C, Paper D, Paper E],
   each delegated to an independent subagent."
-  This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
+  Each sub-item corresponds to an independently executable delegated task; follow the current task_tool
+  description for how to dispatch it.
 
 **Task management rules:**
 - Once a planning need is identified, call todo_create immediately before starting execution.
@@ -49,9 +50,9 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
 - Only one task can be in_progress at a time; complete it before starting the next
   - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
     (e.g., reading several documents simultaneously, concurrently searching multiple sources),
-    you may issue multiple task_tool calls at once within that task and wait for all to return
-    before marking the task completed. This is intra-task parallelism and does not violate the
-    "one in_progress at a time" rule.
+    you may advance those sub-items in parallel and process results as they become available.
+    Mark the task completed only after all required sub-items are finished. This is intra-task parallelism
+    and does not violate the "one in_progress at a time" rule.
 - Mark unnecessary tasks as cancelled via todo_modify.
 - Use todo_list to understand the overall progress of the current task plan
 - Use todo_get to view the details of a specific task
@@ -83,7 +84,7 @@ TODO_SYSTEM_PROMPT_CN = """
   应将其设计为**单个"并行批处理"任务**，而非为每个对象单独建立一条 todo。
 - 该任务的 description 中必须明确列出所有并行子项，例如：
   "并行阅读并分析以下5篇论文：[论文A, 论文B, 论文C, 论文D, 论文E]，每篇委派独立子代理处理"
-  这样执行时才能清楚地为每个子项发出一个 task_tool 调用。
+  每个子项对应一个可独立执行的委派任务；具体派发方式遵循 task_tool 的当前说明。
 
 **任务管理规则：**
 - **识别到规划需求后，在开始执行前立即调用 todo_create。**
@@ -91,7 +92,7 @@ TODO_SYSTEM_PROMPT_CN = """
 - 调用 todo_modify 更新时，每次只传入发生变化的字段（通常只有 id 和 status），不要把未变化的字段重新传一遍
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
   - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
-    可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。
+    可在该任务内并行推进独立子项，按结果就绪情况逐步处理；所有必需子项完成后，再将任务标记为 completed。
     这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
 - 不再需要的任务用 todo_modify 标记为 cancelled
 - 可通过调用 todo_list 了解当前任务整体规划进展
