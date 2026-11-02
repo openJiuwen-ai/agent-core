@@ -496,3 +496,47 @@ def test_build_browser_agent_config_fallback_uses_model_name_field() -> None:
     spec = build_browser_agent_config(model, language="en")
 
     assert spec.factory_kwargs["settings"].model_name == "test-model-name"
+
+
+def test_independent_browser_tasks_have_unique_owned_resources(monkeypatch):
+    monkeypatch.setenv("BROWSER_DRIVER", "managed")
+    settings = _fake_settings()
+    calls, fake = _capture_create_deep_agent()
+    ctx, runtime_cls, _build_tools, _tools = _patch_all(fake)
+    with ctx:
+        first = create_browser_agent(_fake_model(), settings=settings, browser_key="task-A", task_scoped=True)
+        second = create_browser_agent(_fake_model(), settings=settings, browser_key="task-B", task_scoped=True)
+    first_cfg, second_cfg = [call.kwargs for call in runtime_cls.call_args_list]
+    assert first_cfg["instance"].key == "task-A"
+    assert second_cfg["instance"].key == "task-B"
+    assert first_cfg["mcp_cfg"].server_id != second_cfg["mcp_cfg"].server_id
+    assert first_cfg["instance"].profile_name != second_cfg["instance"].profile_name
+    assert settings.instance is None and settings.mcp_cfg.server_id == "test"
+    assert first.register_task_resource_cleanup.call_args.args[0] == runtime_cls.return_value.shutdown
+    assert second.register_task_resource_cleanup.call_args.args[0] == runtime_cls.return_value.shutdown
+
+
+def test_task_browser_does_not_inherit_shared_profile_or_remote_connection(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_MANAGED_USER_DATA_DIR", str(tmp_path / "shared"))
+    monkeypatch.setenv("BROWSER_MANAGED_KILL_EXISTING", "true")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_EXTENSION", "true")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", "--extension --cdp-endpoint http://shared:9222")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ENV_JSON",
+                       '{"PLAYWRIGHT_MCP_EXTENSION":"true","PLAYWRIGHT_MCP_CDP_ENDPOINT":"http://shared:9222"}')
+    calls, fake = _capture_create_deep_agent()
+    ctx, runtime_cls, _build_tools, _tools = _patch_all(fake)
+    with ctx:
+        create_browser_agent(_fake_model(), settings=_fake_settings(), browser_key="task-A",
+                             workspace=str(tmp_path), task_scoped=True)
+        create_browser_agent(_fake_model(), settings=_fake_settings(), browser_key="task-B",
+                             workspace=str(tmp_path), task_scoped=True)
+    first, second = [call.kwargs for call in runtime_cls.call_args_list]
+    assert first["instance"].user_data_dir
+    assert first["instance"].user_data_dir != second["instance"].user_data_dir
+    assert first["instance"].user_data_dir != str(tmp_path / "shared")
+    for item in (first, second):
+        params = item["mcp_cfg"].params
+        assert "--extension" not in params["args"]
+        assert "--cdp-endpoint" not in params["args"]
+        assert not params.get("env", {}).get("PLAYWRIGHT_MCP_EXTENSION")
+        assert not params.get("env", {}).get("PLAYWRIGHT_MCP_CDP_ENDPOINT")

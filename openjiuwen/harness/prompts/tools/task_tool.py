@@ -201,33 +201,54 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
 
 
 def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
-    """Return the full JSON Schema for task tool input_params.
-
-    Args:
-        language: 'cn' or 'en'.
-
-    Returns:
-        JSON Schema dict for tool parameters.
-    """
-    p = TASK_TOOL_PARAMS
+    """Return the task-group protocol used by task_tool."""
+    cn = language != "en"
+    item_properties = {
+        "subagent_type": {"type": "string", "description": TASK_TOOL_PARAMS["subagent_type"]["cn" if cn else "en"]},
+        "task_description": {
+            "type": "string", "description": TASK_TOOL_PARAMS["task_description"]["cn" if cn else "en"],
+        },
+        "browser_capabilities": {
+            "type": "array", "items": {"type": "string"},
+            "description": TASK_TOOL_PARAMS["browser_capabilities"]["cn" if cn else "en"],
+        },
+    }
     return {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
-            "subagent_type": {
-                "type": "string",
-                "description": p["subagent_type"].get(language, p["subagent_type"]["cn"]),
+            "action": {
+                "type": "string", "enum": ["dispatch", "wait", "cancel"],
+                "description": (
+                    "dispatch 派发新任务并等待任一结果；wait 等待已有任务；cancel 取消指定任务。"
+                    if cn else "dispatch starts tasks and waits for any result; "
+                    "wait waits for existing tasks; cancel cancels tasks."
+                ),
             },
-            "task_description": {
-                "type": "string",
-                "description": p["task_description"].get(language, p["task_description"]["cn"]),
+            "tasks": {
+                "type": "array", "minItems": 1, "maxItems": 128,
+                "description": ("dispatch 必填的新任务列表，单个任务也使用数组；wait/cancel 不传。"
+                                if cn else "New tasks, required for dispatch; use an array even for one task. Omit for wait/cancel."),
+                "items": {"type": "object", "properties": item_properties,
+                          "required": ["subagent_type", "task_description"]},
             },
-            "browser_capabilities": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
+            "task_ids": {
+                "type": "array", "maxItems": 128, "items": {"type": "string"},
+                "description": (
+                    "当前任务流程内已有的任务 ID；dispatch 可选，wait/cancel 必填。"
+                    if cn else "Existing task IDs in this run; optional for dispatch, required for wait/cancel."
+                ),
+            },
+            "timeout_s": {
+                "type": "number", "minimum": 0,
+                "description": (
+                    "本次等待的最长秒数；0 立即查询，不传使用默认上限。等待到期不会停止子任务。"
+                    if cn else "Wait limit in seconds; 0 queries immediately, omit for default. "
+                    "Expiry does not stop tasks."
+                ),
             },
         },
-        "required": ["subagent_type", "task_description"],
+        "required": ["action"],
     }
 
 

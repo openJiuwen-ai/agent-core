@@ -8,9 +8,10 @@ from typing import Callable, List, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.tools import get_tool_description
+from openjiuwen.harness.prompts.tools import get_tool_description, get_tool_input_params
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagent_types import (
@@ -34,7 +35,7 @@ TaskPromptExtension = Callable[[AgentCallbackContext, str], Optional[str]]
 class SubagentRail(DeepAgentRail):
     """Rail that registers task or session tools for subagent delegation.
 
-    When ``enable_async_subagent`` is False (default), registers synchronous
+    When ``enable_async_subagent`` is False (default), registers task-group
     task tools for ephemeral subagent delegation.
 
     When ``enable_async_subagent`` is True, registers async session tools
@@ -53,9 +54,9 @@ class SubagentRail(DeepAgentRail):
 
         Args:
             enable_async_subagent: Whether to register async session tools
-                instead of the synchronous ``task_tool``.
+                instead of the task-group ``task_tool``.
             task_prompt_extension: Optional callback that supplies additional
-                guidance for the synchronous ``task_tool`` prompt. It receives
+                guidance for the task-group ``task_tool`` prompt. It receives
                 the current callback context and prompt language, and its
                 result is appended to the same ``task_tool`` section.
         """
@@ -64,6 +65,16 @@ class SubagentRail(DeepAgentRail):
         self.task_prompt_extension = task_prompt_extension
         self.tools = None
         self._toolkit = None  # only used in async branch
+        self.system_prompt_builder = None
+
+    def clone_for_subagent(self) -> SubagentRail:
+        cloned = super().clone_for_subagent()
+        SubagentRail._reset_runtime_bindings(cloned)
+        return cloned
+
+    def _reset_runtime_bindings(self) -> None:
+        self.tools = None
+        self._toolkit = None
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -104,8 +115,51 @@ class SubagentRail(DeepAgentRail):
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
-        mode = "async session" if self.enable_async_subagent else "sync task"
+        mode = "async session" if self.enable_async_subagent else "task group"
         logger.info(f"[SubagentRail] Registered {mode} tool with {len(agent.deep_config.subagents)} subagent(s)")
+
+    @property
+    def task_group_tool(self):
+        if self.enable_async_subagent:
+            return None
+        return next((tool for tool in self.tools or [] if getattr(tool, "task_manager", None) is not None), None)
+
+    @property
+    def task_manager(self):
+        tool = self.task_group_tool
+        return tool.task_manager if tool is not None else None
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        manager = self.task_manager
+        if manager is None:
+            return
+        sid = ctx.session.get_session_id() if ctx.session is not None else getattr(ctx.inputs, "conversation_id", None)
+        query = getattr(ctx.inputs, "query", None)
+        resume = (isinstance(query, InteractiveInput)
+                  or bool(ctx.extra.get("task_group.resume") and manager.scope_if_active(sid) is not None))
+        if resume and manager.scope_if_active(sid) is None:
+            if isinstance(query, InteractiveInput) and any(str(key).startswith("group:") for key in query.user_inputs):
+                raise ValueError("task_not_found: this task group cannot be restored after restart")
+            resume = False
+        ctx.extra["task_group.run"] = manager.enter_run(sid, resume=resume)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        manager = self.task_manager
+        binding = ctx.extra.pop("task_group.run", None)
+        if manager is None or binding is None:
+            return
+        run_id, token = binding
+        try:
+            result = getattr(ctx.inputs, "result", None)
+            if isinstance(result, dict) and (result.get("result_type") == "interrupt"
+                                              or ctx.extra.get("task_group.continue")):
+                return
+            scope = manager.scope_for_run(run_id)
+            if scope is not None:
+                report = await manager.close_run(scope, "parent_finished")
+                ctx.extra["task_group.summary"] = report
+        finally:
+            manager.leave_run(run_id, token)
 
     def refresh_available_agents(self, agent) -> None:
         """Refresh the available-agents text in registered subagent tool cards."""
@@ -122,6 +176,8 @@ class SubagentRail(DeepAgentRail):
             if name not in {"task_tool", "sessions_spawn"}:
                 continue
             card.description = get_tool_description(name, language).format(available_agents=available_agents)
+            if name == "task_tool":
+                card.input_params = get_tool_input_params(name, language)
             apply_subagent_type_enum(card, names)
             refreshed.append(name)
         if refreshed:
@@ -133,6 +189,9 @@ class SubagentRail(DeepAgentRail):
         Args:
             agent: DeepAgent instance to remove tools from.
         """
+        manager = self.task_manager
+        if manager is not None:
+            manager.request_close_all()
         if self.tools and hasattr(agent, "ability_manager"):
             for tool in self.tools:
                 name = getattr(tool.card, "name", None)
@@ -141,14 +200,14 @@ class SubagentRail(DeepAgentRail):
 
         if self.enable_async_subagent:
             agent.set_session_toolkit(None)
-        mode = "async session" if self.enable_async_subagent else "sync task"
+        mode = "async session" if self.enable_async_subagent else "task group"
 
         logger.info(f"[SubagentRail] Unregistered {mode} tools")
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject tool system prompt section before model call.
 
-        In sync mode (enable_async_subagent=False), injects the task_tool
+        In task-group mode (enable_async_subagent=False), injects the task_tool
         prompt section so the model sees delegation guidance.
         In async mode, injects the session tools section so the model can
         see available session tools.

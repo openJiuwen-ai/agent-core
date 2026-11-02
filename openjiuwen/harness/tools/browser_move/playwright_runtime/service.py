@@ -240,11 +240,29 @@ class BrowserService:
             return explicit
         return "remote"
 
+    def _managed_launch_args(self) -> list[str]:
+        """Keep host launch options from overriding an independent task's identity."""
+        args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
+        if not (self._instance and self._instance.task_scoped):
+            return args
+        reserved = {"--user-data-dir", "--remote-debugging-port",
+                    "--remote-debugging-address", "--profile-directory"}
+        result = []
+        index = 0
+        while index < len(args):
+            value = args[index]
+            if value.split("=", 1)[0] in reserved:
+                index += 1 if "=" in value else 2
+                continue
+            result.append(value)
+            index += 1
+        return result
+
     def _build_lifecycle_identity(self) -> BrowserServiceIdentity:
         """Build the process resource identity for this browser instance."""
         instance = self._instance
         browser_key = instance.sanitized_key() if instance else ""
-        managed_args = tuple(parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or ""))
+        managed_args = tuple(self._managed_launch_args())
         headless = any(
             arg == "--headless" or arg.startswith("--headless=")
             for arg in managed_args
@@ -372,7 +390,7 @@ class BrowserService:
             if named is not None and all(named.name != item.name for item in candidates):
                 candidates.append(named)
 
-        _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
+        _expected_extra_args = self._managed_launch_args()
         expected_binary = self.normalize_browser_binary(self._configured_browser_binary())
         for profile in candidates:
             endpoint = str(profile.cdp_url or "").strip()
@@ -457,7 +475,7 @@ class BrowserService:
         else:
             user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
         browser_binary = self._configured_browser_binary()
-        extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
+        extra_args = self._managed_launch_args()
         cdp_url = f"http://{host}:{port}"
         return BrowserProfile(
             name=self._profile_name,
@@ -501,7 +519,7 @@ class BrowserService:
             await self._stop_managed_driver()
 
         profile = self._profile_store.get_profile(self._profile_name)
-        _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
+        _expected_extra_args = self._managed_launch_args()
         if (
             profile is None
             or profile.driver_type != "managed"

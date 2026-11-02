@@ -108,7 +108,7 @@ class TestSubagentRail:
         rail.tools = None
         rail.uninit(mock_agent)
 
-        mock_logger.info.assert_called_once_with("[SubagentRail] Unregistered sync task tools")
+        mock_logger.info.assert_called_once_with("[SubagentRail] Unregistered task group tools")
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -187,7 +187,7 @@ class TestSubagentRail:
         mock_agent.ability_manager.remove.assert_not_called()
         assert rail.tools == [original_tool]
         assert "evolution_reviewer" in tool.card.description
-        assert tool.card.input_params["properties"]["subagent_type"]["enum"] == [
+        assert tool.card.input_params["properties"]["tasks"]["items"]["properties"]["subagent_type"]["enum"] == [
             "stub_agent",
             "evolution_reviewer",
         ]
