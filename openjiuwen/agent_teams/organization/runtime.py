@@ -2881,8 +2881,8 @@ class OrganizationRuntimeManager:
             return 1
         return attempt if attempt >= 1 else 1
 
+    @staticmethod
     def _review_wake_again(
-        self,
         *,
         attempt: int,
         team_id: str,
