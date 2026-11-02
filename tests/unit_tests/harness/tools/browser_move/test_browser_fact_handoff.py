@@ -150,6 +150,7 @@ async def test_task_tool_generic_exception_returns_facts_and_one_focused_resume(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("error,code,success,retryable", [
     (KeyError("missing execution state"), "browser_execution_error", False, False),
     (TypeError("result serialization failed"), "browser_execution_error", False, False),
@@ -158,7 +159,7 @@ async def test_task_tool_generic_exception_returns_facts_and_one_focused_resume(
     (RuntimeError(REPEAT), "model_repeated_output", True, False),
 ])
 async def test_task_invoke_distinguishes_execution_errors_without_losing_facts(
-    monkeypatch, error, code, success, retryable,
+    monkeypatch, streaming, error, code, success, retryable,
 ):
     _, state = cart_session()
     child = Session(session_id="review-child")
@@ -168,6 +169,15 @@ async def test_task_invoke_distinguishes_execution_errors_without_losing_facts(
     parent = Session(session_id="review-parent")
     subagent = SimpleNamespace(card=SimpleNamespace(id="browser", name="browser"),
                                invoke=AsyncMock(side_effect=error))
+    stream_calls = []
+
+    async def stream(inputs, session=None):
+        stream_calls.append((inputs, session))
+        yield {"type": "llm_output", "payload": {"content": "provisional text"}}
+        raise error
+
+    if streaming:
+        subagent.stream = stream
     agent = MagicMock()
     agent.create_subagent.return_value = subagent
     tool = TaskTool(ToolCard(name="task_tool"), agent)
@@ -200,7 +210,11 @@ async def test_task_invoke_distinguishes_execution_errors_without_losing_facts(
                                     "resume_task_id": output.data["resume_task_id"]}, session=parent)
         assert denied.data["code"] == "browser_query_resume_not_allowed"
         assert denied.data["browser_result"]["observations"] == result["observations"]
-    subagent.invoke.assert_awaited_once()  # No replay of the ACKed mutation, even on error.
+    if streaming:
+        assert len(stream_calls) == 1 and stream_calls[0][1] is child
+        subagent.invoke.assert_not_awaited()
+    else:
+        subagent.invoke.assert_awaited_once()  # No replay of the ACKed mutation, even on error.
     prepare.assert_awaited_once()
     cleanup.assert_awaited_once()
     child.post_run.assert_awaited_once()
@@ -238,18 +252,27 @@ def test_outer_failure_keeps_previous_facts_and_explains_query_denial():
     assert denial["browser_result"]["observations"]
 
 
-def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_result():
+@pytest.mark.asyncio
+async def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_result(monkeypatch):
     child, _ = cart_session()
     parent = Session(session_id="parent")
-    tool = TaskTool(ToolCard(name="task_tool"), MagicMock())
+    subagent = SimpleNamespace(card=SimpleNamespace(id="browser", name="browser"), invoke=AsyncMock())
+    agent = MagicMock()
+    agent.create_subagent.return_value = subagent
+    tool = TaskTool(ToolCard(name="task_tool"), agent)
     query = tool._prepare_browser_query(parent, "parent", "Read cart", "")
+    resume_id = tool._build_sub_session_id("parent", "browser_agent", "")
+    query.record["sub_session_id"] = resume_id
     previous = Rail.interrupted_task_result(child, "model_transport_interrupted")["authoritative_browser_result"]
     tool._save_browser_result(parent, query, previous)
-    failure = Rail.model_failure_details(RuntimeError("setup failure"))
-    result = Rail.interrupted_task_result(None, "browser_execution_error", failure=failure)
-    output = tool._build_task_output(
-        result, normalized_type="browser_agent", sub_session_id="child", parent_session=parent,
-        browser_query=query, subagent=SimpleNamespace(card=SimpleNamespace(id="browser")),
+    prepare = AsyncMock(side_effect=RuntimeError("setup failure"))
+    cleanup = AsyncMock()
+    monkeypatch.setattr(task_module.kv_cache_subagent_lifecycle, "affinity_enabled", lambda _: False)
+    monkeypatch.setattr(task_module, "prepare_subagent_task_resources", prepare)
+    monkeypatch.setattr(task_module, "cleanup_subagent_task_resources", cleanup)
+    output = await tool.invoke(
+        {"subagent_type": "browser_agent", "task_description": "Read cart", "resume_task_id": resume_id},
+        session=parent,
     )
     retained = output.data["browser_result"]
     assert output.success is False and "browser_execution_error" in output.error
@@ -258,6 +281,16 @@ def test_resume_setup_failure_preserves_saved_facts_in_body_and_structured_resul
     assert retained["observation_excerpt"] == previous["observation_excerpt"]
     assert retained["status"] == "partial" and not retained["retryable"]
     assert "3 items" in output.data["output"]
+    rendered = json.loads(tool.render_for_llm(output))["browser_orchestration"]
+    assert rendered["success"] is False and rendered["browser_result"] == retained
+    saved = tool._load_browser_query_records(parent)[output.data["query_id"]]["browser_result"]
+    # Real Session treats null optional metadata as deletion, not a stored value.
+    assert set(saved).issubset(retained)
+    assert {key: saved.get(key) for key in retained} == retained
+    subagent.invoke.assert_not_awaited()
+    prepare.assert_awaited_once()
+    cleanup.assert_awaited_once()
+    assert not tool._active_browser_queries
 
 
 def test_multisource_answer_survives_later_diagnostics_without_more_reads():

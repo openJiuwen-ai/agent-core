@@ -914,14 +914,6 @@ class TaskTool(Tool):
             )
         data["query_id"] = browser_query.record["query_id"]
         self._save_browser_result(parent_session, browser_query, browser_result)
-        if browser_result.get("terminal_reason") == "browser_execution_error":
-            # Fact retention does not turn an unexpected execution failure into a
-            # successful tool call. Keep the same payload for the parent and rails.
-            return ToolOutput(
-                success=False, data=data,
-                error=("browser_execution_error: unexpected browser subagent failure; "
-                       "observations and execution receipts are preserved."),
-            )
         return ToolOutput(success=True, data=data, error=None)
 
     def _record_browser_execution_failure(
@@ -1151,10 +1143,19 @@ class TaskTool(Tool):
                         logger.warning("[TaskTool] Browser interrupted: code=%s exception_type=%s",
                                        reason, type(exc).__name__)
                     result = BrowserRuntimeRail.interrupted_task_result(child_session, reason, failure=failure)
-                    return self._build_task_output(
+                    output = self._build_task_output(
                         result, normalized_type=normalized_type, sub_session_id=sub_session_id,
                         parent_session=parent_session, browser_query=browser_query, subagent=subagent,
                     )
+                    if reason == "browser_execution_error":
+                        # Only an unknown exception escaping execution is a tool
+                        # failure; a runtime-finalized partial result is not.
+                        output.success = False
+                        output.error = (
+                            "browser_execution_error: unexpected browser subagent failure; "
+                            "observations and execution receipts are preserved."
+                        )
+                    return output
                 self._record_browser_execution_failure(
                     parent_session,
                     browser_query,

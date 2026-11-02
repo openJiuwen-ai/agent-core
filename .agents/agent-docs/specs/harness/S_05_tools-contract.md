@@ -631,6 +631,9 @@ and includes the failure flag and error in its model-facing renderer. It logs th
 traceback and does not grant another resume. Classified model/transport interruptions keep
 their existing structured partial-result and bounded recovery semantics; cancellation still
 propagates. Fact retention and tool success are separate decisions.
+This failure flag is assigned at the caught-exception boundary. A normally returned,
+runtime-finalized partial/blocked result remains successful delivery of that result;
+its terminal-reason label alone must not be treated as an escaping TaskTool exception.
 
 Terminal source excerpts deduplicate retained records and cover source/scope diversity
 within the existing size limit. They retain raw recall references and source region; absence

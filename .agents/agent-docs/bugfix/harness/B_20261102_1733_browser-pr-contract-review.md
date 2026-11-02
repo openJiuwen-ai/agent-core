@@ -11,6 +11,7 @@ modules:
 files:
   - openjiuwen/harness/subagents/browser_agent.py
   - openjiuwen/harness/tools/subagent/task_tool.py
+  - tests/unit_tests/harness/test_deep_agent_terminal_stream.py
   - tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py
   - tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py
   - tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py
@@ -48,8 +49,8 @@ The browser clone checks all three existing aliases in the request and its `extr
 mapping. Any non-null limit prevents default injection. No supplied carrier is rewritten,
 no parent descriptor is mutated, and no conflicting caller configuration is guessed away.
 
-The existing `browser_execution_error` terminal reason produces a failed ToolOutput
-with retained data. The same journal, sources and current page remain in the parent
+An unknown exception caught at the TaskTool execution boundary produces a failed
+ToolOutput with retained data. The same journal, sources and current page remain in the parent
 query state. The renderer includes success/error alongside those facts, and the exception
 boundary logs the traceback. Classified transport/repeated-output failures keep their
 existing partial-result and recovery handling. Unknown errors do not gain a retry;
@@ -78,6 +79,32 @@ The regression checks preserve typed facts in both the returned body and persist
 query, deny unsupported resume, run cleanup once, and distinguish known transport
 interruption from unknown implementation/authentication errors. Existing live-guard,
 native dispatch and ordinary subagent tests remain in the regression scope.
+
+## CI follow-up: preserve finalized stream delivery
+
+The Linux/Python 3.11.5 CI report for `798a16bf8` recorded 24,973 passes, one failure,
+481 skips and two expected failures. The failing case was
+`test_deep_agent_terminal_stream.py::test_real_browser_rail_stream_reaches_tasktool[provider_error-False]`.
+The same failure reproduced locally with 54 other related cases passing.
+
+The first implementation inferred tool failure from `terminal_reason` inside the common
+result builder. Runtime's existing stream finalizer also uses `browser_execution_error`
+for a normally delivered structured blocked result, so the inference was too broad.
+This is a regression from this fix, not a CI platform issue or a real provider outage.
+The earlier 1,728-case local selection omitted this real DeepAgent stream integration test.
+
+Move the tool failure flag to the actual caught-unknown-exception branch. Keep the
+renderer, retained facts and retry limits; do not weaken the CI assertion or expand
+provider-error keywords to hide this boundary mistake. Regression coverage now includes
+the real DeepAgent/Runtime/TaskTool terminal stream and both invoke-only and streaming
+children that raise an unhandled exception. The setup-failure test goes through public
+TaskTool.invoke and a valid parent-scoped resume ID instead of calling the result builder.
+
+Follow-up regression: all 1,755 cases passed, with no failures or skips, in 194.64
+seconds across 67 test files. This includes the unchanged CI success assertion,
+the previous browser/TaskTool/lifecycle selection and the real terminal stream
+integration module. Two existing Pydantic deprecation warnings remain. The complete
+repository CI suite was not rerun locally.
 
 ## Limits
 
