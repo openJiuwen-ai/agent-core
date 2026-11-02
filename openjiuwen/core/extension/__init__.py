@@ -34,6 +34,7 @@ from openjiuwen.core.extension.schema import (
     ActivePackageRecord,
     ExtensionPlan,
     Manifest,
+    McpServerSpec,
 )
 from openjiuwen.core.extension.selection import ResolveInstallResult, resolve_install_set
 
@@ -47,6 +48,7 @@ __all__ = [
     "HandlerDeclaration",
     "ManagementContext",
     "Manifest",
+    "McpServerSpec",
     "OperationError",
     "Orchestrator",
     "PackageManager",

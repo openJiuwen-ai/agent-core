@@ -10,7 +10,7 @@
 >
 > 公共契约：[S_01 Events 公共契约规约](../specs/S_01_events-contract.md)
 >
-> 验证摘要：`fs.*` 六个事件与 `ops.fs.*` 已实现；专项 23 passed、Events 回归 138 passed（见第 6 节）。
+> 验证摘要：`fs.*` 六个事件与 `ops.fs.*` 已实现；专项 23 passed、Events 回归 207 passed（见第 6 节）。
 
 ## 1. 问题
 
@@ -82,7 +82,7 @@
 
 超时由 `fs_events.py` 的 CORE Handler 统一包裹；`ops.fs.*` 与直接 `bus.trigger` 使用同一预算，超时返回 `status=timeout`（`error.kind=timeout`）。
 
-`FsService.from_ops` 由 `runtime.resolve_agent(session_id)` 取 Agent，再用 `runtime.resolve_sys_operation(agent)` 取后端；Agent 未绑定或未配置 `sys_operation` 时返回 `status=denied`（`error.kind=sys_operation_unavailable`）。
+`FsService.from_ops` 由 `runtime.resolve_agent(session)` 取 Agent，再用 `runtime.resolve_sys_operation(agent)` 取后端；Agent 未绑定或未配置 `sys_operation` 时返回 `status=denied`（`error.kind=sys_operation_unavailable`）。
 
 ```python
 async def load_instructions(ops: EventHandlerOps) -> str:
@@ -133,7 +133,7 @@ python -m pytest tests/unit_tests/core/events -q -o addopts=""
 python -m ruff check openjiuwen/core/events tests/unit_tests/core/events
 ```
 
-结果：FS 专项 23 passed；Events 回归 138 passed。用例覆盖 `ops.build` 命名空间、读取、缺后端降级、写入与 `stat`/`exists` 往返、目录合并、`max_entries` 截断、缺省排除目录、不存在路径、列举失败、`ancestors` 顺序、`ancestors` 名称大小写与 `stop_at` 边界、直接触发与 `ops.fs.*` 超时、非法字段、读取窗口校验、目录部分失败、起始目录不可读、`skipped` 计数、同名重入、工作目录还原。
+结果：FS 专项 23 passed；Events 回归 207 passed。用例覆盖 `ops.build` 命名空间、读取、缺后端降级、写入与 `stat`/`exists` 往返、目录合并、`max_entries` 截断、缺省排除目录、不存在路径、列举失败、`ancestors` 顺序、`ancestors` 名称大小写与 `stop_at` 边界、直接触发与 `ops.fs.*` 超时、非法字段、读取窗口校验、目录部分失败、起始目录不可读、`skipped` 计数、同名重入、工作目录还原。
 
 ## 7. 待确认
 

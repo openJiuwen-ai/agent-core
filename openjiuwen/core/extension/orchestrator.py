@@ -16,6 +16,7 @@ from openjiuwen.core.events.types import PackageMetadata
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.ordering import topological_order
 from openjiuwen.core.extension.schema.manifest import Manifest
+from openjiuwen.core.extension.schema.mcp import load_mcp_config
 from openjiuwen.core.extension.schema.records import (
     ActivePackageRecord,
     ExtensionPlan,
@@ -107,5 +108,10 @@ class Orchestrator:
                     module=extension.module,
                 )
                 for extension in ordered
+            ),
+            mcp_servers=(
+                load_mcp_config(package_root, manifest.package_id)
+                if operation != "uninstall"
+                else ()
             ),
         )
