@@ -31,7 +31,9 @@ generated: true
 | [harness/tools/browser_move](#module-14) |
 | [harness/tools/browser_move/decision](#module-15) |
 | [harness/tools/subagent](#module-16) |
-| [未分类](#module-17) |
+| [jiuwenswarm/jiuwenswarm/symphony](#module-17) |
+| [symphony](#module-18) |
+| [未分类](#module-19) |
 
 <a id="module-1"></a>
 
@@ -121,8 +123,8 @@ generated: true
 | [F_18_hide-human-agent-role-from-teammate](features/agent_teams/F_18_hide-human-agent-role-from-teammate.md) | F | Hide Human-Agent Role from Teammate Prompts (Switchable) | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_19_monitor-hide-dm-switch](features/agent_teams/F_19_monitor-hide-dm-switch.md) | F | Monitor `hide_dm` Switch | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_20261022_2319_inline-member-worktree-isolation](features/F_20261022_2319_inline-member-worktree-isolation.md) | F | 调度模式内联成员支持 worktree 隔离 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/tools/tool_task.py, openjiuwen/agent_teams/tools/locales/cn.py, openjiuwen/agent_teams/tools/locales/en.py, openjiuwen/agent_teams/tools/locales/descs/cn/fragments/create_task_inline_member.md, openjiuwen/agent_teams/tools/locales/descs/en/fragments/create_task_inline_member.md | 无独立 D：对 F_118 内联成员参数遗漏的小范围补齐，复用既有 `isolation` 契约，无独立设计 |
-| [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20261030_2012_teammate-swarmflow-orchestration](features/agent_teams/F_20261030_2012_teammate-swarmflow-orchestration.md) | F | 集群模式teammate支持swarmflow工具（agent-core 侧实现） | @xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/swarmflow_infra.py, openjiuwen/agent_teams/workflow/tool_swarmflow.py | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) |
+| [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
@@ -287,6 +289,7 @@ generated: true
 | [SDD-0027](designs/archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | D | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | @xiajing | agent_teams/workflow | — | — |
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | agent_teams/workflow, agent_teams | — | — |
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | agent_teams, agent_teams/workflow | — | — |
+| [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
 <a id="module-5"></a>
 
@@ -351,6 +354,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | extensions/observability | — | — |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+| [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
 <a id="module-12"></a>
 
@@ -460,6 +464,25 @@ generated: true
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
 <a id="module-17"></a>
+
+## jiuwenswarm/jiuwenswarm/symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [D-20261029-1619-skill-directory-graph-api](designs/proposals/D-20261029-1619-skill-directory-graph-api/design.md) | D | Symphony Runtime 统一配置与检索编排接口收敛 | lin-xiaoyu | symphony, jiuwenswarm/jiuwenswarm/symphony | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/config.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/shared/fingerprint/settings.py | — |
+
+<a id="module-18"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [D-20261029-1619-skill-directory-graph-api](designs/proposals/D-20261029-1619-skill-directory-graph-api/design.md) | D | Symphony Runtime 统一配置与检索编排接口收敛 | lin-xiaoyu | symphony, jiuwenswarm/jiuwenswarm/symphony | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/config.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/shared/fingerprint/settings.py | — |
+| [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) | D | Symphony 配置契约先行 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | — |
+| [F_20261031_1614_symphony-config-contract](features/F_20261031_1614_symphony-config-contract.md) | F | Symphony 多层 Pydantic 配置契约 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) |
+| [S_01_configuration-contract](specs/symphony/S_01_configuration-contract.md) | S | Symphony 目标配置模型规约 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | — |
+
+<a id="module-19"></a>
 
 ## 未分类
 
