@@ -3963,8 +3963,14 @@ class DeepAgent(BaseAgent):
             await self.prepare_interaction_task_loop(session)
             goal_language = self._goal_prompt_language()
             if self._task_completion_rail is None:
+                queued = next(
+                    (rail for rail in self._pending_rails if isinstance(rail, TaskCompletionRail)),
+                    None,
+                )
+                if queued is not None:
+                    self._pending_rails.remove(queued)
                 await self.register_rail(
-                    TaskCompletionRail(goal_language=goal_language)
+                    queued or TaskCompletionRail(goal_language=goal_language)
                 )
 
             from openjiuwen.harness.goal.store import SessionGoalStore
