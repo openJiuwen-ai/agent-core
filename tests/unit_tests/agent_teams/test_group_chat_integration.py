@@ -34,6 +34,8 @@ async def runtime(tmp_path, monkeypatch):
     await db.member.create_member("leader", "group", "Leader", "{}", "ready", role="leader")
     await db.member.create_member("alice", "group", "Expert", "{}", "unstarted", role="teammate")
     token = set_session_id("session")
+    # Mirror ``TeamRuntimeManager.activate``: session tables exist before pooling.
+    await db.create_cur_session_tables()
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="group",
                          leader=LeaderSpec(member_name="leader"))
     backend = TeamBackend("group", "leader", True, db, AsyncMock())
@@ -124,6 +126,20 @@ async def test_group_malformed_input_is_rejected(runtime):
 
 
 @pytest.mark.asyncio
+async def test_group_input_to_dropped_session_tables_fails_without_recreating_them(runtime):
+    await runtime.db.drop_cur_session_tables()
+    result = await runtime.sdk.interact_agent_team(
+        GroupChatMessage("hello", "m1"), team_name="group", session_id="session",
+    )
+    assert not result.ok and result.reason == "group_chat_delivery_failed"
+    async with runtime.db._sessions.read() as session:
+        tables = (await session.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).scalars().all()
+    assert not any(name.startswith("team_message_") for name in tables)
+    assert not GroupConversationLog("group", "session").history_path.exists()
+    runtime.agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_tool_author_is_bound_and_rejects_arbitrary_routing(runtime):
     runtime.backend.member_name = "alice"
     sender = GroupSendMessageTool(runtime.backend, make_translator("cn"))
@@ -150,6 +166,11 @@ async def test_explicit_cleanup_removes_only_selected_scope(runtime, tmp_path):
     other_backend = TeamBackend("group", "leader", True, runtime.db, AsyncMock())
     other_backend.group_chat_spec = runtime.spec
     other_backend.bind_group_session("other")
+    other_token = set_session_id("other")
+    try:
+        await runtime.db.create_cur_session_tables()
+    finally:
+        reset_session_id(other_token)
     other_result = await other_backend.append_group_message("user", "keep", client_message_id="m2")
     other = GroupConversationLog("group", "other")
     await asyncio.to_thread(GroupConversationLog.delete_registered, "group", "session")

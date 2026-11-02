@@ -1407,6 +1407,11 @@ class TeamRuntimeManager:
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
+        # NEW_TEAM_IN_SESSION already created them via ``resume_for_new_session``;
+        # CREATE / COLD_RECOVER only bind later in ``coordination.start``.
+        if kind in (RunActionKind.CREATE, RunActionKind.COLD_RECOVER):
+            await self._ensure_session_tables(agent, session_id)
+
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,
@@ -1441,6 +1446,36 @@ class TeamRuntimeManager:
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
         """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
         await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
+    async def _ensure_session_tables(agent: "TeamAgent", session_id: str) -> None:
+        """Create the per-session dynamic tables before the agent enters the pool.
+
+        Pool membership plus the ``team.runtime_ready`` chunk is what lets
+        embedders reach the backend (group roster sync -> ``build_team`` ->
+        ``on_team_built``, history reads). The leader's ``bind_session`` only
+        runs later in ``coordination.start``, so without this the session's
+        ``team_task_*`` / ``team_message_*`` tables do not exist yet at that
+        point. Idempotent: the later bind re-runs ``checkfirst`` creation.
+
+        Raises:
+            BaseError: When the tables cannot be created within the retry budget.
+        """
+        backend = getattr(agent, "team_backend", None)
+        db = getattr(backend, "db", None)
+        if db is None:
+            return
+        token = set_session_id(session_id)
+        try:
+            await db.initialize()
+            tables_ready = await db.create_cur_session_tables()
+        finally:
+            reset_session_id(token)
+        if tables_ready is False:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="team session database initialization failed",
+            )
 
     @staticmethod
     async def _flush_team_manifest(agent: "TeamAgent", session: AgentTeamSession) -> None:

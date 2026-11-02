@@ -74,7 +74,19 @@ async def context_for(backend, member_name: str, trigger) -> str:
 
 async def post_message(conversation, message_manager, sender: str, content: str, *, client_message_id: str,
                        mentions=(), attachments=()):
-    """Persist one broadcast, project history, then publish the existing broadcast event."""
+    """Persist one broadcast, project history, then publish the existing broadcast event.
+
+    Precondition: the per-session dynamic tables of ``conversation.session_id``
+    must already exist. ``TeamRuntimeManager.activate`` creates them before a
+    runtime enters the pool, and members create them in ``bind_session``; this
+    function deliberately does not create them, so posting to a session whose
+    tables were dropped fails instead of resurrecting it.
+
+    Raises:
+        ValueError: The message or a mentioned member is invalid.
+        sqlalchemy.exc.SQLAlchemyError: Storage failed, including missing
+            session tables.
+    """
     from openjiuwen.agent_teams.context import reset_session_id, set_session_id
     from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
 
@@ -113,7 +125,6 @@ async def post_message(conversation, message_manager, sender: str, content: str,
                     sender_name=author.display_name if author else "user", mentions=mentions, attachments=attachments)
         identity = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(
             [conversation.team_name, conversation.session_id, client_message_id], ensure_ascii=False)))
-        await db.create_cur_session_tables()
         stored = await db.message.get_message(identity)
         duplicate = stored is not None
         if stored is None:
@@ -139,6 +150,8 @@ async def post_message(conversation, message_manager, sender: str, content: str,
 
 async def deliver_group_message(backend, payload):
     """Adapt group posting to the existing interaction result contract."""
+    from sqlalchemy.exc import SQLAlchemyError
+
     from openjiuwen.agent_teams.interaction.payload import DeliverResult
 
     spec = backend.group_chat_spec
@@ -156,5 +169,5 @@ async def deliver_group_message(backend, payload):
         return DeliverResult(ok=True, message_id=result.message.message_id, data=result.model_dump(mode="json"))
     except ValueError:
         return DeliverResult.failure("invalid_group_chat")
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, SQLAlchemyError):
         return DeliverResult.failure("group_chat_delivery_failed")
