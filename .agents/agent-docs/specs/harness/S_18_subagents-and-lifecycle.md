@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（9 文件）、`openjiuwen/harness/tools/cua/`、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-29 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary、F_20_react-iteration-limit、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -587,3 +587,33 @@ An independently cloned browser model defaults to max_tokens=8192 only if no tot
 limit is configured. Explicit provider-native limits and reasoning budgets are respected;
 the parent descriptor is not mutated. Client first/idle waits and task deadline still own
 timeouts. A token limit is not a whole-stream timer and does not replay browser mutations.
+
+### Browser core output-limit compatibility (F30)
+
+Core MODEL_CALL_FAILED output-limit details (length/max_tokens) enter the existing
+model_output_incomplete terminal path, including wrapped core causes. Preserve the
+finish reason, output token count, observations and ACKs. Retryability is governed by
+the original task deadline and resume count; it never schedules automatic write replay
+or a new retry allowance. Recovery first uses retained facts for a concise answer or
+only the still-unexecuted work. Failed attempts remain owned by the exception rail;
+genuinely empty successful output still cannot be completed.
+
+### Optional handoff recovery and invocation exits (2026-10-29)
+
+An unrelated business candidate excluded from Jev's menu must not make phase setup
+the primary recovery instruction for search/reading. LLM tools remain the direct path
+for a clear step; an exact object/operation handoff is needed only to delegate that
+business action to Jev. Current registry identity, operation guards and unknown effects
+are unchanged. Consecutive unperformed management failures use the existing completed
+tool rounds and model-protocol terminal path described in S_05.
+
+An approved explicit resume retires max_iterations_reached from the previous invocation's
+blockers. It preserves the original task deadline, resume allowance, all journal entries,
+source observations, unknown effects and live blockers. An expired deadline or non-resumable
+obstacle does not acquire permission through this cleanup. No new 600-second allowance
+or automatic replay is introduced. A current invocation reaching its own limit still ends.
+
+Local recovery reuses retained facts before any new reading; output-limit recovery remains
+within the existing model/resume policy. Prompts distinguish observed selected variants
+from family titles, confirmation dialogs from completed actions, and historical observations
+from later page state. Runtime does not infer which sort, specification or purchase is correct.

@@ -1,3 +1,16 @@
+---
+title: Browser local intent continuity and reader decisions
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_27_browser-local-intent-and-reader-decisions
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser local intent continuity and reader decisions
 
 ## Metadata

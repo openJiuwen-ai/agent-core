@@ -422,6 +422,29 @@ separate from explicit user requirements: an inline weather answer can be prefer
 another suitable source used if unavailable or insufficient. Preserve user restrictions,
 comparisons, budgets and the authorized endpoint. Later observations do not erase earlier facts.
 
+### Optional handoff and recovery (2026-10-29)
+
+Ordinary search, reading and clear individual actions can use tools directly. The common
+`browser_phase` card exposes only op, objective, allowed_operations, target_ids, bound_values
+and read_queries. Set requires a short objective; verify is for a needed fresh observation.
+Explicit legacy conditions/phase_version/inspect_cart remain strictly validated but are not
+advertised by default. Delegating a selected business action to Jev still requires its exact
+current operation control and operation; a candidate title alone does not authorize it.
+
+Two consecutive failed, definitely unperformed phase rounds omit that optional tool from the
+next request and direct the model to ordinary tools or a targeted probe. Fresh tool work, a
+new user input, successful handoff or unknown read ends the streak. Continued rejected
+management calls use the existing protocol-error terminal path with retained facts.
+An approved resume retires the previous invocation's max_iterations_reached blocker while
+preserving the original deadline, unresolved effects, live obstacles and all execution facts.
+
+Compact receipts and journal retain execution_stage and explicit-target versus active-element
+keyboard binding. Optional focus diagnostics are bounded structural metadata, not field values
+or executable identities. An outer RPC timeout with no returned steps declares
+step_receipts_available=false; it does not imply that nothing was dispatched or permit replay.
+Dedicated logs append on reopen; changing/disabling their path closes prior owned handlers.
+Use a separate configured path for tests. Rotation remains the host's responsibility.
+
 - **Dedicated log file** — Browser activity is written to `./logs/browser_agent.log` through the `openjiuwen.browser_agent` logger, keeping it separate from the common application log. Override the path with `OPENJIUWEN_BROWSER_AGENT_LOG_FILE` (a falsy value such as `0`/`off` disables the file), the level with `OPENJIUWEN_BROWSER_AGENT_LOG_LEVEL` (default `INFO`), and mirroring into the common log with `OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON` (default off).
 - **Status telemetry** — When `BROWSER_SUBAGENT_STATUS_LOG` is enabled (default on), compact JSON records tagged `[BROWSER_SUBAGENT]` are emitted for task/model/tool start, end, and exceptions, including per-tool counts, batch step aggregates, and detection of fallbacks from a failed batch to primitive tools. Sensitive values are redacted and URLs are query-stripped.
 

@@ -1,3 +1,16 @@
+---
+title: Browser shared-state lifecycle and complete retained-source delivery
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_29_browser-shared-state-and-source-delivery
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser shared-state lifecycle and complete retained-source delivery
 
 ## Metadata

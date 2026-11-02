@@ -175,7 +175,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
     逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。
-15. **Browser 输入与回执可恢复**：阶段条件按 kind 声明字段，set/verify 分开校验；错误包含
+15. **Browser 输入与回执可恢复**：常用交接只暴露 objective、当前对象/操作/字段值和读取词；
+    旧显式条件按 kind 声明字段，set/verify 的完整兼容入口仍分开严格校验；错误包含
     字段路径和修正方向，绑定目标来自同一当前 guarded registry。执行器确认的反馈文本保留
     在 journal，但不能替代业务读数。原生工具和 Batch 共用执行安全边界，见 F_17。
     `browser_phase verify` 的 `inspect_cart:true` 仅执行固定 DOM 读取，返回 reader 线索；不认证
@@ -699,6 +700,41 @@ See F_27 for replay boundaries and validation results.
 7. Targetless URL navigation validates the current page/document, arguments and any observed
    link/order provenance, but does not depend on unchanged viewport/scroll geometry. Node
    actions retain their exact node and actionability checks. See F_29 for lifecycle regressions.
+
+### Browser dispatch contract compatibility (F30)
+
+- Primitive batch steps preserve the native executor's exact preflight rejection as
+  executed=false. Failure after action dispatch remains unknown; arbitrary script text
+  cannot impersonate a native target-resolution receipt.
+- Closed page operations use the permission/registered-tool intersection of the current
+  runtime. Fixed observations require their compact transport; short waits are local.
+  Native capability resolution precedes dispatch marking, with an explicit unavailable
+  capability reason. Menus and direct page tools consume the same capability calculation.
+- Jev unknown/business-effect actions require an active exact target and operation
+  binding; broad objectives or merely opening a candidate do not grant that binding.
+  Fixed reads/local UI do not acquire a per-step phase requirement. Binding eligibility
+  diagnostics describe missing facts rather than overriding freshness or actionability.
+
+### Optional browser handoff and receipt diagnostics (2026-10-29)
+
+- The model-facing `browser_phase` card advertises only set/verify, objective,
+  target_ids, allowed_operations, bound_values and read_queries. The existing
+  full schema still validates explicit legacy conditions/phase_version/inspect_cart;
+  hiding advanced fields does not relax them or turn conditions into requirements.
+- Two consecutive completed, rejected-before-dispatch phase rounds omit this optional
+  tool from the next model request and instruct ordinary-tool recovery. Varying invalid
+  arguments does not evade this check. A normal tool round, successful phase, new user
+  input or unknown dispatched verification breaks the streak. Four consecutive rejected
+  rounds use the existing model-protocol partial/blocked result with retained facts.
+  This is not a page action/read budget or a new retry manager.
+- Batch receipts preserve execution_stage and keyboard binding (explicit_target versus
+  active_element); an available focus_before contains only structural attributes, not
+  field values. These are diagnostics, not fresh identities or proof of business effects.
+  An outer RPC timeout with no step receipts remains unknown. ACKed earlier steps in a
+  returned partial batch remain ACKed; their diagnostics are retained in the journal.
+- Dedicated browser logs append on reopen. Retargeting/disable closes the prior owned
+  handler, so a new test path cannot continue writing into the prior run. Callers use
+  OPENJIUWEN_BROWSER_AGENT_LOG_FILE for isolation; host rotation remains host-owned.
 
 ## 客户端执行的工具（client tools，当前契约）
 

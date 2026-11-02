@@ -1,3 +1,16 @@
+---
+title: Browser source retention and local continuity after develop integration
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_28_browser-source-and-local-continuity
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser source retention and local continuity after develop integration
 
 ## Metadata

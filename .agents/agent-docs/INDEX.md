@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
 generated: true
 ---
 
@@ -9,18 +9,20 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 274 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 287 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 201 |
+| [agent_teams](#module-2) | 203 |
 | [agent_teams/workflow](#module-3) | 16 |
 | [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 54 |
-| [未分类](#module-6) | 6 |
+| [harness](#module-5) | 64 |
+| [harness/subagents](#module-6) | 1 |
+| [harness/tools/browser_move](#module-7) | 1 |
+| [未分类](#module-8) | 6 |
 
 <a id="module-1"></a>
 
@@ -204,6 +206,8 @@ generated: true
 | [B_07_team-interrupt-resume-entry-and-leader-ready](bugfix/agent_teams/B_07_team-interrupt-resume-entry-and-leader-ready.md) | B | 团队中断关闭流后无恢复入口：裸文本恢复静默失效，recovery 流伪造 "None" 轮次 | wangcan103 | openjiuwen/agent_teams | — | 待核实 |
 | [B_08_single-branch-worktree-startup-failure](bugfix/agent_teams/B_08_single-branch-worktree-startup-failure.md) | B | 单分支仓库的 worktree 基线失效导致调查成员未启动 | MengHan18 | openjiuwen/agent_teams | — | 待核实 |
 | [B_09_all-done-prompt-stalls-remaining-work](bugfix/agent_teams/B_09_all-done-prompt-stalls-remaining-work.md) | B | 看板清空的收尾提示让 leader 停止建任务，且之后再清空不再提示 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
+| [B_09_session-db-bind-delete-race](bugfix/agent_teams/B_09_session-db-bind-delete-race.md) | B | Concurrent session cleanup can break another session's bind | 待确认 | openjiuwen/agent_teams | — | 待核实 |
+| [B_09_summary-source-waiting-feedback](bugfix/agent_teams/B_09_summary-source-waiting-feedback.md) | B | Summary 来源待验收时误提示 Owner 结束回合等待 | 待确认 | openjiuwen/agent_teams | — | 待核实 |
 | [B_10_task-assigned-to-retired-member-stalls](bugfix/agent_teams/B_10_task-assigned-to-retired-member-stalls.md) | B | 任务派给已退役的任务级成员后整夜无人执行 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [B_20261031_1134_org-ddl-bypasses-write-lock](bugfix/agent_teams/B_20261031_1134_org-ddl-bypasses-write-lock.md) | B | 组织表 DDL 绕过写锁导致团队激活写池耗尽 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/organization/db.py, openjiuwen/agent_teams/tools/database/__init__.py, openjiuwen/agent_teams/tools/database/engine.py, openjiuwen/agent_teams/spawn/shared_resources.py, tests/unit_tests/agent_teams/organization/test_org_db.py, tests/unit_tests/agent_teams/test_database_concurrency.py, tests/unit_tests/agent_teams/test_shared_resources.py | 无独立 D：普通缺陷修复，沿用 F_83（DDL 走写锁）与 tools/AGENTS.md「数据库并发」的既有契约，无独立设计 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | openjiuwen/agent_teams | — | — |
@@ -307,10 +311,20 @@ generated: true
 | [F_18_browser-receipts-and-local-continuity](features/harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](features/harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
+| [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
 | [F_22_agent-template-card-and-async-loader](features/harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
+| [F_22_browser-receipts-and-local-recovery](features/harness/F_22_browser-receipts-and-local-recovery.md) | F | Browser receipts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_22_cli-jiuwen-memory-rail-mount-and-switch](features/harness/F_22_cli-jiuwen-memory-rail-mount-and-switch.md) | F | F_22 CLI 挂载 JiuwenMemoryRail 与启用开关 | huangyuzhe | openjiuwen/harness | — | 待核实 |
+| [F_23_browser-reader-admission-and-stale-recovery](features/harness/F_23_browser-reader-admission-and-stale-recovery.md) | F | Browser reader admission and stale observation recovery | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_23_progressive-tool-discovery-metadata](features/harness/F_23_progressive-tool-discovery-metadata.md) | F | 渐进式工具发现元数据 | MengHan18 | openjiuwen/harness | openjiuwen/harness/tools/tool_discovery/bm25.py, openjiuwen/harness/rails/progressive_tool_rail.py | 无独立 D：复用现有渐进式工具发现架构，仅增加向后兼容的卡片元数据扩展点 |
+| [F_24_browser-dispatch-facts-and-local-recovery](features/harness/F_24_browser-dispatch-facts-and-local-recovery.md) | F | Browser dispatch facts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_25_browser-local-capabilities-and-recovery](features/harness/F_25_browser-local-capabilities-and-recovery.md) | F | Browser local capabilities and recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_26_browser-fact-handoff-and-stream-diagnostics](features/harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_27_browser-local-intent-and-reader-decisions](features/harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_28_browser-source-and-local-continuity](features/harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_29_browser-shared-state-and-source-delivery](features/harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_30_browser-output-and-dispatch-contracts](features/F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | openjiuwen/harness | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/policy_page_action.py, tests/unit_tests/harness/tools/browser_move/test_browser_contract_compatibility.py | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 | [S_01_public-api-and-construction](specs/harness/S_01_public-api-and-construction.md) | S | S_01 公开 API 表面与构造流 | yangzequ | openjiuwen/harness | — | — |
 | [S_02_deep-agent-architecture](specs/harness/S_02_deep-agent-architecture.md) | S | S_02 DeepAgent 架构 | yangzequ | openjiuwen/harness | — | — |
 | [S_03_task-loop](specs/harness/S_03_task-loop.md) | S | S_03 TaskLoop 事件体系 | yangzequ | openjiuwen/harness | — | — |
@@ -332,6 +346,22 @@ generated: true
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
 <a id="module-6"></a>
+
+## harness/subagents
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-7"></a>
+
+## harness/tools/browser_move
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-8"></a>
 
 ## 未分类
 
