@@ -13,10 +13,9 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperationCard
 from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import BashTool
-
 
 # ── fixtures ──────────────────────────────────────────────────
 
@@ -276,7 +275,7 @@ async def test_timeout_returns_collected_output(sys_op) -> None:
     tool = BashTool(sys_op)
     # echo runs first, then sleep blows the 1s timeout: the kill must not drop
     # the output already collected before it.
-    res = await tool.invoke({"command": "echo partial; sleep 5", "timeout": 1})
+    res = await tool.invoke({"command": "echo partial; sleep 5", "timeout": 1, "shell_type": "bash"})
     assert res.success is False
     assert "partial" in res.data["content"]
 

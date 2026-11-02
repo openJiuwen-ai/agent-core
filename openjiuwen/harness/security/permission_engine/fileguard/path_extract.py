@@ -20,17 +20,17 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
 from openjiuwen.core.sys_operation.cwd import get_cwd
-from openjiuwen.harness.security.permission_engine.fileguard.outbound_paths import (
-    is_public_file_url,
-    normalize_file_path_list,
-    resolve_outbound_path,
+from openjiuwen.harness.security.permission_engine.delguard.del_count import (
+    split_shell_operands,
 )
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
     lookup_file_tool_specs,
 )
-from openjiuwen.harness.security.permission_engine.delguard.del_count import (
-    split_shell_operands,
+from openjiuwen.harness.security.permission_engine.fileguard.outbound_paths import (
+    is_public_file_url,
+    normalize_file_path_list,
+    resolve_outbound_path,
 )
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
@@ -625,6 +625,10 @@ def extract_accesses_native(
     permission_config: Mapping[str, Any] | None = None,
 ) -> list[tuple[Path, FileAction, str]]:
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
+    if ((permission_config or {}).get("composition") or {}).get("schema_version") == 2:
+        # Authorization root and execution CWD are separate in v2. Changing
+        # CWD must not make a relative operand appear inside the locked root.
+        workspace = Path(get_cwd()).expanduser().resolve()
     out: list[tuple[Path, FileAction, str]] = []
 
     if tool_name == "send_file_to_user":

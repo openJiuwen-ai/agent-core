@@ -320,7 +320,7 @@ def test_static_risk_levels_use_commands_and_matched_rule_severity() -> None:
     assert pres.risk_level == "高"
 
 
-@pytest.mark.parametrize("source", ["user", "cloud", "builtin"])
+@pytest.mark.parametrize("source", ["user", "user_group", "cloud", "cloud_group", "builtin", "builtin_group"])
 @pytest.mark.parametrize(
     ("rule_id", "command"),
     [
@@ -347,7 +347,10 @@ def test_composed_high_rule_reaches_approval_metadata_and_message(
             "action": "ask",
             "layer": source,
         }],
-        "composition": {"schema_version": 1, "source_order": [source]},
+        "composition": {
+            "schema_version": 2 if source.endswith("_group") else 1,
+            "source_order": [source.removesuffix("_group"), source] if source.endswith("_group") else [source],
+        },
         "file_guard": {"enabled": False},
         "net_guard": {"enabled": False},
     }
