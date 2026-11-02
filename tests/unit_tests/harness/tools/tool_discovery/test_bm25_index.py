@@ -39,3 +39,30 @@ def test_bm25_empty_query_and_limit_are_safe():
 
     assert index.search("", limit=10) == []
     assert index.search("reminder", limit=0) == []
+
+
+def test_exact_tool_name_match_is_forced_to_the_front():
+    index = BM25ToolIndex.build(
+        [
+            _tool("powershell", "搜索文件、搜索内容、搜索技能并执行命令。"),
+            _tool("list_skill", "列出可用技能或为当前任务选择相关技能。"),
+            _tool("search_skill", "Search installable skills from SkillNet."),
+        ]
+    )
+
+    matches = index.search("search_skill 搜索可安装技能", limit=1)
+
+    assert [tool.name for tool in matches] == ["search_skill"]
+
+
+def test_exact_tool_name_match_requires_identifier_boundaries():
+    index = BM25ToolIndex.build(
+        [
+            _tool("search_skill", "Search skills"),
+            _tool("search_skill_extra", "Search extra skills"),
+        ]
+    )
+
+    matches = index.search("please use search_skill_extra", limit=2)
+
+    assert [tool.name for tool in matches] == ["search_skill_extra", "search_skill"]

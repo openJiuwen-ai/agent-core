@@ -1603,6 +1603,7 @@ class AbilityManager:
             tool_call=tool_call,
             session=session,
             tag=tag,
+            callback_context=ctx,
         )
 
         if isinstance(ctx.inputs, ToolCallInputs):
@@ -1652,8 +1653,13 @@ class AbilityManager:
         result = workflow_output.result if isinstance(workflow_output, WorkflowOutput) else workflow_output
         return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
 
-    async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
-                                        tag=None) -> Tuple[Any, ToolMessage]:
+    async def _execute_single_tool_call(
+            self,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+            callback_context: Optional[AgentCallbackContext] = None,
+    ) -> Tuple[Any, ToolMessage]:
         tool_name = tool_call.name
 
         mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
@@ -1693,12 +1699,19 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
+                invoke_kwargs = {"session": session, "tool_call_id": tool_call.id}
+                # The fixed progressive ``tool_call`` wrapper needs the active
+                # callback context to dispatch its discovered target through
+                # this AbilityManager.  Keep the extra kwarg opt-in so ordinary
+                # tools and third-party tools retain their existing invocation
+                # contract.
+                if (
+                    callback_context is not None
+                    and getattr(tool, "accepts_tool_callback_context", False)
+                ):
+                    invoke_kwargs["_tool_callback_context"] = callback_context
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(
-                        tool_args,
-                        session=session,
-                        tool_call_id=tool_call.id,
-                    )
+                    result = await tool.invoke(tool_args, **invoke_kwargs)
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
@@ -1710,6 +1723,8 @@ class AbilityManager:
                 # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
                 # round cancellation) propagate correctly through anyio CancelScope.
                 logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
+            except ToolInterruptException:
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"

@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""The single model-visible tool used for progressive tool discovery."""
+"""Model-visible search tool used for progressive tool discovery."""
 
 from __future__ import annotations
 
@@ -14,13 +14,26 @@ from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
+DEFAULT_TOOL_SEARCH_LIMIT = 5
+MAX_TOOL_SEARCH_LIMIT = 20
+
+
+def _normalize_tool_search_limit(value: Any) -> int:
+    """Normalize the requested/default result limit to the supported range."""
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = DEFAULT_TOOL_SEARCH_LIMIT
+    return max(1, min(limit, MAX_TOOL_SEARCH_LIMIT))
+
+
 class ToolSearchInput(BaseModel):
     query: str = Field(..., description="Query text used to find relevant tools")
-    limit: int = Field(default=5, description="Maximum number of tools to return")
+    limit: Optional[int] = Field(default=None, description="Maximum number of tools to return")
 
 
 class ToolSearchTool(Tool):
-    """Search deferred tools and return complete schemas for direct calls."""
+    """Search deferred tools and return complete schemas for ``tool_call``."""
 
     TOOL_NAME = "tool_search"
     TOOL_ID = "ToolSearchTool"
@@ -30,18 +43,23 @@ class ToolSearchTool(Tool):
         search_tools: Callable[..., Awaitable[List[Dict[str, Any]]]],
         language: str = "cn",
         agent_id: Optional[str] = None,
+        result_limit: int = DEFAULT_TOOL_SEARCH_LIMIT,
     ):
         super().__init__(
             build_tool_card(self.TOOL_NAME, self.TOOL_ID, language, agent_id=agent_id)
         )
         self._search_tools = search_tools
+        self._result_limit = _normalize_tool_search_limit(result_limit)
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         session = kwargs.get("session")
         try:
             parsed = ToolSearchInput(**(inputs or {}))
-            limit = max(1, min(parsed.limit, 20))
+            limit = _normalize_tool_search_limit(
+                parsed.limit if parsed.limit is not None else self._result_limit
+            )
             results = await self._search_tools(parsed.query, limit, session)
+            results = results[:limit]
 
             logger.info(
                 "[ProgressiveToolRail] tool_search invoked | query=%s | "
