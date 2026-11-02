@@ -41,7 +41,7 @@ from ..playwright_runtime.phase_contract import (
     save as save_phase,
 )
 from ..playwright_runtime.policy_page_action import PAGE_OPERATIONS, READ_PAGE_OPERATIONS
-from .action_space import build_menu, build_request
+from .action_space import build_menu, build_request, exclusion_reason
 from .config import BrowserDecisionConfig
 from .guard import DecisionGuard, canonical_arguments, validate_binding, validate_guard
 from .intent import normalize_goal, task_literals
@@ -729,6 +729,12 @@ class BrowserPolicyModel(Model):
                 ),
             )
             constrain_actions(menu, observation.phase_state, observation.controls)
+            bindings = (observation.phase_state.get("active_phase_contract") or {}).get("targets", [])
+            diagnostic["bound_target_exclusions"] = [
+                {"target_id": c["target_id"], "reason": exclusion_reason(c),
+                 "enabled": c.get("enabled"), "actionable": c.get("actionable"), "clickable": c.get("clickable")}
+                for c in observation.controls if any(same_node(b, c) for b in bindings) and exclusion_reason(c)
+            ][:30]
             unknown = bool(observation.state.get("phase", {}).get("unknown_writes"))
             controls = {c["target_id"]: c for c in observation.controls}
             local_recovery = []
@@ -1090,6 +1096,7 @@ class BrowserPolicyModel(Model):
                 "local_context": observation.state.get("local_context", {}),
                 "retained_observation": observation.state.get("retained_observation", {}),
                 "excluded_actions": diagnostic.get("excluded", {}),
+                "bound_target_exclusions": diagnostic.get("bound_target_exclusions", []),
             }
             repeated_navigation = self._repeated_navigation(task)
             if repeated_navigation:
@@ -1121,17 +1128,18 @@ class BrowserPolicyModel(Model):
             elif reason == "local_intent_changed":
                 recovery["next"] = (
                     "The previous local fragment lost its bound document or the LLM acted on a different control. "
-                    "Its old objective/values are historical, not instructions for this page. Use this interpretation "
-                    "turn to set one short remaining objective, current target_ids/bound_values and needed operations; "
-                    "read_queries can supply resolved literals for find/control probes. Or perform a simple ordinary "
-                    "tool action/answer directly. Do not rebind by name or repeat the completed search. "
-                    "Keep candidate inspection read-only until selecting the object/variant for a business write."
+                    "Its old objective/values are historical, not instructions for this page. Continue the current "
+                    "unfinished step with ordinary tools or answer from retained facts. If handing a selected "
+                    "business action to Jev, bind only its current control and operation with a short objective. "
+                    "Missing identity needs a targeted probe, not repeated set. Do not rebind by name or restart "
+                    "the completed search. Candidate inspection is not selection for a business write."
                 )
                 recovery["bindings"] = binding_targets(observation.controls, limit=12)
             elif reason in {"local_intent_required", "no_supported_actions", "missing_task_intent"}:
-                recovery["next"] = ("Choose one current objective; optionally call browser_phase set with objective "
-                                    "and observed field/value bindings, or execute one ordinary LLM tool action. "
-                                    "A changed intent/evidence permits Jev to re-enter.")
+                recovery["next"] = ("Use an ordinary browser tool for the remaining step or inspect its current "
+                                    "object. Excluded business controls elsewhere do not require phase setup. "
+                                    "Only hand a selected business action to Jev with its exact current control "
+                                    "and needed operation. New observations/bindings permit Jev to re-enter.")
                 recovery["bindings"] = binding_targets(observation.controls, limit=12)
             elif reason in {"reader_already_observed", "failed_target"}:
                 recovery["retained_observation"] = observation.state.get("retained_observation", {})
@@ -1153,12 +1161,10 @@ class BrowserPolicyModel(Model):
                 recovery["next"] = "Refresh targets, inspect per-step results, and continue only unfinished steps."
             elif action_uncertain and observation.state.get("intent_source") == "task" and has_phase_tool:
                 recovery["next"] = (
-                    "Resolve what to do next from the source observations. For a complex goal with a clear remaining "
-                    "local fragment, use browser_phase set once with a short objective and, if needed, observed "
-                    "target_ids/bound_values; omit conditions unless useful. Describe only the remaining work on "
-                    "the selected page/object, not the completed navigation/search or the full task. "
-                    "Use an ordinary tool directly for a simple step; do not set a phase before every action. "
-                    "If the observations already answer the goal, finish with LLM instead."
+                    "Resolve the next step from source observations and use an ordinary tool directly. "
+                    "Uncertainty does not require phase setup. For a prepared multi-step local fragment, an "
+                    "optional short objective and current bindings/read_queries can help Jev. If facts already "
+                    "answer the goal, finish instead; do not restart completed navigation/search."
                 )
                 recovery["bindings"] = binding_targets(observation.controls, limit=12)
             else:
@@ -1177,12 +1183,9 @@ class BrowserPolicyModel(Model):
             browser_agent_log_info(marker, json.dumps(public, ensure_ascii=True, default=str))
 
     def _page_operations(self) -> set[str]:
-        from ..playwright_runtime.browser_capabilities import CORE_BROWSER_TOOL_NAMES
+        from ..playwright_runtime.policy_page_action import page_operation_capabilities
 
-        service = getattr(self.runtime, "service", None)
-        allowed = getattr(service, "allowed_tool_names", None)
-        allowed = set(CORE_BROWSER_TOOL_NAMES if allowed is None else allowed)
-        return {op for op, native in PAGE_OPERATIONS.items() if native in allowed}
+        return {op for op, reason in page_operation_capabilities(self.runtime).items() if not reason}
 
     @staticmethod
     def _reader_fingerprint(step: dict[str, Any], observation: _Observation) -> str:

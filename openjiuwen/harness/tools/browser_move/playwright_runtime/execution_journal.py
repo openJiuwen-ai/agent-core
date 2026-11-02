@@ -380,6 +380,9 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         if rejected:
             step.update(execution_state="rejected_before_dispatch", executed=False)
         elif received is not None:
+            for key in ("execution_stage", "keyboard", "focus_before"):
+                if key in received:
+                    step[key] = received[key]
             ok = received.get("ok") is True
             ran = True if ok else received.get("executed")
             uncertain_execution = not ok and ran is not False and ran is not True
@@ -512,6 +515,9 @@ _PROJECTED_STEP_KEYS = (
     "recovery_hint",
     "evidence_ref",
     "observed_feedback",
+    "execution_stage",
+    "keyboard",
+    "focus_before",
 )
 
 

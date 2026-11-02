@@ -25,7 +25,7 @@ from openjiuwen.core.common.logging.browser_context import (
     set_browser_agent_log_context,
 )
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
-from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.llm import SystemMessage, ToolMessage
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -1089,9 +1089,23 @@ class BrowserAgentRuntime:
             },
         }
 
-    async def call_playwright_tool(self, tool_name: str, inputs: Dict[str, Any]) -> Any:
-        """Invoke one registered Playwright MCP tool and unwrap its result data."""
-        tool = await self._get_playwright_mcp_tool(tool_name)
+    def registered_playwright_tool_names(self) -> set[str]:
+        """Read the existing registry for this browser identity, without another RPC/cache."""
+        server_id = str(self._service.mcp_cfg.server_id or "").strip()
+        if not server_id:
+            return set()
+        names = set()
+        for tool_id in Runner.resource_mgr.get_mcp_tool_ids(server_id):
+            tool = Runner.resource_mgr.get_tool(tool_id)
+            if tool is not None:
+                names.add(tool.card.name)
+        return names
+
+    async def call_playwright_tool(
+        self, tool_name: str, inputs: Dict[str, Any], *, resolved_tool: Any = None,
+    ) -> Any:
+        """Invoke a registered tool; callers may resolve it before marking dispatch."""
+        tool = resolved_tool if resolved_tool is not None else await self._get_playwright_mcp_tool(tool_name)
         result = await tool.invoke(inputs)
 
         success = getattr(result, "success", None)
@@ -2067,11 +2081,18 @@ class BrowserAgentRuntime:
         try:
             execution_journal.mark_dispatched()
             tool_result = await tool.invoke(tool_args)
-            success = self.tool_result_succeeded(tool_result)
+            outcome = self.classify_tool_result(tool_result)
+            success = outcome["success"]
             error = str(getattr(tool_result, "error", "") or "").strip()
             payload = getattr(tool_result, "data", None)
             if payload is None:
                 payload = tool_result
+            if not success and not error:
+                native_error = self.unwrap_mcp_text_result(payload)
+                if isinstance(native_error, dict):
+                    native_error = native_error.get("error")
+                if isinstance(native_error, str):
+                    error = native_error  # Full call log, never the classifier's clipped display string.
         except Exception as exc:
             success = False
             error = str(exc)
@@ -2097,10 +2118,22 @@ class BrowserAgentRuntime:
         if tool_name == "browser_navigate" and success:
             runtime_url = runtime_url or str(tool_args.get("url") or "")
         runtime_title = self.extract_result_title(payload)
+        # This boundary knows which native executor produced the error. Do not
+        # apply native preflight text to arbitrary scripts/compact RPC failures.
+        unperformed = not success and not (isinstance(payload, dict) and payload.get("executed") is True) and (
+            execution_journal._native_preflight_failure(tool_name, {"error": error})
+            or tool_name in {"browser_click", "browser_type", "browser_select_option", "browser_press_key"}
+            and execution_journal._never_performed(error)
+        )
+        executed = True if success else False if unperformed else None
+        execution_state = ("acknowledged" if success else
+                           "rejected_before_dispatch" if unperformed else "dispatched_unknown")
         step_result = {
             "index": 0,
             "op": op,
             "ok": success,
+            "executed": executed,
+            "execution_state": execution_state,
             "status": "completed" if success else "failed",
             "elapsed_ms": elapsed_ms,
         }
@@ -2117,9 +2150,9 @@ class BrowserAgentRuntime:
             "error": error or None,
             "action": "browser_batch_interact",
             "execution_mode": "primitive",
-            "executed": True if success else None,
-            "execution_state": "acknowledged" if success else "dispatched_unknown",
-            "state_changed": op not in _SINGLE_BATCH_CONDITION_OPS,
+            "executed": executed,
+            "execution_state": execution_state,
+            "state_changed": executed is not False and op not in _SINGLE_BATCH_CONDITION_OPS,
             "generation_id": self.generation_id,
             "steps": [step_result],
             "extracted": {},
@@ -2873,6 +2906,9 @@ class BrowserRuntimeRail(AgentRail):
         if self._prepare_terminal_synthesis(ctx, session, state):
             return
 
+        if self._recover_failed_phase_calls(ctx, session, state):
+            return
+
         builder = getattr(ctx.agent, "system_prompt_builder", None)
         if builder is None:
             return
@@ -2887,6 +2923,72 @@ class BrowserRuntimeRail(AgentRail):
                 priority=85,
             )
         )
+
+    @staticmethod
+    def _failed_phase_rounds(ctx: AgentCallbackContext) -> int:
+        """Use completed core tool rounds; never count reads, ACKs or unknowns."""
+        from openjiuwen.harness.rails.model_anomaly_detection_rail import _collect_tool_rounds
+
+        context = getattr(ctx, "context", None)
+        messages = list(context.get_messages() if context is not None else
+                        getattr(getattr(ctx, "inputs", None), "messages", None) or [])
+        end, count = len(messages), 0
+        for round_info in reversed(_collect_tool_rounds(messages)):
+            if round_info.end != end or any(name != "browser_phase" for name, _ in round_info.fingerprint):
+                break
+            for message in messages[round_info.start + 1:round_info.end]:
+                try:
+                    payload = json.loads(message.content)
+                except (ValueError, TypeError):
+                    return count
+                if not isinstance(payload, dict):
+                    return count
+                payload = payload.get("data", payload)
+                if (not isinstance(payload, dict) or payload.get("executed") is not False
+                        or not (payload.get("error") or payload.get("denied"))):
+                    return count
+            count += 1
+            end = round_info.start
+            if count >= 4:
+                break
+        return count
+
+    def _recover_failed_phase_calls(self, ctx: AgentCallbackContext, session: Any, state: dict[str, Any]) -> bool:
+        """Remove an optional failing management tool for the next recovery turn.
+
+        No persistent counter or new browser budget: a normal tool round, new
+        user input or successful handoff ends this consecutive failure streak.
+        """
+        builder = getattr(ctx.agent, "system_prompt_builder", None)
+        if builder is not None:
+            builder.remove_section("browser_phase_recovery")
+        failures = self._failed_phase_rounds(ctx)
+        if failures < 2:
+            return False
+        if failures >= 4:
+            self._finish_model_protocol_failure(ctx, session, state)
+            return True
+        inputs = ctx.inputs
+        if isinstance(getattr(inputs, "tools", None), list):
+            inputs.tools = [tool for tool in inputs.tools
+                            if (tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", ""))
+                            != "browser_phase"]
+        guidance = (
+            "The last consecutive browser_phase requests were rejected before dispatch. No page action occurred. "
+            "This optional handoff is omitted from this request. Use an ordinary browser tool for the current "
+            "unfinished step or a targeted probe for missing identity, or answer from retained facts. Do not "
+            "repeat phase setup, restart the search, or replay an ACKed/unknown write. Existing object, "
+            "permission and deadline checks still apply."
+        )
+        if builder is not None:
+            # Core rebuilds messages after before-model hooks. Use its shared
+            # prompt builder so this directive reaches the actual provider input.
+            builder.add_section(PromptSection(name="browser_phase_recovery",
+                                             content={"en": guidance, "cn": guidance}, priority=85))
+        else:
+            inputs.messages = list(getattr(inputs, "messages", None) or []) + [SystemMessage(content=guidance)]
+        browser_agent_log_info("[BROWSER_PHASE_RECOVERY] rejected_rounds=%s action=ordinary_tools", failures)
+        return False
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("after_model_call", ctx)
@@ -2911,7 +3013,8 @@ class BrowserRuntimeRail(AgentRail):
                 ctx.request_force_finish(self._structured_terminal_result(state))
                 return  # Do not relabel a known deadline/interruption as a new model error.
             # Page metadata and reasoning tokens are observations/output activity, not an answer.
-            reason = ("model_output_incomplete" if getattr(response, "finish_reason", None) == "length"
+            reason = ("model_output_incomplete"
+                      if getattr(response, "finish_reason", None) in {"length", "max_tokens"}
                       else "model_output_empty")
             failure = {"code": reason, "source": "model", "stage": "output", "retryable": True,
                        "finish_reason": getattr(response, "finish_reason", None)}
@@ -3070,8 +3173,22 @@ class BrowserRuntimeRail(AgentRail):
         """Classify wrapper envelopes without making fact retention conditional."""
         message = str(exception or "").lower()
         if "browser_task_deadline_exhausted" in message:
-            code, source, stage, retryable = "task_deadline_exhausted", "runtime", "task", False
-        elif "llm repeated stream output detected" in message:
+            return {"code": "task_deadline_exhausted", "source": "runtime", "stage": "task", "retryable": False}
+        # Core validates an empty length response before the after callback.
+        # Consume its structured contract, including SDK wrappers, not arbitrary
+        # occurrences of "length" or token counts in an error message.
+        current, visited = exception, set()
+        while isinstance(current, BaseException) and id(current) not in visited:
+            visited.add(id(current))
+            details = getattr(current, "details", None)
+            if (isinstance(current, BaseError) and current.status == StatusCode.MODEL_CALL_FAILED
+                    and isinstance(details, dict) and details.get("finish_reason") in {"length", "max_tokens"}
+                    and "output_tokens" in details and "provider_code" not in details):
+                return {"code": "model_output_incomplete", "source": "model", "stage": "output",
+                        "retryable": True, "finish_reason": details["finish_reason"],
+                        "output_tokens": details["output_tokens"]}
+            current = getattr(current, "cause", None) or current.__cause__
+        if "llm repeated stream output detected" in message:
             code, source, stage, retryable = "model_repeated_output", "model", "stream", False
         elif "first_chunk" in message or "first_token" in message:
             code, source, stage, retryable = "model_first_chunk_timeout", "client", "first_chunk", True
@@ -3229,6 +3346,9 @@ class BrowserRuntimeRail(AgentRail):
         failure = state.get("model_failure") or {}
         if failure and not failure.get("retryable"):
             return False
+        if (failure.get("code") == "model_output_incomplete" and deadline_at
+                and deadline_at - time.time() <= 20.0):
+            return False  # Do not offer a resume with no meaningful model window.
         blockers = " ".join(str(item or "").strip().lower() for item in state.get("blockers") or [])
         if any(token in blockers for token in _BROWSER_NON_RETRYABLE_BLOCKER_TOKENS):
             return False
@@ -3260,6 +3380,10 @@ class BrowserRuntimeRail(AgentRail):
     def _recommended_recovery(state: Dict[str, Any], missing: list[str]) -> str:
         if unresolved_writes(state):
             return "read_and_reconcile_before_business_retry"
+        if (state.get("model_failure") or {}).get("code") == "model_output_incomplete":
+            return ("Output budget exhausted before an answer/action. Summarize retained observations concisely; "
+                    "if work remains, explicitly resume only unexecuted work on the current page within the "
+                    "original deadline/resume allowance. Do not replay ACKed or uncertain writes.")
         if state.get("model_failure"):
             return ("review_retained_observations_then_read_current_page"
                     if state["model_failure"].get("retryable") else "report_retained_facts_without_retry")
@@ -3478,7 +3602,9 @@ class BrowserRuntimeRail(AgentRail):
             errors = validate_batch_steps(args.get("steps"))
             if errors:
                 raise build_error(StatusCode.SCHEMA_VALIDATE_INVALID, reason="; ".join(errors), data=args)
-        if isinstance(schema, dict):
+        # Phase's smaller model-facing card leaves legacy explicit verification
+        # callable. Its full, strict compatibility schema was validated above.
+        if isinstance(schema, dict) and tool_name != "browser_phase":
             SchemaUtils.validate_with_schema(cls._coerce_tool_args(tool_args), schema)
 
     def _runtime_evidence_fields(self, tool_args: Any) -> list[str]:
@@ -4937,7 +5063,8 @@ class BrowserRuntimeRail(AgentRail):
         for blocker in state.get("blockers") or []:
             normalized_blocker = str(blocker).strip().lower()
             if (normalized_blocker.startswith(recoverable_prefixes)
-                    or normalized_blocker == previous_failure.get("code")):
+                    or normalized_blocker == previous_failure.get("code")
+                    or normalized_blocker == "max_iterations_reached"):
                 continue
             if normalized_blocker.endswith("_phase_budget_exhausted"):
                 continue

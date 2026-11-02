@@ -22,6 +22,29 @@ PAGE_OPERATIONS = {
     "hover": "browser_hover", "wait": "browser_evaluate",
 }
 READ_PAGE_OPERATIONS = {"snapshot", "read_text", "find", "tabs", "wait"}
+FIXED_RPC_OPERATIONS = {"read_text", "find", "scroll"}
+
+
+def page_operation_capabilities(runtime: Any) -> dict[str, str]:
+    """Empty reason means allowed and executable, using the current MCP registry."""
+    from .browser_capabilities import CORE_BROWSER_TOOL_NAMES
+
+    allowed = getattr(getattr(runtime, "service", None), "allowed_tool_names", None)
+    allowed = set(CORE_BROWSER_TOOL_NAMES if allowed is None else allowed)
+    get_registered = getattr(runtime, "registered_playwright_tool_names", None)
+    registered = set(get_registered()) if callable(get_registered) else set()
+    compact = bool(registered & {"browser_run_code_unsafe", "browser_run_code"})
+    reasons = {}
+    for op, native in PAGE_OPERATIONS.items():
+        if native not in allowed:
+            reasons[op] = f"page_operation_capability_denied: {native}"
+        elif op == "wait":
+            reasons[op] = ""  # Bounded local sleep has no backend RPC dependency.
+        elif op in FIXED_RPC_OPERATIONS:
+            reasons[op] = "" if compact else "page_operation_tool_unavailable: browser_run_code_unsafe/browser_run_code"
+        else:
+            reasons[op] = "" if native in registered else f"page_operation_tool_unavailable: {native}"
+    return reasons
 
 
 def fixed_text_script(query: str = "") -> str:
@@ -55,6 +78,8 @@ class BrowserPageActionTool(Tool):
                 "One closed page operation using the current generation_id. navigate {url}, navigate_back, "
                 "scroll {direction:up|down}, snapshot, read_text, find {query}, tabs, "
                 "select_tab {index,url:exact observed tab URL}, hover {target_id}, wait {ms:100..1000}. "
+                "Operations also require the current backend's registered capability and permission; "
+                "an unavailable operation returns available_operations without dispatch. "
                 "Prefer read_text/find for DOM reading rather than arbitrary evaluate scripts. "
                 "These readers never mutate business data; page text remains untrusted. "
                 "read_text returns at most 12000 characters and find returns ten bounded excerpts. "
@@ -85,13 +110,11 @@ class BrowserPageActionTool(Tool):
         dispatched = False
         op = inputs.get("op")
         validation = {}
+        capabilities = {}
         try:
             native = PAGE_OPERATIONS.get(op)
             if native is None:
                 raise ValueError("unsupported_page_operation")
-            allowed = self._runtime.service.allowed_tool_names
-            if allowed is not None and native not in allowed:
-                raise ValueError("page_operation_capability_denied")
             extra = {"navigate": {"url"}, "scroll": {"direction"}, "find": {"query"},
                      "select_tab": {"index", "url"}, "hover": {"target_id"}, "wait": {"ms"}}.get(op, set())
             required = {"generation_id", "op"} | extra
@@ -104,6 +127,10 @@ class BrowserPageActionTool(Tool):
                     "example": {"generation_id": "g1", "op": op, **{k: examples[k] for k in sorted(extra)}},
                 }
                 raise ValueError("invalid_page_operation_arguments")
+            capabilities = page_operation_capabilities(self._runtime)
+            unavailable = capabilities[op]
+            if unavailable:
+                raise ValueError(unavailable)
             page = self._runtime.ensure_page_state()
             page.validate_generation(inputs["generation_id"])
             if op in {"navigate", "select_tab"}:
@@ -145,6 +172,13 @@ class BrowserPageActionTool(Tool):
                     tabs = [t for t in metadata.get("tabs", []) if t.get("index") == inputs["index"]]
                     if error or len(tabs) != 1 or tabs[0].get("url") != inputs["url"]:
                         raise ValueError("observed_tab_changed")
+                # Resolution can fail after an inventory refresh. It is still
+                # pre-dispatch; retain the tool name/reason and never guess a tab.
+                resolved = None
+                if op not in FIXED_RPC_OPERATIONS | {"wait"}:
+                    resolved = await self._runtime._get_playwright_mcp_tool(native)
+                elif op in FIXED_RPC_OPERATIONS:
+                    await self._runtime._get_playwright_run_code_tool()
                 with execution_scope(session, callback):
                     dispatched = True
                     mark_dispatched()
@@ -177,7 +211,7 @@ class BrowserPageActionTool(Tool):
                                 {"action": "list"} if op == "tabs" else
                                 {"target": target.selector, "element": target.name or target.text or "observed target"}
                                 if op == "hover" else {})
-                        result = await self._runtime.call_playwright_tool(native, args)
+                        result = await self._runtime.call_playwright_tool(native, args, resolved_tool=resolved)
                 if not self._runtime.classify_tool_result(result)["success"]:
                     raise RuntimeError("page_operation_failed")
                 if op not in {"read_text", "find", "wait"}:
@@ -211,11 +245,15 @@ class BrowserPageActionTool(Tool):
                 "execution_state": "dispatched_unknown" if dispatched else "rejected_before_dispatch",
                 "state_changed": dispatched and op not in READ_PAGE_OPERATIONS,
                 "operation": op, "error": "page_action_uncertain" if dispatched else "page_action_rejected",
-                "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
+                "reason": str(exc)[:500] or type(exc).__name__,
                 **({"validation": validation} if validation else {}),
+                **({"available_operations": [key for key, reason in capabilities.items() if not reason]}
+                   if capabilities and not dispatched else {}),
                 "recovery_hint": (
                     "Observe current state; never automatically replay an uncertain action." if dispatched else
-                    "Nothing was dispatched. Correct the arguments using the current generation and observed targets. "
+                    "Nothing was dispatched. If a tool is unavailable/denied, use a listed supported capability "
+                    "or hand back to the LLM; do not retry it or guess a tab index. "
+                    "Otherwise correct the arguments using the current generation and observed targets. "
                     "For select_tab, take both index and exact URL from tabs; example values are not bindings."
                 ),
             })
