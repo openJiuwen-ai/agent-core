@@ -57,6 +57,9 @@ async def test_local_reader_is_offered_before_whole_state_fallback(restriction):
     page_operations(runtime)
     state = context.get_session_ref().get_state(PHASE)
     if restriction == "unknown":
+        # This case tests an unbound unknown-effect control, not the fixture's known sort capability.
+        page = runtime.ensure_page_state()
+        page.get_target(page.export_decision_targets()[0]["target_id"]).kind = ""
         state["execution_journal"] = [{"call_id": "uncertain-save", "impact": "business",
                                        "execution_state": "dispatched_unknown"}]
     if restriction == "ambiguous":
@@ -223,6 +226,8 @@ async def test_combined_rpc_reuses_facts_once_and_never_after_another_action():
 async def test_fixed_text_read_joins_existing_evidence_without_cart_mutation():
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(allowed_tool_names=None)
+    runtime.registered_playwright_tool_names = lambda: {"browser_run_code_unsafe"}
+    runtime._get_playwright_run_code_tool = AsyncMock()
     page = runtime.ensure_page_state()
     page.observe(url="https://shop.test/cart")
     runtime.call_fixed_with_observation = AsyncMock(return_value={
@@ -385,6 +390,7 @@ def test_fixed_action_probe_in_one_rpc_keeps_receipt_when_probe_fails(dom_page, 
 async def test_tab_selection_does_not_dispatch_after_observed_index_is_reused():
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(allowed_tool_names=("browser_tabs",))
+    runtime.registered_playwright_tool_names = lambda: {"browser_tabs"}
     runtime.capture_browser_metadata = AsyncMock(return_value=({
         "tabs": [{"index": 1, "url": "https://different.test/"}],
     }, None))
@@ -489,7 +495,7 @@ def rerender(page, url, node):
     """Same link after a navigation/re-render: new url, node id and target id, same label and href."""
     page.register_interactives({"url": url, "title": "Search", "elements": [{
         "selector_hint": "#sales", "selector_hint_validated": True, "match_count": 1,
-        "role": "button", "accessible_name": "销量", "text": "销量", "visible": True,
+        "role": "button", "kind": "sort", "accessible_name": "销量", "text": "销量", "visible": True,
         "enabled": True, "actionable": True, "clickable": True,
         "decision_state": {"tag": "button", "node_guard": {"document": f"doc-{node}", "node": node}},
     }]})

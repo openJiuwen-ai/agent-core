@@ -546,6 +546,8 @@ def test_runtime_rewrites_single_target_click_to_official_primitive() -> None:
             "index": 0,
             "op": "click",
             "ok": True,
+            "executed": True,
+            "execution_state": "acknowledged",
             "status": "completed",
             "elapsed_ms": result["steps"][0]["elapsed_ms"],
         }

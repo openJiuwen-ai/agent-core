@@ -138,9 +138,14 @@ async def test_fallback_instructions_reach_llm_and_local_correction_reenters_jev
 async def test_unknown_business_handoff_is_read_before_retry():
     from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import choose_operation
 
-    policy, llm, client, _, context, captured = setup_policy()
+    policy, llm, client, runtime, context, captured = setup_policy()
+    page = runtime.ensure_page_state()
+    page.get_target(page.export_decision_targets()[0]["target_id"]).kind = ""
+    controls = page.export_decision_targets()
     choose_operation(client, "HANDOFF")
     state = context.get_session_ref().get_state(PHASE_KEY)
+    set_phase(state, {"objective": "Complete the selected action", "allowed_operations": ["click"],
+                      "target_ids": [controls[0]["target_id"]]}, controls)
     state["execution_journal"] = [{"call_id": "cart-1", "execution_state": "dispatched_unknown", "impact": "business"}]
     await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     hint = llm.invoke.call_args.kwargs["messages"][-1].content
