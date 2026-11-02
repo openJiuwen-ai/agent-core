@@ -38,7 +38,11 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   TeamBackend 或活跃 Agent），`team_exists`（静态表轻查询）判定团队存在，团队停止后查询不受影响；
   跨 session 可见性是 capability 语义——session_id 只选 view 绑定哪套动态表、不做访问门（知道
   team_name 即可只读查询），无会话上下文仍不解析；`RuntimePoolResolver` / `GlobalRunnerPoolResolver`
-  已删除（解析不依赖 pool）。当前团队与 policy context 的调用范围绑定（contextvar，嵌套恢复/异常解除）。
+  已删除（解析不依赖 pool）。任务/消息五个查询方法（tasks/task/task_dependencies/messages/message）
+  另收可选 `session_id`：省略 = 调用方 session，显式传 = 读该团队在另一 session 的历史记录——
+  `(team_name, session_id)` 唯一定位一套动态表（task_id / message_id 跨 session 同名歧义消解），
+  消息游标绑定 resolved session（跨 session 旧游标报错）；静态表三方法与 `policy_context` 不加
+  （静态表跨 session；构建快照天然"当前"）。当前团队与 policy context 的调用范围绑定（contextvar，嵌套恢复/异常解除）。
 
 ### leader 侧接线
 
@@ -92,6 +96,8 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
 8. **缺表读空而非建表**：读路径零 DDL——动态表只在 session 绑定（团队运行时 bind 路径）时创建；
    view 的动态表查询前经 `has_cur_session_tables`（只读 inspector 存在性检查，跨后端）判缺，未跑过
    团队的 session 读到空数据（列表空 / 单查 None）而非 missing-table 异常，读路径也不留任何空表。
+9. **显式 session_id 不做"最近关联"猜测**：归属无持久正向记录（动态表后缀是单向哈希），省略一律
+   绑定调用方 session，跨 session 历史读取显式传参。
 
 ## 拒绝的方案
 
@@ -112,7 +118,8 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
 - `tests/unit_tests/agent_teams/extensions/`（契约 + wiring）+ `tests/unit_tests/extensions/ops_build_handlers/`：
   含真 `ExtensionEventBus` 端到端（注册 → USER handler → trigger → 链/短路/`to(CORE)`/校验器/容错）、
   桥接全生命周期（含取消传播）、内存 DB + db_factory 的 resolver、leader rail 惰性构建与前缀视图、
-  `build_team` 披露经链（插件 section 到达 leader）、无活动 session 的缺表读空。
+  `build_team` 披露经链（插件 section 到达 leader）、无活动 session 的缺表读空；显式 session_id
+  透传与消息游标 session 绑定、同一团队双 session 动态表隔离。
 - 全量 `agent_teams` 回归：失败分布与 stash 基线一致（存量：coordination/observability 环境缺依赖
   等），零新增；`test_team_policy_rail.py` 74 个存量用例不动即绿（无 bus 分支逐字一致）。
 - ruff / pylint 干净（存量告警除外）。
@@ -126,6 +133,8 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   `AGENT_TEAM_STATE_INVALID`（132006），语义不贴但 reason 明确、测试不锁码；AGENT_TEAM 段缺
   NOT_FOUND 形态码（其他段有 `AGENT_TOOL_NOT_FOUND` 先例），待观测分类有真实需求时新增
   `AGENT_TEAM_RESOURCE_NOT_FOUND` 并分类收拾。
+- **`ops.team.list()` 未实现**：静态表全量轻投影 + pool 标注运行态（running / paused / stopped）+
+  member_count；不带任务统计（动态表归属未定，不撒谎）。
 - **跨 session 只读行为变化**：读取层统一数据库路径后，跨 session 只读从报错（"not accessible in
   this session"）变为可查（capability 语义），宿主文档需知情。
 - 平台侧设计仓的实现记录回填随该仓自行同步（本仓库不引用其文档编号）。
