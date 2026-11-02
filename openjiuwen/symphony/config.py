@@ -114,7 +114,9 @@ class FingerprintExtractionConfig(SymphonyConfigModel):
     batch_size: PositiveInt = Field(16, title="提取批量大小", description="每批处理的对象数。")
     max_concurrency: PositiveInt = Field(4, title="提取并发上限", description="独立指纹服务的模型请求并发上限。")
     body_limit: PositiveInt = Field(16_000, title="正文字符上限", description="送入语义提取的对象正文字符数上限。")
-    max_tokens: PositiveInt = Field(2_048, title="提取输出上限", description="提取模型单次输出的 token 数上限。")
+    max_tokens: PositiveInt | None = Field(
+        2_048, title="提取输出上限", description="提取模型单次输出的 token 数上限；None 表示不传此参数，沿用注入模型的配置。",
+    )
     timeout_seconds: PositiveFloat | None = Field(
         None, title="提取请求超时", description="单次提取请求超时，单位秒；None 表示沿用模型适配器策略。",
     )
@@ -138,7 +140,7 @@ class FingerprintProtocolConfig(SymphonyConfigModel):
 
     schema_version: str = Field("1.0", title="指纹结构版本", description="现有指纹产物的结构版本。", min_length=1)
     extraction_version: str = Field(
-        "symphony-capability-extraction-v2", title="提取协议版本", description="现有语义提取协议标识。", min_length=1,
+        "symphony-capability-extraction-v3", title="提取协议版本", description="现有语义提取协议标识。", min_length=1,
     )
     evaluation_version: str = Field(
         "symphony-capability-evaluation-v1", title="评估协议版本", description="现有评估协议标识。", min_length=1,

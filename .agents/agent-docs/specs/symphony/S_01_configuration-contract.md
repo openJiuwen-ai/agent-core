@@ -102,6 +102,7 @@ config 模块的 __all__ 仅包含 CapabilityType 和 11 个核心配置类：Sy
 - 配置不包含客户端、执行器、线程池、回调、扫描结果或缓存句柄；独立后端额外选项只接受可序列化 JSON 值。
 - 属性赋值默认冻结；retrieval.build.dynamic 与 experience.build 保留既有可调整需求并校验赋值；前者只允许调整重平衡和扩展策略。列表/字典不是深层冻结，所有实例的默认容器和子模型独立。
 - 所有合法配置通过 model_dump(mode="json") / model_validate 和 model_dump_json / model_validate_json 往返；派生属性不作为重复可写字段导出。
+- 指纹提取 max_tokens 接受正整数或 None，默认仍为 2048；None 表示提取调用不传此参数，沿用注入模型配置。独立 FingerprintProtocolConfig 的 extraction_version 对齐 develop 当前协议 symphony-capability-extraction-v3；目标模型仍不生成缓存签名或自动失效运行缓存。
 
 公共树构建沿用索引入口默认：深度 6、分支 128（至少 2）、并发 2、请求超时 420 秒、分类批量 32。真实底层树入口仍为并发 1、超时 180 秒、批量 20、分支 8，由原业务模块维护；目标 config.py 不再镜像这组不同默认值。公共检索保留 top_k=10、并行分支 3、超时 120 秒；复用分支选择配置后，该超时还接受 None，表示沿用后端策略。
 
