@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """The ``team`` Ops namespace: queries, validation, visibility and paging."""
+
 from __future__ import annotations
 
 import pytest
@@ -208,6 +209,53 @@ async def test_inaccessible_team_raises() -> None:
     team = await _view_methods(resolver)
     with pytest.raises(BaseError):
         await team.info(team_name="research-team")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_table_queries_pass_the_explicit_session() -> None:
+    """Task and message queries forward the explicit session_id; omission keeps the calling session."""
+    view = _FakeView(tasks=[_task("t1")], messages=[_message("m1", timestamp=1)])
+    resolver = _FakeResolver({"research-team": view})
+    team = await _view_methods(resolver)
+
+    await team.tasks(team_name="research-team", session_id="session-2")
+    await team.task("t1", team_name="research-team", session_id="session-2")
+    await team.task_dependencies("t1", team_name="research-team", session_id="session-2")
+    await team.messages(team_name="research-team", session_id="session-2")
+    await team.message("m1", team_name="research-team", session_id="session-2")
+    assert resolver.requests[-5:] == [("session-2", "research-team")] * 5
+
+    # Omitted: the calling session, unchanged from before.
+    await team.tasks(team_name="research-team")
+    assert resolver.requests[-1] == ("session-1", "research-team")
+
+
+@pytest.mark.asyncio
+async def test_message_cursor_binds_the_explicit_session() -> None:
+    """A page opened with an explicit session continues under that session only."""
+    resolver = _FakeResolver(
+        {
+            "research-team": _FakeView(
+                messages=[_message(f"m{i}", timestamp=i) for i in range(3)],
+            )
+        }
+    )
+    team = await _view_methods(resolver)
+
+    page = await team.messages(limit=1, team_name="research-team", session_id="session-2")
+    assert page.next_cursor is not None
+    # Continuing under the same explicit session works.
+    second = await team.messages(
+        limit=1,
+        cursor=page.next_cursor,
+        team_name="research-team",
+        session_id="session-2",
+    )
+    assert [m.message_id for m in second.items] == ["m1"]
+    # The same cursor under the calling session is rejected: it belongs
+    # to a different session.
+    with pytest.raises(BaseError):
+        await team.messages(limit=1, cursor=page.next_cursor, team_name="research-team")
 
 
 # ---------------------------------------------------------------------------

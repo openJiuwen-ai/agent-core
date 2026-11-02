@@ -139,6 +139,35 @@ async def test_view_queries_without_a_bound_session_contextvar(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_view_isolates_per_session_dynamic_tables(db) -> None:
+    """Task and message rows live in per-session tables; one view sees one set."""
+    await _seed(db)
+    # The same team under another session carries its own task tables;
+    # create_cur_session_tables is the idempotent per-session DDL path
+    # (initialize only creates the first bound session's tables).
+    token = set_session_id("other-session")
+    try:
+        await db.create_cur_session_tables()
+        await db.task.create_task("t9", "research-team", "t9", "other work", "pending")
+    finally:
+        reset_session_id(token)
+
+    view = BackendTeamReadView(
+        db,
+        "research-team",
+        session_id=SESSION_ID,
+    )
+    assert {t.task_id for t in await view.tasks()} == {"t1", "t2"}
+
+    other_view = BackendTeamReadView(
+        db,
+        "research-team",
+        session_id="other-session",
+    )
+    assert {t.task_id for t in await other_view.tasks()} == {"t9"}
+
+
+@pytest.mark.asyncio
 async def test_resolver_reads_empty_for_sessions_without_tables(db) -> None:
     """A session that never ran reads empty, and the read path never creates tables."""
     await _seed(db)
