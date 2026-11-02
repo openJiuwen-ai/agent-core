@@ -162,6 +162,19 @@
 - **验收标准：** 见 [F_12 第 6 节](../features/F_12_fs-ops-events.md#6-验证) 的 FS 专项与 Events 回归结果。
 - **联合交付：** `fs.*` 可作为宿主内置能力独立验收，不改变 M-01 的既有范围；JiuwenSwarm 插件接入由对端计划维护。
 
+### EV-13 MCP 事件与 `ops.mcp` 能力
+
+- **优先级：** P1；为插件提供受控 MCP 访问，复用进程级 `ResourceMgr` 与调用方 Agent 的能力面。
+- **目标与范围：** 实现 `mcp.connect`、`mcp.call` 两个 CORE 事件，并通过 `ops.build` 注入 `ops.mcp.*`。服务配置来自包内 `mcp.json` 或平台预登记；`mcp.connect` 建连并发布到调用方 Agent，`mcp.call` 调用已登记服务的工具。
+- **交付范围：**
+  1. 两个事件类型、输入/输出 Validator、CORE Handler 与 `ops.mcp` 命名空间。
+  2. `mcp.json` 解析、进程级声明表，以及安装、reload、uninstall 与声明和连接的一致性。
+  3. 通过 `AgentRuntime` 解析调用方 Agent，`ResourceMgr` 由 `mcp.runtime` 惰性解析 `Runner.resource_mgr`；连接与列工具受事件超时预算约束。
+- **不交付：** `mcp.disconnect`、资源读取与提示词方法、`tool.call` 接入；不新增 `ResourceMgr`。
+- **开工硬前置：** EV-04、EV-05、EV-07；[F_13](../features/F_13_mcp-ops-events.md) 已建档。
+- **验收标准：** 见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) 的 MCP 专项与 Events 回归结果。
+- **联合交付：** `mcp.*` 与 `fs.*` 同为宿主内置能力；JiuwenSwarm 插件接入由对端计划维护。
+
 ## 3. 依赖关系与开发顺序
 
 ```mermaid
@@ -175,6 +188,7 @@ flowchart LR
     EV05 --> EV07["EV-07 AgentRuntime\n与业务 EventType"]
     EV05 --> EV08["EV-08 宿主限定派发"]
     EV07 --> EV12["EV-12 FS 事件\n与 ops.fs 能力"]
+    EV07 --> EV13["EV-13 MCP 事件\n与 ops.mcp 能力"]
 
     EV01 --> Contract["M-02-CONTRACT\nUI 事件与 Session 映射"]
     Contract --> Server["M-02-SERVER"]
@@ -186,6 +200,7 @@ flowchart LR
     EV07 -.-> M01
     EV07 -.-> M02
     EV12 -.-> M02
+    EV13 -.-> M02
     M01 ==> M02{"M-02 Swarm 联合验收"}
     Server -.-> M02
     Plugin -.-> M02
@@ -203,8 +218,9 @@ flowchart LR
 6. EV-07 依赖 EV-04 嵌套 Ops 与 EV-05 故障边界；`AgentRuntime` bind/unbind 在 harness 落地后做联调，不阻塞 Events 侧单测（可用 stub Agent）。
 7. EV-08 依赖 EV-04 和 EV-05，独立提供 Handler ID 限定派发能力。
 8. EV-12 依赖 EV-07 的 AgentRuntime 与会话绑定，先完成 FS 事件及 `ops.fs`，再扩展其他能力事件族。
+9. EV-13 复用 EV-07 的运行时解析与 `ops.build` 装配，新增 `ResourceMgr` 依赖和包内 `mcp.json` 声明生命周期。
 
-建议 EV-02、EV-03、EV-04、EV-05、EV-06、EV-07、EV-08、EV-12 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
+建议 EV-02、EV-03、EV-04、EV-05、EV-06、EV-07、EV-08、EV-12、EV-13 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
 
 ### 3.2 M-02 如何并行
 
@@ -240,6 +256,7 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-07 AgentRuntime 与业务 EventType | 已完成 | 张瑶        | EV-04、EV-05；F_07 已建档 | EV-06-V-01～05 未执行 | 方案见 [F_07](../features/F_07_ev07-agent-runtime-business-events.md)；harness `AgentRuntime` bind/unbind 已部分落地，Events builtins 与示例 CORE/Ops 待实现 |
 | EV-08 宿主限定派发 | 完成 | 刘瑜 | EV-04/05 | Core 595 passed / 1 skipped；已合入 Server 1327 passed / 2 skipped（含 94 项生命周期）；见 [F_09](../features/F_09_handler-selection.md#6-验收与未决问题) | 保留 handler_ids 与 Protocol，兼容目标 AgentRuntime 与包信息能力；本轮未重跑真实模型、浏览器或远端 CI |
 | EV-12 FS 事件与 `ops.fs` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | FS 专项 23 passed；Events 回归 138 passed | 六个 CORE 事件与 `ops.fs` 已实现；方案见 [F_12](../features/F_12_fs-ops-events.md) |
+| EV-13 MCP 事件与 `ops.mcp` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | MCP 专项与 Events 回归见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) | 两个 CORE 事件与 `ops.mcp` 已实现；包内 `mcp.json` 声明参与安装、reload、uninstall |
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
 | M-02 Swarm 联合验收                  | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
@@ -272,3 +289,4 @@ git diff --check
 
 | 2026-11-02 | 1.6 | Core !110 集成当前目标分支，保留 AgentRuntime 与 Team 工作项；限定派发顺延为 EV-08 / F_09，修复本计划中 AgentRuntime feature 的旧文件名引用 | 公开 handler_ids 契约保持；本轮验证和 Server !99 消费证据见 F_09 第 6 节 |
 | 2026-11-02 | 1.7 | 新增 EV-12 FS 事件与 `ops.fs` 能力，补齐六事件、会话后端解析、路径与超时边界 | 见 [F_12](../features/F_12_fs-ops-events.md) 第 7 节 |
+| 2026-11-02 | 1.8 | 新增 EV-13 MCP 事件与 `ops.mcp` 能力，补齐包内声明、连接发布、调用与清理 | 见 [F_13](../features/F_13_mcp-ops-events.md) 第 7 节 |

@@ -330,9 +330,19 @@ extensions:
 
 两类依赖分别处理：`requires.packages` 表示包之间的依赖，由 `package.resolve` 分析；`extensions[].requires` 只表示当前包内扩展之间的依赖，由 `extension.plan` 分析。包内扩展 ID 不能用于引用另一包的扩展单元。
 
+#### 4.2.3 mcp.json 的职责
+
+包根还可以有可选的 `mcp.json`，与 `manifest.yaml` 同级，只声明 MCP 服务：
+
+```json
+{"mcpServers": {"weather": {"client_type": "stdio", "params": {"command": "npx", "args": ["-y", "weather-mcp"]}}}}
+```
+
+解析发生在 `extension.plan`，结果写入 `ExtensionPlan.mcp_servers`。安装和启动加载只登记声明，不建立连接；首次 `mcp.connect` 才调用 `ResourceMgr.add_mcp_server()`。文件缺失表示本包不使用 MCP；文件存在但字段非法则安装失败。规约见 S_01。
+
 遇到不支持的 `schemaVersion`、无效或重复的扩展 ID、缺失入口或无效依赖声明时，应拒绝加载。未知可选字段如何处理、版本范围如何解析，由正式 manifest 规约确定，不默认兼容所有未知内容。
 
-#### 4.2.3 包级定序和依赖结果
+#### 4.2.4 包级定序和依赖结果
 
 `package.resolve` 的 Core Handler 在同一次依赖解析中完成版本与包依赖检查、冲突判断和包级排序。输入包括候选包或卸载目标、操作类型及 Runtime 提供的当前生效事实；输出是合法包集合、处理顺序及拒绝原因。检查与排序不再各设事件，以免基于不同选择结果继续执行。
 
@@ -674,7 +684,7 @@ sequenceDiagram
     B-->>H: 交回结果，不自动生成 Plan
 ```
 
-Package Manager 负责声明和包级依赖判断，Runtime 负责当前运行事实，两者的记录不能互相代替。排序规则及冲突策略见第 4.2.3 节；尚未确定的版本或冲突处理不能解释为默认允许替换。
+Package Manager 负责声明和包级依赖判断，Runtime 负责当前运行事实，两者的记录不能互相代替。排序规则及冲突策略见第 4.2.4 节；尚未确定的版本或冲突处理不能解释为默认允许替换。
 
 #### 5.4.3 extension.plan：生成可信单包计划
 

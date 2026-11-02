@@ -322,9 +322,9 @@ agent-core/openjiuwen/core/events/
 ├── bus.py、event_next.py              # 注册、匹配、执行链与推进控制
 ├── ops.py                             # Builder、Ops 与动态 namespace
 ├── bootstrap.py                       # builtin 自动发现与注册
-├── ops_impl/                          # 能力实现（fs.*）；不被 bootstrap 自动注册
+├── ops_impl/                          # 能力实现（fs.*、mcp.*）；不被 bootstrap 自动注册
 └── builtins/
-    ├── event_types/                   # 内置事件；含 ops.build 与 fs.*
+    ├── event_types/                   # 内置事件；含 ops.build、fs.* 与 mcp.*
     ├── handler_ops/                   # Core 平台能力 Build Handler
     └── event_handlers/                # Core 内置业务 Handler
 ```

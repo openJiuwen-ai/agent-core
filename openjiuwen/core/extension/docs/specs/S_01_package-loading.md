@@ -31,7 +31,8 @@
 | 用户来源 | 调用方传入的原始目录或 zip |
 | 生效记录 | Runtime 中的 `ActivePackageRecord`，供后续依赖与卸载判断 |
 | candidate | 一次 prepare 收集齐的 Handler 声明与已加载模块；发布前对业务调用不可见 |
-| Plan | 单包的有序扩展列表与 generation |
+| Plan | 单包的有序扩展列表、MCP 声明与 generation |
+| MCP 声明 | 包根 `mcp.json` 中的 `mcpServers` 条目，安装期只登记、事件期建连 |
 
 ### 1.3 事实归属
 
@@ -54,6 +55,7 @@
 6. 通过检查的包落在安装副本路径；来源已是该路径时就地使用。
 7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。任何安装失败清理与卸载都不删除用户来源。
 8. 同一 `package.id` 在安装目录中只保留一个版本目录。启动列出若见同 id 多版本，按同批重复 id 处理，不自动挑选。
+9. 可选的 `mcp.json` 与 `manifest.yaml` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
 
 ### 2.2 打开与复制
 
@@ -132,6 +134,7 @@
 | `previous_generation` | 重载/卸载时的原 generation；纯新装可为 `None` |
 | `target_generation` | 安装/重载成功后应达到的 generation；卸载等于 previous |
 | `extensions` | 已按依赖排好序的入口列表 |
+| `mcp_servers` | 本次安装/重载解析出的包内 MCP 声明；卸载为空 |
 
 generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`；重启后重新从 `1`。卸载 Plan 不递增。
 
@@ -194,6 +197,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 - 安装副本的所有权在 Package Manager；用户来源永不由本模块删除。
 - 生效记录在发布成功后写入；卸载判断通过后删除。
 - prepare 失败或 `abort` 只清理本次 `sys.modules` 条目。
+- MCP 声明随安装/重载登记；reload 时声明变化与卸载会移除对应连接。
 - 旧 prepare 产生的函数对象在模块被 abort 后仍可执行其创建时的字节码；是否继续持有引用由调用方与事件层快照决定。
 
 ## 6. 适用限制与兼容性
@@ -208,5 +212,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 | --- | --- |
 | 声明、安装目录、zip 防护、依赖定序 | `tests/unit_tests/core/extension/test_package_source.py` |
 | Plan、prepare、生效记录、卸载判断 | `tests/unit_tests/core/extension/test_plan_runtime.py` |
+| `mcp.json` 解析与声明表 | `tests/unit_tests/core/extension/test_mcp_declarations.py` |
+| 安装/重载/卸载的 MCP 声明生命周期 | `tests/unit_tests/core/extension/test_mcp_package_lifecycle.py` |
 
 管理事件与 Bus 发布的验证在对应工作项（EX-03、EX-04）实现时建立，并引用本节控制面条款。

@@ -10,6 +10,7 @@ from typing import Literal
 from openjiuwen.core.events.types import PackageMetadata
 from openjiuwen.core.extension.errors import OperationError
 from openjiuwen.core.extension.schema.manifest import PackageDependency
+from openjiuwen.core.extension.schema.mcp import McpServerSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class ExtensionPlan:
     previous_generation: int | None
     target_generation: int
     extensions: tuple[ExtensionRef, ...]
+    mcp_servers: tuple[McpServerSpec, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

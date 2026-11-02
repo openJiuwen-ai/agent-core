@@ -4,6 +4,7 @@
 """Data carried between the package loader stages."""
 
 from openjiuwen.core.extension.schema.manifest import ExtensionDecl, Manifest, PackageDependency
+from openjiuwen.core.extension.schema.mcp import McpServerSpec
 from openjiuwen.core.extension.schema.records import (
     ActivationReport,
     ActivePackageRecord,
@@ -18,5 +19,6 @@ __all__ = [
     "ExtensionPlan",
     "ExtensionRef",
     "Manifest",
+    "McpServerSpec",
     "PackageDependency",
 ]

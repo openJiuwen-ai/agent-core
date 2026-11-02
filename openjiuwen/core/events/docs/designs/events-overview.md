@@ -130,7 +130,7 @@ Ops 按 `namespace.method` 动态组织平台能力，例如 `session.cwd`。运
 
 ### 3.1 注册与显式构建 Ops 能力目录
 
-构造 ExtensionEventBus 时，`bootstrap.py` 按 `event_types → handler_ops → event_handlers` 的顺序注册 Core builtins；当前 Core 内置事件含 `ops.build` 与 `fs.*`。平台随后登记业务 EventType、匹配函数和 CORE Handler，再为已有事件登记 BUILTIN / USER Handler。`register_event_handler()` 的默认层级为 USER，`package_metadata` 是关键字参数并随注册记录保存。
+构造 ExtensionEventBus 时，`bootstrap.py` 按 `event_types → handler_ops → event_handlers` 的顺序注册 Core builtins；当前 Core 内置事件含 `ops.build`、`fs.*` 与 `mcp.*`。平台随后登记业务 EventType、匹配函数和 CORE Handler，再为已有事件登记 BUILTIN / USER Handler。`register_event_handler()` 的默认层级为 USER，`package_metadata` 是关键字参数并随注册记录保存。
 
 完成事件和 Build Handler 注册后，宿主必须在开放普通业务前显式触发一次 `ops.build`。Build CORE 创建空 Builder，各 Build Handler 可在下游返回后向同一个 Builder 添加 namespace 和 method。EventBus 只校验最终输出是 EventHandlerOpsBuilder，然后把它保存为 Bus 级能力目录。
 
@@ -285,7 +285,7 @@ USER Handler 可以跳过 BUILTIN 或短路，因此 BUILTIN 层级本身不能�
 | 内置注册、宿主显式 Build、Session 规范化和完整业务调用 | 已实现 | `bootstrap.py`、`builtins/event_types/ops_build.py`、`bus.py`；`test_event_bus_integration.py` |
 | Events 单元测试基线 | 已记录通过 | F-04 与开发计划记录 `tests/unit_tests/core/events/` 67 passed；本次文档更新不重新执行该基线 |
 
-`builtins/event_types/`、`builtins/handler_ops/`、`builtins/event_handlers/` 已具备自动发现路径。当前稳定内置业务事件含 `ops.build` 与 `fs.*`；工作区中以 `TEMPORARY` 标记的 `manual_probe_*` 文件是 bootstrap 手工验证探针，不构成公开产品能力。
+`builtins/event_types/`、`builtins/handler_ops/`、`builtins/event_handlers/` 已具备自动发现路径。当前稳定内置业务事件含 `ops.build`、`fs.*` 与 `mcp.*`；工作区中以 `TEMPORARY` 标记的 `manual_probe_*` 文件是 bootstrap 手工验证探针，不构成公开产品能力。
 
 Core 已有[当前单智能体 Session](../../../session/agent.py)，EventBus 会投影其 session ID；宿主也可以直接提供 SessionContext。已有 [Tool 抽象](../../../foundation/tool/base.py)提供 `invoke()` 和 `stream()`，但尚未通过 Events 接入真实 `tool.call`，已有流式接口也不代表 Events 已有流式协议。
 
@@ -316,4 +316,6 @@ Core 已有[当前单智能体 Session](../../../session/agent.py)，EventBus �
 | [EV-02 EventBus 引擎](../features/F_02_ev02-event-bus-engine.md) | 注册、匹配、三层链、EventNext 和快照语义 |
 | [EV-03 Builder/Ops](../features/F_03_ev03-builder-ops.md) | Builder、独立 Ops、动态能力和上下文隔离 |
 | [EV-04 Build 与业务调用集成](../features/F_04_ev04-event-bus-integration.md) | builtin 自动注册、显式 Build、逐 Handler Ops 和集成验证 |
+| [EV-12 FS 事件与 `ops.fs`](../features/F_12_fs-ops-events.md) | 会话文件能力事件、后端解析与路径边界 |
+| [EV-13 MCP 事件与 `ops.mcp`](../features/F_13_mcp-ops-events.md) | 包内 MCP 声明、连接发布与工具调用 |
 | [Events 特性开发计划](events-development-plan.md) | EV-01～EV-04、M-01、M-02 的状态、依赖、负责人和验证记录 |

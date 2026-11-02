@@ -45,6 +45,7 @@ from openjiuwen.core.extension.management.types import (
 )
 from openjiuwen.core.extension.manifest import load_manifest
 from openjiuwen.core.extension.schema.manifest import Manifest
+from openjiuwen.core.extension.schema.mcp import McpServerSpec, declarations
 from openjiuwen.core.extension.schema.records import ActivationReport, ActivePackageRecord, ExtensionPlan
 from openjiuwen.core.extension.selection import resolve_install_set
 
@@ -135,7 +136,7 @@ async def handle_extension_apply(request: ApplyRequest) -> ActivationReport:
     """Run one plan and report what actually happened."""
     context = context_for(request.bus)
     if request.plan.operation == "uninstall":
-        return _apply_uninstall(context, request)
+        return await _apply_uninstall(context, request)
     return await _apply_load(context, request)
 
 
@@ -386,6 +387,11 @@ async def _apply_load(context: ManagementContext, request: ApplyRequest) -> Acti
     prepared = context.runtime.prepare(plan)
     if prepared.candidate is None:
         return _failed(plan, prepared.error or _invalid_result("prepare"))
+    if plan.operation == "reload":
+        released = await _release_replaced_mcp(plan)
+        if released is not None:
+            context.runtime.abort(prepared.candidate)
+            return _failed(plan, released)
     if plan.operation == "install":
         published = context.runtime.publish(
             prepared.candidate,
@@ -414,6 +420,7 @@ async def _apply_load(context: ManagementContext, request: ApplyRequest) -> Acti
             )
         )
         return _failed(plan, published.error)
+    _declare_mcp(plan.package.package_id, plan.mcp_servers)
     return ActivationReport(
         plan_id=plan.plan_id,
         package_id=plan.package.package_id,
@@ -424,17 +431,21 @@ async def _apply_load(context: ManagementContext, request: ApplyRequest) -> Acti
     )
 
 
-def _apply_uninstall(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
-    """Remove one package from the Bus, then delete its version directory."""
+async def _apply_uninstall(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
+    """Remove one package's MCP connections and handlers, then its files."""
     plan = request.plan
     package_id = plan.package.package_id
     decision = context.runtime.uninstall_decision(package_id)
     if decision is not None:
         return _failed(plan, decision, current_generation=plan.previous_generation)
+    stripped = await _remove_mcp_servers(declarations.specs_for(package_id))
+    if stripped is not None:
+        return _failed(plan, stripped, current_generation=plan.previous_generation)
     try:
         context.runtime.unpublish(package_id, context.bus)
     except ExtensionFailure as exc:
         return _failed(plan, exc.as_error(), current_generation=plan.previous_generation)
+    declarations.withdraw(package_id)
     version = plan.package.package_version or request.manifest.version
     try:
         if context.package_manager.version_dir(package_id, version).is_dir():
@@ -450,6 +461,70 @@ def _apply_uninstall(context: ManagementContext, request: ApplyRequest) -> Activ
         previous_generation=plan.previous_generation,
         current_generation=None,
     )
+
+
+def _declare_mcp(package_id: str, specs: tuple[McpServerSpec, ...]) -> None:
+    """Record a package's declarations after its handlers reached the Bus."""
+    declarations.declare(package_id, specs)
+
+
+async def _release_replaced_mcp(plan: ExtensionPlan) -> OperationError | None:
+    """Drop connections whose declaration changed or disappeared on reload."""
+    previous = declarations.specs_for(plan.package.package_id)
+    current = {spec.name: spec for spec in plan.mcp_servers}
+    stale = tuple(
+        spec
+        for spec in previous
+        if spec.name not in current or current[spec.name].digest != spec.digest
+    )
+    return await _remove_mcp_servers(stale)
+
+
+async def _remove_mcp_servers(specs: Sequence[McpServerSpec]) -> OperationError | None:
+    """Close the servers in ``specs``; absence is not an error."""
+    if not specs:
+        return None
+    manager = _resource_mgr_or_none()
+    if manager is None:
+        return None
+    for spec in specs:
+        try:
+            removed = await manager.remove_mcp_server(
+                spec.server_id,
+                skip_if_tag_not_exists=True,
+                ignore_exception=True,
+            )
+        except Exception as exc:
+            return operation_error(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason=f"cannot release MCP server {spec.server_name}: {exc}",
+            )
+        failure = _result_failure(removed)
+        if failure is not None:
+            return operation_error(
+                StatusCode.EXTENSION_LOAD_FAILED,
+                reason=f"cannot release MCP server {spec.server_name}: {failure}",
+            )
+    return None
+
+
+def _result_failure(result: object) -> BaseException | None:
+    """Return the first failed ``Result`` in one remove call, if any."""
+    items = result if isinstance(result, list) else [result]
+    for item in items:
+        if item is not None and getattr(item, "is_err", lambda: False)():
+            return item.msg()
+    return None
+
+
+def _resource_mgr_or_none() -> object | None:
+    """Return the installed resource manager, or None when the host has none."""
+    from openjiuwen.core.events.ops_impl.mcp.runtime import require_resource_mgr
+
+    try:
+        return require_resource_mgr()
+    except RuntimeError:
+        return None
 
 
 def _manifest_for_record(record: ActivePackageRecord) -> Manifest:
