@@ -141,6 +141,19 @@ class FakeAgent:
         self.member_name = backend.member_name
         self.harness = FakeHarness()
         self.spec = type("Spec", (), {"metadata": {"capabilities": ["analysis"]}})()
+        self._user_input_delivered = None
+
+    def arm_user_input_delivery(self):
+        self._user_input_delivered = asyncio.Event()
+        return self._user_input_delivered
+
+    def note_user_input_delivered(self) -> None:
+        event = self._user_input_delivered
+        if event is not None and not event.is_set():
+            event.set()
+
+    def clear_user_input_delivery(self) -> None:
+        self._user_input_delivered = None
 
 
 @pytest_asyncio.fixture
@@ -4850,6 +4863,153 @@ async def test_drain_leader_turns_keeps_pending_review(active_organization_runti
     await org_runtime._drain_leader_turns("team-a", session_id)
 
     assert turns == ["review pending child"]
+
+
+def _patch_review_wake_timing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.organization.runtime._REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.organization.runtime._REVIEW_WAKE_RETRY_DELAY_SECONDS",
+        0,
+    )
+
+
+def _queue_paused_review(org_runtime, session_id, *, query: str = "review pending child") -> tuple:
+    review_key = (session_id, "team-a", "child-task")
+    org_runtime._scheduled_parent_reviews.add(review_key)
+    org_runtime._leader_turn_queues[(session_id, "team-a")] = deque(
+        [
+            {
+                "query": query,
+                "_org_review_task_id": "child-task",
+                "_org_review_key": review_key,
+            },
+        ]
+    )
+    return review_key
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_retries_when_the_review_prompt_is_not_delivered(
+    active_organization_runtime, monkeypatch
+):
+    """A review that never reaches the leader is cancelled and queued once more."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    _patch_review_wake_timing(monkeypatch)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+    cancelled = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        if len(turns) == 2:
+            assert review_key in org_runtime._scheduled_parent_reviews
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child", "review pending child"]
+    assert cancelled == [True, True]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+    assert not org_runtime._leader_turn_queues.get((session_id, "team-a"))
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_retries_once_when_the_review_stays_pending(
+    active_organization_runtime, monkeypatch
+):
+    """A finished review turn with no verdict is woken once more, then dropped."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-review-retry")
+    _patch_review_wake_timing(monkeypatch)
+
+    async def get_task_review(_task_id):
+        return SimpleNamespace(review_status=OrgTaskReviewStatus.PENDING)
+
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        if len(turns) == 2:
+            assert review_key in org_runtime._scheduled_parent_reviews
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child", "review pending child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_a_review_after_it_is_accepted(
+    active_organization_runtime, monkeypatch
+):
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-review-accepted")
+    _patch_review_wake_timing(monkeypatch)
+    verdict = {"status": OrgTaskReviewStatus.PENDING}
+
+    async def get_task_review(_task_id):
+        return SimpleNamespace(review_status=verdict["status"])
+
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        verdict["status"] = OrgTaskReviewStatus.ACCEPTED
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_waits_out_a_delivered_review(active_organization_runtime, monkeypatch):
+    """Once the review sentence is delivered, the short timeout does not cut the turn."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    _patch_review_wake_timing(monkeypatch)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id, query="review delivered child")
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        entry.agent.note_user_input_delivered()
+        await asyncio.sleep(0.15)
+        turns.append(kwargs["inputs"]["query"])
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review delivered child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
 
 
 @pytest.mark.asyncio
