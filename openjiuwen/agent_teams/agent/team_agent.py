@@ -216,6 +216,7 @@ class TeamAgent(BaseAgent):
             served_model_recorder=self._record_served_model,
         )
         self._coordination = CoordinationKernel(self)
+        self._user_input_delivered: asyncio.Event | None = None
 
     # ------------------------------------------------------------------
     # Properties — delegate to configurator
@@ -561,6 +562,7 @@ class TeamAgent(BaseAgent):
             event.set()
 
     def clear_user_input_delivery(self) -> None:
+        """Drop the delivery signal so a later review wait starts clean."""
         self._user_input_delivered = None
 
     async def deliver_input(
