@@ -1917,7 +1917,7 @@ async def test_root_leader_selects_aggregation_mode_through_update_task_tool(org
         }
     )
     assert created.success
-    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
     assert (await manager.claim_task(task_id="tool-root-agg", team_id="team-a")).ok
 
     unauthorized = await OrgUpdateTaskTool(manager, team_id="team-b", leader_id="leader-b").invoke(

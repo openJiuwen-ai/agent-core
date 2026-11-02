@@ -2587,8 +2587,10 @@ class OrganizationRuntimeManager:
                             review_requeue = True
                             nxt = dict(original_inputs)
                             nxt["_org_review_attempt"] = review_attempt + 1
-                            queue.appendleft(nxt)
-                            await asyncio.sleep(_REVIEW_WAKE_RETRY_DELAY_SECONDS)
+                            # A lone retry waits. Turns queued during that wait go first.
+                            queue.append(nxt)
+                            if len(queue) == 1:
+                                await self._pause_lone_review_retry(key)
                         elif outcome == "not_run":
                             turn_failed = True
                             queue.appendleft(original_inputs)
@@ -2908,6 +2910,23 @@ class OrganizationRuntimeManager:
         )
         return "done"
 
+    async def _pause_lone_review_retry(self, key: tuple) -> None:
+        """Wait out a review retry unless another leader turn arrives.
+
+        The retry sits at the front while this wait runs. A turn queued
+        during the wait is rotated ahead of it so the drain is not stuck.
+        """
+        deadline = time.monotonic() + _REVIEW_WAKE_RETRY_DELAY_SECONDS
+        while time.monotonic() < deadline:
+            pending = self._leader_turn_queues.get(key)
+            if pending is not None and len(pending) > 1:
+                pending.rotate(-1)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.01, remaining))
+
     async def _stop_review_turn(self, task: asyncio.Task) -> None:
         if task.done():
             return
@@ -2940,61 +2959,88 @@ class OrganizationRuntimeManager:
         """
 
         agent = entry.agent
-        delivered = None
         arm = getattr(agent, "arm_user_input_delivery", None)
-        if callable(arm):
-            delivered = arm()
+        delivered = arm() if callable(arm) else None
         turn_task = asyncio.create_task(self._run_leader_turn(team_id, session_id, inputs))
-        delivery_wait: asyncio.Task | None = None
         try:
-            undelivered = False
-            ran = False
-            if delivered is None:
-                ran = await turn_task
-            else:
-                delivery_wait = asyncio.create_task(delivered.wait())
-                done, _pending = await asyncio.wait(
-                    {turn_task, delivery_wait},
-                    timeout=_REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    undelivered = True
-                elif turn_task in done:
-                    ran = turn_task.result()
-                else:
-                    ran = await turn_task
-            if undelivered:
-                return self._review_wake_again(
-                    attempt=attempt,
-                    team_id=team_id,
-                    session_id=session_id,
-                    review_task_id=review_task_id,
-                    reason="review prompt was not delivered",
-                )
-            if not ran:
-                return "not_run"
-            if task_manager is None:
-                return "done"
-            review = await task_manager.get_task_review(review_task_id)
-            status = getattr(review, "review_status", None) if review is not None else None
-            if status in (None, "", OrgTaskReviewStatus.PENDING):
-                return self._review_wake_again(
-                    attempt=attempt,
-                    team_id=team_id,
-                    session_id=session_id,
-                    review_task_id=review_task_id,
-                    reason="review still pending",
-                )
-            return "done"
+            ran, undelivered = await self._await_review_delivery(turn_task, delivered)
+            return await self._review_turn_verdict(
+                ran=ran,
+                undelivered=undelivered,
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                task_manager=task_manager,
+            )
         finally:
-            if delivery_wait is not None and not delivery_wait.done():
+            try:
+                if not turn_task.done():
+                    await self._stop_review_turn(turn_task)
+            finally:
+                clear = getattr(agent, "clear_user_input_delivery", None)
+                if callable(clear):
+                    clear()
+
+    async def _await_review_delivery(self, turn_task: asyncio.Task, delivered: Any) -> tuple[bool, bool]:
+        """Wait until the review sentence arrives, or the turn itself finishes.
+
+        Returns ``(ran, undelivered)``. Stopping the delivery wait lives in
+        this helper so a cancellation there still reaches the caller's cleanup.
+        """
+        if delivered is None:
+            return bool(await turn_task), False
+        delivery_wait = asyncio.create_task(delivered.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {turn_task, delivery_wait},
+                timeout=_REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                return False, True
+            if turn_task in done:
+                return bool(turn_task.result()), False
+            return bool(await turn_task), False
+        finally:
+            if not delivery_wait.done():
                 await self._stop_review_turn(delivery_wait)
-            if not turn_task.done():
-                await self._stop_review_turn(turn_task)
-            clear = getattr(agent, "clear_user_input_delivery", None)
-            if callable(clear):
-                clear()
+
+    async def _review_turn_verdict(
+        self,
+        *,
+        ran: bool,
+        undelivered: bool,
+        attempt: int,
+        team_id: str,
+        session_id: str,
+        review_task_id: str,
+        task_manager: Any,
+    ) -> str:
+        """Decide whether a paused review wake is finished, skipped, or retried."""
+        if undelivered:
+            return self._review_wake_again(
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                reason="review prompt was not delivered",
+            )
+        if not ran:
+            return "not_run"
+        if task_manager is None:
+            return "done"
+        review = await task_manager.get_task_review(review_task_id)
+        status = getattr(review, "review_status", None) if review is not None else None
+        if status in (None, "", OrgTaskReviewStatus.PENDING):
+            return self._review_wake_again(
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                reason="review still pending",
+            )
+        return "done"
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
         closeout = isinstance(inputs, dict) and inputs.get("_org_summary_closeout") is True
