@@ -9,14 +9,14 @@ author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 reviewers: []
 created: 2026-10-31
-updated: 2026-10-31
+updated: 2026-11-02
 approved-date: 2026-10-31
 domain: core
 modules: [symphony]
-files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py]
+files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
 related: [D-20261029-1619-skill-directory-graph-api]
 tags: [symphony, configuration, pydantic]
-scope: 仅形成分层纯配置模型和配置验证；运行链路迁移留待后续
+scope: 分层纯配置模型、树形文档导出和配置验证；运行链路迁移留待后续
 ---
 
 # Symphony 配置契约先行
@@ -29,7 +29,7 @@ scope: 仅形成分层纯配置模型和配置验证；运行链路迁移留待�
 
 ## 2. 目标配置
 
-在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。公共配置按以下结构组合：
+在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。初始公共配置按以下结构组合；挂载范围和路径由第 8、10 节的用户确认方案更新：
 
 ```text
 SymphonyConfig
@@ -53,7 +53,7 @@ SymphonyConfig
 
 ## 4. 阶段边界
 
-本阶段新增目标配置模型和针对性验证。既有定义仍是当前生产行为的依据；不修改 Runtime、引擎、Swarm、公共导出、依赖文件或缓存逻辑。新旧定义暂时并存，不提供自动转换或接入别名。
+本阶段新增目标配置模型和针对性验证。既有定义仍是当前生产行为的依据；不修改 Runtime、引擎、Swarm、包根公共导出、依赖文件或缓存逻辑。新旧定义暂时并存，不提供自动转换或接入别名。
 
 下一阶段再按已审阅的配置层级更新消费者、保留有效参数和缓存身份、删除旧定义并接入 SymphonyRuntime(model, config)。在实际接入前，不能把新配置校验成功解释为对应对象读取器或运行能力已经实现。
 
@@ -65,3 +65,72 @@ SymphonyConfig
 4. 当前配置源的默认值逐项映射到目标位置；不同入口的默认差异得到保护。
 5. 构造和序列化不访问文件系统或模型后端，现有公共配置导出仍指向原定义。
 6. 验证限于配置契约，不运行格式化或静态检查。实际证据由开发 F 文档记录。
+
+
+## 6. 2026-11-02 配置收敛确认
+
+用户在子 Agent 检视后明确要求先实施公共导出收敛、检索配置复用、任务策略归位，并修复 method 校验；默认值保持不变，暂不接入运行链路。本节续写同一配置契约，公共四组、中文元数据及既有默认行为的决策继续有效。
+
+- config 模块的公共导出限定为 SymphonyConfig 配置树的 9 个模型和 CapabilityType。公共与内部模型分别登记，完整登记仍供内部验证和文档工具显式读取，不随登记数量扩大公共导出。
+- 独立检索服务复用渐进检索的字段结构，分别保留 top_k=10 和 top_k=5，不引入新的公共基类或统一默认对象。
+- CapabilityIndexBuildConfig 的 preserve_previous_index_on_failure、strict_failure 归 task，与总时限同组；output 只管理生成预览等产物设置。目标配置不保留旧 output 路径别名；当前运行消费者不变。
+- IndexBuildConfig 和 ResolvedIndexBuildConfig 保留整数编码 4。两者均须在字面量匹配前拒绝浮点数、字符串和布尔值，继续导出 integer/const=4 的 Schema。
+
+验收补充：公共导出不混入内部模型；共享检索字段的覆盖、序列化和可变默认值隔离继续有效；两项失败策略的新路径可用且旧路径明确报错；字典与 JSON 输入均不能绕过 method 类型约束。解析快照去重、倍率调参范围和 Runtime 接入均留待后续决定。
+
+
+## 7. 2026-11-02 树形配置文档导出确认
+
+用户要求输出全部配置的树形结构，并在每个配置项后以 # 注释说明；随后明确选择“每次完成配置修改后，由开发流程自动运行生成脚本”。本节承接原配置元数据导出方向，先实施文本树，不引入 Markdown 文档框架。
+
+- 新增 scripts/export_symphony_config.py，读取 Pydantic model_fields、字段默认值、中文说明和枚举，不另外维护一份字段清单。
+- 生成 openjiuwen/symphony/config.tree.txt：公共树递归展开，内部模型逐一定义并引用子模型；注明必填、默认值和目标配置尚未接入运行链路。
+- 导出只列可配置字段；长列表展示数量并指向源默认定义，不将只读派生属性当作输入字段。公共/内部边界以现有注册表为准。
+- 在 Symphony 模块 AGENTS.md 中要求配置变更后于交付前自动重新生成；生成文件进入版本管理并由定向测试核对一致性。触发方式不包含文件监听器、Git hook 或 Runtime 导入副作用。
+- 脚本按自身位置定位配置与默认输出，允许显式覆盖输出路径；独立加载纯配置文件，不依赖包根和运行模块。相同内容重复导出不重写文件。
+
+验收：每个内部模型字段均被列出，公共树完整展开，中文注释和必填/None 区别正确；嵌套默认工厂覆盖、联合后端类型和递归引用能够展示；同一源重复导出内容稳定，生成文件与配置一致；从仓库外目录运行也能导出，且不导入 openjiuwen 运行模块。
+
+
+## 8. 2026-11-02 用户可调配置并入统一入口
+
+用户在审阅统一配置树建议后明确回复“可以，合并一下吧”。本节部分替代第 2、6 节的公共四组及内部策略独立输入决定；纯配置、旧消费者继续工作、默认值和不接入 Runtime 的边界仍有效。继续同一设计，不另建设计编号。
+
+- 公共入口扩展为 capability、storage、retrieval、orchestration、flow、experience。仅 capability.root、capability.type、storage.artifact_root 必填，其余节点使用独立默认工厂补全。
+- capability 增加 scan 与 fingerprint；指纹开放 extraction、evaluation、cache，协议版本与附加签名继续内部维护。提取开关只保留 capability.fingerprint.extraction.llm_enabled，替代原 orchestration.build.extraction_mode。
+- retrieval.build 直接组合 structure、request、postprocess、equivalence、profiles、prompt、incremental、task、output；search 组合 top_k、traversal、render、generation；discovery 和 toolkit 保留各自语义及默认值。
+- orchestration.build 保留整体 max_concurrency 并组合 matching；共识策略只保留 matching.require_consensus，不再提供第二个匹配并发配置。整体构图并发是上限，后续接入时指纹阶段并发还受 extraction.max_concurrency 限制，两者取较小值。
+- flow 组合 enabled、acceptance、narrative；experience.build 复用聚类、执行、模式配置。Flow 默认 enabled=true 沿用独立模块默认，不表示本阶段启动服务或后台任务。
+- 公共树构建仍采用深度 6、分支 128（最小 2）、并发 2、请求超时 420 秒、分类批量 32；检索 top_k=10、并行分支 3、请求超时 120 秒；图构建整体并发 1、指纹阶段上限 4。底层独立入口的不同默认值继续保留。
+- TreeBuildSettings、ResolvedIndexBuildConfig、RuntimeRetrieverConfig、模型后端、协议标识及尚无统一入口的独立算法/调用参数继续独立。输入参数与派生设置不产生两个可写来源。
+- 公共模型登记覆盖根 Schema 可达的所有子模型，用于验证和文档；config 模块的 __all__ 保留原核心配置类并增加 FlowConfig、ExperienceConfig，不随子模型数量扩大便利导出。包根导出不改。
+- 目标配置的旧扁平路径不提供别名，按未知字段报完整路径；仍未接入运行消费者，后续迁移使用新规范路径。中文元数据同步并自动重新导出完整配置树。
+
+验收：最小输入及深层部分覆盖能补全默认值；旧入口的默认值逐项映射到新的公共位置；重复路径、内部协议/后端/派生字段被拒绝；嵌套错误位置完整；所有配置可序列化往返、生成中文 Schema，可变默认值不共享；公共登记恰好覆盖根 Schema，内部登记继续完整；导出结果与配置一致。只执行配置及导出测试。
+
+
+## 9. 2026-11-02 清理重复的独立配置模型
+
+用户确认 GraphPlanningConfig 与公共规划策略重复后，明确要求“检查一下，还有没有类似的重复独立内部配置，清理一下”。在同一设计内收敛过渡镜像，公共六组结构、默认值、约束和运行链路不变；本节替代第 8 节继续在目标 config.py 中镜像解析设置的安排。
+
+- 检查全部内部模型的字段来源、组合关系、默认差异和运行引用。删除只用于旧字段对照或重复解析快照、没有目标运行消费者的 FingerprintConfig、GraphPlanningConfig、GraphMatchingConfig、CapabilityIndexBuildConfig、TreeBuildSettings、ResolvedIndexTreeStructureConfig、ResolvedIndexBuildConfig、RuntimeRetrieverConfig。
+- 指纹和规划默认值直接与公共节点及独立协议数据对照；索引 task/output 的验证直接进入公共 RetrievalBuildConfig，不为测试保留旧模型包装。
+- 解析设置的真实实现保留在原运行模块；不删除其当前消费者。重复目标模型的唯一字段（例如树构建解析时的连续失败上限）仍由真实运行设置管理，不擅自增加到公共输入。
+- 保留具有独立职责/默认值/约束的参数族：树底层请求与结构、独立索引工作流和提示协议、渐进/服务检索默认差异、模型后端、生成约束、单次请求以及动态树、一次性构建。不同入口的 1/180/20 与 2/420/32、top_k=5/10 不因清理混用。
+- 根据本轮前已提出的文档用途区分，将默认 config.tree.txt 收敛为 SymphonyConfig 用户配置树；--include-internal 显式追加保留模型的开发参考。支持 --output 单独保存完整参考；开发流程仍自动生成默认用户文档。
+
+验收：删除名称不再可从目标模块访问且不再登记；公共 Schema 和默认序列化结果与清理前完全一致；全部保留模型的约束、元数据、默认差异和往返继续验证；真实旧配置导出与消费者保持不变。默认导出仅含公共树，显式完整导出覆盖全部剩余内部字段，两种模式均可独立执行，重复生成不重写。仅运行配置与导出验证，不运行静态检查。
+
+
+## 10. 2026-11-02 构建与检索配置进一步收敛
+
+用户明确要求只梳理 config、业务代码后续修改，并选择“一起收敛”构建和检索包装，随后以 PLEASE IMPLEMENT THIS PLAN 确认本节方案。本节部分替代第 6、8、9 节因旧入口默认差异保留同义目标模型的决定；公共六组、既有公共默认值、中文元数据、配置先行和原业务定义继续工作的边界保持有效。
+
+- 删除 TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildConfig、IndexTreeBuildConfig、TreeManagerConfig、TreePromptConfig、IndexBuildConfig、IndexArtifactConfig、TreeBuildOptions、ProgressiveRetrieverConfig、RetrieverConfig、DisclosureConfig，共 13 个目标模型，不留同义别名或替代包装。
+- IndexRequestConfig 与 RetrievalTreeStructureConfig 直接定义完整字段；构建策略统一在 RetrievalBuildConfig，检索策略统一在 RetrievalSearchConfig。AgenticRenderConfig 直接继承 RetrievalRenderConfig 并显式保留工具浏览默认值。
+- DynamicTreeConfig 通过 retrieval.build.dynamic 挂到公共树，只保留 rebalance_interval=50 和六个扩展倍率 1.5、0.7、1.7、1.3、6.0、12.0；移除结构副本与六个派生属性。后续运行层共用 retrieval.build.structure 计算阈值，本轮不实现转换或计算器。
+- allow_fallback_tree=True 归 retrieval.build.task；verbose=False、show_tree=True、display_capability_root=None 归 retrieval.build.output，generate_tree_html=False 位置不变。新增字段沿用原目标模型默认值，不将旧业务入口的显式覆盖改为这些默认值。
+- 旧工作流的 method 仅支持 TREE=4，目标配置不再提供该字段及专用类型/校验函数。提示指纹版本继续由原业务模块维护。模型由后续 Runtime 的 model 参数承接；独立后端联合类型仍保留，由 TypeAdapter 直接验证。
+- 保留其他独立职责的配置。预期 63 个模型，其中公共树可达 48 个、内部 15 个；不扩大 __all__ 或包根公共导出。
+
+验收：最小输入和深层覆盖能到达所有新归位字段；完整错误路径、序列化往返、可变默认值隔离及中文 Schema 继续成立。对照修改前快照，既有公共字段、默认值、类型、约束和示例不变，仅允许上述新增字段与说明变化；新归位默认值与原目标内部模型一致。删除名称不再出现在模块、登记表及导出模型参考中，真实业务配置与调用链不变。自动生成 config.tree.txt，保留“全量配置”标题；只运行配置和导出测试。
