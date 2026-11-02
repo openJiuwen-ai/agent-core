@@ -29,7 +29,7 @@ scope: 分层纯配置模型、树形文档导出和配置验证；运行链路�
 
 ## 2. 目标配置
 
-在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。初始公共配置按以下结构组合；挂载范围和路径由第 8、10 节的用户确认方案更新：
+在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。初始公共配置按以下结构组合；挂载范围、路径和组合约束由第 8、10、11、12 节的用户确认方案更新：
 
 ```text
 SymphonyConfig
@@ -134,3 +134,31 @@ SymphonyConfig
 - 保留其他独立职责的配置。预期 63 个模型，其中公共树可达 48 个、内部 15 个；不扩大 __all__ 或包根公共导出。
 
 验收：最小输入和深层覆盖能到达所有新归位字段；完整错误路径、序列化往返、可变默认值隔离及中文 Schema 继续成立。对照修改前快照，既有公共字段、默认值、类型、约束和示例不变，仅允许上述新增字段与说明变化；新归位默认值与原目标内部模型一致。删除名称不再出现在模块、登记表及导出模型参考中，真实业务配置与调用链不变。自动生成 config.tree.txt，保留“全量配置”标题；只运行配置和导出测试。
+
+
+## 11. 2026-11-02 配置树评审后的四项语义整理
+
+用户要求一个独立子智能体评估配置树，随后明确确认：“先处理前四项，保持默认值不变，只改 config.py、配置测试和相关文档，重新生成 config.tree.txt，暂时不改业务代码”。本节部分替代第 6 节保留 strict_failure 的目标决定，以及第 10 节六个倍率字段和原经验聚类字段的命名；六个顶层分组、节点归属、所有保留字段的默认值和配置先行边界仍有效。
+
+1. 回退决策统一为 retrieval.build.task.allow_fallback_tree，默认 True；删除 strict_failure，不提供别名或第二个模式开关。preserve_previous_index_on_failure 默认 True，继续独立配置。后续运行迁移时，allow_fallback_tree=False 须承接旧严格模式的缺模型前置失败与错误报告，并禁止回退；存在可用旧索引且启用保留策略时，不能让降级结果覆盖旧索引。本阶段只声明策略，不检查模型配置、文件或当前索引状态。
+2. retrieval.build.dynamic.expansion 下六个字段增加 _multiplier 后缀，依次为 max_capabilities_per_node_multiplier、expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier；默认值继续为 1.5、0.7、1.7、1.3、6.0、12.0，仍要求正数。lazy_split 的基数为节点容量，其余为分支数；分类批量倍率与绝对批量上限不合并。
+3. experience.build.clustering.capability_cluster_num 改为 query_clusters_per_capability_set，默认 None，继续接受正整数或 None。说明明确为“每个能力集合内成功查询的聚类数”，None 表示自适应数量；不再暗示能力类别数或经验库总簇数。
+4. RetrievalSearchConfig 增加纯配置组合校验：mode=logit_selection、compact_codes_enabled=False、fallback_mode=error（含省略时的默认值）的组合拒绝，允许显式 fallback_mode=generate。错误定位到 generation 节点，并说明相关字段及修正方式；从 SymphonyConfig 构造时保留 retrieval.search 前缀。禁用 retrieval 仍校验配置，后端打分能力留给后续运行层检查。
+
+本轮不调整 search.generation/request、Discovery 的 budget/prompt、缓存观测归属或其余字段命名，不新增模型、公共导出或业务适配层。旧目标字段按未知字段拒绝，真实业务定义中的旧字段继续工作；上述变化会收紧目标输入集合，但不改变默认行为。
+
+验收：对照变更前配置快照，除退役 strict_failure 和七个明确改名字段外，默认序列化结果一致；标量类型和约束保持一致，检索仅收紧指定组合。覆盖旧字段拒绝、深层覆盖、完整错误路径、字典/JSON 往返、子模型输入和禁用节点校验；导出的 Schema/配置树包含新的中文语义与条件说明。运行配置和导出测试，自动生成 config.tree.txt；不得修改业务代码、运行格式化或静态检查。
+
+
+## 12. 2026-11-02 请求预算、提示配置与单位命名整理
+
+用户继续确认实施独立评审的后四项，要求“保持默认值不变，只改配置、配置测试和相关文档，重新生成 config.tree.txt，暂时不改业务代码”。本节续写同一设计，替代第 11 节暂缓这四项的范围限制，以及旧 generation/budget/缓存观测位置和单位字段命名；保留六个顶层分组及前四项整理后的语义。
+
+1. retrieval.search.generation 改为 selection，类型为 RetrievalSelectionConfig，只管理 mode、trie_constrained_decoding_enabled 与 logit；输出和超时预算移到 search.request，类型为 RetrievalRequestBudgetConfig，字段为 max_output_tokens=96、timeout_seconds=120.0。工具检索的 AgenticRequestConfig 复用预算字段定义并保留 timeout_seconds 只能为正数的约束；自然语言检索继续接受 None。配置实例和入口覆盖独立，旧 RetrievalGenerationConfig 不保留别名。logit 与紧凑编码的组合规则保持第 11 节语义，错误路径相应改为 retrieval.search.selection。
+2. retrieval.build.prompt.cache_observability 移到 build.output.cache_metrics_enabled，默认 True。prompt 只保留确定性和结构发现种子；指标观测与 request.caching 的缓存策略开关不合并、不相互推导，四种组合仍合法。
+3. retrieval.discovery.budget 的 candidate_budget_ratio=0.01、context_window_tokens=200000 直接并入 DiscoveryPromptConfig，与原 preferred_capability_ids 同组；删除 DiscoveryBudgetConfig 和 budget 节点。只读 candidate_budget_tokens 随之归 prompt，派生公式、至少为 1 的规则和非序列化边界不变，output 独立保留。
+4. 公共策略统一单位命名：指纹正文 body_limit → max_body_chars、输出 max_tokens → max_output_tokens，评估 evidence_text_limit → max_evidence_chars；画像 description_limit/rule_limit → max_description_chars/max_rule_chars；构建 context_window → context_window_tokens。检索和工具请求统一 max_output_tokens/timeout_seconds；已有明确单位的其他字段保持原样，不修改独立模型后端、采样或单次调用模型。所有数值、None/0 含义、标量类型与约束保持不变。
+
+不增加兼容别名或第二个可写路径。预期公共可达模型仍为 48 个、内部 15 个、合计 63 个；不扩大 __all__ 或包根导出。相关运行参数的字段映射、缓存签名、Runtime 和消费者迁移仍留到后续。
+
+验收：按明确路径映射比较变更前后全部公共叶子项的默认值和 Schema 约束，不合并不同入口的值；15 个内部模型的 Schema 保持一致。覆盖旧路径/旧类退役、请求与选择策略分离、超时可空性差异、缓存策略与观测独立、Discovery 提示预算派生、深层覆盖、完整错误路径、字典/JSON 往返和中文说明。自动重新生成 config.tree.txt 并只执行配置、导出测试，不运行格式化或静态检查。
