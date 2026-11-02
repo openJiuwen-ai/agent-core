@@ -259,14 +259,14 @@ class TeamDatabase:
         """Drop dynamic tables for current session."""
         if self.engine is None:
             return
-        await _drop_cur_session_tables(self.engine)
+        await _drop_cur_session_tables(self._sessions)
 
     async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
         """Delete all dynamic team tables and clear static team tables."""
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
-        return await _cleanup_all_runtime_state(self.engine)
+        return await _cleanup_all_runtime_state(self._sessions)
 
     async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
         """Drop dynamic tables for a specific session without active context.
@@ -283,7 +283,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return []
-        return await _drop_session_tables_by_id(self.engine, session_id)
+        return await _drop_session_tables_by_id(self._sessions, session_id)
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Delete a team's persisted row and drop current session tables.
@@ -306,7 +306,7 @@ class TeamDatabase:
         await self.team.delete_team(team_name)
 
         try:
-            await _drop_cur_session_tables(self.engine)
+            await _drop_cur_session_tables(self._sessions)
         except Exception as e:
             team_logger.error(
                 "Failed to drop current session tables for team %s: %s",

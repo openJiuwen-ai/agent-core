@@ -434,6 +434,10 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         calls.append("reset")
         return 1
 
+    async def create_tables() -> bool:
+        calls.append("tables")
+        return True
+
     async def add_to_pool(entry: ActiveTeam) -> None:
         assert entry.agent is agent
         calls.append("activate")
@@ -441,6 +445,7 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
     backend = SimpleNamespace(
         db=SimpleNamespace(
             initialize=initialize,
+            create_cur_session_tables=create_tables,
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
         )
     )
@@ -459,7 +464,8 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         inputs=None,
     )
 
-    assert calls == ["initialize", "reset", "activate"]
+    # Session tables are ensured (initialize is idempotent) before pooling.
+    assert calls == ["initialize", "reset", "initialize", "tables", "activate"]
 
 
 class TestRunOrganizationTurn:
