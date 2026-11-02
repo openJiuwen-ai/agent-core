@@ -116,28 +116,37 @@ async def test_verify_can_refresh_bindable_targets_before_any_phase_exists():
 @pytest.mark.asyncio
 async def test_fallback_instructions_reach_llm_and_local_correction_reenters_jev():
     policy, llm, client, runtime, context, captured = setup_policy(goal="搜索“鼠标”并按销量排序，然后搜索“键盘”")
+    from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import choose_operation
+
+    choose_operation(client, "HANDOFF")
     messages = await messages_for(policy, context, captured)
     await policy.invoke(messages, tools=TOOLS)
     handoff = llm.invoke.call_args.kwargs["messages"][-1]
-    assert handoff.name == "browser_policy_handoff" and "no_supported_actions" in handoff.content
-    assert "target_id" in handoff.content and "node_guard" not in handoff.content
+    assert handoff.name == "browser_policy_handoff" and "handoff_to_llm" in handoff.content
+    assert "unfinished work" in handoff.content and "node_guard" not in handoff.content
     assert len(messages) == 1  # Never accumulate synthetic hints in the conversation.
     state = context.get_session_ref().get_state(PHASE_KEY)
     set_phase(state, {"objective": "点击销量排序"}, runtime.ensure_page_state().export_decision_targets())
+    choose_operation(client, "CLICK")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert result.tool_calls and result.tool_calls[0].id.startswith("jev_")
-    assert client.evaluate.await_count == 1 and llm.invoke.await_count == 1
+    assert client.evaluate.await_count == 2 and llm.invoke.await_count == 1
     assert client.evaluate.call_args.args[0]["state"]["phase"]["version"] == 1
 
 
 @pytest.mark.asyncio
 async def test_unknown_business_handoff_is_read_before_retry():
-    policy, llm, _, _, context, captured = setup_policy()
+    from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import choose_operation
+
+    policy, llm, client, _, context, captured = setup_policy()
+    choose_operation(client, "HANDOFF")
     state = context.get_session_ref().get_state(PHASE_KEY)
     state["execution_journal"] = [{"call_id": "cart-1", "execution_state": "dispatched_unknown", "impact": "business"}]
     await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     hint = llm.invoke.call_args.kwargs["messages"][-1].content
-    assert "no_supported_actions" in hint and "cart-1" in hint
+    assert "handoff_to_llm" in hint and "cart-1" in hint
+    criteria = client.evaluate.call_args.args[0]["questions"]["action"]["criteria"]
+    assert "CLICK" not in criteria and "READ_TARGET_TEXT" in criteria
     assert "never invent a baseline" in hint
 
 
@@ -394,7 +403,7 @@ async def test_first_chunk_timeout_preserves_execution_and_does_not_replay_model
 
 
 @pytest.mark.asyncio
-async def test_stream_first_chunk_timeout_closes_producer_without_tools(monkeypatch):
+async def test_stream_task_deadline_closes_producer_without_tools(monkeypatch):
     policy, fallback, _, _, _, _ = setup_policy()
     closed = []
 
@@ -406,7 +415,7 @@ async def test_stream_first_chunk_timeout_closes_producer_without_tools(monkeypa
             closed.append(True)
 
     fallback.stream = stuck
-    monkeypatch.setattr(policy, "_llm_wait_limit", lambda _: 0.01)
+    monkeypatch.setattr(policy, "_remaining", lambda _: 0.01)
     with pytest.raises(TimeoutError):
         async for _ in policy.stream([], tools=TOOLS):
             pass
@@ -414,7 +423,7 @@ async def test_stream_first_chunk_timeout_closes_producer_without_tools(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_remaining_deadline_bounds_first_chunk_with_handoff_reserve(monkeypatch):
+async def test_remaining_deadline_bounds_first_chunk_without_subtracting_reserve(monkeypatch):
     parent = SimpleNamespace(
         model_client_config=ModelClientConfig(
             client_provider="OpenAI", api_key="offline-test", api_base="https://model.test/v1"
@@ -435,7 +444,7 @@ async def test_remaining_deadline_bounds_first_chunk_with_handoff_reserve(monkey
         agent=SimpleNamespace(system_prompt_builder=None),
     )
     await rail.before_model_call(ctx)
-    assert 0 < child.model_client_config.stream_first_chunk_timeout <= 5
+    assert 19 < child.model_client_config.stream_first_chunk_timeout <= 20
     assert parent.model_client_config.stream_first_chunk_timeout == 300
 
 

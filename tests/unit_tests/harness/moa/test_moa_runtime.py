@@ -7,7 +7,9 @@ import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import AssistantMessage
@@ -17,7 +19,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import DeepAgent, DeepAgentConfig
 from openjiuwen.harness.moa import LlmVerifierProgressScorer, MoAConfig, VerifierConfig
-from openjiuwen.harness.moa.state import MoAState
+from openjiuwen.harness.moa.state import MoAState, active_moa
 from openjiuwen.harness.moa.verifier.llm_verifier.scorer import score_progress
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.moa_rail import CONSULT_TOOL
@@ -209,7 +211,7 @@ async def test_model_retry_reuses_proposal_without_mutating_original_messages() 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_unknown_output_budget_skips_proposal_without_blocking_primary() -> None:
+async def test_unspecified_output_budget_delivers_proposal_without_changing_primary() -> None:
     primary_model = model()
     primary_model.model_config.max_tokens = None
     primary_model.invoke = AsyncMock(return_value=AssistantMessage(content="done"))
@@ -222,12 +224,51 @@ async def test_unknown_output_budget_skips_proposal_without_blocking_primary() -
     result = await deep.invoke("task", session=Session(session_id="moa-unknown-output", card=deep.card))
     assert result["output"] == "done"
     reference.invoke.assert_awaited_once()
-    assert "private" not in str(primary_model.invoke.await_args.kwargs["messages"])
+    assert "private" in str(primary_model.invoke.await_args.kwargs["messages"][-1])
+    assert primary_model.model_config.max_tokens is None
+    assert "max_tokens" not in primary_model.invoke.await_args.kwargs
+    assert "private" not in str(
+        deep.react_agent.context_engine.get_context(session_id="moa-unknown-output").get_messages()
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_text_only_force_continue_does_not_reuse_first_turn_proposal() -> None:
+async def test_unspecified_proposal_overflow_recovery_does_not_consult_again() -> None:
+    primary_model = model()
+    primary_model.model_config.max_tokens = None
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    overflow = BadRequestError(
+        "maximum context length exceeded",
+        response=httpx.Response(400, request=request),
+        body={"error": {"code": "context_length_exceeded", "message": "maximum context length exceeded"}},
+    )
+    primary_model.invoke = AsyncMock(side_effect=[overflow, AssistantMessage(content="done")])
+    reference = model()
+    reference.invoke = AsyncMock(return_value=AssistantMessage(content="private recovery proposal"))
+    deep = agent(
+        primary_model,
+        MoAConfig(mode="verifier_routed", reference_models=(reference,), scorer=lambda *_: 0.5),
+    )
+
+    result = await deep.invoke("task", session=Session(session_id="moa-budget-recovery", card=deep.card))
+
+    assert result["output"] == "done"
+    reference.invoke.assert_awaited_once()
+    assert primary_model.invoke.await_count == 2
+    calls = primary_model.invoke.await_args_list
+    assert "private recovery proposal" in str(calls[0].kwargs["messages"])
+    assert "private recovery proposal" not in str(calls[1].kwargs["messages"])
+    assert primary_model.model_config.max_tokens is None
+    assert all("max_tokens" not in call.kwargs for call in calls)
+    assert "private recovery proposal" not in str(
+        deep.react_agent.context_engine.get_context(session_id="moa-budget-recovery").get_messages()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_text_only_force_continue_reuses_first_turn_proposal() -> None:
     class ContinueOnce(DeepAgentRail):
         async def after_model_call(self, ctx):
             if ctx.inputs.react_iteration == 1:
@@ -244,7 +285,7 @@ async def test_text_only_force_continue_does_not_reuse_first_turn_proposal() -> 
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "final"
     assert "first-turn proposal" in str(primary_model.invoke.await_args_list[0].kwargs["messages"])
-    assert "first-turn proposal" not in str(primary_model.invoke.await_args_list[1].kwargs["messages"])
+    assert "first-turn proposal" in str(primary_model.invoke.await_args_list[1].kwargs["messages"])
 
 
 @pytest.mark.asyncio
@@ -317,7 +358,7 @@ async def test_reference_bodies_are_escaped_and_ordered_without_repeating_tail()
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_reference_target_expires_after_budget_skip_even_if_later_budget_recovers() -> None:
+async def test_reference_target_survives_budget_skip_when_later_budget_recovers() -> None:
     class ChangeOutputBudget(DeepAgentRail):
         priority = 20
 
@@ -350,7 +391,7 @@ async def test_reference_target_expires_after_budget_skip_even_if_later_budget_r
     assert reference.invoke.await_count == 2
     requests = [str(call.kwargs["messages"]) for call in primary_model.invoke.await_args_list]
     assert "late" not in requests[2]
-    assert "late" not in requests[3]
+    assert "late" in requests[3]
 
 
 @pytest.mark.asyncio
@@ -409,7 +450,7 @@ async def test_steering_after_consultation_invalidates_next_turn_proposal() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_task_loop_new_inner_iteration_number_does_not_reuse_old_proposal() -> None:
+async def test_task_loop_new_inner_iteration_number_reuses_latest_proposal() -> None:
     class FollowUpOnce(DeepAgentRail):
         priority = 5
 
@@ -439,13 +480,14 @@ async def test_task_loop_new_inner_iteration_number_does_not_reuse_old_proposal(
     assert len(requests) == 2
     reference.invoke.assert_awaited_once()
     assert "only-first-inner" in str(requests[0])
-    assert "only-first-inner" not in str(requests[1])
+    assert "only-first-inner" in str(requests[1])
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stream_verifier_uses_private_proposal() -> None:
     primary_model = model()
+    primary_model.model_config.max_tokens = None
     requests = []
 
     async def stream(messages, **kwargs):
@@ -473,6 +515,7 @@ async def test_stream_verifier_uses_private_proposal() -> None:
     ]
     assert chunks
     assert "private stream proposal" in str(requests[0])
+    assert primary_model.model_config.max_tokens is None
     assert "private stream proposal" not in str(
         deep.react_agent.context_engine.get_context(session_id="moa-stream").get_messages()
     )
@@ -480,13 +523,52 @@ async def test_stream_verifier_uses_private_proposal() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_failed_stream_does_not_carry_proposal_to_next_invoke() -> None:
+@pytest.mark.parametrize("with_session", [False, True])
+async def test_failed_invoke_retires_proposals_before_next_request(with_session) -> None:
+    primary_model = model()
+    states = []
+
+    async def fail(messages, **kwargs):
+        del kwargs
+        states.append(active_moa.get())
+        assert "old proposal" in str(messages)
+        raise RuntimeError("primary request failed")
+
+    primary_model.invoke = fail
+    reference = model()
+    reference.invoke = AsyncMock(side_effect=[
+        AssistantMessage(content="old proposal"), AssistantMessage(content="fresh proposal"),
+    ])
+    deep = agent(primary_model, MoAConfig(
+        mode="verifier_routed", reference_models=(reference,), scorer=lambda *_: 0.5,
+    ))
+    session = Session(session_id="moa-invoke-failed", card=deep.card) if with_session else None
+
+    with pytest.raises(RuntimeError, match="primary request failed"):
+        await deep.invoke("first", session=session)
+
+    assert states[0].closed and states[0].proposals.closed
+    assert states[0].proposals.active is None
+    assert active_moa.get() is None
+    primary_model.invoke = AsyncMock(return_value=AssistantMessage(content="fresh answer"))
+    result = await deep.invoke("second", session=session)
+    assert result["output"] == "fresh answer"
+    final = str(primary_model.invoke.await_args.kwargs["messages"])
+    assert "fresh proposal" in final and "old proposal" not in final
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("with_session", [False, True])
+async def test_failed_stream_does_not_carry_proposal_to_next_invoke(with_session) -> None:
     primary_model = primary(AssistantMessage(content="fresh answer"))
     streamed_requests = []
+    states = []
 
     async def broken_stream(messages, **kwargs):
         del kwargs
         streamed_requests.append(messages)
+        states.append(active_moa.get())
         yield AssistantMessageChunk(content="partial")
         raise RuntimeError("stream broken")
 
@@ -499,8 +581,12 @@ async def test_failed_stream_does_not_carry_proposal_to_next_invoke() -> None:
         primary_model,
         MoAConfig(mode="verifier_routed", reference_models=(reference,), scorer=lambda *_: 0.5),
     )
-    chunks = [chunk async for chunk in deep.stream("first", session=Session(session_id="moa-broken", card=deep.card))]
+    session = Session(session_id="moa-broken", card=deep.card) if with_session else None
+    chunks = [chunk async for chunk in deep.stream("first", session=session)]
     assert chunks and streamed_requests
+    assert states[0].closed and states[0].proposals.closed
+    assert states[0].proposals.active is None
+    assert active_moa.get() is None
     result = await deep.invoke("second", session=Session(session_id="moa-fresh-after-stream", card=deep.card))
     assert result["output"] == "fresh answer"
     assert "old proposal" in str(streamed_requests[0])
@@ -510,12 +596,15 @@ async def test_failed_stream_does_not_carry_proposal_to_next_invoke() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_cancelled_stream_does_not_carry_proposal_to_next_invoke() -> None:
+@pytest.mark.parametrize("with_session", [False, True])
+async def test_cancelled_stream_does_not_carry_proposal_to_next_invoke(with_session) -> None:
     primary_model = primary(AssistantMessage(content="fresh answer"))
     started = asyncio.Event()
+    states = []
 
     async def waiting_stream(messages, **kwargs):
         del messages, kwargs
+        states.append(active_moa.get())
         started.set()
         await asyncio.sleep(3600)
         yield AssistantMessageChunk(content="never")
@@ -531,7 +620,8 @@ async def test_cancelled_stream_does_not_carry_proposal_to_next_invoke() -> None
     )
 
     async def consume():
-        async for _ in deep.stream("first", session=Session(session_id="moa-stream-cancel", card=deep.card)):
+        session = Session(session_id="moa-stream-cancel", card=deep.card) if with_session else None
+        async for _ in deep.stream("first", session=session):
             pass
 
     task = asyncio.create_task(consume())
@@ -539,6 +629,9 @@ async def test_cancelled_stream_does_not_carry_proposal_to_next_invoke() -> None
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert states[0].closed and states[0].proposals.closed
+    assert states[0].proposals.active is None
+    assert active_moa.get() is None
     result = await deep.invoke("second", session=Session(session_id="moa-stream-fresh", card=deep.card))
     assert result["output"] == "fresh answer"
     final = str(primary_model.invoke.await_args.kwargs["messages"])
@@ -674,13 +767,16 @@ async def test_two_simultaneous_sessions_keep_proposal_separate() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_reference_cancellation_does_not_leak_into_next_invoke() -> None:
+@pytest.mark.parametrize("with_session", [False, True])
+async def test_reference_cancellation_does_not_leak_into_next_invoke(with_session) -> None:
     primary_model = primary(AssistantMessage(content="done"))
     reference = model()
     started = asyncio.Event()
+    states = []
 
     async def pending(**kwargs):
         del kwargs
+        states.append(active_moa.get())
         started.set()
         await asyncio.sleep(3600)
 
@@ -693,11 +789,14 @@ async def test_reference_cancellation_does_not_leak_into_next_invoke() -> None:
             scorer=lambda *_: 0.5,
         ),
     )
-    task = asyncio.create_task(deep.invoke("cancel", session=Session(session_id="moa-cancel", card=deep.card)))
+    session = Session(session_id="moa-cancel", card=deep.card) if with_session else None
+    task = asyncio.create_task(deep.invoke("cancel", session=session))
     await asyncio.wait_for(started.wait(), timeout=2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert states[0].closed and states[0].proposals.closed
+    assert active_moa.get() is None
     reference.invoke = AsyncMock(return_value=AssistantMessage(content="fresh proposal"))
     result = await deep.invoke("fresh", session=Session(session_id="moa-fresh", card=deep.card))
     assert result["output"] == "done"

@@ -155,7 +155,9 @@ def test_lazada_successful_english_query_is_not_replaced_with_chinese_synonym():
     field["role"] = "combobox"
     bound = {"document": "doc", "node": 1, "value": "wireless mouse"}
     menu = build_menu([field], "搜索“无线鼠标”，然后保留原有商品", limit=30, search_bindings=[bound])
-    assert list(menu.steps.values()) == [{"target_id": "search", "op": "press", "key": "Enter"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "search", "op": "press", "key": "Enter"}
+    ]
 
 
 def test_values_do_not_cross_fields_or_use_output_titles_as_input():
@@ -163,15 +165,17 @@ def test_values_do_not_cross_fields_or_use_output_titles_as_input():
     city = control("city", "城市", 2, tag="input", current_value="")
     name["role"] = city["role"] = "textbox"
     goal = "输入“张三”和“北京”，输出标题“搜索结果”"
-    assert not build_menu([name, city], goal, limit=30).steps
+    assert {s["op"] for s in build_menu([name, city], goal, limit=30).steps.values()} == {"extract_value"}
     menu = build_menu(
         [name, city],
         goal,
         limit=30,
         field_bindings=[{"document": "doc", "node": 2, "value": "北京"}],
     )
-    assert list(menu.steps.values()) == [{"target_id": "city", "op": "fill", "value": "北京"}]
-    assert not build_menu([name], "标题“搜索结果”", limit=30).steps
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "city", "op": "fill", "value": "北京"}
+    ]
+    assert {s["op"] for s in build_menu([name], "标题“搜索结果”", limit=30).steps.values()} == {"extract_value"}
 
 
 @pytest.mark.asyncio
@@ -495,10 +499,14 @@ def test_confirmed_query_allows_submit_but_not_refill_or_binding_to_repurposed_f
     bindings = state["active_phase_contract"]["bindings"]
     menu = build_menu([field], "搜索无线鼠标", limit=30, field_bindings=bindings)
     constrain_actions(menu, state, [field])
-    assert list(menu.steps.values()) == [{"target_id": "query", "op": "press", "key": "Enter"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "query", "op": "press", "key": "Enter"}
+    ]
     field["decision_state"]["current_value"] = ""
     field["decision_state"]["node_guard"]["signature"] = "address-label"
-    assert not build_menu([field], "搜索无线鼠标", limit=30, field_bindings=bindings).steps
+    assert {s["op"] for s in build_menu([field], "搜索无线鼠标", limit=30, field_bindings=bindings).steps.values()} == {
+        "extract_value"
+    }
 
 
 def test_new_phase_query_must_be_filled_before_submitting_previous_llm_query():
@@ -507,10 +515,14 @@ def test_new_phase_query_must_be_filled_before_submitting_previous_llm_query():
     previous = {"document": "doc", "node": 1, "value": "wireless mouse"}
     current = {"document": "doc", "node": 1, "value": "keyboard"}
     menu = build_menu([field], "接着搜索键盘", limit=30, search_bindings=[previous], field_bindings=[current])
-    assert list(menu.steps.values()) == [{"target_id": "query", "op": "fill", "value": "keyboard"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "query", "op": "fill", "value": "keyboard"}
+    ]
     field["decision_state"]["current_value"] = "keyboard"
     menu = build_menu([field], "接着搜索键盘", limit=30, search_bindings=[previous], field_bindings=[current])
-    assert list(menu.steps.values()) == [{"target_id": "query", "op": "press", "key": "Enter"}]
+    assert [s for s in menu.steps.values() if s["op"] != "extract_value"] == [
+        {"target_id": "query", "op": "press", "key": "Enter"}
+    ]
 
 
 @pytest.mark.asyncio

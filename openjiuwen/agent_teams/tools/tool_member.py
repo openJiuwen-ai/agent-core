@@ -8,6 +8,7 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from openjiuwen.agent_teams import constants
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -39,6 +40,26 @@ def validate_member_name(member_name: str | None) -> str | None:
         "whitespace, or non-ASCII characters (including CJK) — "
         "member_name is reused as a routing token and a filesystem "
         "path segment"
+    )
+
+
+def validate_display_name(display_name: str | None) -> str | None:
+    """Validate ``display_name`` at the tool boundary.
+
+    Schema ``required`` only binds the hosting LLM; MCP clients call
+    ``invoke`` directly, so this check is the only enforcement. A ``None``
+    that slips through resurfaces as a pydantic error on ``AgentCard.name``
+    — a message that never names the missing parameter.
+
+    Returns:
+        An error message when the name is missing or blank,
+        otherwise ``None``.
+    """
+    if display_name and display_name.strip():
+        return None
+    return (
+        "'display_name' is required: the roster label peers see (distinct "
+        "from 'member_name', the system id used for message routing)"
     )
 
 
@@ -781,6 +802,10 @@ class SpawnTeammateTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         # Schema omission binds the hosting LLM; this rejects the same
         # arguments coming from an MCP client, which calls ``invoke``
         # directly without validating against ``input_params``. Checked
@@ -863,6 +888,9 @@ class SpawnTeammateTool(_SpawnToolBase):
         external_args = inputs.get("external_cli") or {}
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
+        err = validate_display_name(display_name)
+        if err:
+            return self._fail(err)
         result = await register_external_cli_member(
             self.team,
             tool_name="spawn_teammate",
@@ -1042,6 +1070,10 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         if not self.team.hitt_enabled():
             return self._fail(
                 "Cannot spawn human agent: HITT capability is disabled "
@@ -1099,6 +1131,10 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
             return self._fail("spawn_passive_human requires a group_chat runtime")
 
         err = validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        err = validate_display_name(inputs.get("display_name"))
         if err:
             return self._fail(err)
 
@@ -1179,6 +1215,10 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         if not self.team.bridge_enabled():
             return self._fail(
                 "Cannot spawn bridge agent: Bridge capability is disabled "
@@ -1250,7 +1290,9 @@ class ShutdownMemberTool(TeamTool):
             dispatch_mode: How tasks reach members. ``"scheduled"`` keeps the
                 lifetime note; ``"autonomous"`` omits it.
         """
-        lifetime_enabled = dispatch_mode == "scheduled"
+        # Lifetimes exist only on inline members, which the hard switch can
+        # keep out of the model's vocabulary entirely.
+        lifetime_enabled = dispatch_mode == "scheduled" and constants.INLINE_TASK_MEMBER_ENABLED
         super().__init__(
             ToolCard(
                 id="team.shutdown_member",

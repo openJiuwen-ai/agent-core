@@ -417,12 +417,15 @@ class TestTeamDatabaseInit:
         """
         from openjiuwen.agent_teams.tools.database.engine import _ensure_message_meta_column
 
+        session_id = "premeta"
+        table_name = f"team_message_{_sanitize_session_id_for_table(session_id)}"
         engine = create_engine("sqlite:///:memory:")
+        token = set_session_id(session_id)
         try:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
-                    """
-                    CREATE TABLE team_message_premeta (
+                    f"""
+                    CREATE TABLE {table_name} (
                         message_id TEXT PRIMARY KEY,
                         team_name TEXT NOT NULL,
                         from_member_name TEXT NOT NULL,
@@ -436,20 +439,23 @@ class TestTeamDatabaseInit:
                     """
                 )
                 conn.exec_driver_sql(
-                    "INSERT INTO team_message_premeta "
+                    f"INSERT INTO {table_name} "
                     "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
                     "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
                 )
 
                 _ensure_message_meta_column(conn)
 
-                columns = {col["name"] for col in inspect(conn).get_columns("team_message_premeta")}
-                row = conn.exec_driver_sql("SELECT content, meta FROM team_message_premeta").mappings().one()
+                columns = {col["name"] for col in inspect(conn).get_columns(table_name)}
+                row = conn.exec_driver_sql(
+                    f"SELECT content, meta FROM {table_name}"
+                ).mappings().one()
 
             assert "meta" in columns
             assert row["meta"] is None
             assert row["content"] == "hello"
         finally:
+            reset_session_id(token)
             engine.dispose()
 
     @pytest.mark.asyncio
@@ -3688,6 +3694,39 @@ async def test_has_unread_messages_honors_include_broadcast(db) -> None:
         to_member_name="dev",
     )
     assert await db.message.has_unread_messages("t1", include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_recipients_without_a_member_row(db) -> None:
+    """A direct row to a non-member (temp reviewer) can never be read, so it must not block completion."""
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    for name, status in (("leader", "ready"), ("retired", "shut_down")):
+        await db.member.create_member(
+            member_name=name,
+            team_name="t1",
+            display_name=name,
+            agent_card=AgentCard().model_dump_json(),
+            status=status,
+        )
+    await db.message.create_message(
+        message_id="to-reviewer",
+        team_name="t1",
+        from_member_name="leader",
+        content="",
+        to_member_name="verifier_1",
+    )
+    await db.message.create_message(
+        message_id="to-retired",
+        team_name="t1",
+        from_member_name="leader",
+        content="bye",
+        to_member_name="retired",
+    )
+
+    # Nobody can mark the reviewer's row read, and it no longer counts.
+    assert await db.message.mark_message_read("to-reviewer", "verifier_1") is False
+    assert await db.message.has_unread_messages("t1") is False
 
 
 @pytest.mark.asyncio

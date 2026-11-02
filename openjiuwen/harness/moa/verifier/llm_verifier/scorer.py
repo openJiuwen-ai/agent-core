@@ -12,6 +12,7 @@ from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.moa._validation import validate_positive_int
 from openjiuwen.harness.moa.config import MoAConfig
@@ -133,6 +134,16 @@ async def score_progress(config: MoAConfig, state: MoAState) -> float | None:
         arguments = (problem, tuple(state.steps), config.verifier.n_evaluations)
         value = await _call(scorer, *arguments)
         score = float(getattr(value, "value", value))
-        return score if math.isfinite(score) and 0 <= score <= 1 else None
-    except Exception:
+        if math.isfinite(score) and 0 <= score <= 1:
+            return score
+        agent_logger.warning(
+            "MoA verifier invalid score: invoke=%s checkpoint=%s reason=out_of_range",
+            state.invoke_id, len(state.steps),
+        )
+        return None
+    except Exception as exc:
+        agent_logger.warning(
+            "MoA verifier failed: invoke=%s checkpoint=%s error_type=%s",
+            state.invoke_id, len(state.steps), type(exc).__name__,
+        )
         return None

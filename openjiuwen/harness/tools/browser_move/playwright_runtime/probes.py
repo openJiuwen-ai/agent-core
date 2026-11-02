@@ -772,7 +772,8 @@ async (page) => {{
       if (query && queryMatches(`${{actionLikelihood}} ${{tag}} ${{role}}`)) score += 20;
       if (text) score += Math.min(20, text.length / 4);
       if (name) score += Math.min(15, name.length / 5);
-      if (params.decision_mode && name && String(params.intent).includes(name.toLowerCase())) score += 100;
+      if (params.decision_mode && (name || text) &&
+          String(params.intent).includes((name || text).toLowerCase())) score += 100;
 
       if (rect.top >= 0 && rect.top <= window.innerHeight) score += 15;
       if (rect.left >= 0 && rect.left <= window.innerWidth) score += 5;
@@ -826,7 +827,9 @@ async (page) => {{
         if (owner && owner.getAttribute(attr)) identities[attr] = owner.getAttribute(attr);
       }}
       return {{
-        tag, input_type: type, sensitive, readonly: Boolean(el.readOnly),
+        tag, input_type: type, sensitive, readonly: Boolean(el.readOnly), focused: document.activeElement === el,
+        nearby_text: sensitive ? '' : String((el.closest('li,tr,article,[role="row"],[role="listitem"],fieldset') ||
+          el.parentElement)?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240),
         autocomplete: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
         search_like: Boolean(queryField),
         search_query: queryField ? {{value: String(queryField.value || ''),
@@ -884,7 +887,12 @@ async (page) => {{
       const className = el.getAttribute('class') || '';
       const title = el.getAttribute('title') || '';
 
-      const searchable = `${{tag}} ${{role}} ${{type}} ${{id}} ${{nameAttr}} ${{className}} ${{text}} ${{name}} ${{placeholder}} ${{title}} ${{testid}}`.toLowerCase();
+      // Querying an observed object's text also finds its labeled local controls.
+      // Nearby text is context, never an invented accessible name for an icon.
+      const nearby = String((el.closest('li,tr,article,[role="row"],[role="listitem"],fieldset') ||
+        el.parentElement)?.innerText || '').slice(0, 500);
+      const searchable = [tag, role, type, id, nameAttr, className, text, name, placeholder, title, testid, nearby]
+        .join(' ').toLowerCase();
       const exactMatch = exactQueryMatches(searchable);
       if (!exactMatch && !queryMatches(searchable)) continue;
 
@@ -921,13 +929,12 @@ async (page) => {{
       if (params.decision_mode) {{
         decisionState = decisionStateFor(el, false);
         const field = ['input', 'textarea', 'select'].includes(tag) &&
-          ['textbox', 'searchbox', 'combobox'].includes(role) &&
+          ['textbox', 'searchbox', 'combobox', 'spinbutton'].includes(role) &&
           (tag !== 'input' || ['', 'text', 'search', 'email', 'url', 'tel', 'number', 'date'].includes(type.toLowerCase()));
         const checkbox = tag === 'input' && type === 'checkbox';
         const click = clickable && !['textbox', 'searchbox', 'combobox', 'slider', 'spinbutton'].includes(role);
         const excluded = !enabled || !actionable || !clickable ? 'not_actionable' :
           !(name || text) ? 'missing_name' : decisionState.sensitive ? 'sensitive' :
-          decisionState.readonly ? 'readonly' :
           (el.closest('form,[role="dialog"]')?.querySelectorAll('input,textarea,select').length || 0) > 128 ? 'large_form' :
           !(field || checkbox || click) ? 'unsupported_control' : '';
         if (excluded) {{
@@ -986,6 +993,22 @@ async (page) => {{
       return a.bbox[0] - b.bbox[0];
     }});
 
+    const nearbyExcerpts = [];
+    if (query) {{
+      // Bounded text around the requested object, including rows with unlabeled icons.
+      // These excerpts never become executable selectors or guessed target bindings.
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node, scanned = 0;
+      while ((node = walker.nextNode()) && scanned++ < 4000 && nearbyExcerpts.length < 3) {{
+        if (!exactQueryMatches(node.textContent || '')) continue;
+        const owner = node.parentElement;
+        if (!owner || owner.closest('script,style,noscript') ||
+            !isVisible(owner, owner.getBoundingClientRect())) continue;
+        const container = owner.closest('li,tr,article,[role="row"],[role="listitem"],fieldset') || owner.parentElement;
+        const text = String(container?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 380);
+        if (text && !nearbyExcerpts.includes(text)) nearbyExcerpts.push(text);
+      }}
+    }}
     const elements = selectedCandidates.slice(0, maxItems).map((item, index) => {{
       const copy = {{ ...item }};
       copy.decision_state = decisionStateFor(copy._decision_element);
@@ -1021,7 +1044,7 @@ async (page) => {{
         page_text: Array.from(document.body?.innerText || '').slice(0, 6000).join(''),
         page_guard: ({PAGE_STATE_JS})(), excluded: decisionExcluded
       }} : null,
-      local_excerpt: elements.filter((item) => !item.clickable).slice(0, 5)
+      local_excerpt: nearbyExcerpts.join('\\n') || elements.filter((item) => !item.clickable).slice(0, 5)
         .map((item) => `${{item.role || item.tag}} "${{item.accessible_name || item.text}}" ` +
           `(${{item.actionability_reason}})`)
         .join('\\n').slice(0, 1200),
@@ -1743,6 +1766,24 @@ async (page) => {
       return values;
     };
 
+    const recommendationRegion = (el) => {
+      // Structural/section cues only: product titles do not classify their whole list.
+      for (let owner = el, depth = 0; owner && depth < 6; owner = owner.parentElement, depth++) {
+        if (owner.matches('body,main,[role="main"]')) break;
+        const descriptor = elementDescriptor(owner);
+        const heading = Array.from(owner.children || []).find(child => child.matches('h1,h2,h3,[role="heading"]'));
+        const label = String(owner.getAttribute('aria-label') || heading?.innerText || '').trim();
+        const structural = /(?:^|[\s_-])(?:recommend(?:ation|ations|ed)?|related|similar)(?:$|[\s_-])/i;
+        const sectionName = /^(?:recommended for you|you may also like|just for you)$/i;
+        const relatedName = /^(?:similar|related) (?:items|products)$/i;
+        if (structural.test(descriptor) || /just[-_ ]?for[-_ ]?you/i.test(descriptor) ||
+            sectionName.test(label) || relatedName.test(label) ||
+            /^(?:猜你喜欢|为你推荐|相关推荐|相似商品)$/.test(label)) {
+          return label.slice(0, 100) || descriptor.slice(0, 100);
+        }
+      }
+      return '';
+    };
     const classifyCardSemantics = (el, primaryLink, rootText) => {
       const href = String(primaryLink?.href || '').toLowerCase();
       const own = elementDescriptor(el);
@@ -1763,6 +1804,7 @@ async (page) => {
       const isProduct = detailLink?.kind === 'product' ||
         /\/item(?:\.|\/)|\/product(?:\.|\/)|\/goods(?:\.|\/)/.test(href);
       const isHotel = detailLink?.kind === 'hotel';
+      const recommendation = recommendationRegion(el);
       const isSidebar = Boolean(el.closest && el.closest('aside,[role="complementary"]')) ||
         /(sidebar|side-bar|right-rail|right-panel|container-right|main-right)/.test(own);
       const isNavigation = Boolean(el.closest?.('nav,[role="navigation"],header,footer'));
@@ -1796,6 +1838,7 @@ async (page) => {
       if (kind === 'activity') region = 'activity';
       else if (isAd) region = 'sponsored_result';
       else if (isHotSearch) region = 'hot_search';
+      else if (recommendation) region = 'recommendation';
       else if (isSidebar) region = 'sidebar';
       else if (kind === 'chat') region = 'chat';
       if (isNavigation && !isAd) {
@@ -1840,7 +1883,8 @@ async (page) => {
         }
       }
 
-      return { region, kind, is_ad: isAd, semantic_badges: badges, classification_reason: 'page_region:' + region };
+      return { region, kind, is_ad: isAd, semantic_badges: badges,
+               classification_reason: 'page_region:' + region + (recommendation ? ':' + recommendation : '') };
     };
 
     const labeledText = (rootText, labels, limit = 120) => {
@@ -3303,6 +3347,9 @@ async (page) => {
         (document.querySelector('main,[role="main"]') || document.body)?.innerText || '', 1200
       ),
       returned: cards.length,
+      observed_count: resultItems.length,
+      truncated: resultItems.length > cards.length,
+      read_scope: {viewport_only: viewportOnly, query, max_cards: maxCards},
       recurring_signatures: recurringSignatures,
       cards,
       error: null

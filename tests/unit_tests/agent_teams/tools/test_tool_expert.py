@@ -173,6 +173,14 @@ async def db() -> AsyncIterator[TeamDatabase]:
         await database.close()
 
 
+@pytest.fixture
+def inline_members_on(monkeypatch):
+    """Turn on the inline-member hard switch for tests that exercise the feature itself."""
+    from openjiuwen.agent_teams import constants
+
+    monkeypatch.setattr(constants, "INLINE_TASK_MEMBER_ENABLED", True)
+
+
 def _backend(db: TeamDatabase, *external: ExternalCliAgentSpec) -> TeamBackend:
     return TeamBackend(
         team_name=_TEAM,
@@ -986,6 +994,7 @@ def _expert_task(task_id: str, member_name: str, **member: Any) -> dict:
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 def test_inline_member_offers_expert_fields_only_with_a_catalog(db: TeamDatabase, catalog: FakeCatalog) -> None:
     def _member_schema(tool: Any) -> dict:
         return tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]
@@ -999,6 +1008,7 @@ def test_inline_member_offers_expert_fields_only_with_a_catalog(db: TeamDatabase
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_member_runs_as_an_expert_like_spawn_expert(
     db: TeamDatabase, catalog: FakeCatalog, packages: dict[str, Path]
@@ -1039,6 +1049,7 @@ async def test_inline_member_runs_as_an_expert_like_spawn_expert(
         ({"group": "designer"}, "member.group needs member.expert"),
     ],
 )
+@pytest.mark.usefixtures("inline_members_on")
 async def test_inline_expert_rejections_write_nothing(
     db: TeamDatabase, catalog: FakeCatalog, member: dict, error: str
 ) -> None:
@@ -1050,6 +1061,7 @@ async def test_inline_expert_rejections_write_nothing(
 
 
 @pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_expert_without_a_catalog_is_rejected(db: TeamDatabase) -> None:
     result = await _scheduled_create_task(_backend(db), None).invoke(
@@ -1073,6 +1085,7 @@ def _cli_task(task_id: str, member_name: str, **member: Any) -> dict:
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 def test_inline_member_offers_cli_fields_only_when_cli_kinds_are_declared(
     db: TeamDatabase, catalog: FakeCatalog
 ) -> None:
@@ -1091,6 +1104,7 @@ def test_inline_member_offers_cli_fields_only_when_cli_kinds_are_declared(
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.parametrize("builtin_models", [[], [ExternalCliBuiltinModel(name="sonnet")]])
 def test_spawn_teammate_cli_fields_match_the_inline_member(
     db: TeamDatabase, catalog: FakeCatalog, builtin_models: list[ExternalCliBuiltinModel]
@@ -1106,6 +1120,7 @@ def test_spawn_teammate_cli_fields_match_the_inline_member(
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDatabase, catalog: FakeCatalog) -> None:
     declared = ExternalCliAgentSpec(cli_agent="claude", env={"HOST_ONLY": "1"}, skills=[{"dir": "/host/skill"}])
@@ -1130,6 +1145,7 @@ async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDataba
 
 
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_cli_agent_member_registers_like_spawn_teammate(db: TeamDatabase, catalog: FakeCatalog) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
@@ -1151,6 +1167,7 @@ async def test_inline_cli_agent_member_registers_like_spawn_teammate(db: TeamDat
 
 
 @pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: FakeCatalog) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
@@ -1175,6 +1192,7 @@ async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: Fak
         {"effort": "high"},
     ],
 )
+@pytest.mark.usefixtures("inline_members_on")
 async def test_inline_cli_member_model_rules_match_spawn_teammate(
     db: TeamDatabase, catalog: FakeCatalog, models: dict[str, Any]
 ) -> None:
@@ -1201,6 +1219,7 @@ async def test_inline_cli_member_model_rules_match_spawn_teammate(
         ({"isolation": "worktree"}, "member.isolation cannot be set for an external CLI member"),
     ],
 )
+@pytest.mark.usefixtures("inline_members_on")
 async def test_inline_cli_member_rejections_write_nothing(
     db: TeamDatabase, catalog: FakeCatalog, member: dict, error: str
 ) -> None:
@@ -1212,6 +1231,7 @@ async def test_inline_cli_member_rejections_write_nothing(
 
 
 @pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_external_expert_rejects_isolation_like_spawn_expert(
     db: TeamDatabase, catalog: FakeCatalog
@@ -1226,6 +1246,7 @@ async def test_inline_external_expert_rejects_isolation_like_spawn_expert(
 
 
 @pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
 async def test_inline_cli_member_needs_declared_cli_kinds(db: TeamDatabase, catalog: FakeCatalog) -> None:
     result = await _scheduled_create_task(_backend(db), catalog).invoke({"tasks": [_cli_task("t1", "rev-1")]})

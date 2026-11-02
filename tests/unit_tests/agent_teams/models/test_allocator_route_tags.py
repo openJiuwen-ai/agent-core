@@ -179,3 +179,147 @@ def test_member_options_without_a_tag_stay_untagged():
 
     assert load_member_options(raw).model_ref.route_tag is None
     assert "route_tag" not in raw
+
+
+def _case_variant_pool(
+    *, strategy: str = "ordered-failover", strategy_kwargs: dict | None = None,
+) -> list[ModelPoolEntry]:
+    """``GLM-5.3-flash`` and ``GLM-5.3-Flash``: one model, entered with two spellings."""
+    config = IntelliRouterConfig(
+        deployments=[
+            IntelliRouterDeployment(
+                model_name="GLM-5.3-flash",
+                api_key="sk-bad",
+                api_base="https://g.test",
+                id="glm-lower",
+                provider="openai",
+                fallback_tag="GLM-5.3-flash",
+            ),
+            IntelliRouterDeployment(
+                model_name="GLM-5.3-Flash",
+                api_key="sk-good",
+                api_base="https://g.test",
+                id="glm-upper",
+                provider="openai",
+                fallback_tag="GLM-5.3-Flash",
+            ),
+            IntelliRouterDeployment(
+                model_name="deepseek-v4-flash",
+                api_key="sk-ds",
+                api_base="https://d.test",
+                id="ds",
+                provider="deepseek",
+                fallback_tag="deepseek-v4-flash",
+            ),
+        ],
+        strategy=strategy,
+        strategy_kwargs=strategy_kwargs or {},
+    )
+    return config.to_pool_entries()
+
+
+def _tags_by_id(model_config) -> dict:
+    return {d.route_id: d.fallback_tag for d in _router(model_config).deployments}
+
+
+@pytest.mark.level0
+def test_case_variants_are_offered_once_in_group_order_spelling():
+    assert IntelliRouterAllocator(_case_variant_pool()).list_route_tags() == ["GLM-5.3-flash", "deepseek-v4-flash"]
+
+
+@pytest.mark.level0
+def test_pinning_a_spelling_routes_to_every_case_variant():
+    allocation = IntelliRouterAllocator(_case_variant_pool()).allocate("glm-5.3-FLASH")
+
+    assert allocation.route_tag == "GLM-5.3-flash"
+    config = allocation.to_team_model_config()
+    assert _router(config).strategy_kwargs == {"fallback_tag": "GLM-5.3-flash"}
+    assert _tags_by_id(config) == {
+        "glm-lower": "GLM-5.3-flash",
+        "glm-upper": "GLM-5.3-flash",
+        "ds": "deepseek-v4-flash",
+    }
+
+
+@pytest.mark.level1
+def test_case_variant_pinning_does_not_touch_the_shared_pool_entry():
+    pool = _case_variant_pool()
+
+    IntelliRouterAllocator(pool).allocate("GLM-5.3-flash").to_team_model_config()
+
+    tags = [d["fallback_tag"] for d in pool[0].metadata["client"]["intelli_router"]["deployments"]]
+    assert tags == ["GLM-5.3-flash", "GLM-5.3-Flash", "deepseek-v4-flash"]
+
+
+@pytest.mark.level1
+def test_resolve_member_model_accepts_any_persisted_spelling():
+    resolved = resolve_member_model(
+        _team_spec(_case_variant_pool()), model_name="*", model_index=0, route_tag="GLM-5.3-Flash",
+    )
+
+    assert _router(resolved).strategy_kwargs == {"fallback_tag": "GLM-5.3-flash"}
+    assert _tags_by_id(resolved)["glm-upper"] == "GLM-5.3-flash"
+
+
+def _tag_filtered_case_variant_pool(group_tag: str) -> list[ModelPoolEntry]:
+    return _case_variant_pool(strategy="tag-filtered", strategy_kwargs={"fallback_tag": group_tag})
+
+
+@pytest.mark.level0
+def test_group_tag_is_matched_ignoring_case_for_untagged_members():
+    allocation = IntelliRouterAllocator(_tag_filtered_case_variant_pool("glm-5.3-FLASH")).allocate()
+
+    assert allocation.route_tag is None
+    config = allocation.to_team_model_config()
+    assert _router(config).strategy == "tag-filtered"
+    assert _router(config).strategy_kwargs == {"fallback_tag": "GLM-5.3-flash"}
+    assert _tags_by_id(config) == {
+        "glm-lower": "GLM-5.3-flash",
+        "glm-upper": "GLM-5.3-flash",
+        "ds": "deepseek-v4-flash",
+    }
+
+
+@pytest.mark.level0
+def test_group_and_pinned_members_use_the_same_tag_spelling():
+    allocator = IntelliRouterAllocator(_tag_filtered_case_variant_pool("glm-5.3-FLASH"))
+
+    group_config = allocator.allocate().to_team_model_config()
+    pinned_config = allocator.allocate("GLM-5.3-Flash").to_team_model_config()
+
+    assert allocator.list_route_tags() == ["GLM-5.3-flash"]
+    assert _router(group_config).strategy_kwargs == _router(pinned_config).strategy_kwargs
+    assert _tags_by_id(group_config) == _tags_by_id(pinned_config)
+
+
+@pytest.mark.level1
+def test_resolve_member_model_normalizes_the_group_tag_without_a_route_tag():
+    resolved = resolve_member_model(
+        _team_spec(_tag_filtered_case_variant_pool("Glm-5.3-Flash")), model_name="*", model_index=0,
+    )
+
+    assert _router(resolved).strategy_kwargs == {"fallback_tag": "GLM-5.3-flash"}
+    assert _tags_by_id(resolved)["glm-upper"] == "GLM-5.3-flash"
+
+
+@pytest.mark.level1
+def test_group_tag_matching_no_deployment_is_left_as_configured():
+    config = IntelliRouterAllocator(_tag_filtered_case_variant_pool("retired")).allocate().to_team_model_config()
+
+    assert _router(config).strategy_kwargs == {"fallback_tag": "retired"}
+    assert _tags_by_id(config) == {
+        "glm-lower": "GLM-5.3-flash",
+        "glm-upper": "GLM-5.3-Flash",
+        "ds": "deepseek-v4-flash",
+    }
+
+
+@pytest.mark.level1
+def test_group_tag_normalization_does_not_touch_the_shared_pool_entry():
+    pool = _tag_filtered_case_variant_pool("glm-5.3-FLASH")
+
+    IntelliRouterAllocator(pool).allocate().to_team_model_config()
+
+    router = pool[0].metadata["client"]["intelli_router"]
+    assert router["strategy_kwargs"] == {"fallback_tag": "glm-5.3-FLASH"}
+    assert [d["fallback_tag"] for d in router["deployments"]] == ["GLM-5.3-flash", "GLM-5.3-Flash", "deepseek-v4-flash"]

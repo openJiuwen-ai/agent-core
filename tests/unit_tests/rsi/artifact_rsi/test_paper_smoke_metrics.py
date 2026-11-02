@@ -12,7 +12,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementa
 )
 
 
-@pytest.mark.parametrize("key", ["per_question", "task_records", "records", "item_records"])
+@pytest.mark.parametrize("key", ["per_question", "per_item", "task_records", "records", "item_records"])
 def test_smoke_accepts_item_record_aliases(key):
     payload = {
         "method": "react_baseline", "n_questions": 1, "model_call_count": 1,
@@ -22,10 +22,105 @@ def test_smoke_accepts_item_record_aliases(key):
     assert validate_smoke_live_path(payload).ok
 
 
+def test_smoke_accepts_n_items_as_an_n_questions_synonym():
+    # Different task prompts legitimately declare different field-name
+    # conventions (observed directly: a real task's own contract asked for
+    # n_items/per_item instead of n_questions/per_question).
+    payload = {
+        "method": "zero_shot_direct", "n_items": 1, "model_call_count": 1,
+        "per_item": [{"id": "test-01", "correct": True}],
+    }
+    assert validate_metrics_contract(payload, expected_method="zero_shot_direct").ok
+    assert validate_smoke_live_path(payload).ok
+
+
+def test_smoke_accepts_model_call_count_nested_under_canonical_metrics_key():
+    # Observed directly against a real packaged run: the candidate wrote
+    # every scalar (including model_call_count) under the canonical
+    # `metrics` object instead of at the root, which this rejected before
+    # it also checked the nested location.
+    payload = {
+        "method": "zero_shot_direct",
+        "n_questions": 1,
+        "per_question": [{"id": "test-01", "correct": True}],
+        "metrics": {"model_call_count": 1},
+    }
+    assert validate_smoke_live_path(payload).ok
+
+
+def test_smoke_accepts_item_records_nested_under_canonical_metrics_key():
+    # Mirrors the model_call_count case: a candidate that writes its
+    # item-record list under the canonical `metrics` object instead of
+    # the root should not be rejected for it.
+    payload = {
+        "method": "zero_shot_direct",
+        "n_questions": 1,
+        "metrics": {
+            "model_call_count": 1,
+            "per_question": [{"id": "test-01", "correct": True}],
+        },
+    }
+    assert validate_metrics_contract(payload, expected_method="zero_shot_direct").ok
+    assert validate_smoke_live_path(payload).ok
+
+
+def test_nested_item_records_still_participate_in_count_mismatch_detection():
+    # Nested lookup must not blind the (non-blocking) mismatch note either.
+    payload = {
+        "n_questions": 2,
+        "model_call_count": 1,
+        "metrics": {"per_question": [{"id": "one"}]},
+    }
+    contract = validate_metrics_contract(payload)
+    assert contract.ok
+    assert any(issue.reason == "n_questions_mismatch" for issue in contract.issues)
+
+
+def test_malformed_n_questions_is_non_blocking():
+    payload = {"n_questions": "many", "model_call_count": 1, "item_records": [{"id": "one"}]}
+    contract = validate_metrics_contract(payload)
+    assert contract.ok
+    issue = next(i for i in contract.issues if i.reason == "malformed_n_questions")
+    assert issue.blocking is False
+
+
+def test_n_questions_non_positive_stays_blocking():
+    payload = {"n_questions": 0, "model_call_count": 1, "item_records": [{"id": "one"}]}
+    contract = validate_metrics_contract(payload)
+    assert not contract.ok
+    issue = next(i for i in contract.issues if i.reason == "n_questions_non_positive")
+    assert issue.blocking is True
+
+
+def test_existence_checks_stay_blocking_despite_mismatch_downgrade():
+    # The anti-stub / anti-fabrication checks must not have been weakened
+    # by downgrading the count-mismatch note.
+    harness_failed_payload = {"status": "failed", "n_questions": 1, "item_records": [{"id": "one"}]}
+    assert not validate_metrics_contract(harness_failed_payload).ok
+
+    universal_failure_payload = {
+        "status": "completed",
+        "n_questions": 1,
+        "item_records": [{"id": "one", "status": "failed"}],
+    }
+    assert not validate_metrics_contract(universal_failure_payload).ok
+
+    smoke_no_records_payload = {"n_questions": 1, "model_call_count": 1, "item_records": []}
+    assert not validate_smoke_live_path(smoke_no_records_payload).ok
+
+    smoke_no_call_payload = {"n_questions": 1, "model_call_count": 0, "item_records": [{"id": "one"}]}
+    assert not validate_smoke_live_path(smoke_no_call_payload).ok
+
+
 @pytest.mark.parametrize("records", [[], ["not an object"]])
 def test_alias_does_not_allow_empty_or_invalid_records(records):
+    # A declared n_questions that doesn't match the item-record count is a
+    # non-blocking data-quality note now (the host tolerates this class of
+    # mismatch by design) -- it must not fail an otherwise-real run.
     payload = {"n_questions": 1, "model_call_count": 1, "item_records": records}
-    assert not validate_metrics_contract(payload).ok
+    contract = validate_metrics_contract(payload)
+    assert contract.ok
+    assert any(issue.reason == "n_questions_mismatch" for issue in contract.issues)
     result = validate_smoke_live_path(payload)
     assert not result.ok
     assert "per_question" in result.errors[0]
@@ -33,7 +128,9 @@ def test_alias_does_not_allow_empty_or_invalid_records(records):
 
 def test_alias_keeps_count_failure_and_canonical_precedence_checks():
     payload = {"n_questions": 2, "model_call_count": 1, "item_records": [{"id": "one"}]}
-    assert not validate_metrics_contract(payload).ok
+    contract = validate_metrics_contract(payload)
+    assert contract.ok
+    assert any(issue.reason == "n_questions_mismatch" for issue in contract.issues)
     payload.update(n_questions=1, per_question=[])
     assert not validate_smoke_live_path(payload).ok
     del payload["per_question"]

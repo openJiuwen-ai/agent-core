@@ -323,6 +323,35 @@ def test_extract_stdout_metrics_non_dict_payload_treated_as_not_found_content():
     assert payload is None
 
 
+def test_extract_stdout_metrics_tolerates_pretty_printed_multiline_json():
+    # The prompt asks for "compact, one line", but a candidate that
+    # pretty-prints the echo instead (observed directly against a real
+    # packaged run) is still printing valid JSON -- newlines inside an
+    # object are legal whitespace. raw_decode must accept this instead of
+    # requiring the whole payload to share the marker's line.
+    stdout = (
+        "SMOKE_METRICS_JSON:{\n"
+        '  "method": "zero_shot_direct",\n'
+        '  "n_items": 1,\n'
+        '  "model_call_count": 1\n'
+        "}\n"
+        "2026-10-19 | INFO | done\n"
+    )
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is True
+    assert payload == {"method": "zero_shot_direct", "n_items": 1, "model_call_count": 1}
+
+
+def test_extract_stdout_metrics_ignores_marker_text_inside_an_unrelated_string():
+    # The marker must start a line (ignoring leading whitespace) -- the
+    # literal marker text appearing inside some other JSON string value
+    # must never be mistaken for the real echo.
+    stdout = 'some log line mentioning SMOKE_METRICS_JSON: in prose, not at line start\n'
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is False
+    assert payload is None
+
+
 # -- _resolve_smoke_metrics -----------------------------------------------------
 
 
@@ -374,6 +403,23 @@ def test_resolve_smoke_metrics_marker_malformed_reports_invalid_json_without_tou
     assert state == "invalid_json"
     assert metrics == {}
     assert not metrics_path.exists()
+
+
+def test_resolve_smoke_metrics_marker_malformed_but_file_valid_falls_back_to_file(tmp_path):
+    # The stdout echo is a redundant channel. A broken echo must not
+    # discard a genuinely valid --output file (observed directly: a real
+    # run's echo was malformed while its file parsed fine, and the old
+    # behavior threw the valid file result away over a formatting slip in
+    # the echo alone).
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics_path.write_text('{"method": "proposed", "n_questions": 1}', encoding="utf-8")
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "SMOKE_METRICS_JSON:{not valid", metrics_path, "proposed"
+    )
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+    # The file itself must be left untouched -- this is a read, not a repair.
+    assert metrics_path.read_text(encoding="utf-8") == '{"method": "proposed", "n_questions": 1}'
 
 
 # -- _pyright_lsp_command -------------------------------------------------------

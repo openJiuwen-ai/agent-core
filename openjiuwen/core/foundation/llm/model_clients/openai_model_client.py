@@ -1034,6 +1034,12 @@ class OpenAIModelClient(BaseModelClient):
             params["messages"],
         )
         if model_requires_reasoning_content(params.get("model")):
+            if isinstance(build_messages, list):
+                # DeepSeek also needs thinking from plain-text assistant turns
+                # when a later request introduces tools or continues the task.
+                for original, converted in zip(build_messages, params["messages"]):
+                    if isinstance(original, AssistantMessage) and original.reasoning_content is not None:
+                        converted["reasoning_content"] = original.reasoning_content
             params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()

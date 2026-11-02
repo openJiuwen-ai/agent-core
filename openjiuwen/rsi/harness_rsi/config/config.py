@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from openjiuwen.rsi.harness_rsi.model_call import DEFAULT_MODEL_CALL_MAX_RETRIES
+from openjiuwen.rsi.harness_rsi.feedback import OutputRepairConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,18 +57,37 @@ class EvaluatorConfig:
     backend: str = "single_harness"
     evaluation_method: str = "script-based"
     judge_model_config_ref: str = ""
-    judge_agent_max_iterations: int = 20
+    judge_agent_max_iterations: int = 300
     judge_timeout_sec: int = 900
     judge_max_retries: int = 2
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
     judge_success_score: float = 0.8
+    score_mode: str = "binary"
+    judge_baseline_comparison: bool = True
     transient_case_retry_limit: int = 2
     solver_backend: str = "deep_agent"
+    solver_max_iterations: int = 300
     jiuwenswarm_executable: str = ""
     jiuwenswarm_python: str = ""
     jiuwenswarm_expected_version: str = ""
     jiuwenswarm_startup_timeout_sec: int = 120
     jiuwenswarm_runtime_timeout_sec: int = 3600
     jiuwenswarm_runtime_profile: str = "task86"
+    solver_on_max_iterations: str = "error"
+    solver_max_iterations_hard_limit: int = 300
+
+    def __post_init__(self) -> None:
+        if self.score_mode not in {"binary", "continuous"}:
+            raise ValueError("evaluator.score_mode must be binary or continuous")
+        if not isinstance(self.judge_baseline_comparison, bool):
+            raise ValueError("evaluator.judge_baseline_comparison must be a boolean")
+        if type(self.solver_max_iterations) is not int or self.solver_max_iterations < 1:
+            raise ValueError("evaluator.solver_max_iterations must be a positive integer")
+        hard_limit = self.solver_max_iterations_hard_limit
+        if type(hard_limit) is not int or hard_limit < self.solver_max_iterations:
+            raise ValueError("evaluator.solver_max_iterations_hard_limit must be an integer >= solver_max_iterations")
+        if self.solver_on_max_iterations not in ("error", "return_observations"):
+            raise ValueError("evaluator.solver_on_max_iterations is invalid")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluatorConfig":
@@ -80,12 +101,23 @@ class EvaluatorConfig:
             ),
             judge_timeout_sec=_int_value(data.get("judge_timeout_sec"), default=900),
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
+            score_mode=str(data.get("score_mode", "binary")),
+            judge_baseline_comparison=_bool_value(data.get("judge_baseline_comparison"), default=True),
             transient_case_retry_limit=_int_value(
                 data.get("transient_case_retry_limit"),
                 default=2,
             ),
             solver_backend=str(data.get("solver_backend", "deep_agent")),
+            solver_max_iterations=_solver_iteration_limit(data.get("solver_max_iterations")),
+            solver_on_max_iterations=str(data.get("solver_on_max_iterations", "error")),
+            solver_max_iterations_hard_limit=_solver_iteration_limit(
+                data.get(
+                    "solver_max_iterations_hard_limit",
+                    max(300, _solver_iteration_limit(data.get("solver_max_iterations"))),
+                ),
+            ),
             jiuwenswarm_executable=str(data.get("jiuwenswarm_executable", "")),
             jiuwenswarm_python=str(data.get("jiuwenswarm_python", "")),
             jiuwenswarm_expected_version=str(data.get("jiuwenswarm_expected_version", "")),
@@ -101,6 +133,16 @@ class EvaluatorConfig:
         )
 
 
+def evaluator_protocol_config(config: EvaluatorConfig) -> dict[str, Any]:
+    """Keep historical evaluator fingerprints stable for legacy binary runs."""
+    payload = asdict(config)
+    if config.score_mode == "binary":
+        payload.pop("score_mode")
+    if config.score_mode == "binary" or not config.judge_baseline_comparison:
+        payload.pop("judge_baseline_comparison")
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationResultAnalyzerConfig:
     """Post-evaluation causal diagnosis."""
@@ -109,11 +151,12 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_model_config_ref: str = ""
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
-    diagnosis_agent_max_iterations: int = 20
+    diagnosis_agent_max_iterations: int = 300
     causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
     output_filename: str = "issues.yaml"
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluationResultAnalyzerConfig":
@@ -130,7 +173,7 @@ class EvaluationResultAnalyzerConfig:
             ),
             diagnosis_agent_max_iterations=_int_value(
                 data.get("diagnosis_agent_max_iterations"),
-                default=20,
+                default=cls().diagnosis_agent_max_iterations,
             ),
             causal_investigation_required=_bool_value(
                 data.get("causal_investigation_required"),
@@ -139,6 +182,7 @@ class EvaluationResultAnalyzerConfig:
             max_issues=_int_value(data.get("max_issues"), default=20),
             evidence_limit_per_issue=_int_value(data.get("evidence_limit_per_issue"), default=5),
             output_filename=str(data.get("output_filename", "issues.yaml")),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
         )
 
 
@@ -154,6 +198,7 @@ class MemberOptimizerConfig:
     min_attribution_confidence: float = 0.5
     attribution_retry_limit: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     stage_retry_limit: int = DEFAULT_MODEL_CALL_MAX_RETRIES
+    action_planning_max_attempts: int = 10
     max_cases_per_issue: int = 3
     max_trace_excerpt_chars: int = 4000
     max_result_excerpt_chars: int = 2000
@@ -174,11 +219,19 @@ class MemberOptimizerConfig:
     candidate_holdout_cases: int = 0
     candidate_holdout_max_regression: float = 0.0
     adapt_frozen_team_issues: bool = False
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
+
+    runtime_iteration_hard_limit: int = 300
+
+    def __post_init__(self) -> None:
+        if type(self.action_planning_max_attempts) is not int or self.action_planning_max_attempts < 1:
+            raise ValueError("member_optimizer.action_planning_max_attempts must be a positive integer")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemberOptimizerConfig":
         return cls(
             model_config_ref=str(data.get("model_config_ref", "")),
+            runtime_iteration_hard_limit=_solver_iteration_limit(data.get("runtime_iteration_hard_limit", 300)),
             action_group_configs=_string_list(data.get("action_group_configs")),
             agent_skills_dirs=_string_list(data.get("agent_skills_dirs")),
             freeze=_bool_value(data.get("freeze"), default=False),
@@ -192,6 +245,7 @@ class MemberOptimizerConfig:
                 data.get("stage_retry_limit"),
                 default=DEFAULT_MODEL_CALL_MAX_RETRIES,
             ),
+            action_planning_max_attempts=data.get("action_planning_max_attempts", 10),
             max_cases_per_issue=_int_value(data.get("max_cases_per_issue"), default=3),
             max_trace_excerpt_chars=_int_value(data.get("max_trace_excerpt_chars"), default=4000),
             max_result_excerpt_chars=_int_value(data.get("max_result_excerpt_chars"), default=2000),
@@ -236,6 +290,7 @@ class MemberOptimizerConfig:
                 default=0.0,
             ),
             adapt_frozen_team_issues=_bool_value(data.get("adapt_frozen_team_issues"), default=False),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
         )
 
 
@@ -245,16 +300,16 @@ class OrchestratorSchedulingConfig:
 
     evaluation_strategy: str = "hybrid"
     coordination_strategy: str = "team_first_single_pass"
-    promotion_policy: str = "epoch_full_evaluation"
     full_evaluation_enabled: bool = True
     full_evaluation_concurrency: int = 2
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OrchestratorSchedulingConfig":
+        if "promotion_policy" in data:
+            raise ValueError("scheduling.promotion_policy must be migrated to promotion.policy_version")
         config = cls(
             evaluation_strategy=str(data.get("evaluation_strategy", "hybrid")),
             coordination_strategy=str(data.get("coordination_strategy", "team_first_single_pass")),
-            promotion_policy=str(data.get("promotion_policy", "epoch_full_evaluation")),
             full_evaluation_enabled=_bool_value(data.get("full_evaluation_enabled"), default=True),
             full_evaluation_concurrency=_int_value(data.get("full_evaluation_concurrency"), default=2),
         )
@@ -270,8 +325,46 @@ class OrchestratorSchedulingConfig:
             raise ValueError("scheduling.evaluation_strategy must be hybrid")
         if self.coordination_strategy != "team_first_single_pass":
             raise ValueError("scheduling.coordination_strategy must be team_first_single_pass")
-        if self.promotion_policy != "epoch_full_evaluation":
-            raise ValueError("scheduling.promotion_policy must be epoch_full_evaluation")
+
+
+def _require_unit_interval(value: float, name: str) -> None:
+    numeric = not isinstance(value, bool) and isinstance(value, (int, float))
+    finite = numeric and math.isfinite(value)
+    if not finite or not 0 <= value <= 1:
+        raise ValueError(f"{name} must be a finite number between 0 and 1")
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionConfig:
+    """Versioned score authority; historical tasks retain their original policy."""
+
+    policy_version: str = "continuous_two_stage_v2"
+    min_improvement: float = 0.05
+    non_target_max_regression: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.policy_version not in {"legacy_epoch_v1", "continuous_two_stage_v2"}:
+            raise ValueError("unsupported promotion.policy_version; start a new task using continuous_two_stage_v2")
+        _require_unit_interval(self.min_improvement, "promotion.min_improvement")
+        _require_unit_interval(self.non_target_max_regression, "promotion.non_target_max_regression")
+
+    @property
+    def continuous(self) -> bool:
+        """Whether the run uses full-package continuous promotion."""
+        return self.policy_version == "continuous_two_stage_v2"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PromotionConfig":
+        if (
+            data.get("policy_version", cls().policy_version) == "continuous_two_stage_v2"
+            and "confirmation_runs" in data
+        ):
+            raise ValueError("continuous_two_stage_v2 has only target and full evaluations; remove confirmation_runs")
+        return cls(
+            policy_version=str(data.get("policy_version", cls().policy_version)),
+            min_improvement=_float_value(data.get("min_improvement"), default=0.05),
+            non_target_max_regression=_float_value(data.get("non_target_max_regression"), default=0.05),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,13 +379,31 @@ class AutoCoordinatingHarnessConfig:
     evaluation_result_analyzer: EvaluationResultAnalyzerConfig = field(default_factory=EvaluationResultAnalyzerConfig)
     member_optimizer: MemberOptimizerConfig = field(default_factory=MemberOptimizerConfig)
     scheduling: OrchestratorSchedulingConfig = field(default_factory=OrchestratorSchedulingConfig)
+    promotion: PromotionConfig = field(default_factory=PromotionConfig)
+
+    def __post_init__(self) -> None:
+        if self.promotion.continuous and self.evaluator.score_mode != "continuous":
+            object.__setattr__(self, "evaluator", replace(self.evaluator, score_mode="continuous"))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AutoCoordinatingHarnessConfig":
         model_configs = ModelConfigs.from_dict(_mapping(data.get("model_configs")))
         evaluator = EvaluatorConfig.from_dict(_mapping(data.get("evaluator")))
         analyzer = EvaluationResultAnalyzerConfig.from_dict(_mapping(data.get("evaluation_result_analyzer")))
-        optimizer = MemberOptimizerConfig.from_dict(_mapping(data.get("member_optimizer")))
+        member_data = _mapping(data.get("member_optimizer"))
+        optimizer = MemberOptimizerConfig.from_dict(member_data)
+        scheduling_data = dict(_mapping(data.get("scheduling")))
+        promotion_data = dict(_mapping(data.get("promotion")))
+        if "promotion_policy" in scheduling_data:
+            legacy_policy = scheduling_data.pop("promotion_policy")
+            if legacy_policy != "epoch_full_evaluation":
+                raise ValueError("unsupported scheduling.promotion_policy; use promotion.policy_version")
+            if promotion_data.get("policy_version", "legacy_epoch_v1") != "legacy_epoch_v1":
+                raise ValueError(
+                    "conflicting scheduling.promotion_policy and promotion.policy_version; remove the old selector"
+                )
+            promotion_data["policy_version"] = "legacy_epoch_v1"
+        promotion = PromotionConfig.from_dict(promotion_data)
         model_configs = ModelConfigs(
             evaluation=model_configs.evaluation or evaluator.model_config_ref,
             analysis=model_configs.analysis or analyzer.model_config_ref,
@@ -305,8 +416,16 @@ class AutoCoordinatingHarnessConfig:
             data_loader=DataLoaderConfig.from_dict(_mapping(data.get("data_loader"))),
             evaluator=replace(evaluator, model_config_ref=model_configs.evaluation),
             evaluation_result_analyzer=replace(analyzer, model_config_ref=model_configs.analysis),
-            member_optimizer=replace(optimizer, model_config_ref=model_configs.member_optimization),
-            scheduling=OrchestratorSchedulingConfig.from_dict(_mapping(data.get("scheduling"))),
+            member_optimizer=replace(
+                optimizer, model_config_ref=model_configs.member_optimization,
+                runtime_iteration_hard_limit=(
+                    optimizer.runtime_iteration_hard_limit
+                    if "runtime_iteration_hard_limit" in member_data
+                    else evaluator.solver_max_iterations_hard_limit
+                ),
+            ),
+            scheduling=OrchestratorSchedulingConfig.from_dict(scheduling_data),
+            promotion=promotion,
         )
         config.validate()
         return config
@@ -375,6 +494,19 @@ def _int_value(value: Any, *, default: int) -> int:
     return int(value)
 
 
+def _solver_iteration_limit(value: Any) -> int:
+    if value is None:
+        return 300
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError as exc:
+            raise ValueError("evaluator.solver_max_iterations must be a positive integer") from exc
+    if type(value) is not int or value < 1:
+        raise ValueError("evaluator.solver_max_iterations must be a positive integer")
+    return value
+
+
 def _float_value(value: Any, *, default: float) -> float:
     if value is None:
         return default
@@ -391,4 +523,5 @@ __all__ = [
     "MemberOptimizerConfig",
     "ModelConfigs",
     "OrchestratorSchedulingConfig",
+    "PromotionConfig",
 ]

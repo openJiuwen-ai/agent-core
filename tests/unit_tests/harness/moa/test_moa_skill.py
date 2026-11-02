@@ -775,8 +775,8 @@ async def test_partial_reference_success_is_bound_to_next_turn_and_receipt_is_pr
     assert output.data == {"reference_count": 2, "success_count": 1}
     assert "private reference suggestion" not in str(output)
     assert state.reference_calls == 1
-    assert state.pending.target == (state.active_key[0], 3)
-    assert state.pending.sources[0].text == "private reference suggestion"
+    assert state.proposals.ready.target == (state.active_key[0], 3)
+    assert state.proposals.ready.sources[0].text == "private reference suggestion"
     assert reference.invoke.await_args.kwargs["tools"] is None
 
 
@@ -812,7 +812,7 @@ async def test_failed_references_report_failure_and_consume_the_attempt() -> Non
     assert output.data == {"reference_count": 1, "success_count": 0}
     assert output.error == "All reference models failed."
     assert state.reference_calls == 1
-    assert state.pending is None
+    assert state.proposals.ready is None
 
 
 @pytest.mark.level1
@@ -827,7 +827,7 @@ async def test_consultation_cancellation_propagates() -> None:
     finally:
         active_moa.reset(token)
     assert state.reference_calls == 1
-    assert state.pending is None
+    assert state.proposals.ready is None
 
 
 @pytest.mark.level0
@@ -844,7 +844,7 @@ async def test_stream_without_a_target_keeps_receipt_and_does_not_bind_advice() 
     assert len(outputs) == 1
     assert outputs[0].success is True
     assert outputs[0].data == {"reference_count": 1, "success_count": 1}
-    assert state.pending is None
+    assert state.proposals.ready is None
 
 
 @pytest.mark.level0

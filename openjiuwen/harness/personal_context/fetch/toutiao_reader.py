@@ -28,6 +28,7 @@ from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
     is_candidate_read_error,
+    root_provider_error,
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
@@ -44,27 +45,82 @@ _MAX_CONTENT_CHARS = 2_000_000
 _MAX_TEXT_FIELD_CHARS = 4_096
 _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+_ARTICLE_ERROR_SCOPE = "article"
+_SESSION_ERROR_SCOPE = "session"
 
 
 def _validated_article_candidate(candidate: Mapping[str, object]) -> tuple[dict[str, object], str]:
+    if not isinstance(candidate, Mapping):
+        raise _article_error("Toutiao candidate is invalid")
     for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
         value = candidate.get(field_name)
         if not isinstance(value, str) or not value.strip():
-            raise _fetch_error("Toutiao candidate is invalid")
+            raise _article_error("Toutiao candidate is invalid")
     raw_article = candidate.get("article")
     if not isinstance(raw_article, Mapping):
-        raise _fetch_error("Toutiao candidate has no article metadata")
+        raise _article_error("Toutiao candidate has no article metadata")
     article = dict(raw_article)
     article_id = _article_id(article)
     if not article_id or article_id != candidate["stable_id"] or len(article_id) > 256:
-        raise _fetch_error("Toutiao candidate has no stable ID")
+        raise _article_error("Toutiao candidate has no stable ID")
     return article, article_id
 
 
-def _article_failure(offset: int, article_id: str) -> dict[str, object]:
+def _candidate_item_ref(candidate: object, *, offset: int) -> str:
+    if isinstance(candidate, Mapping):
+        for key in ("stable_id", "locator"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:256]
+    return f"toutiao-candidate-{offset}"
+
+
+def _scoped_error(message: str, *, scope: str, cause: BaseException | None = None) -> BaseError:
+    return build_error(
+        StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR,
+        error_msg=message,
+        details={"scope": scope},
+        cause=cause,
+    )
+
+
+def _article_error(message: str, cause: BaseException | None = None) -> BaseError:
+    return _scoped_error(message, scope=_ARTICLE_ERROR_SCOPE, cause=cause)
+
+
+def _session_error(message: str, cause: BaseException | None = None) -> BaseError:
+    return _scoped_error(message, scope=_SESSION_ERROR_SCOPE, cause=cause)
+
+
+def _error_scope(exc: BaseError) -> object:
+    details = getattr(exc, "details", None)
+    return details.get("scope") if isinstance(details, Mapping) else None
+
+
+def _is_isolatable_article_error(exc: BaseError) -> bool:
+    """Keep session-wide failures fatal while isolating one article's own errors."""
+
+    scope = _error_scope(exc)
+    if scope == _SESSION_ERROR_SCOPE:
+        return False
+    return scope == _ARTICLE_ERROR_SCOPE or is_candidate_read_error(exc)
+
+
+def _is_session_wide_error(exc: BaseError) -> bool:
+    """Return whether an article read error invalidates the provider session."""
+
+    if _error_scope(exc) == _SESSION_ERROR_SCOPE:
+        return True
+    root = root_provider_error(exc)
+    if isinstance(root, aiohttp.ClientResponseError):
+        return root.status in {401, 403}
+    return isinstance(root, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError))
+
+
+def _article_failure(offset: int, item_ref: str) -> dict[str, object]:
     return {
         "offset": offset,
-        "item_ref": article_id,
+        "item_ref": item_ref,
         "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
         "message": "条目读取或解析失败",
     }
@@ -159,8 +215,9 @@ class ToutiaoReaderFetchService(ContextFetchService):
                     end = index + _BATCH_SIZE
                     chunk = candidates[index:end]
                     for offset, candidate in enumerate(chunk):
-                        article, article_id = _validated_article_candidate(candidate)
+                        item_ref = _candidate_item_ref(candidate, offset=offset)
                         try:
+                            article, article_id = _validated_article_candidate(candidate)
                             (
                                 article_body,
                                 raw_snapshot,
@@ -182,12 +239,12 @@ class ToutiaoReaderFetchService(ContextFetchService):
                                 )
                             )
                         except BaseError as exc:
-                            if not is_candidate_read_error(exc):
+                            if not _is_isolatable_article_error(exc):
                                 raise
-                            failures.append(_article_failure(offset, article_id))
+                            failures.append(_article_failure(offset, item_ref))
                             continue
                         except (TypeError, ValueError):
-                            failures.append(_article_failure(offset, article_id))
+                            failures.append(_article_failure(offset, item_ref))
                             continue
                         success_offsets.append(offset)
                     yield FetchBatch(
@@ -334,7 +391,7 @@ async def _fetch_article_body(
         record = _unwrap_record(record)
         content = _content_value(record)
         if not content:
-            raise _fetch_error("Toutiao article body is unavailable")
+            raise _article_error("Toutiao article body is unavailable")
         bounded, truncated = _bounded_content(content)
         return (
             bounded,
@@ -343,8 +400,8 @@ async def _fetch_article_body(
             truncated,
             False,
         )
-    except BaseError:
-        if not fallback:
+    except BaseError as exc:
+        if not fallback or _is_session_wide_error(exc):
             raise
         raw = json.dumps(dict(article), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         content, truncated = _bounded_content(fallback)
@@ -430,7 +487,7 @@ def _unwrap_record(payload: object) -> dict[str, Any]:
                 return dict(data["articleInfo"])
             return dict(data)
         return dict(payload)
-    raise _fetch_error("Toutiao article body response is invalid")
+    raise _session_error("Toutiao article body response is invalid")
 
 
 def _content_value(record: Mapping[str, object]) -> str:
@@ -444,7 +501,7 @@ def _content_value(record: Mapping[str, object]) -> str:
 def _bounded_content(value: str) -> tuple[str, bool]:
     text = _html_to_text(value)
     if not text:
-        raise _fetch_error("Toutiao article body is empty")
+        raise _article_error("Toutiao article body is empty")
     return text[:_MAX_CONTENT_CHARS], len(text) > _MAX_CONTENT_CHARS
 
 
@@ -639,7 +696,7 @@ def _payload(body: bytes, *, allow_html: bool = True) -> object:
         return json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as parse_error:
         if not allow_html:
-            raise _fetch_error("Toutiao response is not valid JSON") from parse_error
+            raise _session_error("Toutiao response is not valid JSON") from parse_error
         text = body.decode("utf-8", errors="replace")
         match = re.search(r"<script[^>]+id=[\"']RENDER_DATA[\"'][^>]*>(.*?)</script>", text, re.DOTALL | re.IGNORECASE)
         if match:
@@ -649,11 +706,11 @@ def _payload(body: bytes, *, allow_html: bool = True) -> object:
                     return json.loads(html.unescape(candidate))
                 except json.JSONDecodeError:
                     continue
-            raise _fetch_error("Toutiao embedded page data is invalid", parse_error) from None
+            raise _session_error("Toutiao embedded page data is invalid", parse_error) from None
         lowered = text.casefold()
         if any(marker in lowered for marker in ("captcha", "verify", "robot", "访问验证", "安全验证")):
-            raise _fetch_error("Toutiao page was rejected by the public endpoint") from parse_error
-        raise _fetch_error("Toutiao response page structure is invalid") from parse_error
+            raise _session_error("Toutiao page was rejected by the public endpoint") from parse_error
+        raise _session_error("Toutiao response page structure is invalid") from parse_error
 
 
 async def _request_body(

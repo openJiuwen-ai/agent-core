@@ -63,7 +63,9 @@ def validate_choice(answer: Any, criteria: dict[str, str], threshold: float) -> 
     return chosen
 
 
-def validate_action(answers: Any, questions: dict[str, Any], threshold: float) -> tuple[str, dict[str, Any]]:
+def validate_action(
+    answers: Any, questions: dict[str, Any], threshold: float, *, target_threshold: float | None = None
+) -> tuple[str, dict[str, Any]]:
     """Validate both chosen heads; never pair an operation with another group's target."""
     if not isinstance(answers, dict):
         raise DecisionUnavailable("invalid_choice_type")
@@ -73,7 +75,8 @@ def validate_action(answers: Any, questions: dict[str, Any], threshold: float) -
     head = "target_" + operation
     if head not in questions:
         raise DecisionUnavailable("invalid_choice_group")
-    key = validate_choice(answers.get(head), questions[head]["criteria"], threshold)
+    key = validate_choice(answers.get(head), questions[head]["criteria"],
+                          threshold if target_threshold is None else target_threshold)
     return key, answers[head]
 
 

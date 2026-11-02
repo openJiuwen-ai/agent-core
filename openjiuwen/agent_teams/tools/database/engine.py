@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -409,41 +410,62 @@ def _ensure_message_protocol_column(sync_conn) -> None:
     ``SQLModel.metadata.create_all`` only creates tables that don't exist;
     it never alters live tables.  Per-session message tables created before
     the ``protocol`` column was introduced therefore lack it after upgrading.
-    Probe each message table and run ``ALTER TABLE ... ADD COLUMN`` with a
-    default of ``"plain"`` so legacy rows retain their original semantics.
+    Probe only the current session's message table and run
+    ``ALTER TABLE ... ADD COLUMN`` with a default of ``"plain"`` so legacy
+    rows retain their original semantics. Other sessions may be dropped
+    concurrently and are migrated when they are bound themselves.
     """
+    table_name = next(
+        (name for name in _current_session_migration_tables() if name.startswith("team_message_")),
+        None,
+    )
+    if table_name is None:
+        return
     inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
-        if not table_name.startswith("team_message_"):
-            continue
+    if not inspector.has_table(table_name):
+        return
+    try:
         columns = {col["name"] for col in inspector.get_columns(table_name)}
-        if "protocol" in columns:
-            continue
-        sync_conn.exec_driver_sql(
-            f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
-        )
-        team_logger.info(
-            "Migrated legacy message table %s: added protocol column",
-            table_name,
-        )
+    except NoSuchTableError:
+        team_logger.info("Message table %s disappeared during protocol migration", table_name)
+        return
+    if "protocol" in columns:
+        return
+    sync_conn.exec_driver_sql(
+        f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
+    )
+    team_logger.info(
+        "Migrated legacy message table %s: added protocol column",
+        table_name,
+    )
 
 
 def _ensure_message_meta_column(sync_conn) -> None:
     """Backfill the ``meta`` column on pre-existing per-session message tables.
 
     Same reason as ``_ensure_message_protocol_column``: ``create_all`` never
-    alters a live table. Legacy rows get NULL meta, which the delivery path
-    reads as "plain message, render content verbatim" — the pre-F_63 behavior.
+    alters a live table. Only the current session's message table is probed;
+    legacy rows get NULL meta, which the delivery path reads as "plain message,
+    render content verbatim" — the pre-F_63 behavior.
     """
+    table_name = next(
+        (name for name in _current_session_migration_tables() if name.startswith("team_message_")),
+        None,
+    )
+    if table_name is None:
+        return
     inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
-        if not table_name.startswith("team_message_"):
-            continue
+    if not inspector.has_table(table_name):
+        return
+    try:
         columns = {col["name"] for col in inspector.get_columns(table_name)}
-        if "meta" in columns:
-            continue
-        sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
-        team_logger.info("Migrated legacy message table %s: added meta column", table_name)
+    except NoSuchTableError:
+        team_logger.info("Message table %s disappeared during meta migration", table_name)
+        return
+    if "meta" in columns:
+        return
+    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
+    team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 
 def _current_session_migration_tables() -> list[str]:
@@ -913,7 +935,7 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     )
 
 
-async def create_cur_session_tables(sessions: DbSessions) -> None:
+async def create_cur_session_tables(sessions: DbSessions) -> bool:
     """Create dynamic tables for current session under the process-wide write lock.
 
     Runs inside ``DbSessions.write()`` so bind-time DDL serialises with every
@@ -930,16 +952,16 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     as ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
     ``TimeoutError`` raised by ``DbSessions.write()`` when the driver thread
     is wedged (e.g. multi-process binds racing the file lock at startup; at
-    most one watchdog retry). A failed retry budget does not raise: ``create_cur_session_tables`` returns
-    ``None`` on success-or-give-up and ``bind_session`` does not inspect the
-    return, so a bind-time DDL hiccup degrades to a logged warning rather than
-    crashing the member — the session's tables either got created/migrated on
-    a retry, or the next DAO write surfaces the real error in-band.
+    most one watchdog retry). A failed retry budget does not raise here:
+    ``create_cur_session_tables`` returns ``True`` when the tables are ready
+    and ``False`` when no session is bound or the retry budget is exhausted.
+    Callers that start a session runtime must check the result before
+    proceeding — ``session_manager`` aborts the bind on ``False``.
     """
     session_id = get_session_id()
     if not session_id:
         team_logger.warning("No session_id in context, cannot create session tables")
-        return
+        return False
 
     async def _ddl_once() -> None:
         async with sessions.write() as session:
@@ -949,12 +971,13 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     try:
         await retry_on_transient(_ddl_once, label=f"create_cur_session_tables(session={session_id})")
     except _TRANSIENT_DB_ERRORS:
-        # Budget exhausted (already logged) — do not crash the member. A
-        # subsequent DAO write will either succeed on its own (tables are
-        # idempotent under checkfirst) or raise the real error in-band where
-        # the caller can handle it.
-        return
+        # Budget exhausted (already logged by retry_on_transient) — report it
+        # via the ``False`` contract: callers that start a session runtime
+        # (``session_manager``) abort the bind instead of letting a member run
+        # against tables that never got created.
+        return False
     team_logger.info("Session tables ready for session %s", session_id)
+    return True
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

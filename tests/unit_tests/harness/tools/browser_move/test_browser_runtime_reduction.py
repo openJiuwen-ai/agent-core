@@ -175,7 +175,9 @@ async def test_unrelated_llm_read_does_not_erase_jev_failed_action_suppression()
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert session.get_state(PHASE_KEY)["decision_policy"]["failed_actions"] == failures
     assert result.metadata["browser_policy"]["excluded"]["failed_target"] == 1
-    assert client.evaluate.await_count == 2  # No supported action remains in this minimal tool set.
+    assert client.evaluate.await_count == 3  # Fixed reads remain; the failed mutation stays excluded.
+    criteria = client.evaluate.call_args.args[0]["questions"]["action"]["criteria"]
+    assert "CLICK" not in criteria and "READ_TARGET_TEXT" in criteria
     llm.invoke.assert_awaited()
 
 

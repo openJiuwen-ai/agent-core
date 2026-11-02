@@ -281,6 +281,7 @@ class ReActAgentConfig(BaseModel):
     prompt_template: List[Dict] = Field(default_factory=list, description="Prompt template list")
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
+    max_iterations_hard_limit: int | None = Field(default=None, gt=0, description="Host-owned per-invocation ceiling")
     on_max_iterations: Literal["error", "final_answer", "return_observations"] = Field(
         default="error",
         description="Action on iteration exhaustion; final_answer makes one additional tool-free model call",
@@ -1034,8 +1035,10 @@ class ReActAgent(BaseAgent):
             react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
         )
 
+        finalizing = bool(ctx.extra.get("_finalizing_max_iterations"))
+        rail_attempt_cap = {"_rail_max_attempts": 1} if finalizing else {}
         try:
-            ai_message = await self._railed_model_call(ctx)
+            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
         except Exception as exc:
             if ctx.extra.get("_model_exception_recovery_attempted"):
                 raise
@@ -1066,7 +1069,7 @@ class ReActAgent(BaseAgent):
                 model_context=context,
                 react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
             )
-            ai_message = await self._railed_model_call(ctx)
+            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
 
         if not isinstance(ai_message, AssistantMessage):
             return ai_message
@@ -2854,6 +2857,14 @@ class ReActAgent(BaseAgent):
 
     @with_session()
     async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
+        # Capture the host ceiling before candidate rails can mutate runtime config.
+        hard_iteration_limit = cast(ReActAgentConfig, self._config).max_iterations_hard_limit
+        supplied_ceiling = inputs.get("_host_max_iterations") if isinstance(inputs, dict) else None
+        if type(supplied_ceiling) is int and supplied_ceiling > 0:
+            if hard_iteration_limit is None:
+                hard_iteration_limit = supplied_ceiling
+            else:
+                hard_iteration_limit = min(hard_iteration_limit, supplied_ceiling)
         parent_usage_attribution = current_usage_attribution()
         delegation_attribution = current_usage_delegation()
         raw_invocation_id = inputs.get("invocation_id") if isinstance(inputs, dict) else None
@@ -3068,7 +3079,11 @@ class ReActAgent(BaseAgent):
                     )
 
                 if invoke_inputs.result is None:
-                    for iteration in range(start_iteration, self._config.max_iterations):
+                    iteration_limit = self._config.max_iterations
+                    if hard_iteration_limit is not None:
+                        iteration_limit = min(iteration_limit, hard_iteration_limit)
+                    ctx.extra["_iteration_limit"] = iteration_limit
+                    for iteration in range(start_iteration, iteration_limit):
                         logger.info(f"ReAct iteration {iteration + 1}")
                         ctx.extra["_react_iteration"] = iteration + 1
 
@@ -3272,8 +3287,13 @@ class ReActAgent(BaseAgent):
             "termination_reason": "max_iterations",
             "iterations_used": int(ctx.extra.get("_react_iteration", 0)),
             "truncated_by_max_iterations": True,
+            "max_iterations": ctx.extra.get("_iteration_limit", self._config.max_iterations),
+            "finalization_attempted": False,
+            "finalization_succeeded": False,
         }
         strategy = cast(ReActAgentConfig, self._config).on_max_iterations
+        logger.warning("ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
+                       result["iterations_used"], result["max_iterations"], strategy)
         if strategy == "error":
             return result
 
@@ -3300,6 +3320,7 @@ class ReActAgent(BaseAgent):
             )
         )
         ctx.extra["_finalizing_max_iterations"] = True
+        result["finalization_attempted"] = True
         try:
             answer = await self._call_model(ctx, context, None)
             finish = ctx.consume_force_finish()
@@ -3319,7 +3340,7 @@ class ReActAgent(BaseAgent):
                     result["finalization_error"] = f"Finalization did not complete: {finish_reason}"
                 else:
                     await context.add_messages(answer)
-                    result.update(output=answer.content, result_type="answer")
+                    result.update(output=answer.content, result_type="answer", finalization_succeeded=True)
         except Exception as exc:
             logger.warning("ReAct iteration-limit finalization failed: %s", exc)
             result["finalization_error"] = str(exc)

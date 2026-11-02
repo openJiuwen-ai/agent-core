@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
@@ -43,8 +44,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
 )
 from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import (
     TOOLS,
-    choose_operation,
     answer,
+    choose_operation,
     messages_for,
     setup_policy,
 )
@@ -237,9 +238,12 @@ async def test_execution_receipts_postconditions_and_no_automatic_replay():
     second = result.tool_calls[0]
     policy.record_execution(SimpleNamespace(tool_call=second), context.get_session_ref(), {"success": True})
     runtime.ensure_page_state().decision_snapshot["capture_id"] = "second-noop"
+    choose_operation(client, "READ_TARGET_TEXT")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
-    assert result.metadata["browser_policy"]["reason"] == "no_supported_actions"
-    assert client.evaluate.await_count == 2  # This button cannot consume further decisions.
+    assert result.metadata["browser_policy"]["reason"] == "compiled_action"
+    assert "CLICK" not in client.evaluate.call_args.args[0]["questions"]["action"]["criteria"]
+    assert json.loads(result.tool_calls[0].arguments)["steps"][0]["op"] == "extract_text"
+    assert client.evaluate.await_count == 3  # Read remains available; the click cannot replay.
 
 
 def test_unsupported_controls_are_removed_before_candidate_budget():
@@ -300,7 +304,9 @@ async def test_llm_supplied_search_value_is_bound_to_its_observed_node_only(succ
         assert json.loads(result.tool_calls[0].arguments)["steps"][0]["op"] == "press"
     else:
         assert result.content == "original LLM answer"
-        client.evaluate.assert_not_awaited()
+        criteria = client.evaluate.call_args.args[0]["questions"]["action"]["criteria"]
+        assert "PRESS_ENTER" not in criteria and "TYPE_TEXT" not in criteria
+        assert "READ_VALUE" in criteria
 
 
 def test_search_binding_cannot_cross_dom_nodes_or_create_fill_values():
@@ -318,7 +324,9 @@ def test_search_binding_cannot_cross_dom_nodes_or_create_fill_values():
         },
     }
     binding = {"document": "doc", "node": 1, "value": "derived query"}
-    assert not build_menu([control], "查汇率", limit=30, search_bindings=[binding]).steps
+    assert {s["op"] for s in build_menu([control], "查汇率", limit=30, search_bindings=[binding]).steps.values()} == {
+        "extract_value"
+    }
 
 
 def test_file_inputs_and_duplicate_actions_cannot_consume_action_slots():
@@ -333,7 +341,8 @@ def test_file_inputs_and_duplicate_actions_cannot_consume_action_slots():
     assert not build_menu([item], "输入“anything”", limit=30).steps
     item.update(role="button", clickable=True)
     item["decision_state"] = {"tag": "button", "node_guard": {"node": 1}}
-    assert len(build_menu([item, item], "点击", limit=30).steps) == 1
+    menu = build_menu([item, item], "点击", limit=30)
+    assert [s["op"] for s in menu.steps.values()] == ["click", "extract_text"]
 
 
 def dom_probe(page, limit=30, intent=""):
@@ -350,7 +359,7 @@ def test_real_dom_prefilters_disabled_and_readonly_and_ranks_goal_before_limit(d
     )
     observed = dom_probe(dom_page, limit=1, intent="按销量排序")
     assert observed["elements"][0]["text"] == "销量排序"
-    assert observed["decision_excluded"]["readonly"] > 0
+    assert observed["total_candidates"] == 34  # Readonly fields remain readable without displacing the local goal.
     assert dom_page.evaluate("window.__openjiuwenDecisionNodes.next") == 1
 
 

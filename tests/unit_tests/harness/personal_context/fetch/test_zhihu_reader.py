@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import aiohttp
 import pytest
@@ -156,6 +157,138 @@ async def test_zhihu_fetch_isolates_one_article_timeout_and_continues(
     }
 
 
+@pytest.mark.asyncio
+async def test_zhihu_fetch_isolates_empty_body_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.zhihu.com/api/v4/columns/example/articles": [
+                Response(
+                    {
+                        "data": [_article("image", 20), _article("good", 10)],
+                        "paging": {"is_end": True},
+                    }
+                ),
+            ],
+            "https://www.zhihu.com/api/v4/articles/image": [
+                Response({"data": {"content": '<p><img src="https://p.example/a.jpg"/></p>'}}),
+            ],
+            "https://www.zhihu.com/api/v4/articles/good": [
+                Response({"data": {"content": "<p>good body</p>"}}),
+            ],
+        },
+    )
+    service = ZhihuReaderFetchService(_config(), home=tmp_path)
+    batch = (await _batches(service))[0]
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["zhihu_reader:article:good"]
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "image",
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_zhihu_fetch_isolates_invalid_candidate_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ZhihuReaderFetchService(_config(), home=tmp_path)
+
+    async def body(_session, article):
+        return "body", None, article["updated"], False
+
+    monkeypatch.setattr(zhihu_reader, "_fetch_article_body", body)
+    broken = _fetch_candidate("broken")
+    broken["stable_id"] = ""
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(broken, _fetch_candidate("good")),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["zhihu_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": broken["locator"],
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_zhihu_fetch_isolates_non_mapping_candidate_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ZhihuReaderFetchService(_config(), home=tmp_path)
+
+    async def body(_session, article):
+        return "body", None, article["updated"], False
+
+    monkeypatch.setattr(zhihu_reader, "_fetch_article_body", body)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=cast(tuple[dict[str, object], ...], ("broken", _fetch_candidate("good"))),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["zhihu_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "zhihu-candidate-0",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_zhihu_fetch_aborts_on_article_403(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ZhihuReaderFetchService(_config(), home=tmp_path)
+    requested: list[str] = []
+
+    async def body(_session, article):
+        requested.append(str(article["id"]))
+        if article["id"] == "denied":
+            cause = aiohttp.ClientResponseError(
+                request_info=SimpleNamespace(real_url="https://www.zhihu.com/api/v4/articles/denied"),
+                history=(),
+                status=403,
+            )
+            raise zhihu_reader._fetch_error("Zhihu request failed", cause)
+        return "body", None, article["updated"], False
+
+    monkeypatch.setattr(zhihu_reader, "_fetch_article_body", body)
+
+    with pytest.raises(BaseError) as caught:
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate("denied"), _fetch_candidate("good")),
+        ).__anext__()
+
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
+    assert requested == ["denied"]
+
+
 async def _batches(
     service: ZhihuReaderFetchService,
     cursor: dict[str, object] | None = None,
@@ -284,7 +417,9 @@ async def test_zhihu_updates_same_article_without_inventing_deletes(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_zhihu_body_or_antibot_failure_aborts_without_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_zhihu_invalid_body_response_aborts_without_leaking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _set_responses(
         monkeypatch,
         {
@@ -297,9 +432,11 @@ async def test_zhihu_body_or_antibot_failure_aborts_without_cursor(tmp_path: Pat
     service = ZhihuReaderFetchService(_config(), home=tmp_path)
     with pytest.raises(BaseError) as caught:
         await _batches(service)
+
     assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
-    assert "zhihu.com" not in str(caught.value)
-    assert "captcha" not in str(caught.value).casefold()
+    serialized = str(caught.value)
+    assert "zhihu.com" not in serialized
+    assert "captcha" not in serialized.casefold()
 
 
 @pytest.mark.asyncio

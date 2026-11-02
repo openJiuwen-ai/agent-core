@@ -251,7 +251,7 @@ def test_fixed_reader_treats_query_as_data_and_runs_in_real_dom(dom_page):
 
 
 @pytest.mark.asyncio
-async def test_llm_stream_total_timeout_closes_producer_without_replaying_partial_action(monkeypatch):
+async def test_llm_stream_task_deadline_closes_producer_without_replaying_partial_action(monkeypatch):
     policy, llm, client, runtime, context, captured = setup_policy("llm")
     closed = []
 
@@ -263,7 +263,7 @@ async def test_llm_stream_total_timeout_closes_producer_without_replaying_partia
             closed.append(True)
 
     llm.stream = producer
-    monkeypatch.setattr(policy, "_llm_wait_limit", lambda remaining: 0.02)
+    context.get_session_ref().get_state("")["deadline_at"] = time.time() + 0.02
     with pytest.raises(TimeoutError):
         async for chunk in policy.stream(await messages_for(policy, context, captured), tools=TOOLS):
             assert not chunk.tool_calls
@@ -369,7 +369,8 @@ def test_fixed_action_probe_in_one_rpc_keeps_receipt_when_probe_fails(dom_page, 
       return {ok:true, executed:true, url:page.url()};
     }""")
     value = dom_page.evaluate("""async args => {
-      const page = {evaluate: (fn,arg) => fn(arg), url: () => location.href, title: async () => document.title};
+      const page = {evaluate: (fn,arg) => fn(arg), url: () => location.href, title: async () => document.title,
+        waitForTimeout: ms => new Promise(resolve => setTimeout(resolve, ms))};
       if (args.probe) page.context = () => ({pages: () => [page]});
       return await eval('(' + args.code + ')')(page);
     }""", {"probe": probe_available, "code": code})

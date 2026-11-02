@@ -20,6 +20,8 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
 )
 from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.core.foundation.llm.schema.config import LLMApiMode, LLMAuthMode
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 
 
@@ -723,6 +725,33 @@ def test_deepseek_model_keeps_existing_reasoning_content():
     )
 
     assert params["messages"][1]["reasoning_content"] == "real thinking"
+
+
+@pytest.mark.parametrize("model", ["deepseek-flash", "gpt-5.5", "GLM-5.2"])
+def test_deepseek_replays_text_and_tool_thinking_without_changing_other_models(model: str):
+    messages = [
+        UserMessage(content="initial task"),
+        AssistantMessage(content="first answer", reasoning_content="original text reasoning"),
+        UserMessage(content="use the tool next"),
+        AssistantMessage(
+            content="",
+            reasoning_content="original tool reasoning",
+            tool_calls=[ToolCall(id="call-1", type="function", name="echo", arguments="{}")],
+        ),
+        ToolMessage(content="observed result", tool_call_id="call-1"),
+    ]
+    before = [message.model_dump() for message in messages]
+
+    params = _build_messages_params(model, messages, endpoint_profile=None)
+
+    if model == "deepseek-flash":
+        assert params["messages"][1]["reasoning_content"] == "original text reasoning"
+    else:
+        assert "reasoning_content" not in params["messages"][1]
+    assert params["messages"][3]["reasoning_content"] == "original tool reasoning"
+    assert params["messages"][3]["tool_calls"][0]["id"] == "call-1"
+    assert params["messages"][4]["tool_call_id"] == "call-1"
+    assert [message.model_dump() for message in messages] == before
 
 
 def test_openai_none_auth_uses_placeholder_sdk_key():

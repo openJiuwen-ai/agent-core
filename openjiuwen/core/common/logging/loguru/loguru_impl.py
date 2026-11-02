@@ -538,6 +538,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         return self._LOG_LEVEL_TO_NO[log_level] >= self._effective_level_no
 
     def _emit(self, level: str, log_level: LogLevel, msg: str, args: tuple[Any, ...], **kwargs: Any) -> None:
+        self._capture_invocation_log(log_level, msg, args, kwargs)
         if not self._should_emit(log_level):
             return
 
@@ -580,6 +581,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         self._emit("CRITICAL", LogLevel.CRITICAL, msg, args, **kwargs)
 
     def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._capture_invocation_log(LogLevel.ERROR, msg, args, kwargs, exception=True)
         if not self._should_emit(LogLevel.ERROR):
             return
 

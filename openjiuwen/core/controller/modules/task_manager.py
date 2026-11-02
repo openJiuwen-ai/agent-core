@@ -864,6 +864,19 @@ class TaskManager:
             return [self.tasks[cid].model_copy(deep=True) for cid in children_ids if cid in self.tasks]
 
     # ==================== Task Execution Status Management ====================
+    async def claim_task(self, task_id: str) -> bool:
+        """Atomically claim a submitted task for execution.
+
+        Returns ``False`` when the task no longer exists or its status changed
+        before the scheduler could claim it.
+        """
+        async with self._lock:
+            task = self.tasks.get(task_id)
+            if task is None or task.status != TaskStatus.SUBMITTED:
+                return False
+            task.status = TaskStatus.WORKING
+            return True
+
     async def update_task_status(
             self,
             task_id: Union[str, List[str]],

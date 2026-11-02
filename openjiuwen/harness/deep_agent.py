@@ -7,7 +7,8 @@ import asyncio
 import copy
 import os
 import uuid
-from contextlib import AbstractAsyncContextManager, aclosing, suppress
+from dataclasses import replace
+from contextlib import AbstractAsyncContextManager, ExitStack, aclosing, contextmanager, suppress
 import warnings
 from pathlib import Path
 from typing import (
@@ -29,6 +30,7 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
@@ -352,7 +354,18 @@ class DeepAgent(BaseAgent):
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
+        self._moa_scope_owner: Any = None
         super().__init__(card)
+
+    def _proposal_owner(self) -> Any:
+        """Resolve the in-memory advice owner only when MoA is configured."""
+        if self._deep_config is None or self._deep_config.moa is None:
+            return None
+        if self._moa_scope_owner is None:
+            from openjiuwen.harness.moa.integration import MoAProposalOwner
+
+            self._moa_scope_owner = MoAProposalOwner()
+        return self._moa_scope_owner
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
@@ -398,6 +411,8 @@ class DeepAgent(BaseAgent):
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
+        # Factory config_kwargs are applied after dataclass construction.
+        config.__post_init__()
 
         if self._deep_config is not None and config.moa != self._deep_config.moa:
             raise build_error(
@@ -611,6 +626,8 @@ class DeepAgent(BaseAgent):
                     else client_cfg.client_provider
                 )
         _bind_inner_react_max_iterations(new_react_config, config.max_iterations)
+        new_react_config.on_max_iterations = config.on_max_iterations
+        new_react_config.max_iterations_hard_limit = config.max_iterations_hard_limit
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -1244,6 +1261,8 @@ class DeepAgent(BaseAgent):
 
         react_config = ReActAgentConfig()
         _bind_inner_react_max_iterations(react_config, cfg.max_iterations)
+        react_config.on_max_iterations = cfg.on_max_iterations
+        react_config.max_iterations_hard_limit = cfg.max_iterations_hard_limit
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         if cfg.kv_cache_affinity_config is not None:
@@ -1565,6 +1584,17 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
+    def inherit_invocation_log_dir(self, parent_dir: str | None) -> None:
+        """Copy a parent invocation log directory when this agent has none."""
+        if (
+            parent_dir is None
+            or self._deep_config is None
+            or self._deep_config.invocation_log_dir is not None
+        ):
+            return
+        # Assign the field directly. configure() hot-reloads rails and the model.
+        self._deep_config = replace(self._deep_config, invocation_log_dir=parent_dir)
+
     @staticmethod
     def _bind_inherited_artifact_root(subagent: Any) -> Any:
         """Point subagent file writes at the parent's current artifact root.
@@ -1613,7 +1643,10 @@ class DeepAgent(BaseAgent):
             logger.info("already get deepagent instance, return it")
             # Only bind the field here; cwd is applied in _ensure_initialized
             # so create_subagent does not mutate the parent's ContextVar.
-            return self._bind_inherited_artifact_root(spec)
+            spec = self._bind_inherited_artifact_root(spec)
+            parent_log_dir = self._deep_config.invocation_log_dir if self._deep_config is not None else None
+            spec.inherit_invocation_log_dir(parent_log_dir)
+            return spec
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
             workspace_path = (
@@ -1648,6 +1681,9 @@ class DeepAgent(BaseAgent):
             "mcps": spec.mcps,
             "rails": subagent_rails,
             "enable_task_loop": spec.enable_task_loop,
+            "invocation_log_dir": (
+                spec.invocation_log_dir if spec.invocation_log_dir is not None else self._deep_config.invocation_log_dir
+            ),
             "max_iterations": (
                 spec.max_iterations
                 if spec.max_iterations is not None
@@ -2471,6 +2507,7 @@ class DeepAgent(BaseAgent):
         session: Optional[Session],
         *,
         streaming: bool = False,
+        host_iteration_limit: int | None = None,
     ) -> Dict[str, Any]:
         """Invoke inner ReActAgent exactly once.
 
@@ -2496,6 +2533,13 @@ class DeepAgent(BaseAgent):
             )
 
         effective_inputs = self._to_effective_inputs(modified)
+        steering_queue = ctx.steering_queue
+        if steering_queue is None:
+            steering_queue = asyncio.Queue()
+            ctx.bind_steering_queue(steering_queue)
+        effective_inputs["_steering_queue"] = steering_queue
+        if host_iteration_limit is not None:
+            effective_inputs["_host_max_iterations"] = host_iteration_limit
         if streaming:
             return await self._react_agent.invoke(
                 effective_inputs,
@@ -2935,13 +2979,20 @@ class DeepAgent(BaseAgent):
                     f", query={query_preview}",
                 )
 
-                await controller.submit_round(
-                    session, current_query,
-                    is_follow_up=is_follow_up,
-                    run_kind=modified.run_kind,
-                    run_context=round_run_context,
-                    turn_number=modified.turn_number,
-                )
+                from openjiuwen.harness.moa.state import active_moa_input_origin
+
+                origin_token = active_moa_input_origin.set("internal") if outer_round > 1 else None
+                try:
+                    await controller.submit_round(
+                        session, current_query,
+                        is_follow_up=is_follow_up,
+                        run_kind=modified.run_kind,
+                        run_context=round_run_context,
+                        turn_number=modified.turn_number,
+                    )
+                finally:
+                    if origin_token is not None:
+                        active_moa_input_origin.reset(origin_token)
                 result = await controller.wait_round_completion(timeout=timeout)
 
                 result_type = result.get("result_type", "N/A")
@@ -2995,6 +3046,15 @@ class DeepAgent(BaseAgent):
                     }
                 # Note: MaxOuterRounds yields its own error result inside the loop,
                 # so no additional yield is needed here.
+        except asyncio.CancelledError:
+            try:
+                with anyio.fail_after(1.5, shield=True):
+                    await self._cancel_session_deep_tasks(session_id)
+            except TimeoutError:
+                logger.warning(
+                    "Cancel session deep tasks timed out; continuing cleanup"
+                )
+            raise
         finally:
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)
@@ -3174,6 +3234,7 @@ class DeepAgent(BaseAgent):
         ctx: AgentCallbackContext,
         session: Optional[Session],
         stream_modes: Optional[List[StreamMode]],
+        *, host_iteration_limit: int | None = None,
     ) -> AsyncIterator[Any]:
         """Stream from inner ReActAgent exactly once."""
         modified = ctx.inputs
@@ -3189,8 +3250,16 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
+        effective_inputs = self._to_effective_inputs(modified)
+        steering_queue = ctx.steering_queue
+        if steering_queue is None:
+            steering_queue = asyncio.Queue()
+            ctx.bind_steering_queue(steering_queue)
+        effective_inputs["_steering_queue"] = steering_queue
+        if host_iteration_limit is not None:
+            effective_inputs["_host_max_iterations"] = host_iteration_limit
         async with aclosing(self._react_agent.stream(
-            self._to_effective_inputs(modified), session, stream_modes,
+            effective_inputs, session, stream_modes,
         )) as chunks:
             async for chunk in chunks:
                 yield chunk
@@ -3252,6 +3321,23 @@ class DeepAgent(BaseAgent):
                 exc_info=True,
             )
 
+    @contextmanager
+    def _invocation_log_context(self, session: Session | None):
+        """Capture this invocation without switching process-global log paths."""
+        directory = self._deep_config.invocation_log_dir if self._deep_config is not None else None
+        with ExitStack() as stack:
+            scope = None
+            if directory:
+                session_id = session.get_session_id() if session is not None else ""
+                try:
+                    scope = stack.enter_context(invocation_log_scope(
+                        directory, agent_id=self.card.id,
+                        session_id=session_id, role=self.card.name,
+                    ))
+                except Exception as exc:
+                    logger.warning("Invocation log capture unavailable: %s", type(exc).__name__)
+            yield scope
+
     async def invoke(
         self,
         inputs: Any,
@@ -3269,36 +3355,73 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
-        ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
+        task_loop_enabled = bool(
+            self._deep_config
+            and self._deep_config.enable_task_loop
+            and host_iteration_limit is None
+        )
+        with self._invocation_log_context(session):
+            ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+            if self._deep_config is not None and not self._deep_config.enable_task_loop:
+                ctx.bind_steering_queue(asyncio.Queue())
 
-        self._invoke_active = True
-        try:
-            result: Dict[str, Any]
-            async with ctx.lifecycle(
-                AgentCallbackEvent.BEFORE_INVOKE,
-                AgentCallbackEvent.AFTER_INVOKE,
-            ):
-                await self._sync_expert_role_attachment(invoke_inputs, session)
-                if (
-                    self._deep_config is not None
-                    and self._deep_config.enable_task_loop
-                    and not self._is_resume_input(invoke_inputs)
+            proposal_owner = self._proposal_owner()
+            proposal_binding = proposal_owner.begin_work(
+                session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
+            ) if proposal_owner is not None and session is not None else None
+            proposal_tokens = (
+                proposal_owner.activate(proposal_binding.identity)
+                if proposal_binding is not None else None
+            )
+            proposal_succeeded = False
+
+            self._invoke_active = True
+            try:
+                result: Dict[str, Any]
+                async with ctx.lifecycle(
+                    AgentCallbackEvent.BEFORE_INVOKE,
+                    AgentCallbackEvent.AFTER_INVOKE,
                 ):
-                    result = await self._run_task_loop_invoke(ctx, session)
-                else:
-                    result = await self._run_single_round_invoke(ctx, session)
-                invoke_inputs.result = result
+                    await self._sync_expert_role_attachment(invoke_inputs, session)
+                    if (
+                        task_loop_enabled
+                        and not self._is_resume_input(invoke_inputs)
+                    ):
+                        result = await self._run_task_loop_invoke(ctx, session)
+                    else:
+                        result = await self._run_single_round_invoke(
+                            ctx, session, host_iteration_limit=host_iteration_limit,
+                        )
+                    invoke_inputs.result = result
 
-            if session is not None:
-                self.save_state(session)
-                self.clear_state(session)
-            return invoke_inputs.result
-        finally:
-            self._invoke_active = False
-            if owns_session and session is not None:
-                await session.post_run()
+                if session is not None:
+                    self.save_state(session)
+                    self.clear_state(session)
+                proposal_succeeded = True
+                return invoke_inputs.result
+            finally:
+                if proposal_binding is not None:
+                    proposal_owner.finish_work(
+                        proposal_binding.identity, result=invoke_inputs.result, succeeded=proposal_succeeded,
+                    )
+                    proposal_owner.reset(proposal_tokens)
+                self._invoke_active = False
+                if owns_session and session is not None:
+                    await session.post_run()
 
     async def stream(
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+        stream_modes: Optional[List[StreamMode]] = None,
+    ) -> AsyncIterator[Any]:
+        """Stream in this task so rails finish only after delivered chunks."""
+        async with aclosing(self._stream_with_context(inputs, session, stream_modes)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _stream_with_context(
         self,
         inputs: Any,
         session: Optional[Session] = None,
@@ -3317,60 +3440,94 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
-        ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
+        task_loop_enabled = bool(
+            self._deep_config
+            and self._deep_config.enable_task_loop
+            and host_iteration_limit is None
+        )
+        with self._invocation_log_context(session):
+            ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+            if self._deep_config is not None and not self._deep_config.enable_task_loop:
+                ctx.bind_steering_queue(asyncio.Queue())
 
-        self._invoke_active = True
-        try:
-            stream_result: Optional[Dict[str, Any]] = None
-            stream_output_parts: List[str] = []
-            terminal_chunk = None
-            interrupted = False
-            async with ctx.lifecycle(
-                AgentCallbackEvent.BEFORE_INVOKE,
-                AgentCallbackEvent.AFTER_INVOKE,
-            ):
-                await self._sync_expert_role_attachment(invoke_inputs, session)
-                if (
-                    self._deep_config is not None
-                    and self._deep_config.enable_task_loop
-                    and not self._is_resume_input(invoke_inputs)
+            proposal_owner = self._proposal_owner()
+            proposal_binding = proposal_owner.begin_work(
+                session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
+            ) if proposal_owner is not None and session is not None else None
+            proposal_tokens = (
+                proposal_owner.activate(proposal_binding.identity)
+                if proposal_binding is not None else None
+            )
+            proposal_succeeded = False
+
+            self._invoke_active = True
+            try:
+                stream_result: Optional[Dict[str, Any]] = None
+                stream_output_parts: List[str] = []
+                terminal_chunk = None
+                interrupted = False
+                async with ctx.lifecycle(
+                    AgentCallbackEvent.BEFORE_INVOKE,
+                    AgentCallbackEvent.AFTER_INVOKE,
                 ):
-                    chunks = self._run_task_loop_stream(ctx, session, stream_modes)
-                else:
-                    chunks = self._run_single_round_stream(ctx, session, stream_modes)
-                async with aclosing(chunks):
-                    async for chunk in chunks:
-                        chunk_result = self._result_from_stream_chunk(chunk, stream_output_parts)
-                        if chunk_result is not None:
-                            stream_result = chunk_result
-                            terminal_chunk = chunk
-                        else:
-                            chunk_type = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
-                            interrupted = interrupted or chunk_type == INTERACTION
-                            if chunk_type == INTERACTION:
-                                stream_result = None
-                                terminal_chunk = None
-                            yield chunk
+                    await self._sync_expert_role_attachment(invoke_inputs, session)
+                    if (
+                        task_loop_enabled
+                        and not self._is_resume_input(invoke_inputs)
+                    ):
+                        chunks = self._run_task_loop_stream(ctx, session, stream_modes)
+                    else:
+                        chunks = self._run_single_round_stream(
+                            ctx, session, stream_modes, host_iteration_limit=host_iteration_limit,
+                        )
+                    async with aclosing(chunks):
+                        async for chunk in chunks:
+                            chunk_result = self._result_from_stream_chunk(chunk, stream_output_parts)
+                            if chunk_result is not None:
+                                stream_result = chunk_result
+                                terminal_chunk = chunk
+                            else:
+                                chunk_type = (
+                                    chunk.get("type") if isinstance(chunk, dict)
+                                    else getattr(chunk, "type", None)
+                                )
+                                interrupted = interrupted or chunk_type == INTERACTION
+                                if chunk_type == INTERACTION:
+                                    if proposal_binding is not None:
+                                        proposal_owner.suspend_work(proposal_binding.identity)
+                                    stream_result = None
+                                    terminal_chunk = None
+                                yield chunk
 
-                if stream_result is None and stream_output_parts and not interrupted:
-                    stream_result = {
-                        "output": "".join(stream_output_parts),
-                        "result_type": "answer",
-                    }
-                if stream_result is not None:
-                    invoke_inputs.result = stream_result
+                    if stream_result is None and stream_output_parts and not interrupted:
+                        stream_result = {
+                            "output": "".join(stream_output_parts),
+                            "result_type": "answer",
+                        }
+                    if stream_result is not None:
+                        invoke_inputs.result = stream_result
 
-            if session is not None:
-                self.save_state(session)
-                self.clear_state(session)
-                if owns_session:
+                if session is not None:
+                    self.save_state(session)
+                    self.clear_state(session)
+                    if owns_session:
+                        await session.post_run()
+                proposal_succeeded = True
+                if invoke_inputs.result is not None:
+                    yield self._finalized_answer_chunk(terminal_chunk, invoke_inputs.result)
+            finally:
+                if proposal_binding is not None:
+                    proposal_result = invoke_inputs.result
+                    if proposal_succeeded and proposal_result is None and interrupted:
+                        proposal_result = {"result_type": "interrupt"}
+                    proposal_owner.finish_work(
+                        proposal_binding.identity, result=proposal_result, succeeded=proposal_succeeded,
+                    )
+                    proposal_owner.reset(proposal_tokens)
+                self._invoke_active = False
+                if owns_session and session is not None:
                     await session.post_run()
-            if invoke_inputs.result is not None:
-                yield self._finalized_answer_chunk(terminal_chunk, invoke_inputs.result)
-        finally:
-            self._invoke_active = False
-            if owns_session and session is not None:
-                await session.post_run()
 
     async def follow_up(
         self,
@@ -3547,6 +3704,12 @@ class DeepAgent(BaseAgent):
             session: Parent session whose runtime subagents should be cancelled.
                 Falls back to the bound loop session when omitted.
         """
+        proposal_session = session or self._loop_session
+        if self._moa_scope_owner is not None:
+            if proposal_session is None:
+                self._moa_scope_owner.close_all("aborted")
+            else:
+                self._moa_scope_owner.close_session(proposal_session.get_session_id(), "aborted")
         coordinator = self._loop_coordinator
         controller = self._loop_controller
         if coordinator is not None and controller is not None:
@@ -3585,6 +3748,18 @@ class DeepAgent(BaseAgent):
         session: Session,
     ) -> RoundOutcome:
         """Execute one interaction work item and optionally propose follow-up work."""
+        # Passive work bypasses invoke()/stream(), so materialize pending rails
+        # before its first BEFORE_INVOKE callback, too.
+        await self._ensure_initialized()
+        proposal_owner = self._proposal_owner()
+        proposal_binding = proposal_owner.begin_work(
+            session.get_session_id(), work=work,
+            interaction_response=isinstance(work.query, InteractiveInput),
+        ) if proposal_owner is not None else None
+        proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+        proposal_succeeded = False
+        proposal_result = None
+        next_work = None
         self._invoke_active = True
         try:
             coordinator, controller = await self.prepare_interaction_task_loop(session)
@@ -3634,6 +3809,7 @@ class DeepAgent(BaseAgent):
                     result = await controller.wait_round_completion(timeout=timeout)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
+                proposal_result = result
                 next_work = (
                     None
                     if is_resume_input
@@ -3648,6 +3824,7 @@ class DeepAgent(BaseAgent):
 
             self.save_state(session)
             self.clear_state(session)
+            proposal_succeeded = True
             return RoundOutcome(next_work=next_work)
         except Exception:
             logger.exception("[DeepAgent] interaction round execution failed")
@@ -3656,6 +3833,12 @@ class DeepAgent(BaseAgent):
                 error_message="interaction round execution failed",
             )
         finally:
+            if proposal_binding is not None:
+                proposal_owner.finish_work(
+                    proposal_binding.identity, result=proposal_result,
+                    succeeded=proposal_succeeded, continuing=next_work is not None,
+                )
+                proposal_owner.reset(proposal_tokens)
             self._invoke_active = False
 
     def _build_interaction_next_work(
@@ -3686,18 +3869,24 @@ class DeepAgent(BaseAgent):
             self.save_state(session, state)
             inputs = copy.deepcopy(work.inputs)
             inputs["query"] = query
-            return RoundWorkItem.user(
+            next_work = RoundWorkItem.user(
                 request_id=work.request_id,
                 inputs=inputs,
                 is_follow_up=True,
                 reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.inherit_work(work, next_work)
+            return next_work
         if self._has_remaining_tasks(session):
-            return RoundWorkItem.user(
+            next_work = RoundWorkItem.user(
                 request_id=work.request_id,
                 inputs=work.inputs,
                 reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.inherit_work(work, next_work)
+            return next_work
         return None
 
     @property
@@ -3814,6 +4003,8 @@ class DeepAgent(BaseAgent):
     async def _stop_interaction_locked(self) -> None:
         """Teardown helper; awaited callbacks must not re-enter start or stop."""
         self._fresh_input_context_factory = None
+        if self._moa_scope_owner is not None:
+            self._moa_scope_owner.close_all("interaction_stopped")
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
@@ -4031,6 +4222,7 @@ class DeepAgent(BaseAgent):
             detached = await self._interaction_output.detach(token)
             if not detached:
                 return
+            self._retire_detached_proposals("output_detached", abort_active_round=abort_active_round)
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_detached")
@@ -4040,9 +4232,24 @@ class DeepAgent(BaseAgent):
         if lease is None:
             return
         if await self._interaction_output.detach(lease.token):
+            self._retire_detached_proposals("output_replaced", abort_active_round=abort_active_round)
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_replaced")
+
+    def _retire_detached_proposals(self, reason: str, *, abort_active_round: bool) -> None:
+        owner = self._moa_scope_owner
+        session = self._interaction_session
+        if owner is None or session is None:
+            return
+        if abort_active_round:
+            owner.close_session(session.get_session_id(), reason)
+        else:
+            active = self._active_interaction_round
+            owner.discard_queued(
+                session.get_session_id(), reason,
+                active_work=active.work if active is not None else None,
+            )
 
     def _emit_interaction_event(self, event: InteractionEvent) -> None:
         # The callback is synchronous because rails can invoke it from several
@@ -4110,6 +4317,8 @@ class DeepAgent(BaseAgent):
             return
 
         logger.info("[DeepAgent] cancelling %s round: %s", active.run_kind, reason)
+        if self._moa_scope_owner is not None:
+            self._moa_scope_owner.close_work(active.work, reason)
         task_id = active.task_id
         controller = self.loop_controller
         scheduler = getattr(controller, "task_scheduler", None) if controller else None
@@ -4211,14 +4420,15 @@ class DeepAgent(BaseAgent):
         if controller is None or not controller.has_follow_up():
             return
         for query in controller.drain_follow_up():
-            self._event_manager.push_user(
-                RoundWorkItem.user(
-                    request_id=None,
-                    inputs={"query": query},
-                    is_follow_up=True,
-                    reset_loop=False,
-                )
+            work = RoundWorkItem.user(
+                request_id=None,
+                inputs={"query": query},
+                is_follow_up=True,
+                reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.mark_automatic(work)
+            self._event_manager.push_user(work)
 
     async def _close_idle_output_if_finished(self) -> None:
         """End an ordinary response stream after its final queued round."""
@@ -4295,6 +4505,8 @@ class DeepAgent(BaseAgent):
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
+        continuation_enqueued = False
+        round_succeeded = False
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return
@@ -4315,7 +4527,9 @@ class DeepAgent(BaseAgent):
                 return
             if outcome.next_work is not None:
                 self._event_manager.push_user(outcome.next_work)
+                continuation_enqueued = True
                 self._notify_work()
+            round_succeeded = outcome.error_code is None
             if outcome.error_code is not None:
                 self._emit_interaction_event(
                     InteractionEvent.execution_error(
@@ -4334,6 +4548,11 @@ class DeepAgent(BaseAgent):
                 )
             )
         finally:
+            owner = self._moa_scope_owner
+            if owner is not None:
+                suspended = session is not None and owner.is_suspended(work, session.get_session_id())
+                if not round_succeeded or (not continuation_enqueued and not suspended):
+                    owner.close_work(work, "work_not_continued")
             self._event_manager.mark_finished(work)
             if session is not None:
                 emitted = await self._emit_round_boundary(session)

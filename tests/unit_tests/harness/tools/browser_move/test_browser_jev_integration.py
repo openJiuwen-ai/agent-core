@@ -116,7 +116,7 @@ def test_real_dom_exposes_labels_values_options_and_compiles_native_actions(dom_
     assert any(c.get("name") == "包早餐" for c in controls)
     menu = build_menu(controls, '搜索“键盘”，城市选新加坡，勾选包早餐', limit=30)
     operations = {step["op"] for step in menu.steps.values()}
-    assert operations == {"fill", "click", "select_option", "set_checked"}
+    assert operations == {"fill", "click", "select_option", "set_checked", "extract_value", "extract_text"}
     assert any(step.get("value") == "sg" for step in menu.steps.values())
     assert "synthetic-secret" not in json.dumps(menu.criteria)
 

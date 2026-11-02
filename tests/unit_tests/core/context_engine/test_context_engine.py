@@ -198,6 +198,35 @@ class TestContextEngine:
     def test_context_overflow_matcher_ignores_unrelated_model_errors(self, message):
         assert ContextEngine.is_context_overflow_error(RuntimeError(message)) is False
 
+    def test_context_overflow_matcher_ignores_unread_streaming_response(self):
+        """An unread stream body must not abort overflow detection."""
+
+        class _UnreadResponse:
+            @property
+            def text(self):
+                raise RuntimeError(
+                    "Attempted to access streaming response content, "
+                    "without having called `read()`."
+                )
+
+            @property
+            def content(self):
+                raise RuntimeError(
+                    "Attempted to access streaming response content, "
+                    "without having called `read()`."
+                )
+
+        provider_error = RuntimeError("auth failed")
+        provider_error.response = _UnreadResponse()
+        wrapped = RuntimeError("model call failed")
+        wrapped.__cause__ = provider_error
+
+        assert ContextEngine.is_context_overflow_error(wrapped) is False
+
+        overflow = RuntimeError("maximum context length is 1048576 tokens")
+        overflow.response = _UnreadResponse()
+        assert ContextEngine.is_context_overflow_error(overflow) is True
+
     @pytest.mark.asyncio
     async def test_recover_from_model_exception_compresses_context_once(self, engine, session):
         context = await engine.create_context(

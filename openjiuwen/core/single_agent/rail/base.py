@@ -1067,6 +1067,9 @@ def rail(
     def decorator(fn):
         @wraps(fn)
         async def wrapper(self, ctx, *args, **kwargs):
+            max_attempts = kwargs.pop("_rail_max_attempts", None)
+            if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+                raise ValueError("_rail_max_attempts must be a positive integer")
             ctx.invoke_start_time = time.monotonic()
             attempt = 0
             while True:
@@ -1119,7 +1122,7 @@ def rail(
                         return ff.result if ff is not None else {}
 
                     retry_request = ctx.consume_retry_request()
-                    if not retry_request:
+                    if not retry_request or (max_attempts is not None and attempt + 1 >= max_attempts):
                         raise
 
                     if retry_request.delay_seconds > 0:
