@@ -26,7 +26,8 @@ DEFAULT_CHUNK_OVERLAP_TOKENS = 300
 RECALL_DIR_NAME = "compression_recall"
 # CreateDirectory keeps 12 characters under MAX_PATH for an 8.3 name. 247 stays
 # on the safe side of the 248-character documented limit. File paths exclude the
-# terminating NUL, so the usable file limit is 259.
+# terminating NUL, so the usable file limit is 259. Other platforms are not
+# checked here; their PATH_MAX is far above these values.
 WINDOWS_DIRECTORY_MAX_CHARS = 247
 WINDOWS_FILE_MAX_CHARS = 259
 _ID_ATTEMPTS = 8
@@ -37,7 +38,11 @@ _ARCHIVE_FILENAMES = ("turns.jsonl", "raw_messages.json", "manifest.json")
 
 
 class ArchiveError(OSError):
-    """Raised when a compression archive cannot be written."""
+    """Raised when writing an archive fails. Callers keep the original messages."""
+
+
+class RecallUnavailable(Exception):
+    """Raised when an archive cannot be offered. Callers compress without a marker."""
 
 
 def directory_matches_memory_id(name: str, memory_id: str) -> bool:
@@ -45,8 +50,19 @@ def directory_matches_memory_id(name: str, memory_id: str) -> bool:
     return name == memory_id or name.startswith(f"{memory_id}_")
 
 
+def _windows_path_limits_apply() -> bool:
+    return os.name == "nt"
+
+
+def _windows_budget_length(path: Path) -> int:
+    """Length of the absolute path, so a relative path or link is not under-counted."""
+    return len(str(path.resolve()))
+
+
 def _exceeds_windows_path_budget(path: Path, *, kind: str) -> bool:
-    return len(str(path)) > _windows_path_limit(kind)
+    if not _windows_path_limits_apply():
+        return False
+    return _windows_budget_length(path) > _windows_path_limit(kind)
 
 
 def _windows_path_limit(kind: str) -> int:
@@ -96,7 +112,7 @@ def archive_compression_messages(
             chunk_size_tokens=chunk_size_tokens,
             chunk_overlap_tokens=chunk_overlap_tokens,
         )
-    except ArchiveError:
+    except (ArchiveError, RecallUnavailable):
         raise
     except Exception as exc:
         raise ArchiveError("compression archive failed") from exc
@@ -116,9 +132,9 @@ def _archive_compression_messages(  # pylint: disable=too-many-locals
     session_id = _context_value(context, "session_id")
     context_id = _context_value(context, "context_id")
     if not workspace_dir:
-        raise OSError("compression recall requires a workspace directory")
+        raise RecallUnavailable("compression recall requires a workspace directory")
     if not session_id:
-        raise OSError("compression recall requires a session id")
+        raise RecallUnavailable("compression recall requires a session id")
 
     workspace = Path(workspace_dir)
     recall_root = _recall_root(workspace, session_id)
@@ -350,17 +366,17 @@ def _validate_archive_root(workspace_dir: Path, recall_root: Path) -> None:
     try:
         relative_parts = recall_root.relative_to(workspace_dir).parts
     except ValueError as exc:
-        raise OSError("compression recall path escapes the workspace") from exc
+        raise RecallUnavailable("compression recall path escapes the workspace") from exc
     current = workspace_dir
     for part in relative_parts:
         current = current / part
         if current.exists() and current.is_symlink():
-            raise OSError("compression recall path contains a symbolic link")
+            raise RecallUnavailable("compression recall path contains a symbolic link")
     if recall_root.exists():
         try:
             recall_root.resolve().relative_to(resolved_workspace)
         except ValueError as exc:
-            raise OSError("compression recall path escapes the workspace") from exc
+            raise RecallUnavailable("compression recall path escapes the workspace") from exc
 
 
 def _new_memory_id(recall_root: Path) -> str:
@@ -374,7 +390,7 @@ def _new_memory_id(recall_root: Path) -> str:
         candidate = f"{base}-{secrets.token_hex(_COLLISION_TOKEN_BYTES)}"
         if not _memory_id_taken(recall_root, candidate):
             return candidate
-    raise ArchiveError("compression archive could not allocate a memory id")
+    raise RecallUnavailable("compression archive could not allocate a memory id")
 
 
 def _allocate_hex_id(recall_root: Path, nbytes: int) -> str:
@@ -382,7 +398,7 @@ def _allocate_hex_id(recall_root: Path, nbytes: int) -> str:
         candidate = secrets.token_hex(nbytes)
         if not _memory_id_taken(recall_root, candidate):
             return candidate
-    raise ArchiveError("compression archive could not allocate a memory id")
+    raise RecallUnavailable("compression archive could not allocate a memory id")
 
 
 def _allocate_temp_token(recall_root: Path, memory_id: str) -> str:
@@ -390,7 +406,7 @@ def _allocate_temp_token(recall_root: Path, memory_id: str) -> str:
         token = secrets.token_hex(_TEMP_TOKEN_BYTES)
         if not (recall_root / f".{memory_id}.{token}.tmp").exists():
             return token
-    raise ArchiveError("compression archive could not allocate a temporary directory")
+    raise RecallUnavailable("compression archive could not allocate a temporary directory")
 
 
 def _memory_id_taken(recall_root: Path, memory_id: str) -> bool:
@@ -427,7 +443,7 @@ def _ensure_paths_fit(entries: list[tuple[Path, str]]) -> None:
     for path, kind in entries:
         if _exceeds_windows_path_budget(path, kind=kind):
             limit = _windows_path_limit(kind)
-            raise ArchiveError(
+            raise RecallUnavailable(
                 f"compression archive path exceeds the Windows {kind} limit ({limit}): {path}"
             )
 

@@ -14,7 +14,10 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     get_session_memory_runtime,
 )
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import ArchiveError
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
+    ArchiveError,
+    RecallUnavailable,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
     resolve_context_max,
@@ -79,6 +82,13 @@ class SessionMemoryCompressor(ContextProcessor):
                 original_messages=original_messages,
                 messages_to_compress=original_messages[: len(original_messages) - len(preserved_messages)],
             )
+        except RecallUnavailable as exc:
+            logger.warning(
+                "[%s] compression recall unavailable, continuing without a marker: %s",
+                self.processor_type(),
+                exc,
+            )
+            archive = None
         except ArchiveError as exc:
             logger.error(
                 "[%s] skipping compression to preserve messages: %s",
@@ -111,8 +121,9 @@ class SessionMemoryCompressor(ContextProcessor):
         """Archive messages replaced by the session memory block.
 
         Returns ``None`` when recall is disabled or there is nothing to archive.
-        ``ArchiveError`` propagates so the caller can skip replacement and keep
-        the original messages.
+        ``RecallUnavailable`` and ``ArchiveError`` propagate. The caller continues
+        compression without a marker for the former, and keeps the original
+        messages for the latter.
         """
         get_recall_config = getattr(context, "compression_recall_config", None)
         recall_config = get_recall_config() if callable(get_recall_config) else None

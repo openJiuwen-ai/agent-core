@@ -46,7 +46,7 @@ def recall_compressed_context(
     if not session_id:
         raise CompressionRecallError("compression recall requires a session")
     memory_id = (memory_id or "").strip()
-    if memory_id and not _MEMORY_ID_RE.fullmatch(memory_id):
+    if memory_id and not _memory_id_is_safe(memory_id):
         raise CompressionRecallError("memory_id is invalid")
     if not query or not query.strip():
         raise CompressionRecallError("query is required")
@@ -130,7 +130,15 @@ def _recall_single_archive(
     return result
 
 
+def _memory_id_is_safe(memory_id: str) -> bool:
+    if not _MEMORY_ID_RE.fullmatch(memory_id):
+        return False
+    return all(part not in {".", ".."} for part in Path(memory_id).parts)
+
+
 def _directories_for_memory_id(session_root: Path, memory_id: str) -> list[Path]:
+    if not _memory_id_is_safe(memory_id):
+        return []
     matches: list[Path] = []
     exact = session_root / memory_id
     if _is_real_directory(exact):

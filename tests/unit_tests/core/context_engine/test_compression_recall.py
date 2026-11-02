@@ -723,12 +723,25 @@ def _path_of_length(length: int) -> Path:
     return Path("x" * length)
 
 
-def test_path_budget_rejects_directory_over_247_and_file_over_259():
+def test_path_budget_rejects_directory_over_247_and_file_over_259(monkeypatch):
     exceeds = archive_module._exceeds_windows_path_budget
+    monkeypatch.setattr(archive_module, "_windows_budget_length", lambda path: len(str(path)))
+    monkeypatch.setattr(archive_module, "_windows_path_limits_apply", lambda: True)
     assert exceeds(_path_of_length(247), kind="directory") is False
     assert exceeds(_path_of_length(259), kind="file") is False
     assert exceeds(_path_of_length(248), kind="directory") is True
     assert exceeds(_path_of_length(260), kind="file") is True
+    monkeypatch.setattr(archive_module, "_windows_path_limits_apply", lambda: False)
+    assert exceeds(_path_of_length(248), kind="directory") is False
+    assert exceeds(_path_of_length(260), kind="file") is False
+
+
+def test_windows_budget_length_uses_resolved_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    relative = Path("rel")
+    resolved_length = len(str((tmp_path / "rel").resolve()))
+    assert archive_module._windows_budget_length(relative) == resolved_length
+    assert resolved_length > len(str(relative))
 
 
 def test_archive_paths_fit_accident_root(monkeypatch):
@@ -785,13 +798,14 @@ def test_archive_paths_fit_accident_root(monkeypatch):
     assert [path.name for path in recall_root.iterdir() if path.name.startswith(".")] == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path budget is only enforced on Windows")
 def test_archive_preflight_rejects_without_creating_directories(monkeypatch):
     session_id = "s"
     workspace = _workspace_for_recall_root_length(189, session_id)
     memory_id = "20260102T030405123456Z-ab12"
     monkeypatch.setattr(archive_module, "_new_memory_id", lambda _root: memory_id)
 
-    with pytest.raises(archive_module.ArchiveError):
+    with pytest.raises(archive_module.RecallUnavailable):
         _archive(
             workspace,
             [UserMessage(content="database retries"), AssistantMessage(content="use backoff")],
@@ -909,6 +923,54 @@ async def test_prefix_compact_skips_archive_when_nothing_to_compress(tmp_path):
     )
 
     assert archive is None
+    assert list(tmp_path.rglob("compression_recall")) == []
+
+
+def test_missing_session_is_recall_unavailable(tmp_path):
+    context = _context(tmp_path, session_id="")
+    with pytest.raises(archive_module.RecallUnavailable):
+        archive_compression_messages(
+            context=context,
+            processor_type="DialogueCompressor",
+            original_messages=[UserMessage(content="keep")],
+            messages_to_compress=[UserMessage(content="keep")],
+            preceding_messages=[],
+        )
+
+
+def test_recall_rejects_parent_directory_memory_id(tmp_path):
+    with pytest.raises(CompressionRecallError, match="invalid"):
+        recall_compressed_context(
+            workspace_dir=str(tmp_path),
+            session_id="session-1",
+            memory_id="..",
+            query="database",
+        )
+
+
+@pytest.mark.asyncio
+async def test_prefix_compact_continues_without_marker_when_recall_unavailable(tmp_path, monkeypatch):
+    def _unavailable(_entries):
+        raise archive_module.RecallUnavailable("compression archive path exceeds the Windows file limit")
+
+    monkeypatch.setattr(archive_module, "_ensure_paths_fit", _unavailable)
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
+    compressor._compression_executor = executor
+    context = _context(tmp_path, recall_config=CompressionRecallConfig(enabled=True))
+    messages = [
+        UserMessage(content="Historical request"),
+        AssistantMessage(content="historical work " * 600),
+        UserMessage(content="Current task"),
+    ]
+    window = ContextWindow(system_messages=[], context_messages=messages, tools=[])
+
+    event, updated = await compressor.on_get_context_window(context, window)
+
+    assert event is not None
+    context.set_messages.assert_called_once()
+    assert all("COMPRESSION_RECALL" not in str(message.content) for message in updated.context_messages)
     assert list(tmp_path.rglob("compression_recall")) == []
 
 

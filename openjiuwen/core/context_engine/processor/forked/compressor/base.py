@@ -12,7 +12,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import ArchiveError
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
+    ArchiveError,
+    RecallUnavailable,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
@@ -228,6 +231,13 @@ class PrefixCompactProcessor(ContextProcessor):
                 original_messages=original_messages,
                 span=span,
             )
+        except RecallUnavailable as exc:
+            logger.warning(
+                "[%s] compression recall unavailable, continuing without a marker: %s",
+                self.processor_type(),
+                exc,
+            )
+            archive = None
         except ArchiveError as exc:
             logger.error(
                 "[%s] skipping compression to preserve messages: %s",
@@ -545,8 +555,9 @@ class PrefixCompactProcessor(ContextProcessor):
         """Archive messages replaced by a prefix compaction.
 
         Returns ``None`` when recall is disabled or there is nothing to archive.
-        ``ArchiveError`` propagates so the caller can skip replacement and keep
-        the original messages.
+        ``RecallUnavailable`` and ``ArchiveError`` propagate. The caller continues
+        compression without a marker for the former, and keeps the original
+        messages for the latter.
         """
         get_recall_config = getattr(context, "compression_recall_config", None)
         recall_config = get_recall_config() if callable(get_recall_config) else None

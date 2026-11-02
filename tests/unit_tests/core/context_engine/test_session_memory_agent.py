@@ -10,6 +10,7 @@ import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
+from openjiuwen.core.context_engine.processor.forked.compressor.recall import archive as archive_module
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.retriever import (
     recall_compressed_context,
 )
@@ -288,6 +289,26 @@ async def test_session_memory_compressor_skips_archive_when_recall_disabled(tmp_
     notes_path = tmp_path / "session_context.md"
     notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
     context = _recall_test_context(tmp_path, notes_path, recall_enabled=False)
+    processor = SessionMemoryCompressor(
+        SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
+    )
+
+    event, updated = await processor.on_get_context_window(context, _recall_test_window())
+
+    assert event is not None
+    assert "COMPRESSION_RECALL" not in updated.context_messages[0].content
+    assert list(Path(tmp_path).glob("context/*/compression_recall/*")) == []
+
+
+@pytest.mark.asyncio
+async def test_session_memory_compressor_continues_without_marker_when_recall_unavailable(tmp_path, monkeypatch):
+    def _unavailable(_entries):
+        raise archive_module.RecallUnavailable("compression archive path exceeds the Windows file limit")
+
+    monkeypatch.setattr(archive_module, "_ensure_paths_fit", _unavailable)
+    notes_path = tmp_path / "session_context.md"
+    notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
+    context = _recall_test_context(tmp_path, notes_path, recall_enabled=True)
     processor = SessionMemoryCompressor(
         SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
     )
