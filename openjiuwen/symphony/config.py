@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import PurePath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue, ValidationInfo, field_validator
 
 
 def _path_text(value: object) -> object:
@@ -113,8 +113,8 @@ class FingerprintExtractionConfig(SymphonyConfigModel):
     llm_enabled: bool = Field(False, title="模型语义提取", description="是否在确定性元数据提取之外调用模型提取语义。")
     batch_size: PositiveInt = Field(16, title="提取批量大小", description="每批处理的对象数。")
     max_concurrency: PositiveInt = Field(4, title="提取并发上限", description="独立指纹服务的模型请求并发上限。")
-    body_limit: PositiveInt = Field(16_000, title="正文字符上限", description="送入语义提取的对象正文字符数上限。")
-    max_tokens: PositiveInt | None = Field(
+    max_body_chars: PositiveInt = Field(16_000, title="正文字符上限", description="送入语义提取的对象正文字符数上限。")
+    max_output_tokens: PositiveInt | None = Field(
         2_048, title="提取输出上限", description="提取模型单次输出的 token 数上限；None 表示不传此参数，沿用注入模型的配置。",
     )
     timeout_seconds: PositiveFloat | None = Field(
@@ -126,7 +126,7 @@ class FingerprintEvaluationConfig(SymphonyConfigModel):
     """指纹评估参数；静态评估不依赖模型评估开关。"""
 
     llm_enabled: bool = Field(False, title="模型评估", description="是否追加模型辅助评估。")
-    evidence_text_limit: PositiveInt = Field(512, title="证据文本长度", description="单条评估证据文本的字符数上限。")
+    max_evidence_chars: PositiveInt = Field(512, title="证据文本长度", description="单条评估证据文本的字符数上限。")
 
 
 class FingerprintCacheConfig(SymphonyConfigModel):
@@ -206,22 +206,6 @@ class FlowConfig(SymphonyConfigModel):
     )
 
 
-class DiscoveryBudgetConfig(SymphonyConfigModel):
-    """Discovery 候选提示预算；模型上下文大小必须由调用方明确提供或使用现有默认值。"""
-
-    candidate_budget_ratio: Annotated[float, Field(gt=0, le=1)] = Field(
-        0.01, title="候选预算比例", description="候选提示可占用的上下文比例，范围大于 0 且不超过 1。",
-    )
-    context_window_tokens: PositiveInt = Field(
-        200_000, title="上下文窗口", description="用于计算候选预算的上下文容量，单位 token。",
-    )
-
-    @property
-    def candidate_budget_tokens(self) -> int:
-        """按现有规则计算候选 token 预算，最少为 1。"""
-        return max(1, int(self.context_window_tokens * self.candidate_budget_ratio))
-
-
 class DiscoveryOutputConfig(SymphonyConfigModel):
     """Discovery 返回内容和列表分页的预算。"""
 
@@ -234,35 +218,45 @@ class DiscoveryOutputConfig(SymphonyConfigModel):
 
 
 class DiscoveryPromptConfig(SymphonyConfigModel):
-    """Discovery 提示中的优先对象；现有真实对象标识保持原值。"""
+    """Discovery 候选提示的容量与优先对象；不推断模型上下文，现有对象标识保持原值。"""
 
+    candidate_budget_ratio: Annotated[float, Field(gt=0, le=1)] = Field(
+        0.01, title="候选预算比例", description="候选提示可占用的上下文比例，范围大于 0 且不超过 1。",
+    )
+    context_window_tokens: PositiveInt = Field(
+        200_000, title="上下文窗口", description="用于计算候选预算的上下文容量，单位 token。",
+    )
     preferred_capability_ids: list[str] = Field(
         default_factory=lambda: ["skill-creator", "swarmskill-creator", "symphony-assistant"],
         title="优先对象标识", description="提示优先展示的对象标识列表，顺序有意义；不表示已授权执行。",
     )
 
+    @property
+    def candidate_budget_tokens(self) -> int:
+        """按现有规则计算候选 token 预算，最少为 1；只读派生值不进入配置输入或序列化。"""
+        return max(1, int(self.context_window_tokens * self.candidate_budget_ratio))
+
 
 class DiscoveryConfig(SymphonyConfigModel):
     """Discovery 的纯配置；不包含应用 YAML 加载和模型上下文推断。"""
 
-    budget: DiscoveryBudgetConfig = Field(
-        default_factory=DiscoveryBudgetConfig, title="候选预算", description="按上下文容量计算候选提示预算。",
+    prompt: DiscoveryPromptConfig = Field(
+        default_factory=DiscoveryPromptConfig, title="提示策略", description="候选提示的上下文容量、预算比例和优先对象设置。",
     )
     output: DiscoveryOutputConfig = Field(
         default_factory=DiscoveryOutputConfig, title="输出预算", description="发现结果、列表和增量提示的限制。",
     )
     use_existing_index: bool = Field(False, title="使用已有索引", description="是否使用已经构建的检索索引辅助发现。")
-    prompt: DiscoveryPromptConfig = Field(
-        default_factory=DiscoveryPromptConfig, title="提示策略", description="优先对象等发现提示设置。",
-    )
 
 
 class ExperienceClusteringConfig(SymphonyConfigModel):
-    """经验库构建的聚类设置。"""
+    """经验库先按能力集合分组，再在各组内对成功轨迹的查询聚类。"""
 
     min_cluster_size: PositiveInt = Field(1, title="最小聚类规模", description="一个聚类至少包含的记录数。")
-    capability_cluster_num: PositiveInt | None = Field(
-        None, title="对象聚类数", description="指定对象聚类数量；None 表示由现有构建逻辑决定。",
+    query_clusters_per_capability_set: PositiveInt | None = Field(
+        None, title="每能力集合的查询聚类数",
+        description="每个能力集合内成功查询的聚类数；None 使用自适应数量，不表示能力类别数或经验库总簇数。",
+        examples=[None, 4],
     )
 
 
@@ -327,18 +321,17 @@ class CapabilityProfilesConfig(SymphonyConfigModel):
     enabled: bool = Field(False, title="启用对象画像", description="是否在分类前生成对象语义画像。")
     select_rules_enabled: bool = Field(True, title="提取选择规则", description="生成画像时是否同时提取选择和排除规则。")
     batch_size: PositiveInt = Field(48, title="画像提取批量", description="每批画像提取处理的对象数。")
-    description_limit: Annotated[int, Field(ge=40)] = Field(
+    max_description_chars: Annotated[int, Field(ge=40)] = Field(
         140, title="画像描述长度", description="对象画像描述的字符数上限。",
     )
-    rule_limit: Annotated[int, Field(ge=40)] = Field(120, title="选择规则长度", description="单条画像选择规则的字符数上限。")
+    max_rule_chars: Annotated[int, Field(ge=40)] = Field(120, title="选择规则长度", description="单条画像选择规则的字符数上限。")
 
 
 class TreePromptPolicyConfig(SymphonyConfigModel):
-    """用户可调的提示确定性、结构发现种子和缓存观测策略。"""
+    """用户可调的提示确定性和结构发现种子。"""
 
     deterministic: bool = Field(True, title="确定性提示", description="是否使用稳定排序和确定性提示构造。")
     discovery_seed: int = Field(42, title="结构发现种子", description="分类结构发现过程的随机种子。")
-    cache_observability: bool = Field(True, title="缓存观测", description="是否记录树构建缓存的观测信息。")
 
 
 class TreeIncrementalConfig(SymphonyConfigModel):
@@ -363,7 +356,7 @@ class IndexRequestConfig(SymphonyConfigModel):
     caching: bool = Field(False, title="树构建缓存", description="是否启用底层树构建缓存。")
     max_retries: NonNegativeInt = Field(2, title="最大重试次数", description="模型请求失败后的最多重试次数。")
     timeout_seconds: PositiveFloat = Field(420.0, title="索引请求超时", description="单次索引构建模型请求超时，单位秒。")
-    context_window: NonNegativeInt = Field(0, title="构建上下文窗口", description="上下文 token 预算；0 表示未显式指定。")
+    context_window_tokens: NonNegativeInt = Field(0, title="构建上下文窗口", description="上下文 token 预算；0 表示未显式指定。")
     max_output_tokens: NonNegativeInt = Field(0, title="构建输出预算", description="模型输出 token 上限；0 表示未显式指定。")
     classification_batch_limit: PositiveInt = Field(32, title="索引分类批量", description="索引分类请求处理的最多对象数。")
 
@@ -371,12 +364,20 @@ class IndexRequestConfig(SymphonyConfigModel):
 class TreeExpansionConfig(SymphonyConfigModel):
     """动态树派生阈值的倍率，沿用 schema.py 中的现有常量。"""
 
-    max_capabilities_per_node: PositiveFloat = Field(1.5, title="节点容量倍率", description="节点容量相对分支数的倍率。")
-    expand_threshold: PositiveFloat = Field(0.7, title="扩展阈值倍率", description="节点扩展阈值相对分支数的倍率。")
-    early_stop: PositiveFloat = Field(1.7, title="提前停止倍率", description="提前停止对象数相对分支数的倍率。")
-    lazy_split: PositiveFloat = Field(1.3, title="延迟拆分倍率", description="延迟拆分阈值相对节点容量的倍率。")
-    classification_batch: PositiveFloat = Field(6.0, title="分类批量倍率", description="分类批量相对分支数的倍率。")
-    structure_sample: PositiveFloat = Field(12.0, title="结构采样倍率", description="结构采样数量相对分支数的倍率。")
+    max_capabilities_per_node_multiplier: PositiveFloat = Field(
+        1.5, title="节点容量倍率", description="节点容量相对分支数的倍率。",
+    )
+    expand_threshold_multiplier: PositiveFloat = Field(
+        0.7, title="扩展阈值倍率", description="节点扩展阈值相对分支数的倍率。",
+    )
+    early_stop_multiplier: PositiveFloat = Field(1.7, title="提前停止倍率", description="提前停止对象数相对分支数的倍率。")
+    lazy_split_multiplier: PositiveFloat = Field(1.3, title="延迟拆分倍率", description="延迟拆分阈值相对节点容量的倍率。")
+    classification_batch_multiplier: PositiveFloat = Field(
+        6.0, title="分类批量倍率", description="分类批量相对分支数的倍率；区别于 request.classification_batch_limit 的绝对上限。",
+    )
+    structure_sample_multiplier: PositiveFloat = Field(
+        12.0, title="结构采样倍率", description="结构采样数量相对分支数的倍率。",
+    )
 
 
 class DynamicTreeConfig(SymphonyConfigModel):
@@ -398,18 +399,25 @@ class IndexTaskConfig(SymphonyConfigModel):
     preserve_previous_index_on_failure: bool = Field(
         True, title="失败保留旧索引", description="构建失败时是否保留上一次成功发布的索引。",
     )
-    strict_failure: bool = Field(False, title="严格失败模式", description="是否按现有 toolkit 的严格失败方式报告错误。")
-    allow_fallback_tree: bool = Field(True, title="允许回退分类树", description="是否允许沿用现有工作流的回退树策略。")
+    allow_fallback_tree: bool = Field(
+        True, title="允许回退分类树",
+        description="是否允许构建降级为回退树；False 对应原严格失败策略，缺少模型配置时应提前失败。"
+        "启用旧索引保留且存在可用旧索引时，不以回退树覆盖旧索引；运行接入阶段落实这些策略。",
+    )
 
 
 class IndexOutputConfig(SymphonyConfigModel):
-    """索引构建过程与产物的展示设置，分别控制详细输出、分类树展示和 HTML 预览。"""
+    """索引构建的输出与诊断设置，分别控制详细输出、分类树展示、HTML 预览和缓存指标。"""
 
     generate_tree_html: bool = Field(False, title="生成树预览", description="是否生成分类树 HTML 预览产物。")
     verbose: bool = Field(False, title="详细构建输出", description="是否显示现有构建过程的详细信息。")
     show_tree: bool = Field(True, title="显示分类树", description="是否显示构建后的分类树；区别于生成 HTML 预览文件。")
     display_capability_root: ConfigPath | None = Field(
         None, title="展示对象目录", description="输出展示使用的对象目录文本；不影响扫描根目录。",
+    )
+    cache_metrics_enabled: bool = Field(
+        True, title="缓存指标观测",
+        description="是否记录并展示树构建模型请求的缓存命中和提示指纹统计；独立于 request.caching 的缓存策略开关。",
     )
 
 
@@ -620,7 +628,9 @@ class LogitSelectionConfig(SymphonyConfigModel):
     require_single_token_codes: bool = Field(True, title="要求单 token 编码", description="候选编码是否必须对应单个 token。")
     return_probabilities: bool = Field(True, title="返回候选概率", description="是否在打分结果中返回候选概率。")
     fallback_mode: Literal["error", "generate"] = Field(
-        "error", title="打分回退方式", description="不支持候选打分时直接报错，或回退为生成式选择。",
+        "error", title="打分回退方式",
+        description="不支持候选打分或关闭紧凑编码时直接报错，或回退为生成式选择；"
+        "logit_selection 模式关闭紧凑编码时必须选择 generate。",
     )
     max_candidates: PositiveInt = Field(512, title="最大打分候选数", description="一次候选打分考虑的最多编码数量。")
     min_probability: Probability | None = Field(
@@ -629,21 +639,28 @@ class LogitSelectionConfig(SymphonyConfigModel):
     trace_top_n: NonNegativeInt = Field(10, title="打分追踪数量", description="追踪信息最多记录的高分候选数量。")
 
 
-class RetrievalGenerationConfig(SymphonyConfigModel):
-    """检索分支选择配置，区别于底层模型采样参数 LLMGenerationConfig。"""
+class RetrievalSelectionConfig(SymphonyConfigModel):
+    """检索候选选择方式、解码约束与打分策略；请求预算独立配置，区别于底层模型采样参数。"""
 
     mode: Literal["generate", "logit_selection"] = Field(
-        "generate", title="候选选择方式", description="生成候选编码，或使用模型支持的候选 logit 打分。",
-    )
-    max_tokens: PositiveInt = Field(96, title="选择输出上限", description="分支选择输出的 token 上限。")
-    request_timeout_seconds: PositiveFloat | None = Field(
-        120.0, title="选择请求超时", description="单次候选选择请求超时，单位秒；None 沿用后端策略。",
+        "generate", title="候选选择方式",
+        description="生成候选编码，或使用模型支持的候选 logit 打分；logit_selection 需要启用 "
+        "render.compact_codes_enabled，否则 logit.fallback_mode 必须为 generate。",
     )
     trie_constrained_decoding_enabled: bool = Field(
         False, title="字典树约束解码", description="是否在支持的模型后端启用字典树约束解码。",
     )
     logit: LogitSelectionConfig = Field(
         default_factory=LogitSelectionConfig, title="候选打分", description="logit_selection 模式的候选打分设置。",
+    )
+
+
+class RetrievalRequestBudgetConfig(SymphonyConfigModel):
+    """检索模型请求的输出与超时预算；自然语言检索允许沿用后端超时策略。"""
+
+    max_output_tokens: PositiveInt = Field(96, title="选择输出上限", description="分支选择输出的 token 上限。")
+    timeout_seconds: PositiveFloat | None = Field(
+        120.0, title="选择请求超时", description="单次候选选择请求超时，单位秒；None 沿用后端策略。",
     )
 
 
@@ -660,9 +677,31 @@ class RetrievalSearchConfig(SymphonyConfigModel):
     render: RetrievalRenderConfig = Field(
         default_factory=RetrievalRenderConfig, title="提示渲染", description="渐进检索的树展示和编码策略。",
     )
-    generation: RetrievalGenerationConfig = Field(
-        default_factory=RetrievalGenerationConfig, title="候选选择", description="渐进检索的生成或打分策略。",
+    request: RetrievalRequestBudgetConfig = Field(
+        default_factory=RetrievalRequestBudgetConfig, title="检索请求预算", description="候选选择请求的输出和超时预算。",
     )
+    selection: RetrievalSelectionConfig = Field(
+        default_factory=RetrievalSelectionConfig, title="候选选择", description="渐进检索的生成或打分策略。",
+    )
+
+    @field_validator("selection")
+    @classmethod
+    def _validate_logit_rendering(
+        cls, selection: RetrievalSelectionConfig, info: ValidationInfo,
+    ) -> RetrievalSelectionConfig:
+        """对照前序已校验的 render，拒绝无紧凑编码且禁止生成回退的打分组合。"""
+        render = info.data.get("render")
+        if (
+            render is not None
+            and selection.mode == "logit_selection"
+            and not render.compact_codes_enabled
+            and selection.logit.fallback_mode == "error"
+        ):
+            raise ValueError(
+                "logit_selection 需要 render.compact_codes_enabled=True，"
+                "或设置 selection.logit.fallback_mode='generate' 允许生成式回退"
+            )
+        return selection
 
 
 class RetrievalRequestConfig(SymphonyConfigModel):
@@ -673,11 +712,10 @@ class RetrievalRequestConfig(SymphonyConfigModel):
     )
 
 
-class AgenticRequestConfig(SymphonyConfigModel):
-    """agent toolkit 的检索请求预算，不添加独立检索器的打分策略。"""
+class AgenticRequestConfig(RetrievalRequestBudgetConfig):
+    """工具检索复用请求预算字段，保留超时必须为正数的约束，不添加候选选择策略。"""
 
-    max_tokens: PositiveInt = Field(96, title="工具检索输出上限", description="检索选择请求的输出 token 上限。")
-    request_timeout_seconds: PositiveFloat = Field(120.0, title="工具检索超时", description="单次模型请求超时，单位秒。")
+    timeout_seconds: PositiveFloat = Field(120.0, title="工具检索超时", description="单次模型请求超时，单位秒。")
 
 
 class RetrievalToolNamesConfig(SymphonyConfigModel):
@@ -786,7 +824,7 @@ class RetrievalBuildConfig(SymphonyConfigModel):
         default_factory=CapabilityProfilesConfig, title="对象画像", description="对象画像和选择规则提取设置。",
     )
     prompt: TreePromptPolicyConfig = Field(
-        default_factory=TreePromptPolicyConfig, title="构建提示", description="提示确定性、结构发现种子和缓存观测。",
+        default_factory=TreePromptPolicyConfig, title="构建提示", description="提示确定性和结构发现种子。",
     )
     incremental: TreeIncrementalConfig = Field(
         default_factory=TreeIncrementalConfig, title="增量更新", description="变化比例、分类置信度和结构不均衡策略。",
@@ -795,7 +833,7 @@ class RetrievalBuildConfig(SymphonyConfigModel):
         default_factory=IndexTaskConfig, title="构建任务", description="整体时限、回退和失败处理；区别于单次请求超时。",
     )
     output: IndexOutputConfig = Field(
-        default_factory=IndexOutputConfig, title="产物展示", description="构建输出、分类树展示和预览产物设置。",
+        default_factory=IndexOutputConfig, title="输出与诊断", description="构建输出、分类树展示、预览产物和缓存指标设置。",
     )
 
 
@@ -879,8 +917,9 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
     DynamicTreeConfig, TreeExpansionConfig,
     TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,
     TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
-    RetrievalSearchConfig, RetrievalTraversalConfig, RetrievalRenderConfig, RetrievalGenerationConfig, LogitSelectionConfig,
-    DiscoveryConfig, DiscoveryBudgetConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,
+    RetrievalSearchConfig, RetrievalTraversalConfig, RetrievalRenderConfig, RetrievalSelectionConfig,
+    RetrievalRequestBudgetConfig, LogitSelectionConfig,
+    DiscoveryConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,
     AgenticRetrievalConfig, AgenticRenderConfig, AgenticRequestConfig, RetrievalToolNamesConfig,
     OrchestrationConfig, OrchestrationBuildConfig, GraphMatchingPolicyConfig, OrchestrationPlanConfig,
     FlowConfig, FlowAcceptanceConfig, FlowNarrativeConfig,

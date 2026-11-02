@@ -285,3 +285,71 @@ python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symph
 结果：**227 passed，2 个既有 Pydantic 弃用警告，1.05 秒**，包括现有默认值源对照以及新增 None/正整数预算、零值/负值/布尔值/小数/字符串拒绝验证。未运行格式化或静态检查。测试后仅同步文档，不再次运行未受影响的测试。
 
 此记录对应重放后的 6c9aadd59 加本轮目标指纹配置兼容补丁；重写后的提交与原远端历史不同。当前原远端分支为 e9d715c05，远端更新需使用该明确旧值的租约保护，不能用无保护的强推覆盖后续提交。本地 rebase 和恢复点不等于已经完成远端历史更新。
+
+
+## 2026-11-02 配置树评审后的四项语义整理
+
+### 确认与替代范围
+
+本轮基线为 feature/symphony-config-contract 的 395a5df964c98c982a6231f1a549dbc3feb23a99，开始时工作区干净。用户在独立子智能体评审后确认仅落实前四项，并限定 config.py、配置测试与相关文档，保持默认值，重新生成配置树；业务模块后续迁移。确认方案续写在关联 D 第 11 节，当前有效契约更新到关联 S；本节部分替代早期章节中保留 strict_failure 及使用旧倍率/聚类名称的决定，不重写历史测试事实。
+
+### 实际实施与取舍
+
+- 删除 IndexTaskConfig.strict_failure，回退决策只保留 allow_fallback_tree=True；preserve_previous_index_on_failure=True 继续独立。旧 toolkit 的 not strict_failure 映射作为来源证据，默认值对照显式验证该反向关系。四种保留开关组合均可构造，配置不判断模型齐备性或索引状态；未来运行接入须迁移禁止回退时的缺模型前置失败、错误报告，以及可用旧索引的保护优先级。
+- TreeExpansionConfig 六个字段统一添加 _multiplier 后缀，默认值保持 1.5、0.7、1.7、1.3、6.0、12.0，正数约束不变。保留 lazy_split 相对节点容量、其他五项相对分支数的区别；说明中明确分类批量倍率不替代 request.classification_batch_limit 的绝对上限。
+- 经验聚类字段改为 query_clusters_per_capability_set，默认仍为 None，正整数或 None 的类型不变。中文元数据明确实际处理的是每个能力集合内成功轨迹的查询，而非能力类别数或整个库的簇数，并补充 None/4 示例。
+- RetrievalSearchConfig 使用 Pydantic 字段校验，在前序 render 已校验后检查 generation。logit_selection + 关闭紧凑编码 + error 回退被拒绝，错误路径为 retrieval.search.generation；允许 generate 回退，generate 选择模式不受此限制。选择字段校验以保留定位到 generation 的错误路径，不把 render 与 generation 合并。后端能力检查仍不进入纯配置。
+
+八个退役输入名称（一个删除、七个改名）均按未知字段拒绝，无别名或自动迁移。其余四项评审建议本轮未实施：不移动 search.generation/request、不合并 Discovery 节点、不迁移缓存观测、不统一其他单位字段。模型登记仍为 63 个（公共 48、内部 15），便利导出和业务包根导出保持原样。
+
+### 验证证据
+
+修改前保存目标源码、完整最小输入的默认序列化结果及公共 Schema，临时位置为 /var/folders/xq/wcv2ptms57b92bkfwgbv40zw0000gn/T/symphony-config-semantics-v5x1pmkq。对照时只执行上述七个字段改名及 strict_failure 删除，再比较所有默认值，结果完全一致。Schema 对照只额外排除明确修改的中文元数据和聚类字段新增示例，其余字段、类型、标量约束和默认值完全一致；新组合约束由 Pydantic 校验实现，并以中文说明导出。
+
+实际环境：macOS、主仓已有 Python 3.11.15 / Pydantic 2.12.5 / pytest 9.0.2，PYTHONPATH 指向当前工作树。执行：
+
+```bash
+source /Users/xiaoyulin/Documents/Huawei/code/agent-core/.venv/bin/activate
+export PYTHONPATH=.:${PYTHONPATH:-}
+python scripts/export_symphony_config.py
+python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symphony/test_config_export.py -q
+```
+
+结果：**293 passed，2 个既有 Pydantic 弃用警告，1.10 秒**。覆盖选择模式/紧凑编码/回退方式的八种组合、缺省回退、禁用 retrieval、已构造子模型、Python/JSON 输入和完整错误路径；覆盖旧字段拒绝、倍率正数约束、查询聚类数量的严格整数与自适应值、保留策略组合、默认值来源、序列化和文档导出。警告仍来自 connector_pool.py 与 http_client.py 的既有 class Config。
+
+config.tree.txt 已自动重新生成，保留“全量配置”标题；README 示例与说明、当前 S 和 D 第 11 节同步。本轮按 jw-review 对上述基线到工作区差异自检，核对单一回退决策、字段名与默认值映射、条件校验、输出文档及运行边界，未发现需追加代码修改的问题。配置与导出验证不代表未来 Runtime 适配或真实模型行为已经验证。
+
+未修改业务代码、Runtime、引擎、Swarm、依赖或缓存逻辑；未运行格式化、静态检查或业务链路测试，未提交或推送。测试通过后仅完成文档收尾与索引同步，不重复运行未受影响的配置测试。
+
+
+## 2026-11-02 配置树评审后四项归属与命名整理
+
+### 确认、基线与实际决定
+
+用户明确要求继续落实前次独立评审的后四项，保持默认值，并限制为配置、配置测试与相关文档；关联 D 第 12 节记录确认方案。本轮基线是上一节 293 项测试通过后的未提交工作区，HEAD 仍为 395a5df964c98c982a6231f1a549dbc3feb23a99，完整保留前四项改动及历史证据。本节替代上一节暂缓后四项的实施范围，当前路径由关联 S 统一维护。
+
+- 将 RetrievalGenerationConfig 拆为 RetrievalSelectionConfig 与 RetrievalRequestBudgetConfig。selection 管理模式、解码约束和 logit 打分；request 管理 max_output_tokens=96 与 timeout_seconds=120.0。AgenticRequestConfig 继承预算字段并覆盖不可空的正数超时约束；自然语言检索继续接受 None。没有共享实例、覆盖值或新增后端包装；内部 RetrievalRequestConfig 仍只表达单次 top_k 覆盖。
+- 将 cache_observability 从构建 prompt 移到 output.cache_metrics_enabled，保留 True。中文说明明确这是模型请求缓存命中、提示指纹统计及其展示；不等同于 request.caching，也不因缓存策略关闭而禁用观测。
+- 将 DiscoveryBudgetConfig 的两个字段与只读 candidate_budget_tokens 合到 DiscoveryPromptConfig，删除旧类、登记和 budget 节点；优先对象列表、预算默认值、计算公式及派生值不进入输入/序列化的规则均保留。
+- 公共策略按字符、token、秒统一字段名，完整迁移表见 S 第 3 节。保留所有默认值、类型和约束，尤其是画像字符数至少 40、构建 token 预算的 0、指纹输出预算与自然语言检索超时的 None；独立后端和采样字段不跟随改名。
+
+前四项新增的 logit/紧凑编码组合校验继续生效，错误路径随节点改名为 retrieval.search.selection，错误提示指出 selection.logit.fallback_mode。旧 generation、Discovery budget、旧单位字段和缓存观测路径均被拒绝，无兼容别名；两个退役类不再存在于模块、登记或导出参考。模型总数仍为 63，公共 48、内部 15，__all__ 与业务包根导出不变。
+
+### 验证与交接
+
+本轮开始时保存源码、配置测试、配置树、公共默认值和 Schema 快照，位置为 /var/folders/xq/wcv2ptms57b92bkfwgbv40zw0000gn/T/symphony-config-naming-dh21b8y5。对照使用已声明的字段改名/归位关系，未把不同入口的值合并：**133 个公共叶子项的默认值全部一致，133 项 Schema 标量/容器约束和示例全部一致**。Schema 叶子比较仅排除允许更新的 title/description；另逐个比较 15 个内部模型的完整 Schema，结果完全一致，公共便利导出也一致。组合校验的行为与新错误路径由配置测试验证。
+
+使用主仓已有 Python 3.11.15、Pydantic 2.12.5、pytest 9.0.2，PYTHONPATH 指向当前工作树：
+
+```bash
+source /Users/xiaoyulin/Documents/Huawei/code/agent-core/.venv/bin/activate
+export PYTHONPATH=.:${PYTHONPATH:-}
+python scripts/export_symphony_config.py
+python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symphony/test_config_export.py -q
+```
+
+结果：**339 passed，2 个既有 Pydantic 弃用警告，1.14 秒**。覆盖全部模型默认值与中文元数据、旧类/旧路径拒绝、请求超时可空性差异、各入口预算独立、四种缓存开关组合、提示预算取整与最小值、完整错误路径及往返；前轮的 logit 组合、倍率、聚类与单一回退策略验证继续通过。配置树自动生成并保留“全量配置”标题，导出脚本未改。
+
+当前 S、README 示例及 D 第 12 节已同步；历史设计章节与前轮测试数字保留为当时事实。按 jw-review 对本轮快照到候选的配置、测试和文档差异自检，重点核对分层职责、旧参数映射、默认值/约束、入口隔离、组合校验和独立导出。业务模块、Runtime、引擎、Swarm、依赖、缓存签名和包根导出均未修改；配置验证不表示运行链路已完成迁移。
+
+未运行格式化、静态检查或业务链路测试，未提交或推送。测试通过后仅进行文档及索引收尾，不再次运行未受影响的配置测试。

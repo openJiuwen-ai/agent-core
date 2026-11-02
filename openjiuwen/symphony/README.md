@@ -82,20 +82,40 @@ config = SymphonyConfig.model_validate({
     "retrieval": {
         "build": {
             "request": {"max_concurrency": 4},
-            "dynamic": {"rebalance_interval": 80},
+            "dynamic": {"rebalance_interval": 80, "expansion": {"early_stop_multiplier": 2.0}},
             "task": {"allow_fallback_tree": False},
-            "output": {"show_tree": False},
+            "output": {"show_tree": False, "cache_metrics_enabled": True},
         },
-        "search": {"top_k": 5, "traversal": {"max_parallel_branches": 1}},
+        "search": {
+            "top_k": 5, "traversal": {"max_parallel_branches": 1},
+            "request": {"max_output_tokens": 64, "timeout_seconds": None},
+            "selection": {"mode": "generate"},
+        },
+        "discovery": {"prompt": {"candidate_budget_ratio": 0.02, "context_window_tokens": 100000}},
     },
     "flow": {"acceptance": {"min_successes": 2}},
+    "experience": {"build": {"clustering": {"query_clusters_per_capability_set": 4}}},
 })
 ```
 
 树深度和分支数位于 `retrieval.build.structure`，构建请求预算位于 `retrieval.build.request`；
 动态树的重平衡和扩展倍率位于 `retrieval.build.dynamic`，共用上述树结构，派生阈值由后续运行层计算。
-回退树开关位于 `retrieval.build.task.allow_fallback_tree`，详细输出、分类树展示和 HTML 预览位于 `retrieval.build.output`。
-检索超时位于 `retrieval.search.generation.request_timeout_seconds`。
+六个倍率字段统一以 `_multiplier` 结尾；`lazy_split_multiplier` 相对节点容量，其余相对分支数。
+回退决策仅使用 `retrieval.build.task.allow_fallback_tree`，默认 `True`；原 `strict_failure` 目标字段已删除。
+设置为 `False` 时，后续运行接入须执行缺模型配置时提前失败及禁止回退的策略；存在可用旧索引且启用保留策略时，仍须保护旧索引。
+详细输出、分类树展示、HTML 预览和缓存指标观测位于 `retrieval.build.output`。
+`cache_metrics_enabled=True` 独立控制缓存指标，`retrieval.build.request.caching=False` 继续控制缓存策略。
+候选选择方式、解码约束和打分策略位于 `retrieval.search.selection`；请求预算位于
+`retrieval.search.request`，使用 `max_output_tokens` 和 `timeout_seconds`，默认分别为 96 和 120 秒。
+工具检索 `retrieval.toolkit.request` 使用相同字段名和默认值；只有自然语言检索的超时接受 `None`，两者独立覆盖。
+使用 `logit_selection` 时需要开启 `retrieval.search.render.compact_codes_enabled`，或将
+`retrieval.search.selection.logit.fallback_mode` 设置为 `generate`；否则配置校验报错。
+Discovery 的上下文容量、候选预算比例和优先对象列表统一位于 `retrieval.discovery.prompt`；
+只读 `candidate_budget_tokens` 仍按比例派生，不写入输入配置。原 `generation`、`discovery.budget` 节点已删除。
+公共字符上限统一使用 `max_body_chars`、`max_evidence_chars`、`max_description_chars`、`max_rule_chars`；
+token 预算使用 `max_output_tokens`、`context_window_tokens`。各阶段默认值、0/None 的含义和约束均保持不变。
+`experience.build.clustering.query_clusters_per_capability_set` 控制每个能力集合内成功查询的聚类数，
+默认 `None` 使用自适应数量；它不表示能力类别数或经验库总簇数。
 指纹提取开关统一使用 `capability.fingerprint.extraction.llm_enabled`，关系共识使用
 `orchestration.build.matching.require_consensus`。原目标配置中的对应扁平路径会按未知字段报错。
 构建和检索策略直接使用公共配置树；`config.py` 不再为旧入口的默认差异声明同义包装或解析快照。
