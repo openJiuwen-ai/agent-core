@@ -13,12 +13,12 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 
 
-def test_default_root_aggregation_is_summary_team():
+def test_default_root_aggregation_is_hierarchical():
     config = default_root_aggregation("root-1")
-    assert config.mode == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert config.mode == OrgTaskAggregationMode.HIERARCHICAL
     assert config.final_output_task_id == "root-1"
     assert config.summary_task_id is None
-    assert OrgTaskAggregationConfig().mode == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert OrgTaskAggregationConfig().mode == OrgTaskAggregationMode.HIERARCHICAL
 
 
 def test_org_task_status_terminal_only_completed_failed():
