@@ -2301,6 +2301,25 @@ class DeepAgent(BaseAgent):
                 cause=exc,
             ) from exc
 
+    async def load_subagent_config(self, config: "SubAgentConfig") -> LoadRecord:
+        """Bind one in-memory sub-agent config through the extension binder.
+
+        This is the production entry used by event-driven registration. It
+        records the same ``LoadRecord`` as file-backed extension loading and
+        delegates duplicate checks, ability binding, and rail preparation to
+        ``apply_extension_hot``.
+        """
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        if not isinstance(config, SubAgentConfig):
+            raise TypeError("config must be SubAgentConfig")
+        if self.deep_config is None:
+            raise ValueError("DeepAgentConfig is required. Call configure() first.")
+        return await self._apply_extension_parts(
+            ExtensionParts(subagents=[config]),
+            source_uri=None,
+        )
+
     async def unload_extension(self, record: LoadRecord) -> list[str]:
         """Unload resources produced by a successful Plugin / AgentTemplate load.
 
