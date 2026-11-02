@@ -1251,9 +1251,15 @@ class AbilityManager:
                     existing_card = self._tools.get(mcp_tool_name)
                     if (
                         existing_card is None
-                        or existing_card.id != mcp_tool_id
-                        or existing_card.description != exposed.description
-                        or existing_card.input_params != (exposed.parameters or {})
+                        or (
+                            existing_card.id,
+                            existing_card.description,
+                            existing_card.input_params,
+                        ) != (
+                            mcp_tool_id,
+                            exposed.description,
+                            exposed.parameters or {},
+                        )
                     ):
                         # MCP cards materialize lazily. New cards use normal
                         # registration; changed schemas replace the cached
