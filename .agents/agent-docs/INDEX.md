@@ -9,15 +9,15 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 273 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 274 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 200 |
-| [agent_teams/workflow](#module-3) | 15 |
+| [agent_teams](#module-2) | 201 |
+| [agent_teams/workflow](#module-3) | 16 |
 | [extensions/observability](#module-4) | 2 |
 | [harness](#module-5) | 54 |
 | [未分类](#module-6) | 6 |
@@ -43,6 +43,7 @@ generated: true
 | [SDD-0019](designs/proposals/SDD-0019-team-model-group/design.md) | D | Team 模式模型组接入与成员模型分配 | @<huanghao> | agent_teams | — | — |
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | agent_teams/workflow, agent_teams | — | — |
+| [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | agent_teams, agent_teams/workflow | — | — |
 | [agent_swarm_overview](designs/agent_teams/agent_swarm_overview.md) | D | Agent Swarm（Agent Team）特性文档 | alan_cheng | openjiuwen/agent_teams | — | — |
 | [architecture_cn](designs/agent_teams/architecture_cn.md) | D | AgentTeam 架构文档 | alan_cheng | openjiuwen/agent_teams | — | — |
 | [F_01_coordination-protocol-cleanup](features/agent_teams/F_01_coordination-protocol-cleanup.md) | F | Coordination Protocol Cleanup | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
@@ -258,6 +259,7 @@ generated: true
 | [SDD-0021](designs/proposals/SDD-0021-swarmflow-toolsearch-and-thirdparty-agent/design.md) | D | Swarmflow 渐进式工具暴露开关与三方 Agent 接入（tool_search + agent_type） | @chenchunzhou | agent_teams/workflow | — | — |
 | [SDD-0027](designs/archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | D | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | @xiajing | agent_teams/workflow | — | — |
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | agent_teams/workflow, agent_teams | — | — |
+| [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | agent_teams, agent_teams/workflow | — | — |
 
 <a id="module-4"></a>
 

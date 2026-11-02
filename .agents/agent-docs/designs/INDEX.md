@@ -6,11 +6,11 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-10-31T15:39+08:00 -->
+<!-- generated-at: 2026-11-02T10:49+08:00 -->
 
 # 设计文档索引 (INDEX)
 
-> 开发前 11 · 开发中 1 · 开发后 12 · 已否决 0
+> 开发前 12 · 开发中 1 · 开发后 12 · 已否决 0
 
 按模块目录分组，组内按生命周期展示；跨模块设计在各相关模块下列出，全局统计按文档去重。
 
@@ -19,8 +19,8 @@ generated: true
 | 模块 | 设计数 |
 |---|---|
 | [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 7 |
-| [agent_teams/workflow](#module-3) | 15 |
+| [agent_teams](#module-2) | 8 |
+| [agent_teams/workflow](#module-3) | 16 |
 | [extensions/observability](#module-4) | 2 |
 | [harness](#module-5) | 3 |
 | [未分类](#module-6) | 1 |
@@ -47,6 +47,7 @@ generated: true
 | [SDD-0019](proposals/SDD-0019-team-model-group/design.md) | Team 模式模型组接入与成员模型分配 | draft | @<huanghao> | core | 2026-09-14 |
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0030](proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | draft | @chenchunzhou | core | 2026-10-15 |
+| [SDD-0031](proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | 集群模式teammate支持swarmflow工具 | draft | @xiajing | core | 2026-10-31 |
 
 ### 开发后 (archive)
 
@@ -69,6 +70,7 @@ generated: true
 | [SDD-0020](proposals/SDD-0020-swarmflow-operator-options/design.md) | Swarmflow 算子 options 参数治理（model 前置校验 + timeout 可观测性） | draft | @wangcan103 | core | 2026-09-28 |
 | [SDD-0021](proposals/SDD-0021-swarmflow-toolsearch-and-thirdparty-agent/design.md) | Swarmflow 渐进式工具暴露开关与三方 Agent 接入（tool_search + agent_type） | draft | @chenchunzhou | core | 2026-09-29 |
 | [SDD-0030](proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | draft | @chenchunzhou | core | 2026-10-15 |
+| [SDD-0031](proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | 集群模式teammate支持swarmflow工具 | draft | @xiajing | core | 2026-10-31 |
 
 ### 开发中 (active)
 
