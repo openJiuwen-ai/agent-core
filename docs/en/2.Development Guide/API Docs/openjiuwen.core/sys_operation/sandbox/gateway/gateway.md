@@ -97,6 +97,14 @@ Handle full-link stream request: parse endpoint → select Provider → invoke s
 
 **AsyncIterator**, stream invoke result.
 
+### async get_or_create_provider
+
+```python
+async get_or_create_provider(config: SandboxGatewayConfig, isolation_key: Optional[str], op_type: str) -> Any
+```
+
+Return a cached provider or resolve its endpoint and create one for client preparation checks, without invoking a tool.
+
 ### async get_sandbox
 
 ```python

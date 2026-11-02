@@ -20,6 +20,8 @@ from weakref import WeakValueDictionary
 
 import httpx
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.sys_operation.sandbox.fallback_audit import emit_fallback_audit
+from openjiuwen.core.sys_operation.sandbox.fallback_audit import set_fallback_audit_hook as set_fallback_audit_hook
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +320,10 @@ def build_jiuwenbox_http_client(
     )
 
 
+class JiuwenBoxUnavailableError(RuntimeError):
+    """Instance startup failed before tool dispatch, with verified remote cleanup."""
+
+
 class _JiuwenBoxClient:
     def __init__(
         self,
@@ -350,7 +356,17 @@ class _JiuwenBoxClient:
             timeout=max(self._client.timeout.read or 0, _CREATE_SANDBOX_MIN_TIMEOUT_SECONDS),
         )
         _raise_for_status(response)
-        return response.json()["id"]
+        data = response.json()
+        sandbox_id = data["id"]
+        if data.get("phase") == "error":
+            # A failed DELETE must override the startup error: ACL cleanup is
+            # mandatory before a host may retry or choose local execution.
+            self.delete_sandbox(sandbox_id)
+            error = data.get("error_message") or "sandbox startup failed"
+            if data.get("failure_kind") == "runtime_start":
+                raise JiuwenBoxUnavailableError(error)
+            raise RuntimeError(error)
+        return sandbox_id
 
     def set_idle_timeout(
         self,
@@ -368,6 +384,33 @@ class _JiuwenBoxClient:
             return
         response = self._client.put("/api/v1/timeout", json=body)
         _raise_for_status(response)
+
+    def sandbox_ready(self, sandbox_id: str) -> bool:
+        """Probe before dispatch; only a missing/stopped runner permits recreation."""
+        deadline = time.monotonic() + (self._client.timeout.read or 30.0)
+        while True:
+            response = self._client.get(
+                f"/api/v1/sandboxes/{sandbox_id}", timeout=max(deadline - time.monotonic(), 0.001),
+            )
+            if response.status_code == 404:
+                return False
+            _raise_for_status(response)
+            data = response.json()
+            if data.get("phase") == "ready":
+                return True
+            if data.get("phase") == "provisioning":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The creator may still own ACL work: neither delete nor
+                    # host fallback is safe until creation has completed.
+                    raise RuntimeError(f"sandbox readiness timed out while provisioning: {sandbox_id}")
+                time.sleep(min(0.1, remaining))
+                continue
+            if data.get("phase") == "stopped" or (
+                data.get("phase") == "error" and data.get("failure_kind") == "runtime_start"
+            ):
+                return False
+            raise RuntimeError(data.get("error_message") or f"sandbox is not ready: {data.get('phase')}")
 
     def live_sandbox_ids(self) -> set[str]:
         """List live or unknown-phase instances without touching activity timestamps.
@@ -610,7 +653,7 @@ class _JiuwenBoxProviderMixin:
     # Survives cache invalidation while a creator/rebuilder still owns or waits
     # for the scope. Weak entries disappear once the last caller releases them.
     _scope_lifecycle_locks: ClassVar[WeakValueDictionary[str, threading.Lock]] = WeakValueDictionary()
-    _creation_failures: ClassVar[Dict[str, Tuple[float, str]]] = {}
+    _creation_failures: ClassVar[Dict[str, Tuple[float, Exception]]] = {}
     # Cache shared_scope_key -> lifecycle_hook captured at create time, so teardown
     # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
     _lifecycle_hooks: ClassVar[Dict[str, Callable[[str, dict], None]]] = {}
@@ -948,6 +991,8 @@ class _JiuwenBoxProviderMixin:
                     self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
                     failure = self._creation_failures.get(shared_key)
                 if self._sandbox_id is None and failure and time.monotonic() < failure[0]:
+                    if isinstance(failure[1], (JiuwenBoxUnavailableError, httpx.ConnectError, httpx.ConnectTimeout)):
+                        raise failure[1]
                     raise RuntimeError(f"jiuwenbox sandbox creation temporarily unavailable: {failure[1]}")
                 if self._sandbox_id is None:
                     sandbox_id = None
@@ -977,7 +1022,7 @@ class _JiuwenBoxProviderMixin:
                                 )
                         with self._shared_lock:
                             if self._creation_locks.get(shared_key) is create_lock:
-                                self._creation_failures[shared_key] = (time.monotonic() + 30.0, str(exc))
+                                self._creation_failures[shared_key] = (time.monotonic() + 30.0, exc)
                         raise
                     with self._shared_lock:
                         valid = (
@@ -999,6 +1044,20 @@ class _JiuwenBoxProviderMixin:
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
+
+    async def prepare_for_execution(self) -> None:
+        """Prepare an instance without dispatching a tool; retry only known startup failures."""
+        self._assert_policy_ready()
+        with self._shared_lock:
+            key = self._shared_scope_key()
+            failure = self._creation_failures.get(key)
+            if failure and isinstance(
+                failure[1], (JiuwenBoxUnavailableError, httpx.ConnectError, httpx.ConnectTimeout),
+            ):
+                self._creation_failures.pop(key, None)
+        sandbox_id = await self._acquire_sandbox_id()
+        if not await asyncio.to_thread(self._get_client().sandbox_ready, sandbox_id):
+            await self._recreate_sandbox_after_loss(stale_sandbox_id=sandbox_id)
 
     def _assert_policy_ready(self) -> None:
         with self._shared_lock:
@@ -2017,23 +2076,9 @@ def _command_matches_exclude(command: str, patterns: list[str] | None) -> bool:
 
 _FALLBACK_POLICIES = {"never", "inline_only", "always"}
 
-_FALLBACK_AUDIT_HOOK: Callable[..., Any] | None = None
-
-
-def set_fallback_audit_hook(hook: Callable[..., Any] | None) -> None:
-    """注册沙箱兜底审计回调（由宿主应用接入；best-effort，异常仅告警）。"""
-    global _FALLBACK_AUDIT_HOOK
-    _FALLBACK_AUDIT_HOOK = hook
-
 
 def _emit_fallback_audit(**fields: Any) -> None:
-    hook = _FALLBACK_AUDIT_HOOK
-    if hook is None:
-        return
-    try:
-        hook(**fields)
-    except Exception:  # noqa: BLE001
-        logger.warning("[jiuwenbox] fallback audit hook failed", exc_info=True)
+    emit_fallback_audit(**fields)
 
 
 def _read_fallback_policy(extra: Any) -> str:
