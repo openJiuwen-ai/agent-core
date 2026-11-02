@@ -6,9 +6,9 @@
 The team Ops methods resolve their data through a
 :class:`TeamResourceResolver`: given the session id and a team name it
 returns a :class:`TeamReadView` — a read-only query surface over the
-monitor models — or ``None`` when the team is not accessible in that
-session. Binding the real resolver to the runtime pool is host wiring;
-tests supply fakes.
+monitor models — or ``None`` when the team has no row in the database.
+Binding the real resolver to the team database is host wiring; tests
+supply fakes.
 
 Two bindings carry call-scoped facts that Ops methods and the policy CORE
 read instead of threading them through arguments:
@@ -118,10 +118,12 @@ class TeamReadView(Protocol):
 
 
 class TeamResourceResolver(Protocol):
-    """Resolve a read view for one team within one session.
+    """Resolve a read view for one team.
 
-    Implementations locate the session's accessible Team Runtime and reuse
-    its existing access checks — never a cross-session lookup by name.
+    Implementations answer from the database — the source of truth — so a
+    team stays queryable after its runtime is stopped. Cross-session
+    visibility is capability-based: ``session_id`` selects which session's
+    dynamic tables the view binds, it does not gate resolution.
     """
 
     async def resolve(self, session_id: str | None, team_name: str) -> TeamReadView | None:

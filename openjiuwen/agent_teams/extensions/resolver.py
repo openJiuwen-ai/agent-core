@@ -1,27 +1,27 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Production resolver and read view over the team runtime pool.
+"""Production resolver and read view over the team database.
 
 The team Ops namespace resolves its data through a ``TeamResourceResolver``
-(see ``ops.py``). :class:`RuntimePoolResolver` is the production
-implementation: it looks up the session's active pool entry and wraps the
-entry's team backend into a :class:`BackendTeamReadView`. Hosts that own
-the Runner pass ``TeamRuntimeManager.pool`` at wiring time —
-``register(bus, RuntimePoolResolver(manager.pool))``.
+(see ``ops.py``). :class:`DatabaseResolver` is the production
+implementation: it answers from the database — the source of truth — so a
+team stays queryable after its runtime is stopped, whether or not a
+runtime for it exists in this process at all. The database instance comes
+from a host-provided async factory (typically the process-wide shared
+singleton keyed by connection string), which keeps engine creation out of
+the per-query path.
 
-This module deliberately keeps pool/entry consumption structural (no
+This module deliberately keeps database consumption structural (no
 imports from ``agent_teams.runtime`` / ``agent_teams.agent`` at module
 level): those packages pull the full TeamAgent assembly chain, which
-imports this package in turn. The global-runner lookup below is a
-function-local import for the same reason — it only runs at resolve
-time, when the host process has the runner loaded anyway.
+imports this package in turn.
 """
 
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import (
     get_session_id,
@@ -32,37 +32,11 @@ from openjiuwen.agent_teams.extensions.ops import TaskDependencyInfo, TeamReadVi
 from openjiuwen.agent_teams.monitor.models import MemberInfo, MessageInfo, TaskInfo, TeamInfo
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-class _PoolEntryAgent(Protocol):
-    """The leader agent of one active pool entry (structural subset)."""
-
-    @property
-    def team_backend(self) -> "TeamBackend | None":
-        """Return the entry's team backend."""
-        ...
-
-
-class _PoolEntry(Protocol):
-    """One active team entry (structural subset of the pool's entry type)."""
-
-    @property
-    def agent(self) -> _PoolEntryAgent:
-        """Return the entry's leader agent."""
-        ...
-
-
-class _RuntimePool(Protocol):
-    """The runtime pool (structural subset of TeamRuntimePool)."""
-
-    async def teams_for_session(self, session_id: str) -> Sequence[_PoolEntry]:
-        """Return the active teams currently bound to ``session_id``."""
-        ...
+    from openjiuwen.agent_teams.tools.database import TeamDatabase
 
 
 class BackendTeamReadView(TeamReadView):
-    """Read view over one team backend, bound to one session.
+    """Read view over one team's rows, bound to one session.
 
     Per-session dynamic tables resolve through the ``agent_teams.context``
     contextvar; every query binds the view's session id for its duration
@@ -71,22 +45,26 @@ class BackendTeamReadView(TeamReadView):
 
     def __init__(
         self,
-        team_backend: "TeamBackend",
+        db: "TeamDatabase",
+        team_name: str,
         *,
-        session_id: str,
+        session_id: str | None,
         hide_dm: bool = False,
     ) -> None:
-        """Initialize the view over one backend's database.
+        """Initialize the view over the shared team database.
 
         Args:
-            team_backend: The active entry's team backend.
-            session_id: Session the runtime instance runs under; bound
-                around every query so per-session tables resolve.
+            db: The team database; team and member rows live in its static
+                tables, task and message rows in per-session dynamic ones.
+            team_name: The team this view queries.
+            session_id: Session whose dynamic tables the queries bind; bound
+                around every query so per-session tables resolve. The Ops
+                call may run outside the leader's loop.
             hide_dm: Whether direct (non-broadcast) messages are hidden
                 for this caller; the host's visibility policy.
         """
-        self._db = team_backend.db
-        self._team_name = team_backend.team_name
+        self._db = db
+        self._team_name = team_name
         self._session_id = session_id
         self._hide_dm = hide_dm
 
@@ -132,20 +110,34 @@ class BackendTeamReadView(TeamReadView):
         return MemberInfo.from_internal(row) if row is not None else None
 
     async def tasks(self, status: str | None = None) -> list[TaskInfo]:
-        """Return the team's tasks, optionally filtered by status."""
+        """Return the team's tasks, optionally filtered by status.
+
+        A session that never ran a team has no task tables: its data is
+        empty — reads never run DDL.
+        """
         with self._bound_session():
+            if not await self._db.has_cur_session_tables("task"):
+                return []
             rows = await self._db.task.get_team_tasks(self._team_name, status=status)
         return [TaskInfo.from_internal(row) for row in rows]
 
     async def task(self, task_id: str) -> TaskInfo | None:
         """Return one task, or None if not found."""
         with self._bound_session():
+            if not await self._db.has_cur_session_tables("task"):
+                return None
             row = await self._db.task.get_task(task_id)
         return TaskInfo.from_internal(row) if row is not None else None
 
     async def task_dependencies(self, task_id: str) -> list[TaskDependencyInfo]:
-        """Return the task's direct dependencies."""
+        """Return the task's direct dependencies.
+
+        A session that never ran a team has no task tables: no
+        dependencies to report.
+        """
         with self._bound_session():
+            if not await self._db.has_cur_session_tables("task"):
+                return []
             rows = await self._db.task.get_task_dependencies(task_id)
         return [
             TaskDependencyInfo(
@@ -157,93 +149,83 @@ class BackendTeamReadView(TeamReadView):
         ]
 
     async def messages(self) -> list[MessageInfo]:
-        """Return the team's messages; the Ops layer filters and paginates."""
+        """Return the team's messages; the Ops layer filters and paginates.
+
+        A session that never ran a team has no message tables: its data
+        is empty — reads never run DDL.
+        """
         with self._bound_session():
+            if not await self._db.has_cur_session_tables("message"):
+                return []
             rows = await self._db.message.get_team_messages(self._team_name)
         return [MessageInfo.from_internal(row) for row in rows]
 
     async def message(self, message_id: str) -> MessageInfo | None:
         """Return one message, or None if not found."""
         with self._bound_session():
+            if not await self._db.has_cur_session_tables("message"):
+                return None
             row = await self._db.message.get_message(message_id)
         return MessageInfo.from_internal(row) if row is not None else None
 
 
-class RuntimePoolResolver:
-    """Resolve read views from the Runner's team runtime pool.
+class DatabaseResolver:
+    """Resolve read views directly over the team database.
 
-    Locates the session's accessible pool entry by team name and wraps its
-    team backend; never a cross-session lookup. A team with no entry in
-    this session's pool resolves to ``None`` (the Ops layer turns that
-    into an explicit error).
+    The database is the source of truth: a team with a row in the static
+    ``team_info`` table is queryable whether or not a runtime for it is
+    currently active, so stopped teams keep answering queries. The
+    database instance comes from the host-provided factory, called at
+    resolve time; nothing about the runtime pool participates in
+    resolution, and the read path never runs DDL — dynamic tables are
+    created only when a session binds (the team-runtime write path).
     """
 
-    def __init__(self, pool: _RuntimePool, *, hide_dm: bool = False) -> None:
-        """Initialize the resolver over one pool.
+    def __init__(
+        self,
+        db_factory: "Callable[[], Awaitable[TeamDatabase | None]]",
+        *,
+        hide_dm: bool = False,
+    ) -> None:
+        """Initialize the resolver over one database factory.
 
         Args:
-            pool: The runtime pool holding the active team entries
-                (``TeamRuntimeManager.pool`` at host wiring time).
+            db_factory: Async factory returning an initialized
+                ``TeamDatabase``, or ``None`` when the host has no team
+                storage configured (every team then resolves to ``None``).
+                The factory hands out the shared database — which session's
+                dynamic tables a view binds is the view's per-query concern,
+                not the factory's. Implementations should return a cached
+                instance (e.g. the process-wide shared singleton keyed by
+                connection string) — engine creation must stay out of the
+                per-query path.
             hide_dm: The host's message visibility policy, forwarded to
                 every resolved view.
         """
-        self._pool = pool
+        self._db_factory = db_factory
         self._hide_dm = hide_dm
 
     async def resolve(self, session_id: str | None, team_name: str) -> TeamReadView | None:
-        """Return the team's read view, or None when not accessible."""
-        if not session_id:
-            return None
-        entries = await self._pool.teams_for_session(session_id)
-        for entry in entries:
-            backend = entry.agent.team_backend
-            if backend is not None and backend.team_name == team_name:
-                return BackendTeamReadView(
-                    backend,
-                    session_id=session_id,
-                    hide_dm=self._hide_dm,
-                )
-        return None
+        """Return the team's read view, or None when no team row exists.
 
-
-class GlobalRunnerPoolResolver:
-    """Resolve read views through the global Runner's team pool, lazily.
-
-    Hosts wire the team Ops namespace at process start (``ops.build``
-    freezes handlers), but the global Runner's team runtime manager is
-    created lazily on the first team run — so this resolver looks the
-    manager up at resolve time instead of holding a reference. Before any
-    team has run the lookup finds no manager and every team resolves to
-    ``None`` (an explicit Ops error), which is the correct answer: no
-    active team exists yet.
-    """
-
-    def __init__(self, *, hide_dm: bool = False) -> None:
-        """Initialize the lazy resolver.
-
-        Args:
-            hide_dm: The host's message visibility policy, forwarded to
-                every resolved view.
+        ``session_id`` selects which session's dynamic tables the view
+        binds; it does not gate resolution — cross-session visibility is
+        capability-based (knowing the team name is the access).
         """
-        self._hide_dm = hide_dm
-
-    async def resolve(self, session_id: str | None, team_name: str) -> TeamReadView | None:
-        """Return the team's read view, or None when not accessible."""
         if not session_id:
             return None
-        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
-
-        # Read the manager slot directly (the runner creates it lazily on the
-        # first team run); creating it here would skip the runner's own wiring.
-        manager = vars(GLOBAL_RUNNER).get("_team_runtime_manager")
-        if manager is None:
+        db = await self._db_factory()
+        if db is None or not await db.team.team_exists(team_name):
             return None
-        resolver = RuntimePoolResolver(manager.pool, hide_dm=self._hide_dm)
-        return await resolver.resolve(session_id, team_name)
+        return BackendTeamReadView(
+            db,
+            team_name,
+            session_id=session_id,
+            hide_dm=self._hide_dm,
+        )
 
 
 __all__ = [
     "BackendTeamReadView",
-    "GlobalRunnerPoolResolver",
-    "RuntimePoolResolver",
+    "DatabaseResolver",
 ]

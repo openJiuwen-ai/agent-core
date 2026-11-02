@@ -133,8 +133,7 @@ async def _resolve_view(
 
     Raises:
         BaseError: ``AGENT_TEAM_STATE_INVALID`` when the session is
-            missing, no team can be determined, or the team is not
-            accessible in this session.
+            missing or the team has no row in the database.
     """
     session_id = _require_session_id(ops)
     resolved_team = _resolve_team_name(team_name)
@@ -142,7 +141,7 @@ async def _resolve_view(
     if view is None:
         raise_error(
             StatusCode.AGENT_TEAM_STATE_INVALID,
-            reason=f"team '{resolved_team}' is not accessible in this session",
+            reason=f"team '{resolved_team}' not found",
         )
     return resolved_team, view
 
