@@ -33,9 +33,12 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   注册 `ops.build` BUILTIN（空 pattern——框架 ops.build matcher 只放行空 pattern），`ops.team` 九个
   只读方法（info/members/member/tasks/task/task_dependencies/messages/message/policy_context），含
   AND 筛选、timestamp+message_id 降序分页、服务端游标（关联 session/team/filters，不一致报错）、
-  hide_dm 可见性、任务归属校验。数据源经 `TeamResourceResolver` 协议注入；`RuntimePoolResolver` +
-  `BackendTeamReadView` 为生产实现（零重 import——pool 经结构化 Protocol 消费，避免 runtime→agent
-  全链循环）。当前团队与 policy context 的调用范围绑定（contextvar，嵌套恢复/异常解除）。
+  hide_dm 可见性、任务归属校验。数据源经 `TeamResourceResolver` 协议注入；`DatabaseResolver` +
+  `BackendTeamReadView` 为生产实现——**统一数据库路径**：view 直连 db 与 team_name（不依赖
+  TeamBackend 或活跃 Agent），`team_exists`（静态表轻查询）判定团队存在，团队停止后查询不受影响；
+  跨 session 可见性是 capability 语义——session_id 只选 view 绑定哪套动态表、不做访问门（知道
+  team_name 即可只读查询），无会话上下文仍不解析；`RuntimePoolResolver` / `GlobalRunnerPoolResolver`
+  已删除（解析不依赖 pool）。当前团队与 policy context 的调用范围绑定（contextvar，嵌套恢复/异常解除）。
 
 ### leader 侧接线
 
@@ -64,10 +67,9 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   `spec.build()` → rail 惰性构建；derive 保 bus 单测）+ 在 `inprocess_spawn` 落注释保护该隐式链
   （在该处重建 spec 会静默丢掉 bus）。宿主未给 spec 设 `build_context` 时保持无扩展（本地默认）。
 - **宿主接线面**：`Runner.set_team_extension_bus(bus)` classmethod——宿主在 bus 初始化（事件注册 +
-  ops.build）后一次调用即达全部冷构建路径；`GlobalRunnerPoolResolver`——Ops namespace 的惰性 resolver，
-  resolve 时才读全局 Runner 的 manager 槽位（`ops.build` 冻结早于 manager 惰性创建，故不能持引用），
-  manager 未创建时一切解析为不可访问（此时无活跃团队，语义正确），且不代创建（避免绕过 Runner 自身的
-  org wiring）。
+  ops.build）后一次调用即达全部冷构建路径；`DatabaseResolver(db_factory)`——Ops namespace 的 resolver，
+  factory 收目标 session_id、返回已 initialize 的共享单例（`get_shared_db` 按 connection_string，引擎
+  创建不落进每次查询路径），宿主未配置团队存储时 factory 返回 None（一切解析为不可用）。
 
 ## 关键决策
 
@@ -83,6 +85,13 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
    "建队时等待 Policy 构建完成"正是该时点），render 只拼接。
 6. **bus 放 `TeamRuntimeManager`**：与 `TeamInfra` setter 注入同构、桥接生命周期所有权对齐、多
    Runner 兼容；排除进程级全局 holder（违背框架"宿主持有"模型，多 bus 场景含糊）。
+7. **统一数据库路径而非降级路径**：resolve 时经宿主 factory 拿库直连构造 view，pool 彻底退出解析
+   （只留运行态标注用途）。原 `RuntimePoolResolver` 经 pool entry 取 backend 的唯一贡献是递 db 与
+   team_name 两个属性，且 db 是 `get_shared_db` 的进程级单例——活跃与否拿到的本就是同一实例；统一后
+   只有一条路径，无活跃/停止两套逻辑漂移。
+8. **缺表读空而非建表**：读路径零 DDL——动态表只在 session 绑定（团队运行时 bind 路径）时创建；
+   view 的动态表查询前经 `has_cur_session_tables`（只读 inspector 存在性检查，跨后端）判缺，未跑过
+   团队的 session 读到空数据（列表空 / 单查 None）而非 missing-table 异常，读路径也不留任何空表。
 
 ## 拒绝的方案
 
@@ -94,13 +103,16 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   Team matcher 全部防御式返回 False。
 - 桥接 stop 用 `except CancelledError: pass`——无法区分"自己请求的 consumer 取消"与"stop 自身被
   取消"，后者被吞会丢失调用方取消信号；用 `Task.cancelling()` 区分。
+- pool entry 优先 + 无 entry 时降级 DB-only——两条路径各自维护 view 构造与可见性细节，漂移风险；
+  统一后只有一条。`team_session` 归属关联表——归属证据已在数据本身（session 的动态表里有该团队的行
+  即关联），建表是重复记账，还引入写入点完整性与存量回填问题。
 
 ## 验证基线
 
 - `tests/unit_tests/agent_teams/extensions/`（契约 + wiring）+ `tests/unit_tests/extensions/ops_build_handlers/`：
   含真 `ExtensionEventBus` 端到端（注册 → USER handler → trigger → 链/短路/`to(CORE)`/校验器/容错）、
-  桥接全生命周期（含取消传播）、内存 DB + 真 pool 的 resolver、leader rail 惰性构建与前缀视图、
-  `build_team` 披露经链（插件 section 到达 leader）。
+  桥接全生命周期（含取消传播）、内存 DB + db_factory 的 resolver、leader rail 惰性构建与前缀视图、
+  `build_team` 披露经链（插件 section 到达 leader）、无活动 session 的缺表读空。
 - 全量 `agent_teams` 回归：失败分布与 stash 基线一致（存量：coordination/observability 环境缺依赖
   等），零新增；`test_team_policy_rail.py` 74 个存量用例不动即绿（无 bus 分支逐字一致）。
 - ruff / pylint 干净（存量告警除外）。
@@ -114,4 +126,6 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
   `AGENT_TEAM_STATE_INVALID`（132006），语义不贴但 reason 明确、测试不锁码；AGENT_TEAM 段缺
   NOT_FOUND 形态码（其他段有 `AGENT_TOOL_NOT_FOUND` 先例），待观测分类有真实需求时新增
   `AGENT_TEAM_RESOURCE_NOT_FOUND` 并分类收拾。
+- **跨 session 只读行为变化**：读取层统一数据库路径后，跨 session 只读从报错（"not accessible in
+  this session"）变为可查（capability 语义），宿主文档需知情。
 - 平台侧设计仓的实现记录回填随该仓自行同步（本仓库不引用其文档编号）。
