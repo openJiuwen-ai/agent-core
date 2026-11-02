@@ -1,11 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""RuntimePoolResolver and BackendTeamReadView over a real in-memory database."""
-from __future__ import annotations
+"""DatabaseResolver and BackendTeamReadView over a real in-memory database."""
 
-from dataclasses import dataclass, field
-from typing import Any
+from __future__ import annotations
 
 import pytest
 import pytest_asyncio
@@ -14,28 +12,12 @@ from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.extensions.ops import TaskDependencyInfo
 from openjiuwen.agent_teams.extensions.resolver import (
     BackendTeamReadView,
-    RuntimePoolResolver,
+    DatabaseResolver,
 )
-from openjiuwen.agent_teams.runtime.pool import ActiveTeam, TeamRuntimePool
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
 
 SESSION_ID = "resolver-session"
-
-
-@dataclass
-class _StubBackend:
-    """Structural stand-in for TeamBackend: only db and team_name are read."""
-
-    db: TeamDatabase
-    team_name: str
-
-
-@dataclass
-class _StubAgent:
-    """Structural stand-in for the leader agent of one pool entry."""
-
-    team_backend: Any
 
 
 @pytest_asyncio.fixture
@@ -49,21 +31,6 @@ async def db():
     finally:
         await database.close()
         reset_session_id(token)
-
-
-@dataclass
-class _PoolWorld:
-    """A real pool seeded with one active entry over the stub backend."""
-
-    pool: TeamRuntimePool = field(default_factory=TeamRuntimePool)
-
-    async def add_entry(self, backend: _StubBackend, *, session_id: str) -> None:
-        entry = ActiveTeam(
-            team_name=backend.team_name,
-            agent=_StubAgent(team_backend=backend),  # type: ignore[arg-type]
-            current_session_id=session_id,
-        )
-        await self.pool.add(entry)
 
 
 async def _seed(database: TeamDatabase) -> None:
@@ -95,21 +62,41 @@ async def _seed(database: TeamDatabase) -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_resolver_wraps_the_sessions_active_entry(db) -> None:
-    """The session's entry resolves; other sessions or teams do not."""
-    await _seed(db)
-    backend = _StubBackend(db=db, team_name="research-team")
-    world = _PoolWorld()
-    await world.add_entry(backend, session_id=SESSION_ID)
+def _resolver(database: TeamDatabase) -> DatabaseResolver:
+    """Build a resolver whose factory hands out the fixture's database."""
 
-    resolver = RuntimePoolResolver(world.pool)
+    async def factory() -> TeamDatabase:
+        return database
+
+    return DatabaseResolver(factory)
+
+
+@pytest.mark.asyncio
+async def test_resolver_answers_from_the_database(db) -> None:
+    """Teams with rows resolve from the database, not from the runtime pool."""
+    await _seed(db)
+
+    resolver = _resolver(db)
     view = await resolver.resolve(SESSION_ID, "research-team")
     assert isinstance(view, BackendTeamReadView)
 
-    assert await resolver.resolve("other-session", "research-team") is None
+    # Stopped teams stay queryable: no runtime pool participates in
+    # resolution, and the session id selects dynamic tables, not access.
+    assert await resolver.resolve("other-session", "research-team") is not None
+    # Unknown teams and missing sessions still resolve to None.
     assert await resolver.resolve(SESSION_ID, "other-team") is None
     assert await resolver.resolve(None, "research-team") is None
+
+
+@pytest.mark.asyncio
+async def test_resolver_with_no_database_resolves_to_none() -> None:
+    """A host without team storage configured resolves every team to None."""
+
+    async def factory() -> TeamDatabase | None:
+        return None
+
+    resolver = DatabaseResolver(factory)
+    assert await resolver.resolve(SESSION_ID, "research-team") is None
 
 
 @pytest.mark.asyncio
@@ -117,7 +104,8 @@ async def test_view_queries_without_a_bound_session_contextvar(db) -> None:
     """The view binds its session around every query itself."""
     await _seed(db)
     view = BackendTeamReadView(
-        _StubBackend(db=db, team_name="research-team"),
+        db,
+        "research-team",
         session_id=SESSION_ID,
     )
     # Drop the contextvar to prove the view rebinds it per query.
@@ -151,10 +139,43 @@ async def test_view_queries_without_a_bound_session_contextvar(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolver_reads_empty_for_sessions_without_tables(db) -> None:
+    """A session that never ran reads empty, and the read path never creates tables."""
+    await _seed(db)
+
+    # A session that never ran has no dynamic tables yet...
+    token = set_session_id("fresh-session")
+    try:
+        assert not await db.has_cur_session_tables("task")
+        assert not await db.has_cur_session_tables("message")
+    finally:
+        reset_session_id(token)
+
+    # ...a known team under it still resolves, the queries answer empty
+    # data instead of raising, and they still create no tables.
+    resolver = _resolver(db)
+    view = await resolver.resolve("fresh-session", "research-team")
+    assert view is not None
+    assert await view.tasks() == []
+    assert await view.task("t1") is None
+    assert await view.task_dependencies("t1") == []
+    assert await view.messages() == []
+    assert await view.message("m1") is None
+
+    token = set_session_id("fresh-session")
+    try:
+        assert not await db.has_cur_session_tables("task")
+        assert not await db.has_cur_session_tables("message")
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
 async def test_view_owns_no_team_rows(db) -> None:
     """A team with no rows still answers queries without raising."""
     view = BackendTeamReadView(
-        _StubBackend(db=db, team_name="ghost-team"),
+        db,
+        "ghost-team",
         session_id=SESSION_ID,
     )
     assert await view.team_info() is None
