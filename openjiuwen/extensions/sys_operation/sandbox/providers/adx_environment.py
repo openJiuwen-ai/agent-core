@@ -110,24 +110,23 @@ class _AdxEnvironmentBackend:
             connection_args.setdefault("token", os.environ.get("ADX_TOKEN", ""))
             connection_args.setdefault("verify_tls", True)
             connection = ConnectionConfig(**connection_args)
-            kwargs = {
-                key: self._extra[key]
-                for key in (
-                    "image",
-                    "runtime",
-                    "user",
-                    "group",
-                    "cpu",
-                    "memory",
-                    "cpu_limit",
-                    "mem_limit",
-                    "idle_timeout",
-                    "env",
-                    "create_timeout",
-                    "schedule_timeout",
-                )
-                if key in self._extra
-            }
+            kwargs = {}
+            for key in (
+                "image",
+                "runtime",
+                "user",
+                "group",
+                "cpu",
+                "memory",
+                "cpu_limit",
+                "mem_limit",
+                "idle_timeout",
+                "env",
+                "create_timeout",
+                "schedule_timeout",
+            ):
+                if key in self._extra:
+                    kwargs[key] = self._extra[key]
             if not kwargs.get("image"):
                 raise ValueError("ADX tool environment requires an image")
             kwargs.setdefault("runtime", "runsc")
@@ -142,6 +141,36 @@ class _AdxEnvironmentBackend:
             environment = Environment(connection=connection, **kwargs)
             self._instances[self._scope] = (environment, connection)
             return environment
+
+    @staticmethod
+    def _matches_scope(key: str, shared_key: str | None, base_url: str | None) -> bool:
+        if key == shared_key:
+            return True
+        if shared_key:
+            return key.startswith(shared_key + "|identity=")
+        if base_url:
+            return key.startswith(base_url.rstrip("/") + "|")
+        return False
+
+    @classmethod
+    def delete_environments(cls, shared_key: str | None, base_url: str | None) -> list[str]:
+        """Delete matching cached environments, retaining failed entries for retry."""
+        from adx_environment import Environment  # pylint: disable=no-name-in-module
+
+        deleted = []
+        with cls._lock:
+            keys = []
+            for key in cls._instances:
+                if cls._matches_scope(key, shared_key, base_url):
+                    keys.append(key)
+            for key in keys:
+                instance, connection = cls._instances[key]
+                Environment.delete(instance.id, connection=connection)
+                instance.close()
+                del cls._instances[key]
+                cls._incarnations[key] = uuid.uuid4().hex
+                deleted.append(key)
+        return deleted
 
     async def _run_command(
         self,
@@ -239,7 +268,8 @@ class _AdxEnvironmentBackend:
         result = []
         for entry in items:
             is_directory = entry.type == "dir"
-            if (is_directory and not include_dirs) or (not is_directory and not include_files):
+            include_entry = include_dirs if is_directory else include_files
+            if not include_entry:
                 continue
             result.append(
                 {
@@ -275,28 +305,7 @@ async def delete_adx_environment(
 ) -> list[str]:
     """Delete matching tool environments; retain failed entries for retry."""
     del reason
-    from adx_environment import Environment  # pylint: disable=no-name-in-module
-
-    def remove() -> list[str]:
-        deleted = []
-        with _AdxEnvironmentBackend._lock:
-            keys = [
-                key
-                for key in _AdxEnvironmentBackend._instances
-                if key == shared_key
-                or (shared_key and key.startswith(shared_key + "|identity="))
-                or (not shared_key and base_url and key.startswith(base_url.rstrip("/") + "|"))
-            ]
-            for key in keys:
-                instance, connection = _AdxEnvironmentBackend._instances[key]
-                Environment.delete(instance.id, connection=connection)
-                instance.close()
-                del _AdxEnvironmentBackend._instances[key]
-                _AdxEnvironmentBackend._incarnations[key] = uuid.uuid4().hex
-                deleted.append(key)
-        return deleted
-
-    return await asyncio.to_thread(remove)
+    return await asyncio.to_thread(_AdxEnvironmentBackend.delete_environments, shared_key, base_url)
 
 
 @SandboxRegistry.provider("adx-environment", "fs")

@@ -257,7 +257,10 @@ class NativeFSOperations(BaseFSProvider):
                 chunk_size = 8192
             if not raw:
                 return
-            pieces = [raw[start : start + chunk_size] for start in range(0, len(raw), max(chunk_size, 1))]
+            pieces = []
+            for start in range(0, len(raw), max(chunk_size, 1)):
+                stop = start + chunk_size
+                pieces.append(raw[start:stop])
             for index, piece in enumerate(pieces):
                 yield ReadFileStreamResult(
                     code=StatusCode.SUCCESS.code,
