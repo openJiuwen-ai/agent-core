@@ -119,19 +119,43 @@ QUERY_GUIDANCE_EN = (
 )
 
 DISK_CATALOG_GUIDANCE_CN = """\
-## 经验目录
+## 经验目录与任务前置查询（必须先于技能加载）
 
-末尾附件是按类目统计的经验目录，不是 FACT/TIP 正文。闲聊可忽略。
-非闲聊且附件中有与当前任务相关的类时，动手前用 `ttse_consult` 取回该类经验再规划；没有相关类或附件为 `(empty)` 时直接执行。
-经验是历史启发式，与当前工具证据冲突时以当前证据为准。
+末尾附件是经验分类目录，不是 FACT/TIP 正文。
+当 `ttse_consult` 工具可用时，收到新的非闲聊任务后，第一次工具调用必须仅调用一次 `ttse_consult`。
+必须收到并阅读查询结果后，才能加载技能、制定执行计划或调用其他工具。
+即使用户明确指定某个技能，也必须先查经验，再调用 `skill_tool` 或技能加速工具。
+不得将 `ttse_consult` 与 `skill_tool`、todo 工具或其他业务工具放在同一批调用中。
+查询是技能执行流程的前置步骤；技能规范中的“先加载技能”“第一个工作工具”和 todo 顺序要求，均从查询完成后开始适用。
+
+category 根据目录选择相关分类，无法判断时使用 `all`；不得因目录没有明显匹配分类或为 `(empty)` 而跳过查询。
+query 应描述本次任务及已知环境，不必先加载技能来构造查询。
+无命中或查询失败后正常继续，不要仅为满足流程反复重试。
+
+同一任务已有查询结果，或已有运行时前置查询结果附件时，先阅读结果，无需重复查询；工具结果续跑、审批恢复也无需重查。
+历史上其他任务的查询不能代替本次查询。加载技能后若发现需要更具体的经验，可以补充查询。
+闲聊、工具不可用或用户明确要求不查询经验时，不要求调用。
+经验是历史启发式；遵循用户明确要求，与当前工具证据冲突时以当前证据为准。
 """
 
 DISK_CATALOG_GUIDANCE_EN = """\
-## Experience catalog
+## Experience catalog and task lookup (mandatory before loading skills)
 
-The trailing attachment is the category listing and counts, not FACT/TIP bodies. Ignore it for chitchat.
-On a non-trivial task, if a listed category applies, call `ttse_consult` before acting and plan from the returned experience. If none apply or the attachment is `(empty)`, proceed.
-These are historical heuristics; if they conflict with current tool evidence, trust the current evidence.
+The trailing attachment is a category catalog, not FACT/TIP bodies.
+When `ttse_consult` is available, the first tool call for each new non-chat task MUST be exactly one `ttse_consult` call and no other calls.
+Receive and read its result before loading skills, making an execution plan, or calling any other tool.
+Even when the user specifies a skill, consult first, then call `skill_tool` or a skill acceleration tool.
+Never batch the consult with skill, todo, or business tools.
+The lookup precedes the skill workflow: skill-loading, first-work-tool, and todo ordering rules apply only after the lookup completes.
+
+Choose a relevant catalog category; use `all` if uncertain. An unmatched or `(empty)` catalog is not a reason to skip the lookup.
+Build the query from the current task and known environment without loading a skill first.
+Continue normally after no matches or a lookup failure; do not repeatedly retry merely to satisfy this procedure.
+
+If this task already has a consult result or a runtime preflight result attachment, read it without repeating the lookup; tool-result continuations and approval resumes do not need another lookup.
+Results from other tasks do not satisfy this task's lookup. You may consult again for more specific experience after loading a skill.
+Small talk, an unavailable tool, or an explicit user instruction not to consult is exempt.
+Experience is historical guidance; follow explicit user instructions and prefer current tool evidence when it conflicts.
 """
 
 # Backward-compatible alias (English). Prefer the _CN / _EN constants in new code.

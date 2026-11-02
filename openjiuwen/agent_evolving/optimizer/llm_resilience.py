@@ -111,23 +111,28 @@ async def invoke_text_with_retry_and_prompt(
                         )
                 except Exception as exc:
                     last_error = exc
+                    error_text = str(exc).strip() or type(exc).__name__
                     logger.warning(
                         "[llm_resilience] LLM attempt failed: model=%s attempt=%d/%d prompt_chars=%d "
-                        "timeout=%.1fs timeout_like=%s error=%s",
+                        "timeout=%.1fs elapsed=%.1fs timeout_like=%s error_type=%s error=%s",
                         model,
                         attempt,
                         max(policy.max_attempts, 1),
                         len(current_prompt),
                         timeout_secs,
+                        time.monotonic() - started_at,
                         _is_timeout_like(exc),
-                        exc,
+                        type(exc).__name__,
+                        error_text,
                     )
                     remaining_after = policy.total_budget_secs - (time.monotonic() - started_at)
                     has_retry_budget = remaining_after > 0 and attempt < policy.max_attempts
-                    if has_retry_budget and retry_prompt is not None and _is_timeout_like(exc):
-                        use_retry_prompt = True
+                    if has_retry_budget and _is_timeout_like(exc):
+                        # Timeout retry does not require a shorter retry prompt;
+                        # without one the original prompt is retried as-is.
+                        use_retry_prompt = retry_prompt is not None
                         logger.info(
-                            "[llm_resilience] attempt %d/%d timed out; retrying with shorter prompt",
+                            "[llm_resilience] attempt %d/%d timed out; retrying",
                             attempt,
                             policy.max_attempts,
                         )
@@ -203,13 +208,14 @@ async def invoke_text_with_retry_and_prompt(
     except TimeoutError as exc:
         logger.warning(
             "[llm_resilience] LLM total budget exceeded: model=%s attempts_started=%d prompt_chars=%d "
-            "total_budget=%.1fs elapsed=%.1fs last_error=%s",
+            "total_budget=%.1fs elapsed=%.1fs last_error_type=%s last_error=%s",
             model,
             attempts_started,
             len(prompt),
             policy.total_budget_secs,
             time.monotonic() - started_at,
-            last_error,
+            type(last_error).__name__ if last_error is not None else "",
+            str(last_error).strip() if last_error is not None else "",
         )
         _raise_llm_resilience_error(
             StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,

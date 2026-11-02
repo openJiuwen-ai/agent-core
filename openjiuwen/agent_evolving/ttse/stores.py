@@ -9,12 +9,13 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
   Exact normalized equality is always a hit. The scan is O(n) in bank size
-  (capped by ``max_facts`` / ``max_tips``); a process-local embedding cache
+  (unlimited by default); a process-local embedding cache
   makes repeat adds CPU-only when a provider is set. Cold cache fills with
-  batched ``embed_documents``, not one RPC per row. n<=400 is a linear
+  batched ``embed_documents``, not one RPC per row. Dedup uses a linear
   scan; an ANN index is not used.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
-  The cache is an LRU capped at ``max_facts + max_tips + 100`` and is pruned
+  The cache is an LRU sized for each track's configured cap (or current
+  size when unlimited), plus 100 query entries, and is pruned
   when records leave the bank (retire / delete / cap / reload).
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
   ``last_injected_at``, ``inject_hits``) for Auto-dream prune, plus
@@ -210,7 +211,7 @@ _EMBED_DOC_BATCH = 32
 _EMBED_PROBE_TEXT = "ttse"
 _EMBED_PROBE_RETRY_S = 300.0
 
-# Headroom above max_facts+max_tips for in-flight query texts (consult / dedup).
+# Headroom above the bank capacity/size for in-flight query texts (consult / dedup).
 _EMBED_CACHE_SLACK = 100
 
 
@@ -619,7 +620,9 @@ class TTSERecordStore:
             self._emb_last_call_at = time.monotonic()
 
     def _embedding_cache_limit(self) -> int:
-        return max(int(self._config.max_facts) + int(self._config.max_tips) + _EMBED_CACHE_SLACK, 1)
+        facts = len(self.facts) if self._config.max_facts is None else int(self._config.max_facts)
+        tips = len(self.tips) if self._config.max_tips is None else int(self._config.max_tips)
+        return max(facts + tips + _EMBED_CACHE_SLACK, 1)
 
     def _cached_embedding(self, key: str) -> Optional[List[float]]:
         vec = self._emb_cache.get(key)
@@ -774,8 +777,7 @@ class TTSERecordStore:
 
         Cosine match when an embedding provider is available; otherwise
         substring match (reference behavior). Exact normalized equality is
-        always treated as a duplicate. Scans are O(n) in ``store`` (n capped
-        by max_facts/max_tips).
+        always treated as a duplicate. Scans are O(n) in ``store``.
         """
         n = _norm(text)
         if not n:
@@ -883,7 +885,7 @@ class TTSERecordStore:
     # Mutation
     # ------------------------------------------------------------------
 
-    async def _add(self, store: List[Dict[str, Any]], text: str, cap: int) -> Optional[str]:
+    async def _add(self, store: List[Dict[str, Any]], text: str, cap: Optional[int]) -> Optional[str]:
         """Add or merge a rule.
 
         Returns ``"added"`` for a new rule, ``"merged"`` when an existing rule's
@@ -904,7 +906,7 @@ class TTSERecordStore:
                 return "merged"
             store.append(_new_record(text))
             store.sort(key=lambda x: -x.get("count", 0))
-            if len(store) > cap:
+            if cap is not None and len(store) > cap:
                 del store[cap:]
                 self._drop_stale_embeddings()
             return "added"
@@ -976,7 +978,7 @@ class TTSERecordStore:
         async with self._lock:
             store.append(record)
             store.sort(key=lambda x: -x.get("count", 0))
-            if len(store) > cap:
+            if cap is not None and len(store) > cap:
                 del store[cap:]
                 self._drop_stale_embeddings()
         if save:
