@@ -4,11 +4,13 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
+from openjiuwen.core.context_engine.processor.forked.compressor.recall import archive as archive_module
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.retriever import (
     recall_compressed_context,
 )
@@ -268,7 +270,7 @@ async def test_session_memory_compressor_archives_replaced_messages_for_recall(t
     assert marker is not None
     memory_id = marker.group(1)
 
-    archives = list(Path(tmp_path).glob(f"context/*/compression_recall/{memory_id}_*"))
+    archives = list(Path(tmp_path).glob(f"context/*/compression_recall/{memory_id}"))
     assert len(archives) == 1
     turns = [json.loads(line) for line in (archives[0] / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
     assert turns[0]["query"] == "how should database retries work"
@@ -296,6 +298,49 @@ async def test_session_memory_compressor_skips_archive_when_recall_disabled(tmp_
     assert event is not None
     assert "COMPRESSION_RECALL" not in updated.context_messages[0].content
     assert list(Path(tmp_path).glob("context/*/compression_recall/*")) == []
+
+
+@pytest.mark.asyncio
+async def test_session_memory_compressor_continues_without_marker_when_recall_unavailable(tmp_path, monkeypatch):
+    def _unavailable(_entries):
+        raise archive_module.RecallUnavailable("compression archive path exceeds the Windows file limit")
+
+    monkeypatch.setattr(archive_module, "_ensure_paths_fit", _unavailable)
+    notes_path = tmp_path / "session_context.md"
+    notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
+    context = _recall_test_context(tmp_path, notes_path, recall_enabled=True)
+    processor = SessionMemoryCompressor(
+        SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
+    )
+
+    event, updated = await processor.on_get_context_window(context, _recall_test_window())
+
+    assert event is not None
+    assert "COMPRESSION_RECALL" not in updated.context_messages[0].content
+    assert list(Path(tmp_path).glob("context/*/compression_recall/*")) == []
+
+
+@pytest.mark.asyncio
+async def test_session_memory_compressor_keeps_messages_when_recall_archive_fails(tmp_path):
+    notes_path = tmp_path / "session_context.md"
+    notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
+    workspace = tmp_path / "not-a-directory"
+    workspace.write_text("x", encoding="utf-8")
+    context = _recall_test_context(tmp_path, notes_path, recall_enabled=True)
+    context.workspace_dir = lambda: str(workspace)
+    context.set_messages = MagicMock()
+    processor = SessionMemoryCompressor(
+        SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
+    )
+    window = _recall_test_window()
+    original = list(window.context_messages)
+
+    event, updated = await processor.on_get_context_window(context, window)
+
+    assert event is None
+    assert updated.context_messages == original
+    context.set_messages.assert_not_called()
+    assert all("COMPRESSION_RECALL" not in str(message.content) for message in updated.context_messages)
 
 
 @pytest.mark.asyncio

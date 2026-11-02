@@ -9,7 +9,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import RECALL_DIR_NAME
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
+    RECALL_DIR_NAME,
+    directory_matches_memory_id,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.bm25 import normalize_markdown, rank_bm25
 
 TURN_TOP_K = 2
@@ -43,7 +46,7 @@ def recall_compressed_context(
     if not session_id:
         raise CompressionRecallError("compression recall requires a session")
     memory_id = (memory_id or "").strip()
-    if memory_id and not _MEMORY_ID_RE.fullmatch(memory_id):
+    if memory_id and not _memory_id_is_safe(memory_id):
         raise CompressionRecallError("memory_id is invalid")
     if not query or not query.strip():
         raise CompressionRecallError("query is required")
@@ -91,7 +94,7 @@ def _list_session_archives(session_root: Path, session_id: str) -> list[dict[str
         except CompressionRecallError:
             continue
         memory_id = str(manifest.get("memory_id") or "")
-        if not memory_id or not path.name.startswith(f"{memory_id}_"):
+        if not memory_id or not directory_matches_memory_id(path.name, memory_id):
             continue
         if str(manifest.get("session_id") or "") != session_id:
             continue
@@ -127,6 +130,29 @@ def _recall_single_archive(
     return result
 
 
+def _memory_id_is_safe(memory_id: str) -> bool:
+    if not _MEMORY_ID_RE.fullmatch(memory_id):
+        return False
+    return all(part not in {".", ".."} for part in Path(memory_id).parts)
+
+
+def _directories_for_memory_id(session_root: Path, memory_id: str) -> list[Path]:
+    if not _memory_id_is_safe(memory_id):
+        return []
+    matches: list[Path] = []
+    exact = session_root / memory_id
+    if _is_real_directory(exact):
+        matches.append(exact)
+    matches.extend(
+        path for path in session_root.glob(f"{memory_id}_*") if _is_real_directory(path)
+    )
+    return matches
+
+
+def _is_real_directory(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
 def _raise_for_rejected_candidate(session_root: Path, memory_id: str, *, session_id: str) -> None:
     """Report why an explicitly requested archive was rejected, when it exists.
 
@@ -134,7 +160,7 @@ def _raise_for_rejected_candidate(session_root: Path, memory_id: str, *, session
     an explicit ``memory_id`` lookup keeps the specific errors so callers can
     tell "no such archive" apart from "not your session's archive".
     """
-    candidates = [path for path in session_root.glob(f"{memory_id}_*") if path.is_dir() and not path.is_symlink()]
+    candidates = _directories_for_memory_id(session_root, memory_id)
     if len(candidates) != 1:
         return
     try:
