@@ -1,0 +1,66 @@
+---
+title: 集群模式teammate支持swarmflow工具（agent-core 侧实现）
+author: '@xiajing'
+id: F_20261030_2012_teammate-swarmflow-orchestration
+type: F
+modules:
+- openjiuwen/agent_teams
+files:
+- openjiuwen/agent_teams/workflow/swarmflow_infra.py
+- openjiuwen/agent_teams/workflow/tool_swarmflow.py
+- openjiuwen/agent_teams/agent/infra.py
+- openjiuwen/agent_teams/agent/agent_configurator.py
+- openjiuwen/agent_teams/agent/team_agent.py
+- openjiuwen/agent_teams/agent/coordination/handlers/workflow.py
+- openjiuwen/agent_teams/spawn/inprocess_spawn.py
+- openjiuwen/agent_teams/harness/team_harness.py
+- openjiuwen/agent_teams/runtime/background_task_controller.py
+- openjiuwen/agent_teams/schema/events.py
+- openjiuwen/agent_teams/schema/blueprint.py
+- openjiuwen/agent_teams/tools/tool_factory.py
+- openjiuwen/agent_teams/tools/tool_permissions.py
+- openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py
+- openjiuwen/agent_teams/workflow/engine/primitives.py
+- openjiuwen/agent_teams/workflow/engine/progress.py
+- openjiuwen/agent_teams/workflow/engine/runner.py
+- openjiuwen/agent_teams/workflow/runner.py
+designs:
+- SDD-0031
+design_note: 设计依据见 SDD-0031
+author_email: xiajing22@huawei.com
+---
+
+# 集群模式teammate支持swarmflow工具（agent-core 侧实现）
+
+## 元信息
+
+| 项 | 值 |
+|---|---|
+| 范围 | 见 frontmatter files（工具开放/归因/叙述路由/human 硬化四主题，18 文件） |
+| 测试基线 | `tests/unit_tests/agent_teams/` 13 件 153 passed：test_swarmflow_infra、test_teammate_controller_attach、test_swarmflow_owner、test_swarmflow_leader、test_swarmflow_locales、test_tool_factory、test_reply_buffer、test_engine_retryable、test_pause_resume、test_runner、test_swarmflow_invoke_control、test_background_task_controller、test_shutdown_stops_owned_runs |
+| 关联设计 | SDD-0031 |
+
+## 实施要点
+
+| 主题 | 实际做法 |
+|---|---|
+| 共享设施 | `SwarmflowInfra` team 级单例（governor/预算 ledger/resolver/specs），leader 构建、`TeamInfra` 挂载、teammate configure 前按引用收养；无注入实例时 resolver gate 剔除工具 |
+| controller attach | teammate session controller attach 到成员循环；run 跨轮存活（stop_by_owner dispose-only）；relaunch 走发起工具票面；inline script 按 run 物化 |
+| shutdown 先停 run | `shutdown_self` 在流收尾前经 session 级 controller 调 `stop_by_owner(include_paused=True)` 停掉名下 run；否则 native.stop 裸 cancel 抢先摘票，run 无终态事件无 journal，卡永挂；dispose 处的调用保留作幂等兜底 |
+| 预算 rail | 挂载条件从 leader 角色放宽为持有账本即挂；成员 run 与成员自身普通轮都计入同一 session ledger，与 leader 共池同约束；session 总额是部署配置（TeamAgentSpec），单 run 限额由脚本 META 声明 |
+| executor 归因 | 事件 schema 单字段 `executor`；工具从 build_context 按当前宿主现算（leader 也填名）。叙述、注入、run 卡徽章、恢复转交全部读它：谁执行就进谁的上下文 |
+| 叙述边界 | run 的 started/phase/agent 叙述进当前宿主上下文；executor 为 None（无团队上下文）时 leader 兜底；paused/resumed 不叙述；终态不叙述（async-tool 注入回宿主） |
+| human 硬化 | timeout 只计等人（豁免外层 attempt 超时）；重试复用已获回复；HUMAN_REPLY_SKIP 哨兵；seal/pause WAL cancel-shielded |
+| 三方成员边界 | external-CLI 成员不经 inprocess_spawn → 拿不到 SwarmflowInfra 注入 → 工厂减法摘除工具；更深层是 SwarmflowTool 绑死 NativeHarness 的 AsyncTool（后台执行 + follow-up 注入），CLI 的一轮同步工具通道承载不了 |
+| 与灯的边界 | run 宿主在成员 runtime + 团队 controller，不占对话轮，本特性不改灯；灯由任务在飞与 run 活跃两道 hold 撑住，teammate 的 run 通常包在任务里 |
+
+## 已知遗留
+
+三方成员受 AsyncTool 契约限制不接入、RPC 控制后运行方无感知——边界与细节统一
+见 SDD-0031 §6，本仓不再重复。
+
+## 验证结论
+
+UT 153 passed 全绿。
+端到端（wire 链路、恢复转交 ST、human 往返 ST）在嵌入层仓库验证，见该仓
+F_20261030_2018_teammate-swarmflow-adaptation。
