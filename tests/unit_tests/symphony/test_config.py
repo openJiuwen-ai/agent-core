@@ -142,6 +142,32 @@ def test_confidence_rejects_invalid_values(value):
         target.SymphonyConfig.model_validate({**MINIMAL, "orchestration": {"min_edge_confidence": value}})
 
 
+@pytest.mark.parametrize("value", [None, 1024])
+def test_fingerprint_output_budget_supports_injected_model_default(value):
+    config = target.SymphonyConfig.model_validate({
+        **MINIMAL,
+        "capability": {**MINIMAL["capability"], "fingerprint": {"extraction": {"max_tokens": value}}},
+    })
+    assert config.capability.fingerprint.extraction.max_tokens == value
+    assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
+    assert target.FingerprintExtractionConfig().max_tokens == FingerprintSettings().llm_max_tokens == 2048
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2048"])
+def test_fingerprint_output_budget_rejects_invalid_values(value):
+    payload = {
+        **MINIMAL,
+        "capability": {**MINIMAL["capability"], "fingerprint": {"extraction": {"max_tokens": value}}},
+    }
+    for validate, data in (
+        (target.SymphonyConfig.model_validate, payload),
+        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
+    ):
+        with pytest.raises(ValidationError) as error:
+            validate(data)
+        assert error.value.errors()[0]["loc"] == ("capability", "fingerprint", "extraction", "max_tokens")
+
+
 @pytest.mark.parametrize("payload, location", [
     ({"retrieval": {"search": {"topk": 3}}}, ("retrieval", "search", "topk")),
     ({"retrieval": None}, ("retrieval",)),

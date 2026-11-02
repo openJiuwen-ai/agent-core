@@ -30,7 +30,7 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │       │   ├── batch_size # 默认=16；每批处理的对象数。
 │       │   ├── max_concurrency # 默认=4；独立指纹服务的模型请求并发上限。
 │       │   ├── body_limit # 默认=16000；送入语义提取的对象正文字符数上限。
-│       │   ├── max_tokens # 默认=2048；提取模型单次输出的 token 数上限。
+│       │   ├── max_tokens # 默认=2048；提取模型单次输出的 token 数上限；None 表示不传此参数，沿用注入模型的配置。
 │       │   └── timeout_seconds # 默认=None；单次提取请求超时，单位秒；None 表示沿用模型适配器策略。
 │       ├── evaluation → FingerprintEvaluationConfig # 默认=FingerprintEvaluationConfig()；评估方式及证据文本上限。
 │       │   ├── llm_enabled # 默认=false；是否追加模型辅助评估。

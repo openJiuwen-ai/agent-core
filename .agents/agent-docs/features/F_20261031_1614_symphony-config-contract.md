@@ -253,3 +253,35 @@ config.tree.txt 已重新生成，标题“全量配置”保留，默认文档�
 
 
 交付前按 jw-review 对本轮工作区快照到候选的配置、测试、导出和文档差异完成自检，核对模型删除、字段归位、继承默认值、后端联合类型、包根导出及源码消费者；范围内未发现需要修改代码的问题。复查中将 S 的设计章节引用补到第 10 节，并在历史 B 中追加 method 退役后的适用范围，没有改写历史故障和验证结果。配置源码和测试在通过后未改变，文档修订不触发重复执行模型测试。
+
+
+## 2026-11-02 Rebase 到最新 develop 并解决冲突
+
+### 基线与冲突处理
+
+用户要求将已推送的 feature/symphony-config-contract rebase 到 develop 并解决冲突。获取远端后确认 origin/develop 仍为 e089198835426cd7681761b0cc278670cd83031f，upstream/develop 已前进 59 个提交至 da6045f3b0c66de64b3d9bf8cfebfbd950154b18，因此采用后者作为本轮固定目标，不移动另一个工作树中的本地 develop。
+
+Rebase 前分支为 e9d715c0578e8dfffc2d389d3c90ff91680c1c78，本地恢复点为 backup/symphony-config-contract-pre-rebase-e9d715c05。两个配置提交依次重放为 8784b086a 和 6c9aadd59。文本冲突仅在生成的文档索引：总索引、设计索引及 bugfix 索引；源文档均保留，通过 sync_documents.py 重新生成合并结果，并保留索引作者。同步器附带补写的 7 篇上游旧文档 frontmatter 已撤回，避免本次 rebase 改动无关源文档；索引包含两侧文档，最终按 286 篇源文档生成。
+
+Range-diff 排除生成索引后，两个配置提交的补丁均等价；rebase 完成后，配置、配置测试、导出脚本与树形文件均与原分支一致。上游 README 的新说明与本分支目标配置说明自动合并，均予保留。
+
+### 上游契约兼容
+
+上游 c8c621b22 将 FingerprintSettings 的提取协议从 v2 升为 v3，并让 llm_max_tokens 接受 None。原目标配置仍是 v2 且拒绝 None，会使默认值源对照失败，也无法表达上游新增的预算选项。
+
+本轮仅在目标 config.py 中将 FingerprintProtocolConfig.extraction_version 对齐 symphony-capability-extraction-v3，并将 capability.fingerprint.extraction.max_tokens 扩展为正整数或 None，默认继续为 2048。补充中文说明、字典/JSON 输入与完整错误路径验证，重新导出 config.tree.txt 并同步当前规约。模型总数仍为 63，公共 48、内部 15；业务实现保持 upstream/develop 的版本，未提前接入新配置。
+
+### 验证与交接
+
+本轮实际基线与配置输入约束发生变化，因此重新运行受影响的配置和导出测试；不是在不变提交上重复推送前验证。主仓已有 Python 3.11.15、Pydantic 2.12.5、pytest 9.0.2 环境，PYTHONPATH 指向当前工作树：
+
+```bash
+source /Users/xiaoyulin/Documents/Huawei/code/agent-core/.venv/bin/activate
+export PYTHONPATH=.:${PYTHONPATH:-}
+python scripts/export_symphony_config.py
+python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symphony/test_config_export.py -q
+```
+
+结果：**227 passed，2 个既有 Pydantic 弃用警告，1.05 秒**，包括现有默认值源对照以及新增 None/正整数预算、零值/负值/布尔值/小数/字符串拒绝验证。未运行格式化或静态检查。测试后仅同步文档，不再次运行未受影响的测试。
+
+此记录对应重放后的 6c9aadd59 加本轮目标指纹配置兼容补丁；重写后的提交与原远端历史不同。当前原远端分支为 e9d715c05，远端更新需使用该明确旧值的租约保护，不能用无保护的强推覆盖后续提交。本地 rebase 和恢复点不等于已经完成远端历史更新。
