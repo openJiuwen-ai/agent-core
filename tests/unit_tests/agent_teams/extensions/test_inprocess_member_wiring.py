@@ -9,9 +9,9 @@ teammate with the leader's very spec object, so the bus seeded into
 ``spec.build_context.extras`` reaches the teammate's rail factories through
 the same per-member derive.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -23,7 +23,6 @@ from openjiuwen.agent_teams.rails.team_context import (
 )
 from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
-from openjiuwen.agent_teams.runtime.pool import ActiveTeam
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.core.events import Event, ExtensionEventBus
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE
@@ -58,11 +57,7 @@ def _seeded_spec(bus: ExtensionEventBus) -> TeamAgentSpec:
 def _policy_rails(harness: Any) -> list[TeamPolicyRail]:
     """Collect TeamPolicyRail instances from the harness's rail queues."""
     native = harness._native
-    return [
-        rail
-        for rail in (*native._pending_rails, *native._registered_rails)
-        if isinstance(rail, TeamPolicyRail)
-    ]
+    return [rail for rail in (*native._pending_rails, *native._registered_rails) if isinstance(rail, TeamPolicyRail)]
 
 
 @pytest.mark.asyncio
@@ -126,7 +121,7 @@ async def test_unseeded_spec_builds_the_rail_locally() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Host-facing wiring points: the Runner facade and the lazy resolver
+# Host-facing wiring points: the Runner facade and the database resolver
 # ---------------------------------------------------------------------------
 
 
@@ -150,43 +145,35 @@ async def test_runner_facade_injects_the_bus() -> None:
 
 
 @pytest.mark.asyncio
-async def test_global_runner_pool_resolver_is_lazy() -> None:
-    """The lazy resolver reads the manager slot at resolve time only."""
+async def test_database_resolver_resolves_from_the_factory() -> None:
+    """The resolver calls the db factory at resolve time and answers from rows."""
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
     from openjiuwen.agent_teams.extensions.resolver import (
         BackendTeamReadView,
-        GlobalRunnerPoolResolver,
+        DatabaseResolver,
     )
-    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+    from openjiuwen.agent_teams.tools.database import TeamDatabase
+    from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
 
-    resolver = GlobalRunnerPoolResolver()
-    # A stub pool entry shaped like the structural protocol.
-    entry = ActiveTeam(
-        team_name="research-team",
-        agent=_StubAgent(team_backend=_StubBuildBackend()),  # type: ignore[arg-type]
-        current_session_id="session-1",
-    )
-    real_manager = GLOBAL_RUNNER._get_team_runtime_manager()
-    await real_manager.pool.add(entry)
+    token = set_session_id("session-1")
     try:
+        database = TeamDatabase(DatabaseConfig(connection_string=":memory:"))
+        await database.initialize()
+        await database.team.create_team("research-team", "Research", "leader")
+    finally:
+        reset_session_id(token)
+
+    async def factory() -> TeamDatabase:
+        return database
+
+    try:
+        resolver = DatabaseResolver(factory)
         view = await resolver.resolve("session-1", "research-team")
         assert isinstance(view, BackendTeamReadView)
+        # The session id selects dynamic tables, not access: a team with
+        # rows answers from any session that knows its name.
+        assert await resolver.resolve("other-session", "research-team") is not None
         assert await resolver.resolve("session-1", "other-team") is None
-        assert await resolver.resolve("other-session", "research-team") is None
         assert await resolver.resolve(None, "research-team") is None
     finally:
-        await real_manager.pool.remove("research-team")
-
-
-@dataclass
-class _StubBuildBackend:
-    """Structural backend: the view reads db and team_name (db unused here)."""
-
-    team_name: str = "research-team"
-    db: Any = None
-
-
-@dataclass
-class _StubAgent:
-    """Structural agent holding a stub backend."""
-
-    team_backend: Any
+        await database.close()

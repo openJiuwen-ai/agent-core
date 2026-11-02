@@ -1,12 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Host-facing wiring points: the Runner facade and the lazy resolver."""
+"""Host-facing wiring points: the Runner facade and the database resolver."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
@@ -34,38 +31,35 @@ def test_runner_facade_injects_the_bus() -> None:
 
 
 @pytest.mark.asyncio
-async def test_global_runner_pool_resolver_is_lazy() -> None:
-    """The lazy resolver reads the manager slot at resolve time only."""
+async def test_database_resolver_resolves_from_the_factory() -> None:
+    """The resolver calls the db factory at resolve time and answers from rows."""
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
     from openjiuwen.agent_teams.extensions.resolver import (
         BackendTeamReadView,
-        GlobalRunnerPoolResolver,
+        DatabaseResolver,
     )
-    from openjiuwen.agent_teams.runtime.pool import ActiveTeam
-    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+    from openjiuwen.agent_teams.tools.database import TeamDatabase
+    from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
 
-    resolver = GlobalRunnerPoolResolver()
-
-    @dataclass
-    class _StubBuildBackend:
-        team_name: str = "research-team"
-        db: Any = None
-
-    @dataclass
-    class _StubAgent:
-        team_backend: Any = None
-
-    entry = ActiveTeam(
-        team_name="research-team",
-        agent=_StubAgent(team_backend=_StubBuildBackend()),  # type: ignore[arg-type]
-        current_session_id="session-1",
-    )
-    manager = GLOBAL_RUNNER._get_team_runtime_manager()
-    await manager.pool.add(entry)
+    token = set_session_id("session-1")
     try:
+        database = TeamDatabase(DatabaseConfig(connection_string=":memory:"))
+        await database.initialize()
+        await database.team.create_team("research-team", "Research", "leader")
+    finally:
+        reset_session_id(token)
+
+    async def factory() -> TeamDatabase:
+        return database
+
+    try:
+        resolver = DatabaseResolver(factory)
         view = await resolver.resolve("session-1", "research-team")
         assert isinstance(view, BackendTeamReadView)
+        # The session id selects dynamic tables, not access: a team with
+        # rows answers from any session that knows its name.
+        assert await resolver.resolve("other-session", "research-team") is not None
         assert await resolver.resolve("session-1", "other-team") is None
-        assert await resolver.resolve("other-session", "research-team") is None
         assert await resolver.resolve(None, "research-team") is None
     finally:
-        await manager.pool.remove("research-team")
+        await database.close()
