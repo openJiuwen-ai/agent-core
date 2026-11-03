@@ -1293,11 +1293,14 @@ class TeamBackend:
                 "auto_confirm": auto_confirm,
             }
         )
-        await self.message_manager.send_message(
+        message_id = await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
             protocol="json",
         )
+        if not message_id:
+            team_logger.error("Failed to persist tool approval for {} / {}", member_name, tool_call_id)
+            return False
 
         try:
             await self.messager.publish(

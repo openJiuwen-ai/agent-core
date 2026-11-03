@@ -99,6 +99,11 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         if target_id is None or target_id != member_name:
             return
 
+        # approve_tool persisted the reply; mailbox polling handles it after
+        # the active round settles without queuing a duplicate resume query.
+        if self._round.has_in_flight_round():
+            return
+
         from openjiuwen.core.session import InteractiveInput
 
         interactive_input = InteractiveInput()
