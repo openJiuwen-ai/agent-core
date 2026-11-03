@@ -8,23 +8,23 @@ Symphony 的最终设计围绕 Agent 能力资产提供以下核心能力：
 - **能力指纹**：从能力资产中提取语义画像、输入输出语义和能力标签，形成供检索、编排和评估共享的标准化能力指纹。
 - **能力检索**：将能力资产组织成可逐层浏览和检索的树结构，帮助 Agent 找到候选能力。
 - **能力编排**：将能力视图组织成关系图，并基于候选能力生成可解释的执行路线。
-- **经验沉淀**：从会话轨迹中提取能力使用模式，构建可检索的经验知识库。
+- **经验沉淀**：通过观测和 Flow 从执行图沉淀可复用的组合能力包。
 - **能力评估**：评估智能体能力、技能质量和能力组合效果，为分发、推荐和持续优化提供依据。
-- **Agent Toolkit**：向 Agent 提供组合检索和编排的统一调用入口。
+- **Agent Toolkit**：提供索引构建接口，以及 Discovery 的目录列表、搜索和读取工具。
 
 ## 实施状态
 
 本文档同时描述最终设计和当前实现。“当前可运行接口”描述当前可直接导入的能力；
-“最终 Runtime 与统一接口蓝图”中明确标注为目标形态的代码示例不代表当前已有对应 facade。
+“后续 Runtime 接入”描述尚未实现的统一配置入口。
 
 | 能力域 | 当前状态 | 说明 |
 | --- | --- | --- |
 | 能力指纹 | 已实现 | 已提供普通能力清单、显式 Skill 扫描、语义画像、IO 归一化、增量 cache 和带 schema 版本的 `fingerprint.json`。 |
-| 能力检索 | 待迁入 | 最终提供能力树构建、浏览和自然语言检索。 |
+| 能力检索 | 已实现 | 提供分类树构建、共享索引加载及 Discovery/SkillFS 目录搜索；旧模型检索链已退役。 |
 | 能力编排 | 已实现 | 已提供关系图构建、版本化产物、Fast/Beam Planner 和执行图。 |
-| 经验沉淀 | 部分实现 | 独立模块已提供轨迹解析、评估、经验库构建和检索；尚未接入 `SymphonyRuntime`。 |
+| 经验沉淀 | 已实现 | 保留 observation、Flow 及 Runtime 演进提交；独立 experience 经验库已退役。 |
 | 能力评估 | 已实现 | 已提供可注册的静态与轨迹指标，并保留 reason、evidence、failure 和 suggestion。 |
-| Agent Toolkit | 待迁入 | 最终组合检索和编排，供 Agent 调用。 |
+| Agent Toolkit | 已实现 | 构建 SDK 与 Discovery 工具各自提供入口；工具注册和权限由应用负责。 |
 | 公共 `models` | 已实现 | 提供 capability、fingerprint、evaluation 和 normalization 的不可变公开模型。 |
 
 ## 功能边界
@@ -36,7 +36,7 @@ Symphony 处理能力资产的发现、检索、关系建模、编排、经验�
 | 能力指纹 | 提取并归一化能力资产的语义画像、输入输出和标签。 | 能力清单、能力指纹、归一化标签 |
 | 能力检索 | 建立树索引，支持按任务逐层探索候选能力。 | 分支摘要、候选能力、能力 ID 列表 |
 | 能力编排 | 根据候选能力及其关系图生成执行路线。 | 编排计划、执行图、缺失输入说明 |
-| 经验沉淀 | 从执行轨迹提炼可复用的能力使用模式。 | 经验条目、候选能力 ID 列表 |
+| 经验沉淀 | 从执行图提炼可复用的组合能力。 | Flow 候选、能力包和观测回执 |
 | 能力评估 | 评估智能体能力、技能质量和能力组合效果。 | 评估结果、指标汇总、改进建议 |
 
 使用方通过 Adapter 接入 Symphony：
@@ -69,8 +69,8 @@ Core 只评审和生成临时产物，用户确认、实时成员状态重验及
 `config.py` 定义多层 Pydantic 目标配置，尚未接入现有 Runtime。全部字段、默认值和中文说明可在
 [用户配置树](config.tree.txt) 中查看；该文档完整展开 `SymphonyConfig` 支持的所有配置输入。
 
-公共入口分为 `capability`、`storage`、`retrieval`、`orchestration`、`flow`、`experience` 六组。
-扫描和指纹策略归入 `capability`，对象发现和工具交互归入 `retrieval.discovery`、`retrieval.toolkit`。
+公共入口分为 `capability`、`storage`、`retrieval`、`orchestration`、`flow` 五组。
+扫描和指纹策略归入 `capability`，分类树构建归入 `retrieval.build`，目录发现和搜索归入 `retrieval.discovery`。
 仅对象目录、对象类型和产物目录必填，其余参数可以按需覆盖，未填写的子项自动补全：
 
 ```python
@@ -86,15 +86,9 @@ config = SymphonyConfig.model_validate({
             "task": {"allow_fallback_tree": False},
             "output": {"show_tree": False, "cache_metrics_enabled": True},
         },
-        "search": {
-            "top_k": 5, "traversal": {"max_parallel_branches": 1},
-            "request": {"max_output_tokens": 64, "timeout_seconds": None},
-            "selection": {"mode": "generate"},
-        },
         "discovery": {"prompt": {"candidate_budget_ratio": 0.02, "context_window_tokens": 100000}},
     },
     "flow": {"acceptance": {"min_successes": 2}},
-    "experience": {"build": {"clustering": {"query_clusters_per_capability_set": 4}}},
 })
 ```
 
@@ -105,21 +99,14 @@ config = SymphonyConfig.model_validate({
 设置为 `False` 时，后续运行接入须执行缺模型配置时提前失败及禁止回退的策略；存在可用旧索引且启用保留策略时，仍须保护旧索引。
 详细输出、分类树展示、HTML 预览和缓存指标观测位于 `retrieval.build.output`。
 `cache_metrics_enabled=True` 独立控制缓存指标，`retrieval.build.request.caching=False` 继续控制缓存策略。
-候选选择方式、解码约束和打分策略位于 `retrieval.search.selection`；请求预算位于
-`retrieval.search.request`，使用 `max_output_tokens` 和 `timeout_seconds`，默认分别为 96 和 120 秒。
-工具检索 `retrieval.toolkit.request` 使用相同字段名和默认值；只有自然语言检索的超时接受 `None`，两者独立覆盖。
-使用 `logit_selection` 时需要开启 `retrieval.search.render.compact_codes_enabled`，或将
-`retrieval.search.selection.logit.fallback_mode` 设置为 `generate`；否则配置校验报错。
 Discovery 的上下文容量、候选预算比例和优先对象列表统一位于 `retrieval.discovery.prompt`；
-只读 `candidate_budget_tokens` 仍按比例派生，不写入输入配置。原 `generation`、`discovery.budget` 节点已删除。
+只读 `candidate_budget_tokens` 仍按比例派生，不写入输入配置。原 `discovery.budget` 节点已删除。
 公共字符上限统一使用 `max_body_chars`、`max_evidence_chars`、`max_description_chars`、`max_rule_chars`；
 token 预算使用 `max_output_tokens`、`context_window_tokens`。各阶段默认值、0/None 的含义和约束均保持不变。
-`experience.build.clustering.query_clusters_per_capability_set` 控制每个能力集合内成功查询的聚类数，
-默认 `None` 使用自适应数量；它不表示能力类别数或经验库总簇数。
 指纹提取开关统一使用 `capability.fingerprint.extraction.llm_enabled`，关系共识使用
 `orchestration.build.matching.require_consensus`。原目标配置中的对应扁平路径会按未知字段报错。
 构建和检索策略直接使用公共配置树；`config.py` 不再为旧入口的默认差异声明同义包装或解析快照。
-旧业务模块继续保留原定义，独立模型后端、协议及其他独立用途的参数保留为内部参考。
+保留业务模块继续使用原定义；内部参考只保留指纹协议、一次性构树及构建模型连接参数。
 构造配置不会启动任何服务。
 
 在仓库根目录激活已有 Python 环境后运行：
@@ -151,7 +138,7 @@ inventory
 shared/fingerprint
   ├── retrieval tree
   │     ↓
-  │   AgenticSymphonyToolkit.retrieval
+  │   Discovery / SkillFS
   │     ↓
   │   candidate capability_id
   │
@@ -165,17 +152,18 @@ shared/fingerprint
 ```
 
 - `shared/fingerprint` 扫描或消费能力清单，抽取语义画像，归一化 IO，并原子发布带 schema 版本的能力指纹。
-- `retrieval` 构建并读取能力树索引，向 Agent 渐进披露分支和候选能力。
+- `retrieval` 构建能力树，并保留 Discovery 共用的索引加载与词法搜索。
+- `discovery` 组合实时清单、分类树快照、可见范围和目录列表/搜索/读取工具。
 - `orchestration/graph` 生成关系候选、进行 IO/语义匹配、判断关系并构建能力图。
 - `orchestration` 管理图产物，并根据候选能力和任务目标生成执行路线。
-- `experience` 评估会话轨迹、沉淀能力使用经验，并支持经验检索。
+- `observation` 和 `flow` 处理执行图观测及组合能力包沉淀。
 - `evaluation` 提供可注册的静态质量和调用方轨迹评估，不固化业务准入阈值。
 - `interfaces` 定义使用方需要实现或传入的协议。
 - `agent` 提供 Agent-facing toolkit；使用方负责将 toolkit 方法接入自己的调用体系。
 
 能力图是编排领域的内部组成，不是一个独立的 Runtime 服务；公共运行时通过
-`SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService`、`EvaluationSuite` 和
-experience 领域能力已可独立使用，但尚未组合进 `SymphonyRuntime`。
+`SymphonyRuntime.orchestration` 暴露图生命周期和规划能力，并通过 `submit_evolution` 提交观测和可选 Flow。
+`FingerprintService`、`EvaluationSuite` 继续提供独立服务入口。
 
 ### 检索树中的 Skill 等价群
 
@@ -208,14 +196,16 @@ agent-core
 │       ├── __init__.py
 │       ├── runtime.py
 │       ├── interfaces
-│       ├── agent                         # 待迁入
-│       ├── retrieval                     # 待迁入
+│       ├── agent                         # 索引构建、状态与恢复
+│       ├── retrieval                     # 构树与 Discovery 共享实现
+│       ├── discovery                     # 目录列表、搜索、读取及快照
 │       ├── orchestration
 │       │   ├── graph
 │       │   │   ├── candidates
 │       │   │   └── matcher              # 内部实现，不作为公共 API
 │       │   └── planning
-│       ├── experience                    # 独立模块已实现，Runtime 接入待完成
+│       ├── observation                   # 执行图观测
+│       ├── flow                          # 组合能力包沉淀
 │       ├── evaluation
 │       ├── models
 │       └── shared
@@ -237,7 +227,7 @@ agent-core
 
 ## 当前可运行接口
 
-当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。`openjiuwen.symphony.experience` 已提供可单独导入的领域能力，但尚未组合到 Runtime。
+当前 `SymphonyRuntime` 组合编排服务和图引擎，并接受可选 `flow_engine`；配置、能力清单、模型和产物目录由调用方显式注入。独立经验库已退役，`submit_evolution` 的观测与 Flow 行为保持不变。
 
 ```python
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
@@ -589,160 +579,53 @@ plan = await engine.plan(
 revision，通常由下一次规划读取。`flush_observations()` 只用于测试、管理命令或要求 read-after-write
 的流程，不应放在普通在线规划热路径。
 
-## 最终 Runtime 与统一接口蓝图（部分尚未接入）
+## 检索与构建的当前接口
 
-以下接口展示 Symphony 多能力域统一接入 Runtime 后的目标形态。当前版本尚不存在 `runtime.retrieval`、
-`runtime.experience`、`runtime.evaluation` 或 `runtime.agent_toolkit(...)`；指纹、评估和经验能力当前通过各自的
-公开服务或领域包独立使用。
+`AgenticSkillRetrievalToolkit` 保留名称和构建职责：构造参数为 `index_root`、`skills`、`skills_dir`、
+`build_config`、`llm_config`。公开方法为 `build_index`、`build_index_async`、`check_build_status`、
+`cancel_build`、`load_index_status`、`load_index_tree` 和 `update_skills`。
+`IndexBuilder.build/add/delete` 统一使用 `config=BuildConfig(...)`；不再接收 `method` 或 `runtime_config` 别名。
 
-### Adapter 协议
-
-最终设计仍由使用方提供 Adapter，Symphony 不直接耦合使用方的配置系统和资产目录。以下是目标协议的概念示例，具体类型将在对应模块迁入时确定：
-
-```python
-# 最终目标示例；当前不可运行。
-from pathlib import Path
-from typing import Protocol, Sequence
-
-from openjiuwen.core.foundation.llm import Model
-from openjiuwen.symphony import CapabilityFingerprint
-
-
-class CapabilityInventoryProvider(Protocol):
-    def assets_root(self) -> Path: ...
-
-    def list_capabilities(self) -> Sequence[CapabilityFingerprint]: ...
-
-
-class ModelProvider(Protocol):
-    def model(self) -> Model: ...
-
-
-class ArtifactPathProvider(Protocol):
-    def tree_artifact_root(self) -> Path: ...
-
-    def graph_artifact_root(self) -> Path: ...
-
-    def experience_artifact_root(self) -> Path: ...
-```
-
-能力清单使用 `capability_id` 作为统一标识，并通过 `capability_type` 区分不同资产类型。
-
-### 能力指纹
-
-当前 `FingerprintService` 已提供显式资产扫描、语义画像、IO 归一化和版本化产物。最终 Runtime 将组合该
-服务，并把同一份标准化指纹交给检索、编排和评估；使用方仍可显式提供普通对象或
-`CapabilityFingerprint`，无需让 Symphony 读取应用内部注册表。
-
-### 能力检索
-
-最终检索服务将已注册能力组织成树索引，并向 Agent 按需披露分支和候选能力：
+Discovery 的入口保持不变：
 
 ```python
-# 最终目标示例；当前不可运行。
-status = symphony.retrieval.status()
-if not status.exists or not status.fresh:
-    await symphony.retrieval.build(force=False)
+from openjiuwen.symphony.discovery import DiscoverySettings, InstalledSkillsDirectoryToolkit, SkillFS
 
-result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
+# records_provider 返回当前可见范围之外的完整 Discovery SkillRecord 清单；
+# visible_skill_names 在本会话视图中过滤对象。
+environment = SkillFS(
+    records_provider,
+    settings=DiscoverySettings(use_existing_index=True),
+    artifact_root="./artifacts/tree",
+    visible_skill_names={"pdf-reader", "summary-writer"},
+    pin_index_revision=True,
 )
-candidate_ids = [
-    capability.capability_id
-    for capability in result.capabilities
-]
+toolkit = InstalledSkillsDirectoryToolkit(environment, session_scope="session-1")
+
+async def discover():
+    try:
+        return await toolkit.skill_index("search", query="PDF summary")
+    finally:
+        await toolkit.aclose()
 ```
 
-目标服务包括索引状态查询、构建与取消、树摘要读取、分支探索及自然语言检索；检索结果包含候选能力、命中分支、排序信息和产物版本。
+缺少可用分类树时，Discovery 继续使用实时清单提供发现能力。共享索引加载仍位于
+`retrieval.search.artifacts.loading`，词法搜索仍位于 `retrieval.search.runtime.lexical`。
 
-### 多服务 Runtime
+旧 `Retriever`、`ProgressiveRetriever`、`FlatRetriever`、分支探索/预览工具、紧凑编码、logit/trie
+选择与检索专用模型后端已删除；`retrieval.search` 不再导出独立模型检索服务。
+独立 `experience` 包已删除；Flow 的 `symphony.experience_recipe.v1` 是保留的能力包协议。
+本次不迁移、不删除任何用户已有的索引、经验文件或会话历史。
 
-最终 `SymphonyRuntime` 将组合检索、编排、经验和评估子服务：
+## 后续 Runtime 接入
 
-```python
-# 最终目标示例；当前不可运行。
-from openjiuwen.symphony import SymphonyRuntime
+目标是将现有构树、Discovery、编排及 Flow 按 `SymphonyConfig` 统一接入。
+`SymphonyRuntime(model, config)` 尚未实现，不能将当前目标配置直接传给现有 Runtime。
+保留能力的业务默认值、构建指纹和工件格式不变；运行接入时仍须显式处理字段映射。
 
-symphony = SymphonyRuntime(
-    inventory_provider=adapter.capability_inventory_provider(),
-    tree_artifact_root=adapter.tree_artifact_root(),
-    graph_artifact_root=adapter.graph_artifact_root(),
-    experience_artifact_root=adapter.experience_artifact_root(),
-    retrieval_settings=adapter.retrieval_settings(),
-    orchestration_settings=adapter.orchestration_settings(),
-    model=adapter.model(),
-)
+## 运行时产物
 
-retrieval_result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await symphony.orchestration.plan(
-    query="读取 PDF 内容并生成摘要",
-    candidate_ids=candidate_ids,
-)
-```
-
-### 经验沉淀
-
-当前独立的 [`openjiuwen.symphony.experience`](experience/API.md) 包已提供轨迹解析、评估、经验库构建和检索。下例展示未来统一 Runtime facade 的目标形态，当前不可运行：
-
-```python
-# 最终目标示例；当前不可运行。
-records = await symphony.experience.evaluate(traces)
-await symphony.experience.build(records)
-experience_result = await symphony.experience.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = experience_result.candidate_ids
-```
-
-现有领域对象包括轨迹记录、轨迹评估器、经验库、经验库构建器和经验检索器；统一 Runtime 接口将在集成时以现有实现和测试为准。
-
-### 能力评估
-
-当前 `EvaluationSuite` 已支持独立的静态和轨迹评估。以下示例是未来 Runtime facade 面向单项能力、Agent
-能力和能力组合的目标形态：
-
-```python
-# 最终目标示例；当前不可运行。
-evaluation = await symphony.evaluation.evaluate_capabilities(
-    capability_ids=candidate_ids,
-    traces=traces,
-)
-```
-
-### Agent Toolkit
-
-最终 `AgenticSymphonyToolkit` 组合检索和编排能力，使用方可以将其方法接入自己的 Agent 调用体系：
-
-```python
-# 最终目标示例；当前不可运行。
-toolkit = symphony.agent_toolkit(language="cn")
-
-retrieval_result = await toolkit.retrieval.search(
-    "读取 PDF 内容，总结后发送邮件",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await toolkit.orchestration.plan(
-    query="读取 PDF 内容，总结后发送邮件",
-    candidate_ids=candidate_ids,
-)
-```
-
-- `toolkit.retrieval` 最终提供根分类渲染、分支预览、分支展开和自然语言检索。
-- `toolkit.orchestration` 最终提供关系图读取、刷新和在线计划生成。
-- Toolkit 只提供 Agent-facing 领域方法；工具注册、权限、进度展示和 UI 由使用方负责。
-
-## 最终运行时产物
-
-指纹、检索、编排和当前独立的经验模块使用调用方指定的产物目录：
+指纹、分类树与编排使用调用方指定的产物目录；Flow 的存储由注入引擎管理：
 
 ```text
 fingerprint_artifact_root/
@@ -751,8 +634,12 @@ fingerprint_artifact_root/
 └── .fingerprint.lock
 
 tree_artifact_root/
-├── current.json
-└── versions/<version>/tree.json
+├── state.json
+└── index/
+    ├── tree_index.yaml
+    ├── catalog.jsonl
+    ├── manifest.json
+    └── commit.json
 
 graph_artifact_root/
 ├── cache/relation_matches.json
@@ -766,22 +653,15 @@ graph_artifact_root/
         ├── observations/<observation-revision>/overlay.json
         └── merged/<merged-revision>/manifest.json
 
-experience_kb/
-├── meta.json
-├── scalar/metadata.jsonl
-└── vector/
-    ├── faiss_index.bin
-    └── embeddings.npy
 
 ```
 
 - `fingerprint.json` 当前保存标准化能力指纹、质量结果、诊断和 source snapshot。
-- `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
+- `index/` 保存一次完整发布的分类树、目录、清单和提交信息；`state.json` 记录构建状态。
 - `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
 - `evolution/evidence.sqlite3` 是 append-only 规范证据日志；`observations` 与 `merged` 保存不可变派生版本。
-- `experience_kb` 是当前独立经验库的调用方指定目录；canonical Trajectory 的归档仍由 Harness 管理，
-  GraphEngine 只持久化脱敏后的规范边证据。
-- 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
+- canonical Trajectory 的归档仍由 Harness 管理，GraphEngine 只持久化脱敏后的规范边证据。
+- 机器产物使用 JSON/JSONL，分类树保存为 `tree_index.yaml`；YAML 也用于配置和 prompt。
 
 ## 开发与验证
 

@@ -9,7 +9,7 @@ author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 reviewers: []
 created: 2026-10-31
-updated: 2026-11-02
+updated: 2026-11-03
 approved-date: 2026-10-31
 domain: core
 modules: [symphony]
@@ -162,3 +162,8 @@ SymphonyConfig
 不增加兼容别名或第二个可写路径。预期公共可达模型仍为 48 个、内部 15 个、合计 63 个；不扩大 __all__ 或包根导出。相关运行参数的字段映射、缓存签名、Runtime 和消费者迁移仍留到后续。
 
 验收：按明确路径映射比较变更前后全部公共叶子项的默认值和 Schema 约束，不合并不同入口的值；15 个内部模型的 Schema 保持一致。覆盖旧路径/旧类退役、请求与选择策略分离、超时可空性差异、缓存策略与观测独立、Discovery 提示预算派生、深层覆盖、完整错误路径、字典/JSON 往返和中文说明。自动重新生成 config.tree.txt 并只执行配置、导出测试，不运行格式化或静态检查。
+
+
+## 13. 2026-11-03 能力退役的后继决定
+
+用户批准连代码与配置一起删除旧模型检索、分支浏览和独立经验库，方案由 [D-20261103-1438-symphony-capability-retirement](../D-20261103-1438-symphony-capability-retirement/design.md) 承接。此前有关这些能力保留的选择被局部替代；嵌套结构、中文元数据、保留默认值和目标配置尚未接入 Runtime 等约定继续有效。此前章节保留其当时语境。

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from enum import IntFlag
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence
 
@@ -19,13 +18,8 @@ from openjiuwen.symphony.retrieval.build.tree.root_categories import RootCategor
 from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, unique_child_cid
 
 
-class BuildMethod(IntFlag):
-    TREE = 4
-
-
 @dataclass(frozen=True)
 class BuildConfig:
-    method: BuildMethod = BuildMethod.TREE
     llm_openai_client: OpenAI | None = None
     llm_model: str = ""
     llm_api_key: str = ""
@@ -65,13 +59,8 @@ class BuildConfig:
     allow_fallback_tree: bool = True
 
 
-# 向后兼容别名：IndexBuildRuntimeConfig 已合并到 BuildConfig
-IndexBuildRuntimeConfig = BuildConfig
-
-
 @dataclass(frozen=True)
 class ResolvedBuildConfig:
-    method: BuildMethod
     llm_openai_client: Any | None
     llm_model: str
     llm_seed: int | None
@@ -114,13 +103,9 @@ class ResolvedBuildConfig:
 def resolve_build_config(
     *,
     config: BuildConfig | None = None,
-    runtime_config: BuildConfig | None = None,  # 向后兼容：现在也接受BuildConfig
 ) -> ResolvedBuildConfig:
-    if config is not None and runtime_config is not None:
-        raise ValueError("Specify either config or runtime_config, not both")
-    cfg = config or runtime_config or BuildConfig()
+    cfg = config or BuildConfig()
     return ResolvedBuildConfig(
-        method=_resolve_build_method(cfg.method),
         llm_openai_client=cfg.llm_openai_client,
         llm_model=str(cfg.llm_model or "").strip(),
         llm_seed=cfg.llm_seed,
@@ -159,17 +144,6 @@ def resolve_build_config(
         generate_tree_html=bool(cfg.generate_tree_html),
         allow_fallback_tree=bool(cfg.allow_fallback_tree),
     )
-
-
-def _resolve_build_method(method: BuildMethod) -> BuildMethod:
-    message = f"Unsupported build method: {method!r}. Only BuildMethod.TREE is currently supported."
-    try:
-        resolved = BuildMethod(method)
-    except ValueError as exc:
-        raise ValueError(message) from exc
-    if resolved != BuildMethod.TREE:
-        raise ValueError(message)
-    return resolved
 
 
 def build_catalog_records_from_nodes(
@@ -306,7 +280,7 @@ def can_build_tree_with_llm(runtime_config: BuildConfig | ResolvedBuildConfig | 
     """检查是否可以用LLM构建树索引。
 
     Args:
-        runtime_config: BuildConfig 或 ResolvedBuildConfig（向后兼容也接受IndexBuildRuntimeConfig）
+        runtime_config: BuildConfig 或 ResolvedBuildConfig
 
     Returns:
         如果配置了LLM模型和API密钥/客户端，返回True
@@ -315,7 +289,7 @@ def can_build_tree_with_llm(runtime_config: BuildConfig | ResolvedBuildConfig | 
         return bool(str(runtime_config.llm_model or "").strip()) and (
             runtime_config.llm_openai_client is not None or bool(str(runtime_config.tree_llm_api_key or "").strip())
         )
-    # BuildConfig 或向后兼容的 IndexBuildRuntimeConfig
+    # BuildConfig
     if runtime_config is None:
         runtime_config = BuildConfig()
     # BuildConfig 使用 llm_model 和 llm_api_key/llm_base_url
@@ -331,8 +305,6 @@ def can_build_tree_with_llm(runtime_config: BuildConfig | ResolvedBuildConfig | 
 
 __all__ = [
     "BuildConfig",
-    "BuildMethod",
-    "IndexBuildRuntimeConfig",
     "ResolvedBuildConfig",
     "build_catalog_records_from_nodes",
     "build_fallback_tree_nodes",

@@ -7,28 +7,19 @@ from pathlib import Path
 import re
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from openjiuwen.symphony import config as target
 from openjiuwen.symphony.agent.retrieval_toolkit import (
-    AgenticRetrievalConfig as CurrentAgenticConfig,
     SkillIndexBuildConfig as CurrentIndexBuildConfig,
 )
 from openjiuwen.symphony.discovery.config import DiscoverySettings
-from openjiuwen.symphony.experience.models import ExperienceBankBuildConfig as CurrentExperienceConfig
 from openjiuwen.symphony.orchestration.config import (
     OrchestrationConfig as CurrentPlanningConfig,
     SymphonyFlowConfig as CurrentFlowConfig,
 )
 from openjiuwen.symphony.retrieval.build.tree import schema as current_tree
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig as CurrentWorkflowConfig
-from openjiuwen.symphony.retrieval.llm.config import (
-    OpenAIClientConfig as CurrentOpenAIConfig,
-    TransformersClientConfig as CurrentTransformersConfig,
-    VLLMClientConfig as CurrentVLLMConfig,
-)
-from openjiuwen.symphony.retrieval.search.runtime.codebooks import DEFAULT_COMPACT_BOUNDARY_CODEBOOK
-from openjiuwen.symphony.retrieval.search.service.models import RetrieverConfig as CurrentRetrieverConfig
 from openjiuwen.symphony.shared.fingerprint.settings import FingerprintSettings
 
 
@@ -101,9 +92,7 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
     assert config.retrieval.build.request.max_concurrency == 2
     assert config.retrieval.build.request.timeout_seconds == 420.0
     assert config.retrieval.build.request.classification_batch_limit == 32
-    assert config.retrieval.search.top_k == 10
-    assert config.retrieval.search.traversal.max_parallel_branches == 3
-    assert config.retrieval.search.request.timeout_seconds == 120.0
+    assert config.retrieval.discovery.output.max_results == 10
     assert config.orchestration.min_edge_confidence == 0.7
     assert not config.capability.fingerprint.extraction.llm_enabled
     assert config.capability.fingerprint.extraction.max_concurrency == 4
@@ -113,7 +102,6 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
     assert config.orchestration.plan.top_k == 3
     assert config.orchestration.plan.max_depth == 4
     assert config.flow.enabled
-    assert config.experience.build.execution.max_concurrency == 8
 
 
 @pytest.mark.parametrize("capability_type", ["skill", "expert", "connector", "mcp"])
@@ -131,8 +119,10 @@ def test_supported_types_do_not_imply_runtime_loading(capability_type):
 @pytest.mark.parametrize("value", [0, -1, True, 2.5, "10", None])
 def test_invalid_nested_value_reports_full_field_path(value):
     with pytest.raises(ValidationError) as error:
-        target.SymphonyConfig.model_validate({**MINIMAL, "retrieval": {"search": {"top_k": value}}})
-    assert error.value.errors()[0]["loc"] == ("retrieval", "search", "top_k")
+        target.SymphonyConfig.model_validate({
+            **MINIMAL, "retrieval": {"discovery": {"output": {"max_results": value}}},
+        })
+    assert error.value.errors()[0]["loc"] == ("retrieval", "discovery", "output", "max_results")
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf"), True])
@@ -168,7 +158,7 @@ def test_fingerprint_output_budget_rejects_invalid_values(value):
 
 
 @pytest.mark.parametrize("payload, location", [
-    ({"retrieval": {"search": {"topk": 3}}}, ("retrieval", "search", "topk")),
+    ({"retrieval": {"discovery": {"output": {"max_result": 3}}}}, ("retrieval", "discovery", "output", "max_result")),
     ({"retrieval": None}, ("retrieval",)),
     ({"retrieval": {"enabled": "false"}}, ("retrieval", "enabled")),
     ({"orchestration": {"plan": {"mode": "unknown"}}}, ("orchestration", "plan", "mode")),
@@ -192,78 +182,20 @@ def test_disabled_groups_are_still_validated_and_both_can_be_disabled():
     assert not config.retrieval.enabled and not config.orchestration.enabled
 
 
-@pytest.mark.parametrize("mode", ["generate", "logit_selection"])
-@pytest.mark.parametrize("compact_codes_enabled", [True, False])
-@pytest.mark.parametrize("fallback_mode", ["error", "generate"])
-def test_selection_and_rendering_combinations(mode, compact_codes_enabled, fallback_mode):
-    # 输入顺序不影响跨字段校验；按模型字段顺序先校验 render，再校验 selection。
-    search = {
-        "selection": {"mode": mode, "logit": {"fallback_mode": fallback_mode}},
-        "render": {"compact_codes_enabled": compact_codes_enabled},
-    }
-    payload = {**MINIMAL, "retrieval": {"search": search}}
-    invalid = mode == "logit_selection" and not compact_codes_enabled and fallback_mode == "error"
-    for validate, data, location in (
-        (target.RetrievalSearchConfig.model_validate, search, ("selection",)),
-        (target.SymphonyConfig.model_validate, payload, ("retrieval", "search", "selection")),
-        (target.SymphonyConfig.model_validate_json, json.dumps(payload), ("retrieval", "search", "selection")),
-    ):
-        if invalid:
-            with pytest.raises(ValidationError) as error:
-                validate(data)
-            assert error.value.errors()[0]["loc"] == location
-            assert error.value.errors()[0]["type"] == "value_error"
-            assert "render.compact_codes_enabled" in error.value.errors()[0]["msg"]
-            assert "selection.logit.fallback_mode" in error.value.errors()[0]["msg"]
-        else:
-            config = validate(data)
-            assert type(config).model_validate_json(config.model_dump_json()) == config
-            assert type(config).model_validate(config.model_dump(mode="json")) == config
-
-
-@pytest.mark.parametrize("enabled", [True, False])
-def test_logit_selection_validates_default_fallback_even_when_retrieval_is_disabled(enabled):
-    payload = {
-        **MINIMAL, "retrieval": {
-            "enabled": enabled,
-            "search": {"render": {"compact_codes_enabled": False}, "selection": {"mode": "logit_selection"}},
-        },
-    }
-    for validate, data in (
-        (target.SymphonyConfig.model_validate, payload),
-        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
-    ):
-        with pytest.raises(ValidationError) as error:
-            validate(data)
-        assert error.value.errors()[0]["loc"] == ("retrieval", "search", "selection")
-
-
-def test_logit_selection_uses_default_rendering_and_validates_prebuilt_child_models():
-    config = target.RetrievalSearchConfig(selection={"mode": "logit_selection"})
-    assert config.render.compact_codes_enabled
-    assert config.selection.logit.fallback_mode == "error"
-    with pytest.raises(ValidationError) as error:
-        target.RetrievalSearchConfig(
-            render=target.RetrievalRenderConfig(compact_codes_enabled=False),
-            selection=config.selection,
-        )
-    assert error.value.errors()[0]["loc"] == ("selection",)
-
-
 def test_configuration_does_not_resolve_paths_or_read_environment(monkeypatch):
     def unexpected(*args, **kwargs):
         raise AssertionError("配置构造不应访问文件系统")
 
     for name in ("resolve", "exists", "is_dir", "mkdir", "read_text"):
         monkeypatch.setattr(Path, name, unexpected)
-    monkeypatch.setenv("SYMPHONY_RETRIEVAL_TOP_K", "999")
+    monkeypatch.setenv("SYMPHONY_DISCOVERY_MAX_RESULTS", "999")
     config = target.SymphonyConfig.model_validate({
         "capability": {"root": Path("missing/../capabilities"), "type": "expert"},
         "storage": {"artifact_root": Path("./artifacts")},
     })
     assert config.capability.root == "missing/../capabilities"
     assert config.storage.artifact_root == "artifacts"
-    assert config.retrieval.search.top_k == 10
+    assert config.retrieval.discovery.output.max_results == 10
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
 
 
@@ -290,8 +222,6 @@ def _example(model):
         target.CapabilityConfig: {"root": "./capabilities", "type": "skill"},
         target.StorageConfig: {"artifact_root": "./artifacts"},
         target.SymphonyConfig: MINIMAL,
-        target.CapabilityIndexStorageConfig: {"index_root": "./index"},
-        target.TrieConstraintConfig: {"allowed_output_ids": ["capability-a"]},
     }
     return model.model_validate(examples.get(model, {}))
 
@@ -315,12 +245,12 @@ def test_all_config_models_export_chinese_field_documentation(model):
         assert schema["properties"][name]["description"] == info.description
 
 
-def test_schema_preserves_bounds_enum_examples_and_backend_discriminator():
+def test_schema_preserves_bounds_enum_and_examples():
     schema = target.SymphonyConfig.model_json_schema()
     assert schema["required"] == ["capability", "storage"]
-    search = schema["$defs"]["RetrievalSearchConfig"]["properties"]["top_k"]
-    assert search["default"] == 10 and search["exclusiveMinimum"] == 0
-    assert search["examples"] == [5, 10]
+    output = schema["$defs"]["DiscoveryOutputConfig"]["properties"]["max_results"]
+    assert output["default"] == 10 and output["exclusiveMinimum"] == 0
+    assert schema["$defs"]["CapabilityConfig"]["properties"]["root"]["examples"] == ["./capabilities"]
     assert schema["$defs"]["CapabilityConfig"]["properties"]["type"]["enum"] == [
         "skill", "expert", "connector", "mcp",
     ]
@@ -329,8 +259,6 @@ def test_schema_preserves_bounds_enum_examples_and_backend_discriminator():
     for model in target.PUBLIC_CONFIG_MODELS:
         if model not in (target.SymphonyConfig, target.CapabilityConfig, target.StorageConfig):
             assert not any(info.is_required() for info in model.model_fields.values()), model.__name__
-    backend = TypeAdapter(target.LLMClientConfig).json_schema()
-    assert backend["discriminator"]["propertyName"] == "backend"
 
 
 def test_model_registry_covers_all_concrete_models():
@@ -360,9 +288,9 @@ def test_legacy_mirrors_and_resolved_snapshots_are_not_target_configuration():
 
 def test_public_exports_are_limited_to_the_runtime_configuration_tree():
     expected = {
-        "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig", "RetrievalSearchConfig",
+        "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig",
         "RetrievalConfig", "OrchestrationBuildConfig", "OrchestrationPlanConfig", "OrchestrationConfig", "SymphonyConfig",
-        "FlowConfig", "ExperienceConfig",
+        "FlowConfig",
     }
     assert set(target.__all__) == expected
     public_names = {model.__name__ for model in target.PUBLIC_CONFIG_MODELS}
@@ -376,14 +304,11 @@ def test_public_exports_are_limited_to_the_runtime_configuration_tree():
 
 
 def test_default_containers_are_not_shared_and_public_assignment_is_frozen():
-    first, second = target.RetrievalSearchConfig(), target.RetrievalSearchConfig()
-    first.render.compact_codebook.append("EXAMPLE")
-    first_backend, second_backend = target.OpenAIClientConfig(), target.OpenAIClientConfig()
-    first_backend.extra_body["options"] = {"enabled": True}
-    assert second.render.compact_codebook == list(DEFAULT_COMPACT_BOUNDARY_CODEBOOK)
-    assert second_backend.extra_body == {}
+    first, second = target.DiscoveryPromptConfig(), target.DiscoveryPromptConfig()
+    first.preferred_capability_ids.append("extra")
+    assert "extra" not in second.preferred_capability_ids
     with pytest.raises(ValidationError) as error:
-        target.SymphonyConfig.model_validate(MINIMAL).retrieval.search.top_k = 2
+        target.SymphonyConfig.model_validate(MINIMAL).retrieval.discovery.output.max_results = 2
     assert error.value.errors()[0]["type"] == "frozen_instance"
     mutable = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build.dynamic
     mutable.rebalance_interval = 80
@@ -392,33 +317,9 @@ def test_default_containers_are_not_shared_and_public_assignment_is_frozen():
         mutable.rebalance_interval = 0
 
 
-@pytest.mark.parametrize("backend, model_type", [
-    ("openai", target.OpenAIClientConfig),
-    ("vllm", target.VLLMClientConfig),
-    ("transformers", target.TransformersClientConfig),
-    ("transformers_prefix_cached", target.TransformersClientConfig),
-    ("transformers_prefix_cached_generation", target.TransformersClientConfig),
-])
-def test_backend_union_can_be_selected_from_serializable_configuration(backend, model_type):
-    adapter = TypeAdapter(target.LLMClientConfig)
-    config = adapter.validate_python({"backend": backend})
-    assert isinstance(config, model_type)
-    assert adapter.validate_json(adapter.dump_json(config)) == config
-
-
 def test_runtime_dependencies_are_not_configuration_fields():
     with pytest.raises(ValidationError):
-        target.OpenAIClientConfig(client=object())
-    with pytest.raises(ValidationError):
-        target.LLMGenerationConfig(prompt_cache=object())
-    with pytest.raises(ValidationError):
         target.SymphonyConfig.model_validate({**MINIMAL, "model": object()})
-
-
-@pytest.mark.parametrize("value", [object(), float("nan"), float("inf")])
-def test_backend_extensions_must_be_serializable_json(value):
-    with pytest.raises(ValidationError):
-        target.OpenAIClientConfig(extra_body={"custom": value})
 
 
 def test_public_build_preserves_every_configurable_toolkit_default():
@@ -438,25 +339,8 @@ def test_public_build_preserves_every_configurable_toolkit_default():
 def test_public_groups_preserve_existing_module_defaults():
     config = target.SymphonyConfig.model_validate(MINIMAL)
     assert config.capability.scan == target.DirectoryScanConfig()
-    current = CurrentRetrieverConfig()
-    assert config.retrieval.search.top_k == current.top_k
-    for old, planned in (
-        (current.traversal_config, config.retrieval.search.traversal),
-        (current.render_config, config.retrieval.search.render),
-    ):
-        _assert_defaults(old, planned, {name: name for name in asdict(old)})
-    selection_mapping = {
-        name: "selection." + (name.replace("logit_", "logit.", 1) if name.startswith("logit_") else name)
-        for name in asdict(current.generation_config)
-    }
-    selection_mapping.update({
-        "max_tokens": "request.max_output_tokens", "request_timeout_seconds": "request.timeout_seconds",
-    })
-    _assert_defaults(current.generation_config, config.retrieval.search, selection_mapping)
     assert config.retrieval.discovery == target.DiscoveryConfig()
-    assert config.retrieval.toolkit == target.AgenticRetrievalConfig()
     assert config.flow == target.FlowConfig()
-    assert config.experience.build == target.ExperienceBankBuildConfig()
     assert config.orchestration.build.matching.model_dump() == {
         "batch_size": 12, "require_consensus": True, "max_candidates_per_capability_relation": 32,
         "max_port_mappings_per_candidate": 12, "max_exact_io_pair_fanout": 64,
@@ -488,23 +372,10 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
                 "output": {"generate_tree_html": True, "verbose": True, "show_tree": False,
                            "display_capability_root": "./display", "cache_metrics_enabled": False},
             },
-            "search": {
-                "top_k": 7, "traversal": {"max_parallel_branches": 1}, "render": {"compact_codebook": ["AA", "BB"]},
-                "request": {"max_output_tokens": 64, "timeout_seconds": None},
-                "selection": {"mode": "logit_selection", "logit": {"min_probability": 0.2}},
-            },
             "discovery": {"prompt": {"candidate_budget_ratio": 0.02, "preferred_capability_ids": ["expert-a"]}},
-            "toolkit": {
-                "render": {"max_exposure_depth": 2}, "tools": {"branch_explore": "capability_explore"},
-                "request": {"max_output_tokens": 48, "timeout_seconds": 60.0},
-            },
         },
         "orchestration": {"build": {"matching": {"require_consensus": False}}, "plan": {"mode": "beam"}},
         "flow": {"enabled": False, "acceptance": {"min_successes": 2}, "narrative": {"max_examples": 3}},
-        "experience": {"build": {
-            "clustering": {"min_cluster_size": 2, "query_clusters_per_capability_set": 4},
-            "execution": {"max_concurrency": 1},
-        }},
     })
     assert config.capability.scan.limits.max_entrypoints == 200
     assert config.capability.scan.manifest.max_frontmatter_depth == 8
@@ -530,22 +401,10 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     assert config.retrieval.build.output.verbose and not config.retrieval.build.output.show_tree
     assert config.retrieval.build.output.display_capability_root == "./display"
     assert not config.retrieval.build.output.cache_metrics_enabled
-    assert config.retrieval.search.top_k == 7 and config.retrieval.search.traversal.max_parallel_branches == 1
-    assert config.retrieval.search.render.compact_codebook == ["AA", "BB"]
-    assert config.retrieval.search.selection.logit.min_probability == 0.2
-    assert config.retrieval.search.request.max_output_tokens == 64
-    assert config.retrieval.search.request.timeout_seconds is None
     assert config.retrieval.discovery.prompt.candidate_budget_tokens == 4000
     assert config.retrieval.discovery.prompt.preferred_capability_ids == ["expert-a"]
-    assert config.retrieval.toolkit.render.max_exposure_depth == 2
-    assert config.retrieval.toolkit.tools.branch_explore == "capability_explore"
-    assert config.retrieval.toolkit.request.max_output_tokens == 48
-    assert config.retrieval.toolkit.request.timeout_seconds == 60.0
     assert not config.orchestration.build.matching.require_consensus and config.orchestration.plan.mode == "beam"
     assert not config.flow.enabled and config.flow.acceptance.min_successes == 2 and config.flow.narrative.max_examples == 3
-    assert config.experience.build.clustering.min_cluster_size == 2 and config.experience.build.execution.max_concurrency == 1
-    assert config.experience.build.clustering.query_clusters_per_capability_set == 4
-    assert config.experience.build.patterns.merge_threshold == 0.9
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
     assert target.SymphonyConfig.model_validate(config.model_dump(mode="json")) == config
 
@@ -555,16 +414,12 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     ("retrieval.build.branching_factor", 16),
     ("retrieval.build.max_concurrency", 2),
     ("retrieval.build.request_timeout_seconds", 60.0),
-    ("retrieval.search.max_parallel_branches", 1),
-    ("retrieval.search.request_timeout_seconds", 60.0),
     ("orchestration.build.extraction_mode", "llm"),
     ("orchestration.build.require_consensus", False),
     ("orchestration.build.matching.max_concurrency", 2),
     ("orchestration.plan.min_edge_confidence", 0.8),
     ("capability.fingerprint.protocol", {"schema_version": "2.0"}),
     ("retrieval.build.prompt.fingerprint_version", "v2"),
-    ("retrieval.search.llm", {"backend": "vllm"}),
-    ("retrieval.search.progressive", {}),
     ("retrieval.build.manager", {}),
     ("retrieval.build.build", {}),
     ("retrieval.build.dynamic.structure", {"branching_factor": 8}),
@@ -579,7 +434,6 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     ("retrieval.build.dynamic.expansion.lazy_split", 1.3),
     ("retrieval.build.dynamic.expansion.classification_batch", 6.0),
     ("retrieval.build.dynamic.expansion.structure_sample", 12.0),
-    ("experience.build.clustering.capability_cluster_num", None),
     ("capability.fingerprint.extraction.body_limit", 16000),
     ("capability.fingerprint.extraction.max_tokens", 2048),
     ("capability.fingerprint.evaluation.evidence_text_limit", 512),
@@ -588,14 +442,6 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     ("retrieval.build.request.context_window", 0),
     ("retrieval.build.prompt.cache_observability", True),
     ("retrieval.build.output.cache_observability", True),
-    ("retrieval.search.generation", {"mode": "generate"}),
-    ("retrieval.search.selection.max_tokens", 96),
-    ("retrieval.search.selection.request_timeout_seconds", 120.0),
-    ("retrieval.search.request.max_tokens", 96),
-    ("retrieval.search.request.request_timeout_seconds", 120.0),
-    ("retrieval.search.request.mode", "generate"),
-    ("retrieval.toolkit.request.max_tokens", 96),
-    ("retrieval.toolkit.request.request_timeout_seconds", 120.0),
     ("retrieval.discovery.budget", {"candidate_budget_ratio": 0.01}),
     ("retrieval.discovery.prompt.candidate_budget_tokens", 2000),
 ])
@@ -618,12 +464,8 @@ def test_duplicate_or_internal_input_paths_are_rejected(path, value):
 
 @pytest.mark.parametrize("payload, location", [
     ({"retrieval": {"build": {"structure": {"branching_factor": 1}}}}, ("retrieval", "build", "structure", "branching_factor")),
-    ({"retrieval": {"search": {"selection": {"logit": {"min_probability": 2}}}}},
-     ("retrieval", "search", "selection", "logit", "min_probability")),
     ({"flow": {"enabled": False, "acceptance": {"min_pack_success_rate": -0.1}}},
      ("flow", "acceptance", "min_pack_success_rate")),
-    ({"experience": {"build": {"execution": {"max_concurrency": "2"}}}},
-     ("experience", "build", "execution", "max_concurrency")),
     ({"retrieval": {"build": {"dynamic": {"rebalance_interval": 0}}}},
      ("retrieval", "build", "dynamic", "rebalance_interval")),
     ({"retrieval": {"build": {"dynamic": {"expansion": {"lazy_split_multiplier": 0}}}}},
@@ -642,21 +484,12 @@ def test_merged_configuration_errors_keep_complete_paths(payload, location):
 def test_nested_public_defaults_are_independent_between_instances():
     first = target.SymphonyConfig.model_validate(MINIMAL)
     second = target.SymphonyConfig.model_validate(MINIMAL)
-    first.retrieval.search.render.compact_codebook.append("EXAMPLE")
-    first.retrieval.toolkit.render.compact_codebook.append("TOOL")
     first.retrieval.discovery.prompt.preferred_capability_ids.append("expert-extra")
-    # 经验构建节点保留既有可修改语义，赋值仍校验且默认对象不能跨根实例共享。
-    first.experience.build.execution = target.ExperienceExecutionConfig(max_concurrency=1)
     first.retrieval.build.dynamic.rebalance_interval = 80
     first.retrieval.build.dynamic.expansion = target.TreeExpansionConfig(early_stop_multiplier=2.0)
-    assert second.retrieval.search.render.compact_codebook == list(DEFAULT_COMPACT_BOUNDARY_CODEBOOK)
-    assert second.retrieval.toolkit.render.compact_codebook == []
     assert "expert-extra" not in second.retrieval.discovery.prompt.preferred_capability_ids
-    assert second.experience.build.execution.max_concurrency == 8
     assert second.retrieval.build.dynamic.rebalance_interval == 50
     assert second.retrieval.build.dynamic.expansion.early_stop_multiplier == 1.7
-    with pytest.raises(ValidationError):
-        first.experience.build.execution = {"max_concurrency": 0}
 
 
 def test_index_task_policy_and_output_have_separate_serialized_paths():
@@ -736,12 +569,12 @@ def test_public_build_matches_existing_workflow_and_shared_tree_defaults():
         **{old: new for old, new in INDEX_MAPPING.items() if old.startswith("incremental_")},
     })
     _assert_defaults(CurrentWorkflowConfig(), config, workflow_mapping, excluded=(
-        "method", "llm_openai_client", "llm_model", "llm_api_key", "llm_base_url", "llm_seed",
+        "llm_openai_client", "llm_model", "llm_api_key", "llm_base_url", "llm_seed",
         "tree_prompt_fingerprint_version",
     ))
 
 
-def test_fingerprint_flow_discovery_and_experience_defaults_match_existing_sources():
+def test_fingerprint_flow_and_discovery_defaults_match_existing_sources():
     public = target.SymphonyConfig.model_validate(MINIMAL)
     current_fingerprint = FingerprintSettings()
     _assert_defaults(current_fingerprint, public.capability.fingerprint, {
@@ -765,104 +598,14 @@ def test_fingerprint_flow_discovery_and_experience_defaults_match_existing_sourc
         "max_list_entries": "output.max_list_entries", "incremental_notice_max_chars": "output.incremental_notice_max_chars",
         "use_existing_index": "use_existing_index", "prompt_preferred_skills": "prompt.preferred_capability_ids",
     })
-    _assert_defaults(CurrentExperienceConfig(), target.ExperienceBankBuildConfig(), {
-        "min_cluster_size": "clustering.min_cluster_size", "max_workers": "execution.max_concurrency",
-        "max_success_examples": "patterns.max_success_examples", "pending_flush_threshold": "execution.pending_flush_threshold",
-        "min_hits_for_pattern": "patterns.min_hits", "skill_cluster_num": "clustering.query_clusters_per_capability_set",
-        "pattern_merge_threshold": "patterns.merge_threshold", "query_examples_count": "patterns.query_examples_count",
-    })
 
 
-def test_agentic_and_planning_defaults_preserve_the_current_contracts():
+def test_planning_defaults_preserve_the_current_contract():
     public = target.SymphonyConfig.model_validate(MINIMAL)
     _assert_defaults(CurrentPlanningConfig(), public.orchestration, {
         "mode": "plan.mode", "top_k": "plan.top_k", "max_depth": "plan.max_depth",
         "min_edge_confidence": "min_edge_confidence", "dynamic_graph_enabled": "plan.dynamic_graph_enabled",
     })
-    _assert_defaults(CurrentAgenticConfig(), target.AgenticRetrievalConfig(), {
-        "top_k": "top_k", "compact_codes_enabled": "render.compact_codes_enabled",
-        "flatten_tree": "render.flatten_tree", "max_exposure_depth": "render.max_exposure_depth",
-        "exposure_threshold": "render.exposure_threshold", "max_tokens": "request.max_output_tokens",
-        "request_timeout_seconds": "request.timeout_seconds", "index_build_tool_name": "tools.index_build",
-        "branch_explore_tool_name": "tools.branch_explore", "branch_peek_tool_name": "tools.branch_peek",
-    })
-    assert target.AgenticRenderConfig().max_exposure_depth == 1
-    assert target.RetrievalRenderConfig().max_exposure_depth == 99
-
-
-def test_backend_defaults_preserve_all_pure_fields():
-    _assert_defaults(CurrentOpenAIConfig(), target.OpenAIClientConfig(), {
-        "backend": "backend", "model": "model", "api_key": "api_key", "base_url": "base_url",
-        "seed": "seed", "extra_body": "extra_body",
-    }, excluded=("client",))
-    _assert_defaults(CurrentVLLMConfig(), target.VLLMClientConfig(), {
-        "backend": "backend", "model_path": "model_path", "tokenizer_path": "tokenizer_path",
-        "request_model": "request_model", "vllm_kwargs": "options",
-    })
-    _assert_defaults(CurrentTransformersConfig(), target.TransformersClientConfig(), {
-        "backend": "backend", "model_path": "model_path", "tokenizer_path": "tokenizer_path",
-        "device": "device", "dtype": "dtype", "tensor_parallel_size": "parallelism.tensor_parallel_size",
-        "data_parallel_size": "parallelism.data_parallel_size", "device_ids": "parallelism.device_ids",
-        "attn_implementation": "optimization.attn_implementation", "torch_compile": "optimization.torch_compile",
-        "tensor_parallel_plan": "parallelism.tensor_parallel_plan",
-    })
-
-
-def test_public_retrieval_keeps_nested_overrides_and_independent_defaults():
-    config = target.RetrievalSearchConfig.model_validate({
-        "traversal": {"max_parallel_branches": 1},
-        "render": {"max_exposure_depth": 3},
-        "selection": {"mode": "logit_selection", "logit": {"min_probability": 0.4}},
-    })
-    assert config.top_k == 10
-    assert config.traversal.max_parallel_branches == 1
-    assert config.render.max_exposure_depth == 3
-    assert config.selection.mode == "logit_selection"
-    assert config.selection.logit.min_probability == 0.4
-    assert target.RetrievalSearchConfig.model_validate_json(config.model_dump_json()) == config
-    config.render.compact_codebook.append("EXAMPLE")
-    assert target.RetrievalSearchConfig().render.compact_codebook == list(DEFAULT_COMPACT_BOUNDARY_CODEBOOK)
-
-
-@pytest.mark.parametrize("owner", ["search", "toolkit"])
-@pytest.mark.parametrize("timeout", [None, 30.0])
-def test_request_budgets_preserve_timeout_nullability(owner, timeout):
-    payload = {**MINIMAL, "retrieval": {owner: {"request": {"timeout_seconds": timeout}}}}
-    for validate, data in (
-        (target.SymphonyConfig.model_validate, payload),
-        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
-    ):
-        if owner == "toolkit" and timeout is None:
-            with pytest.raises(ValidationError) as error:
-                validate(data)
-            assert error.value.errors()[0]["loc"] == ("retrieval", owner, "request", "timeout_seconds")
-        else:
-            config = validate(data)
-            assert getattr(config.retrieval, owner).request.timeout_seconds == timeout
-            assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
-
-
-@pytest.mark.parametrize("owner", ["search", "toolkit"])
-@pytest.mark.parametrize("field, value", [
-    ("max_output_tokens", 0), ("max_output_tokens", True), ("max_output_tokens", 1.5),
-    ("timeout_seconds", 0), ("timeout_seconds", "120"), ("timeout_seconds", float("inf")),
-])
-def test_request_budget_errors_use_the_new_field_paths(owner, field, value):
-    payload = {**MINIMAL, "retrieval": {owner: {"request": {field: value}}}}
-    with pytest.raises(ValidationError) as error:
-        target.SymphonyConfig.model_validate(payload)
-    assert error.value.errors()[0]["loc"] == ("retrieval", owner, "request", field)
-
-
-def test_request_budget_overrides_do_not_change_other_consumers_or_defaults():
-    config = target.SymphonyConfig.model_validate({
-        **MINIMAL, "retrieval": {"search": {"request": {"max_output_tokens": 32, "timeout_seconds": None}}},
-    })
-    assert config.retrieval.toolkit.request.model_dump() == {"max_output_tokens": 96, "timeout_seconds": 120.0}
-    assert config.retrieval.search.request is not config.retrieval.toolkit.request
-    assert target.RetrievalSearchConfig().request.model_dump() == {"max_output_tokens": 96, "timeout_seconds": 120.0}
-    assert config.retrieval.build.request.max_output_tokens == 0
-    assert config.capability.fingerprint.extraction.max_output_tokens == 2048
 
 
 @pytest.mark.parametrize("caching", [True, False])
@@ -936,32 +679,8 @@ def test_expansion_multipliers_preserve_positive_numeric_constraints(field, valu
     assert error.value.errors()[0]["loc"] == ("retrieval", "build", "dynamic", "expansion", field)
 
 
-@pytest.mark.parametrize("value", [None, 4])
-def test_query_cluster_count_supports_adaptive_and_explicit_values(value):
-    config = target.SymphonyConfig.model_validate({
-        **MINIMAL, "experience": {"build": {"clustering": {"query_clusters_per_capability_set": value}}},
-    })
-    assert config.experience.build.clustering.query_clusters_per_capability_set == value
-    assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
-
-
-@pytest.mark.parametrize("value", [0, -1, True, 1.5, "4"])
-def test_query_cluster_count_preserves_strict_positive_integer_constraint(value):
-    payload = {**MINIMAL, "experience": {"build": {"clustering": {"query_clusters_per_capability_set": value}}}}
-    for validate, data in (
-        (target.SymphonyConfig.model_validate, payload),
-        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
-    ):
-        with pytest.raises(ValidationError) as error:
-            validate(data)
-        assert error.value.errors()[0]["loc"] == (
-            "experience", "build", "clustering", "query_clusters_per_capability_set",
-        )
-
-
 def test_independent_derived_configuration_values_and_explicit_overrides():
     assert target.DiscoveryPromptConfig().candidate_budget_tokens == 2000
-    assert target.DistributedGenerationConfig(tp_size=2, dp_size=3).world_size == 6
 
 
 def test_existing_package_exports_continue_to_use_the_existing_configuration():
@@ -970,3 +689,28 @@ def test_existing_package_exports_continue_to_use_the_existing_configuration():
     assert symphony.OrchestrationConfig is CurrentPlanningConfig
     assert symphony.OrchestrationConfig is not target.OrchestrationConfig
     assert "SymphonyConfig" not in symphony.__all__
+
+
+@pytest.mark.parametrize("payload, location", [
+    ({"retrieval": {"search": {}}}, ("retrieval", "search")),
+    ({"retrieval": {"toolkit": {}}}, ("retrieval", "toolkit")),
+    ({"experience": {}}, ("experience",)),
+])
+def test_retired_capabilities_are_rejected_without_compatibility_aliases(payload, location):
+    with pytest.raises(ValidationError) as error:
+        target.SymphonyConfig.model_validate({**MINIMAL, **payload})
+    assert error.value.errors()[0]["loc"] == location
+    assert error.value.errors()[0]["type"] == "extra_forbidden"
+
+
+def test_registry_contains_only_retained_capabilities():
+    assert len(target.PUBLIC_CONFIG_MODELS) == 33
+    assert len(target.INTERNAL_CONFIG_MODELS) == 3
+    assert {m.__name__ for m in target.INTERNAL_CONFIG_MODELS} == {
+        "FingerprintProtocolConfig", "OneShotTreeBuildConfig", "RetrievalModelConfig",
+    }
+    for name in (
+        "_DEFAULT_COMPACT_CODES", "LLMClientConfig", "RetrievalSearchConfig", "AgenticRetrievalConfig",
+        "ExperienceConfig", "CapabilityIndexStorageConfig", "ScoreTruncationConfig",
+    ):
+        assert not hasattr(target, name)

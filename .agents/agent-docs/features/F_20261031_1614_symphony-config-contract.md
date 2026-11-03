@@ -353,3 +353,8 @@ python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symph
 当前 S、README 示例及 D 第 12 节已同步；历史设计章节与前轮测试数字保留为当时事实。按 jw-review 对本轮快照到候选的配置、测试和文档差异自检，重点核对分层职责、旧参数映射、默认值/约束、入口隔离、组合校验和独立导出。业务模块、Runtime、引擎、Swarm、依赖、缓存签名和包根导出均未修改；配置验证不表示运行链路已完成迁移。
 
 未运行格式化、静态检查或业务链路测试，未提交或推送。测试通过后仅进行文档及索引收尾，不再次运行未受影响的配置测试。
+
+
+## 2026-11-03 后继能力退役
+
+旧检索与独立经验库的保留决定由 [F_20261103_1458_symphony-capability-retirement](F_20261103_1458_symphony-capability-retirement.md) 局部替代，当前模型登记和运行边界以 S_01_configuration-contract 为准。上文模型数量和测试结果保留为各次候选的历史事实。

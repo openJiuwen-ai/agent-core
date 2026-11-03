@@ -2,8 +2,8 @@
 """Symphony 目标配置，尚未接入运行链路。
 
 公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration、
-flow、experience 组合可调策略；子配置均有默认值，仅对象目录、类型和产物目录必填。
-协议身份、模型后端及具有独立用途的算法和调用参数仍单独定义；解析设置仅由原运行模块维护。
+flow 组合可调策略；子配置均有默认值，仅对象目录、类型和产物目录必填。
+指纹协议、一次性构树及构建模型连接参数仍单独定义；解析设置仅由原运行模块维护。
 公共树模型与内部模型分别登记；便利导出只保留核心配置类，供验证和文档读取完整登记。
 现有模块配置仍是运行行为的依据；本文件不读取环境、扫描目录或创建模型客户端。
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import PurePath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue, ValidationInfo, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue
 
 
 def _path_text(value: object) -> object:
@@ -164,7 +164,7 @@ class FingerprintPolicyConfig(SymphonyConfigModel):
     )
 
 
-# 独立模块：保留 orchestration/config.py、discovery/config.py、experience/models.py 的默认值。
+# 独立模块：保留 orchestration/config.py、discovery/config.py 的默认值。
 class GraphMatchingPolicyConfig(SymphonyConfigModel):
     """关系匹配策略；公共入口统一使用所属构图任务的并发上限。"""
 
@@ -247,50 +247,6 @@ class DiscoveryConfig(SymphonyConfigModel):
         default_factory=DiscoveryOutputConfig, title="输出预算", description="发现结果、列表和增量提示的限制。",
     )
     use_existing_index: bool = Field(False, title="使用已有索引", description="是否使用已经构建的检索索引辅助发现。")
-
-
-class ExperienceClusteringConfig(SymphonyConfigModel):
-    """经验库先按能力集合分组，再在各组内对成功轨迹的查询聚类。"""
-
-    min_cluster_size: PositiveInt = Field(1, title="最小聚类规模", description="一个聚类至少包含的记录数。")
-    query_clusters_per_capability_set: PositiveInt | None = Field(
-        None, title="每能力集合的查询聚类数",
-        description="每个能力集合内成功查询的聚类数；None 使用自适应数量，不表示能力类别数或经验库总簇数。",
-        examples=[None, 4],
-    )
-
-
-class ExperienceExecutionConfig(SymphonyConfigModel):
-    """经验库构建的执行和待写入预算。"""
-
-    max_concurrency: PositiveInt = Field(8, title="经验构建并发", description="经验构建工作并发上限，映射旧 max_workers。")
-    pending_flush_threshold: PositiveInt = Field(
-        20, title="待写入批量阈值", description="待写入经验累计达到此数量时触发刷新。",
-    )
-
-
-class ExperiencePatternConfig(SymphonyConfigModel):
-    """经验模式提炼与合并设置。"""
-
-    max_success_examples: PositiveInt = Field(20, title="成功示例上限", description="模式提炼保留的成功示例数。")
-    min_hits: PositiveInt = Field(1, title="最少命中次数", description="生成模式所需的最少命中次数。")
-    merge_threshold: Probability = Field(0.9, title="模式合并阈值", description="模式相似度达到此阈值时允许合并。")
-    query_examples_count: PositiveInt = Field(5, title="查询示例数量", description="每个经验模式生成的查询示例数。")
-
-
-class ExperienceBankBuildConfig(SymphonyConfigModel):
-    """经验库构建配置；保留原配置可修改的性质，并对赋值进行校验。"""
-
-    model_config = ConfigDict(frozen=False, validate_assignment=True)
-    clustering: ExperienceClusteringConfig = Field(
-        default_factory=ExperienceClusteringConfig, title="聚类策略", description="经验记录的聚类设置。",
-    )
-    execution: ExperienceExecutionConfig = Field(
-        default_factory=ExperienceExecutionConfig, title="执行预算", description="经验构建并发和写入批量设置。",
-    )
-    patterns: ExperiencePatternConfig = Field(
-        default_factory=ExperiencePatternConfig, title="模式提炼", description="经验模式的提炼和合并设置。",
-    )
 
 
 # 树构建：保留底层树、索引工作流、agent toolkit 三个入口各自的默认值。
@@ -421,13 +377,6 @@ class IndexOutputConfig(SymphonyConfigModel):
     )
 
 
-class CapabilityIndexStorageConfig(SymphonyConfigModel):
-    """原 SkillIndexRuntimeConfig 的纯存储设置；不推断或创建默认目录。"""
-
-    index_root: ConfigPath = Field(title="索引根目录", description="显式指定索引根目录。", examples=["./index"])
-    state_filename: str = Field("state.json", title="状态文件名", description="索引根目录内的状态文件名。", min_length=1)
-
-
 class OneShotTreeBuildConfig(SymphonyConfigModel):
     """一次性分类树构建预算，保持 one_shot.py 中独立入口的默认值。"""
 
@@ -438,7 +387,7 @@ class OneShotTreeBuildConfig(SymphonyConfigModel):
     seed: int | None = Field(None, title="一次性构建种子", description="可选的模型随机种子。")
 
 
-# 模型后端：只保留纯数据字段，不接收旧 client、llm_openai_client 或 prompt_cache 句柄。
+# 构建模型连接：只保留纯数据字段，不接收 client 或 llm_openai_client 句柄。
 class RetrievalModelConfig(SymphonyConfigModel):
     """现有 toolkit LLMConfig 和索引工作流模型参数的纯数据部分。"""
 
@@ -446,318 +395,6 @@ class RetrievalModelConfig(SymphonyConfigModel):
     api_key: str = Field("", title="模型访问凭证", description="独立后端的访问凭证；文档只导出空默认值。", repr=False)
     base_url: str = Field("", title="模型服务地址", description="独立模型服务的基础 URL。")
     seed: int | None = Field(None, title="模型随机种子", description="可选的模型随机种子。")
-
-
-class OpenAIClientConfig(RetrievalModelConfig):
-    """OpenAI 兼容检索后端的纯配置；已创建的客户端由后续运行接口注入。"""
-
-    backend: Literal["openai"] = Field("openai", title="后端类型", description="选择 OpenAI 兼容客户端后端。")
-    extra_body: dict[str, JsonValue] = Field(
-        default_factory=dict, title="额外请求参数", description="后端特定的 JSON 请求体参数，例如禁用 thinking。",
-    )
-
-
-class VLLMClientConfig(SymphonyConfigModel):
-    """本地 vLLM 后端的纯配置；不加载模型或创建推理进程。"""
-
-    backend: Literal["vllm"] = Field("vllm", title="后端类型", description="选择本地 vLLM 后端。")
-    model_path: str = Field("", title="本地模型目录", description="模型文件目录；空值表示尚未配置。")
-    tokenizer_path: str = Field("", title="分词器目录", description="分词器目录；空值由运行适配器沿用模型目录。")
-    request_model: str = Field("", title="请求模型名称", description="请求和日志中使用的模型名称。")
-    options: dict[str, JsonValue] = Field(
-        default_factory=dict, title="后端启动选项", description="vLLM 启动的 JSON 参数，映射旧 vllm_kwargs。",
-    )
-
-
-class TransformersParallelismConfig(SymphonyConfigModel):
-    """Transformers 后端的并行度和设备分配设置。"""
-
-    tensor_parallel_size: PositiveInt = Field(1, title="张量并行度", description="单副本内的张量并行规模。")
-    data_parallel_size: PositiveInt = Field(1, title="数据并行度", description="模型副本的数据并行规模。")
-    device_ids: list[NonNegativeInt] = Field(
-        default_factory=list, title="显式设备编号", description="设备编号列表；空列表表示交给运行适配器分配。",
-    )
-    tensor_parallel_plan: str = Field("", title="张量并行方案", description="可选的模型张量并行方案名称。")
-
-
-class TransformersOptimizationConfig(SymphonyConfigModel):
-    """Transformers 后端的注意力和编译设置。"""
-
-    attn_implementation: str = Field("", title="注意力实现", description="可选的注意力实现名称；空值沿用后端默认。")
-    torch_compile: bool = Field(False, title="启用编译", description="是否在运行适配器中启用 torch.compile。")
-
-
-class TransformersClientConfig(SymphonyConfigModel):
-    """本地 Transformers 系列后端的纯配置，默认 dtype 保持 bfloat16。"""
-
-    backend: Literal["transformers", "transformers_prefix_cached", "transformers_prefix_cached_generation"] = Field(
-        "transformers", title="后端类型", description="选择普通或前缀缓存 Transformers 后端。",
-    )
-    model_path: str = Field("", title="本地模型目录", description="模型文件目录；空值表示尚未配置。")
-    tokenizer_path: str = Field("", title="分词器目录", description="分词器目录；空值由运行适配器沿用模型目录。")
-    device: str = Field("auto", title="设备选择", description="设备选择字符串，例如 auto、cpu 或 cuda:0。")
-    dtype: str = Field("bfloat16", title="推理精度", description="模型加载时采用的数据类型名称。")
-    parallelism: TransformersParallelismConfig = Field(
-        default_factory=TransformersParallelismConfig, title="并行配置", description="张量、数据并行与设备编号。",
-    )
-    optimization: TransformersOptimizationConfig = Field(
-        default_factory=TransformersOptimizationConfig, title="推理优化", description="注意力实现和编译设置。",
-    )
-
-
-LLMClientConfig = Annotated[
-    OpenAIClientConfig | VLLMClientConfig | TransformersClientConfig,
-    Field(discriminator="backend"),
-]
-
-
-class DistributedGenerationConfig(SymphonyConfigModel):
-    """前缀缓存生成后端的分布式拓扑，保留其独立配置和现有 world_size 规则。"""
-
-    tp_size: PositiveInt = Field(1, title="张量并行规模", description="单模型副本的张量并行规模。")
-    dp_size: PositiveInt = Field(1, title="数据并行规模", description="模型副本数量。")
-    device_type: str = Field("auto", title="设备类型", description="分布式推理使用的设备类型。")
-    device_ids: list[NonNegativeInt] = Field(
-        default_factory=list, title="分布式设备编号", description="显式设备编号列表；空列表由后端分配。",
-    )
-
-    @property
-    def world_size(self) -> int:
-        """张量并行规模和数据并行规模的乘积。"""
-        return self.tp_size * self.dp_size
-
-
-class TrieConstraintConfig(SymphonyConfigModel):
-    """生成时的字典树约束数据；不包含分词器或解码器实例。"""
-
-    allowed_output_ids: list[str] = Field(title="允许输出标识", description="生成时允许选择的对象标识。")
-    excluded_output_ids: list[str] = Field(
-        default_factory=list, title="排除输出标识", description="生成时必须排除的对象标识。",
-    )
-    top_k: PositiveInt = Field(1, title="约束选择数量", description="本次约束最多允许选择的标识数。")
-    version: str | None = Field(None, title="约束版本", description="可选的约束数据版本。")
-
-
-class GenerationConstraintsConfig(SymphonyConfigModel):
-    """模型生成约束集合；空约束表示不额外限制生成。"""
-
-    trie: TrieConstraintConfig | None = Field(None, title="字典树约束", description="可选的对象标识字典树约束。")
-
-
-class LLMGenerationConfig(SymphonyConfigModel):
-    """底层模型生成参数，区别于检索分支选择配置；默认种子保持 1223。"""
-
-    disable_thinking: bool = Field(True, title="禁用思考输出", description="是否向支持的模型请求关闭 thinking。")
-    temperature: Annotated[float, Field(ge=0)] = Field(0.0, title="采样温度", description="模型生成采样温度。")
-    top_p: Probability = Field(1.0, title="核采样概率", description="模型生成的 top-p 采样概率。")
-    seed: int | None = Field(1223, title="生成随机种子", description="底层模型生成的可选随机种子。")
-    constraints: GenerationConstraintsConfig = Field(
-        default_factory=GenerationConstraintsConfig, title="生成约束", description="不含运行时缓存句柄的生成约束。",
-    )
-
-
-# 原检索默认码表按既有顺序保存，避免配置模型反向导入检索实现模块。
-# 来源：retrieval/search/runtime/codebooks.py；与旧码表的逐项一致性由配置测试保护。
-_DEFAULT_COMPACT_CODES = tuple((
-    "IU BK OE NW MU AO HB IW MA VS NI XS NE BH HP RP UC PB LI UK CF PW WO CO "
-    "MI ON FS GM CH OA NV AD VC MR TB KA ZH ZR IM HA MO PH VV CN RA DV ST UY "
-    "BA DN IA SZ EA LY AC JK WD MY BY XL FM LU WX NF BM MP SV MN SX BT ZX GU "
-    "HO AB VM TA QC IK ME JU LL YA LB KN TV NQ EX FK DK PS TD RL GV FH EP NT "
-    "BP ZE KC ZO TS NL ZI KD AS OX JP MH GG HC SM BV AL NN CI FN UB AA CL UM "
-    "KI TO PY QB ZF ND QP NS KV LK UF IV GT CD SD HG RB CY GP DL WG EL VF WK "
-    "WT HR JJ NR QH CC DY CG QU MF OF VL PE DF FE JS KL UG QG YL MJ DO ML FP "
-    "JB UE FB AV MG KT CW UI AK OI CX EC SP FR FY RH IH IO WM QL US HF LF VR "
-    "BL PU SC MT DU IF PF QQ AI RJ LO LC GA PL OP WF TX BW HX UD XB YG LT DW "
-    "MZ SU HT PJ DA VA IQ JA PX KB GE EB AF LG GC XE OT TG OB PD IB JI BD XR "
-    "GR HQ WB FC KO KH GO RV BF EU SE RO YZ GY OS TY ID EG UA OR BC SO PR HK "
-    "XI RN MK ZY FG GX DX EM FA IS TI TU PI UP LP IR EI VB TH FU TC HU BU NU "
-    "LR SS IJ LA PN TW BS KG CV SF ER MM AZ MV OD LE MS JE TK MQ CA EW VO XA "
-    "CM TN UN RR UL RY YW FX OK GW HI NM EZ SI IZ SA DR QA JO HN QN HZ MX PK "
-    "FI DC RD QS WL AJ VP UV BB AY YN NK UR OM DG XD NY XM DT KF JC KR TL RI "
-    "YM EN OU RS DB LD NG AM JT NB BJ OL UT HD WA IE II KS YP VE BR RW AU SQ "
-    "JV HW CS IL UU DJ SW AQ JM TE EO LS SB CU QR SH WN DH ZN LN AW SL DI KY "
-    "EF ES KW XC OV CK DD IN WS KE PP RU UH EH RE MC ZA SN WW HY OW BE OG AH "
-    "BN QE NP RC ZZ QM BX CT WR SG TR BI MB ED RX SJ NA OC DP NO JD FO FL HH "
-    "FW TT QT NZ CR AG HL TF VN SK YO LV GI VI SR YT CB HE KP XT PG RG JR TP "
-    "HM AR MW BG HS AP GF KM NJ RK YE NX AN XF AX LM PM GB DS IG UX GL GS PT "
-    "VD FF OO GD XY IC UZ KU "
-).split())
-
-
-class RetrievalTraversalConfig(SymphonyConfigModel):
-    """渐进检索的树分支探索策略，来自 search/service/models.py。"""
-
-    max_branch_choices: PositiveInt = Field(6, title="单节点分支候选数", description="一次最多考虑的子分支数量。")
-    max_parallel_branches: PositiveInt = Field(3, title="并行分支数量", description="同时搜索的最多分支数。")
-    enable_parallel_branches: bool = Field(True, title="并行分支搜索", description="是否启用多个分支的并行搜索。")
-    branch_choice_slack: NonNegativeInt = Field(2, title="分支选择余量", description="相对 top_k 多考虑的分支数量。")
-    branch_candidate_slack: NonNegativeInt = Field(1, title="分支候选余量", description="每个分支额外保留的候选数量。")
-    round_robin_branch_reduce: bool = Field(True, title="轮询合并分支", description="是否交替从各分支选取候选进行合并。")
-
-
-class RetrievalRenderConfig(SymphonyConfigModel):
-    """独立检索服务的提示渲染配置；保持完整树展开和默认紧凑码表。"""
-
-    compact_codes_enabled: bool = Field(True, title="使用紧凑编码", description="是否以紧凑候选编码向模型展示对象。")
-    compact_codebook: list[str] = Field(
-        default_factory=lambda: list(_DEFAULT_COMPACT_CODES), title="紧凑编码表",
-        description="按既有检索实验顺序排列的候选编码；顺序与旧默认码表一致。",
-    )
-    flatten_tree: bool = Field(True, title="展开完整树", description="是否将当前候选树展平成提示内容。")
-    max_exposure_depth: NonNegativeInt = Field(99, title="提示展示深度", description="一次模型请求最多展示的树层数。")
-    exposure_threshold: NonNegativeInt = Field(
-        1_000_000_000, title="提示展开阈值", description="控制节点展开的候选数量阈值，保留独立检索服务默认值。",
-    )
-
-
-class AgenticRenderConfig(RetrievalRenderConfig):
-    """工具浏览复用检索渲染字段，保留一层展示、空码表和片段展开阈值。"""
-
-    compact_codes_enabled: bool = Field(False, title="片段紧凑编码", description="是否为片段候选使用紧凑编码。")
-    compact_codebook: list[str] = Field(
-        default_factory=list, title="片段编码表", description="片段展示的自定义码表；默认由运行过程决定编码。",
-    )
-    flatten_tree: bool = Field(False, title="片段展平", description="是否将展示片段展开为平面内容。")
-    max_exposure_depth: NonNegativeInt = Field(1, title="工具浏览深度", description="一次工具浏览最多展示的树层数。")
-    exposure_threshold: NonNegativeInt = Field(12, title="片段展开阈值", description="片段节点展开的候选数量阈值。")
-
-
-class LogitSelectionConfig(SymphonyConfigModel):
-    """候选 logit 打分策略，只有选择模式为 logit_selection 时生效。"""
-
-    require_single_token_codes: bool = Field(True, title="要求单 token 编码", description="候选编码是否必须对应单个 token。")
-    return_probabilities: bool = Field(True, title="返回候选概率", description="是否在打分结果中返回候选概率。")
-    fallback_mode: Literal["error", "generate"] = Field(
-        "error", title="打分回退方式",
-        description="不支持候选打分或关闭紧凑编码时直接报错，或回退为生成式选择；"
-        "logit_selection 模式关闭紧凑编码时必须选择 generate。",
-    )
-    max_candidates: PositiveInt = Field(512, title="最大打分候选数", description="一次候选打分考虑的最多编码数量。")
-    min_probability: Probability | None = Field(
-        None, title="最低候选概率", description="可选的候选概率下限；None 表示不按最低概率截断。",
-    )
-    trace_top_n: NonNegativeInt = Field(10, title="打分追踪数量", description="追踪信息最多记录的高分候选数量。")
-
-
-class RetrievalSelectionConfig(SymphonyConfigModel):
-    """检索候选选择方式、解码约束与打分策略；请求预算独立配置，区别于底层模型采样参数。"""
-
-    mode: Literal["generate", "logit_selection"] = Field(
-        "generate", title="候选选择方式",
-        description="生成候选编码，或使用模型支持的候选 logit 打分；logit_selection 需要启用 "
-        "render.compact_codes_enabled，否则 logit.fallback_mode 必须为 generate。",
-    )
-    trie_constrained_decoding_enabled: bool = Field(
-        False, title="字典树约束解码", description="是否在支持的模型后端启用字典树约束解码。",
-    )
-    logit: LogitSelectionConfig = Field(
-        default_factory=LogitSelectionConfig, title="候选打分", description="logit_selection 模式的候选打分设置。",
-    )
-
-
-class RetrievalRequestBudgetConfig(SymphonyConfigModel):
-    """检索模型请求的输出与超时预算；自然语言检索允许沿用后端超时策略。"""
-
-    max_output_tokens: PositiveInt = Field(96, title="选择输出上限", description="分支选择输出的 token 上限。")
-    timeout_seconds: PositiveFloat | None = Field(
-        120.0, title="选择请求超时", description="单次候选选择请求超时，单位秒；None 沿用后端策略。",
-    )
-
-
-class RetrievalSearchConfig(SymphonyConfigModel):
-    """公共自然语言检索策略；模型实例由 Runtime 注入，配置只控制检索行为。"""
-
-    top_k: PositiveInt = Field(
-        10, title="候选数量上限", description="每次检索最多返回的对象数；可在调用时覆盖，不影响已有索引。",
-        examples=[5, 10],
-    )
-    traversal: RetrievalTraversalConfig = Field(
-        default_factory=RetrievalTraversalConfig, title="分支遍历", description="渐进检索的分支探索策略。",
-    )
-    render: RetrievalRenderConfig = Field(
-        default_factory=RetrievalRenderConfig, title="提示渲染", description="渐进检索的树展示和编码策略。",
-    )
-    request: RetrievalRequestBudgetConfig = Field(
-        default_factory=RetrievalRequestBudgetConfig, title="检索请求预算", description="候选选择请求的输出和超时预算。",
-    )
-    selection: RetrievalSelectionConfig = Field(
-        default_factory=RetrievalSelectionConfig, title="候选选择", description="渐进检索的生成或打分策略。",
-    )
-
-    @field_validator("selection")
-    @classmethod
-    def _validate_logit_rendering(
-        cls, selection: RetrievalSelectionConfig, info: ValidationInfo,
-    ) -> RetrievalSelectionConfig:
-        """对照前序已校验的 render，拒绝无紧凑编码且禁止生成回退的打分组合。"""
-        render = info.data.get("render")
-        if (
-            render is not None
-            and selection.mode == "logit_selection"
-            and not render.compact_codes_enabled
-            and selection.logit.fallback_mode == "error"
-        ):
-            raise ValueError(
-                "logit_selection 需要 render.compact_codes_enabled=True，"
-                "或设置 selection.logit.fallback_mode='generate' 允许生成式回退"
-            )
-        return selection
-
-
-class RetrievalRequestConfig(SymphonyConfigModel):
-    """单次检索请求的纯覆盖参数；查询文本和可见范围属于调用输入。"""
-
-    top_k: PositiveInt | None = Field(
-        None, title="本次候选上限", description="覆盖本次查询返回数量；None 表示沿用检索器配置。",
-    )
-
-
-class AgenticRequestConfig(RetrievalRequestBudgetConfig):
-    """工具检索复用请求预算字段，保留超时必须为正数的约束，不添加候选选择策略。"""
-
-    timeout_seconds: PositiveFloat = Field(120.0, title="工具检索超时", description="单次模型请求超时，单位秒。")
-
-
-class RetrievalToolNamesConfig(SymphonyConfigModel):
-    """已有检索工具的标识；字符串保持原值，配置字段统一使用通用命名。"""
-
-    index_build: str = Field(
-        "skill_index_build", title="索引构建工具", description="现有索引构建工具注册名称。", min_length=1,
-    )
-    branch_explore: str = Field(
-        "skill_branch_explore", title="分支探索工具", description="现有分类树分支探索工具注册名称。", min_length=1,
-    )
-    branch_peek: str = Field(
-        "skill_branch_peek", title="分支预览工具", description="现有分类树分支预览工具注册名称。", min_length=1,
-    )
-
-
-class AgenticRetrievalConfig(SymphonyConfigModel):
-    """agent toolkit 的检索配置，保持工具浏览与自然语言独立检索的默认差异。"""
-
-    top_k: PositiveInt = Field(10, title="工具候选上限", description="工具检索最多返回的对象数量。")
-    render: AgenticRenderConfig = Field(
-        default_factory=AgenticRenderConfig, title="工具浏览展示", description="工具浏览的层级和候选展示策略。",
-    )
-    request: AgenticRequestConfig = Field(
-        default_factory=AgenticRequestConfig, title="工具请求预算", description="工具检索的输出和超时预算。",
-    )
-    tools: RetrievalToolNamesConfig = Field(
-        default_factory=RetrievalToolNamesConfig, title="工具注册名称", description="保持现有协议的检索工具标识。",
-    )
-
-
-class ScoreTruncationConfig(SymphonyConfigModel):
-    """候选得分截断设置；绝对分数可为负值，以兼容不同评分尺度。"""
-
-    min_score: float | None = Field(None, title="最低绝对分数", description="可选的绝对得分下限；None 表示不按此截断。")
-    relative_min_score: Annotated[float, Field(ge=0)] | None = Field(
-        None, title="相对分数下限", description="相对最佳候选的分数比例阈值；None 表示不启用。",
-    )
-    autocut_jumps: NonNegativeInt = Field(0, title="自动截断跳变数", description="允许的得分跳变数；0 表示不启用自动截断。")
-    autocut_min_relative_drop: Annotated[float, Field(ge=0)] = Field(
-        0.0, title="自动截断相对落差", description="识别得分跳变所需的最小相对落差。",
-    )
 
 
 # 公共组合在子模型定义之后声明，默认工厂不需要运行模块或前向引用修复。
@@ -838,20 +475,14 @@ class RetrievalBuildConfig(SymphonyConfigModel):
 
 
 class RetrievalConfig(SymphonyConfigModel):
-    """公共检索配置；构建、查询、发现和工具交互分别配置，启用不会自动构建索引。"""
+    """公共检索配置；组合分类树构建和对象发现，启用不会自动构建索引。"""
 
     enabled: bool = Field(True, title="启用检索", description="允许使用检索入口；独立于编排开关。")
     build: RetrievalBuildConfig = Field(
         default_factory=RetrievalBuildConfig, title="索引构建", description="显式构建分类树时使用的策略。",
     )
-    search: RetrievalSearchConfig = Field(
-        default_factory=RetrievalSearchConfig, title="候选检索", description="查询已有分类树时使用的默认策略。",
-    )
     discovery: DiscoveryConfig = Field(
         default_factory=DiscoveryConfig, title="对象发现", description="对象发现的候选、输出和提示预算。",
-    )
-    toolkit: AgenticRetrievalConfig = Field(
-        default_factory=AgenticRetrievalConfig, title="工具交互", description="工具浏览、请求预算和工具标识；区别于自然语言检索。",
     )
 
 
@@ -882,30 +513,19 @@ class OrchestrationConfig(SymphonyConfigModel):
     )
 
 
-class ExperienceConfig(SymphonyConfigModel):
-    """经验库策略；仅声明构建参数，不自动评估轨迹、创建经验库或触发构建。"""
-
-    build: ExperienceBankBuildConfig = Field(
-        default_factory=ExperienceBankBuildConfig, title="经验构建", description="经验记录的聚类、构建执行和模式提炼策略。",
-    )
-
-
 class SymphonyConfig(SymphonyConfigModel):
     """Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。"""
 
     capability: CapabilityConfig = Field(title="对象集合", description="显式声明对象目录、类型及预处理策略。")
     storage: StorageConfig = Field(title="产物存储", description="显式声明本集合的产物根目录。")
     retrieval: RetrievalConfig = Field(
-        default_factory=RetrievalConfig, title="检索能力", description="分类树构建、候选检索、对象发现和工具交互的默认配置。",
+        default_factory=RetrievalConfig, title="检索能力", description="分类树构建与对象发现的默认配置。",
     )
     orchestration: OrchestrationConfig = Field(
         default_factory=OrchestrationConfig, title="编排能力", description="关系图构建和计划生成的默认配置。",
     )
     flow: FlowConfig = Field(
         default_factory=FlowConfig, title="组合能力沉淀", description="能力包接纳与叙述策略；配置存在或启用不表示服务已启动。",
-    )
-    experience: ExperienceConfig = Field(
-        default_factory=ExperienceConfig, title="经验库", description="经验库构建的默认配置；不隐式读取或写入经验。",
     )
 
 
@@ -917,29 +537,20 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
     DynamicTreeConfig, TreeExpansionConfig,
     TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,
     TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
-    RetrievalSearchConfig, RetrievalTraversalConfig, RetrievalRenderConfig, RetrievalSelectionConfig,
-    RetrievalRequestBudgetConfig, LogitSelectionConfig,
     DiscoveryConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,
-    AgenticRetrievalConfig, AgenticRenderConfig, AgenticRequestConfig, RetrievalToolNamesConfig,
     OrchestrationConfig, OrchestrationBuildConfig, GraphMatchingPolicyConfig, OrchestrationPlanConfig,
     FlowConfig, FlowAcceptanceConfig, FlowNarrativeConfig,
-    ExperienceConfig, ExperienceBankBuildConfig, ExperienceClusteringConfig, ExperienceExecutionConfig, ExperiencePatternConfig,
 )
 
 INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    FingerprintProtocolConfig,
-    CapabilityIndexStorageConfig, OneShotTreeBuildConfig,
-    RetrievalModelConfig, OpenAIClientConfig, VLLMClientConfig, TransformersParallelismConfig,
-    TransformersOptimizationConfig, TransformersClientConfig, DistributedGenerationConfig,
-    TrieConstraintConfig, GenerationConstraintsConfig, LLMGenerationConfig,
-    RetrievalRequestConfig, ScoreTruncationConfig,
+    FingerprintProtocolConfig, OneShotTreeBuildConfig, RetrievalModelConfig,
 )
 
 CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + INTERNAL_CONFIG_MODELS
 
 # 保留核心配置类的便利导出；子模型可通过嵌套字典配置，内部工具显式读取登记表。
 __all__ = [
-    "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig", "RetrievalSearchConfig",
+    "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig",
     "RetrievalConfig", "OrchestrationBuildConfig", "OrchestrationPlanConfig", "OrchestrationConfig",
-    "FlowConfig", "ExperienceConfig", "SymphonyConfig",
+    "FlowConfig", "SymphonyConfig",
 ]

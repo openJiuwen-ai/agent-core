@@ -11,13 +11,9 @@ from typing import Optional, TypedDict, Unpack
 
 from .json_parser import parse_json_from_response as _parse_json_from_response
 from .root_categories import FIXED_ROOT_CATEGORIES as _FIXED_ROOT_CATEGORIES
-from .search_models import MultiLevelSearchResult as _MultiLevelSearchResult
-from .search_models import SearchStep as _SearchStep
 
 parse_json_from_response = _parse_json_from_response
 FIXED_ROOT_CATEGORIES = _FIXED_ROOT_CATEGORIES
-MultiLevelSearchResult = _MultiLevelSearchResult
-SearchStep = _SearchStep
 
 _Identifier = TypedDict("_Identifier", {"id": str})
 
