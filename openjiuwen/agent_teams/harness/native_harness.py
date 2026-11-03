@@ -52,6 +52,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -641,6 +646,7 @@ class NativeHarness(DeepAgent):
         coroutine returns only once PAUSED has been reached.
         """
         self._require_alive()
+        mark_cancellation_cause(self.session_id, CancellationCause.PAUSE)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdPause(ack=ack))
         await ack
@@ -661,6 +667,7 @@ class NativeHarness(DeepAgent):
         No-op in any other state.
         """
         self._require_alive()
+        clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdResume(ack=ack, query=query))
         await ack

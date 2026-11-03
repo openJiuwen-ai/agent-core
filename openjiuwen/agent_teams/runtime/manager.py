@@ -73,6 +73,10 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
 )
@@ -522,6 +526,7 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        mark_cancellation_cause(session_id, CancellationCause.PAUSE)
         await entry.agent.pause_coordination()
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
@@ -930,6 +935,7 @@ class TeamRuntimeManager:
             return False
         # A failed shutdown is still a live, owned runtime. Preserve the entry
         # and propagate the failure so callers can retry instead of orphaning it.
+        mark_cancellation_cause(session_id, CancellationCause.CANCEL)
         token = set_session_id(session_id)
         try:
             if self._organization_runtime_manager is not None:

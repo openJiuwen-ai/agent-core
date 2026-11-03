@@ -34,6 +34,10 @@ from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
@@ -3704,6 +3708,7 @@ class DeepAgent(BaseAgent):
             session: Parent session whose runtime subagents should be cancelled.
                 Falls back to the bound loop session when omitted.
         """
+        self._mark_cancellation_cause(CancellationCause.CANCEL)
         proposal_session = session or self._loop_session
         if self._moa_scope_owner is not None:
             if proposal_session is None:
@@ -4281,8 +4286,18 @@ class DeepAgent(BaseAgent):
         active = self._active_interaction_round
         if active is None:
             return False
+        self._mark_cancellation_cause(CancellationCause.CANCEL)
         await self._cancel_active_round(reason=reason)
         return True
+
+    def _mark_cancellation_cause(self, cause: CancellationCause) -> None:
+        """Tag the bound session so compression reports cancel instead of failed."""
+        try:
+            session_id = self._resolve_context_session_id()
+        except Exception:
+            logger.debug("[DeepAgent] cancel cause not bound to a session", exc_info=True)
+            return
+        mark_cancellation_cause(session_id, cause)
 
     async def _cancel_active_round(
         self,
