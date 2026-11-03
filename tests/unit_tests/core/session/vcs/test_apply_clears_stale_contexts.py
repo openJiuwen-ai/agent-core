@@ -24,13 +24,16 @@ class _ContextEngine:
     def get_context(self, cid: str, session_id: str):
         return self.contexts.get(cid)
 
+    def list_context_ids(self, session_id: str) -> list[str]:
+        return list(self.contexts)
+
     async def create_context(self, cid: str, session):
         context = _Context()
         self.contexts[cid] = context
         return context
 
     async def clear_context(self, *, context_id=None, session_id=None):
-        self.contexts.clear()
+        self.contexts.pop(context_id, None)
 
 
 class _State:

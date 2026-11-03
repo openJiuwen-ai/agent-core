@@ -568,6 +568,13 @@ class ContextEngine:
                 nested_value, depth=depth + 1, seen=seen
             )
 
+    def list_context_ids(self, session_id: str) -> list[str]:
+        """Return ids of live contexts owned by one session without saving state."""
+        return [
+            context.context_id() for context in self._context_pool.values()
+            if context.session_id() == session_id
+        ]
+
     async def clear_context(
             self,
             context_id: str = None,

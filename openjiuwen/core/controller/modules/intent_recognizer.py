@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 
 """Intent recognition module.
@@ -28,6 +28,7 @@ Supported intent types (see ``IntentType`` for details):
 """
 import asyncio
 import json
+from uuid import uuid4
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, List
 
@@ -281,22 +282,21 @@ class EventHandlerWithIntentRecognition(EventHandler):
                 "error_message": inputs.event.error_message
             })
 
-    async def _process_create_task_intent(self, intent: Intent, session: Session):
-        """处理创建任务意图
-
-        用户自定义执行新任务逻辑。
+    async def _process_create_task_intent(self, intent: Intent, session: Session) -> None:
+        """Create a task, generating one shared task/context identity if omitted.
 
         Args:
-            intent: 意图
+            intent: Task creation intent with an optional target task id.
             session: Session
         """
+        task_id = intent.target_task_id or uuid4().hex
         task = Task(
             session_id=session.get_session_id(),
-            task_id=intent.target_task_id,
+            task_id=task_id,
             task_type="default_task_type",
             description=intent.target_task_description,
             priority=1,
-            context_id=f"{session.get_session_id()}_{intent.target_task_id}",
+            context_id=f"{session.get_session_id()}_{task_id}",
             inputs=[intent.event] if isinstance(intent.event, InputEvent) else None,
             status=TaskStatus.SUBMITTED,
             error_message=None,
