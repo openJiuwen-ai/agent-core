@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -349,9 +350,14 @@ def create_browser_agent(
     browser_key: Optional[str] = None,
     browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
     browser_capabilities: Optional[List[str]] = None,
+    task_scoped: bool = False,
     **config_kwargs: Any,
 ) -> DeepAgent:
-    """Create the browser subagent with task-scoped capability context.
+    """Create a browser subagent with task-scoped capability context.
+
+    Independent task dispatch uses a fresh managed browser identity and closes
+    its process resources at task completion. Other browser hosts own their
+    existing instance lifecycle.
 
     ``browser_capabilities`` is resolved against the trusted capability
     catalog here. Core is always applied, including when the caller omits the
@@ -380,6 +386,28 @@ def create_browser_agent(
     instance = _coerce_browser_instance(browser_instance, browser_key)
     browser_model = _browser_model_with_temperature(model, temperature)
     resolved_settings = _resolve_runtime_settings(browser_model, settings, instance)
+    if task_scoped:
+        if not browser_key:
+            raise ValueError("Independent browser tasks require a browser_key")
+        configured_instance = resolved_settings.instance
+        identity = BrowserInstanceConfig(key=browser_key).sanitized_key()
+        if not identity:
+            raise ValueError("Independent browser tasks require a nonempty browser identity")
+        profile_root = (
+            getattr(workspace, "root_path", workspace)
+            or resolved_settings.mcp_cfg.params.get("cwd") or "."
+        )
+        instance = BrowserInstanceConfig(
+            key=identity,
+            task_scoped=True,
+            profile_name=identity,
+            user_data_dir=str((Path(profile_root) / ".browser-profiles" / identity).resolve()),
+            driver_mode="managed",
+            browser_binary=configured_instance.browser_binary if configured_instance else "",
+        )
+        resolved_settings = dataclasses.replace(
+            resolved_settings, instance=instance, mcp_cfg=build_playwright_mcp_config(instance),
+        )
 
     final_card = card or AgentCard(
         name="browser_agent",
@@ -455,7 +483,7 @@ def create_browser_agent(
         **config_kwargs,
     )
     agent.register_task_resource_cleanup(
-        browser_backend.release_task_resources,
+        browser_backend.shutdown if task_scoped else browser_backend.release_task_resources,
         prepare=browser_backend.acquire_task_resources,
     )
     return agent

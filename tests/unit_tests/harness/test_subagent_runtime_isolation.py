@@ -76,3 +76,59 @@ async def test_terminal_cleanup_releases_only_this_child_runtime(tmp_path):
     assert Runner.resource_mgr.get_sys_operation("general-purpose_cleanup-A") is None
     assert Runner.resource_mgr.get_sys_operation("general-purpose_cleanup-B") is second_op
     await second.cleanup_task_resources()
+
+
+@pytest.mark.asyncio
+async def test_independent_verifiers_override_shared_owner_and_clean_separately(tmp_path):
+    from openjiuwen.harness.subagents.verification_agent import build_verification_agent_config
+    parent = parent_agent(tmp_path)
+    spec = build_verification_agent_config(model=parent.deep_config.model)
+    spec.factory_kwargs = {"tool_owner_id": "shared-owner"}
+    parent.deep_config.subagents = [spec]
+    first = parent.create_subagent("verification_agent", "verify-A", isolated=True)
+    second = parent.create_subagent("verification_agent", "verify-B", isolated=True)
+    assert first is not second
+    assert first.deep_config.tool_owner_id == "verify-A"
+    assert second.deep_config.tool_owner_id == "verify-B"
+    assert spec.factory_kwargs == {"tool_owner_id": "shared-owner"}
+    await first._ensure_initialized()
+    await second._ensure_initialized()
+    from openjiuwen.core.runner import Runner
+    peer_tool = second.ability_manager.get("read_file")
+    await first.cleanup_task_resources()
+    assert Runner.resource_mgr.get_tool(peer_tool.id) is not None
+    await second.cleanup_task_resources()
+
+
+@pytest.mark.asyncio
+async def test_independent_browsers_own_profiles_ports_and_driver_shutdown(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
+    monkeypatch.setenv("BROWSER_PROFILE_STORE_PATH", str(tmp_path / "profiles.json"))
+    monkeypatch.setenv("PLAYWRIGHT_RUNTIME_MCP_CWD", str(tmp_path))
+    monkeypatch.setenv("BROWSER_MANAGED_ARGS",
+                       "--headless=new --user-data-dir=C:/shared --remote-debugging-port=9333")
+    parent = parent_agent(tmp_path)
+    spec = build_browser_agent_config(parent.deep_config.model)
+    parent.deep_config.subagents = [spec]
+    first = parent.create_subagent("browser_agent", "browser-A", isolated=True)
+    second = parent.create_subagent("browser_agent", "browser-B", isolated=True)
+    a = first.find_rails_by_type((BrowserRuntimeRail,))[0]._runtime.service
+    b = second.find_rails_by_type((BrowserRuntimeRail,))[0]._runtime.service
+    assert a.lifecycle_identity != b.lifecycle_identity
+    ports = iter([41001, 41002])
+    monkeypatch.setattr(BrowserService, "_allocate_free_port", staticmethod(lambda: next(ports)))
+    pa, pb = a._build_managed_profile(), b._build_managed_profile()
+    assert pa.user_data_dir != pb.user_data_dir and pa.debug_port != pb.debug_port
+    assert pa.extra_args == pb.extra_args == ["--headless=new"]
+    stopped = []
+    a._managed_driver = SimpleNamespace(stop=lambda: stopped.append("A"))
+    b._managed_driver = SimpleNamespace(stop=lambda: stopped.append("B"))
+    await first.prepare_task_resources()
+    await second.prepare_task_resources()
+    await first.cleanup_task_resources()
+    assert stopped == ["A"] and b._managed_driver is not None
+    await second.cleanup_task_resources()
+    assert stopped == ["A", "B"]

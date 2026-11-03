@@ -12,6 +12,7 @@ import uuid
 from contextlib import suppress
 import warnings
 from pathlib import Path
+from weakref import WeakSet
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -45,7 +46,7 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import (
@@ -226,6 +227,7 @@ class DeepAgent(BaseAgent):
         self._bound_session_id: Optional[str] = None
         self._load_records: dict[str, LoadRecord] = {}
         self._session_toolkit: SessionToolkit | None = None
+        self._task_group_tools: WeakSet = WeakSet()
         self._pending_harness_configs: List[str] = []
         self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
         self._interaction_session: Optional[Session] = None
@@ -1113,7 +1115,7 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         await self._resolve_read_image_multimodal()
-        
+
         self._sync_prompt_builder_references()
 
         # Unregister stale rails left over from a previous configure() cycle.
@@ -1213,6 +1215,8 @@ class DeepAgent(BaseAgent):
         subagent_type: str,
         subsession_id: str,
         browser_capabilities: Optional[List[str]] = None,
+        *,
+        isolated: bool = False,
     ) -> "DeepAgent":
         """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
 
@@ -1220,6 +1224,7 @@ class DeepAgent(BaseAgent):
             subagent_type: Type of subagent to create (e.g., "general-purpose").
             subsession_id: The session id for the subagent.
             browser_capabilities: Task-scoped browser capability categories.
+            isolated: Allocate task-owned tools and browser resources; reject shared agent instances.
 
         Returns:
             Configured DeepAgent instance.
@@ -1250,6 +1255,8 @@ class DeepAgent(BaseAgent):
             )
 
         if isinstance(spec, DeepAgent):
+            if isolated:
+                raise ValueError("Independent tasks require a SubAgentConfig factory, not a shared DeepAgent instance")
             logger.info("already get deepagent instance, return it")
             # Only bind the field here; cwd is applied in _ensure_initialized
             # so create_subagent does not mutate the parent's ContextVar.
@@ -1297,7 +1304,7 @@ class DeepAgent(BaseAgent):
             ),
             "sys_operation": (
                 spec.sys_operation
-                if spec.sys_operation is not None and spec.workspace is not None
+                if not isolated and spec.sys_operation is not None and spec.workspace is not None
                 else None
             ),
             "language": (
@@ -1318,15 +1325,21 @@ class DeepAgent(BaseAgent):
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
         }
 
-        if "tool_owner_id" not in (spec.factory_kwargs or {}):
+        factory_kwargs = dict(spec.factory_kwargs or {})
+        if isolated:
+            factory_kwargs.pop("tool_owner_id", None)
+            factory_kwargs.pop("sys_operation", None)
+        if "tool_owner_id" not in factory_kwargs:
             create_kwargs["tool_owner_id"] = subsession_id
 
         def bind_subagent(subagent: "DeepAgent") -> "DeepAgent":
             subagent = self._bind_inherited_artifact_root(subagent)
             # Only auto-owned ephemeral runtimes belong to this dispatch.
             # Explicit factory owners / SysOperations retain their host lifecycle.
-            if isinstance(subagent, DeepAgent) and "tool_owner_id" not in (spec.factory_kwargs or {}):
-                owned_operation = subagent.deep_config.sys_operation if spec.sys_operation is None else None
+            if isinstance(subagent, DeepAgent) and "tool_owner_id" not in factory_kwargs:
+                owned_operation = (
+                    subagent.deep_config.sys_operation if isolated or spec.sys_operation is None else None
+                )
                 operation_id = f"{subagent.card.name}_{subsession_id}"
 
                 async def cleanup_runtime() -> None:
@@ -1345,7 +1358,9 @@ class DeepAgent(BaseAgent):
                     create_browser_agent,
                 )
 
-                factory_kwargs = dict(spec.factory_kwargs or {})
+                if isolated:
+                    factory_kwargs["browser_key"] = subsession_id
+                    factory_kwargs["task_scoped"] = True
                 browser_model = create_kwargs["model"]
                 browser_parent_model = getattr(
                     browser_model,
@@ -1381,7 +1396,7 @@ class DeepAgent(BaseAgent):
                 return bind_subagent(
                     create_code_agent(
                         **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **factory_kwargs,
                     )
                 )
             if normalized_factory == "research_agent":
@@ -1392,7 +1407,7 @@ class DeepAgent(BaseAgent):
                 return bind_subagent(
                     create_research_agent(
                         **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **factory_kwargs,
                     )
                 )
             if normalized_factory in {"mobile_gui_agent", "mobile_agent"}:
@@ -1403,7 +1418,7 @@ class DeepAgent(BaseAgent):
                 return bind_subagent(
                     create_mobile_gui_agent(
                         **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **factory_kwargs,
                     )
                 )
 
@@ -1415,7 +1430,7 @@ class DeepAgent(BaseAgent):
         from openjiuwen.harness.factory import create_deep_agent
 
         return bind_subagent(
-            create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
+            create_deep_agent(**create_kwargs, **factory_kwargs)
         )
 
     def available_subagent_types(self) -> list[str]:
@@ -1579,6 +1594,8 @@ class DeepAgent(BaseAgent):
             chunk_type = chunk.get("type", chunk_type)
             payload = chunk.get("payload", payload)
 
+        if chunk_type == "interaction":
+            return {"result_type": "interrupt"}
         if not isinstance(payload, dict):
             return None
 
@@ -2550,12 +2567,25 @@ class DeepAgent(BaseAgent):
             )
 
         async def _stream_process() -> None:
+            from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
+
+            grouped = any(rail.task_manager is not None for rail in self.find_rails_by_type((SubagentRail,)))
+            last_result = None
             try:
                 async for result in self._run_task_loop(ctx, session):
-                    await self._write_round_result_to_stream(result, session)
+                    if not grouped:
+                        await self._write_round_result_to_stream(result, session)
+                    elif last_result is not None:
+                        # A loop iteration is not the end of the logical task.
+                        await self._write_round_result_to_stream(last_result, session)
+                    last_result = result
+                if grouped and last_result is not None:
+                    last_result = await self._finalize_background_subtasks_result(last_result, session.get_session_id())
+                    await self._write_round_result_to_stream(last_result, session)
             except Exception as e:
                 logger.error(f"Task loop stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
+                error_result = await self._finalize_background_subtasks_result(error_result, session.get_session_id())
                 await self._write_round_result_to_stream(error_result, session)
             finally:
                 # Only close the stream emitter to send END_FRAME,
@@ -2629,6 +2659,66 @@ class DeepAgent(BaseAgent):
         ):
             yield chunk
 
+    def _track_task_group_tool(self, tool: Any) -> None:
+        """Keep child-task ownership independent of public tool registration."""
+        self._task_group_tools.add(tool)
+
+    async def cancel_background_subtasks(
+        self,
+        parent_session_id: str | None = None,
+        *,
+        reason: str = "parent_stopped",
+    ) -> dict | None:
+        """Close only this parent's managed task groups, including paused approvals."""
+        from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
+
+        reports = []
+        seen = set()
+        tools = [
+            *self._task_group_tools,
+            *(rail.task_group_tool for rail in self.find_rails_by_type((SubagentRail,))),
+        ]
+        for tool in tools:
+            if tool is None or id(tool) in seen:
+                continue
+            seen.add(id(tool))
+            report = await tool.close_task_groups(parent_session_id, reason=reason)
+            if report is not None:
+                reports.append(report)
+        if not reports:
+            return None
+        return {
+            key: [item for report in reports for item in report[key]]
+            for key in ("tasks", "unfinished", "uncollected", "cleanup_pending_ids")
+        } | {"reason": reason}
+
+    async def _finalize_background_subtasks_result(self, result, parent_session_id=None):
+        if not isinstance(result, dict) or result.get("result_type") == "interrupt":
+            return result
+        report = await self.cancel_background_subtasks(parent_session_id, reason="parent_finished")
+        if report is None or not report["tasks"]:
+            return result
+        result = dict(result)
+        result["task_group_summary"] = report
+        if report["unfinished"] or report["uncollected"]:
+            notice = "\n\n[子任务状态] 尚有未完成或未取回的子任务结果，未完成任务已请求停止；本轮不能视为全部完成。"
+            output = result.get("output", "")
+            result["output"] = str(output) + notice
+            if isinstance(result.get("content"), str):
+                result["content"] = result["output"]
+        return result
+
+    async def _finalize_task_group_chunk(self, chunk, result, parent_session_id):
+        finalized = await self._finalize_background_subtasks_result(result, parent_session_id)
+        if finalized is result:
+            return chunk, result
+        if isinstance(chunk, dict):
+            chunk = {**chunk, "payload": finalized}
+        else:
+            chunk = copy.copy(chunk)
+            chunk.payload = finalized
+        return chunk, finalized
+
     async def invoke(
         self,
         inputs: Any,
@@ -2661,6 +2751,8 @@ class DeepAgent(BaseAgent):
                     result = await self._run_task_loop_invoke(ctx, session)
                 else:
                     result = await self._run_single_round_invoke(ctx, session)
+                result = await self._finalize_background_subtasks_result(
+                    result, session.get_session_id() if session is not None else invoke_inputs.conversation_id)
                 invoke_inputs.result = result
 
             if session is not None:
@@ -2719,7 +2811,9 @@ class DeepAgent(BaseAgent):
                             chunk, stream_output_parts
                         )
                         if chunk_result is not None:
-                            stream_result = chunk_result
+                            chunk, stream_result = await self._finalize_task_group_chunk(
+                                chunk, chunk_result,
+                                session.get_session_id() if session is not None else invoke_inputs.conversation_id)
                         yield chunk
 
                 if stream_result is None and stream_output_parts:
@@ -2728,6 +2822,13 @@ class DeepAgent(BaseAgent):
                         "result_type": "answer",
                     }
                 if stream_result is not None:
+                    finalized = await self._finalize_background_subtasks_result(
+                        stream_result,
+                        session.get_session_id() if session is not None else invoke_inputs.conversation_id,
+                    )
+                    if finalized is not stream_result:
+                        yield OutputSchema(type="answer", index=0, payload=finalized)
+                    stream_result = finalized
                     invoke_inputs.result = stream_result
 
             if session is not None:
@@ -2929,6 +3030,7 @@ class DeepAgent(BaseAgent):
             ctx = AgentCallbackContext(
                 agent=self, inputs=invoke_inputs, session=session
             )
+            ctx.extra["task_group.resume"] = work.kind == "user" and not work.reset_loop
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -2950,8 +3052,6 @@ class DeepAgent(BaseAgent):
                         else 600.0
                     )
                     result = await controller.wait_round_completion(timeout=timeout)
-                await self._write_round_result_to_stream(result, session)
-                invoke_inputs.result = result
                 next_work = (
                     None
                     if is_resume_input
@@ -2963,6 +3063,14 @@ class DeepAgent(BaseAgent):
                         controller=controller,
                     )
                 )
+                continuing = (next_work is not None and next_work.kind == "user"
+                              and next_work.request_id == work.request_id and not next_work.reset_loop)
+                ctx.extra["task_group.continue"] = continuing
+                if not continuing:
+                    result = await self._finalize_background_subtasks_result(result, session.get_session_id())
+                await self._write_round_result_to_stream(result, session)
+                invoke_inputs.result = result
+
 
             self.save_state(session)
             # 记录本轮 request_id，作为 checkpointer 优先恢复时的增量起点指针。

@@ -667,7 +667,7 @@ async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeyp
         del self
         captured["inputs"] = inputs
         captured["kwargs"] = kwargs
-        return SimpleNamespace(success=True, data={"output": '{"ok": true}', "agent_id": "subagent-1"})
+        return SimpleNamespace(success=True, data={"ready": [{"output": '{"ok": true}', "task_id": "review-task", "status": "completed"}], "pending_ids": []})
 
     monkeypatch.setattr("openjiuwen.agent_evolving.tools.skill.TaskTool.invoke", fake_invoke)
     tool = EvolveReviewTaskTool(parent_agent=Mock(), language="cn", agent_id="agent-1")
@@ -682,9 +682,11 @@ async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeyp
     )
 
     assert result.success is True
-    assert captured["inputs"]["subagent_type"] == EVOLUTION_REVIEW_AGENT_NAME
-    assert "review-ref-1" in captured["inputs"]["task_description"]
-    assert "capture parser lesson" in captured["inputs"]["task_description"]
+    assert result.data["output"] == '{"ok": true}'
+    assert captured["inputs"]["action"] == "dispatch"
+    assert captured["inputs"]["tasks"][0]["subagent_type"] == EVOLUTION_REVIEW_AGENT_NAME
+    assert "review-ref-1" in captured["inputs"]["tasks"][0]["task_description"]
+    assert "capture parser lesson" in captured["inputs"]["tasks"][0]["task_description"]
     assert captured["kwargs"]["session"] is not None
 
 
