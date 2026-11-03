@@ -1,11 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unconditional write protection for host control-plane paths.
+"""Write protection for host control-plane paths and project execution files.
 
-Unlike configurable ``file_guard`` rules, this guard is supplied by the host
-and remains active when the ordinary permission system is disabled.  It is a
-tool-layer boundary; operating-system isolation is still required against
-arbitrary native code that path extraction cannot observe.
+The permission engine skips this guard when ``permissions.enabled`` is false,
+and when a host keeps the rest of the engine on but sets
+``immutable_control_enabled`` to false. ``file_guard.enabled`` does not load
+or unload it. The guard is a tool-layer boundary; operating-system isolation
+is still required against native code that path extraction cannot observe.
 """
 
 from __future__ import annotations

@@ -17,28 +17,63 @@ from openjiuwen.harness.security.permission_engine.models import (
 )
 
 
-def _engine(workspace: Path, protected: Path, *, enabled: bool = False) -> PermissionEngine:
+def _engine(
+    workspace: Path,
+    protected: Path,
+    *,
+    enabled: bool = False,
+    file_guard_enabled: bool | None = None,
+    immutable_control_enabled: bool | None = None,
+) -> PermissionEngine:
+    config: dict = {"enabled": enabled, "package_builtin_rules": False}
+    if file_guard_enabled is not None:
+        config["file_guard"] = {"enabled": file_guard_enabled}
+    if immutable_control_enabled is not None:
+        config["immutable_control_enabled"] = immutable_control_enabled
     return PermissionEngine(
-        {"enabled": enabled, "package_builtin_rules": False},
+        config,
         workspace_root=workspace,
         immutable_control_roots=[protected],
     )
 
 
 @pytest.mark.asyncio
-async def test_protected_write_is_denied_even_when_permissions_are_disabled(tmp_path):
+async def test_control_plane_write_follows_the_master_switch(tmp_path):
     protected = tmp_path / "control"
     protected.mkdir()
     target = protected / "config.yaml"
-    engine = _engine(tmp_path, protected, enabled=False)
+    payload = {"file_path": str(target), "content": "permissions:\n  enabled: false\n"}
 
-    result = await engine.check_permission(
-        "write_file",
-        {"file_path": str(target), "content": "permissions:\n  enabled: false\n"},
+    disabled = await _engine(
+        tmp_path, protected, enabled=False, file_guard_enabled=True,
+    ).check_permission("write_file", payload)
+    assert disabled.permission == PermissionLevel.ALLOW
+    assert disabled.reason == "Permission system is disabled"
+    assert disabled.matched_rule != "immutable_control_plane"
+
+    protected_on = await _engine(
+        tmp_path, protected, enabled=True, file_guard_enabled=False,
+    ).check_permission("write_file", payload)
+    assert protected_on.permission == PermissionLevel.DENY
+    assert protected_on.matched_rule == "immutable_control_plane"
+
+    host_off = PermissionEngine(
+        {
+            "enabled": True,
+            "package_builtin_rules": False,
+            "immutable_control_enabled": False,
+            "tools": {"write_file": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+            },
+        },
+        workspace_root=tmp_path,
+        immutable_control_roots=[protected],
     )
-
-    assert result.permission == PermissionLevel.DENY
-    assert result.matched_rule == "immutable_control_plane"
+    host_result = await host_off.check_permission("write_file", payload)
+    assert host_result.permission == PermissionLevel.ALLOW
+    assert host_result.matched_rule != "immutable_control_plane"
 
 
 @pytest.mark.asyncio
@@ -60,7 +95,7 @@ async def test_shell_write_to_protected_root_is_denied(tmp_path, tool_name):
     protected = tmp_path / "control"
     protected.mkdir()
     target = protected / "config.yaml"
-    engine = _engine(tmp_path, protected, enabled=False)
+    engine = _engine(tmp_path, protected, enabled=True, file_guard_enabled=False)
     command = (
         f'Set-Content -Path "{target}" -Value disabled'
         if tool_name == "powershell"
@@ -74,6 +109,22 @@ async def test_shell_write_to_protected_root_is_denied(tmp_path, tool_name):
 
     assert result.permission == PermissionLevel.DENY
     assert result.matched_rule == "immutable_control_plane"
+
+
+@pytest.mark.asyncio
+async def test_shell_write_to_protected_root_is_allowed_when_master_switch_is_off(tmp_path):
+    protected = tmp_path / "control"
+    protected.mkdir()
+    target = protected / "config.yaml"
+    engine = _engine(tmp_path, protected, enabled=False, file_guard_enabled=True)
+
+    result = await engine.check_permission(
+        "powershell",
+        {"command": f'Set-Content -Path "{target}" -Value disabled', "workdir": str(tmp_path)},
+    )
+
+    assert result.permission == PermissionLevel.ALLOW
+    assert result.reason == "Permission system is disabled"
 
 
 @pytest.mark.asyncio
@@ -99,11 +150,13 @@ async def test_write_outside_protected_root_keeps_normal_full_access_behavior(tm
     ".git/hooks/pre-commit",
     ".vscode/tasks.json",
 ])
-async def test_project_execution_config_requires_one_time_approval_in_full_access(tmp_path, relative):
+async def test_project_execution_config_requires_one_time_approval_when_master_switch_is_on(
+    tmp_path, relative,
+):
     protected = tmp_path / "control"
     protected.mkdir()
     target = tmp_path / relative
-    engine = _engine(tmp_path, protected, enabled=False)
+    engine = _engine(tmp_path, protected, enabled=True, file_guard_enabled=False)
 
     result = await engine.check_permission(
         "write_file",
@@ -112,6 +165,22 @@ async def test_project_execution_config_requires_one_time_approval_in_full_acces
 
     assert result.permission == PermissionLevel.ASK
     assert result.matched_rule == "immutable_project_execution_config"
+
+
+@pytest.mark.asyncio
+async def test_project_execution_config_is_not_asked_when_master_switch_is_off(tmp_path):
+    protected = tmp_path / "control"
+    protected.mkdir()
+    engine = _engine(tmp_path, protected, enabled=False, file_guard_enabled=True)
+
+    result = await engine.check_permission(
+        "write_file",
+        {"file_path": str(tmp_path / "package.json"), "content": "changed"},
+    )
+
+    assert result.permission == PermissionLevel.ALLOW
+    assert result.reason == "Permission system is disabled"
+    assert result.matched_rule != "immutable_project_execution_config"
 
 
 class _Session:
@@ -127,7 +196,7 @@ class _Session:
 
 def _one_time_approval_rail(tmp_path, *, hosted_confirmation=None):
     persisted: list[str] = []
-    config = {"enabled": False, "package_builtin_rules": False}
+    config = {"enabled": True, "package_builtin_rules": False, "file_guard": {"enabled": False}}
     host = ToolPermissionHost(
         get_permissions_snapshot=lambda: dict(config),
         persist_allow_rule=lambda _cfg: persisted.append("permanent") or True,

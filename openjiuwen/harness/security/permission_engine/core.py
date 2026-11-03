@@ -228,6 +228,18 @@ class PermissionEngine:
             workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
 
+    def _immutable_control_active(self) -> bool:
+        """Control-plane writes follow the master switch, not ``file_guard``.
+
+        An explicit boolean ``immutable_control_enabled`` wins so a host can
+        keep ordinary checks on while this guard is off. A missing flag
+        follows ``permissions.enabled``.
+        """
+        flag = self.config.get("immutable_control_enabled")
+        if isinstance(flag, bool):
+            return flag
+        return bool(self._enabled)
+
     # ---------- 配置 ----------
 
     def _rebuild_file_guard(self) -> None:
@@ -425,22 +437,29 @@ class PermissionEngine:
             self._enabled,
         )
 
-        immutable_args = tool_args if isinstance(tool_args, dict) else {}
-        immutable_result = self._immutable_control_guard.evaluate(tool_name, immutable_args)
-        if immutable_result is not None:
-            logger.warning(
-                "[PermissionEngine] permission.immutable_control_plane.denied "
-                "tool=%s paths=%s",
-                tool_name,
-                immutable_result.external_paths or [],
-            )
-            return immutable_result
-
         if not self._enabled:
             logger.info("[PermissionEngine] permission.check.skip reason=system_disabled decision=allow")
             return PermissionResult(
                 permission=PermissionLevel.ALLOW,
                 reason="Permission system is disabled",
+            )
+
+        if self._immutable_control_active():
+            immutable_args = tool_args if isinstance(tool_args, dict) else {}
+            immutable_result = self._immutable_control_guard.evaluate(tool_name, immutable_args)
+            if immutable_result is not None:
+                logger.warning(
+                    "[PermissionEngine] permission.immutable_control_plane.denied "
+                    "tool=%s paths=%s",
+                    tool_name,
+                    immutable_result.external_paths or [],
+                )
+                return immutable_result
+        else:
+            logger.info(
+                "[PermissionEngine] permission.immutable_control_plane.skip "
+                "reason=master_switch_off tool=%s",
+                tool_name,
             )
 
         active_fn = self._permission_checks_active
