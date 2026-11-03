@@ -99,7 +99,9 @@ class ContextEngine:
         self._window_mutators.append(mutator)
 
     def register_compaction_hook(self, hook: CompactionHook) -> Callable[[], None]:
-        """Register one host hook for existing and future native contexts.
+        """Register a host hook for explicit compact_context calls.
+
+        Legacy/manual/automatic entry-point integration is deliberately deferred.
 
         Returns:
             An idempotent function removing this registration and its cache.
@@ -427,26 +429,27 @@ class ContextEngine:
         A successful compression is saved to the resolved session and committed
         before this method returns. Contexts without a session remain in-memory only.
         """
-        if self._compaction.hook is not None:
-            from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
-            trigger_name = kwargs.pop("compression_trigger", "manual")
-            trigger_name = "auto" if trigger_name in ("passive", "model_context_overflow") else trigger_name
-            try:
-                decision = await self.compact_context(
-                    context_id, session, session_id=session_id, trigger=trigger_name,
-                    instructions=kwargs.pop("instructions", None), processor_types=processor_types,
-                )
-            except CompactionError as error:
-                if error.code != "COMPACT_BUSY":
-                    raise
-                return {"result": "busy"} if kwargs.get("return_state") else "busy"
-            code = "compressed" if isinstance(decision, CompactionCandidate) else "noop"
-            if kwargs.get("return_state"):
-                context = self.get_context(context_id=context_id, session_id=session.get_session_id() if session else (session_id or "default_session_id"))
-                state = getattr(context, "_last_compaction", {}) if code == "compressed" else {}
-                return {"result": code, "skip": getattr(decision, "skip", None), "state": state,
-                        "compact_summary": state.get("compact_summary")}
-            return code
+        # TODO(compact): Native compress_context does not enter the extension bridge in this stage.
+        # if self._compaction.hook is not None:
+            # from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
+            # trigger_name = kwargs.pop("compression_trigger", "manual")
+            # trigger_name = "auto" if trigger_name in ("passive", "model_context_overflow") else trigger_name
+            # try:
+                # decision = await self.compact_context(
+                    # context_id, session, session_id=session_id, trigger=trigger_name,
+                    # instructions=kwargs.pop("instructions", None), processor_types=processor_types,
+                # )
+            # except CompactionError as error:
+                # if error.code != "COMPACT_BUSY":
+                    # raise
+                # return {"result": "busy"} if kwargs.get("return_state") else "busy"
+            # code = "compressed" if isinstance(decision, CompactionCandidate) else "noop"
+            # if kwargs.get("return_state"):
+                # context = self.get_context(context_id=context_id, session_id=session.get_session_id() if session else (session_id or "default_session_id"))
+                # state = getattr(context, "_last_compaction", {}) if code == "compressed" else {}
+                # return {"result": code, "skip": getattr(decision, "skip", None), "state": state,
+                        # "compact_summary": state.get("compact_summary")}
+            # return code
         resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
         context = self.get_context(context_id=context_id, session_id=resolved_session_id)
         if context is None:

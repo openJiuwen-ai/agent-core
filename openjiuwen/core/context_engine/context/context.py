@@ -416,11 +416,12 @@ class SessionModelContext(ModelContext):
         processor_types: List[str] = None,
         **kwargs,
     ) -> str | dict[str, Any]:
-        if self._has_compaction_hook():
-            return await self._compaction_coordinator.engine.compress_context(
-                self.context_id(), self.get_session_ref(), session_id=self.session_id(),
-                processor_types=processor_types, **kwargs,
-            )
+        # TODO(compact): Keep direct native compression on the original path.
+        # if self._has_compaction_hook():
+            # return await self._compaction_coordinator.engine.compress_context(
+                # self.context_id(), self.get_session_ref(), session_id=self.session_id(),
+                # processor_types=processor_types, **kwargs,
+            # )
         return_state = bool(kwargs.pop("return_state", False))
         compression_trigger = kwargs.get("compression_trigger")
         if compression_trigger is None:
@@ -643,23 +644,26 @@ class SessionModelContext(ModelContext):
             call_window_mutators = kwargs.pop("window_mutators", None) or []
             kwargs.update({"window_size": window_size})
             kwargs.setdefault("sys_operation", self._sys_operation)
-            compaction_handled = False
+            # TODO(compact): Automatic GET integration is deferred.
+            # compaction_handled = False
             for processor in self._processors:
-                if compaction_handled and self._is_summary_processor(processor):
-                    continue
+                # TODO(compact): Retain original processor iteration until automatic GET integration.
+                # if compaction_handled and self._is_summary_processor(processor):
+                    # continue
                 operation_id = None
                 started_at = None
                 before_messages = None
                 started_emitted = False
                 try:
                     if await processor.trigger_get_context_window(self, window):
-                        if self._has_compaction_hook() and self._is_summary_processor(processor):
-                            await self._intercept_auto_compaction([], window=window, **kwargs)
-                            window.system_messages, window.context_messages = self._get_window_messages(
-                                window.system_messages, window_size, dialogue_round,
-                            )
-                            compaction_handled = True
-                            continue
+                        # TODO(compact): Do not intercept native automatic GET compression yet.
+                        # if self._has_compaction_hook() and self._is_summary_processor(processor):
+                            # await self._intercept_auto_compaction([], window=window, **kwargs)
+                            # window.system_messages, window.context_messages = self._get_window_messages(
+                                # window.system_messages, window_size, dialogue_round,
+                            # )
+                            # compaction_handled = True
+                            # continue
                         logger.info(f"trigger context processor {processor.processor_type()} on GET")
                         operation_id = uuid.uuid4().hex
                         started_at = time.time()
@@ -711,8 +715,9 @@ class SessionModelContext(ModelContext):
                                 compression_usage=getattr(event, "compression_usage", None),
                             )
                         )
-                except CompactionError:
-                    raise
+                # TODO(compact): The legacy processor error policy remains active.
+                # except CompactionError:
+                    # raise
                 except asyncio.CancelledError:
                     if started_emitted:
                         await self._build_and_emit_processor_cancelled_state(
@@ -1197,7 +1202,7 @@ class SessionModelContext(ModelContext):
         )
 
     async def _intercept_auto_compaction(self, pending, *, window=None, **kwargs) -> bool:
-        """Intercept one ADD/GET summary cycle, retaining normal pending input."""
+        """Reserved ADD/GET bridge; native call sites are deliberately disabled."""
         coordinator = self._compaction_coordinator
         source = [*self.get_messages(), *pending]
         indices = []
@@ -1246,10 +1251,12 @@ class SessionModelContext(ModelContext):
             compression_only=compression_only,
         )
         changed = False
-        compaction_handled = False
+        # TODO(compact): Automatic ADD integration is deferred.
+        # compaction_handled = False
         for processor in processors:
-            if compaction_handled and self._is_summary_processor(processor):
-                continue
+            # TODO(compact): Retain original processor iteration until automatic ADD integration.
+            # if compaction_handled and self._is_summary_processor(processor):
+                # continue
             operation_id = None
             started_at = None
             before_messages = None
@@ -1261,13 +1268,14 @@ class SessionModelContext(ModelContext):
             try:
                 should_run = force or await processor.trigger_add_messages(self, messages_to_add, **kwargs)
                 if should_run:
-                    if self._has_compaction_hook() and self._is_summary_processor(processor):
-                        installed = await self._intercept_auto_compaction(messages_to_add, **kwargs)
-                        if installed:
-                            messages_to_add = []
-                            changed = True
-                        compaction_handled = True
-                        continue
+                    # TODO(compact): Do not intercept native automatic ADD compression yet.
+                    # if self._has_compaction_hook() and self._is_summary_processor(processor):
+                        # installed = await self._intercept_auto_compaction(messages_to_add, **kwargs)
+                        # if installed:
+                            # messages_to_add = []
+                            # changed = True
+                        # compaction_handled = True
+                        # continue
                     logger.info(
                         f"{'force trigger' if force else 'trigger'} "
                         f"context processor {processor.processor_type()} on ADD"
@@ -1330,8 +1338,9 @@ class SessionModelContext(ModelContext):
                     )
                     if event is not None:
                         changed = True
-            except CompactionError:
-                raise
+            # TODO(compact): The legacy processor error policy remains active.
+            # except CompactionError:
+                # raise
             except asyncio.CancelledError:
                 if started_emitted:
                     await self._build_and_emit_processor_cancelled_state(

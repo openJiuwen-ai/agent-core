@@ -95,30 +95,33 @@ async def test_precompute_does_not_install_and_matching_candidate_is_reused():
 
 
 @pytest.mark.asyncio
-async def test_auto_add_skip_preserves_new_input_once():
+async def test_native_auto_add_does_not_enter_staged_compaction_hook():
     engine, context, calls = await _engine()
-    async def hook(request, next_handler):
-        assert request.trigger == "auto"
-        assert request.messages[-1].content == "new input"
-        return CompactionSkipped("keep original")
+    context._processors[0].trigger_add_messages = AsyncMock(return_value=True)
+    hook = AsyncMock(side_effect=AssertionError("native ADD must keep its original path"))
     engine.register_compaction_hook(hook)
     await context.add_messages(UserMessage(content="new input"))
     assert [message.content for message in context.get_messages()].count("new input") == 1
-    assert len(context.get_messages()) == 5
-    assert not calls
+    hook.assert_not_awaited()
+    assert len(calls) == 1
+    assert "Tests pending" in " ".join(message.content for message in context.get_messages())
 
 
 @pytest.mark.asyncio
-async def test_auto_get_uses_final_result_in_same_model_window():
+async def test_native_auto_get_calls_original_processor_without_staged_hook():
     engine, context, calls = await _engine()
     context._processors[0].trigger_get_context_window = AsyncMock(return_value=True)
-    async def hook(request, next_handler):
-        assert request.trigger == "auto"
-        return CompactionCandidate((UserMessage(content="final window summary"),))
+    async def original_processor(native, window, **kwargs):
+        window.context_messages = [UserMessage(content="original processor result")]
+        return None, window
+    context._processors[0].on_get_context_window = AsyncMock(side_effect=original_processor)
+    hook = AsyncMock(side_effect=AssertionError("native GET must keep its original path"))
     engine.register_compaction_hook(hook)
     window = await context.get_context_window()
-    assert window.context_messages[0].content == "final window summary"
-    assert context.get_messages()[0].content == "final window summary"
+    hook.assert_not_awaited()
+    context._processors[0].on_get_context_window.assert_awaited_once()
+    assert window.context_messages[0].content == "original processor result"
+    assert not calls
 
 
 @pytest.mark.asyncio
@@ -289,9 +292,9 @@ def test_installed_forked_processors_have_isolated_candidate_state(name):
 @pytest.mark.asyncio
 async def test_precomputed_prefix_keeps_new_appended_input_without_another_model_call():
     engine, context, calls = await _engine()
+    # Exercise the explicit API without independently triggering legacy ADD compression.
+    context._processors[0].trigger_add_messages = AsyncMock(return_value=False)
     async def hook(request, next_handler):
-        if request.trigger == "auto":
-            return CompactionSkipped("wait for requested compact")
         return await next_handler(request)
     engine.register_compaction_hook(hook)
     await engine.compact_context(trigger="precompute")
@@ -304,6 +307,7 @@ async def test_precomputed_prefix_keeps_new_appended_input_without_another_model
 @pytest.mark.asyncio
 async def test_precompute_does_not_hold_the_live_processor_lock():
     engine, context, calls = await _engine()
+    context._processors[0].trigger_add_messages = AsyncMock(return_value=False)
     entered, release = asyncio.Event(), asyncio.Event()
     original_invoke = context._processors[0]._model.invoke
     async def delayed(*args, **kwargs):
@@ -312,8 +316,6 @@ async def test_precompute_does_not_hold_the_live_processor_lock():
         return await original_invoke(*args, **kwargs)
     context._processors[0]._model.invoke = delayed
     async def hook(request, next_handler):
-        if request.trigger == "auto":
-            return CompactionSkipped("leave new input untouched")
         return await next_handler(request)
     engine.register_compaction_hook(hook)
     task = asyncio.create_task(engine.compact_context(trigger="precompute"))
@@ -337,15 +339,15 @@ async def test_model_change_invalidates_speculative_candidate():
 
 
 @pytest.mark.asyncio
-async def test_direct_legacy_context_compact_also_enters_registered_hook():
+@pytest.mark.parametrize("entry", ["context", "engine"])
+async def test_legacy_compact_does_not_enter_staged_hook(entry):
     engine, context, calls = await _engine()
-    observed = []
-    async def hook(request, next_handler):
-        observed.append(request.trigger)
-        return CompactionSkipped("skip legacy path")
+    hook = AsyncMock(side_effect=AssertionError("legacy compression must not dispatch extensions"))
     engine.register_compaction_hook(hook)
-    assert await context.compress_context() == "noop"
-    assert observed == ["manual"] and not calls
+    result = await (context.compress_context() if entry == "context" else engine.compress_context())
+    assert result == "compressed"
+    hook.assert_not_awaited()
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,9 @@ created: 2026-11-03
 
 # 原生压缩候选与 Server 扩展联动实施
 
+**2026-11-03 范围收缩：** 用户明确要求本轮只交付 Ops / Event 接口与 Handler 链，主流程接入注释保留，真实压缩暂不接入。生产环境不绑定原生引擎，不拦截原有手动、自动和溢出压缩，不自动调度预计算；默认 Ops 报 COMPACT_NOT_INTEGRATED。以下完整压缩实现和原验收记录仅说明预留机制及历史版本，不能作为当前主流程已启用的结论。
+
+
 ## 关联依据与范围
 
 用户于 2026-11-03 确认 [联合设计](../designs/active/D-20261103-1156-session-compaction-events/design.md) 后实施。Core 基于 `45e6418c01302124da6736972eec20e68d0dd4f2`，Server 联调基于 `4b6021ca873e4e3b697628e29b72fdd1eef344d6`。持久契约见 [压缩规约](../specs/context_engine/S_01_compaction.md) 与 [Extension Runtime 调用校验](../../../openjiuwen/core/extension/docs/specs/S_02_registry-and-bus.md#42-当前包-handler-调用有效性)。EventBus 沿用上游 Events S_01。
@@ -24,7 +27,7 @@ created: 2026-11-03
 
 真实 Worker 验证识别了运行轨道使用 forked 独立基类，因此 canonical 与 forked 基类均接入安全 fork；仅复制选中算法，避免强迫旁路 Symphony/自定义处理器加入本次压缩。第三方真正被选中时仍须显式适配，不静默提前提交。
 
-precompute 是内存候选，实际安装重新进入 Hook；会话消息前缀、模型、处理器白名单/配置、记忆和宿主策略不兼容时重算。自动 ADD 保留 pending 一次；GET 保留系统与工具窗口并重算最终窗口。Core 的旧 compress_context 消费方在未注册 Hook 时沿用旧流程。
+precompute 的候选机制保留。完整接入版本曾验证自动 ADD/GET；当前这些调用点及传统 compress_context 的重定向均已注释，即使注册 Hook，原入口仍走旧流程。显式 compact_context 作为独立宿主 API/测试入口保留，生产 Server 不绑定引擎、不调用该 API。
 
 2026-11-03 经用户确认后，撤回原 EventBus/Ops 身份和排除接口增量；当前运行实现保持最新目标的 EventBus、Ops 与 Builder。调用有效期放在既有 Extension Runtime Handler 包装：检查当前 Ops 对象、嵌套层、Task 和活动标记；Server 仅注入只读校验回调。压缩模块在第二次事件前拒绝同会话重入，匹配链不作额外排除。
 
@@ -58,3 +61,11 @@ Core PR 先提供本协议；Server PR 标记依赖具体 Core 提交。任何�
 ## 文档编号修订
 
 2026-11-03 按用户要求接续 Server 当前目录，compact 特性文档改为 F_28_session-compact.md、规约改为 S_15_session-compact.md，原 F30/S17 为历史别名。Core 本文的日期编号、ContextEngine S_01 和设计 ID 保持稳定；此次仅同步跨仓引用，不改变压缩实现及原版本验收事实。
+
+## 当前接口阶段实施与验证
+
+按用户“先把主流程接入部分注释掉”及“真实压缩暂不接入”的明确要求，局部替代原完整接入范围：Core 的 Engine.compress_context、Context.compress_context 和自动 ADD/GET 重定向已注释；原算法保持原调用路径。保留显式 API、Hook、候选准备/校验/提交机制与 Extension Runtime 只读调用校验，供 Server 独立 Ops/Event 测试及后续主流程接入使用，不改 EventBus 接口。
+
+Core 31 项定向与 139 项原生 ContextEngine/ContextModel/FullCompact 回归通过，共 170 个不同用例。验证注册 Hook 后原生 ADD/GET/两个 legacy 压缩入口仍不触发 Hook，显式 API 的候选、post-next skip、安全边界仍可独立使用。Server 85 项回归加实际安装包调用 1 项通过，共 86 项；默认活动 Ops 报 COMPACT_NOT_INTEGRATED，测试显式绑定后完整 USER→BUILTIN→CORE 链返回结果。证据在 `D:\work_space\.codex-temp\session-compact-interface-only-20261103` 的 core-interface-final.xml、core-native-regression.xml、server-interface-final.xml、server-installed-package.xml。
+
+本轮未启用生产真实压缩，未重跑真实模型/SQLite 压缩恢复；上文原完整接入版本的证据仅保留历史含义。早期测试启动遗漏 asyncio_mode 及两个新增断言不准确的失败工件保留，修正后受影响范围全部通过。恢复生产入口后需重新做主流程和持久化验收，远端 CI 不作为本地通过证据。
