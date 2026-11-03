@@ -130,6 +130,19 @@ class ContextProcessorRail(DeepAgentRail):
         # another rail has since taken the name over.
         self._owned_tool_cards: Dict[str, ToolCard] = {}
 
+    def add_processors(
+        self,
+        processors: List[Tuple[str, Union[BaseModel, Dict]]],
+    ) -> None:
+        """Add or replace processor overrides before the rail is initialized."""
+        replacements = dict(processors)
+        self._user_processors = [
+            (key, config)
+            for key, config in self._user_processors
+            if key not in replacements
+        ]
+        self._user_processors.extend(processors)
+
     @staticmethod
     def _merge_config_with_overrides(
         base_config: BaseModel,
