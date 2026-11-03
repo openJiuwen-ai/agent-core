@@ -97,3 +97,21 @@ Events、Extension、store 和 callback 扩大回归为 **732 passed、2 skipped
   tests/unit_tests/core/events tests/unit_tests/core/extension `
   tests/unit_tests/core/extension/data tests/unit_tests/core/runner/callback
 ```
+
+## 2026-11-03 Windows 文件回归修复
+
+State 回归暴露 store 的两项已有失败：并发访问偶发把正常路径判为越界，卸载后旁路锁文件消失。
+本机 filelock 3.29 的 Windows 实现会在释放锁后尝试删除锁文件，与本文和 S_02 要求的稳定旁路文件不一致。
+同时，Windows Path.resolve 在并发目录变化时可能保留扩展长度前缀，导致同一目录的比较结果不同。
+
+本轮复用共享 files 模块的 resolve_data_path、package_data_path 和 package_file_lock：
+统一规范路径前缀、继续拒绝重定向和别名，采用项目已声明依赖 portalocker 的公开 Lock 保留旁路文件，
+并在取得锁后重新校验数据路径。store CRUD、取消等待、提交未知和卸载顺序保持原契约。
+
+验证入口为 test_store.py 的并发、跨进程、旁路锁保留、路径前缀、提交未知用例，
+以及 Events、Extension、callback 的扩大回归。锁释放故障注入同步针对新的公开 Lock.release 执行。
+
+修复后 store、store Ops 与 state 文件回归为 **78 passed、1 skipped**；
+Events、Extension、callback 扩大回归为 **810 passed、2 skipped，0 failed**。
+跳过均由当前 Windows 账户不能创建符号链接导致；没有通过跳过原失败用例来使结果通过。
+新增确定性用例覆盖扩展路径前缀和锁获取失败，原并发、跨进程、锁保留及提交未知用例均通过。

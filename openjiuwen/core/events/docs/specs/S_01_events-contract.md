@@ -305,6 +305,10 @@ class EventHandlerOps:
 - Handler 通过 `ops.<namespace>.<method>(...)` 访问能力。未知 namespace 或未知 method 必须拒绝。
 - 名词能力直接执行；动词能力可携带当前 SessionContext 发起新的业务事件。动词完成不自动推进原链。
 
+state 能力的自动依赖收集由宿主构建入口与状态服务协作，不向 trigger、Builder 或 Ops 增加调用上下文参数。
+普通 Handler 和嵌套 Ops 无需为 state 适配；无会话状态调用继续使用 session=None。
+状态接口、构建读取与写入约束见 [State 规约](S_03_state.md)。
+
 ### 4.6.1 package 包信息能力
 
 按预置构建链完成 `ops.build` 后，普通 Handler 的 Ops 包含 `package` 命名空间。

@@ -182,7 +182,19 @@
   卸载协作引用 [Extension S_02](../../../extension/docs/specs/S_02_registry-and-bus.md)。
 - **硬前置：** EV-04、EV-06 包信息及既有 Extension 发布与管理事件。
 - **验收：** F_14 第 4 节数据、文件、失败、事件、Ops、生命周期六组可独立运行，记录真实命令和结果。
+- **Windows 回归修复：** 修复路径前缀误判和旁路锁删除；文件专项 78 passed、1 skipped，扩大回归 810 passed、2 skipped。
 - **不交付：** state、package 身份调整、应用保存目录与界面接线、真实业务触发点。
+
+### EV-15 State 持久化、版本与构建依赖
+
+- **责任人：** 李志远。
+- **目标与范围：** state.get/set、Session/Application 作用域、CAS、文件持久化、
+  自动构建依赖、纯后端状态使用及旧代资源回收；不修改 Bus/Ops 公共调用参数，不实现内置业务 Handler。
+- **契约与记录：** [State 规约](../specs/S_03_state.md)、
+  [F_15 State](../features/F_15_ops-state.md)。
+- **状态：** 已开发；自动收集修订专项 47 passed，修复 store 后扩大回归 810 passed、2 skipped、0 failed。
+  嵌套能力无需透传，普通业务使用 state 不建立面板依赖；结果见 F_15 第 5 节。
+  已完成组件、公开入口和下游正式装配验证；真实应用展示和部署路由不作为 SDK 组件验收。
 
 ## 3. 依赖关系与开发顺序
 
@@ -199,6 +211,7 @@ flowchart LR
     EV07 --> EV13["EV-13 MCP 事件\n与 ops.mcp 能力"]
 
     EV04 --> EV14["EV-14 store 持久化与清理"]
+    EV14 --> EV15["EV-15 State 持久化\n与构建依赖"]
     PackageOps["EV-06 包信息"] --> EV14
     Extension["Extension 包管理与发布"] --> EV14
 
@@ -270,7 +283,8 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-12 FS 事件与 `ops.fs` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | FS 专项 23 passed；Events 回归 138 passed | 六个 CORE 事件与 `ops.fs` 已实现；方案见 [F_12](../features/F_12_fs-ops-events.md) |
 | EV-13 MCP 事件与 `ops.mcp` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | MCP 专项与 Events 回归见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) | 三个 CORE 事件与 `ops.mcp` 已实现；动态登记、包声明建连与直调工具共用 MCP 资源面 |
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
-| EV-14 store 持久化与卸载清理 | 已完成 | 未登记 | EV-04、EV-06、Extension | 修订后 640 passed、2 skipped；store 覆盖率 92% | 定义、登记与通用清理验证见 [F_14](../features/F_14_ops-store.md)；应用装配由消费方维护 |
+| EV-14 store 持久化与卸载清理 | 已完成 | 未登记 | EV-04、EV-06、Extension | Windows 修复后 810 passed、2 skipped | 定义、登记与文件回归见 [F_14](../features/F_14_ops-store.md)；应用装配由消费方维护 |
+| EV-15 State 持久化与构建依赖 | 已开发 | 李志远 | EV-04、EV-06、EV-14、Extension | 810 passed、2 skipped、0 failed | [F_15 State](../features/F_15_ops-state.md)；宿主展示和路由由消费方验收 |
 | M-02 Swarm 联合验收                  | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
 工作项逐项记录进度，交付节点单独记录联合验收结果。
@@ -305,3 +319,4 @@ git diff --check
 | 2026-11-02 | 1.8 | 新增 EV-13 MCP 事件与 `ops.mcp` 能力，补齐包内声明、连接发布、调用与清理 | 见 [F_13](../features/F_13_mcp-ops-events.md) 第 7 节 |
 | 2026-11-03 | 1.9 | `mcp.register` 并入 `ops.mcp` 事件族，统一模型、服务与 Ops 装配 | 动态登记不随插件 uninstall 自动清理，见 F_13 第 7 节 |
 | 2026-11-03 | 2.0 | 撤回 EV-08 的调用级 handler_ids 接口；session.start 定向选择转到 JiuwenSwarm 宿主的注册与匹配阶段 | 当前契约见 S_01；旧版验证保留在 F_09，不用于证明撤回后的行为 |
+| 2026-11-03 | 2.1 | 新增 EV-15 State 持久化、版本与构建依赖；构树期间的 state.get 记录面板依赖 | 宿主真实展示和部署路由不作为 SDK 验收，见 [F_15](../features/F_15_ops-state.md) |

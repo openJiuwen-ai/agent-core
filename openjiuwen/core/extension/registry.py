@@ -15,7 +15,7 @@ from pathlib import Path
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event
-from openjiuwen.core.extension.data import JsonStore
+from openjiuwen.core.extension.data import JsonState, JsonStore, StateDependencies
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.management import (
     PACKAGE_INSTALL_EVENT,
@@ -80,6 +80,8 @@ class Registry:
         host_event_types: Callable[[ExtensionEventBusProtocol], None] | None = None,
         host_handlers: Callable[[ExtensionEventBusProtocol], None] | None = None,
         store: JsonStore | None = None,
+        states: JsonState | None = None,
+        state_dependencies: StateDependencies | None = None,
         cleanup_callbacks: Sequence[PackageResourceCleanup] = (),
     ) -> None:
         """Bind one EventBus and register the host's own events and handlers.
@@ -89,7 +91,9 @@ class Registry:
         After the host callbacks return, it triggers ``ops.build`` once so
         later management events are accepted. The caller does not trigger it.
         ``store`` has an explicit host-selected directory. Resource cleanup
-        callbacks run in order before Core deletes package store data.
+        callbacks run in order before Core deletes package store/state data.
+        ``states`` and ``state_dependencies`` bind durable state and opaque
+        build dependencies before capability construction.
 
         Raises:
             ExtensionFailure: This Registry is already initialized, or the bus
@@ -101,6 +105,16 @@ class Registry:
                 reason="registry is already initialized",
             )
         callbacks = tuple(cleanup_callbacks)
+        dependencies = state_dependencies if state_dependencies is not None else StateDependencies()
+        if states is not None:
+
+            async def cleanup_state(package_id: str, generation: int, reason: str) -> None:
+                del generation
+                await states.cleanup_package(package_id, reason=reason)
+                if reason == "uninstall":
+                    dependencies.drop_package(package_id)
+
+            callbacks = (*callbacks, cleanup_state)
         if store is not None:
 
             async def cleanup_store(package_id: str, generation: int, reason: str) -> None:
@@ -117,11 +131,19 @@ class Registry:
         )
         bind_context(context)
         store_bound = False
+        state_bound = False
         # Imported lazily: ops_impl.store imports extension.data, and this module
         # is loaded while openjiuwen.core.extension.__init__ is still running.
         from openjiuwen.core.events.ops_impl.store import configure_store, unconfigure_store
+        from openjiuwen.core.events.ops_impl.state import configure_state, unconfigure_state
 
         try:
+            if states is not None:
+                configure_state(
+                    event_bus, states, dependencies=dependencies,
+                    begin_calls=runtime.begin_calls, end_calls=runtime.end_calls,
+                )
+                state_bound = True
             if store is not None:
                 configure_store(event_bus, store, begin_calls=runtime.begin_calls, end_calls=runtime.end_calls)
                 store_bound = True
@@ -131,6 +153,8 @@ class Registry:
                 host_handlers(event_bus)
             await event_bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
         except BaseException:
+            if state_bound:
+                unconfigure_state(event_bus)
             if store_bound:
                 unconfigure_store(event_bus)
             unbind_context(event_bus)

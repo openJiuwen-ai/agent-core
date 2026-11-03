@@ -37,11 +37,22 @@
 | `uninstall(package_id)` | `package.uninstall` | 一个 `ActivationReport` |
 | `reload(package_id)` | `package.reload` | 一个 `ActivationReport` |
 
-`init(event_bus, *, host_event_types=None, host_handlers=None, store=None, cleanup_callbacks=())`
+`init(event_bus, *, host_event_types=None, host_handlers=None, store=None, states=None,`
+`state_dependencies=None, cleanup_callbacks=())`
 接收 EventBus 和可选宿主服务。store 是 `JsonStore`，目录完全由宿主选择；Build 前绑定到当前 Bus。
 `cleanup_callbacks` 是按顺序执行的异步 `PackageResourceCleanup(package_id, generation, reason)` 回调，
 类型从 `openjiuwen.core.extension` 导入。宿主回调在 Core store 清理前执行，必须幂等；异常和取消不能吞掉。
 初始化失败或取消时撤销本次存储绑定和管理上下文。
+
+2026-11-03：states 是宿主显式配置目录的 JsonState，state_dependencies 是可选 StateDependencies。
+二者在 Build 前绑定；宿主资源回调先执行，随后清理 Core state/store 数据。
+只有 uninstall 删除持久文件和相应数据依赖；reload/shutdown 保留值与版本。
+State 契约见 [Events State 规约](../../../events/docs/specs/S_03_state.md)。
+
+重载保持热切换。新代发布后旧代已开始的 Handler 和嵌套 state 操作可继续完成；
+Runtime 按 Ops 记录其原代，旧代退出后异步执行 reason=reload 的清理回调。
+回调失败保留后台任务并退避重试，不回滚已经发布的新代。宿主停止 Runtime 时调用
+`stop_retirements()`，随后按原 shutdown 顺序释放资源。清理回调必须按 generation 隔离旧代资源。
 
 `open_install_dir(install_dir, *, host_version=None)` 在 `init` 之后调用。它记住安装目录，用 `host_version` 和 `requires.host` 比较，并返回目录里已有的 `<package.id>/<version>/`。这一步不安装。调用方把返回的路径交给 `install`。
 
