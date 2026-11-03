@@ -153,6 +153,11 @@ class MemberRuntime(Protocol):
         """
         ...
 
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Read side of the attach above, or None when none was attached."""
+        ...
+
     # ---- config snapshots ----
 
     @property

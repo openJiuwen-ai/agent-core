@@ -396,6 +396,16 @@ class SwarmflowTool(AsyncTool):
         # the journal from the disk script, or from the inline source's META.
         resume_id = await self._seal_guard(script_path, script, resume_id)
         run_id = resume_id or new_swarmflow_run_id()
+        # Re-run gate BEFORE materialisation: the lint must compare the inline
+        # edit against the PREVIOUS run's on-disk snapshot. Running it after
+        # would read back the just-written file (old == new) and the gate
+        # would never bite; worse, the materialised write would already have
+        # replaced the snapshot the comparison needed.
+        try:
+            self._check_rerun(script_path, script)
+        except Exception as exc:  # noqa: BLE001 - never escape as an exception
+            await self._governor.release_workflow(ticket)
+            return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
         if not script_path and script:
             # The run_id is minted before materialisation so the inline script
             # lands in a per-run file (script-{run_id}.py): two runs sharing a
@@ -405,12 +415,6 @@ class SwarmflowTool(AsyncTool):
             except Exception as exc:  # noqa: BLE001 - never escape as an exception
                 await self._governor.release_workflow(ticket)
                 return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
-
-        try:
-            self._check_rerun(script_path, script)
-        except Exception as exc:  # noqa: BLE001 - never escape as an exception
-            await self._governor.release_workflow(ticket)
-            return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
 
         enriched = self._enriched_inputs(
             inputs,
