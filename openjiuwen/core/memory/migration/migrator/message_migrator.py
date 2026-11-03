@@ -71,8 +71,9 @@ class MessageMigrator:
         )
 
         backup_data = None
+        backup_expected = 0
         try:
-            backup_data = await self._create_backup()
+            backup_data, backup_expected = await self._create_backup()
 
             executed_operations: list[UpdateMessageOperation] = []
             last_version = current_version
@@ -107,7 +108,7 @@ class MessageMigrator:
                 exception=str(e),
             )
             if backup_data is not None:
-                await self._restore_from_backup(backup_data, current_version)
+                await self._restore_from_backup(backup_data, backup_expected, current_version)
             return False
 
     async def _execute_operation(self, operation: BaseOperation) -> None:
@@ -130,18 +131,23 @@ class MessageMigrator:
 
     # ==================== Backup / Restore ====================
 
-    async def _create_backup(self) -> list[dict]:
+    async def _create_backup(self) -> tuple[list[dict], int]:
         """
         Create a backup of all messages before migration.
 
         Returns:
-            list[dict]: Serialized message records for restoration on failure.
+            tuple[list[dict], int]: Serialized message records for restoration on
+            failure, and the number of messages the store held when the backup was
+            taken.
         """
         backup_data: list[dict] = []
         message_filter: Dict[str, Any] = {}
+        expected = await self.message_store.count_messages(message_filter)
+        # get_messages has no offset, so ask for every message in one call; a fixed
+        # page size would silently leave the newest messages out of the backup.
         messages = await self.message_store.get_messages(
             message_filter=message_filter,
-            limit=_BACKUP_PAGE_SIZE,
+            limit=max(expected, _BACKUP_PAGE_SIZE),
             order_by="timestamp",
             order_direction="asc",
         )
@@ -156,26 +162,37 @@ class MessageMigrator:
             })
 
         memory_logger.info(
-            f"Created message backup with {len(backup_data)} records",
+            f"Created message backup with {len(backup_data)} of {expected} records",
             event_type=LogEventType.MEMORY_INIT,
         )
-        return backup_data
+        return backup_data, expected
 
     async def _restore_from_backup(
-        self, backup_data: list[dict], pre_migration_version: int | None
+        self, backup_data: list[dict], backup_expected: int, pre_migration_version: int | None
     ) -> None:
         """
         Restore messages from backup after migration failure.
 
         Deletes all current messages, re-inserts backup data,
-        then resets the schema version.
+        then resets the schema version. The delete is skipped when the backup holds
+        fewer messages than the store did, since it would remove messages that cannot
+        be put back.
 
         Args:
             backup_data: Serialized message records from _create_backup.
+            backup_expected: Number of messages in the store when the backup was taken.
             pre_migration_version: Version before migration started.
         """
         try:
             message_filter: Dict[str, Any] = {}
+            if len(backup_data) < backup_expected:
+                raise build_error(
+                    StatusCode.MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR,
+                    error_msg=(
+                        f"backup holds {len(backup_data)} of {backup_expected} messages; "
+                        "skipping restore so messages missing from the backup are not deleted"
+                    ),
+                )
             await self.message_store.delete_messages(message_filter)
 
             if backup_data:
@@ -196,10 +213,17 @@ class MessageMigrator:
                     }
                     await self.message_store.add_message(add_req)
 
-            memory_logger.info(
-                f"Successfully restored {len(backup_data)} messages from backup",
-                event_type=LogEventType.MEMORY_INIT,
-            )
+            restored = await self.message_store.count_messages(message_filter)
+            if restored != len(backup_data):
+                memory_logger.error(
+                    f"Restored {restored} messages but the backup holds {len(backup_data)}",
+                    event_type=LogEventType.MEMORY_INIT,
+                )
+            else:
+                memory_logger.info(
+                    f"Successfully restored {len(backup_data)} messages from backup",
+                    event_type=LogEventType.MEMORY_INIT,
+                )
 
         except Exception as e:
             memory_logger.error(
