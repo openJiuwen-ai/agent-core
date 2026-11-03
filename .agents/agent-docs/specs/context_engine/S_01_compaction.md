@@ -13,13 +13,13 @@ updated: 2026-11-03
 
 ## 1. 范围与职责
 
-适用于 ContextEngine 的原生会话消息。Core 管理快照、处理器候选、原生消息校验与正式安装，宿主负责触发来源、会话空闲准入和领域事件。Core 不依赖 Server session.compact、JSONL 或界面渲染。
+当前交付为显式 Hook / 候选 API 与宿主 Ops/Event 接口阶段；原生主流程接入点已注释。下述候选/提交契约只对显式 compact_context 的独立调用生效，不代表传统手动、自动或溢出流程已接入。适用于 ContextEngine 的原生会话消息。Core 管理快照、处理器候选、原生消息校验与正式安装，宿主负责触发来源、会话空闲准入和领域事件。Core 不依赖 Server session.compact、JSONL 或界面渲染。
 
 设计依据：D-20261103-1156-session-compaction-events，当前位于 designs/active；实施和证据见 [F_20261103_1515_session-compaction-events](../../features/F_20261103_1515_session-compaction-events.md)。
 
 ## 2. 公开入口与输入输出
 
-`ContextEngine.register_compaction_hook(hook: CompactionHook) -> Callable[[], None]` 注册单个宿主 Hook，影响该引擎已有及后续原生 Context。重复注册失败，返回的移除函数幂等，移除时清理缓存；旧注册准备的结果不得继续安装。
+`ContextEngine.register_compaction_hook(hook: CompactionHook) -> Callable[[], None]` 为显式 compact_context 注册单个宿主 Hook；当前不改变已有 compress_context、Context 直接压缩或自动 ADD/GET 的调用路径。重复注册失败，返回的移除函数幂等，移除时清理缓存；旧注册准备的结果不得继续安装。
 
 `await ContextEngine.compact_context(context_id="default_context_id", session=None, *, session_id=None, trigger="manual", instructions=None, processor_types=None) -> CompactionDecision` 面向宿主使用。Session 优先解析真实会话；context_id 是该 Session 内真实上下文键。用户领域事件不得通过修改输入切换这两个目标。processor_types 是宿主选择的原生算法白名单，不从插件公开参数取值。
 
@@ -41,12 +41,12 @@ CompactionHook 接收 `(request, default_continuation)` 并异步返回 Compacti
 - CP-02：默认压缩在独立缓冲、处理器状态副本、会话状态快照和暂存目录内运行。原算法不改为另一个“测试摘要器”；原生和 forked 内置处理器均提供候选 fork。第三方被选中处理器必须显式提供安全 fork，否则失败。
 - CP-03：只 fork 本次选中压缩器；未参与的旁路处理器不执行、不获得额外候选副作用。
 - CP-04：最终消息必须通过原生类型、工具调用/结果配对和固定目标校验。不能伪造未完成工具调用或孤立结果。
-- CP-05：最终 skip 不安装本次结果。ADD 仍正常追加原 pending，一次且不丢失；GET 重新形成同一次最终窗口并保留系统提示、工具和窗口约束。
+- CP-05：显式调用的最终 skip 不安装本次结果。原生 ADD/GET 的桥接调用已注释，继续原有处理器及窗口逻辑，不触发宿主 Hook；保留的自动拦截 helper 属于后续接入机制。
 - CP-06：同一 live 目标的正式安装串行。嵌套压缩在等待自身锁前拒绝。消息、Hook 代次、模型/处理器/记忆依赖变化使旧候选失效。
 - CP-07：正式结果最多安装一次；有有效 Session 时必须完成 save_contexts 和 Session.commit，之后才能报告 committed。
 - CP-08：安装前取消丢弃候选；安装中取消等待有界保存收尾，不把取消解释为已经回滚。保存结果不确定时冻结后续 ADD/GET，只有成功加载权威状态才解除。
 - CP-09：precompute 不占用 live 处理器锁等待模型，不安装，也不生成正式压缩历史。缓存每个上下文一份，可丢弃；原前缀、策略和记忆依赖有效时才复用，合法追加尾部原样接回。
-- CP-10：传统 compress_context 在没有 Hook 时保持旧路径；注册 Hook 后主动压缩、Context 直接调用、自动摘要和溢出恢复进入统一边界。普通 micro/offload 或宿主旁路检索维护不冒充摘要事件。
+- CP-10：传统 compress_context、Context 直接压缩、自动 ADD/GET 和原溢出恢复均保持旧路径，即使显式注册 Hook 也不重定向。只有显式 compact_context 的独立测试调用进入本协调器；Server 生产引擎绑定及预计算调度未接入。恢复注释调用点需作为后续主流程变更重新验收。
 
 ## 4. 生效、持久化与恢复
 
