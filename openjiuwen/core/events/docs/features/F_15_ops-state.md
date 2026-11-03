@@ -67,8 +67,8 @@ build_state_ops 在 `builtins/handler_ops/state.py`，经现有自动发现登�
 ### 4.1 文件与版本
 
 每个包一个目录。应用状态写入 `<package.id>/application.json`，每个会话写入
-`<package.id>/sessions/<session_id>.json`。文件顶层 format_version=1，entries 保存该文件内各 key 的值与版本。
-它与扩展版本、每个 key 的 version 独立；未知格式拒绝读取，当前不提供自动迁移。
+`<package.id>/sessions/<session_id>.json`。文件内容就是该作用域的 key 对象，各 key 并列，
+每个 key 同时保存 value 和 version。结构对不上的文件拒绝读取，当前不提供自动迁移。
 每个状态文件单独使用稳定的旁路锁完成读改写、CAS 比较与原子替换。应用文件和各个会话文件互不共用这把锁。
 阻塞文件操作在线程执行，取消等待工作线程真正退出。
 State 使用已有依赖 portalocker 的公开 Lock；共享 files 模块提供通用路径和锁方法，store 同样复用，
