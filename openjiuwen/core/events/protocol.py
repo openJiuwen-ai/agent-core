@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from openjiuwen.core.events.event_next import EventNext
@@ -73,6 +73,9 @@ class ExtensionEventBusProtocol(Protocol):
         self,
         event: Event,
         session: Session | SessionContext | None = None,
+        *,
+        handler_ids: Sequence[HandlerId] | None = None,
+        exclude_handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None:
-        """Dispatch through matched handlers."""
+        """Dispatch through matched handlers, optionally limited to an ID set."""
         ...
