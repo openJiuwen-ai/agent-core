@@ -242,6 +242,17 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
+            if processors and isinstance(context, SessionModelContext) and not context.has_processors():
+                # The context was first created without processors (e.g. to seed
+                # history); without this the caller's processors are silently lost.
+                context.attach_processors([
+                    self._create_processor(processor_type, processor_config)
+                    for processor_type, processor_config in processors
+                ])
+                context_engine_logger.info(
+                    "attached %d processor(s) to cached context %s, which was created without processors",
+                    len(processors), full_context_id,
+                )
             context.set_session_ref(session)
             self._load_state_from_session(context, session, history_messages)
             return context

@@ -167,6 +167,25 @@ class SessionModelContext(ModelContext):
             model_context_window_tokens=self._model_context_window_tokens,
         )
 
+    def has_processors(self) -> bool:
+        """Whether this context has any processors."""
+        return bool(self._processors)
+
+    def attach_processors(self, processors: List[ContextProcessor]) -> bool:
+        """Give a context created without processors the ones a later caller configures.
+
+        ``ContextEngine`` caches contexts by session/context ID, so a context
+        first created to seed history (with no processors) is the one an agent
+        later receives. Processors already present are kept: they carry state.
+
+        Returns:
+            Whether the processors were attached.
+        """
+        if self._processors or not processors:
+            return False
+        self._processors = list(processors)
+        return True
+
     def rebind_model(
         self,
         config: ContextEngineConfig,
