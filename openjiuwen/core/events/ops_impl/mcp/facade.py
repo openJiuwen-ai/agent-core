@@ -17,7 +17,11 @@ from openjiuwen.core.events.ops_impl.mcp.models import (
     McpCallOutput,
     McpConnectInput,
     McpConnectOutput,
+    McpRegisterOutput,
+    McpRegisterSpec,
+    McpRegisterValue,
     McpStatus,
+    build_mcp_register_input,
 )
 from openjiuwen.core.events.ops_impl.runtime import build_context
 from openjiuwen.core.events.types import Event, SessionContext
@@ -69,6 +73,19 @@ class McpOpsFacade:
                     error=OpsError(kind="reentrant_call", message="mcp.connect is already active"),
                 )
             return await self._trigger("mcp.connect", request, McpConnectOutput)
+
+    async def register(self, spec: McpRegisterSpec) -> McpRegisterValue:
+        """Trigger ``mcp.register`` for one runtime server declaration."""
+
+        request = build_mcp_register_input(spec)
+        with OpsCallGuard.enter("mcp.register") as allowed:
+            if not allowed:
+                raise RuntimeError("mcp.register is already active")
+            output = await self._trigger("mcp.register", request, McpRegisterOutput)
+        if output.deny is not None:
+            raise RuntimeError(output.deny)
+        assert output.value is not None
+        return output.value
 
     async def _trigger(self, event_type: str, request: object, output_type: type[_Output]) -> _Output:
         """Run the event chain and return its typed result."""
