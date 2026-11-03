@@ -152,9 +152,6 @@ def build_fork_agent(frame: SpawnFrame, task_description: str) -> Any:
     seed = finished_seed(_caller_messages(caller, frame.caller_session_id)) if frame.plant_seed else []
     workspace = getattr(config, "workspace", None)
     sys_operation = getattr(config, "sys_operation", None)
-    if workspace is None or sys_operation is None:
-        workspace = None
-        sys_operation = None
     language = getattr(config, "language", None) or "cn"
     return create_deep_agent(
         model=getattr(config, "model", None),

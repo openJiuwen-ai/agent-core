@@ -88,3 +88,77 @@ async def test_nested_caller_cannot_wait_on_a_sibling() -> None:
             own.subagent_id,
             other.subagent_id,
         }
+
+
+@pytest.mark.asyncio
+async def test_plant_fork_seed_awaits_update_and_keeps_seed_when_write_fails() -> None:
+    from openjiuwen.harness.subagent_runtime.fork_rail import ForkInstructionRail
+    from openjiuwen.harness.subagent_runtime.instance import _plant_fork_seed
+
+    planted = ForkInstructionRail("task", ["seed-msg"])
+
+    class _Agent:
+        def find_rails_by_type(self, types):
+            _ = types
+            return [planted]
+
+    class _Session:
+        def __init__(self) -> None:
+            self.data = None
+
+        async def update_state(self, data):
+            self.data = data
+
+    session = _Session()
+    await _plant_fork_seed(_Agent(), session)
+    assert session.data == {"background_messages": ["seed-msg"]}
+    assert planted.pending_seed == []
+
+    kept = ForkInstructionRail("task", ["seed-msg"])
+
+    class _KeptAgent:
+        def find_rails_by_type(self, types):
+            _ = types
+            return [kept]
+
+    class _BadSession:
+        def update_state(self, data):
+            _ = data
+            raise RuntimeError("state rejected")
+
+    await _plant_fork_seed(_KeptAgent(), _BadSession())
+    assert kept.pending_seed == ["seed-msg"]
+
+
+def test_refresh_keeps_fork_leaf_allowed_type() -> None:
+    from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
+    from openjiuwen.harness.subagent_runtime.binding import ToolBinding
+
+    class _Card:
+        name = "subagent_spawn"
+        description = ""
+
+    class _Tool:
+        def __init__(self) -> None:
+            self.card = _Card()
+            self.allowed = None
+
+        def set_allowed_subagent_types(self, types) -> None:
+            self.allowed = types
+
+    class _Agent:
+        def __init__(self) -> None:
+            self.deep_config = SimpleNamespace(subagents=[])
+            self._subagent_tool_binding = ToolBinding(
+                control=object(),
+                caller_id="fork-1",
+                caller_depth=2,
+                caller_kind="fork",
+            )
+
+    rail = SubagentRail(enable_subagent_runtime=True)
+    rail.tools = [_Tool()]
+    rail.system_prompt_builder = SimpleNamespace(language="cn")
+    rail.refresh_available_agents(_Agent())
+    assert rail.tools[0].allowed == frozenset({"fork"})
+    assert "不能再派" in rail.tools[0].card.description

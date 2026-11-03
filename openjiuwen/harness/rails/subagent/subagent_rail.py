@@ -104,42 +104,19 @@ class SubagentRail(DeepAgentRail):
                 configured_subagents
             )
             self.tools = []
-            if fork_leaf:
-                self.tools.extend(
-                    build_subagent_tools(
-                        parent_agent=agent,
-                        language=self.system_prompt_builder.language,
-                        available_agents=(
-                            "- fork: 不能再派子代理。调用 subagent_spawn 会直接失败。"
-                            if self.system_prompt_builder.language != "en"
-                            else "- fork: cannot spawn subagents. subagent_spawn returns an error."
-                        ),
-                        agent_id=agent_id,
-                        allowed_subagent_types=frozenset({"fork"}),
-                        runtime_binding=binding,
-                    )
+            if fork_leaf or runtime_subagents or binding is None:
+                available_agents, allowed_types = self._runtime_spawn_catalog(
+                    agent,
+                    runtime_subagents,
                 )
-            elif runtime_subagents or binding is None:
-                runtime_names = set(self._subagent_names(runtime_subagents))
-                available_agents = self._build_available_agents_description(runtime_subagents)
-                if binding is None and "fork" not in runtime_names:
-                    runtime_names.add("fork")
-                    fork_line = (
-                        "- fork: 继承当前已经结束的对话、系统提示、工具和模型。"
-                        "需要隔离上下文时用 general-purpose。"
-                        if self.system_prompt_builder.language != "en"
-                        else "- fork: inherits the finished conversation, system prompt, tools, and model. "
-                        "Use general-purpose when the subtask needs an isolated context."
-                    )
-                    available_agents = f"{available_agents}\n{fork_line}".strip()
-                if runtime_names:
+                if allowed_types:
                     self.tools.extend(
                         build_subagent_tools(
                             parent_agent=agent,
                             language=self.system_prompt_builder.language,
                             available_agents=available_agents,
                             agent_id=agent_id,
-                            allowed_subagent_types=frozenset(runtime_names),
+                            allowed_subagent_types=allowed_types,
                             runtime_binding=binding,
                         )
                     )
@@ -206,7 +183,12 @@ class SubagentRail(DeepAgentRail):
             name = getattr(card, "name", None)
             if name not in self._REFRESHABLE_TOOL_NAMES:
                 continue
-            if name == "subagent_spawn":
+            if name == "subagent_spawn" and self._runtime_mode():
+                available_agents, allowed_types = self._runtime_spawn_catalog(
+                    agent,
+                    runtime_subagents,
+                )
+            elif name == "subagent_spawn":
                 available_agents = runtime_agents
                 allowed_types = self._subagent_names(runtime_subagents)
             elif self._runtime_mode():
@@ -224,6 +206,39 @@ class SubagentRail(DeepAgentRail):
             refreshed.append(name)
         if refreshed:
             logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
+
+    def _runtime_spawn_catalog(
+        self,
+        agent,
+        runtime_subagents,
+    ) -> tuple[str, frozenset[str]]:
+        """Allowed spawn types and description shared by init and refresh."""
+        from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
+
+        binding = current_tool_binding() or getattr(agent, "_subagent_tool_binding", None)
+        language = getattr(self.system_prompt_builder, "language", None) or "cn"
+        if binding is not None and binding.caller_kind == "fork":
+            if language == "en":
+                text = "- fork: cannot spawn subagents. subagent_spawn returns an error."
+            else:
+                text = "- fork: 不能再派子代理。调用 subagent_spawn 会直接失败。"
+            return text, frozenset({"fork"})
+        names = set(self._subagent_names(runtime_subagents))
+        description = self._build_available_agents_description(runtime_subagents)
+        if binding is None and "fork" not in names:
+            names.add("fork")
+            if language == "en":
+                line = (
+                    "- fork: inherits the finished conversation, system prompt, tools, and model. "
+                    "Use general-purpose when the subtask needs an isolated context."
+                )
+            else:
+                line = (
+                    "- fork: 继承当前已经结束的对话、系统提示、工具和模型。"
+                    "需要隔离上下文时用 general-purpose。"
+                )
+            description = f"{description}\n{line}".strip()
+        return description, frozenset(names)
 
     def uninit(self, agent) -> None:
         """Remove tools from the agent."""

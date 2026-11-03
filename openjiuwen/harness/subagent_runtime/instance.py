@@ -27,11 +27,16 @@ from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusRece
 from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 
-def _plant_fork_seed(agent: Any, session: Any) -> None:
+async def _plant_fork_seed(agent: Any, session: Any) -> None:
     """Insert the fork seed ahead of the first user query, once."""
-    update_state = getattr(session, "update_state", None)
     find_rails = getattr(agent, "find_rails_by_type", None)
-    if not callable(update_state) or not callable(find_rails):
+    if not callable(find_rails):
+        return
+    update_state = getattr(session, "update_state", None)
+    if not callable(update_state):
+        logger.warning(
+            "[SubagentInstance] fork seed not planted: session has no update_state",
+        )
         return
     from openjiuwen.harness.subagent_runtime.fork_rail import ForkInstructionRail
 
@@ -39,7 +44,16 @@ def _plant_fork_seed(agent: Any, session: Any) -> None:
         pending = list(getattr(rail, "pending_seed", None) or [])
         if not pending:
             continue
-        update_state({"background_messages": pending})
+        try:
+            result = update_state({"background_messages": pending})
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "[SubagentInstance] fork seed not planted: %s",
+                exc,
+            )
+            return
         rail.pending_seed = []
         return
 
@@ -314,7 +328,7 @@ class SubagentInstance:
                         await self._on_turn_start(session)
                     if self._on_turn_stream_start is not None:
                         await self._on_turn_stream_start(op)
-                    _plant_fork_seed(self._agent, session)
+                    await _plant_fork_seed(self._agent, session)
                     inputs = self._build_stream_inputs(op)
                     gen = self._agent.stream(inputs, session=session)
                     async with contextlib.aclosing(gen):
