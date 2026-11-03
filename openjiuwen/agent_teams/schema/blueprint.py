@@ -29,7 +29,6 @@ from openjiuwen.agent_teams.constants import (
     DEFAULT_LEADER_MEMBER_NAME,
     RESERVED_MEMBER_NAMES,
 )
-from openjiuwen.agent_teams.duplex.config import DuplexConfig
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import (
@@ -50,6 +49,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.team_rules.config import TeamRulesConfig
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -672,9 +672,9 @@ class TeamAgentSpec(BaseModel):
     ``reliability.enabled``; attaches a monitoring rail to the configured roles
     and a remediation handler on the leader."""
 
-    duplex: Optional[DuplexConfig] = None
-    """Optional duplex delivery routing (F_130). Opt-in via ``duplex.enabled``
-    and ``duplex.mode == "active"``; swaps the mailbox handlers for routing
+    team_rules: Optional[TeamRulesConfig] = None
+    """Optional Group team rules delivery routing (F_130). Opt-in via ``team_rules.enabled``
+    and ``team_rules.mode == "active"``; swaps the mailbox handlers for routing
     variants that decide how a new message reaches a busy member (interrupt and
     replan / steer / append / deliver now / record only). Stores only the NAME
     of the API key environment variable, never the key."""

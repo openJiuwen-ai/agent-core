@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_teams.duplex import DuplexConfig
-from openjiuwen.agent_teams.duplex.policy import MessageSource
-from openjiuwen.agent_teams.duplex.router import DuplexRouter
-from openjiuwen.agent_teams.duplex.scheduler import RoutedMessage
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.agent_teams.team_rules import TeamRulesConfig
+from openjiuwen.agent_teams.team_rules.policy import MessageSource
+from openjiuwen.agent_teams.team_rules.router import TeamRulesRouter
+from openjiuwen.agent_teams.team_rules.scheduler import RoutedMessage
 from openjiuwen.core.foundation.llm.system_one import ChoiceAnswer
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.schema.task import TaskPlan, TodoItem
@@ -71,8 +71,8 @@ async def test_kafka_to_redis_correction_interrupts_and_replans() -> None:
         infra.team_backend = None
         infra.message_manager.mark_messages_read = AsyncMock()
         classifier = _Classifier()
-        config = DuplexConfig(enabled=True, mode="active", api_base="http://s.invalid/v1", model="m")
-        router = DuplexRouter(
+        config = TeamRulesConfig(enabled=True, mode="active", api_base="http://s.invalid/v1", model="m")
+        router = TeamRulesRouter(
             _Host(harness), infra, "dev", config, redrain=AsyncMock(), classifier_factory=lambda: classifier
         )
 

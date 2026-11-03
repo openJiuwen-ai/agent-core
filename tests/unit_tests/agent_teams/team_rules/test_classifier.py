@@ -12,15 +12,15 @@ from typing import Any, Callable
 import httpx
 import pytest
 
-from openjiuwen.agent_teams.duplex import DuplexConfig
-from openjiuwen.agent_teams.duplex.classifier import build_classifier, logprobs_support, reset_logprobs_support
+from openjiuwen.agent_teams.team_rules import TeamRulesConfig
+from openjiuwen.agent_teams.team_rules.classifier import build_classifier, logprobs_support, reset_logprobs_support
 from openjiuwen.core.common.exception.errors import BaseError
 
-KEY_ENV = "DUPLEX_TEST_KEY"
+KEY_ENV = "TEAM_RULES_TEST_KEY"
 
 
-def _config(fmt: str, api_base: str) -> DuplexConfig:
-    return DuplexConfig(enabled=True, mode="active", format=fmt, api_base=api_base, model="m", api_key_env=KEY_ENV)
+def _config(fmt: str, api_base: str) -> TeamRulesConfig:
+    return TeamRulesConfig(enabled=True, mode="active", format=fmt, api_base=api_base, model="m", api_key_env=KEY_ENV)
 
 
 def _transport(requests: list[dict], respond: Callable[[dict], dict]) -> httpx.MockTransport:
@@ -344,7 +344,7 @@ async def test_anthropic_format_forces_choice_tool() -> None:
     [
         ("", "", "https://api.typesafe.ai/v1/systemone", "TYPESAFE_API_KEY"),
         ("https://openrouter.ai/api/alpha", "", "https://openrouter.ai/api/alpha/decisions", "OPENROUTER_API_KEY"),
-        ("https://mcl.example.com/v2", "m", "https://mcl.example.com/v2/decisions", "DUPLEX_ROUTER_API_KEY"),
+        ("https://mcl.example.com/v2", "m", "https://mcl.example.com/v2/decisions", "TEAM_RULES_API_KEY"),
     ],
 )
 async def test_jev_endpoint_follows_api_base(
@@ -365,9 +365,9 @@ async def test_jev_endpoint_follows_api_base(
         }
         return {"model": "m", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}}
 
-    config = DuplexConfig(enabled=True, mode="active", format="jev", api_base=api_base, model=model)
+    config = TeamRulesConfig(enabled=True, mode="active", format="jev", api_base=api_base, model=model)
     assert config.api_key_env == key_env and config.model
-    from openjiuwen.agent_teams.duplex.classifier import JevChoiceClassifier
+    from openjiuwen.agent_teams.team_rules.classifier import JevChoiceClassifier
 
     classifier = JevChoiceClassifier(config, http_client=httpx.AsyncClient(transport=_transport(requests, respond)))
     answers = await classifier.classify(("relevance", "urgency"), '{"phase": "running"}', ["from peer: x"])
@@ -379,4 +379,4 @@ async def test_jev_endpoint_follows_api_base(
 
 @pytest.mark.level0
 def test_default_timeout_covers_a_relay_round_trip() -> None:
-    assert DuplexConfig().timeout_seconds == 8.0
+    assert TeamRulesConfig().timeout_seconds == 8.0

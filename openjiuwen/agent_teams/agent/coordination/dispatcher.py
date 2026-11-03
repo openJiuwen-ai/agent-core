@@ -223,9 +223,9 @@ class EventDispatcher:
         "scheduled": ScheduledStaleTaskHandler,
     }
 
-    # Roles whose mailbox deliveries the duplex router may route (F_130). Human
+    # Roles whose mailbox deliveries the team rules router may route (F_130). Human
     # agent avatars and bridge avatars keep the original handlers.
-    _DUPLEX_ROLES: ClassVar[frozenset[TeamRole]] = frozenset(
+    _TEAM_RULES_ROLES: ClassVar[frozenset[TeamRole]] = frozenset(
         {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
     )
 
@@ -248,11 +248,11 @@ class EventDispatcher:
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
-        # Duplex delivery routing (F_130) mounts only when the team opts in:
+        # Team rules delivery routing (F_130) mounts only when the team opts in:
         # the two mailbox handlers are swapped for their routing variants here,
         # at assembly, exactly like the reliability handler below. Disabled
         # teams construct the original classes and behave as before.
-        self.duplex_router = None
+        self.team_rules_router = None
         self._mount_mailbox_handlers(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
@@ -341,9 +341,9 @@ class EventDispatcher:
         await getattr(handler, method_name)(event)
 
     async def aclose(self) -> None:
-        """Release dispatcher-owned background work (the duplex judge worker)."""
-        if self.duplex_router is not None:
-            await self.duplex_router.aclose()
+        """Release dispatcher-owned background work (the team rules judge worker)."""
+        if self.team_rules_router is not None:
+            await self.team_rules_router.aclose()
 
     def _mount_mailbox_handlers(
         self,
@@ -352,26 +352,28 @@ class EventDispatcher:
         infra: TeamInfra,
         poll_ctrl: PollController,
     ) -> None:
-        """Build the message / group-message handlers, routed through duplex when opted in."""
-        duplex_cfg = getattr(blueprint.spec, "duplex", None)
+        """Build the message / group-message handlers, routed through team rules when opted in."""
+        team_rules_cfg = getattr(blueprint.spec, "team_rules", None)
         if (
-            duplex_cfg is not None
-            and duplex_cfg.active
-            and blueprint.role in self._DUPLEX_ROLES
+            team_rules_cfg is not None
+            and team_rules_cfg.active
+            and blueprint.role in self._TEAM_RULES_ROLES
             and blueprint.member_name
         ):
-            from openjiuwen.agent_teams.duplex.handlers import DuplexGroupMessageHandler, DuplexMessageHandler
-            from openjiuwen.agent_teams.duplex.router import DuplexRouter
+            from openjiuwen.agent_teams.team_rules.handlers import TeamRulesGroupMessageHandler, TeamRulesMessageHandler
+            from openjiuwen.agent_teams.team_rules.router import TeamRulesRouter
 
-            self.duplex_router = DuplexRouter(
+            self.team_rules_router = TeamRulesRouter(
                 host,
                 infra,
                 blueprint.member_name,
-                duplex_cfg,
+                team_rules_cfg,
                 redrain=partial(poll_ctrl.enqueue, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)),
             )
-            self.message = DuplexMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
-            self.group_message = DuplexGroupMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
+            self.message = TeamRulesMessageHandler(host, blueprint, infra, poll_ctrl, router=self.team_rules_router)
+            self.group_message = TeamRulesGroupMessageHandler(
+                host, blueprint, infra, poll_ctrl, router=self.team_rules_router
+            )
         else:
             self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
             self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)

@@ -326,8 +326,8 @@ class MessageHandler(BaseCoordinationHandler):
         """Feed one rendered mailbox row to the local agent.
 
         Returns whether the drain should mark the row read. The base handler
-        always steers (or follows up) and returns True. ``duplex.handlers.DuplexMessageHandler``
-        overrides this to route the row through the duplex router (F_130).
+        always steers (or follows up) and returns True. ``team_rules.handlers.TeamRulesMessageHandler``
+        overrides this to route the row through the team rules router (F_130).
         """
         await self._round.deliver_input(text, use_steer=use_steer)
         return True

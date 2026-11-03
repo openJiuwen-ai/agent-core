@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.duplex.policy import (
+from openjiuwen.agent_teams.team_rules.policy import (
     RELEVANCE,
     URGENCY,
     broadcast_allowed,
@@ -14,10 +14,10 @@ from openjiuwen.agent_teams.duplex.policy import (
     plan,
     resolve,
 )
-from openjiuwen.agent_teams.duplex.policy import (
+from openjiuwen.agent_teams.team_rules.policy import (
     DeliveryAction as A,
 )
-from openjiuwen.agent_teams.duplex.policy import (
+from openjiuwen.agent_teams.team_rules.policy import (
     MessageSource as S,
 )
 from openjiuwen.core.foundation.llm.system_one import ChoiceAnswer

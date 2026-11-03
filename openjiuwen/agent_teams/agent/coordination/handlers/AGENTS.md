@@ -42,8 +42,8 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 而是"不打断的话，它接下来做的事会不会作废"——任务被改派/取消，继续干就是白干，必须 steer；
 催它推进一个它已经在推进的任务，打断反而适得其反，只能 append。
 
-维度 3 对**邮箱消息**还有第三种投递方式：团队开启双工路由（`TeamAgentSpec.duplex`，F_130）后，
-邮箱 handler 被装配期换成 `DuplexMessageHandler` / `DuplexGroupMessageHandler`（`duplex/handlers.py`，开启时才延迟导入），投递方式改由
+维度 3 对**邮箱消息**还有第三种投递方式：团队开启 Group 团队规则（`TeamAgentSpec.team_rules`，F_130）后，
+邮箱 handler 被装配期换成 `TeamRulesMessageHandler` / `TeamRulesGroupMessageHandler`（`team_rules/handlers.py`，开启时才延迟导入），投递方式改由
 策略表 + 监工决定——用户侧消息照旧（空闲直接处理、忙则插入，永不降级）；队友私信 / 群聊 @ 在成员
 忙时，监工以 ≥ 0.9 判 INTERRUPT 才**打断重规划**（`interrupt`：安全位置停下、保留上下文、作废
 计划），否则排队（append）；广播先问相关性（SKIP ≥ 0.8 只记录），忙时最多插入；监工失败照常投递
@@ -123,8 +123,8 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   `(task_id, revision)`，投递成功后 `_observe_shown_revision` 交给 `task_manager.observe_revision`（DAO 只对当前
   assignee 生效）。`on_task_claimed` 的自身指派通知同理。
 - **投递钩子 `_deliver_message`**（F_130）：排空循环对每条渲染好的行调用它，返回值决定是否记为
-  已读。基类 = `deliver_input` + True。`DuplexDeliveryMixin`（`duplex/router.py`）覆写它把行交给
-  `DuplexRouter`，并覆写 `_read_all_unread` 滤掉路由器正在判断的行、以及比被扣住的广播更新的广播
+  已读。基类 = `deliver_input` + True。`TeamRulesDeliveryMixin`（`team_rules/router.py`）覆写它把行交给
+  `TeamRulesRouter`，并覆写 `_read_all_unread` 滤掉路由器正在判断的行、以及比被扣住的广播更新的广播
   （广播已读是水位线），且按从旧到新排序；被接管的行由路由器自行标已读。
 - **投递前先 `_expand`**（`message_template.expand_message`，F_63）：普通消息原样过；框架
   模板消息（`content` 空 + `meta`）在**投递这一刻**按当前任务行渲染正文，所以排队很久的交接

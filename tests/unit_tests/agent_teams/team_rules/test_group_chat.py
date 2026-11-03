@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Duplex routing of group chat posts: "@ a member" and "no @" rows of the scenario table."""
+"""Team rules routing of group chat posts: "@ a member" and "no @" rows of the scenario table."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_teams.duplex.handlers import DuplexGroupMessageHandler
-from openjiuwen.agent_teams.duplex.policy import MessageSource
 from openjiuwen.agent_teams.harness.protocol import INTERRUPT_APPLIED
 from openjiuwen.agent_teams.message_template import ExpandedMessage
-from tests.unit_tests.agent_teams.duplex.test_router import FakeClassifier, FakeHost, _answer, _marked, _router
+from openjiuwen.agent_teams.team_rules.handlers import TeamRulesGroupMessageHandler
+from openjiuwen.agent_teams.team_rules.policy import MessageSource
+from tests.unit_tests.agent_teams.team_rules.test_router import FakeClassifier, FakeHost, _answer, _marked, _router
 
 URGENT = {"urgency": _answer("INTERRUPT", "APPEND", 0.95)}
 NOT_URGENT = {"urgency": _answer("INTERRUPT", "APPEND", 0.85)}
@@ -49,8 +49,8 @@ def _group_row(mid: str, sender: str, mentions: list[str]) -> Any:
     )
 
 
-def _handler(router: Any) -> DuplexGroupMessageHandler:
-    handler = DuplexGroupMessageHandler.__new__(DuplexGroupMessageHandler)
+def _handler(router: Any) -> TeamRulesGroupMessageHandler:
+    handler = TeamRulesGroupMessageHandler.__new__(TeamRulesGroupMessageHandler)
     handler._router = router
     handler._blueprint = SimpleNamespace(member_name="dev", team_spec=SimpleNamespace(leader_member_name="leader"))
     backend = MagicMock()
@@ -60,7 +60,7 @@ def _handler(router: Any) -> DuplexGroupMessageHandler:
     return handler
 
 
-async def _deliver(handler: DuplexGroupMessageHandler, row: Any) -> bool:
+async def _deliver(handler: TeamRulesGroupMessageHandler, row: Any) -> bool:
     expanded = ExpandedMessage(body=f"excerpt {row.message_id}", is_template=False)
     return await handler._deliver_message(row, f"excerpt {row.message_id}", expanded=expanded, use_steer=True)
 

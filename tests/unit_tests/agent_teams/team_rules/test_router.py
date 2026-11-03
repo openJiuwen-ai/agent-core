@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Duplex router + scheduler: batching, rate limit, failure paths, assembly."""
+"""Team rules router + scheduler: batching, rate limit, failure paths, assembly."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ import pytest
 
 from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
 from openjiuwen.agent_teams.agent.coordination.handlers import MessageHandler
-from openjiuwen.agent_teams.duplex import DuplexConfig
-from openjiuwen.agent_teams.duplex.handlers import DuplexMessageHandler
-from openjiuwen.agent_teams.duplex.policy import MessageSource
-from openjiuwen.agent_teams.duplex.router import DuplexRouter
-from openjiuwen.agent_teams.duplex.scheduler import RoutedMessage
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.team_rules import TeamRulesConfig
+from openjiuwen.agent_teams.team_rules.handlers import TeamRulesMessageHandler
+from openjiuwen.agent_teams.team_rules.policy import MessageSource
+from openjiuwen.agent_teams.team_rules.router import TeamRulesRouter
+from openjiuwen.agent_teams.team_rules.scheduler import RoutedMessage
 from openjiuwen.core.foundation.llm.system_one import ChoiceAnswer
 
-CONFIG = DuplexConfig(enabled=True, mode="active", api_base="http://supervisor.invalid/v1", model="m")
+CONFIG = TeamRulesConfig(enabled=True, mode="active", api_base="http://supervisor.invalid/v1", model="m")
 
 
 def _answer(choice: str, other: str, p: float) -> ChoiceAnswer:
@@ -61,12 +61,12 @@ class FakeHost:
         self.delivered.append((content, use_steer))
 
 
-def _router(host: FakeHost, classifier: FakeClassifier) -> tuple[DuplexRouter, MagicMock, AsyncMock]:
+def _router(host: FakeHost, classifier: FakeClassifier) -> tuple[TeamRulesRouter, MagicMock, AsyncMock]:
     infra = MagicMock()
     infra.team_backend = None
     infra.message_manager.mark_messages_read = AsyncMock()
     redrain = AsyncMock()
-    router = DuplexRouter(host, infra, "dev", CONFIG, redrain=redrain, classifier_factory=lambda: classifier)
+    router = TeamRulesRouter(host, infra, "dev", CONFIG, redrain=redrain, classifier_factory=lambda: classifier)
     return router, infra, redrain
 
 
@@ -144,15 +144,17 @@ async def test_visible_only_does_not_wake_and_user_is_never_judged() -> None:
 
 @pytest.mark.level0
 def test_disabled_assembles_original_handlers() -> None:
-    def build(duplex: DuplexConfig | None) -> EventDispatcher:
-        spec = MagicMock(duplex=duplex, reliability=None, stale_claim_idle_timeout=600, stale_pending_idle_timeout=600)
+    def build(team_rules: TeamRulesConfig | None) -> EventDispatcher:
+        spec = MagicMock(
+            team_rules=team_rules, reliability=None, stale_claim_idle_timeout=600, stale_pending_idle_timeout=600
+        )
         blueprint = SimpleNamespace(spec=spec, role=TeamRole.TEAMMATE, member_name="dev")
         return EventDispatcher(MagicMock(), blueprint, MagicMock(), MagicMock())
 
-    for duplex in (None, DuplexConfig(enabled=True), DuplexConfig(mode="active", api_base="u", model="m")):
-        dispatcher = build(duplex)
-        assert type(dispatcher.message) is MessageHandler and dispatcher.duplex_router is None
-    assert type(build(CONFIG).message) is DuplexMessageHandler
+    for team_rules in (None, TeamRulesConfig(enabled=True), TeamRulesConfig(mode="active", api_base="u", model="m")):
+        dispatcher = build(team_rules)
+        assert type(dispatcher.message) is MessageHandler and dispatcher.team_rules_router is None
+    assert type(build(CONFIG).message) is TeamRulesMessageHandler
 
 
 @pytest.mark.level0
@@ -271,7 +273,9 @@ async def test_classifier_is_built_once_and_closed_with_the_router() -> None:
     infra = MagicMock()
     infra.team_backend = None
     infra.message_manager.mark_messages_read = AsyncMock()
-    router = DuplexRouter(FakeHost(running=True), infra, "dev", CONFIG, redrain=AsyncMock(), classifier_factory=factory)
+    router = TeamRulesRouter(
+        FakeHost(running=True), infra, "dev", CONFIG, redrain=AsyncMock(), classifier_factory=factory
+    )
     for mid in ("m1", "m2"):
         await router.submit(_msg(mid, MessageSource.DIRECT))
         await router.scheduler.wait_idle()
@@ -315,7 +319,7 @@ async def test_judgment_failure_delivers_as_usual_and_releases_the_row() -> None
 @pytest.mark.level1
 @pytest.mark.asyncio
 async def test_redrain_uses_the_poll_controller_protocol() -> None:
-    """The duplex router re-drains through ``PollController.enqueue``, which the event bus implements."""
+    """The team rules router re-drains through ``PollController.enqueue``, which the event bus implements."""
     from openjiuwen.agent_teams.agent.coordination.dispatcher import PollController
     from openjiuwen.agent_teams.agent.coordination.event_bus import EventBus, InnerEventType
 
@@ -333,9 +337,9 @@ async def test_redrain_uses_the_poll_controller_protocol() -> None:
     assert isinstance(EventBus(role=TeamRole.TEAMMATE), PollController)
     poll = ProtocolPoll()
     assert isinstance(poll, PollController)
-    spec = MagicMock(duplex=CONFIG, reliability=None, stale_claim_idle_timeout=600, stale_pending_idle_timeout=600)
+    spec = MagicMock(team_rules=CONFIG, reliability=None, stale_claim_idle_timeout=600, stale_pending_idle_timeout=600)
     blueprint = SimpleNamespace(spec=spec, role=TeamRole.TEAMMATE, member_name="dev")
     dispatcher = EventDispatcher(MagicMock(), blueprint, MagicMock(), poll)
-    await dispatcher.duplex_router._redrain()
+    await dispatcher.team_rules_router._redrain()
     assert [event.event_type for event in poll.events] == [InnerEventType.POLL_MAILBOX]
-    await dispatcher.duplex_router.aclose()
+    await dispatcher.team_rules_router.aclose()

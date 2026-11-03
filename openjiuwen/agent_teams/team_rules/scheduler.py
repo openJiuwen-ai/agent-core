@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Per-target judgment scheduling for the duplex router.
+"""Per-target judgment scheduling for the team rules router.
 
 One scheduler serves one target member. It holds the state the pure policy
 must not hold:
@@ -27,9 +27,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from openjiuwen.agent_teams.duplex.classifier import ChoiceClassifier
-from openjiuwen.agent_teams.duplex.policy import Decision, MessageSource, Plan, broadcast_allowed, resolve
 from openjiuwen.agent_teams.harness.protocol import WorkSummarySource
+from openjiuwen.agent_teams.team_rules.classifier import ChoiceClassifier
+from openjiuwen.agent_teams.team_rules.policy import Decision, MessageSource, Plan, broadcast_allowed, resolve
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -83,7 +83,7 @@ def work_context(runtime: Any, member_name: str, *, running: bool) -> str:
     return json.dumps(summary, ensure_ascii=False)
 
 
-class DuplexScheduler:
+class TeamRulesScheduler:
     """Single in-flight judgment per target, with batching and rate limit."""
 
     def __init__(
@@ -122,7 +122,7 @@ class DuplexScheduler:
         """Queue an item; starts the worker when none is running."""
         self._pending.append(judged)
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run(), name="duplex_scheduler")
+            self._worker = asyncio.create_task(self._run(), name="team_rules_scheduler")
 
     async def wait_idle(self) -> None:
         """Wait until the queue is drained (tests and shutdown)."""
@@ -142,7 +142,7 @@ class DuplexScheduler:
             try:
                 await close()
             except Exception:  # noqa: BLE001 - shutdown must not fail on a connection close
-                team_logger.warning("duplex: classifier close failed", exc_info=True)
+                team_logger.warning("team_rules: classifier close failed", exc_info=True)
 
     async def _run(self) -> None:
         while self._pending:
@@ -153,14 +153,14 @@ class DuplexScheduler:
             try:
                 answers = await self._judge(batch)
             except Exception:  # noqa: BLE001 - judgment failure must not drop the batch
-                team_logger.error("duplex: judgment failed; delivering as usual", exc_info=True)
+                team_logger.error("team_rules: judgment failed; delivering as usual", exc_info=True)
                 answers = {}
             for judged in batch:
                 judged.decision = self._decide(judged, answers.get(judged.plan.questions))
             try:
                 await self._execute(batch)
             except Exception:  # noqa: BLE001 - one bad batch must not stop the worker
-                team_logger.error("duplex: batch execution failed", exc_info=True)
+                team_logger.error("team_rules: batch execution failed", exc_info=True)
 
     @staticmethod
     def _decide(judged: Judged, answer: Any) -> Decision:
@@ -168,7 +168,7 @@ class DuplexScheduler:
             return resolve(judged.item.source, judged.plan, answer, idle=judged.idle)
         except Exception:  # noqa: BLE001 - an unusable answer means "deliver as usual"
             team_logger.error(
-                "duplex: resolve failed message_id={}; delivering as usual", judged.item.message_id, exc_info=True
+                "team_rules: resolve failed message_id={}; delivering as usual", judged.item.message_id, exc_info=True
             )
             return resolve(judged.item.source, judged.plan, None, idle=judged.idle)
 
@@ -183,7 +183,7 @@ class DuplexScheduler:
                 self._classifier = self._classifier_factory()  # built once, reused, closed in aclose
             classifier = self._classifier
         except Exception as exc:  # noqa: BLE001 - e.g. missing API key: deliver as usual
-            team_logger.warning("duplex: classifier unavailable ({}); delivering as usual", exc)
+            team_logger.warning("team_rules: classifier unavailable ({}); delivering as usual", exc)
             return {}
 
         async def ask(questions: tuple[str, ...], items: list[Judged]) -> Any:
@@ -193,7 +193,9 @@ class DuplexScheduler:
                     questions, context, [judged.item.classifier_text() for judged in items]
                 )
             except Exception as exc:  # noqa: BLE001 - failure means "deliver as usual"
-                team_logger.warning("duplex: classify failed message_ids={} error={}; delivering as usual", ids, exc)
+                team_logger.warning(
+                    "team_rules: classify failed message_ids={} error={}; delivering as usual", ids, exc
+                )
                 return None
 
         results = await asyncio.gather(*(ask(questions, items) for questions, items in groups.items()))

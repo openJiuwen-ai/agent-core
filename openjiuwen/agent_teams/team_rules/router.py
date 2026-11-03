@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Duplex router: classify a mailbox row's scene, plan, and execute the action.
+"""Team rules router: classify a mailbox row's scene, plan, and execute the action.
 
 The router sits at the coordination mailbox drain (``MessageHandler``'s
 ``_deliver_message`` hook, swapped in at assembly time). It never blocks the
@@ -29,9 +29,13 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
-from openjiuwen.agent_teams.duplex.classifier import ChoiceClassifier, build_classifier
-from openjiuwen.agent_teams.duplex.config import DuplexConfig
-from openjiuwen.agent_teams.duplex.policy import (
+from openjiuwen.agent_teams.group_chat.handler import group_metadata
+from openjiuwen.agent_teams.harness.protocol import INTERRUPT_UNAVAILABLE, InterruptibleHarness
+from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.team_rules.classifier import ChoiceClassifier, build_classifier
+from openjiuwen.agent_teams.team_rules.config import TeamRulesConfig
+from openjiuwen.agent_teams.team_rules.policy import (
     BROADCAST_WINDOW_SECONDS,
     Decision,
     DeliveryAction,
@@ -40,26 +44,22 @@ from openjiuwen.agent_teams.duplex.policy import (
     plan,
     resolve,
 )
-from openjiuwen.agent_teams.duplex.scheduler import DuplexScheduler, Judged, RoutedMessage, work_context
-from openjiuwen.agent_teams.group_chat.handler import group_metadata
-from openjiuwen.agent_teams.harness.protocol import INTERRUPT_UNAVAILABLE, InterruptibleHarness
-from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.team_rules.scheduler import Judged, RoutedMessage, TeamRulesScheduler, work_context
 from openjiuwen.core.common.logging import team_logger
 
 _TEXT_PROTOCOLS = frozenset({"", "plain", "text"})
 _DEPARTING = frozenset({MemberStatus.SHUTDOWN.value, MemberStatus.SHUTDOWN_REQUESTED.value})
 
 
-class DuplexRouter:
-    """Routes one member's mailbox rows through the duplex policy.
+class TeamRulesRouter:
+    """Routes one member's mailbox rows through the team rules policy.
 
     Args:
         host: The owning TeamAgent (``deliver_input`` / ``is_agent_running`` /
             ``has_pending_interrupt`` / ``harness``).
         infra: Per-process infra (message manager and team backend).
         member_name: The target member.
-        config: The active duplex configuration.
+        config: The active team rules configuration.
         redrain: Re-queues a mailbox sweep after taken-over rows settled.
         classifier_factory: Builds the classifier once, on first use (tests inject).
     """
@@ -69,7 +69,7 @@ class DuplexRouter:
         host: Any,
         infra: Any,
         member_name: str,
-        config: DuplexConfig,
+        config: TeamRulesConfig,
         *,
         redrain: Callable[[], Awaitable[None]],
         classifier_factory: Callable[[], ChoiceClassifier] | None = None,
@@ -81,7 +81,7 @@ class DuplexRouter:
         self._redrain = redrain
         self._owned: dict[str, Any] = {}
         extra = {"clock": clock} if clock is not None else {}
-        self.scheduler = DuplexScheduler(
+        self.scheduler = TeamRulesScheduler(
             classifier_factory=classifier_factory or (lambda: build_classifier(config)),
             context=lambda: work_context(self._host.harness, member_name, running=not self._idle()),
             execute=self._execute_batch,
@@ -201,7 +201,7 @@ class DuplexRouter:
     async def _run(self, item: RoutedMessage, action: DeliveryAction, reason: str) -> bool:
         """Execute one non-interrupt action; False when the delivery failed."""
         team_logger.info(
-            "duplex decision member={} message_id={} sender={} action={} {}",
+            "team_rules decision member={} message_id={} sender={} action={} {}",
             self._member,
             item.message_id,
             item.sender,
@@ -219,7 +219,7 @@ class DuplexRouter:
         try:
             await self._host.deliver_input(item.text, use_steer=use_steer)
         except Exception:  # noqa: BLE001 - row stays unread and is redelivered
-            team_logger.error("duplex: delivery failed message_id={}", item.message_id, exc_info=True)
+            team_logger.error("team_rules: delivery failed message_id={}", item.message_id, exc_info=True)
             return False
         return True
 
@@ -230,7 +230,7 @@ class DuplexRouter:
         redelivered. No steer fallback — it would override an explicit
         pause / stop, or deliver the replan twice.
         """
-        content = t("duplex.replan", messages="\n\n".join(j.item.text for j in items))
+        content = t("team_rules.replan", messages="\n\n".join(j.item.text for j in items))
         ids = [j.item.message_id for j in items]
         runtime = self._host.harness
         try:
@@ -240,9 +240,11 @@ class DuplexRouter:
             if result == INTERRUPT_UNAVAILABLE:
                 await self._host.deliver_input("\n\n".join(j.item.text for j in items), use_steer=True)
         except Exception:  # noqa: BLE001 - rows stay unread and are redelivered
-            team_logger.warning("duplex: interrupt failed member={} message_ids={}", self._member, ids, exc_info=True)
+            team_logger.warning(
+                "team_rules: interrupt failed member={} message_ids={}", self._member, ids, exc_info=True
+            )
             return False
-        team_logger.info("duplex interrupt member={} message_ids={} result={}", self._member, ids, result)
+        team_logger.info("team_rules interrupt member={} message_ids={} result={}", self._member, ids, result)
         return True
 
 
@@ -251,15 +253,15 @@ def _behind(row: Any, held: list[Any]) -> bool:
     return getattr(row, "broadcast", False) and any(h.timestamp <= row.timestamp for h in held)
 
 
-class DuplexDeliveryMixin:
+class TeamRulesDeliveryMixin:
     """Mailbox-handler mixin that routes the drain's deliveries through a router.
 
     Mixed in front of ``MessageHandler`` / ``GroupMessageHandler`` by the
-    dispatcher when ``TeamAgentSpec.duplex`` is active (assembly-time swap,
+    dispatcher when ``TeamAgentSpec.team_rules`` is active (assembly-time swap,
     no mode check inside handler methods).
     """
 
-    def __init__(self, *args: Any, router: DuplexRouter, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, router: TeamRulesRouter, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._router = router
 

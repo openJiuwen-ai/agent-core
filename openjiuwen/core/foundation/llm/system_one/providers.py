@@ -41,4 +41,4 @@ def jev_defaults_for(api_base: str) -> tuple[str, str, str]:
     if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
         openrouter = JEV_PROVIDERS["openrouter"]
         return "/decisions", openrouter.model, openrouter.api_key_env
-    return "/decisions", "", "DUPLEX_ROUTER_API_KEY"
+    return "/decisions", "", "TEAM_RULES_API_KEY"

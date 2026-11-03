@@ -4,7 +4,7 @@
 """Supervisor classifier: two choice questions, three wire formats.
 
 Every format needs only ``api_base`` + ``model`` + the API key (read from the
-environment variable named by ``DuplexConfig.api_key_env``) and returns one
+environment variable named by ``TeamRulesConfig.api_key_env``) and returns one
 ``system_one.ChoiceAnswer`` per question:
 
 - ``openai``: Chat Completions through core's ``OpenAIModelClient`` with
@@ -40,8 +40,8 @@ from typing import Any, Protocol
 
 import httpx
 
-from openjiuwen.agent_teams.duplex.config import DuplexConfig
-from openjiuwen.agent_teams.duplex.policy import APPEND, DELIVER, INTERRUPT, RELEVANCE, SKIP, URGENCY
+from openjiuwen.agent_teams.team_rules.config import TeamRulesConfig
+from openjiuwen.agent_teams.team_rules.policy import APPEND, DELIVER, INTERRUPT, RELEVANCE, SKIP, URGENCY
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import team_logger
@@ -125,7 +125,7 @@ class ChoiceClassifier(Protocol):
 
 
 def _failed(reason: str, cause: BaseException | None = None) -> BaseError:
-    return build_error(StatusCode.MODEL_CALL_FAILED, error_msg=f"duplex classifier: {reason}", cause=cause)
+    return build_error(StatusCode.MODEL_CALL_FAILED, error_msg=f"team_rules classifier: {reason}", cause=cause)
 
 
 def _validated(
@@ -150,12 +150,12 @@ def _validated(
     return ChoiceAnswer(choice=choice, confidence=values[choice], probabilities=values)
 
 
-def _api_key(config: DuplexConfig) -> str:
+def _api_key(config: TeamRulesConfig) -> str:
     value = os.environ.get(config.api_key_env, "").strip()
     if not value:
         raise build_error(
             StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-            error_msg=f"duplex classifier: environment variable {config.api_key_env} is empty",
+            error_msg=f"team_rules classifier: environment variable {config.api_key_env} is empty",
         )
     return value
 
@@ -215,7 +215,7 @@ def _parse_tool_answer(tool_calls: Any, labels: Sequence[str]) -> ChoiceAnswer:
 class _BaseClassifier:
     """Shared deadline, question lookup and error wrapping."""
 
-    def __init__(self, config: DuplexConfig) -> None:
+    def __init__(self, config: TeamRulesConfig) -> None:
         self._config = config
 
     async def classify(
@@ -225,7 +225,7 @@ class _BaseClassifier:
         unknown = [name for name in questions if name not in QUESTIONS]
         if not questions or unknown:
             raise build_error(
-                StatusCode.MODEL_INVOKE_PARAM_ERROR, error_msg=f"duplex classifier: bad questions {unknown}"
+                StatusCode.MODEL_INVOKE_PARAM_ERROR, error_msg=f"team_rules classifier: bad questions {unknown}"
             )
         selected = {name: QUESTIONS[name] for name in questions}
         try:
@@ -263,7 +263,7 @@ class _PerQuestionClassifier(_BaseClassifier):
 class OpenAIChoiceClassifier(_PerQuestionClassifier):
     """One-letter answer from logprobs; a required choice tool call when the endpoint drops logprobs."""
 
-    def __init__(self, config: DuplexConfig) -> None:
+    def __init__(self, config: TeamRulesConfig) -> None:
         super().__init__(config)
         from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
         from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
@@ -343,7 +343,7 @@ class OpenAIChoiceClassifier(_PerQuestionClassifier):
             return
         _LOGPROBS_SUPPORT[self._key] = supported
         path = "logprobs" if supported else "choice tool calls"
-        team_logger.info("duplex: %s at %s %s; using %s", self._config.model, self._config.api_base, reason, path)
+        team_logger.info("team_rules: %s at %s %s; using %s", self._config.model, self._config.api_base, reason, path)
 
     async def _ask_letter(
         self, question: ChoiceQuestion, letters: Mapping[str, str], context: str, messages: Sequence[str]
@@ -411,7 +411,7 @@ def parse_logprobs(logprobs: Any, letters: Mapping[str, str]) -> ChoiceAnswer:
 class AnthropicChoiceClassifier(_PerQuestionClassifier):
     """Forced tool call; the probabilities are self-reported and uncalibrated."""
 
-    def __init__(self, config: DuplexConfig) -> None:
+    def __init__(self, config: TeamRulesConfig) -> None:
         super().__init__(config)
         from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
         from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
@@ -442,7 +442,7 @@ class AnthropicChoiceClassifier(_PerQuestionClassifier):
 class JevChoiceClassifier(_BaseClassifier):
     """System One typed choices: one request answers every question."""
 
-    def __init__(self, config: DuplexConfig, *, http_client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, config: TeamRulesConfig, *, http_client: httpx.AsyncClient | None = None) -> None:
         super().__init__(config)
         self.client = JevSystemOneClient(
             api_key=_api_key(config),
@@ -479,6 +479,6 @@ _FORMATS: dict[str, type[_BaseClassifier]] = {
 }
 
 
-def build_classifier(config: DuplexConfig) -> ChoiceClassifier:
+def build_classifier(config: TeamRulesConfig) -> ChoiceClassifier:
     """Build the classifier for ``config.format``; raises when the key is missing."""
     return _FORMATS[config.format](config)

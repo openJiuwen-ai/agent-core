@@ -1,12 +1,12 @@
-# 双工投递路由：Agent 干活时收到新消息，自动决定怎么投递
+# Group 团队规则：Agent 干活时收到新消息，自动决定怎么投递
 
 ## 元信息
 
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-11-03 |
-| 范围 | `agent_teams/duplex/`（新增）、`agent_teams/harness/{control,state,protocol,native_harness,team_harness}.py`、`agent_teams/agent/coordination/{dispatcher.py,handlers/message.py}`、`agent_teams/group_chat/message_handler.py`、`agent_teams/schema/blueprint.py` |
-| 测试基线 | `tests/unit_tests/agent_teams/duplex` 与 `harness/test_interrupt.py` 23 个用例全部通过；`tests/unit_tests/agent_teams` 4219 passed、14 failed，失败集合与 develop 619aafa1 完全相同（4196 passed、14 failed） |
+| 范围 | `agent_teams/team_rules/`（新增）、`agent_teams/harness/{control,state,protocol,native_harness,team_harness}.py`、`agent_teams/agent/coordination/{dispatcher.py,handlers/message.py}`、`agent_teams/group_chat/message_handler.py`、`agent_teams/schema/blueprint.py` |
+| 测试基线 | `tests/unit_tests/agent_teams/team_rules` 与 `harness/test_interrupt.py` 23 个用例全部通过；`tests/unit_tests/agent_teams` 4219 passed、14 failed，失败集合与 develop 619aafa1 完全相同（4196 passed、14 failed） |
 | Refs | #2027 |
 
 ## 背景
@@ -43,10 +43,10 @@
 ```
 邮箱行（MessageHandler 排空邮箱）
   │
-  ├─ 1. DuplexMessageHandler 按发件人和行类型分出场景（source）
+  ├─ 1. TeamRulesMessageHandler 按发件人和行类型分出场景（source）
   ├─ 2. policy.plan：要不要问监工，问什么
   │      不问 → 当场执行动作，调用方照常标已读
-  │      要问 → 交给 DuplexScheduler，路由器接管这一行（暂不标已读）
+  │      要问 → 交给 TeamRulesScheduler，路由器接管这一行（暂不标已读）
   ├─ 3. scheduler：每个成员同一时间只做一次判断；判断期间新到的消息合成下一批
   ├─ 4. classifier 回答，附带概率（三种格式）
   ├─ 5. policy.resolve + final_action：执行前重新读目标状态
@@ -72,7 +72,7 @@
 | 系统消息（框架模板、JSON 协议行、看板巡视、催办等） | 不问 | 原样投递 | 原样投递 |
 
 - "必须打断"指监工回答 INTERRUPT，且概率 ≥ 0.9。"无关"指监工回答 SKIP，且概率 ≥ 0.8。阈值是
-  `duplex/policy.py` 的常量，不进配置——阈值属于投递策略，不属于某个模型。
+  `team_rules/policy.py` 的常量，不进配置——阈值属于投递策略，不属于某个模型。
 - 用户的消息优先级最高：不经过监工，也不会被降级。
 - Leader 的广播不经过监工，也不限流。原因：Leader 的全员停工广播绝不能被过滤或延后。发件人等于
   `team_spec.leader_member_name` 的非群聊广播归入这一场景（`MessageSource.LEADER_BROADCAST`）。
@@ -136,7 +136,7 @@ PAUSING 期间到达的 `send`：原实现对 PAUSING 没有分支，消息被�
 
 ## 怎么开启
 
-`TeamAgentSpec.duplex: DuplexConfig | None`：
+`TeamAgentSpec.team_rules: TeamRulesConfig | None`：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -146,15 +146,15 @@ PAUSING 期间到达的 `send`：原实现对 PAUSING 没有分支，消息被�
 | `api_base` | `""` | openai：API base（含 `/v1`），必填；anthropic：API base，必填；jev：留空用 TypeSafe 的 `https://api.typesafe.ai/v1`；OpenRouter 填 `https://openrouter.ai/api/alpha`，其他服务填它自己的地址 |
 | `endpoint` | `""` | 只对 jev 生效，端点路径。留空时按 api_base 推出：主机是 typesafe.ai 用 `/systemone`，其他主机一律用 `/decisions` |
 | `model` | `""` | 模型名。openai / anthropic 必填；jev 按主机给默认值：typesafe.ai 主机取 `jev-1.13.0`，openrouter.ai 主机取 `typesafe/jev-1.13`，可留空；其他主机必填 |
-| `api_key_env` | `""` | **只存环境变量名**。留空时 openai / anthropic 用 `DUPLEX_ROUTER_API_KEY`；jev 按主机选：typesafe.ai 用 `TYPESAFE_API_KEY`，openrouter.ai 用 `OPENROUTER_API_KEY`（这两个和浏览器决策是同一把密钥），其他主机用 `DUPLEX_ROUTER_API_KEY` |
+| `api_key_env` | `""` | **只存环境变量名**。留空时 openai / anthropic 用 `TEAM_RULES_API_KEY`；jev 按主机选：typesafe.ai 用 `TYPESAFE_API_KEY`，openrouter.ai 用 `OPENROUTER_API_KEY`（这两个和浏览器决策是同一把密钥），其他主机用 `TEAM_RULES_API_KEY` |
 | `timeout_seconds` | 8.0 | 一次判断的总时限。中转上一次判断约 3–4 秒，8 秒也够没有 logprobs 时再用工具问一次 |
 
 **为什么只存环境变量名**：spec 随 `model_dump` 进 checkpoint、跨进程拉起成员时序列化、也会落到
 日志和团队快照里。存密钥原文就等于把密钥写进这些地方。平台沿用自己的密钥存储，把密钥注入成员
 进程的环境变量；子进程继承环境，路由器在调用时读取。密钥缺失按监工失败处理，消息照常投递。
 
-`spec.duplex.enabled and mode == "active"` 时，`EventDispatcher` 在构造期把邮箱 handler 换成
-`DuplexMessageHandler` / `DuplexGroupMessageHandler`（定义在 `duplex/handlers.py`，开启时才延迟导入；与 `reliability` 的条件装配同一模式，见
+`spec.team_rules.enabled and mode == "active"` 时，`EventDispatcher` 在构造期把邮箱 handler 换成
+`TeamRulesMessageHandler` / `TeamRulesGroupMessageHandler`（定义在 `team_rules/handlers.py`，开启时才延迟导入；与 `reliability` 的条件装配同一模式，见
 handlers 维度 5：模式差异换类，方法体内不判模式）。只换 leader / teammate / external_cli 三种角色；
 human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**行为与原来逐字一致**。
 
@@ -175,11 +175,11 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
 - **广播水位线：被扣住的广播挡住更新的广播。** 广播的已读状态是每个成员一条水位线，只前进不后退。
   标记一条广播已读，就等于标记所有更早的广播已读。所以一条广播在路由器手里（判断中）时，
   比它新的广播一律不投递、不标已读，留在邮箱里；被扣住的那条处理完（成功或失败）后再排空。为此
-  双工模式下排空按时间从旧到新（原排空从新到旧），被扣住的广播总在更新的广播之前决定。失败的那条
+  开启团队规则时排空按时间从旧到新（原排空从新到旧），被扣住的广播总在更新的广播之前决定。失败的那条
   仍在水位线之上，下一次轮询重投。
 - **投递钩子是 `MessageHandler._deliver_message`。** 基类实现就是原来的两行（`deliver_input`
-  + 记为已投递）。双工类覆写它，不在基类方法体里判断开关。
-- **策略是纯函数。** `duplex/policy.py` 无 I/O、无运行时依赖，场景表每一行都有单测。
+  + 记为已投递）。团队规则类覆写它，不在基类方法体里判断开关。
+- **策略是纯函数。** `team_rules/policy.py` 无 I/O、无运行时依赖，场景表每一行都有单测。
 - **一次判断 = 一批。** 同一批里需要的问题集合不同（私信只问 urgency，广播问两个）就分组，
   每组一次分类请求，并发发出。整批答案回来后，每行的最终动作只算一次：非打断动作按到达顺序先执行，
   执行完立即标已读并释放，不等打断；打断最后做。分类器每成员只建一个，首次判断时创建，路由器关闭时关闭。
@@ -201,7 +201,7 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
 
 ## 验证
 
-- `tests/unit_tests/agent_teams/duplex/test_policy.py`：场景表逐行一张表（含 0.9 / 0.8 阈值边界、
+- `tests/unit_tests/agent_teams/team_rules/test_policy.py`：场景表逐行一张表（含 0.9 / 0.8 阈值边界、
   执行前重读状态、10 秒广播窗口）。
 - `test_router.py`：同一时间只做一次判断、判断期间到达的消息合批、广播限速只记录；监工失败照常
   投递（忙 → 排队）；打断失败不回退插入且行保持未读；只记录不唤醒；用户消息不问监工；Leader 广播
@@ -209,9 +209,9 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
   装配原类。
 - `test_classifier.py`：三种格式各一例，mock transport、无网络：openai 请求带 `max_tokens=1` /
   `logprobs` / `top_logprobs=20`、字母概率归一化；无 logprobs 时改用 `tool_choice="required"` 的工具调用并记住、之后不再请求 logprobs，工具也失败则报错；anthropic 强制工具
-  `tool_choice`、枚举入参；jev 两题一请求，TypeSafe 地址请求 `/v1/systemone`，OpenRouter 地址请求 `/api/alpha/decisions`，其他主机请求它自己路径下的 `/decisions` 并读 `DUPLEX_ROUTER_API_KEY`。openai 用例同时证明 core 的
+  `tool_choice`、枚举入参；jev 两题一请求，TypeSafe 地址请求 `/v1/systemone`，OpenRouter 地址请求 `/api/alpha/decisions`，其他主机请求它自己路径下的 `/decisions` 并读 `TEAM_RULES_API_KEY`。openai 用例同时证明 core 的
   `OpenAIModelClient` 在 Chat Completions 路径上透传并返回 logprobs。
-- `test_duplex_e2e.py`：真实 NativeHarness 上，队友私信"不能部署 Kafka，改用 Redis Streams"
+- `test_team_rules_e2e.py`：真实 NativeHarness 上，队友私信"不能部署 Kafka，改用 Redis Streams"
   经路由器判为打断：生成被取消、计划作废、上下文未回滚、重规划消息进入下一次模型调用。
 - `tests/unit_tests/agent_teams/harness/test_interrupt.py`：原生打断命令在工具阶段等工具跑完、
   作废计划、PAUSING 期间的 send 不丢；空闲时返回 UNAVAILABLE。
@@ -223,4 +223,4 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
   标记。紧随其后的重规划消息说明了原因，但标记文字本身不准确。改它要动 core 的 ReActAgent。
 - 打断在工具阶段要等工具跑完，worker 在此期间不处理下一批（仍然只有一个判断在飞）。
 - 广播被扣住期间，更新的广播最多晚一次判断的时间（默认 8 秒）才投递，不等打断（广播不会触发打断）。
-- 设置页（JiuwenSwarm）负责把配置传给 `TeamAgentSpec.duplex`、把密钥注入环境变量，不在本仓库。
+- 设置页（JiuwenSwarm）负责把配置传给 `TeamAgentSpec.team_rules`、把密钥注入环境变量，不在本仓库。
