@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import context_engine_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.context_engine.compaction import CompactionDecision, CompactionHook, CompactionTrigger
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
@@ -84,6 +85,8 @@ class ContextEngine:
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
+        from openjiuwen.core.context_engine.compaction import CompactionCoordinator
+        self._compaction = CompactionCoordinator(self)
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
@@ -94,6 +97,46 @@ class ContextEngine:
     ) -> None:
         """Register an instance-level final-window mutator."""
         self._window_mutators.append(mutator)
+
+    def register_compaction_hook(self, hook: CompactionHook) -> Callable[[], None]:
+        """Register one host hook for existing and future native contexts.
+
+        Returns:
+            An idempotent function removing this registration and its cache.
+        """
+        return self._compaction.register(hook)
+
+    def invalidate_compaction_candidates(self) -> None:
+        """Discard speculative candidates after host policy or model changes."""
+        self._compaction.clear()
+
+    async def compact_context(
+        self, context_id: str = "default_context_id", session: Session = None,
+        *, session_id: str = None, trigger: CompactionTrigger = "manual",
+        instructions: str | None = None, processor_types: List[str] = None,
+    ) -> CompactionDecision:
+        """Prepare, intercept and persist a native compaction exactly once."""
+        from openjiuwen.core.context_engine.compaction import CompactionError
+        resolved_id = session.get_session_id() if session else (session_id or "default_session_id")
+        context = self.get_context(context_id=context_id, session_id=resolved_id)
+        if not isinstance(context, SessionModelContext) or getattr(context, "_compaction_uncertain", False):
+            raise CompactionError("COMPACT_SESSION_UNAVAILABLE")
+        key = (resolved_id, context_id)
+        if key in self._compaction.active:
+            raise CompactionError("COMPACT_REENTRANT")
+        if context._processor_lock.locked():
+            raise CompactionError("COMPACT_BUSY")
+        async def prepare(draft):
+            await draft.compress_context(processor_types=processor_types)
+        async def persist():
+            effective_session = session or context.get_session_ref()
+            if effective_session is not None:
+                await self.save_contexts(effective_session, context_ids=[context_id])
+                await effective_session.commit()
+        if trigger == "precompute":
+            return await self._compaction.run(context, trigger, instructions, prepare, processor_types=processor_types)
+        async with context._guarded_processor_lock("compact_context"):
+            return await self._compaction.run(context, trigger, instructions, prepare, persist=persist, processor_types=processor_types)
 
     def clear_window_mutators(self) -> None:
         """Clear instance-level final-window mutators."""
@@ -272,6 +315,7 @@ class ContextEngine:
             window_mutators=self._window_mutators,
         )
         self._load_state_from_session(context, session, history_messages)
+        context._compaction_coordinator = self._compaction
         self._context_pool[full_context_id] = context
         return context
 
@@ -383,6 +427,26 @@ class ContextEngine:
         A successful compression is saved to the resolved session and committed
         before this method returns. Contexts without a session remain in-memory only.
         """
+        if self._compaction.hook is not None:
+            from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
+            trigger_name = kwargs.pop("compression_trigger", "manual")
+            trigger_name = "auto" if trigger_name in ("passive", "model_context_overflow") else trigger_name
+            try:
+                decision = await self.compact_context(
+                    context_id, session, session_id=session_id, trigger=trigger_name,
+                    instructions=kwargs.pop("instructions", None), processor_types=processor_types,
+                )
+            except CompactionError as error:
+                if error.code != "COMPACT_BUSY":
+                    raise
+                return {"result": "busy"} if kwargs.get("return_state") else "busy"
+            code = "compressed" if isinstance(decision, CompactionCandidate) else "noop"
+            if kwargs.get("return_state"):
+                context = self.get_context(context_id=context_id, session_id=session.get_session_id() if session else (session_id or "default_session_id"))
+                state = getattr(context, "_last_compaction", {}) if code == "compressed" else {}
+                return {"result": code, "skip": getattr(decision, "skip", None), "state": state,
+                        "compact_summary": state.get("compact_summary")}
+            return code
         resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
         context = self.get_context(context_id=context_id, session_id=resolved_session_id)
         if context is None:
@@ -591,6 +655,10 @@ class ContextEngine:
         --------
         Logs a warning when the requested session or context cannot be found.
         """
+        from openjiuwen.core.context_engine.compaction import CompactionError
+        if self._compaction.active:
+            raise CompactionError("COMPACT_BUSY")
+        self._compaction.clear()
         if session_id is None:
             cleared_count = len(self._context_pool)
             self._context_pool.clear()

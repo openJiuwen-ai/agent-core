@@ -166,6 +166,37 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         """
         return getattr(cls, _PROCESSOR_TYPE_ATTR, "")
 
+    def fork_compaction(self, instructions: str | None, failures: list):
+        """Fork built-in state; third-party processors must opt in explicitly.
+
+        Shared model clients are borrowed. Mutable processor state is isolated
+        so preparing a candidate cannot advance the live processor's counters.
+        """
+        import copy
+        from openjiuwen.core.context_engine.compaction import CompactionError, _InstructionModel
+
+        if not type(self).__module__.startswith("openjiuwen.core.context_engine.processor."):
+            raise CompactionError("COMPACT_UNSUPPORTED")
+        forked = copy.copy(self)
+        for name, value in vars(self).items():
+            if name not in ("_model", "_compression_executor"):
+                setattr(forked, name, copy.deepcopy(value))
+        forked._compaction_instructions = instructions
+        forked._compaction_failures = failures
+        model = getattr(self, "_model", None)
+        if model is not None:
+            forked._model = _InstructionModel(model, instructions, failures)
+        executor = getattr(self, "_compression_executor", None)
+        if executor is not None:
+            forked._compression_executor = copy.copy(executor)
+            forked._compression_executor._model = forked._model
+            forked._compression_executor._last_response = None
+        if instructions and hasattr(forked, "_session_memory_enabled"):
+            forked._session_memory_enabled = False
+        if instructions and self.processor_type() == "SessionMemoryCompressor":
+            forked._config = forked._config.model_copy(update={"enabled": False})
+        return forked
+
     @property
     def config(self) -> BaseModel:
         """
