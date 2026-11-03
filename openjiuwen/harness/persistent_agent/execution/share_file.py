@@ -18,7 +18,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import FileToolSpec, register_file_tool
 
 from ..schema.execution import ExecutionContext
-from ..workspace.access import WorkspaceAccessPort
+from ..workspace.access import PermissionProfile, WorkspaceAccessPort
 from .handoff import (
     MAX_REGISTRATIONS,
     SHARE_FILE,
@@ -104,6 +104,7 @@ class ShareFileTool(Tool):
         workspace_access: WorkspaceAccessPort,
         registrations: dict,
         max_bytes: int,
+        permission_profile: PermissionProfile = "default",
     ) -> None:
         super().__init__(
             ToolCard(
@@ -118,6 +119,7 @@ class ShareFileTool(Tool):
         self._workspace_access = workspace_access
         self._registrations = registrations
         self._max_bytes = max_bytes
+        self._permission_profile = permission_profile
 
     async def invoke(self, inputs: Mapping[str, Any] | None, **kwargs: Any) -> ToolOutput:
         arguments = _arguments(inputs)
@@ -125,7 +127,11 @@ class ShareFileTool(Tool):
             return _failure("invalid_arguments")
         file_path, share_mode, caption = arguments
         try:
-            scope = await read_scope(self._execution, self._workspace_access)
+            scope = await read_scope(
+                self._execution,
+                self._workspace_access,
+                permission_profile=self._permission_profile,
+            )
             resolved = resolve_shared_path(scope, file_path)
             if not is_logical_path(resolved.relative_path):
                 return _failure("invalid_arguments")
@@ -153,12 +159,14 @@ class ShareFileRail(DeepAgentRail):
         workspace_access: WorkspaceAccessPort,
         registrations: dict,
         max_bytes: int,
+        permission_profile: PermissionProfile = "default",
     ) -> None:
         super().__init__()
         self.execution = execution
         self.workspace_access = workspace_access
         self.registrations = registrations
         self.max_bytes = max_bytes
+        self.permission_profile = permission_profile
         self.tools: list[ShareFileTool] = []
 
     def init(self, agent) -> None:
@@ -169,6 +177,7 @@ class ShareFileRail(DeepAgentRail):
             workspace_access=self.workspace_access,
             registrations=self.registrations,
             max_bytes=self.max_bytes,
+            permission_profile=self.permission_profile,
         )
         self.tools = [tool]
         agent.ability_manager.add_ability(tool.card, tool)
