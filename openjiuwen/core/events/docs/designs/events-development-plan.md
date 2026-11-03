@@ -141,12 +141,12 @@
   5. EV-07-V-05：示例 EventType 的注册、匹配、三层链与 S_01 不变量兼容；新增错误语义如有则同步 S_01 或 F_07 实施记录。
 - **联合交付：** EV-07 可与 M-01 并行推进；M-02 真实工具/能力路径建议在 EV-06 通过后纳入联合场景。
 
-### EV-08 宿主按 Handler ID 限定派发
+### EV-08 宿主按 Handler ID 限定派发（已撤回）
 
-- **目标与范围：** trigger 增加默认 None 的仅关键字 handler_ids，可消费 Runtime 已公开的注册 ID；候选缩小后仍走原 matcher/层级/容错。
+- **历史目标与范围：** 曾拟为 trigger 增加仅关键字 handler_ids；2026-11-03 决定撤回，当前公开接口不包含该参数。
 - **负责人及状态：** 见第 4 节；关联 [F_09](../features/F_09_handler-selection.md) 与 [S_01](../specs/S_01_events-contract.md)。
-- **必要前置：** EV-04/05；已合入 Server !99 的 PR06 / session.start 消费该机制，不把包激活策略放入 Core。
-- **验收：** 省略/空/混合/非法白名单、快照与注销、USER/BUILTIN、Validator/取消/故障隔离、旧调用兼容和真实宿主包定向调用。
+- **必要前置：** 历史方案依赖 EV-04/05；JiuwenSwarm `session.start` 改为宿主注册时绑定包目标，由事件 matcher 派发。
+- **验收：** 回退后的 Protocol/Bus 签名与普通匹配回归；跨仓包定向行为由 JiuwenSwarm 验证。
 - **边界：** 无业务事件或 Ops，非授权；不改变原 M-01 的 EV-01～05 MVP 里程碑范围。
 
 ### EV-12 FS 事件与 `ops.fs` 能力
@@ -195,7 +195,6 @@ flowchart LR
     EV03 --> EV04
     EV04 --> EV05["EV-05 Handler 故障隔离"]
     EV05 --> EV07["EV-07 AgentRuntime\n与业务 EventType"]
-    EV05 --> EV08["EV-08 宿主限定派发"]
     EV07 --> EV12["EV-12 FS 事件\n与 ops.fs 能力"]
     EV07 --> EV13["EV-13 MCP 事件\n与 ops.mcp 能力"]
 
@@ -267,7 +266,7 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-05 扩展 Handler 故障隔离            | 已完成 | 张瑶        | EV-04 | EV-05-V-01～14 已覆盖；Events + callback 468 passed | 外部取消 `trigger()` 未单独覆盖；二期超时/`.catch` 不在范围 |
 | EV-06 Handler 包信息能力              | 已完成 | 李志远 | EV-03、EV-04；Extension 已有加载流程 | 专项 19 passed；两个仓库相关回归各 573 passed、1 skipped；静态检查与文档示例通过，见 [F_06 第 7 节](../features/F_06_ops-package.md#7-验证设计记录与结论) | 不新增业务触发入口；既有符号链接测试因环境权限跳过 |
 | EV-07 AgentRuntime 与业务 EventType | 已完成 | 张瑶        | EV-04、EV-05；F_07 已建档 | EV-06-V-01～05 未执行 | 方案见 [F_07](../features/F_07_ev07-agent-runtime-business-events.md)；harness `AgentRuntime` bind/unbind 已部分落地，Events builtins 与示例 CORE/Ops 待实现 |
-| EV-08 宿主限定派发 | 完成 | 刘瑜 | EV-04/05 | Core 595 passed / 1 skipped；已合入 Server 1327 passed / 2 skipped（含 94 项生命周期）；见 [F_09](../features/F_09_handler-selection.md#6-验收与未决问题) | 保留 handler_ids 与 Protocol，兼容目标 AgentRuntime 与包信息能力；本轮未重跑真实模型、浏览器或远端 CI |
+| EV-08 宿主限定派发 | 已撤回 | 刘瑜 | EV-04/05 | 旧版验证仅作历史记录，见 [F_09](../features/F_09_handler-selection.md#6-验收与未决问题) | 当前 Protocol/Bus 无 handler_ids；宿主按包匹配由 JiuwenSwarm 实现和验证 |
 | EV-12 FS 事件与 `ops.fs` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | FS 专项 23 passed；Events 回归 138 passed | 六个 CORE 事件与 `ops.fs` 已实现；方案见 [F_12](../features/F_12_fs-ops-events.md) |
 | EV-13 MCP 事件与 `ops.mcp` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | MCP 专项与 Events 回归见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) | 三个 CORE 事件与 `ops.mcp` 已实现；动态登记、包声明建连与直调工具共用 MCP 资源面 |
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
@@ -305,3 +304,4 @@ git diff --check
 | 2026-11-02 | 1.7 | 新增 EV-12 FS 事件与 `ops.fs` 能力，补齐六事件、会话后端解析、路径与超时边界 | 见 [F_12](../features/F_12_fs-ops-events.md) 第 7 节 |
 | 2026-11-02 | 1.8 | 新增 EV-13 MCP 事件与 `ops.mcp` 能力，补齐包内声明、连接发布、调用与清理 | 见 [F_13](../features/F_13_mcp-ops-events.md) 第 7 节 |
 | 2026-11-03 | 1.9 | `mcp.register` 并入 `ops.mcp` 事件族，统一模型、服务与 Ops 装配 | 动态登记不随插件 uninstall 自动清理，见 F_13 第 7 节 |
+| 2026-11-03 | 2.0 | 撤回 EV-08 的调用级 handler_ids 接口；session.start 定向选择转到 JiuwenSwarm 宿主的注册与匹配阶段 | 当前契约见 S_01；旧版验证保留在 F_09，不用于证明撤回后的行为 |

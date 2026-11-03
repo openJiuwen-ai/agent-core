@@ -1,6 +1,10 @@
-# EventBus handler_ids 限定派发特性设计
+# EventBus handler_ids 限定派发历史方案（已撤回）
 
-建档日期：2026-10-28。主责契约：[S_01](../specs/S_01_events-contract.md)。计划条目 EV-07，配套 JiuwenSwarm Server PR06 的 session.start；本文件在实现前建档，当前机制已实现并完成下述验证。
+建档日期：2026-10-28。主责契约：[S_01](../specs/S_01_events-contract.md)。最近修订：2026-11-03。计划条目 EV-08。**本方案已撤回**：Core 的 `trigger` 恢复为仅接收 event 和可选 session；JiuwenSwarm 在宿主注册 `session.start` Handler 时绑定可信包目标，匹配阶段筛选。以下为撤回前的设计与当时版本的验证记录，不代表当前公开接口。撤回后的验证以本轮工作树和 JiuwenSwarm F_21 的新增记录为准。
+
+撤回验证：Windows / Python 3.11.15，Core `feature/session-start-match-pattern-20261103` 基于已合入 !110 的目标分支 `45e6418c`，与 Swarm 同名分支（目标基线 `4b6021ca8`）合跑。Core 相关 Events、Extension、callback、AgentRuntime 与 DeepAgent 回归 **709 passed、1 skipped**；Swarm 相关回归 **1458 passed、5 skipped、2 deselected**。两项 LoopBeat 计时测试此前已在未修改基线复现，未计入通过。初版候选基于 `4aceb5cd` 曾得 Core 581 passed/1 skipped、Swarm 1414 passed/5 skipped/2 deselected；这些数值不代替目标分支更新后的结果。
+
+扩大到目标分支新增 store 用例时，Core 首轮 **761 passed、2 skipped、2 failed**；同两项 store 用例在未修改的目标基线也失败。Swarm 首轮 **1463 passed、5 skipped、2 deselected、1 failed**，失败的 store 持久化用例在未修改目标基线同样复现。因此当前通过数明确排除 Core `test_ops_store.py` 与 `core/extension/data`、Swarm `test_store_persistence.py`，不宣称全套通过。JUnit、日志、基线对照和真实 Front → 子 Worker 两轮模型输入见 `D:/work_space/.codex-temp/session-start-match-pattern-20261103/` 及 Swarm F_21。旧版下述通过数不能替代本次验证。
 
 ## 1. 范围、状态与依据
 
@@ -52,7 +56,23 @@ Protocol 与真实 Bus 同步增加仅关键字可选参数；_match_handlers �
 
 ## 6. 验收与未决问题
 
-2026-10-31 合并交付调整：Core !110 合并最新目标分支 `bdde48a8`，保留其已合入的 EV-06 / F_06 包信息能力；本项待合入的编号改为 EV-07 / F_07，`handler_ids` 代码和公开语义不变。Server 原 !91 的消费者与文档、结束、关联及解除能力一起整理到 [Server !99](https://gitcode.com/huenrui_/jiuwenswarm/merge_requests/99)，保留四个提交；合并顺序仍为先 Core !110，再 Server，不能只合入 Server。
+2026-11-02 冲突集成：当前目标分支 `bb8f7ba4a` 已合入 AgentRuntime 及 Team 相关能力，并使用 EV-07 和最高 F_08。本 PR 保留目标内容，将待合入的限定派发条目顺延为 EV-08 / F_09；`bus.py`、`protocol.py` 和 handler_ids 测试相对原 !110 提交 `0b5dd43f1` 保持不变。开发计划合并双方工作项，同时修复该计划指向 AgentRuntime 已改名 feature 的引用。
+
+Server !99 目前已经合入 `rsi_native_agent_os`，其 session.start 仍调用 `trigger(..., handler_ids=ids)`。本轮直接使用已合入的 Server 源码验证消费兼容性；不再把“先 Core、后 Server”的历史合并计划当作当前状态，也不将四项生命周期业务移入 Core。
+
+本轮 Windows / Python 3.11.15 验证：Core Events、Extension、callback、AgentRuntime 与 DeepAgent 绑定回归 **595 项通过、1 项跳过**，包含 handler_ids 专项 14 项；跳过原有目录符号链接测试，当前环境不允许创建符号链接。已合入 Server `e847fb045` 与本候选 Core 合跑，扩展、Runtime、原生切换和历史入口 **1327 项通过、2 项跳过**，包含 start/end/attach/detach 与字段契约的 94 项生命周期测试；跳过项分别为当前平台无法提供的符号链接和命名管道。没有排除失败用例，未运行格式化或静态检查。
+
+实际命令如下，PYTHONPATH 分别指向本候选 Core 和已合入 Server 的独立 worktree，运行时打印的模块来源已核对；Core 的 Python 实现与本轮测试期间一致：
+
+```text
+python -m pytest -q -o addopts= --asyncio-mode=auto tests/unit_tests/core/events tests/unit_tests/core/extension tests/unit_tests/core/runner/callback tests/unit_tests/core/single_agent/test_agent_runtime.py tests/unit_tests/harness/test_deep_agent_runtime_binding.py
+python -m pytest -q -o addopts= --asyncio-mode=auto --no-cov -o log_cli=false tests/unit_tests/extensions_v2 tests/unit_tests/runtime tests/unit_tests/agentserver/test_session_switch_characterization.py tests/unit_tests/agentserver/test_history_append_record.py
+```
+
+本地命令、版本/来源收据与 JUnit XML 位于 `D:/work_space/.codex-temp/resolve-core110-20261102`；报告为 core-regression.xml、server-regression.xml。上述为源码组装与单元/组件回归，本轮未重跑真实子 Worker/模型、浏览器、非 Windows 实机或远端 CI。下列旧日期的通过数量仍归属于各自原始版本，不替代本轮验证。
+
+
+2026-10-31 合并交付调整：Core !110 合并最新目标分支 `bdde48a8`，保留其已合入的 EV-06 / F_06 包信息能力；本项待合入的编号改为 EV-07 / F_07，`handler_ids` 代码和公开语义不变。Server 原 !91 的消费者与文档、结束、关联及解除能力一起整理到 [Server !99](https://gitcode.com/huenrui_/jiuwenswarm/merge_requests/99)，保留四个提交；当时计划先 Core !110、再 Server；当前合入状态见本节 2026-11-02 记录。
 
 本次 Windows / Python 3.11.15 的 Events、Extension、callback 回归 **587 项通过、1 项跳过**，包括目标分支新增的包信息能力与原 handler_ids 用例；符号链接用例因当前环境权限跳过。命令和报告位于 `D:\work_space\.codex-temp\consolidate-server-prs-20261031\core-command.json`、`core-regression.xml`。本环境未提供 make，本轮未执行 make check；本次不以历史静态检查、真实模型或远端 CI 记录代替当前执行结果。
 
