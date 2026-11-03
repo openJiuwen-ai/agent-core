@@ -18,7 +18,7 @@ def test_reserved_marker_keys_survive_round_trip() -> None:
         "nested": [{"__class__": "tool-result"}],
     }
 
-    restored = deserialize_message(serialize_message(DmqResponseMessage(payload=payload)))
+    restored = deserialize_message(serialize_message(DmqResponseMessage(payload=payload), wire_version=2))
 
     assert restored.payload == payload
 

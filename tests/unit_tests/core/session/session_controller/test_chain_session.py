@@ -185,8 +185,9 @@ class TestChainSessionPersistence:
         assert state_data["data"] == {}
         assert state_data["meta"]["is_active"] is True
 
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
-        assert link_file.exists()
+        link_files = list((tmp_session_dir / "downstreams").glob("*.link"))
+        assert len(link_files) == 1
+        assert json.loads(link_files[0].read_text(encoding="utf-8"))["target_agent"] == "agent2"
 
     @pytest.mark.asyncio
     async def test_flush_removes_deleted_downstream(
@@ -195,7 +196,7 @@ class TestChainSessionPersistence:
         # flush deletes .link files for removed downstreams
         chain_session.add_downstream("agent2", "session-2")
         await chain_session.flush()
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
+        link_file = next((tmp_session_dir / "downstreams").glob("*.link"))
         assert link_file.exists()
 
         chain_session.remove_downstream("agent2", "session-2")
@@ -346,7 +347,7 @@ class TestChainSessionPersistenceAdvanced:
         # flush marks .link as removed=true before deleting it
         chain_session.add_downstream("agent2", "session-2")
         await chain_session.flush()
-        link_file = tmp_session_dir / "downstreams" / "agent2_session-2.link"
+        link_file = next((tmp_session_dir / "downstreams").glob("*.link"))
         assert link_file.exists()
 
         chain_session.remove_downstream("agent2", "session-2")

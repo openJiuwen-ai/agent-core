@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Diff/apply algorithms for vcs.
 
 Two tracks with different data shapes:
@@ -107,7 +107,7 @@ def diff_state(old: dict, new: dict) -> StateDelta:
     set_flat: dict[str, Any] = {}
     removed: list[str] = []
     _diff_into(old, new, "", set_flat, removed)
-    return StateDelta(set=set_flat, removed=removed)
+    return StateDelta(set=set_flat, removed=removed, path_encoding=2)
 
 
 def _diff_into(old: dict, new: dict, prefix: str, set_flat: dict, removed: list) -> None:
@@ -127,12 +127,14 @@ def _diff_into(old: dict, new: dict, prefix: str, set_flat: dict, removed: list)
 
 
 def apply_state(state: dict, delta: StateDelta) -> dict:
-    """Apply a StateDelta onto a kv dict; returns a new dict. None stays a value."""
+    """Apply versioned paths without reinterpreting legacy WAL keys or None."""
     result = deepcopy(state)
     for path, value in delta.set.items():
-        _set_path(result, _split_path(path), deepcopy(value))
+        keys = _split_path(path) if delta.path_encoding == 2 else path.split(".")
+        _set_path(result, keys, deepcopy(value))
     for path in delta.removed:
-        _del_path(result, _split_path(path))
+        keys = _split_path(path) if delta.path_encoding == 2 else path.split(".")
+        _del_path(result, keys)
     return result
 
 

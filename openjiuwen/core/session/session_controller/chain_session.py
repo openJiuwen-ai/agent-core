@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generic, Optional, TypeVar
@@ -262,14 +263,14 @@ class ChainSession(Generic[T]):
 
                 # Write current downstream relationships
                 for (target_agent, target_session), policy in self._downstream_policies.items():
-                    link_filename = f"{target_agent}_{target_session}.link"
+                    target_key = json.dumps([target_agent, target_session], ensure_ascii=False).encode("utf-8")
+                    link_filename = f"v2-{sha256(target_key).hexdigest()}.link"
                     link_file = downstreams_dir / link_filename
                     current_links.add(link_file)
 
                     link_data = {
-                        # Persist the ids so ids containing '_' survive the
-                        # round-trip; the filename remains a human-readable
-                        # legacy locator.
+                        # Store authoritative ids in the payload; the digest
+                        # separates ambiguous legacy names and unsafe path characters.
                         'target_agent': target_agent,
                         'target_session': target_session,
                         'permission': {
