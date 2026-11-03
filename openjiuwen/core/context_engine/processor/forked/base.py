@@ -165,6 +165,11 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         """
         return getattr(cls, _PROCESSOR_TYPE_ATTR, "")
 
+    def fork_compaction(self, instructions: str | None, failures: list):
+        """Use the native candidate fork for the installed forked processor rail."""
+        from openjiuwen.core.context_engine.processor.base import ContextProcessor as NativeProcessor
+        return NativeProcessor.fork_compaction(self, instructions, failures)
+
     @property
     def config(self) -> BaseModel:
         """
