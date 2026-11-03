@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
@@ -20,7 +20,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from ..schema.events import CAPTION_MAX_CHARS, EVENT_MAX_BYTES, AgentEvent, EventType
 from ..schema.execution import ExecutionContext
 from ..schema.integration import EXECUTION_END, EXECUTION_HEADER, WINDOW_PART_KEY
-from ..workspace.access import WorkspaceAccessPort, WorkspaceReadScope, validate_read_scope
+from ..workspace.access import PermissionProfile, WorkspaceAccessPort, WorkspaceReadScope, validate_read_scope
 from ..workspace.path_policy import ResolvedWorkspacePath, WorkspacePathError, resolve_read_path
 from .emitter import EventEmitter, longest_prefix, widest_size
 
@@ -248,10 +248,15 @@ def split_answer(text: str, room: int) -> list[str] | None:
     return segments
 
 
-async def read_scope(execution: ExecutionContext, access: WorkspaceAccessPort) -> WorkspaceReadScope:
+async def read_scope(
+    execution: ExecutionContext, access: WorkspaceAccessPort, *, permission_profile: PermissionProfile = "default"
+) -> WorkspaceReadScope:
     """Current read authorization bound to this Execution; any lookup or identity failure fails closed."""
     try:
-        return validate_read_scope(await access.resolve_read_scope(execution), execution)
+        scope = validate_read_scope(await access.resolve_read_scope(execution), execution,
+                                    permission_profile=permission_profile)
+        # Host-wide tool access is not permission to hand off arbitrary host or sibling-session files.
+        return replace(scope, host_wide=False, allowed_roots=()) if scope.host_wide else scope
     except Exception:  # noqa: BLE001 - no host detail reaches the model or the event
         raise HandoffFileError("unknown") from None
 
@@ -356,10 +361,11 @@ async def _file_payloads(
     target_ref: str,
     registrations: list[Registration],
     max_bytes: int,
+    permission_profile: PermissionProfile,
 ) -> tuple[list[dict], list[tuple[str, str, str]], list[tuple[str, str]]]:
     payloads, files, failures = [], [], []
     try:
-        scope = await read_scope(execution, access)
+        scope = await read_scope(execution, access, permission_profile=permission_profile)
     except HandoffFileError as exc:
         return [], [], [(registration.file_path, exc.status) for registration in registrations]
     for registration in registrations:
@@ -401,6 +407,7 @@ async def prepare_batch(
     answer: str | None,
     registrations: list[Registration],
     max_bytes: int,
+    *, permission_profile: PermissionProfile = "default",
 ) -> PreparedBatch:
     """Prepare every candidate of one ending, or report every part that failed; nothing is recorded here."""
     payloads: list[dict] = []
@@ -419,7 +426,7 @@ async def prepare_batch(
             failures.extend((registration.file_path, "unknown") for registration in registrations)
         else:
             file_payloads, files, file_failures = await _file_payloads(
-                execution, access, target_ref, registrations, max_bytes
+                execution, access, target_ref, registrations, max_bytes, permission_profile
             )
             payloads.extend(file_payloads)
             failures.extend(file_failures)

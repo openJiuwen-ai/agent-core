@@ -339,6 +339,7 @@ async def _finish(
                 answer,
                 await _effective_registrations(context, spec),
                 spec.share_file_max_bytes,
+                permission_profile=spec.permission_profile,
             )
             if batch.failures:
                 failure = handoff.describe_failures(batch.failures)
