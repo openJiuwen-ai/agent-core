@@ -298,9 +298,71 @@ def _resolve_external_paths(
     return cwd, tuple(extra_dirs)
 
 
+def _external_swarmflow_host(
+    team_agent: "TeamAgent",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    team_name: str,
+    member_name: str | None,
+    session_id: str,
+    runtime: Any,
+) -> Any:
+    """Build the async-tool host for this CLI member's ``swarmflow`` tool.
+
+    ``SwarmflowTool`` probes its ``parent_agent`` for five surfaces
+    (launch/inject via ``launch_async_tool``, attribution via
+    ``build_context.member_name``, ``model``, controller registration). An
+    external CLI member has no NativeHarness, so the leader's shared
+    infrastructure (governor / budget / resolver / base specs / expert table)
+    is re-hosted on an :class:`ExternalSwarmflowHost`: a per-member
+    async-tool runtime whose completion injection forwards into the member's
+    own runtime (``send(immediate=False)`` — follow-up mid-turn, fresh turn
+    when idle), with a derived per-member build context (platform subclass
+    preserved, so worker harness builds see the real platform shape) and the
+    session-level controller every in-process member shares.
+
+    Returns ``None`` when the team has no shared infrastructure (the host
+    never enabled swarmflow): the factory's resolver gate then drops the
+    tool, unchanged behavior for non-swarmflow teams.
+    """
+    infra = team_agent.infra.swarmflow
+    if infra is None:
+        return None
+    from openjiuwen.agent_teams.workflow.external_swarmflow_host import ExternalSwarmflowHost
+
+    base_context = spec.build_context
+    if base_context is not None:
+        member_context = base_context.derive(
+            member_name=member_name,
+            role=ctx.role.value,
+            member_card_id=f"{team_name}_{member_name}" if member_name else None,
+            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
+        )
+        member_context.extras = dict(member_context.extras)
+    else:
+        member_context = None
+    # SwarmflowTool reads the external-CLI allowlist and expert table from its
+    # parent_agent.build_context.extras (the same keys the leader's
+    # inject_team_handles writes). Re-host both from the shared infra here, or
+    # the member's inner agent(agent_type=...) / agent_template nodes resolve
+    # against an empty allowlist and are rejected as "not declared".
+    if member_context is not None:
+        from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+        member_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = infra.external_cli_agents
+        member_context.extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = infra.expert_specs
+    host = ExternalSwarmflowHost(
+        build_context=member_context,
+        background_task_controller=team_agent.background_task_controller,
+    )
+    host.bind_member_runtime(runtime)
+    return host
+
+
 def _bind_protocol_member_team_tools(
     runtime: Any,
     *,
+    leader: "TeamAgent",
     teammate: "TeamAgent",
     teammate_backend: "TeamBackend",
     spec: "TeamAgentSpec",
@@ -308,11 +370,32 @@ def _bind_protocol_member_team_tools(
     team_name: str,
     session_id: str,
 ) -> None:
-    """Bind local team tools through the protocol provider's native channel."""
+    """Bind local team tools through the protocol provider's native channel.
+
+    A team with shared swarmflow infrastructure additionally hosts the native
+    ``swarmflow`` tool for this CLI member (see ``_external_swarmflow_host``):
+    the tool keeps its one launch-and-inject contract, only the host under it
+    differs from an in-process member's NativeHarness. The shared infra and
+    session controller live on the leader (the member's runtime controller is
+    a no-op), so the host reads them off ``leader``, not ``teammate``.
+    """
     if not runtime.inject_mcp:
         return
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    swarmflow_host = _external_swarmflow_host(
+        leader, spec, ctx, team_name, ctx.member_name, session_id, runtime
+    )
+    swarmflow_handles: dict[str, Any] = {}
+    if swarmflow_host is not None:
+        infra = leader.infra.swarmflow
+        swarmflow_handles = {
+            "swarmflow_model_resolver": infra.model_resolver,
+            "swarmflow_worker_base_spec": infra.worker_base_spec,
+            "swarmflow_human_base_spec": infra.human_base_spec,
+            "concurrency_governor": infra.concurrency_governor,
+            "swarmflow_budget": infra.budget,
+        }
     if runtime.provider_name == "claude-code":
         from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
         from openjiuwen.harness_protocol import McpServerConfig, McpTransport
@@ -326,9 +409,11 @@ def _bind_protocol_member_team_tools(
             lifecycle=spec.lifecycle,
             language=language,
             workspace_manager=teammate.infra.workspace_manager,
+            parent_agent=swarmflow_host,
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+            **swarmflow_handles,
         )
         runtime.bind_mcp_servers(
             [
@@ -356,9 +441,11 @@ def _bind_protocol_member_team_tools(
             lifecycle=spec.lifecycle,
             language=language,
             workspace_manager=teammate.infra.workspace_manager,
+            parent_agent=swarmflow_host,
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+            **swarmflow_handles,
         )
     )
 
@@ -625,6 +712,7 @@ async def external_cli_spawn(
     if isinstance(runtime, ExternalHarnessMemberRuntime) and teammate_backend is not None:
         _bind_protocol_member_team_tools(
             runtime,
+            leader=team_agent,
             teammate=teammate,
             teammate_backend=teammate_backend,
             spec=spec,
