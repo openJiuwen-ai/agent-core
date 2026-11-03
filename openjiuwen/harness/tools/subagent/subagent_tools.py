@@ -238,7 +238,10 @@ class SubagentWaitTool(Tool):
                 reason="'timeout_ms' must be an integer",
             )
 
-        result = await control.wait(list(subagent_ids), timeout_ms=timeout_ms, caller_id=caller_id)
+        wait_kwargs: dict[str, Any] = {"timeout_ms": timeout_ms}
+        if caller_id:
+            wait_kwargs["caller_id"] = caller_id
+        result = await control.wait(list(subagent_ids), **wait_kwargs)
         session = kwargs.get("session")
         for sid in subagent_ids:
             await control.emit_status_update(str(sid), session=session)
@@ -469,8 +472,6 @@ def _runtime_call(tool: Tool, session: Any) -> tuple[Any, str | None, int, str, 
             binding.caller_kind,
             tool,
         )
-    from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
-
     parent = getattr(tool, "_parent_agent", None)
     return get_subagent_control(parent, session), None, 0, "", tool
 
