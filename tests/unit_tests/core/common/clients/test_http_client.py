@@ -8,7 +8,6 @@ import pytest
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 
-from openjiuwen.core.common.clients import get_connector_pool_manager
 from openjiuwen.core.common.clients.http_client import HttpSession, HttpSessionManager, SessionConfig, HttpClient
 
 
@@ -108,14 +107,14 @@ class TestHttpSessionManager:
 
     @pytest.fixture
     def mock_connector_pool(self):
-        mock_pool = AsyncMock()
+        mock_pool = Mock()
         mock_conn = Mock()
         mock_pool.conn.return_value = mock_conn
         return mock_pool
 
     @pytest.mark.asyncio
     async def test_create_resource(self, manager, config, mock_connector_pool):
-        with (patch('openjiuwen.core.common.clients.get_connector_pool_manager')
+        with (patch('openjiuwen.core.common.clients.http_client.get_connector_pool_manager')
               as mock_get_pool_manager):
             mock_manager = Mock()
             mock_get_pool_manager.return_value = mock_manager
@@ -126,12 +125,14 @@ class TestHttpSessionManager:
                 mock_client_session.return_value = mock_session
                 http_session, _ = await manager.acquire(config)
                 assert isinstance(http_session, HttpSession)
+                mock_manager.get_connector_pool.assert_awaited_once_with(config=config.connector_pool_config)
                 mock_client_session.assert_called_once()
+                assert mock_client_session.call_args.kwargs["connector"] is mock_connector_pool.conn.return_value
                 await manager.release_session(config)
 
     @pytest.mark.asyncio
     async def test_acquire_new_session(self, manager, config, mock_connector_pool):
-        with (patch('openjiuwen.core.common.clients.get_connector_pool_manager')
+        with (patch('openjiuwen.core.common.clients.http_client.get_connector_pool_manager')
               as mock_get_pool_manager):
             mock_manager = Mock()
             mock_get_pool_manager.return_value = mock_manager
@@ -149,7 +150,7 @@ class TestHttpSessionManager:
 
     @pytest.mark.asyncio
     async def test_acquire_existing_session(self, manager, config, mock_connector_pool):
-        with (patch('openjiuwen.core.common.clients.get_connector_pool_manager')
+        with (patch('openjiuwen.core.common.clients.http_client.get_connector_pool_manager')
               as mock_get_pool_manager):
             mock_manager = Mock()
             mock_get_pool_manager.return_value = mock_manager
@@ -168,7 +169,7 @@ class TestHttpSessionManager:
 
     @pytest.mark.asyncio
     async def test_release_session(self, manager, config, mock_connector_pool):
-        with (patch('openjiuwen.core.common.clients.get_connector_pool_manager')
+        with (patch('openjiuwen.core.common.clients.http_client.get_connector_pool_manager')
               as mock_get_pool_manager):
             mock_manager = Mock()
             mock_get_pool_manager.return_value = mock_manager
@@ -187,7 +188,7 @@ class TestHttpSessionManager:
 
     @pytest.mark.asyncio
     async def test_get_session_context_manager(self, manager, config, mock_connector_pool):
-        with (patch('openjiuwen.core.common.clients.get_connector_pool_manager')
+        with (patch('openjiuwen.core.common.clients.http_client.get_connector_pool_manager')
               as mock_get_pool_manager):
             mock_manager = Mock()
             mock_get_pool_manager.return_value = mock_manager
