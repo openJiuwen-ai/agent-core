@@ -42,7 +42,6 @@ async def test_openai_format_uses_letter_logprobs() -> None:
     import openai
 
     requests: list[dict] = []
-    with_logprobs = {"value": True}
 
     def respond(body: dict) -> dict:
         logprobs = {
@@ -63,9 +62,8 @@ async def test_openai_format_uses_letter_logprobs() -> None:
             "index": 0,
             "finish_reason": "length",
             "message": {"role": "assistant", "content": "A"},
+            "logprobs": logprobs,
         }
-        if with_logprobs["value"]:
-            choice["logprobs"] = logprobs
         return {"id": "c1", "object": "chat.completion", "created": 0, "model": "m", "choices": [choice]}
 
     classifier = build_classifier(_config("openai", "http://relay.invalid/v1"))
@@ -85,9 +83,77 @@ async def test_openai_format_uses_letter_logprobs() -> None:
     assert answers["urgency"].choice == "INTERRUPT"
     assert answers["urgency"].probabilities["INTERRUPT"] == pytest.approx(0.75 / 0.95)
 
-    with_logprobs["value"] = False  # no logprobs -> error, never a text fallback
+
+def _openai_sdk(requests: list[dict], respond: Callable[[dict], dict]) -> Any:
+    import openai
+
+    return openai.AsyncOpenAI(
+        api_key="mock-api-key",
+        base_url="http://relay.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=_transport(requests, respond)),
+    )
+
+
+def _openai_reply(message: dict) -> dict:
+    choice = {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}
+    return {"id": "c1", "object": "chat.completion", "created": 0, "model": "m", "choices": [choice]}
+
+
+def _openai_tool_reply(arguments: dict) -> dict:
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "record_choice", "arguments": json.dumps(arguments)},
+    }
+    return _openai_reply({"content": None, "tool_calls": [call]})
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_without_logprobs_switches_to_choice_tool() -> None:
+    requests: list[dict] = []
+
+    def respond(body: dict) -> dict:
+        if "tools" not in body:  # the relay drops logprobs
+            return _openai_reply({"content": "A"})
+        first, second = body["tools"][0]["function"]["parameters"]["properties"]["choice"]["enum"]
+        return _openai_tool_reply({"choice": first, "probabilities": {first: 0.8, second: 0.2}})
+
+    classifier = build_classifier(_config("openai", "http://relay.invalid/v1"))
+    sdk = _openai_sdk(requests, respond)
+    classifier.client._create_async_openai_client = lambda timeout=None: sdk
+
+    answers = await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert [("tools" in r["body"], r["body"].get("logprobs")) for r in requests] == [(False, True), (True, None)]
+    tool_body = requests[1]["body"]
+    assert tool_body["tool_choice"] == "required"
+    assert tool_body["tools"][0]["function"]["name"] == "record_choice"
+    assert tool_body["tools"][0]["function"]["parameters"]["properties"]["choice"]["enum"] == ["INTERRUPT", "APPEND"]
+    assert answers["urgency"].choice == "INTERRUPT"
+    assert answers["urgency"].probabilities["INTERRUPT"] == pytest.approx(0.8)
+
+    requests.clear()  # remembered: later questions go straight to the tool
+    answers = await classifier.classify(("urgency", "relevance"), "{}", ["from peer: use Redis"])
+    assert answers["relevance"].choice == "DELIVER"
+    assert len(requests) == 2 and all("tools" in r["body"] and "logprobs" not in r["body"] for r in requests)
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_choice_tool_failure_raises() -> None:
+    requests: list[dict] = []
+
+    def respond(body: dict) -> dict:
+        return _openai_reply({"content": "INTERRUPT"})  # no logprobs and no tool call
+
+    classifier = build_classifier(_config("openai", "http://relay.invalid/v1"))
+    sdk = _openai_sdk(requests, respond)
+    classifier.client._create_async_openai_client = lambda timeout=None: sdk
+
     with pytest.raises(BaseError):
         await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert len(requests) == 2 and "tools" in requests[1]["body"]
 
 
 @pytest.mark.level0
@@ -165,3 +231,8 @@ async def test_jev_endpoint_follows_api_base(
     assert requests[0]["url"] == url
     assert set(body["questions"]) == {"relevance", "urgency"} and body["state"]["messages"] == ["from peer: x"]
     assert answers["urgency"].choice == "INTERRUPT" and answers["relevance"].choice == "DELIVER"
+
+
+@pytest.mark.level0
+def test_default_timeout_covers_a_relay_round_trip() -> None:
+    assert DuplexConfig().timeout_seconds == 8.0

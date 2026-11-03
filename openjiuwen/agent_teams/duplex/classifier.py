@@ -9,8 +9,11 @@ environment variable named by ``DuplexConfig.api_key_env``) and returns one
 
 - ``openai``: Chat Completions through core's ``OpenAIModelClient`` with
   ``max_tokens=1``, ``logprobs=true``, ``top_logprobs=20``. Labels map to letters
-  A, B, ...; probabilities come from the letters' top logprobs, normalized. A
-  response without logprobs raises — there is no text fallback.
+  A, B, ...; probabilities come from the letters' top logprobs, normalized. When
+  the response carries no logprobs, the same question is asked again as a
+  required function call that self-reports ``{choice, probabilities}`` (as in
+  ``anthropic``), and the classifier keeps using that call from then on. There
+  is no text fallback.
 - ``anthropic``: the Messages API has no logprobs, so core's
   ``AnthropicModelClient`` forces one tool call whose input is
   ``{choice, probabilities}``. These probabilities are self-reported by the
@@ -38,6 +41,7 @@ from openjiuwen.agent_teams.duplex.config import DuplexConfig
 from openjiuwen.agent_teams.duplex.policy import APPEND, DELIVER, INTERRUPT, RELEVANCE, SKIP, URGENCY
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.system_one import ChoiceAnswer, ChoiceQuestion, JevSystemOneClient
 
 URGENCY_INSTRUCTIONS = """Judge the delivery behavior of new messages for one recipient.
@@ -86,6 +90,9 @@ QUESTIONS: Mapping[str, ChoiceQuestion] = {
 
 _TOP_LOGPROBS = 20
 _TOOL_NAME = "record_choice"
+# Reasoning models behind OpenAI-format relays think before calling the tool; 256 tokens
+# was observed to run out mid-reasoning (finish_reason=length, no tool call).
+_OPENAI_TOOL_MAX_TOKENS = 1024
 _SELF_REPORTED_TOLERANCE = 0.02
 _SERVICE_TOLERANCE = 1e-3
 
@@ -139,6 +146,54 @@ def _user_payload(context: str, messages: Sequence[str]) -> str:
     return json.dumps({"context": context, "messages": list(messages)}, ensure_ascii=False)
 
 
+def _choice_tool(labels: Sequence[str]) -> Any:
+    """Tool whose input is ``{choice, probabilities}``; the model self-reports the probabilities."""
+    from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+    return ToolInfo(
+        name=_TOOL_NAME,
+        description="Record the chosen label and the probability of every label (summing to 1).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "choice": {"type": "string", "enum": list(labels)},
+                "probabilities": {
+                    "type": "object",
+                    "properties": {label: {"type": "number", "minimum": 0, "maximum": 1} for label in labels},
+                    "required": list(labels),
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["choice", "probabilities"],
+        },
+    )
+
+
+def _tool_prompt(question: ChoiceQuestion) -> str:
+    options = "\n".join(f"{label}: {text}" for label, text in question.criteria.items())
+    return f"{question.instructions}\n{options}\nCall {_TOOL_NAME} once."
+
+
+def _parse_tool_answer(tool_calls: Any, labels: Sequence[str]) -> ChoiceAnswer:
+    """Validate the self-reported choice tool call (uncalibrated probabilities)."""
+    call = next((c for c in tool_calls or [] if c.name == _TOOL_NAME), None)
+    if call is None:
+        raise _failed("model did not call the choice tool")
+    try:
+        data = json.loads(call.arguments) if isinstance(call.arguments, str) else dict(call.arguments)
+    except (TypeError, ValueError) as exc:
+        raise _failed("choice tool arguments are not JSON", exc) from exc
+    if not isinstance(data, Mapping):
+        raise _failed("choice tool arguments are not an object")
+    return _validated(
+        data.get("choice"),
+        data.get("probabilities"),
+        labels,
+        tolerance=_SELF_REPORTED_TOLERANCE,
+        renormalize=True,
+    )
+
+
 class _BaseClassifier:
     """Shared deadline, question lookup and error wrapping."""
 
@@ -188,7 +243,7 @@ class _PerQuestionClassifier(_BaseClassifier):
 
 
 class OpenAIChoiceClassifier(_PerQuestionClassifier):
-    """One-letter answer; probabilities from the letter tokens' logprobs."""
+    """One-letter answer from logprobs; a required choice tool call when the endpoint drops logprobs."""
 
     def __init__(self, config: DuplexConfig) -> None:
         super().__init__(config)
@@ -204,10 +259,23 @@ class OpenAIChoiceClassifier(_PerQuestionClassifier):
                 timeout=config.timeout_seconds,
             ),
         )
+        self.uses_tool = False
+        """Set once a response came back without logprobs; later questions skip the logprobs request."""
 
     async def _ask_one(self, question: ChoiceQuestion, context: str, messages: Sequence[str]) -> ChoiceAnswer:
-        labels = list(question.criteria)
-        letters = dict(zip(string.ascii_uppercase, labels))
+        if not self.uses_tool:
+            letters = dict(zip(string.ascii_uppercase, question.criteria))
+            logprobs = await self._ask_letter(question, letters, context, messages)
+            if _top_logprobs(logprobs) is not None:
+                return parse_logprobs(logprobs, letters)
+            if not self.uses_tool:
+                self.uses_tool = True
+                team_logger.info("duplex: %s returned no logprobs; switching to choice tool calls", self._config.model)
+        return await self._ask_tool(question, context, messages)
+
+    async def _ask_letter(
+        self, question: ChoiceQuestion, letters: Mapping[str, str], context: str, messages: Sequence[str]
+    ) -> Any:
         options = "\n".join(f"{letter} = {label}: {question.criteria[label]}" for letter, label in letters.items())
         reply = await self.client.invoke(
             [
@@ -219,15 +287,36 @@ class OpenAIChoiceClassifier(_PerQuestionClassifier):
             logprobs=True,
             top_logprobs=_TOP_LOGPROBS,
         )
-        return parse_logprobs(reply.logprobs, letters)
+        return reply.logprobs
+
+    async def _ask_tool(self, question: ChoiceQuestion, context: str, messages: Sequence[str]) -> ChoiceAnswer:
+        # "required" without a tool name: some relays reject a named tool_choice.
+        reply = await self.client.invoke(
+            [
+                {"role": "system", "content": _tool_prompt(question)},
+                {"role": "user", "content": _user_payload(context, messages)},
+            ],
+            tools=[_choice_tool(list(question.criteria))],
+            tool_choice="required",
+            max_tokens=_OPENAI_TOOL_MAX_TOKENS,
+        )
+        return _parse_tool_answer(reply.tool_calls, list(question.criteria))
+
+
+def _top_logprobs(logprobs: Any) -> Any:
+    """The first token's ``top_logprobs`` list, or None when the response has none."""
+    try:
+        entries = logprobs["content"][0]["top_logprobs"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return entries or None
 
 
 def parse_logprobs(logprobs: Any, letters: Mapping[str, str]) -> ChoiceAnswer:
     """Normalize the label letters found in the first token's ``top_logprobs``."""
-    try:
-        entries = logprobs["content"][0]["top_logprobs"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise _failed("response has no logprobs; the model or relay does not support them", exc) from exc
+    entries = _top_logprobs(logprobs)
+    if entries is None:
+        raise _failed("response has no logprobs; the model or relay does not support them")
     found: dict[str, float] = {}
     for entry in entries or []:
         token = str(entry.get("token", "")).strip() if isinstance(entry, Mapping) else ""
@@ -266,50 +355,16 @@ class AnthropicChoiceClassifier(_PerQuestionClassifier):
         )
 
     async def _ask_one(self, question: ChoiceQuestion, context: str, messages: Sequence[str]) -> ChoiceAnswer:
-        from openjiuwen.core.foundation.tool.schema import ToolInfo
-
-        labels = list(question.criteria)
-        options = "\n".join(f"{label}: {question.criteria[label]}" for label in labels)
-        tool = ToolInfo(
-            name=_TOOL_NAME,
-            description="Record the chosen label and the probability of every label (summing to 1).",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "choice": {"type": "string", "enum": labels},
-                    "probabilities": {
-                        "type": "object",
-                        "properties": {label: {"type": "number", "minimum": 0, "maximum": 1} for label in labels},
-                        "required": labels,
-                        "additionalProperties": False,
-                    },
-                },
-                "required": ["choice", "probabilities"],
-            },
-        )
         reply = await self.client.invoke(
             [
-                {"role": "system", "content": f"{question.instructions}\n{options}\nCall {_TOOL_NAME} once."},
+                {"role": "system", "content": _tool_prompt(question)},
                 {"role": "user", "content": _user_payload(context, messages)},
             ],
-            tools=[tool],
+            tools=[_choice_tool(list(question.criteria))],
             tool_choice={"type": "tool", "name": _TOOL_NAME},
             max_tokens=256,
         )
-        call = next((c for c in reply.tool_calls or [] if c.name == _TOOL_NAME), None)
-        if call is None:
-            raise _failed("model did not call the choice tool")
-        try:
-            data = json.loads(call.arguments) if isinstance(call.arguments, str) else dict(call.arguments)
-        except (TypeError, ValueError) as exc:
-            raise _failed("choice tool arguments are not JSON", exc) from exc
-        return _validated(
-            data.get("choice"),
-            data.get("probabilities"),
-            labels,
-            tolerance=_SELF_REPORTED_TOLERANCE,
-            renormalize=True,
-        )
+        return _parse_tool_answer(reply.tool_calls, list(question.criteria))
 
 
 class JevChoiceClassifier(_BaseClassifier):

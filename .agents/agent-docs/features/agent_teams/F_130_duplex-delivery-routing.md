@@ -103,7 +103,7 @@
 
 | 格式 | 适用 | 怎么拿到概率 | 复用的 core 客户端 |
 |---|---|---|---|
-| `openai` | DeepSeek、GLM、Kimi 等，OpenAI 格式的中转站 | Chat Completions，`max_tokens=1`、`logprobs=true`、`top_logprobs=20`。选项映射成字母 A、B…，从 `top_logprobs` 里取这些字母，归一化成概率。不返回 logprobs 直接报错，不改用文本猜测 | `OpenAIModelClient`。它在 Chat Completions 路径上把 `logprobs` / `top_logprobs` 原样透传给 SDK，并把响应的 `choice.logprobs` 放进 `AssistantMessage.logprobs` |
+| `openai` | DeepSeek、GLM、Kimi 等，OpenAI 格式的中转站 | Chat Completions，`max_tokens=1`、`logprobs=true`、`top_logprobs=20`。选项映射成字母 A、B…，从 `top_logprobs` 里取这些字母，归一化成概率。响应里没有 logprobs 时，当场用 function calling 重问这一题（`tool_choice="required"`，不指定工具名；`max_tokens=1024`，给推理模型留思考余量；入参与 anthropic 相同，概率是模型自报），同一个 classifier 之后都直接用工具，不再先试 logprobs；工具也失败则报错。不改用文本猜测 | `OpenAIModelClient`。它在 Chat Completions 路径上把 `logprobs` / `top_logprobs` 原样透传给 SDK，并把响应的 `choice.logprobs` 放进 `AssistantMessage.logprobs` |
 | `anthropic` | Anthropic 格式的中转站 | Messages API 没有 logprobs。用 `tool_choice` 强制模型调用一个工具，入参 `{choice: enum, probabilities: {label: number}}`；校验和约等于 1、choice 与最大概率一致。**这个概率是模型自报的，没有校准** | `AnthropicModelClient`（`tools` + `tool_choice={"type": "tool"}`） |
 | `jev` | JEV 格式的服务：TypeSafe 直连，或 OpenRouter、MCL、Yale 等。只有 TypeSafe 用自己的 `/systemone`，其余都用 OpenRouter 通用的 `/decisions` | 服务端直接返回选项和概率 | `core/foundation/llm/system_one` 的 `JevSystemOneClient` / `ChoiceQuestion` / `ChoiceAnswer`；端点、模型、密钥变量的默认值由同目录的 `jev_defaults_for(api_base)` 按 api_base 推出 |
 
@@ -147,7 +147,7 @@ PAUSING 期间到达的 `send`：原实现对 PAUSING 没有分支，消息被�
 | `endpoint` | `""` | 只对 jev 生效，端点路径。留空时按 api_base 推出：主机是 typesafe.ai 用 `/systemone`，其他主机一律用 `/decisions` |
 | `model` | `""` | 模型名。openai / anthropic 必填；jev 按主机给默认值：typesafe.ai 主机取 `jev-1.13.0`，openrouter.ai 主机取 `typesafe/jev-1.13`，可留空；其他主机必填 |
 | `api_key_env` | `""` | **只存环境变量名**。留空时 openai / anthropic 用 `DUPLEX_ROUTER_API_KEY`；jev 按主机选：typesafe.ai 用 `TYPESAFE_API_KEY`，openrouter.ai 用 `OPENROUTER_API_KEY`（这两个和浏览器决策是同一把密钥），其他主机用 `DUPLEX_ROUTER_API_KEY` |
-| `timeout_seconds` | 2.0 | 一次判断的总时限 |
+| `timeout_seconds` | 8.0 | 一次判断的总时限。中转上一次判断约 3–4 秒，8 秒也够没有 logprobs 时再用工具问一次 |
 
 **为什么只存环境变量名**：spec 随 `model_dump` 进 checkpoint、跨进程拉起成员时序列化、也会落到
 日志和团队快照里。存密钥原文就等于把密钥写进这些地方。平台沿用自己的密钥存储，把密钥注入成员
@@ -168,7 +168,7 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
 ## 决策
 
 - **路由器异步接管，不阻塞协调循环。** coordination 的 EventBus 串行处理事件。若在排空邮箱时
-  同步等待监工（最多 2 秒一条），用户输入、审批结果都会排在后面。所以要判断的行交给每成员一个
+  同步等待监工（默认最多 8 秒一条），用户输入、审批结果都会排在后面。所以要判断的行交给每成员一个
   worker 任务，handler 立即返回；路由器执行完动作后自己标已读，并入队一次 `POLL_MAILBOX`
   把判断期间被挡住的行排出来。被接管的行在后续排空里被过滤，不会重复提交。这一批有投递或打断
   失败时不立即重新排空，失败的行留给定时轮询，避免热循环重试。
@@ -194,8 +194,8 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
 - **打断失败回退成插入**：会推翻显式 pause/stop，或重复投递已推进去的重规划消息。
 - **在 `deliver_input` 里同步判断**：阻塞串行事件循环，用户消息会被监工延迟。
 - **把阈值放进配置**：阈值是两条原则的一部分（降级门槛与只记录门槛），不随模型变化。
-- **OpenAI 格式拿不到 logprobs 时改用文本答案**：文本答案没有概率，0.9 门槛失去意义；直接报错，
-  按监工失败处理。
+- **OpenAI 格式拿不到 logprobs 时改用文本答案**：文本答案没有概率，0.9 门槛失去意义。改用
+  function calling 让模型自报概率（与 anthropic 相同）；工具也失败才按监工失败处理。
 - **让 `interrupt` 进 `HarnessProtocol`**：`HarnessProtocol` 是 `runtime_checkable`，加方法会让
   所有不支持打断的实现 `isinstance` 失败。改成独立的可选协议 `InterruptibleHarness`。
 
@@ -208,7 +208,7 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
   不问监工、不限流；被扣住的广播挡住更新的广播，投递失败后不立即重排、下次轮询重投成功；关闭时
   装配原类。
 - `test_classifier.py`：三种格式各一例，mock transport、无网络：openai 请求带 `max_tokens=1` /
-  `logprobs` / `top_logprobs=20`、字母概率归一化、无 logprobs 报错；anthropic 强制工具
+  `logprobs` / `top_logprobs=20`、字母概率归一化；无 logprobs 时改用 `tool_choice="required"` 的工具调用并记住、之后不再请求 logprobs，工具也失败则报错；anthropic 强制工具
   `tool_choice`、枚举入参；jev 两题一请求，TypeSafe 地址请求 `/v1/systemone`，OpenRouter 地址请求 `/api/alpha/decisions`，其他主机请求它自己路径下的 `/decisions` 并读 `DUPLEX_ROUTER_API_KEY`。openai 用例同时证明 core 的
   `OpenAIModelClient` 在 Chat Completions 路径上透传并返回 logprobs。
 - `test_duplex_e2e.py`：真实 NativeHarness 上，队友私信"不能部署 Kafka，改用 Redis Streams"
@@ -222,5 +222,5 @@ human agent 与 bridge avatar 不换。关闭时装配的就是原来的类，**
 - 硬取消生成时，若上下文停在用户消息上，ReAct 的取消清理会补一条 `[Request cancelled by user]`
   标记。紧随其后的重规划消息说明了原因，但标记文字本身不准确。改它要动 core 的 ReActAgent。
 - 打断在工具阶段要等工具跑完，worker 在此期间不处理下一批（仍然只有一个判断在飞）。
-- 广播被扣住期间，更新的广播最多晚一次判断的时间（默认 2 秒）才投递，不等打断（广播不会触发打断）。
+- 广播被扣住期间，更新的广播最多晚一次判断的时间（默认 8 秒）才投递，不等打断（广播不会触发打断）。
 - 设置页（JiuwenSwarm）负责把配置传给 `TeamAgentSpec.duplex`、把密钥注入环境变量，不在本仓库。

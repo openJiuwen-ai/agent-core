@@ -33,8 +33,10 @@ class DuplexConfig(BaseModel):
     api_key_env: str = ""
     """Name of the environment variable that holds the API key (never the key). Empty means
     TYPESAFE_API_KEY / OPENROUTER_API_KEY for jev on those hosts, otherwise DUPLEX_ROUTER_API_KEY."""
-    timeout_seconds: float = Field(default=2.0, gt=0)
-    """Total time budget for one judgment; on expiry the message is delivered as usual."""
+    timeout_seconds: float = Field(default=8.0, gt=0)
+    """Total time budget for one judgment; on expiry the message is delivered as usual.
+    One judgment through a relay takes about 3-4 seconds, so the default also covers
+    the choice-tool retry when the endpoint returns no logprobs."""
 
     @property
     def active(self) -> bool:
