@@ -21,7 +21,7 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Ok
@@ -36,7 +36,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
-from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
 from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
@@ -313,6 +313,25 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.is_initialized is True
 
     assert agent.loop_coordinator is None
+
+
+def test_progressive_agent_exposes_configured_core_tools_directly() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(progressive_tool_enabled=True, enable_task_loop=False)
+    )
+
+    for name in _DEFAULT_DIRECT_TOOL_NAMES:
+        card = ToolCard(id=name, name=name, description=f"{name} tool")
+        assert agent.ability_manager.add(card).added is True
+
+    deferred = ToolCard(id="ordinary_deferred", name="ordinary_deferred")
+    assert agent.ability_manager.add(deferred).added is True
+
+    assert all(
+        agent.ability_manager.get(name).exposure is ToolExposure.DIRECT
+        for name in _DEFAULT_DIRECT_TOOL_NAMES
+    )
+    assert agent.ability_manager.get("ordinary_deferred").exposure is ToolExposure.DEFERRED
 
 
 def test_reconstructed_deep_agents_share_inner_persistence_identity() -> None:
@@ -1135,6 +1154,17 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     )
 
     assert agent.ability_manager.get("task_tool") is not None
+
+
+def test_refresh_subagent_tool_descriptions_updates_retained_rails() -> None:
+    """Hot reload refreshes dynamic tool names without rebuilding task_tool."""
+    agent = DeepAgent(AgentCard(name="refresh_test"))
+    rail = MagicMock()
+    agent._registered_rails = [rail]
+
+    agent._refresh_subagent_tool_descriptions()
+
+    rail.refresh_available_agents.assert_called_once_with(agent)
 
 
 def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:

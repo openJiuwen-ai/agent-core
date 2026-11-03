@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
 class MetaSchema(BaseModel):
@@ -141,15 +141,25 @@ class RuntimeHarnessManifest(BaseModel):
     default_mode: Optional[str] = None
     permissions: Optional[Dict[str, Any]] = None
     progressive_tool_enabled: Optional[bool] = None
-    progressive_tool_always_visible_tools: List[str] = Field(default_factory=list)
-    progressive_tool_default_visible_tools: List[str] = Field(default_factory=list)
-    progressive_tool_max_loaded_tools: Optional[int] = None
 
     subagents: Optional[List[Dict[str, Any]]] = None
     context: Optional[Dict[str, Any]] = None
     stop_eval_conditions: Optional[Dict[str, Any]] = None
 
     model_config = {"populate_by_name": True, "extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _discard_legacy_progressive_visibility(cls, data: Any) -> Any:
+        """Accept old manifests without forwarding removed visibility knobs."""
+        if not isinstance(data, dict):
+            return data
+        removed = {
+            "progressive_tool_always_visible_tools",
+            "progressive_tool_default_visible_tools",
+            "progressive_tool_max_loaded_tools",
+        }
+        return {key: value for key, value in data.items() if key not in removed}
 
 
 def load_runtime_manifest(path: Union[str, Path]) -> RuntimeHarnessManifest:

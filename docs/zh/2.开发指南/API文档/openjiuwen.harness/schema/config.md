@@ -114,9 +114,6 @@ class DeepAgentConfig:
     audio_model_config: Optional[AudioModelConfig] = None
     rails: Optional[List[AgentRail]] = None
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(default_factory=list)
-    progressive_tool_default_visible_tools: List[str] = field(default_factory=list)
-    progressive_tool_max_loaded_tools: int = 12
 ```
 
 DeepAgent 运行时配置。
@@ -148,9 +145,6 @@ DeepAgent 运行时配置。
 | `audio_model_config` | `Optional[AudioModelConfig]` | `None` | 音频模型配置 |
 | `rails` | `Optional[List[AgentRail]]` | `None` | 要注册的 Rails 列表 |
 | `progressive_tool_enabled` | `bool` | `False` | 是否启用渐进式工具暴露 |
-| `progressive_tool_always_visible_tools` | `List[str]` | `[]` | 始终可见的工具名称列表 |
-| `progressive_tool_default_visible_tools` | `List[str]` | `[]` | 默认可见的工具名称列表 |
-| `progressive_tool_max_loaded_tools` | `int` | `12` | 最大同时加载工具数 |
 
 ---
 

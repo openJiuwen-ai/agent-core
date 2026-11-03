@@ -201,9 +201,7 @@ class ProgressiveToolSpec(BaseModel):
     """
 
     enabled: bool = True
-    always_visible_tools: list[str] = []
-    default_visible_tools: list[str] = []
-    max_loaded_tools: int = 12
+    search_limit: int = 5
 
 
 class SysOperationSpec(BaseModel):
@@ -634,9 +632,7 @@ class DeepAgentSpec(BaseModel):
         pt = self.progressive_tool
         return {
             "progressive_tool_enabled": pt.enabled,
-            "progressive_tool_always_visible_tools": pt.always_visible_tools,
-            "progressive_tool_default_visible_tools": pt.default_visible_tools,
-            "progressive_tool_max_loaded_tools": pt.max_loaded_tools,
+            "tool_search_limit": pt.search_limit,
         }
 
 

@@ -277,13 +277,9 @@ class DeepAgentConfig:
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_default_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_max_loaded_tools: int = 12
+    # Default result count for tool_search; the model may override it with limit.
+    # The effective value is clamped to 1..20.
+    tool_search_limit: int = 5
 
     # Plan mode config
     default_mode: AgentMode = AgentMode.NORMAL

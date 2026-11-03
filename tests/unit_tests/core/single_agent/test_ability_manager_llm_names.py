@@ -155,6 +155,38 @@ def test_mcp_server_tool_names_stable_across_list_tool_info_calls() -> None:
     asyncio.run(_run())
 
 
+def test_mcp_schema_refresh_replaces_cached_card_without_duplicate_warning() -> None:
+    async def _run():
+        await Runner.start()
+        am = AbilityManager(owner_id="mcp-refresh")
+        am.set_tool_exposure_policy(True)
+        cfg = McpServerConfig(server_name="review", server_path="stdio://mock")
+        try:
+            am.add(cfg)
+            with patch.object(
+                Runner.resource_mgr,
+                "get_mcp_tool_infos",
+                AsyncMock(side_effect=[
+                    [ToolInfo(name="lookup", description="old", parameters={})],
+                    [ToolInfo(name="lookup", description="new", parameters={"type": "object"})],
+                ]),
+            ):
+                await am.list_tool_info()
+                revision = am.registry_revision
+                await am.list_tool_info()
+
+            card = am.get("mcp_review_lookup")
+            assert card.description == "new"
+            assert card.input_params == {"type": "object"}
+            assert card.exposure.value == "deferred"
+            assert am.registry_revision == revision + 1
+        finally:
+            am.remove("review")
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
 def test_raw_key_wins_over_stale_alias_in_routing() -> None:
     """A later registration under an alias name must win everywhere.
 

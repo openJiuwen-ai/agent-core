@@ -60,7 +60,7 @@ from openjiuwen.harness.tools.todo import (
     TodoTool,
     create_todos_tool,
 )
-from openjiuwen.harness.tools.tool_discovery import LoadToolsTool, SearchToolsTool
+from openjiuwen.harness.tools.tool_discovery import ToolCallTool, ToolSearchTool
 from openjiuwen.harness.tools.web import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -91,14 +91,12 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "create_cron_tools",
-    "SearchToolsTool",
-    "LoadToolsTool",
+    "ToolSearchTool",
+    "ToolCallTool",
     "ImageOCRTool",
     "ListDirTool",
     "ListSkillTool",
-    "LoadToolsTool",
     "ReadFileTool",
-    "SearchToolsTool",
     "SkillTool",
     "TodoCreateTool",
     "TodoListTool",

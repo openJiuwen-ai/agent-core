@@ -145,12 +145,9 @@ def _handle_prebuilt_card(
         overrides['stateless'] = True
 
     if overrides:
-        new_card = ToolCard(
-            name=overrides.get('name', card.name),
-            description=overrides.get('description', card.description),
-            input_params=overrides.get('input_params', card.input_params),
-            stateless=overrides.get('stateless', card.stateless),
-        )
+        # Keep runtime policy and the other card metadata when the decorator
+        # only overrides a subset of fields.
+        new_card = card.model_copy(update=overrides)
         return LocalFunction(card=new_card, func=func)
 
     # Use card as-is
