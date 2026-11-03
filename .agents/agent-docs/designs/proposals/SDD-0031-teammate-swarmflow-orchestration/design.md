@@ -6,8 +6,8 @@ status: draft
 stage: proposals
 reviewers: []
 created: 2026-10-27
-updated: 2026-10-31
-version: 3
+updated: 2026-11-03
+version: 4
 domain: core
 modules: [agent_teams, agent_teams/workflow]
 tags: [swarmflow, teammate, orchestration, attribution, executor, resume]
@@ -46,8 +46,8 @@ leader 代跑，run 的进展叙述、结果注入、暂停恢复全部落在 le
 4. **human 往返硬化**：human 节点的 timeout 只计"等人"，慢回复不再触发重复弹窗与
    重问。
 
-非目标：跨进程/external-cli worker 的工具开放；叙述去重表机制（重放即设计，去重
-移除）。
+非目标：跨进程/external-cli worker 的工具开放（后由 §8.1 打通 SDK 族发起者方向）；
+叙述去重表机制（重放即设计，去重移除）。
 
 ## 2. 共享设施与工具开放
 
@@ -431,12 +431,8 @@ flowchart TD
 
 ## 8. 边界与遗留
 
-- **三方成员不接入的原因**：`SwarmflowTool` 是 NativeHarness 的 `AsyncTool`——invoke
-  立即返回，run 在后台跑，终态结果作为 follow-up 注入下一轮。外部 CLI 成员的工具通道
-  是一轮 turn 内的同步请求/应答，既没有后台任务注册表，也没有 follow-up 注入通道，
-  承载不了这套契约。第一层原因更表面：external-CLI 成员不经 `inprocess_spawn`，拿不到
-  `SwarmflowInfra` 注入，工厂的 resolver gate 直接把工具摘掉。所以这是 inprocess-only
-  的能力边界。
+- **三方成员（SDK 族）发起支持**：外部 CLI 成员（claude/codex）经
+  `ExternalSwarmflowHost` 适配器持有 `swarmflow` 工具，见 §8.1。
 - **与小飞机（会话灯）的关系**：run 独立于对话轮存活，灯的开关不由 run 决定。灯由两道
   hold 撑住：任务进行中（框架层成员 BUSY）与 run-lamp（嵌入层 run 活跃）。teammate 的 run
   通常包在任务里，所以灯亮满 run 全程。用户已裁决灯语义 = 任务全部完成 + 对话输出完成，
@@ -448,6 +444,45 @@ flowchart TD
   后续批次统一脚本路径。
 - **swarmflow 提示词缺 human 节点参数说明**（遗留）：描述里没写 human 节点
   `options.timeout` 等参数的语义，模型不易正确使用；后续补提示词。
+
+### 8.1 三方成员 swarmflow 发起支持
+
+外部 CLI 成员（claude / codex SDK 族）作为发起者调 `swarmflow` 工具，语义与本进程
+成员一致：invoke 即还控、结果 follow-up 回灌、归因 `executor`=成员名、控制面走
+会话级共享 controller。CLI 子进程只承担发起决策；工具执行、run 引擎、infra、
+controller 全部留在 team 进程。
+
+`SwarmflowTool` 通过 `parent_agent` 读取五个宿主依赖。外部 CLI 成员没有
+NativeHarness，由 `ExternalSwarmflowHost`（`workflow/external_swarmflow_host.py`）
+提供同构面：
+
+| `SwarmflowTool` 探针 | host 提供 | NativeHarness 语义 |
+|---|---|---|
+| `launch_async_tool` | 自有 `AsyncToolRuntime`（协程在 team 进程跑） | harness 异步工具运行时 |
+| 完成注入 | `inject → member_runtime.send(immediate=False)` | follow-up 回灌 |
+| `build_context.member_name` | 从成员 spec 派生 | run 归因键 |
+| `model` | 恒 None（CLI 模型与池不对齐，worker 走 base spec/池解析） | 发起者模型 |
+| `background_task_controller` | 会话级共享控制器 | pause/stop/stop_by_owner |
+
+`SwarmflowTool`、两条工具通道（claude SDK MCP 桥 / codex ToolGateway）、工厂减法门
+零改动——工具对外一个名字、一个 schema、一个 invoke，差异全部收在 host 适配器。
+`external_cli_spawn._bind_protocol_member_team_tools` 两条通道各传 `parent_agent=host`
++ 五共享句柄（来自 `TeamInfra.swarmflow`，与 leader 同源：一个 governor、一个账本）。
+
+成员发起的 run 内再派三方 worker（`agent(options={"agent_type":...})`）：host 派生
+成员 context 后回写 `SWARMFLOW_EXTERNAL_CLI_AGENTS` / `SWARMFLOW_EXPERT_SPECS` 两个
+extras key（`_gate_agent_type` 的允许表从 build_context extras 读取，不回写则 inner
+节点按 "not declared" 拒绝）。
+
+边界：adapter 族（gemini/openclaw/hermes 等一次性子进程）与三方 harness provider 的
+工具在 out-of-band MCP server 独立进程执行，infra 状态会跨进程分裂，本设计不覆盖；
+配置面不注入该工具即保持现状，跨进程桥待另行立项。
+
+验证：UT（`test_external_swarmflow_host.py` host 探针 7 项 +
+`test_external_cli_spawn_wrapper.py` 接线 3 项）；ST 三层——回灌归属（成员 turn 收到
+结果而非错发 leader）、inner `agent_type` 节点真实执行（codex 节点产出结果）、
+codex+claude 双成员矩阵；Web UI 端到端（codex 成员发起→completed→成员汇报，run 卡
+归因 executor=成员名）。
 
 ## 9. 验证
 
