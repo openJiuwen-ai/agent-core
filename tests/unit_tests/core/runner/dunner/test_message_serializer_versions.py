@@ -15,19 +15,21 @@ from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import (
 )
 
 
-def _old_decode(value: object) -> object:
-    """Freeze the legacy marker-based consumer, with no new format support."""
+def _old_decode(value: object, *, escaped: bool = False) -> object:
+    """Freeze both historical consumers without supporting the new envelope."""
     if isinstance(value, list):
-        return [_old_decode(item) for item in value]
+        return [_old_decode(item, escaped=escaped) for item in value]
     if isinstance(value, dict):
         if value.get("__type__") == "datetime":
             return datetime.datetime.fromisoformat(value["value"])
-        fields = {key: _old_decode(item) for key, item in value.items() if key != "__class__"}
+        fields = {key: _old_decode(item, escaped=escaped) for key, item in value.items() if key != "__class__"}
         if "__class__" in value:
             name = value["__class__"]
             if name not in TYPE_REGISTRY:
                 raise ValueError(f"Unknown payload class: {name}")
             return TYPE_REGISTRY[name].model_validate(fields)
+        if escaped:
+            return {key.removeprefix("__dsh_escaped__"): item for key, item in fields.items()}
         return fields
     return value
 
@@ -74,3 +76,35 @@ def test_legacy_writes_reject_payload_old_receivers_would_corrupt(payload: dict)
 def test_unknown_wire_version_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unsupported MQ wire version"):
         deserialize_message(b'{"__class__":"DmqWireEnvelope","version":3,"message":{}}')
+
+
+def test_explicit_escaped_reader_preserves_upstream_writer_payload() -> None:
+    """Decode a frozen message from the unversioned escaped upstream writer."""
+    data = (
+        b'{"__class__":"DmqResponseMessage","payload":'
+        b'{"__dsh_escaped____class__":"business",'
+        b'"__dsh_escaped____type__":"datetime","value":"not-a-date",'
+        b'"__dsh_escaped____dsh_escaped__x":1,"x":2}}'
+    )
+    expected = {"__class__": "business", "__type__": "datetime", "value": "not-a-date", "__dsh_escaped__x": 1, "x": 2}
+    assert deserialize_message(data, legacy_key_encoding="escaped").payload == expected
+    assert _old_decode(json.loads(data), escaped=True).payload == expected
+
+
+def test_explicit_escaped_writer_is_readable_by_upstream_consumer() -> None:
+    """Preserve marker and prefix keys with the actual upstream decoding rules."""
+    message = DmqResponseMessage(payload={
+        "__class__": "business", "__type__": "datetime", "value": "not-a-date",
+        "nested": [{"__dsh_escaped__x": 1, "x": 2}],
+        "timestamp": datetime.datetime(2026, 11, 3),
+    })
+    data = serialize_message(message, legacy_key_encoding="escaped")
+    assert _old_decode(json.loads(data), escaped=True) == message
+    assert deserialize_message(data, legacy_key_encoding="escaped") == message
+
+
+def test_version_two_keys_are_not_unescaped_in_legacy_compatibility_mode() -> None:
+    """The envelope determines decoding even when legacy traffic uses escapes."""
+    message = DmqResponseMessage(payload={"__dsh_escaped__x": 1, "__class__": "business"})
+    data = serialize_message(message, wire_version=2, legacy_key_encoding="escaped")
+    assert deserialize_message(data, legacy_key_encoding="escaped") == message

@@ -19,6 +19,10 @@ files:
   - openjiuwen/core/context_engine/context_engine.py
   - openjiuwen/core/controller/modules/intent_recognizer.py
   - openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py
+  - openjiuwen/core/runner/runner_config.py
+  - openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py
+  - openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py
+  - openjiuwen/extensions/message_queue/message_queue_pulsar.py
   - openjiuwen/extensions/a2a/a2a_agent_executor.py
 ---
 
@@ -52,16 +56,38 @@ files:
 
 - `serialize_message(..., wire_version=1)` 为默认行为，继续输出旧格式；新版 reader 不根据
   `__dsh_escaped__` 业务键前缀去掉任何字符。可被旧格式表达的载荷支持旧写新读、新写旧读。
-- 旧 reader 无法表达普通字典里的 `__class__` 或 `__type__="datetime"`。默认 writer
+- 原始字面量格式的旧 reader 无法表达普通字典里的 `__class__` 或 `__type__="datetime"`。默认 writer
   遇到这些冲突时抛出 `ValueError`，禁止静默改键或伪装成可兼容格式。
 - `wire_version=2` 显式写 `DmqWireEnvelope/version=2`；普通字典使用带类型标识的键值对容器，
   不修改业务键。嵌套模型和 datetime 保留类型。reader 自动识别 envelope，未知版本拒绝读取。
+- `MessageQueueConfig.wire_version` 贯穿队列工厂、FakeMQ 和 Pulsar 的生产者；
+  `legacy_key_encoding` 为 `literal`（默认）或 `escaped`，同时决定 v1 写入及无版本消息的读取规则。
+  `escaped` 精确兼容 upstream `69e0ce1b0` 的转义格式：写入时对保留键和已有前缀多加一层
+  `__dsh_escaped__`，读取普通字典时仅去掉一层；有版本的 v2 信封始终按 v2 读取，不受该设置影响。
+- 与原始 reader 通信用默认 `wire_version=1, legacy_key_encoding="literal"`；
+  与 upstream 的转义 reader/writer 通信用 `wire_version=1, legacy_key_encoding="escaped"`。
+  同一无版本队列中的历史消息必须采用已知的统一编码；两种格式不能通过键内容可靠自动识别。
+- 全部接收端升级后用 `MessageQueueConfig(wire_version=2, legacy_key_encoding=...)` 启用 v2；
+  `legacy_key_encoding` 继续按队列中尚存的无版本消息选择。直接构造 `FakeMQ`、`MessageQueuePulsar`
+  或调用 `MessageQueuePulsar.start_with_retry` 时提供同名关键字；Pulsar 回退 FakeMQ 保留两项配置。
 - 必须先升级接收端，再由调用方选择 v2；内置队列不自动协商、不自动切换 writer。
   v2 对旧 reader 不兼容，应明确失败，不能承诺滚动升级期间任意保留键都能透传给旧 reader。
 
+配置示例（确认所有接收端支持 v2，历史队列消息采用转义格式）：
+
+```python
+MessageQueueConfig(
+    type="pulsar",
+    pulsar_config=PulsarConfig(url="pulsar://localhost:6650"),
+    wire_version=2,
+    legacy_key_encoding="escaped",
+)
+```
+
 ## 4. 支持边界与验证入口
 
-未版本化但已经做过转义的数据无法仅靠内容与旧字面量无歧义地区分，不能自动猜测迁移。
+未版本化但已经做过转义的数据无法仅靠内容与旧字面量无歧义地区分，不能自动猜测迁移；
+必须按部署或队列的既有编码显式选择 `legacy_key_encoding`，不能混入另一种无版本格式。
 新 WAL 和含冒号的新版 scope key 不保证旧程序可读；已有原始历史数据保持新程序可读。
 `.link` 多文件写入沿用既有 flush 行为，不新增跨文件事务或多 writer 保证。
 

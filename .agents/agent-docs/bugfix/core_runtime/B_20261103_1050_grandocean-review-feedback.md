@@ -19,6 +19,10 @@ files:
   - openjiuwen/core/context_engine/context_engine.py
   - openjiuwen/core/controller/modules/intent_recognizer.py
   - openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py
+  - openjiuwen/core/runner/runner_config.py
+  - openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py
+  - openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py
+  - openjiuwen/extensions/message_queue/message_queue_pulsar.py
   - openjiuwen/extensions/a2a/a2a_agent_executor.py
 designs: []
 design_note: 用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。
@@ -86,3 +90,28 @@ VCS 原有模块说明同步版本字段与实例保留约束。
 原始未转义历史可读；已写入但未标记版本的歧义转义数据需要外部版本依据才能迁移。
 用户随后明确授权提交、推送并创建新 PR，无需再次确认。交付按运行时代码与测试、兼容规约与故障记录
 两个提交组织，均复用原七个 PR 共同关联的 issue #2113；实际提交与 PR 状态以 Git/GitCode 记录为准。
+
+
+## 2026-11-03 MQ 检视补充修复
+
+PR !3553 的两条意见均可复现：删除无版本转义读取后，与 upstream `69e0ce1b0` 的收发端混用会改键；
+内置 FakeMQ / Pulsar 未透传 `wire_version`，保留键载荷在默认格式拒绝后无法通过生产入口选择 v2。
+此前“原始旧 reader 可读”的测试只模拟转义功能合入前的 reader，不能作为转义 reader 的兼容证据。
+
+现通过 `MessageQueueConfig` 的 `wire_version` 和 `legacy_key_encoding` 显式配置读写：
+默认 `1/literal` 保留原始历史键；`1/escaped` 双向兼容上游无版本转义格式；v2 信封独立决定读取规则。
+配置贯穿工厂、FakeMQ、Pulsar 订阅和生产入口，`start_with_retry` 回退时保留配置。
+同时修正工厂中已不存在的 Pulsar 模块导入路径，使真实工厂入口可用。读端单次解析 JSON，避免重复解析。
+
+不恢复无条件反转义：未版本化格式本身存在歧义，不能判断前缀是业务键还是转义标记；
+不遇错自动改写 v2：旧接收端无法识别信封。选择格式必须依据部署接收端及队列中历史消息的实际编码。
+配置及示例以当前 [兼容规约](../../specs/core_runtime/S_01_runtime-data-compatibility.md) 为准。
+
+新增验证覆盖冻结的旧转义字节、独立模拟的转义 reader、嵌套保留键 / datetime、v2 的前缀键保持、
+FakeMQ 真实订阅交付、工厂构造 Pulsar 后捕获 SDK 发送字节、Pulsar 接收旧转义消息及确认、
+重试回退后实际交付，以及非法配置拒绝。首次 Pulsar 接收测试使用了没有 `type` 的基础 QueueMessage fixture，
+改为生产链路使用的 DmqResponseMessage 后通过；没有改变产品日志或收发语义来迁就 fixture。
+
+本轮在 core `.venv` 中补齐 `pulsar-client` 可选依赖；未修改依赖清单或锁文件。
+序列化与扩展 MQ 定向测试 **47 passed**；连同原 PR 的 VCS、scope、A2A 等回归、队列与配置测试及文档同步测试
+合并执行共 **197 passed**（含前述 47 项，不相加）。未连接真实 Pulsar broker，未运行格式化或静态检查。
