@@ -1093,6 +1093,29 @@ def test_team_agent_recover_from_session_restores_session_id():
     assert agent.session_id == session_id
 
 
+@pytest.mark.parametrize("live", ["off", "changed", "no_runtime_spec"])
+def test_team_agent_recover_from_session_takes_duplex_from_live_spec(live):
+    """Duplex is host configuration: a cold restart applies the current setting
+    (including turning it off) instead of the checkpointed one."""
+    from openjiuwen.agent_teams.duplex.config import DuplexConfig
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
+    old = DuplexConfig(enabled=True, mode="active", api_base="https://old.example/v1", model="old")
+    session = create_agent_team_session(session_id=f"recover_duplex_{uuid.uuid4().hex}", team_id="duplex_team")
+    team_spec = {"team_name": "duplex_team", "display_name": "duplex_team", "leader_member_name": "leader"}
+    context = {"role": "leader", "member_name": "leader", "desc": "leader", "team_spec": team_spec}
+    context.update(messager_config={}, db_config={})
+    spec = {"team_name": "duplex_team", "agents": {"leader": {}}, "duplex": old.model_dump()}
+    write_team_namespace(session, "duplex_team", {"spec": spec, "context": context})
+    runtime_spec = None if live == "no_runtime_spec" else _runtime_spec("duplex_team")
+    if live == "changed":
+        runtime_spec.duplex = old.model_copy(update={"model": "new", "timeout_seconds": 10.0})
+
+    agent = TeamAgent.recover_from_session(session, "duplex_team", runtime_spec=runtime_spec)
+
+    assert agent.spec.duplex == (old if runtime_spec is None else runtime_spec.duplex)
+
+
 def test_team_agent_recover_from_session_marks_history_restored():
     """Cold recovery must tell the backend its history came back (F_76).
 
