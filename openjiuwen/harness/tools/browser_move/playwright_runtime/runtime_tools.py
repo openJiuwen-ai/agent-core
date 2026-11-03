@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
@@ -21,6 +22,20 @@ _ctx_parent_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "playwright_runtime_parent_request_id",
     default="",
 )
+
+
+def _probe_one_step_content(data: Dict[str, Any], key: str, fields: tuple[str, ...]) -> str | None:
+    """Keep a small probe summary for the next model step, never as durable page state."""
+    items = data.get(key)
+    if not isinstance(items, list):
+        return None
+    summary = [
+        {field: str(item[field])[:200] for field in fields if item.get(field)}
+        for item in items[:5]
+        if isinstance(item, dict)
+    ]
+    summary = [item for item in summary if item]
+    return json.dumps(summary, ensure_ascii=False, separators=(",", ":")) if summary else None
 
 _CANCEL_DESC = (
     "Cancel an in-progress browser task by session_id. "
@@ -682,6 +697,10 @@ class BrowserProbeInteractivesTool(Tool):
                 success=bool(data.get("ok", True)),
                 data=data,
                 error=data.get("error"),
+                extracted_content=_probe_one_step_content(
+                    data, "elements", ("role", "text", "aria_label", "selector_hint")
+                ),
+                include_extracted_content_only_once=True,
             )
         except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
@@ -744,6 +763,10 @@ class BrowserProbeCardsTool(Tool):
                 success=bool(data.get("ok", True)),
                 data=data,
                 error=data.get("error"),
+                extracted_content=_probe_one_step_content(
+                    data, "cards", ("title", "primary_link", "price", "summary")
+                ),
+                include_extracted_content_only_once=True,
             )
         except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
@@ -789,6 +812,11 @@ class BrowserBatchInteractTool(Tool):
                 success=bool(result.get("ok", True)),
                 data=result,
                 error=result.get("error"),
+                long_term_memory=(
+                    json.dumps(result["extracted"], ensure_ascii=False, default=str, separators=(",", ":"))
+                    if isinstance(result.get("extracted"), dict) and result["extracted"]
+                    else None
+                ),
             )
         except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
