@@ -879,8 +879,8 @@ def test_read_lock_supports_sqlite_without_schema_alias(work_dir, monkeypatch):
     """Read locking falls back to sqlite_master on SQLite versions before 3.33."""
     lock_file = Path(work_dir) / "legacy_sqlite_lock.db"
 
-    def legacy_configure(lock, mode, _timeout, *, blocking, start_time):
-        del blocking, start_time
+    def legacy_configure(lock, mode, _timeout, *, blocking, **kwargs):
+        del blocking, kwargs
         assert mode == "read"
         lock._con.execute("BEGIN TRANSACTION;").close()
         raise sqlite3.OperationalError("no such table: sqlite_schema")
@@ -1551,3 +1551,94 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_cancel_during_backend_release_clears_writer(work_dir, monkeypatch, cancel_count):
+    """Cancellation during release must leave the coordinator reusable."""
+    lock = HybridAsyncReadWriteLock(Path(work_dir) / "cancel_release.db", is_singleton=False)
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    original_release = lock.file_lock.release
+
+    async def delayed_release():
+        release_started.set()
+        await allow_release.wait()
+        await original_release()
+
+    monkeypatch.setattr(lock.file_lock, "release", delayed_release)
+
+    async def writer():
+        async with lock.write(timeout=1.0):
+            pass
+
+    task = asyncio.create_task(writer())
+    try:
+        await asyncio.wait_for(release_started.wait(), timeout=2.0)
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+        allow_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert not lock._writer, "Writer state remained active after release"
+        async with lock.write(timeout=1.0):
+            pass
+    finally:
+        allow_release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if not lock._writer and not lock._readers:
+            await lock.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_cancel_during_backend_acquire_releases_lock(work_dir, monkeypatch, cancel_count):
+    """A cancelled caller must clean up a backend acquisition that finishes later."""
+    lock = HybridAsyncReadWriteLock(Path(work_dir) / "cancel_acquire.db", is_singleton=False)
+    acquire_started = asyncio.Event()
+    allow_acquire = asyncio.Event()
+    original_acquire = lock.file_lock.acquire_write
+
+    async def delayed_acquire(**kwargs):
+        acquire_started.set()
+        await allow_acquire.wait()
+        return await original_acquire(**kwargs)
+
+    monkeypatch.setattr(lock.file_lock, "acquire_write", delayed_acquire)
+
+    async def writer():
+        async with lock.write(timeout=1.0):
+            pytest.fail("Cancelled writer entered the protected section")
+
+    task = asyncio.create_task(writer())
+    try:
+        await asyncio.wait_for(acquire_started.wait(), timeout=2.0)
+        owner = lock._owner_task
+        assert owner is not None
+
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+
+        allow_acquire.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert owner.done(), "Caller exited before backend cleanup completed"
+        assert lock._owner_task is None
+        assert not lock._writer
+
+        async with lock.write(timeout=1.0):
+            pass
+    finally:
+        allow_acquire.set()
+        await asyncio.gather(task, return_exceptions=True)
+        if lock._owner_task is not None:
+            await lock._release_file()
+        if not lock._writer and not lock._readers:
+            await lock.close()
