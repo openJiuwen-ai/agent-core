@@ -328,3 +328,6 @@ class SubAgentConfig:
     enable_plan_mode: bool = False
     parallel_tool_calls: bool = True
     restrict_to_work_dir: bool = True
+    # When true, and the child is still above the depth floor, create_subagent
+    # opens the persistent runtime. general-purpose sets this; fork does not.
+    can_delegate: bool = False

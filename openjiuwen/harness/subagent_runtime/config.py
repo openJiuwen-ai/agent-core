@@ -24,6 +24,8 @@ class SubagentRuntimeConfig:
 
     max_subagents: int = 10
     max_concurrent_running: int = 10
+    # Main session is depth 0. 1 keeps delegation on the main session only.
+    max_spawn_depth: int = 2
     turn_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
     spawn_slot_wait_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
     enable_lru_eviction: bool = True

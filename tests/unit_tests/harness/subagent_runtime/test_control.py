@@ -20,6 +20,7 @@ from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
 from openjiuwen.harness.subagent_runtime.models import (
+    SpawnResult,
     SubagentCreateOptions,
     SubagentRecord,
     SubagentStatus,
@@ -313,17 +314,20 @@ async def test_spawn_slot_wait_times_out_without_leaking_quota() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parallel_spawns_beyond_cap_all_succeed() -> None:
+async def test_parallel_spawns_beyond_running_cap_are_rejected() -> None:
     config = SubagentRuntimeConfig(max_subagents=2, max_concurrent_running=2, enable_lru_eviction=True)
-    parent = ControlParentAgent(mock_agent=MockAgent(output="ok", delay_s=0.1))
+    parent = ControlParentAgent(mock_agent=MockAgent(output="ok", delay_s=0.2))
     async with _patched_control(parent=parent, config=config) as control:
-        spawned = await asyncio.gather(*(control.spawn("explore", f"task {i}") for i in range(5)))
-        ids = [item.subagent_id for item in spawned]
-        assert len(set(ids)) == 5
-        assert control._registry.count <= 2
-        result = await control.wait(ids, timeout_ms=2000)
-        assert all(status.kind is SubagentStatusKind.COMPLETED for status in result.statuses.values())
-        assert set(result.results) == set(ids)
+        outcomes = await asyncio.gather(
+            *(control.spawn("explore", f"task {i}") for i in range(5)),
+            return_exceptions=True,
+        )
+        spawned = [item for item in outcomes if isinstance(item, SpawnResult)]
+        rejected = [item for item in outcomes if isinstance(item, BaseException)]
+        assert len(spawned) == 2
+        assert len(rejected) == 3
+        assert all("Concurrent subagent limit reached" in str(item) for item in rejected)
+        assert control._registry.count == 2
 
 
 @pytest.mark.asyncio
@@ -811,22 +815,28 @@ async def test_resume_live_instance_returns_not_restored() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_does_not_normalize_turn_waiting_for_concurrency_slot() -> None:
-    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.3))
     config = SubagentRuntimeConfig(max_concurrent_running=1)
     async with _patched_control(parent=parent, config=config) as control:
-        await control.spawn("explore", "occupy slot")
+        first = await control.spawn("explore", "finish first")
+        await control.wait([first.subagent_id], timeout_ms=2000)
+        first_instance = control._manager.get(first.subagent_id)
+        while first_instance.has_active_turn():
+            await asyncio.sleep(0)
+        running = await control.spawn("explore", "occupy slot")
         await asyncio.sleep(0.02)
-        waiting = await control.spawn("explore", "wait for slot")
-        instance = control._manager.get(waiting.subagent_id)
+        await control.send_input(first.subagent_id, "wait for the running slot")
+        instance = control._manager.get(first.subagent_id)
 
         async def wait_until_worker_claims_turn() -> None:
-            while instance.current_task_id is None:
+            while instance.current_task_id is None or not instance.has_active_turn():
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(wait_until_worker_claims_turn(), timeout=1.0)
         assert instance.agent_status().kind is SubagentStatusKind.PENDING_INIT
+        assert control._manager.find(running.subagent_id) is not None
 
-        result = await control.resume(waiting.subagent_id)
+        result = await control.resume(first.subagent_id)
 
         assert result.restored is False
         assert result.status.kind is SubagentStatusKind.PENDING_INIT

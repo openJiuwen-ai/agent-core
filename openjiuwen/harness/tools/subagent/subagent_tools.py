@@ -150,6 +150,18 @@ class SubagentSpawnTool(Tool):
         role = payload.get("role")
         _validate_spawn_payload(payload)
 
+        control, caller_id, caller_depth, caller_kind, _tool = _runtime_call(
+            self,
+            kwargs.get("session"),
+        )
+        if caller_kind == "fork":
+            from openjiuwen.harness.subagent_runtime.errors import (
+                FORK_CANNOT_SPAWN,
+                build_subagent_runtime_error,
+            )
+
+            raise build_subagent_runtime_error(FORK_CANNOT_SPAWN)
+
         normalized_type = str(subagent_type).strip()
         if not subagent_type_allowed(normalized_type, self._allowed_subagent_types):
             raise build_error(
@@ -161,7 +173,7 @@ class SubagentSpawnTool(Tool):
             )
         create_type = canonicalize_subagent_type(normalized_type)
 
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        session = kwargs.get("session")
         browser_capabilities = _parse_browser_capabilities(payload, create_type)
         result = await control.spawn(
             create_type,
@@ -170,6 +182,11 @@ class SubagentSpawnTool(Tool):
             role=str(role),
             browser_capabilities=browser_capabilities,
             create_options=SubagentCreateOptions.from_dict(payload),
+            caller_id=caller_id,
+            caller_depth=caller_depth,
+            caller_kind=caller_kind,
+            caller_agent=self._parent_agent,
+            caller_session_id=_caller_session_id(session),
         )
         await control.emit_status_update(result.subagent_id, session=kwargs.get("session"))
         return ToolOutput(
@@ -205,7 +222,7 @@ class SubagentWaitTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control, caller_id, _depth, _kind, _tool = _runtime_call(self, kwargs.get("session"))
 
         subagent_ids = _parse_subagent_ids(payload)
         if not subagent_ids:
@@ -221,7 +238,7 @@ class SubagentWaitTool(Tool):
                 reason="'timeout_ms' must be an integer",
             )
 
-        result = await control.wait(list(subagent_ids), timeout_ms=timeout_ms)
+        result = await control.wait(list(subagent_ids), timeout_ms=timeout_ms, caller_id=caller_id)
         session = kwargs.get("session")
         for sid in subagent_ids:
             await control.emit_status_update(str(sid), session=session)
@@ -268,10 +285,10 @@ class SubagentListTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         _ = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control, caller_id, _depth, _kind, _tool = _runtime_call(self, kwargs.get("session"))
         return ToolOutput(
             success=True,
-            data=control.describe_list(),
+            data=control.describe_list(caller_id=caller_id),
         )
 
     def render_for_llm(self, output: ToolOutput) -> str:
@@ -305,7 +322,7 @@ class SubagentSendInputTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control, caller_id, _depth, _kind, _tool = _runtime_call(self, kwargs.get("session"))
 
         subagent_id = payload.get("subagent_id")
         query = payload.get("query")
@@ -331,6 +348,7 @@ class SubagentSendInputTool(Tool):
             subagent_id,
             str(query),
             interrupt=interrupt,
+            caller_id=caller_id,
         )
         session = kwargs.get("session")
         await control.emit_status_update(subagent_id, session=session)
@@ -367,7 +385,7 @@ class SubagentCloseTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control, caller_id, _depth, _kind, _tool = _runtime_call(self, kwargs.get("session"))
 
         subagent_id = payload.get("subagent_id")
         if not subagent_id or not isinstance(subagent_id, str):
@@ -376,7 +394,7 @@ class SubagentCloseTool(Tool):
                 reason="'subagent_id' is required",
             )
 
-        previous = await control.close(subagent_id, reason="manual")
+        previous = await control.close(subagent_id, reason="manual", caller_id=caller_id)
         session = kwargs.get("session")
         await control.emit_status_update(subagent_id, session=session)
         return ToolOutput(
@@ -410,7 +428,7 @@ class SubagentResumeTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control, caller_id, _depth, _kind, _tool = _runtime_call(self, kwargs.get("session"))
 
         subagent_id = payload.get("subagent_id")
         if not subagent_id or not isinstance(subagent_id, str):
@@ -419,7 +437,7 @@ class SubagentResumeTool(Tool):
                 reason="'subagent_id' is required",
             )
 
-        result = await control.resume(subagent_id)
+        result = await control.resume(subagent_id, caller_id=caller_id)
         session = kwargs.get("session")
         await control.emit_status_update(subagent_id, session=session)
         view = map_status_to_view(result.status)
@@ -441,6 +459,30 @@ class SubagentResumeTool(Tool):
         yield await self.invoke(inputs, **kwargs)
 
 
+def _runtime_call(tool: Tool, session: Any) -> tuple[Any, str | None, int, str, Any]:
+    binding = getattr(tool, "_runtime_binding", None)
+    if binding is not None:
+        return (
+            binding.control,
+            binding.caller_id,
+            binding.caller_depth,
+            binding.caller_kind,
+            tool,
+        )
+    from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
+
+    parent = getattr(tool, "_parent_agent", None)
+    return get_subagent_control(parent, session), None, 0, "", tool
+
+
+def _caller_session_id(session: Any) -> str | None:
+    getter = getattr(session, "get_session_id", None)
+    if not callable(getter):
+        return None
+    session_id = getter()
+    return str(session_id) if session_id else None
+
+
 def build_subagent_tools(
     parent_agent: "DeepAgent",
     *,
@@ -448,6 +490,7 @@ def build_subagent_tools(
     available_agents: str = "",
     agent_id: Optional[str] = None,
     allowed_subagent_types: Collection[str] | None = None,
+    runtime_binding: Any = None,
 ) -> List[Tool]:
     """Build runtime subagent tools (spawn, wait, list, send_input, close, resume)."""
     format_args = {"available_agents": available_agents}
@@ -493,7 +536,7 @@ def build_subagent_tools(
         language=language,
         agent_id=agent_id,
     )
-    return [
+    tools: List[Tool] = [
         SubagentSpawnTool(
             spawn_card,
             parent_agent,
@@ -506,6 +549,9 @@ def build_subagent_tools(
         SubagentCloseTool(close_card, parent_agent, language=language),
         SubagentResumeTool(resume_card, parent_agent, language=language),
     ]
+    for tool in tools:
+        setattr(tool, "_runtime_binding", runtime_binding)
+    return tools
 
 
 __all__ = [

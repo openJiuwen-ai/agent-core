@@ -19,7 +19,20 @@ from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_MIN,
     SubagentRuntimeConfig,
 )
-from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error, raise_subagent_not_found
+from openjiuwen.harness.subagent_runtime.binding import (
+    FORK_TYPE,
+    SpawnFrame,
+    ToolBinding,
+    pop_creation,
+    push_creation,
+)
+from openjiuwen.harness.subagent_runtime.errors import (
+    CONCURRENT_LIMIT_REACHED,
+    DEPTH_LIMIT_REACHED,
+    FORK_CANNOT_SPAWN,
+    build_subagent_runtime_error,
+    raise_subagent_not_found,
+)
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
     ResumeResult,
@@ -137,6 +150,8 @@ class SubagentControl:
         self._evicted_finals: dict[str, SubagentStatus] = {}
         self._claimed_sids: set[str] = set()
         self._shutting_down = False
+        self._quota_lock = asyncio.Lock()
+        self._concurrent_reservations = 0
         self._turns: dict[str, deque[SubagentTurn]] = {}
         self._turn_seq: dict[str, int] = {}
         self._activities: dict[str, deque[SubagentActivity]] = {}
@@ -172,6 +187,11 @@ class SubagentControl:
         """
         del subagent_id, chunk
 
+    @property
+    def config(self):
+        """Runtime limits for this root control, including spawn depth."""
+        return self._config
+
     async def spawn(
         self,
         subagent_type: str,
@@ -182,8 +202,59 @@ class SubagentControl:
         role: str | None = None,
         browser_capabilities: list[str] | None = None,
         create_options: SubagentCreateOptions | None = None,
+        caller_id: str | None = None,
+        caller_depth: int = 0,
+        caller_kind: str = "",
+        caller_agent: Any | None = None,
+        caller_session_id: str | None = None,
     ) -> SpawnResult:
         options = create_options or SubagentCreateOptions()
+        from openjiuwen.harness.tools.subagent.type_aliases import canonicalize_subagent_type
+
+        child_kind = FORK_TYPE if canonicalize_subagent_type(subagent_type) == FORK_TYPE else subagent_type
+        child_depth = caller_depth + 1
+        self._reject_spawn_policy(caller_kind, child_depth)
+        if child_kind == FORK_TYPE:
+            options = SubagentCreateOptions(thinking=options.thinking)
+        await self._reserve_concurrent()
+        try:
+            return await self._spawn_reserved(
+                subagent_type,
+                query,
+                options=options,
+                subagent_id=subagent_id,
+                display_name=display_name,
+                role=role,
+                browser_capabilities=browser_capabilities,
+                caller_id=caller_id,
+                caller_depth=caller_depth,
+                caller_kind=caller_kind,
+                caller_agent=caller_agent,
+                caller_session_id=caller_session_id,
+                child_kind=child_kind,
+                child_depth=child_depth,
+            )
+        finally:
+            await self._release_concurrent_reservation()
+
+    async def _spawn_reserved(
+        self,
+        subagent_type: str,
+        query: str,
+        *,
+        options: SubagentCreateOptions,
+        subagent_id: str | None,
+        display_name: str | None,
+        role: str | None,
+        browser_capabilities: list[str] | None,
+        caller_id: str | None,
+        caller_depth: int,
+        caller_kind: str,
+        caller_agent: Any | None,
+        caller_session_id: str | None,
+        child_kind: str,
+        child_depth: int,
+    ) -> SpawnResult:
         sticky = _runtime_sticky_subagent_type(subagent_type)
         sid = subagent_id or build_subagent_id(
             self._parent_session_id,
@@ -200,32 +271,56 @@ class SubagentControl:
             )
             task_description = self._truncate_task_description(query)
             reservation = await self._acquire_slot()
-
+            frame = SpawnFrame(
+                caller_agent=caller_agent or self._parent_agent,
+                caller_depth=caller_depth,
+                caller_kind=caller_kind,
+                caller_session_id=caller_session_id,
+                child_id=sid,
+                child_depth=child_depth,
+                child_kind=child_kind,
+                control=self,
+                plant_seed=True,
+                task_description=query,
+            )
+            binding = ToolBinding(
+                control=self,
+                caller_id=sid,
+                caller_depth=child_depth,
+                caller_kind=child_kind,
+            )
+            tokens = push_creation(frame, binding)
             try:
-                instance = await self._manager.create(
-                    subagent_type=subagent_type,
-                    subagent_id=sid,
-                    parent_session_id=self._parent_session_id,
-                    display_name=resolved_name,
-                    role=resolved_role,
-                    browser_capabilities=browser_capabilities,
-                    create_options=options,
-                )
-                reservation.commit(
-                    SubagentMetadataBuildParams(
+                try:
+                    instance = await self._manager.create(
+                        subagent_type=child_kind,
                         subagent_id=sid,
-                        subagent_type=subagent_type,
-                        task_id=task_id,
+                        parent_session_id=self._parent_session_id,
                         display_name=resolved_name,
                         role=resolved_role,
-                        task_description=task_description,
+                        browser_capabilities=browser_capabilities,
                         create_options=options,
-                    ).to_metadata(parent_session_id=self._parent_session_id),
-                )
-            except BaseException:
-                reservation.rollback()
-                self._notify_slot_waiters()
-                raise
+                    )
+                    reservation.commit(
+                        SubagentMetadataBuildParams(
+                            subagent_id=sid,
+                            subagent_type=child_kind,
+                            task_id=task_id,
+                            display_name=resolved_name,
+                            role=resolved_role,
+                            task_description=task_description,
+                            create_options=options,
+                            parent_id=caller_id or "",
+                            depth=child_depth,
+                            kind=child_kind,
+                        ).to_metadata(parent_session_id=self._parent_session_id),
+                    )
+                except BaseException:
+                    reservation.rollback()
+                    self._notify_slot_waiters()
+                    raise
+            finally:
+                pop_creation(*tokens)
         finally:
             self._claimed_sids.discard(sid)
         await self._discard_if_shutting_down(sid)
@@ -248,10 +343,71 @@ class SubagentControl:
             status=instance.agent_status(),
         )
 
+    def _reject_spawn_policy(self, caller_kind: str, child_depth: int) -> None:
+        if caller_kind == FORK_TYPE:
+            raise build_subagent_runtime_error(FORK_CANNOT_SPAWN)
+        if child_depth > self._config.max_spawn_depth:
+            raise build_subagent_runtime_error(DEPTH_LIMIT_REACHED)
+
+    def _committed_running(self) -> int:
+        live = 0
+        for metadata in self._registry.list_live():
+            instance = self._manager.find(metadata.subagent_id)
+            if instance is not None and instance.has_active_turn():
+                live += 1
+        return live + self._concurrent_reservations
+
+    async def _reserve_concurrent(self) -> None:
+        async with self._quota_lock:
+            if self._committed_running() >= self._config.max_concurrent_running:
+                raise build_subagent_runtime_error(CONCURRENT_LIMIT_REACHED)
+            self._concurrent_reservations += 1
+
+    async def _release_concurrent_reservation(self) -> None:
+        async with self._quota_lock:
+            if self._concurrent_reservations > 0:
+                self._concurrent_reservations -= 1
+
+    def _parent_of(self, subagent_id: str) -> str | None:
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None:
+            return metadata.parent_id
+        record = self._closed_records.get(subagent_id)
+        if record is not None:
+            return record.parent_id
+        return None
+
+    def _operation_visible(self, subagent_id: str, caller_id: str | None) -> bool:
+        if not caller_id:
+            return True
+        parent_id = self._parent_of(subagent_id)
+        if parent_id is None:
+            return True
+        return parent_id == caller_id
+
+    def _is_descendant(self, subagent_id: str, ancestor_id: str) -> bool:
+        current = self._parent_of(subagent_id)
+        seen: set[str] = set()
+        while current and current not in seen:
+            if current == ancestor_id:
+                return True
+            seen.add(current)
+            current = self._parent_of(current)
+        return False
+
+    def _descendant_count(self, subagent_id: str) -> int:
+        return sum(
+            1
+            for metadata in self._registry.list_live()
+            if self._is_descendant(metadata.subagent_id, subagent_id)
+        )
+
     async def wait(
         self,
         subagent_ids: list[str],
         timeout_ms: int = WAIT_TIMEOUT_MS_DEFAULT,
+        *,
+        caller_id: str | None = None,
     ) -> WaitResult:
         timeout_s = min(max(timeout_ms, WAIT_TIMEOUT_MS_MIN), WAIT_TIMEOUT_MS_MAX) / 1000
         loop = asyncio.get_running_loop()
@@ -262,6 +418,9 @@ class SubagentControl:
         waiters: dict[asyncio.Task[SubagentStatus], str] = {}
 
         for sid in targets:
+            if not self._operation_visible(sid, caller_id):
+                statuses[sid] = SubagentStatus.not_found()
+                continue
             instance = self._manager.find(sid)
             if instance is None:
                 statuses[sid] = self._evicted_finals.get(sid) or SubagentStatus.not_found()
@@ -402,11 +561,14 @@ class SubagentControl:
             for record in self._closed_records.values()
         ]
 
-    def describe_list(self) -> dict[str, Any]:
+    def describe_list(self, *, caller_id: str | None = None) -> dict[str, Any]:
         """Return a unified list view separating live and closed subagents."""
         self.merge_persisted_records()
         live = self.describe_live()
         closed = self.describe_closed()
+        if caller_id:
+            live = [row for row in live if self._row_in_subtree(row, caller_id)]
+            closed = [row for row in closed if self._row_in_subtree(row, caller_id)]
         return {
             "capacity": self.capacity(),
             # Compatibility alias for clients predating live_subagents.
@@ -441,8 +603,13 @@ class SubagentControl:
         query: str,
         *,
         interrupt: bool = False,
+        caller_id: str | None = None,
     ) -> str:
         """Enqueue follow-up input and return a new task_id without blocking."""
+        if not self._operation_visible(subagent_id, caller_id):
+            raise build_subagent_runtime_error(
+                f"subagent closed or not found: {subagent_id}; call subagent_resume first",
+            )
         instance = self._manager.find(subagent_id)
         if instance is None or instance.is_closed():
             raise build_subagent_runtime_error(
@@ -463,8 +630,10 @@ class SubagentControl:
         await self._emit_running_for_turn(subagent_id, task_id)
         return task_id
 
-    async def resume(self, subagent_id: str) -> ResumeResult:
+    async def resume(self, subagent_id: str, *, caller_id: str | None = None) -> ResumeResult:
         """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
+        if not self._operation_visible(subagent_id, caller_id):
+            raise_subagent_not_found(subagent_id)
         existing = self._manager.find(subagent_id)
         if existing is not None and not existing.is_closed():
             status = await self._finalize_resume_idle(subagent_id, existing)
@@ -488,22 +657,46 @@ class SubagentControl:
         self._claim_sid(subagent_id, f"subagent is already live or being restored: {subagent_id}")
         try:
             reservation = await self._acquire_slot()
+            child_kind = record.kind or record.subagent_type
+            child_depth = record.depth or 1
+            tokens = push_creation(
+                SpawnFrame(
+                    caller_agent=self._resume_source_agent(record),
+                    caller_depth=max(child_depth - 1, 0),
+                    caller_kind="",
+                    caller_session_id=None,
+                    child_id=subagent_id,
+                    child_depth=child_depth,
+                    child_kind=child_kind,
+                    control=self,
+                    plant_seed=False,
+                ),
+                ToolBinding(
+                    control=self,
+                    caller_id=subagent_id,
+                    caller_depth=child_depth,
+                    caller_kind=child_kind,
+                ),
+            )
             try:
-                await self._manager.restore(
-                    subagent_id=subagent_id,
-                    subagent_type=record.subagent_type,
-                    parent_session_id=self._parent_session_id,
-                    display_name=record.display_name,
-                    role=record.role,
-                    create_options=record.create_options,
-                )
-                reservation.commit(
-                    self._build_metadata_from_record(record, task_id=None),
-                )
-            except BaseException:
-                reservation.rollback()
-                self._notify_slot_waiters()
-                raise
+                try:
+                    await self._manager.restore(
+                        subagent_id=subagent_id,
+                        subagent_type=record.subagent_type,
+                        parent_session_id=self._parent_session_id,
+                        display_name=record.display_name,
+                        role=record.role,
+                        create_options=record.create_options,
+                    )
+                    reservation.commit(
+                        self._build_metadata_from_record(record, task_id=None),
+                    )
+                except BaseException:
+                    reservation.rollback()
+                    self._notify_slot_waiters()
+                    raise
+            finally:
+                pop_creation(*tokens)
         finally:
             self._claimed_sids.discard(subagent_id)
         await self._discard_if_shutting_down(subagent_id)
@@ -516,7 +709,15 @@ class SubagentControl:
         status = await self._finalize_resume_idle(subagent_id, restored)
         return ResumeResult(status=status, restored=True)
 
-    async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
+    async def close(
+        self,
+        subagent_id: str,
+        reason: str = "manual",
+        *,
+        caller_id: str | None = None,
+    ) -> SubagentStatus:
+        if not self._operation_visible(subagent_id, caller_id):
+            raise_subagent_not_found(subagent_id)
         instance = self._manager.get(subagent_id)
         previous = instance.agent_status()
         if previous.kind is SubagentStatusKind.RUNNING:
@@ -843,6 +1044,9 @@ class SubagentControl:
             created_at_ms=record.created_at_ms,
             updated_at_ms=now_ms,
             create_options=record.create_options,
+            parent_id=record.parent_id,
+            depth=record.depth,
+            kind=record.kind or record.subagent_type,
         )
 
     def _store_closed_record(
@@ -863,6 +1067,9 @@ class SubagentControl:
             closed_at_ms=closed_at_ms,
             closed_reason=close_reason,
             create_options=metadata.create_options,
+            parent_id=metadata.parent_id,
+            depth=metadata.depth,
+            kind=metadata.kind or metadata.subagent_type,
         )
         self._trim_closed_records()
 
@@ -879,6 +1086,9 @@ class SubagentControl:
             closed_at_ms=metadata.closed_at_ms,
             closed_reason=None,
             create_options=metadata.create_options,
+            parent_id=metadata.parent_id,
+            depth=metadata.depth,
+            kind=metadata.kind or metadata.subagent_type,
         )
 
     @staticmethod
@@ -1074,8 +1284,20 @@ class SubagentControl:
             self._turn_seq.pop(sid, None)
             self._activities.pop(sid, None)
 
-    @staticmethod
+    def _row_in_subtree(self, row: dict[str, Any], caller_id: str) -> bool:
+        subagent_id = str(row.get("subagent_id") or "")
+        return bool(subagent_id) and self._is_descendant(subagent_id, caller_id)
+
+    def _resume_source_agent(self, record: SubagentRecord) -> Any:
+        if record.parent_id:
+            instance = self._manager.find(record.parent_id)
+            agent = getattr(instance, "_agent", None) if instance is not None else None
+            if agent is not None:
+                return agent
+        return self._parent_agent
+
     def _closed_record_to_payload(
+        self,
         record: SubagentRecord,
         parent_session_id: str,
     ) -> dict[str, Any]:
@@ -1092,10 +1314,14 @@ class SubagentControl:
             closed_at_ms=record.closed_at_ms,
             status=SubagentStatus.closed(close_reason),
             revision=0,
+            parent_id=record.parent_id,
+            depth=record.depth,
+            kind=record.kind or record.subagent_type,
+            descendant_count=self._descendant_count(record.subagent_id),
         )
 
-    @staticmethod
     def _metadata_to_payload(
+        self,
         metadata: SubagentMetadata,
         *,
         status: SubagentStatus,
@@ -1114,6 +1340,10 @@ class SubagentControl:
             closed_at_ms=metadata.closed_at_ms,
             status=status,
             revision=revision,
+            parent_id=metadata.parent_id,
+            depth=metadata.depth,
+            kind=metadata.kind or metadata.subagent_type,
+            descendant_count=self._descendant_count(metadata.subagent_id),
         )
 
     def _resolve_spawn_presentation(

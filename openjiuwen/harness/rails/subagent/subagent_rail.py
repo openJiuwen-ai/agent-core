@@ -87,12 +87,15 @@ class SubagentRail(DeepAgentRail):
     def init(self, agent) -> None:
         """Register subagent tools on the agent."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
 
-        if not agent.deep_config.subagents:
+        binding = current_tool_binding() or getattr(agent, "_subagent_tool_binding", None)
+        fork_leaf = binding is not None and binding.caller_kind == "fork"
+        if not agent.deep_config.subagents and not fork_leaf:
             logger.info("[SubagentRail] No subagents configured, skipping")
             return
 
-        configured_subagents = list(agent.deep_config.subagents)
+        configured_subagents = list(agent.deep_config.subagents or [])
         available_agents = self._build_available_agents_description(configured_subagents)
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
@@ -101,19 +104,45 @@ class SubagentRail(DeepAgentRail):
                 configured_subagents
             )
             self.tools = []
-            if runtime_subagents:
-                runtime_names = self._subagent_names(runtime_subagents)
+            if fork_leaf:
                 self.tools.extend(
                     build_subagent_tools(
                         parent_agent=agent,
                         language=self.system_prompt_builder.language,
-                        available_agents=self._build_available_agents_description(
-                            runtime_subagents
+                        available_agents=(
+                            "- fork: 不能再派子代理。调用 subagent_spawn 会直接失败。"
+                            if self.system_prompt_builder.language != "en"
+                            else "- fork: cannot spawn subagents. subagent_spawn returns an error."
                         ),
                         agent_id=agent_id,
-                        allowed_subagent_types=runtime_names,
+                        allowed_subagent_types=frozenset({"fork"}),
+                        runtime_binding=binding,
                     )
                 )
+            elif runtime_subagents or binding is None:
+                runtime_names = set(self._subagent_names(runtime_subagents))
+                available_agents = self._build_available_agents_description(runtime_subagents)
+                if binding is None and "fork" not in runtime_names:
+                    runtime_names.add("fork")
+                    fork_line = (
+                        "- fork: 继承当前已经结束的对话、系统提示、工具和模型。"
+                        "需要隔离上下文时用 general-purpose。"
+                        if self.system_prompt_builder.language != "en"
+                        else "- fork: inherits the finished conversation, system prompt, tools, and model. "
+                        "Use general-purpose when the subtask needs an isolated context."
+                    )
+                    available_agents = f"{available_agents}\n{fork_line}".strip()
+                if runtime_names:
+                    self.tools.extend(
+                        build_subagent_tools(
+                            parent_agent=agent,
+                            language=self.system_prompt_builder.language,
+                            available_agents=available_agents,
+                            agent_id=agent_id,
+                            allowed_subagent_types=frozenset(runtime_names),
+                            runtime_binding=binding,
+                        )
+                    )
             if sync_subagents:
                 sync_names = self._subagent_names(sync_subagents)
                 self.tools.extend(
@@ -155,7 +184,7 @@ class SubagentRail(DeepAgentRail):
         logger.info(
             "[SubagentRail] Registered %s tool(s) with %s subagent(s)",
             mode,
-            len(agent.deep_config.subagents),
+            len(agent.deep_config.subagents or []),
         )
 
     def refresh_available_agents(self, agent) -> None:
