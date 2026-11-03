@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -329,24 +330,26 @@ def _wal_run_records(journal_path: str) -> list[dict]:
     return records
 
 
-def _hold_run_records(record_type: str) -> tuple[asyncio.Event, "journal_mod.Journal._append_wal"]:
-    """Patch ``Journal._append_wal`` to hold ``record_type`` open and signal it.
+def _hold_run_records(record_type: str) -> tuple[asyncio.Event, asyncio.Event, "journal_mod.Journal._append_wal"]:
+    """Patch ``Journal._append_wal`` to gate ``record_type`` behind an event.
 
-    Returns ``(started, patched)``; the caller installs ``patched`` (and restores
-    the original afterwards) and waits on ``started`` before cancelling — the
-    run task is then deterministically suspended inside the record write, which
-    is exactly where a controller stop's pending cancellation lands.
+    Returns ``(started, release, patched)``: install ``patched`` with
+    monkeypatch, wait ``started`` — the run task is then deterministically
+    suspended inside the record write, exactly where a controller stop's
+    pending cancellation lands — then issue the cancellations and set
+    ``release`` to let the write finish. Event-driven end to end: no sleeps.
     """
     started = asyncio.Event()
+    release = asyncio.Event()
     orig = journal_mod.Journal._append_wal
 
     async def _hold(self, record):
         if record.get("type") == record_type:
             started.set()
-            await asyncio.sleep(0.1)
+            await release.wait()
         return await orig(self, record)
 
-    return started, _hold
+    return started, release, _hold
 
 
 @pytest.mark.parametrize("cancels", [1, 2])
@@ -357,8 +360,12 @@ def test_stop_seal_survives_cancel_during_seal_write(tmp_path, monkeypatch, canc
     abort signal; when the pre-journal guard has already raised
     ``WorkflowAborted(stop)`` the pending cancellation lands on the seal-write
     await inside the exception handler (a member teardown may cancel a second
-    time mid-write). The seal must still reach the WAL — otherwise a same-run_id
-    relaunch replays the terminated run's cache instead of forcing a fresh id.
+    time mid-write). Two invariants, both asserted here:
+
+    * the seal still reaches the WAL — otherwise a same-run_id relaunch
+      replays the terminated run's cache instead of forcing a fresh id;
+    * the cancellation is re-raised once the write completes — a stop request
+      must not be silently swallowed (CancelledError is a BaseException).
     """
     script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
     journal_path = str(tmp_path / "j.jsonl")
@@ -367,7 +374,7 @@ def test_stop_seal_survives_cancel_during_seal_write(tmp_path, monkeypatch, canc
     ev = AbortSignal()
 
     async def _scenario() -> None:
-        started, patched = _hold_run_records("seal")
+        started, release, patched = _hold_run_records("seal")
         monkeypatch.setattr(journal_mod.Journal, "_append_wal", patched)
         task = asyncio.create_task(
             run_workflow(script, backend=backend, journal_path=journal_path, abort_event=ev)
@@ -378,7 +385,8 @@ def test_stop_seal_survives_cancel_during_seal_write(tmp_path, monkeypatch, canc
         await started.wait()  # engine is suspended inside the seal write
         for _ in range(cancels):
             task.cancel()
-        with pytest.raises(WorkflowAborted):
+        release.set()  # write proceeds; the shield defers the pending cancels
+        with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_scenario())
@@ -387,7 +395,12 @@ def test_stop_seal_survives_cancel_during_seal_write(tmp_path, monkeypatch, canc
 
 
 def test_pause_record_survives_cancel_during_write(tmp_path, monkeypatch):
-    """A pause interrupted by a cancellation still writes its pause record."""
+    """A pause interrupted by a cancellation still writes its pause record.
+
+    Same contract as the seal race above: the record lands first, then the
+    deferred CancelledError is re-raised so the controller's pause (a silent
+    cancel the relauncher consumes) still terminates the engine task.
+    """
     script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
     journal_path = str(tmp_path / "j.jsonl")
     backend = _GatedBackend()
@@ -395,7 +408,7 @@ def test_pause_record_survives_cancel_during_write(tmp_path, monkeypatch):
     ev = AbortSignal()
 
     async def _scenario() -> None:
-        started, patched = _hold_run_records("pause")
+        started, release, patched = _hold_run_records("pause")
         monkeypatch.setattr(journal_mod.Journal, "_append_wal", patched)
         task = asyncio.create_task(
             run_workflow(script, backend=backend, journal_path=journal_path, abort_event=ev)
@@ -405,7 +418,8 @@ def test_pause_record_survives_cancel_during_write(tmp_path, monkeypatch):
         b_gate.set()
         await started.wait()
         task.cancel()
-        with pytest.raises(WorkflowAborted):
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_scenario())
@@ -439,3 +453,38 @@ def test_stop_cancel_while_call_in_flight_still_seals(tmp_path):
     asyncio.run(_scenario())
     seals = [rec for rec in _wal_run_records(journal_path) if rec.get("type") == "seal"]
     assert [rec.get("terminal_status") for rec in seals] == ["stopped"]
+
+
+def test_terminal_write_inner_cancel_propagates_without_spinning():
+    """A cancellation that kills the WRITE task itself propagates promptly.
+
+    The deferral loop discriminates by cancel origin: a CancelledError that
+    came through the shield from the write task (no pending cancel on this
+    coroutine) is re-raised immediately — the record can never land. The
+    pre-fix loop treated it as a deferred outer cancel and re-shielded the
+    terminated task forever; awaiting a done-cancelled task never yields to
+    the loop, so the spin starves it (not even ``asyncio.timeout`` can fire).
+    The daemon-thread watchdog is what turns that regression into a failure
+    instead of a hung run.
+    """
+    from openjiuwen.agent_teams.workflow.engine.runner import _await_terminal_write
+
+    outcome: dict[str, str] = {}
+
+    async def cancelled_write():
+        raise asyncio.CancelledError()
+
+    async def scenario() -> None:
+        try:
+            await _await_terminal_write(cancelled_write)
+        except asyncio.CancelledError:
+            outcome["result"] = "propagated"
+
+    def run_scenario() -> None:
+        asyncio.run(scenario())
+
+    worker = threading.Thread(target=run_scenario, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "terminal write never finished: livelock"
+    assert outcome.get("result") == "propagated"
