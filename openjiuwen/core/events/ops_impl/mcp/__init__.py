@@ -8,7 +8,13 @@ from openjiuwen.core.events.ops_impl.mcp.models import (
     McpCallOutput,
     McpConnectInput,
     McpConnectOutput,
+    McpHttpSpec,
+    McpRegisterInput,
+    McpRegisterOutput,
+    McpRegisterSpec,
+    McpRegisterValue,
     McpStatus,
+    McpStdioSpec,
     McpToolDescriptor,
 )
 
@@ -17,6 +23,12 @@ __all__ = [
     "McpCallOutput",
     "McpConnectInput",
     "McpConnectOutput",
+    "McpHttpSpec",
+    "McpRegisterInput",
+    "McpRegisterOutput",
+    "McpRegisterSpec",
+    "McpRegisterValue",
     "McpStatus",
+    "McpStdioSpec",
     "McpToolDescriptor",
 ]

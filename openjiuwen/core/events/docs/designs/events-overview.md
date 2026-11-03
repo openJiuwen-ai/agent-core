@@ -320,5 +320,5 @@ Core 已有[当前单智能体 Session](../../../session/agent.py)，EventBus �
 | [EV-03 Builder/Ops](../features/F_03_ev03-builder-ops.md) | Builder、独立 Ops、动态能力和上下文隔离 |
 | [EV-04 Build 与业务调用集成](../features/F_04_ev04-event-bus-integration.md) | builtin 自动注册、显式 Build、逐 Handler Ops 和集成验证 |
 | [EV-12 FS 事件与 `ops.fs`](../features/F_12_fs-ops-events.md) | 会话文件能力事件、后端解析与路径边界 |
-| [EV-13 MCP 事件与 `ops.mcp`](../features/F_13_mcp-ops-events.md) | 包内 MCP 声明、连接发布与工具调用 |
+| [EV-13 MCP 事件与 `ops.mcp`](../features/F_13_mcp-ops-events.md) | 动态登记、包内 MCP 声明、连接发布与工具调用 |
 | [Events 特性开发计划](events-development-plan.md) | EV-01～EV-04、M-01、M-02 的状态、依赖、负责人和验证记录 |

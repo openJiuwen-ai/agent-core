@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""``mcp.call`` / ``mcp.connect`` event types and their CORE handlers."""
+"""``mcp.*`` event types and their CORE handlers."""
 
 from __future__ import annotations
 
@@ -24,16 +24,20 @@ from openjiuwen.core.events.ops_impl.mcp.models import (
     McpCallOutput,
     McpConnectInput,
     McpConnectOutput,
+    McpRegisterInput,
+    McpRegisterOutput,
     McpStatus,
+    prepare_mcp_register_input,
 )
 from openjiuwen.core.events.ops_impl.mcp.service import McpService
-from openjiuwen.core.events.types import Event, EventInput
+from openjiuwen.core.events.types import Event, EventInput, EventOutput
 
 if TYPE_CHECKING:
     from openjiuwen.core.events.bus import ExtensionEventBus
 
 MCP_CALL_EVENT_TYPE = "mcp.call"
 MCP_CONNECT_EVENT_TYPE = "mcp.connect"
+MCP_REGISTER_EVENT_TYPE = "mcp.register"
 
 
 def call_input_validator(event_input: EventInput) -> bool:
@@ -66,6 +70,30 @@ def connect_input_validator(event_input: EventInput) -> bool:
     if not (event_input.server_id or (event_input.package_id and event_input.server_name)):
         return False
     return timeout_is_valid(event_input.timeout_ms)
+
+
+def register_input_validator(event_input: EventInput) -> bool:
+    """Validate one ``McpRegisterInput``."""
+
+    if not isinstance(event_input, McpRegisterInput):
+        return False
+    try:
+        prepare_mcp_register_input(event_input)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def register_output_validator(event_output: EventOutput) -> bool:
+    """Validate one ``McpRegisterOutput``."""
+
+    if not isinstance(event_output, McpRegisterOutput):
+        return False
+    try:
+        event_output.validate()
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 async def mcp_call_core(
@@ -107,8 +135,24 @@ async def mcp_connect_core(
     return await McpService.from_ops(ops).connect(request)
 
 
+async def mcp_register_core(
+    event: Event,
+    ops: EventHandlerOps | None,
+    event_next: EventNext,
+) -> McpRegisterOutput:
+    """Register one MCP server for the session's agent."""
+
+    del event_next
+    request = event.event_input
+    if not isinstance(request, McpRegisterInput):
+        raise TypeError("mcp.register requires McpRegisterInput")
+    if ops is None or ops.session_context is None:
+        raise RuntimeError("mcp.register requires EventHandlerOps")
+    return await McpService.from_ops(ops).register(request)
+
+
 def register(bus: ExtensionEventBus) -> None:
-    """Register both ``mcp.*`` event types."""
+    """Register all ``mcp.*`` event types."""
 
     bus.register_event_type(
         MCP_CALL_EVENT_TYPE,
@@ -123,4 +167,11 @@ def register(bus: ExtensionEventBus) -> None:
         mcp_connect_core,
         input_validator=connect_input_validator,
         output_validator=lambda value: isinstance(value, McpConnectOutput),
+    )
+    bus.register_event_type(
+        MCP_REGISTER_EVENT_TYPE,
+        no_match_pattern,
+        mcp_register_core,
+        input_validator=register_input_validator,
+        output_validator=register_output_validator,
     )

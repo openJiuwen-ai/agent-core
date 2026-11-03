@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""``mcp.call`` / ``mcp.connect`` events and their ``ops.mcp`` capabilities."""
+"""``mcp.*`` events and their ``ops.mcp`` capabilities."""
 
 from __future__ import annotations
 
@@ -14,14 +14,22 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.events.bus import ExtensionEventBus
+from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOps, EventHandlerOpsBuilder
 from openjiuwen.core.events.ops_impl.mcp.models import (
     McpCallInput,
     McpCallOutput,
     McpConnectInput,
     McpConnectOutput,
+    McpHttpSpec,
+    McpRegisterInput,
+    McpRegisterOutput,
+    McpRegisterSpec,
+    McpRegisterValue,
     McpStatus,
+    McpStdioSpec,
     McpToolDescriptor,
+    build_mcp_register_input,
 )
 from openjiuwen.core.events.ops_impl.mcp.runtime import require_resource_mgr, set_resource_mgr_provider
 from openjiuwen.core.events.ops_impl.mcp.service import _select_tool
@@ -30,6 +38,7 @@ from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
     Event,
     EventOutput,
+    HandlerLevel,
     PackageMetadata,
     SessionContext,
 )
@@ -184,15 +193,24 @@ class _FakeResourceMgr:
         return Ok(str(server_id))
 
 
+@dataclass
+class _AddAbilityResult:
+    added: bool
+
+
 class _FakeAbilityManager:
     def __init__(self) -> None:
         self.servers: dict[str, McpServerConfig] = {}
         self.add_calls = 0
         self.remove_calls = 0
+        self.add_result: _AddAbilityResult | None = None
 
     def add(self, ability):
         self.add_calls += 1
+        if self.add_result is not None:
+            return self.add_result
         self.servers.setdefault(ability.server_name, ability)
+        return _AddAbilityResult(added=True)
 
     def remove(self, name):
         self.remove_calls += 1
@@ -230,12 +248,26 @@ def _connected_mgr(*, ability: object | None = None) -> _FakeResourceMgr:
     return mgr
 
 
+def _stdio_spec() -> McpRegisterSpec:
+    return McpRegisterSpec(
+        name="notes",
+        transport="stdio",
+        connection=McpStdioSpec(
+            command="python",
+            args=("server.py",),
+            cwd="C:/servers",
+            env={"MCP_MODE": "test"},
+        ),
+    )
+
+
 async def test_ops_build_exposes_mcp_namespace() -> None:
     bus = ExtensionEventBus()
     ops = await _ready_ops(bus)
 
     assert callable(ops.mcp.call)
     assert callable(ops.mcp.connect)
+    assert callable(ops.mcp.register)
 
 
 async def test_ops_require_an_installed_resource_mgr() -> None:
@@ -723,3 +755,169 @@ async def test_resource_mgr_defaults_to_runner(monkeypatch) -> None:
         assert require_resource_mgr() is manager
     finally:
         set_resource_mgr_provider(previous)
+
+
+async def test_register_connects_and_binds_native_config() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    ability = _FakeAbilityManager()
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+    ops = await _ready_ops(bus)
+
+    result = await ops.mcp.register(_stdio_spec())
+
+    config = manager.add_calls[0][0]
+    assert result == McpRegisterValue(server_id=config.server_id, server_name="notes")
+    assert manager.add_calls[0][2] == 60.0
+    assert config.server_name == "notes"
+    assert config.client_type == "stdio"
+    assert config.server_path == ""
+    assert config.params == {
+        "command": "python",
+        "args": ["server.py"],
+        "cwd": "C:/servers",
+        "env": {"MCP_MODE": "test"},
+    }
+    assert ability.get("notes") is config
+
+
+async def test_register_maps_http_and_keeps_event_input_pure() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    ability = _FakeAbilityManager()
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+    captured: list[object] = []
+
+    async def capture(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> McpRegisterOutput:
+        del ops
+        captured.append(event.event_input)
+        return await event_next(event)
+
+    bus.register_event_handler("mcp.register", capture, {}, HandlerLevel.USER)
+    ops = await _ready_ops(bus)
+
+    result = await ops.mcp.register(
+        McpRegisterSpec(
+            name="remote_notes",
+            transport="streamable_http",
+            connection=McpHttpSpec(
+                url="https://mcp.example.com/sse",
+                headers={"Authorization": "Bearer token"},
+            ),
+            timeout_ms=1_500,
+        )
+    )
+
+    config = manager.add_calls[0][0]
+    assert isinstance(captured[0], McpRegisterInput)
+    assert not isinstance(captured[0], McpServerConfig)
+    assert result.server_name == "remote_notes"
+    assert manager.add_calls[0][2] == 1.5
+    assert config.client_type == "streamable-http"
+    assert config.server_path == "https://mcp.example.com/sse"
+    assert config.auth_headers == {"Authorization": "Bearer token"}
+
+
+async def test_register_rejects_duplicate_ability_before_connect() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    ability = _FakeAbilityManager()
+    ability.servers["notes"] = McpServerConfig(server_name="notes", server_path="", client_type="stdio")
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+    ops = await _ready_ops(bus)
+
+    with pytest.raises(RuntimeError, match="already registered"):
+        await ops.mcp.register(_stdio_spec())
+
+    assert manager.add_calls == []
+
+
+async def test_register_cleans_up_resource_when_ability_binding_fails() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    ability = _FakeAbilityManager()
+    ability.add_result = _AddAbilityResult(added=False)
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+    ops = await _ready_ops(bus)
+
+    with pytest.raises(RuntimeError, match="ability registration failed"):
+        await ops.mcp.register(_stdio_spec())
+
+    assert manager.removed == [manager.add_calls[0][0].server_id]
+    assert ability.get("notes") is None
+
+
+async def test_register_surfaces_resource_failure_without_binding() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    manager.add_error = RuntimeError("server unavailable")
+    ability = _FakeAbilityManager()
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+    ops = await _ready_ops(bus)
+
+    with pytest.raises(RuntimeError, match="MCP server registration failed"):
+        await ops.mcp.register(_stdio_spec())
+
+    assert manager.removed == [manager.add_calls[0][0].server_id]
+    assert ability.get("notes") is None
+
+
+async def test_register_user_short_circuit_skips_core() -> None:
+    bus = ExtensionEventBus()
+    manager = _FakeResourceMgr()
+    ability = _FakeAbilityManager()
+    _use_resource_mgr(manager)
+    _bind_agent(_SESSION, ability_manager=ability)
+
+    async def short_circuit(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> McpRegisterOutput:
+        del event, ops, event_next
+        return McpRegisterOutput(
+            value=McpRegisterValue(server_id="custom", server_name="short_circuit")
+        )
+
+    bus.register_event_handler("mcp.register", short_circuit, {}, HandlerLevel.USER)
+    ops = await _ready_ops(bus)
+
+    result = await ops.mcp.register(_stdio_spec())
+
+    assert result.server_name == "short_circuit"
+    assert manager.add_calls == []
+
+
+async def test_register_requires_bound_agent() -> None:
+    bus = ExtensionEventBus()
+    _use_resource_mgr(_FakeResourceMgr())
+    ops = await _ready_ops(bus)
+
+    with pytest.raises(RuntimeError, match="requires an agent AbilityManager"):
+        await ops.mcp.register(_stdio_spec())
+
+
+async def test_register_input_rejects_invalid_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout_ms"):
+        build_mcp_register_input(
+            McpRegisterSpec(
+                name="notes",
+                transport="stdio",
+                connection=McpStdioSpec(command="python"),
+                timeout_ms=0,
+            )
+        )
+
+
+async def test_register_output_rejects_empty_deny() -> None:
+    with pytest.raises(ValueError, match="deny must not be empty"):
+        McpRegisterOutput(deny=" ")

@@ -18,38 +18,154 @@ from openjiuwen.core.events.ops_impl.common import (
 from openjiuwen.core.events.ops_impl.mcp.models import (
     DEFAULT_MCP_CALL_TIMEOUT_MS,
     DEFAULT_MCP_CONNECT_TIMEOUT_MS,
+    DEFAULT_MCP_REGISTER_TIMEOUT_MS,
+    MCP_TRANSPORT_CLIENT_TYPES,
     McpCallInput,
     McpCallOutput,
     McpConnectInput,
     McpConnectOutput,
+    McpRegisterInput,
+    McpRegisterOutput,
+    McpRegisterValue,
     McpStatus,
     McpToolDescriptor,
+    prepare_mcp_register_input,
 )
 from openjiuwen.core.events.ops_impl.mcp.runtime import require_resource_mgr, resolve_ability_manager
 from openjiuwen.core.events.ops_impl.runtime import build_context, resolve_agent
-from openjiuwen.core.events.types import SessionContext
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, McpToolResult
 
 if TYPE_CHECKING:
     from openjiuwen.core.extension.schema.mcp import McpServerSpec
 
 
+def _build_mcp_register_config(data: McpRegisterInput) -> McpServerConfig:
+    client_type = MCP_TRANSPORT_CLIENT_TYPES[data.transport]
+    if data.transport == "stdio":
+        connection = data.connection
+        params: dict[str, Any] = {
+            "command": connection.command,
+            "args": list(connection.args),
+        }
+        if connection.cwd is not None:
+            params["cwd"] = connection.cwd
+        if connection.env:
+            params["env"] = dict(connection.env)
+        return McpServerConfig(
+            server_name=data.name,
+            server_path="",
+            client_type=client_type,
+            params=params,
+            include_image_content=data.include_image_content,
+        )
+
+    connection = data.connection
+    return McpServerConfig(
+        server_name=data.name,
+        server_path=connection.url,
+        client_type=client_type,
+        auth_headers=dict(connection.headers),
+        include_image_content=data.include_image_content,
+    )
+
+
+def _require_mcp_add_success(result: object) -> None:
+    is_ok = getattr(result, "is_ok", None)
+    if callable(is_ok) and is_ok():
+        return
+    failure = result.msg() if callable(getattr(result, "msg", None)) else None
+    if isinstance(failure, BaseException):
+        raise RuntimeError("MCP server registration failed") from failure
+    raise RuntimeError("MCP server registration failed")
+
+
+async def _cleanup_failed_registration(
+    config: McpServerConfig,
+    ability_manager: Any,
+    resource_mgr: Any,
+    *,
+    resource_attempted: bool,
+    ability_added: bool,
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    if ability_added:
+        try:
+            ability_manager.remove(config.server_name)
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    if resource_attempted:
+        try:
+            result = await resource_mgr.remove_mcp_server(
+                server_id=config.server_id,
+                skip_if_tag_not_exists=True,
+                ignore_exception=True,
+            )
+            results = result if isinstance(result, list) else [result]
+            if any(item is not None and getattr(item, "is_err", lambda: False)() for item in results):
+                cleanup_errors.append(RuntimeError("MCP server cleanup returned an error"))
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    if cleanup_errors:
+        raise RuntimeError("MCP server registration cleanup failed") from cleanup_errors[0]
+
+
 class McpService:
     """Run one ``mcp.*`` request against the caller's resource manager."""
 
-    def __init__(self, resource_mgr: Any, context: SessionContext, ability_manager: Any | None) -> None:
-        """Bind the resource manager, the caller's session and its agent tools."""
+    def __init__(self, resource_mgr: Any, ability_manager: Any | None) -> None:
+        """Bind the resource manager and the caller's agent tools."""
 
         self._resource_mgr = resource_mgr
-        self._context = context
         self._ability_manager = ability_manager
 
     @classmethod
     def from_ops(cls, ops: EventHandlerOps) -> McpService:
-        """Resolve the resource manager, session and agent for the calling handler."""
+        """Resolve the resource manager and agent for the calling handler."""
 
         context = build_context(ops)
-        return cls(require_resource_mgr(), context, resolve_ability_manager(resolve_agent(context)))
+        return cls(require_resource_mgr(), resolve_ability_manager(resolve_agent(context)))
+
+    async def register(self, request: McpRegisterInput) -> McpRegisterOutput:
+        """Register one server, then bind its tools to the caller's agent."""
+
+        data = prepare_mcp_register_input(request)
+        manager = self._ability_manager
+        if manager is None:
+            return McpRegisterOutput(deny="mcp.register requires an agent AbilityManager")
+
+        config = _build_mcp_register_config(data)
+        if manager.get(config.server_name) is not None:
+            return McpRegisterOutput(deny=f"MCP server '{config.server_name}' is already registered")
+
+        resource_attempted = False
+        ability_added = False
+        try:
+            resource_attempted = True
+            timeout = resolve_timeout_ms(data.timeout_ms, DEFAULT_MCP_REGISTER_TIMEOUT_MS) / 1000
+            result = await self._resource_mgr.add_mcp_server(config, timeout=timeout)
+            _require_mcp_add_success(result)
+            added = manager.add(config)
+            if not getattr(added, "added", False):
+                raise RuntimeError("MCP ability registration failed")
+            ability_added = True
+        except BaseException:
+            try:
+                await _cleanup_failed_registration(
+                    config,
+                    manager,
+                    self._resource_mgr,
+                    resource_attempted=resource_attempted,
+                    ability_added=ability_added,
+                )
+            except BaseException as cleanup_error:
+                raise RuntimeError("MCP server registration failed and cleanup failed") from cleanup_error
+            raise
+
+        return McpRegisterOutput(
+            value=McpRegisterValue(server_id=config.server_id, server_name=config.server_name)
+        )
 
     async def connect(self, request: McpConnectInput) -> McpConnectOutput:
         """Open a declared server when needed, then publish it to the agent.
