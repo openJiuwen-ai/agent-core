@@ -16,7 +16,6 @@ from openjiuwen.symphony.retrieval.build.io.tree import (
 )
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import (
     BuildConfig,
-    BuildMethod,
     build_catalog_records_from_nodes,
     build_fallback_tree_nodes,
     build_retrieval_text,
@@ -28,9 +27,8 @@ from openjiuwen.symphony.retrieval.build.workflows.artifacts import (
 
 
 class ArtifactsAndIoTests(unittest.TestCase):
-    def test_resolve_build_config_clamps_and_rejects_conflicts(self) -> None:
+    def test_resolve_build_config_clamps_and_rejects_retired_inputs(self) -> None:
         config = BuildConfig(
-            method=BuildMethod.TREE,
             llm_model="tree-model",
             llm_api_key="tree-key",
             tree_branching_factor=0,
@@ -42,7 +40,6 @@ class ArtifactsAndIoTests(unittest.TestCase):
 
         resolved = resolve_build_config(config=config)
 
-        self.assertEqual(resolved.method, BuildMethod.TREE)
         self.assertEqual(resolved.llm_model, "tree-model")
         self.assertEqual(resolved.tree_llm_api_key, "tree-key")
         self.assertEqual(resolved.tree_branching_factor, 8)
@@ -50,10 +47,10 @@ class ArtifactsAndIoTests(unittest.TestCase):
         self.assertEqual(resolved.tree_max_workers, 1)
         self.assertEqual(resolved.tree_equiv_min_lexical_similarity, 1.0)
         self.assertTrue(resolved.generate_tree_html)
-        with self.assertRaisesRegex(ValueError, "Specify either config or runtime_config"):
+        with self.assertRaisesRegex(TypeError, "runtime_config"):
             resolve_build_config(config=BuildConfig(), runtime_config=BuildConfig())
-        with self.assertRaisesRegex(ValueError, "Unsupported build method"):
-            resolve_build_config(config=BuildConfig(method=BuildMethod(8)))
+        with self.assertRaisesRegex(TypeError, "method"):
+            BuildConfig(method=4)
 
     def test_llm_capability_detection_accepts_client_or_key(self) -> None:
         self.assertFalse(can_build_tree_with_llm(BuildConfig()))

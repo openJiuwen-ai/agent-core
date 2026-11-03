@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 import portalocker
 
@@ -24,15 +24,7 @@ from openjiuwen.symphony.retrieval.build.scanners.common import (
 )
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
-from openjiuwen.symphony.retrieval.common.models import RetrieverItem, RetrieverNode
-from openjiuwen.symphony.retrieval.common.prompts import AGENTIC_RETRIEVAL_YAML, get_prompt
-from openjiuwen.symphony.retrieval.search.artifacts.loading import (
-    CatalogRecord,
-    LoadedRetrieverIndex,
-    load_retriever_index,
-)
-from openjiuwen.symphony.retrieval.search.runtime.subtree import DefaultCurrentSubtreeProvider
-from openjiuwen.symphony.retrieval.search.runtime.types import ProgressiveRetrieverConfig, SearchCursor
+from openjiuwen.symphony.retrieval.search.artifacts.loading import CatalogRecord, load_retriever_index
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
 
 TREE_INDEX_FILENAME = "tree_index.yaml"
@@ -109,26 +101,6 @@ class SkillIndexBuildConfig:
     strict_failure: bool = False
 
 
-@dataclass(frozen=True)
-class SkillIndexRuntimeConfig:
-    index_root: str | Path
-    state_filename: str = STATE_FILENAME
-
-
-@dataclass(frozen=True)
-class AgenticRetrievalConfig:
-    top_k: int = 10
-    compact_codes_enabled: bool = False
-    flatten_tree: bool = False
-    max_exposure_depth: int = 1
-    exposure_threshold: int = 12
-    max_tokens: int = 96
-    request_timeout_seconds: float = 120.0
-    index_build_tool_name: str = "skill_index_build"
-    branch_explore_tool_name: str = "skill_branch_explore"
-    branch_peek_tool_name: str = "skill_branch_peek"
-
-
 @dataclass
 class _BuildTask:
     thread: threading.Thread
@@ -152,7 +124,7 @@ class SkillIndexBuildTimeout(RuntimeError):
 
 
 class AgenticSkillRetrievalToolkit:
-    """Single SDK entrypoint for indexed, agent-controlled skill retrieval."""
+    """Build, update, and inspect skill indexes consumed by Discovery."""
 
     def __init__(
         self,
@@ -161,25 +133,14 @@ class AgenticSkillRetrievalToolkit:
         skills: Sequence[SkillRecord | dict[str, Any]] | None = None,
         skills_dir: str | Path | None = None,
         build_config: SkillIndexBuildConfig | None = None,
-        retrieval_config: AgenticRetrievalConfig | None = None,
         llm_config: LLMConfig | None = None,
-        visible_skill_names: Iterable[str] | None = None,
     ) -> None:
         self.index_root = Path(index_root).expanduser().resolve()
         self.index_dir = self.index_root / "index"
         self._build_config = build_config or SkillIndexBuildConfig()
-        self._retrieval_config = retrieval_config or AgenticRetrievalConfig()
         self._llm_config = llm_config or LLMConfig()
         self._skills = _coerce_skill_records(skills)
         self._skills_dir = Path(skills_dir).expanduser().resolve() if skills_dir else None
-        self._visible_skill_names = _normalize_visible_skill_names(visible_skill_names)
-        self._loaded_index: LoadedRetrieverIndex | None = None
-        self._loaded_index_generation = ""
-        self._filtered_root: RetrieverNode | None = None
-        self._node_by_id: dict[str, RetrieverNode] = {}
-        self._path_by_id: dict[str, tuple[str, ...]] = {}
-        self._stats_by_id: dict[str, dict[str, int]] = {}
-        self._catalog_by_payload: dict[str, CatalogRecord] = {}
 
     def build_index(
         self,
@@ -444,7 +405,6 @@ class AgenticSkillRetrievalToolkit:
                 )
                 _publish_index(candidate_dir=output_dir, index_dir=self.index_dir, expected_build_id=build_id)
                 published = True
-                self._clear_loaded_index()
                 elapsed = time.monotonic() - started
                 state = _build_state(
                     status="success",
@@ -759,130 +719,6 @@ class AgenticSkillRetrievalToolkit:
             data={"index_exists": True, "tree": _tree_payload(nodes)},
         )
 
-    def branch_explore(
-        self,
-        node_ids: Sequence[str],
-        *,
-        visible_skill_names: Iterable[str] | None = None,
-        retrieval_config: AgenticRetrievalConfig | None = None,
-        max_exposure_depth: int | None = None,
-    ) -> dict[str, Any]:
-        try:
-            self._ensure_runtime(visible_skill_names=visible_skill_names)
-        except Exception as exc:
-            return _result(False, _index_unavailable_text(_normalize_error(exc), language="en"))
-        nodes, error = self._resolve_nodes(node_ids, default_root=False)
-        if error:
-            return _result(False, error)
-        if any(node.node_id == "ROOT" for node in nodes):
-            return _result(
-                False,
-                "`ROOT` is already summarized in the retrieval prompt. "
-                "Call `branch_explore` with a first-level category id.",
-            )
-        base_config = retrieval_config or self._retrieval_config
-        config = replace(
-            base_config,
-            max_exposure_depth=(
-                max_exposure_depth if max_exposure_depth is not None else base_config.max_exposure_depth
-            ),
-        )
-        provider = DefaultCurrentSubtreeProvider(
-            config=_progressive_config(config),
-            subtree_item_count=lambda current: self._node_stats(current)["skill_count"],
-            cache={},
-            cache_lock=None,
-        )
-        lines = ["# Skill Branch Explore", ""]
-        steps: list[dict[str, Any]] = []
-        candidates: list[dict[str, Any]] = []
-        for index, node in enumerate(nodes):
-            if index:
-                lines.append("")
-            path = self._path_by_id.get(node.node_id, ("ROOT", node.node_id))
-            subtree = provider.get_current_subtree(
-                cursor=SearchCursor(node=node, depth=max(0, len(path) - 1), branch_path=path, top_k=config.top_k)
-            )
-            self._render_explore_fragment(lines, node=node, fragment=subtree.fragment, candidates=candidates)
-            steps.append(_step_payload("explore", node))
-        return _result(
-            True,
-            "\n".join(lines).rstrip(),
-            detailed_output={
-                "skill_tree": {
-                    "query": {"tool": "branch_explore", "node_ids": list(node_ids)},
-                    "steps": steps,
-                    "candidates": candidates,
-                }
-            },
-        )
-
-    def branch_peek(
-        self,
-        node_ids: Sequence[str],
-        *,
-        visible_skill_names: Iterable[str] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            self._ensure_runtime(visible_skill_names=visible_skill_names)
-        except Exception as exc:
-            return _result(False, _index_unavailable_text(_normalize_error(exc), language="en"))
-        nodes, error = self._resolve_nodes(node_ids, default_root=True)
-        if error:
-            return _result(False, error)
-        lines = ["# Skill Branch Peek", ""]
-        steps: list[dict[str, Any]] = []
-        for index, node in enumerate(nodes):
-            if index:
-                lines.append("")
-            self._render_peek_node(lines, node)
-            steps.append(_step_payload("peek", node))
-        return _result(
-            True,
-            "\n".join(lines).rstrip(),
-            detailed_output={
-                "skill_tree": {
-                    "query": {"tool": "branch_peek", "node_ids": list(node_ids)},
-                    "steps": steps,
-                    "candidates": [],
-                }
-            },
-        )
-
-    def render_retrieval_prompt(
-        self,
-        *,
-        language: str = "zh",
-        visible_skill_names: Iterable[str] | None = None,
-        max_children: int = 30,
-    ) -> str:
-        error = self._index_readiness_error()
-        if error:
-            return self._render_index_unavailable_prompt(error, language=language)
-        try:
-            self._ensure_runtime(visible_skill_names=visible_skill_names)
-        except Exception as exc:
-            return self._render_index_unavailable_prompt(_normalize_error(exc), language=language)
-        children = list((self._filtered_root or RetrieverNode("ROOT", "ROOT")).children)
-        category_lines: list[str] = []
-        for child in children[: max(1, int(max_children))]:
-            stats = self._node_stats(child)
-            description = _compact_text(child.description, limit=120)
-            suffix = f" - {description}" if description else ""
-            category_lines.append(f"- `{child.node_id}`{suffix} ({stats['skill_count']} skills)")
-        if len(children) > max_children:
-            category_lines.append(f"- ... {len(children) - max_children} more categories")
-        if not category_lines:
-            category_lines.append(
-                "当前索引树没有第一层分支。" if language.startswith("zh") else "No first-level branches are available."
-            )
-        key = "zh" if language.startswith("zh") else "en"
-        return get_prompt(AGENTIC_RETRIEVAL_YAML, "root_prompt", key).format(
-            build_tool=self._retrieval_config.index_build_tool_name,
-            explore_tool=self._retrieval_config.branch_explore_tool_name,
-            peek_tool=self._retrieval_config.branch_peek_tool_name,
-            categories="\n".join(category_lines),
-        )
 
     def update_skills(
         self,
@@ -895,12 +731,6 @@ class AgenticSkillRetrievalToolkit:
         if skills_dir is not None:
             self._skills_dir = Path(skills_dir).expanduser().resolve()
 
-    def update_visible_skills(self, visible_skill_names: Iterable[str] | None) -> None:
-        self._visible_skill_names = _normalize_visible_skill_names(visible_skill_names)
-        self._clear_loaded_index()
-
-    def close(self) -> None:
-        self._clear_loaded_index()
 
     def _run_async_build(self, **kwargs: Any) -> None:
         build_id = str(kwargs.pop("build_id"))
@@ -1004,45 +834,6 @@ class AgenticSkillRetrievalToolkit:
         state = self._read_committed_index_state(fallback=self._read_state())
         return _is_complete_index(self.index_dir) and str(state.get("fingerprint") or "") == fingerprint
 
-    def _ensure_runtime(self, *, visible_skill_names: Iterable[str] | None = None) -> None:
-        visible = _normalize_visible_skill_names(visible_skill_names)
-        if visible is None:
-            visible = self._visible_skill_names
-        records = self._current_records()
-        expected = _index_fingerprint(records, self._build_config) if records else ""
-        with portalocker.Lock(
-            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
-            mode="a+",
-            timeout=30,
-        ):
-            _recover_index_directory_unlocked(self.index_dir)
-            if not _is_complete_index(self.index_dir):
-                raise RuntimeError(f"skill index is not complete: {self.index_dir}")
-            commit_path = self.index_dir / COMMIT_FILENAME
-            committed = (
-                _read_json_object(commit_path)
-                if commit_path.is_file()
-                else _read_json_object(self.index_root / STATE_FILENAME)
-            )
-            if expected and str(committed.get("fingerprint") or "") != expected:
-                raise RuntimeError("Skill index is stale because skills or build settings changed.")
-            generation = str(committed.get("build_id") or committed.get("fingerprint") or "")
-            if (
-                self._loaded_index is not None
-                and visible == self._visible_skill_names
-                and generation == self._loaded_index_generation
-            ):
-                return
-            loaded = load_retriever_index(self.index_dir)
-        self._loaded_index = loaded
-        self._loaded_index_generation = generation
-        self._visible_skill_names = visible
-        self._catalog_by_payload = {str(record.payload): record for record in loaded.catalog_records}
-        self._filtered_root = _filter_tree(loaded.tree_root, self._catalog_by_payload, visible)
-        self._node_by_id = {}
-        self._path_by_id = {}
-        self._stats_by_id = {}
-        self._index_nodes(self._filtered_root, ("ROOT",))
 
     def _index_readiness_error(self, *, refresh_inventory: bool = False) -> str | None:
         state = self._read_committed_index_state(fallback=self._read_state())
@@ -1057,158 +848,6 @@ class AgenticSkillRetrievalToolkit:
             return "Skill index is stale because skills or build settings changed."
         return None
 
-    def _render_index_unavailable_prompt(self, reason: str, *, language: str) -> str:
-        key = "zh" if language.startswith("zh") else "en"
-        return get_prompt(AGENTIC_RETRIEVAL_YAML, "index_unavailable", key).format(
-            build_tool=self._retrieval_config.index_build_tool_name,
-            reason=_index_unavailable_text(reason, language=language),
-        )
-
-    def _clear_loaded_index(self) -> None:
-        self._loaded_index = None
-        self._loaded_index_generation = ""
-        self._filtered_root = None
-        self._node_by_id = {}
-        self._path_by_id = {}
-        self._stats_by_id = {}
-        self._catalog_by_payload = {}
-
-    def _index_nodes(self, node: RetrieverNode, path: tuple[str, ...]) -> None:
-        self._node_by_id[node.node_id] = node
-        self._path_by_id[node.node_id] = path
-        for child in node.children:
-            self._index_nodes(child, (*path, child.node_id))
-
-    def _resolve_nodes(self, node_ids: Sequence[str], *, default_root: bool) -> tuple[list[RetrieverNode], str]:
-        normalized = [str(item or "").strip() for item in (node_ids or []) if str(item or "").strip()]
-        if not normalized and default_root:
-            normalized = ["ROOT"]
-        if not normalized:
-            return [], "No branch node ids were provided."
-        nodes: list[RetrieverNode] = []
-        missing: list[str] = []
-        for node_id in normalized:
-            node = self._node_by_id.get(node_id)
-            if node is None:
-                missing.append(node_id)
-            else:
-                nodes.append(node)
-        if missing:
-            return [], f"Unknown skill tree branch id(s): {', '.join(missing)}."
-        return nodes, ""
-
-    def _node_stats(self, node: RetrieverNode) -> dict[str, int]:
-        cached = self._stats_by_id.get(node.node_id)
-        if cached is not None:
-            return cached
-        branch_count = 0
-        skill_count = len(node.items)
-        for child in node.children:
-            branch_count += 1
-            child_stats = self._node_stats(child)
-            branch_count += child_stats["branch_count"]
-            skill_count += child_stats["skill_count"]
-        stats = {"branch_count": branch_count, "skill_count": skill_count}
-        self._stats_by_id[node.node_id] = stats
-        return stats
-
-    def _render_peek_node(self, lines: list[str], node: RetrieverNode) -> None:
-        lines.append(f"## Input Node: `{node.node_id}`")
-        children = list(node.children)
-        if not children:
-            lines.append("")
-            lines.append("No child branches.")
-            return
-        lines.append("")
-        for child in children:
-            stats = self._node_stats(child)
-            description = _compact_text(child.description, limit=140)
-            suffix = f" - {description}" if description else ""
-            lines.append(f"- `{child.node_id}`{suffix} ({stats['skill_count']} skills)")
-
-    def _render_explore_fragment(
-        self,
-        lines: list[str],
-        *,
-        node: RetrieverNode,
-        fragment: Any,
-        candidates: list[dict[str, Any]],
-    ) -> None:
-        lines.append(f"## Input Node: `{node.node_id}`")
-        lines.append("")
-        resolutions = {
-            str(resolution.canonical_id): resolution
-            for resolution in fragment.code_to_resolution.values()
-            if getattr(resolution, "item", None) is not None
-        }
-        children = list(getattr(fragment.root, "children", ()) or ())
-        if not children:
-            lines.append("No exposed branches or visible skills.")
-            return
-        self._render_exposed_children(lines, children, resolutions=resolutions, level=3, candidates=candidates)
-
-    def _render_exposed_children(
-        self,
-        lines: list[str],
-        children: Sequence[Any],
-        *,
-        resolutions: dict[str, Any],
-        level: int,
-        candidates: list[dict[str, Any]],
-    ) -> None:
-        terminal_children = [child for child in children if _terminal_resolution(child, resolutions) is not None]
-        branch_children = [child for child in children if _terminal_resolution(child, resolutions) is None]
-        if terminal_children:
-            for index, child in enumerate(terminal_children, start=1):
-                resolution = _terminal_resolution(child, resolutions)
-                entry = self._skill_entry_from_exposed(child, resolution)
-                candidates.append(asdict(entry))
-                lines.append(f"{index}. `{entry.label}`")
-                if entry.description:
-                    lines.append(f"   - Description: {entry.description}")
-                if entry.skill_md_path:
-                    lines.append(f"   - SKILL.md: `{entry.skill_md_path}`")
-            if branch_children:
-                lines.append("")
-        for child in branch_children:
-            node_id = str(getattr(child, "canonical_id", "") or getattr(child, "label", "") or "").strip()
-            title = _compact_text(str(getattr(child, "label", "") or node_id), limit=80)
-            lines.append(f"{'#' * max(3, level)} `{node_id}` {title}".rstrip())
-            description = _compact_text(str(getattr(child, "description", "") or ""), limit=180)
-            if description:
-                lines.append("")
-                lines.append(description)
-            grandchildren = list(getattr(child, "children", ()) or ())
-            if grandchildren:
-                lines.append("")
-                self._render_exposed_children(
-                    lines,
-                    grandchildren,
-                    resolutions=resolutions,
-                    level=level + 1,
-                    candidates=candidates,
-                )
-                lines.append("")
-
-    def _skill_entry_from_exposed(self, child: Any, resolution: Any | None) -> "_SkillEntry":
-        item = getattr(resolution, "item", None)
-        payload = str(getattr(item, "payload", "") or getattr(child, "canonical_id", "") or "").strip()
-        record = self._catalog_by_payload.get(payload)
-        metadata = dict(getattr(record, "metadata", {}) or {}) if record else {}
-        label = str(
-            (getattr(record, "name", "") if record else "")
-            or getattr(item, "label", "")
-            or getattr(child, "label", "")
-            or payload
-        ).strip()
-        description = str(
-            (getattr(record, "description", "") if record else "")
-            or getattr(item, "description", "")
-            or getattr(child, "description", "")
-            or ""
-        ).strip()
-        skill_md_path = str(metadata.get("skill_path") or "").strip()
-        return _SkillEntry(label=label, description=_first_description_line(description), skill_md_path=skill_md_path)
 
     def _set_running_state(
         self,
@@ -1533,13 +1172,6 @@ def _is_running_build_task(task: _BuildTask | None, build_id: Any) -> bool:
     return task.build_id == build_id
 
 
-@dataclass(frozen=True)
-class _SkillEntry:
-    label: str
-    description: str
-    skill_md_path: str
-
-
 def scan_skill_records(skills_dir: str | Path) -> list[SkillRecord]:
     root = Path(skills_dir).expanduser().resolve()
     records: list[SkillRecord] = []
@@ -1648,18 +1280,6 @@ def _to_retrieval_build_config(config: SkillIndexBuildConfig, llm: LLMConfig) ->
     )
 
 
-def _progressive_config(config: AgenticRetrievalConfig) -> ProgressiveRetrieverConfig:
-    return ProgressiveRetrieverConfig(
-        top_k=max(1, int(config.top_k)),
-        max_tokens=max(1, int(config.max_tokens)),
-        request_timeout=config.request_timeout_seconds,
-        compact_boundary_codes_enabled=bool(config.compact_codes_enabled),
-        flatten_full_tree_in_prompt=bool(config.flatten_tree),
-        max_exposure_depth_per_call=max(0, int(config.max_exposure_depth)),
-        exposure_threshold=max(0, int(config.exposure_threshold)),
-    )
-
-
 def _coerce_skill_records(records: Sequence[SkillRecord | dict[str, Any]] | None) -> list[SkillRecord]:
     out: list[SkillRecord] = []
     for record in records or []:
@@ -1698,71 +1318,6 @@ def _write_records_jsonl(records: Sequence[SkillRecord], path: Path) -> None:
         }
         lines.append(json.dumps({"contentExtendParam": content_extend}, ensure_ascii=False, default=str))
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-
-
-def _filter_tree(
-    root: RetrieverNode,
-    catalog_by_payload: dict[str, CatalogRecord],
-    visible_skill_names: frozenset[str] | None,
-) -> RetrieverNode:
-    if visible_skill_names is None:
-        return root
-
-    def item_visible(item: RetrieverItem) -> bool:
-        record = catalog_by_payload.get(str(item.payload))
-        values = {
-            str(item.item_id or "").strip(),
-            str(item.label or "").strip(),
-            str(item.payload or "").strip(),
-        }
-        if record:
-            values.update(
-                {
-                    str(record.worker_id or "").strip(),
-                    str(record.name or "").strip(),
-                    str(record.choice_id or "").strip(),
-                    str(record.payload or "").strip(),
-                }
-            )
-        return any(value in visible_skill_names for value in values if value)
-
-    def visit(node: RetrieverNode) -> RetrieverNode | None:
-        items = tuple(item for item in node.items if item_visible(item))
-        children = tuple(child for child in (visit(child) for child in node.children) if child is not None)
-        if node.node_id == "ROOT" or items or children:
-            return RetrieverNode(
-                node_id=node.node_id,
-                label=node.label,
-                description=node.description,
-                children=children,
-                items=items,
-            )
-        return None
-
-    return visit(root) or RetrieverNode(node_id="ROOT", label="ROOT")
-
-
-def _terminal_resolution(child: Any, resolutions: dict[str, Any]) -> Any | None:
-    selectable = str(getattr(child, "selectable_canonical_id", "") or "").strip()
-    if not selectable:
-        selectable = str(getattr(child, "canonical_id", "") or "").strip()
-    resolution = resolutions.get(selectable)
-    if resolution is not None:
-        return resolution
-    for candidate in resolutions.values():
-        item = getattr(candidate, "item", None)
-        if item is not None and str(getattr(item, "payload", "") or "") == selectable:
-            return candidate
-    return None
-
-
-def _step_payload(kind: str, node: RetrieverNode) -> dict[str, Any]:
-    return {
-        "source": kind,
-        "node_id": node.node_id,
-        "label": node.label,
-        "description": _compact_text(node.description, limit=180),
-    }
 
 
 def _tree_payload(nodes: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2186,12 +1741,6 @@ def _first_description_line(text: str) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
-
-
-def _normalize_visible_skill_names(values: Iterable[str] | None) -> frozenset[str] | None:
-    if values is None:
-        return None
-    return frozenset(str(value or "").strip() for value in values if str(value or "").strip())
 
 
 def _cancel_check(cancel_token: Callable[[], bool] | threading.Event | None) -> Callable[[], bool]:

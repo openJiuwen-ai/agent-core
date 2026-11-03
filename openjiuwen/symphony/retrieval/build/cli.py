@@ -3,7 +3,7 @@ import os
 import shutil
 import time
 
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig, BuildMethod
+from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,6 @@ def main():
     # 配置初始化
     config_start = time.time()
     config = BuildConfig(
-        method=BuildMethod.TREE,
         llm_model=os.getenv("LLM_MODEL_NAME"),
         llm_api_key=os.getenv("OPENAI_API_KEY"),
         llm_base_url=os.getenv("OPENAI_BASE_URL"),

@@ -4,8 +4,8 @@
 
 ## 目标配置边界
 
-- 用户可调策略通过 `SymphonyConfig` 的六个分组组合，每个参数只有一个可写路径。
-  协议身份、模型后端及独立用途的算法和单次调用输入独立维护；归一化结果保留在原运行模块。
+- 用户可调策略通过 `SymphonyConfig` 的五个分组组合，每个参数只有一个可写路径。
+  指纹协议、一次性构树与构建模型连接参数独立维护；归一化结果保留在原运行模块。
   目标 config.py 不再为旧入口的不同默认值声明同义镜像或包装，也不为测试恢复已退役模型。
   新配置尚未接入运行链路。
 - 公共构建使用索引入口默认值和约束，旧底层入口的不同默认值继续由原业务模块维护。
@@ -13,6 +13,14 @@
   回退树策略归 retrieval.build.task，构建展示归 retrieval.build.output，不增加第二个可写路径。
 - `PUBLIC_CONFIG_MODELS` 覆盖根 Schema 可达的子模型，`INTERNAL_CONFIG_MODELS` 登记其余模型。
   模型登记不等于 `__all__` 便利导出范围，新增子节点不自动增加独立导出。
+
+## 能力退役边界
+
+- 旧模型检索服务、分支浏览工具、紧凑编码、检索专用模型后端和独立 `experience` 包已退役，不恢复配置或兼容别名。
+- Discovery 继续使用 `retrieval/search/artifacts/loading.py`、`retrieval/search/runtime/lexical.py`
+  和 `agent/retrieval_toolkit.py` 的发布恢复函数；这些共享路径不能随旧检索服务一并删除。
+- 构树、指纹、编排、动态观测与 Flow 保留；Flow 的 `symphony.experience_recipe.v1` 是现有产物协议，
+  不等于已退役的独立经验库。保持构建指纹和工件格式，不能将新配置 dump 直接替换旧签名输入。
 
 ## 配置文档同步
 

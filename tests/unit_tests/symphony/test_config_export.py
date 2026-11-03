@@ -71,12 +71,12 @@ def test_default_document_contains_only_public_configuration(exporter):
     for model in config.INTERNAL_CONFIG_MODELS:
         assert "\n" + model.__name__ + " # " not in public
         assert "→ " + model.__name__ + " # " not in public
+    assert "全量配置" in public
+    assert "search →" not in public and "toolkit →" not in public and "experience →" not in public
     assert "scan → DirectoryScanConfig" in public
     assert "fingerprint → FingerprintPolicyConfig" in public
     assert "discovery → DiscoveryConfig" in public
-    assert "toolkit → AgenticRetrievalConfig" in public
     assert "flow → FlowConfig" in public
-    assert "experience → ExperienceConfig" in public
     assert "dynamic → DynamicTreeConfig" in public
     assert "expansion → TreeExpansionConfig" in public
     assert "rebalance_interval # 默认=50" in public
@@ -88,13 +88,7 @@ def test_default_document_contains_only_public_configuration(exporter):
     ):
         assert f"{name}_multiplier # 默认={value}" in public
         assert f"── {name} #" not in public
-    assert "query_clusters_per_capability_set # 默认=None" in public
-    assert "每个能力集合内成功查询的聚类数" in public
     assert "capability_cluster_num #" not in public
-    assert "logit_selection 需要启用 render.compact_codes_enabled" in public
-    assert "logit.fallback_mode 必须为 generate" in public
-    assert "selection → RetrievalSelectionConfig" in public
-    assert "request → RetrievalRequestBudgetConfig" in public
     assert "cache_metrics_enabled # 默认=true" in public
     assert "prompt → DiscoveryPromptConfig" in public
     assert "candidate_budget_ratio # 默认=0.01" in public
@@ -103,7 +97,6 @@ def test_default_document_contains_only_public_configuration(exporter):
     assert "max_evidence_chars # 默认=512" in public
     assert "max_description_chars # 默认=140" in public
     assert "max_rule_chars # 默认=120" in public
-    assert "max_output_tokens # 默认=96" in public
     for name in (
         "body_limit", "max_tokens", "evidence_text_limit", "description_limit", "rule_limit",
         "context_window", "cache_observability", "request_timeout_seconds",
@@ -112,7 +105,6 @@ def test_default_document_contains_only_public_configuration(exporter):
     assert "generation →" not in public and "budget →" not in public
     assert "show_tree # 默认=true" in public
     assert "display_capability_root # 默认=None" in public
-    assert "默认=列表（512 项，完整内容见 config.py 默认定义）" in public
     assert "protocol →" not in public and "fingerprint_version #" not in public
     assert "llm →" not in public and "独立内部配置" not in public and "内部模型参考" not in public
     assert "candidate_budget_tokens #" not in public
@@ -129,7 +121,7 @@ def test_optional_reference_covers_all_remaining_internal_fields(exporter):
         assert len(block.splitlines()) == len(model.model_fields) + 1
         for field in model.model_fields:
             assert f"── {field} # " in block or f"── {field} → " in block
-    for name in ("OpenAIClientConfig", "VLLMClientConfig", "TransformersClientConfig"):
+    for name in ("FingerprintProtocolConfig", "OneShotTreeBuildConfig", "RetrievalModelConfig"):
         assert "\n" + name + " # " in internal
     for name in (
         "TreeRequestConfig", "TreeStructureConfig", "IndexTreeStructureConfig", "TreeBuildConfig",

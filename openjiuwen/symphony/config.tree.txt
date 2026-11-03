@@ -2,7 +2,7 @@
 # 目标配置，尚未接入运行链路；当前运行行为仍以原有模块配置为准。
 # 注释标明默认值或必填；→ 表示子模型类型，用户可调子模型在根树完整展开。
 # 不列只读派生属性；长列表展示数量，完整默认内容保留在 config.py。
-# 用户配置树覆盖 48 个模型。
+# 用户配置树覆盖 33 个模型。
 
 # 全量配置
 SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。
@@ -39,7 +39,7 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │           └── enabled # 默认=true；是否允许复用符合身份与内容校验的指纹缓存。
 ├── storage → StorageConfig # 必填；显式声明本集合的产物根目录。
 │   └── artifact_root # 必填；保存 inventory、缓存、tree 和 graph 的根目录；模型校验不会创建目录。
-├── retrieval → RetrievalConfig # 默认=RetrievalConfig()；分类树构建、候选检索、对象发现和工具交互的默认配置。
+├── retrieval → RetrievalConfig # 默认=RetrievalConfig()；分类树构建与对象发现的默认配置。
 │   ├── enabled # 默认=true；允许使用检索入口；独立于编排开关。
 │   ├── build → RetrievalBuildConfig # 默认=RetrievalBuildConfig()；显式构建分类树时使用的策略。
 │   │   ├── structure → RetrievalTreeStructureConfig # 默认=RetrievalTreeStructureConfig()；分类树深度、分支和根分类输入。
@@ -96,60 +96,17 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │   │       ├── show_tree # 默认=true；是否显示构建后的分类树；区别于生成 HTML 预览文件。
 │   │       ├── display_capability_root # 默认=None；输出展示使用的对象目录文本；不影响扫描根目录。
 │   │       └── cache_metrics_enabled # 默认=true；是否记录并展示树构建模型请求的缓存命中和提示指纹统计；独立于 request.caching 的缓存策略开关。
-│   ├── search → RetrievalSearchConfig # 默认=RetrievalSearchConfig()；查询已有分类树时使用的默认策略。
-│   │   ├── top_k # 默认=10；每次检索最多返回的对象数；可在调用时覆盖，不影响已有索引。
-│   │   ├── traversal → RetrievalTraversalConfig # 默认=RetrievalTraversalConfig()；渐进检索的分支探索策略。
-│   │   │   ├── max_branch_choices # 默认=6；一次最多考虑的子分支数量。
-│   │   │   ├── max_parallel_branches # 默认=3；同时搜索的最多分支数。
-│   │   │   ├── enable_parallel_branches # 默认=true；是否启用多个分支的并行搜索。
-│   │   │   ├── branch_choice_slack # 默认=2；相对 top_k 多考虑的分支数量。
-│   │   │   ├── branch_candidate_slack # 默认=1；每个分支额外保留的候选数量。
-│   │   │   └── round_robin_branch_reduce # 默认=true；是否交替从各分支选取候选进行合并。
-│   │   ├── render → RetrievalRenderConfig # 默认=RetrievalRenderConfig()；渐进检索的树展示和编码策略。
-│   │   │   ├── compact_codes_enabled # 默认=true；是否以紧凑候选编码向模型展示对象。
-│   │   │   ├── compact_codebook # 默认=列表（512 项，完整内容见 config.py 默认定义）；按既有检索实验顺序排列的候选编码；顺序与旧默认码表一致。
-│   │   │   ├── flatten_tree # 默认=true；是否将当前候选树展平成提示内容。
-│   │   │   ├── max_exposure_depth # 默认=99；一次模型请求最多展示的树层数。
-│   │   │   └── exposure_threshold # 默认=1000000000；控制节点展开的候选数量阈值，保留独立检索服务默认值。
-│   │   ├── request → RetrievalRequestBudgetConfig # 默认=RetrievalRequestBudgetConfig()；候选选择请求的输出和超时预算。
-│   │   │   ├── max_output_tokens # 默认=96；分支选择输出的 token 上限。
-│   │   │   └── timeout_seconds # 默认=120.0；单次候选选择请求超时，单位秒；None 沿用后端策略。
-│   │   └── selection → RetrievalSelectionConfig # 默认=RetrievalSelectionConfig()；渐进检索的生成或打分策略。
-│   │       ├── mode # 默认="generate"；生成候选编码，或使用模型支持的候选 logit 打分；logit_selection 需要启用 render.compact_codes_enabled，否则 logit.fallback_mode 必须为 generate。 可选：generate / logit_selection。
-│   │       ├── trie_constrained_decoding_enabled # 默认=false；是否在支持的模型后端启用字典树约束解码。
-│   │       └── logit → LogitSelectionConfig # 默认=LogitSelectionConfig()；logit_selection 模式的候选打分设置。
-│   │           ├── require_single_token_codes # 默认=true；候选编码是否必须对应单个 token。
-│   │           ├── return_probabilities # 默认=true；是否在打分结果中返回候选概率。
-│   │           ├── fallback_mode # 默认="error"；不支持候选打分或关闭紧凑编码时直接报错，或回退为生成式选择；logit_selection 模式关闭紧凑编码时必须选择 generate。 可选：error / generate。
-│   │           ├── max_candidates # 默认=512；一次候选打分考虑的最多编码数量。
-│   │           ├── min_probability # 默认=None；可选的候选概率下限；None 表示不按最低概率截断。
-│   │           └── trace_top_n # 默认=10；追踪信息最多记录的高分候选数量。
-│   ├── discovery → DiscoveryConfig # 默认=DiscoveryConfig()；对象发现的候选、输出和提示预算。
-│   │   ├── prompt → DiscoveryPromptConfig # 默认=DiscoveryPromptConfig()；候选提示的上下文容量、预算比例和优先对象设置。
-│   │   │   ├── candidate_budget_ratio # 默认=0.01；候选提示可占用的上下文比例，范围大于 0 且不超过 1。
-│   │   │   ├── context_window_tokens # 默认=200000；用于计算候选预算的上下文容量，单位 token。
-│   │   │   └── preferred_capability_ids # 默认=["skill-creator", "swarmskill-creator", "symphony-assistant"]；提示优先展示的对象标识列表，顺序有意义；不表示已授权执行。
-│   │   ├── output → DiscoveryOutputConfig # 默认=DiscoveryOutputConfig()；发现结果、列表和增量提示的限制。
-│   │   │   ├── max_chars # 默认=12000；一次发现结果的最多输出字符数。
-│   │   │   ├── max_results # 默认=10；一次发现请求返回的最多结果数。
-│   │   │   ├── max_list_entries # 默认=40；一次列表展示的最多条目数。
-│   │   │   └── incremental_notice_max_chars # 默认=4000；增量变化提示的最多字符数。
-│   │   └── use_existing_index # 默认=false；是否使用已经构建的检索索引辅助发现。
-│   └── toolkit → AgenticRetrievalConfig # 默认=AgenticRetrievalConfig()；工具浏览、请求预算和工具标识；区别于自然语言检索。
-│       ├── top_k # 默认=10；工具检索最多返回的对象数量。
-│       ├── render → AgenticRenderConfig # 默认=AgenticRenderConfig()；工具浏览的层级和候选展示策略。
-│       │   ├── compact_codes_enabled # 默认=false；是否为片段候选使用紧凑编码。
-│       │   ├── compact_codebook # 默认=[]；片段展示的自定义码表；默认由运行过程决定编码。
-│       │   ├── flatten_tree # 默认=false；是否将展示片段展开为平面内容。
-│       │   ├── max_exposure_depth # 默认=1；一次工具浏览最多展示的树层数。
-│       │   └── exposure_threshold # 默认=12；片段节点展开的候选数量阈值。
-│       ├── request → AgenticRequestConfig # 默认=AgenticRequestConfig()；工具检索的输出和超时预算。
-│       │   ├── max_output_tokens # 默认=96；分支选择输出的 token 上限。
-│       │   └── timeout_seconds # 默认=120.0；单次模型请求超时，单位秒。
-│       └── tools → RetrievalToolNamesConfig # 默认=RetrievalToolNamesConfig()；保持现有协议的检索工具标识。
-│           ├── index_build # 默认="skill_index_build"；现有索引构建工具注册名称。
-│           ├── branch_explore # 默认="skill_branch_explore"；现有分类树分支探索工具注册名称。
-│           └── branch_peek # 默认="skill_branch_peek"；现有分类树分支预览工具注册名称。
+│   └── discovery → DiscoveryConfig # 默认=DiscoveryConfig()；对象发现的候选、输出和提示预算。
+│       ├── prompt → DiscoveryPromptConfig # 默认=DiscoveryPromptConfig()；候选提示的上下文容量、预算比例和优先对象设置。
+│       │   ├── candidate_budget_ratio # 默认=0.01；候选提示可占用的上下文比例，范围大于 0 且不超过 1。
+│       │   ├── context_window_tokens # 默认=200000；用于计算候选预算的上下文容量，单位 token。
+│       │   └── preferred_capability_ids # 默认=["skill-creator", "swarmskill-creator", "symphony-assistant"]；提示优先展示的对象标识列表，顺序有意义；不表示已授权执行。
+│       ├── output → DiscoveryOutputConfig # 默认=DiscoveryOutputConfig()；发现结果、列表和增量提示的限制。
+│       │   ├── max_chars # 默认=12000；一次发现结果的最多输出字符数。
+│       │   ├── max_results # 默认=10；一次发现请求返回的最多结果数。
+│       │   ├── max_list_entries # 默认=40；一次列表展示的最多条目数。
+│       │   └── incremental_notice_max_chars # 默认=4000；增量变化提示的最多字符数。
+│       └── use_existing_index # 默认=false；是否使用已经构建的检索索引辅助发现。
 ├── orchestration → OrchestrationConfig # 默认=OrchestrationConfig()；关系图构建和计划生成的默认配置。
 │   ├── enabled # 默认=true；允许使用编排入口；启用本身不触发构图。
 │   ├── min_edge_confidence # 默认=0.7；构图接纳关系和规划使用关系的共同阈值，取值范围 0 到 1。
@@ -166,23 +123,10 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │       ├── top_k # 默认=3；仅 beam 使用，控制搜索保留宽度与最多输出方案数；fast 不使用。
 │       ├── max_depth # 默认=4；规划搜索深度，与分类树或目录扫描深度无关。
 │       └── dynamic_graph_enabled # 默认=false；规划时是否使用已有图观测结果；不表示自动执行或自动构图。
-├── flow → FlowConfig # 默认=FlowConfig()；能力包接纳与叙述策略；配置存在或启用不表示服务已启动。
-│   ├── enabled # 默认=true；是否启用 Flow 的经验沉淀与能力包处理。
-│   ├── acceptance → FlowAcceptanceConfig # 默认=FlowAcceptanceConfig()；能力包的成功次数和成功率要求。
-│   │   ├── min_successes # 默认=1；接纳能力包所需的成功记录数。
-│   │   └── min_pack_success_rate # 默认=0.8；能力包整体成功率下限。
-│   └── narrative → FlowNarrativeConfig # 默认=FlowNarrativeConfig()；经验叙述示例的数量限制。
-│       └── max_examples # 默认=5；每个能力包叙述保留的最多示例数。
-└── experience → ExperienceConfig # 默认=ExperienceConfig()；经验库构建的默认配置；不隐式读取或写入经验。
-    └── build → ExperienceBankBuildConfig # 默认=ExperienceBankBuildConfig()；经验记录的聚类、构建执行和模式提炼策略。
-        ├── clustering → ExperienceClusteringConfig # 默认=ExperienceClusteringConfig()；经验记录的聚类设置。
-        │   ├── min_cluster_size # 默认=1；一个聚类至少包含的记录数。
-        │   └── query_clusters_per_capability_set # 默认=None；每个能力集合内成功查询的聚类数；None 使用自适应数量，不表示能力类别数或经验库总簇数。
-        ├── execution → ExperienceExecutionConfig # 默认=ExperienceExecutionConfig()；经验构建并发和写入批量设置。
-        │   ├── max_concurrency # 默认=8；经验构建工作并发上限，映射旧 max_workers。
-        │   └── pending_flush_threshold # 默认=20；待写入经验累计达到此数量时触发刷新。
-        └── patterns → ExperiencePatternConfig # 默认=ExperiencePatternConfig()；经验模式的提炼和合并设置。
-            ├── max_success_examples # 默认=20；模式提炼保留的成功示例数。
-            ├── min_hits # 默认=1；生成模式所需的最少命中次数。
-            ├── merge_threshold # 默认=0.9；模式相似度达到此阈值时允许合并。
-            └── query_examples_count # 默认=5；每个经验模式生成的查询示例数。
+└── flow → FlowConfig # 默认=FlowConfig()；能力包接纳与叙述策略；配置存在或启用不表示服务已启动。
+    ├── enabled # 默认=true；是否启用 Flow 的经验沉淀与能力包处理。
+    ├── acceptance → FlowAcceptanceConfig # 默认=FlowAcceptanceConfig()；能力包的成功次数和成功率要求。
+    │   ├── min_successes # 默认=1；接纳能力包所需的成功记录数。
+    │   └── min_pack_success_rate # 默认=0.8；能力包整体成功率下限。
+    └── narrative → FlowNarrativeConfig # 默认=FlowNarrativeConfig()；经验叙述示例的数量限制。
+        └── max_examples # 默认=5；每个能力包叙述保留的最多示例数。
