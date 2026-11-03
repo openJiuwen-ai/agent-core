@@ -11,6 +11,7 @@ from typing import List
 
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.encode_guard import CountCache, count_with_guard
+from openjiuwen.core.context_engine.token.image_tokens import estimate_content_image_tokens
 from openjiuwen.core.context_engine.token.native_tokenizer_counter import NativeTokenizerCounter
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -140,6 +141,8 @@ class TiktokenModelCounter(TokenCounter):
             content = NativeTokenizerCounter.content_text(message.content)
             piece = f"<|start|>{message.role}\n{content}<|end|>"
             total += self.count(piece, model=model, **kwargs)
+            # ``content_text`` drops the image payload; price images separately.
+            total += estimate_content_image_tokens(message.content)
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 total += self.count(
                     json.dumps([call.model_dump() for call in message.tool_calls], ensure_ascii=False),

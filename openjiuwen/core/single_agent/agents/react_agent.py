@@ -17,7 +17,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
@@ -347,6 +347,28 @@ class ReActAgentConfig(BaseModel):
     parallel_tool_calls: bool = Field(
         default=True,
         description="Whether to execute tool calls in parallel (as opposed to in sequence)",
+    )
+
+    # Native image input policy for the send path. ``None`` (default) disables
+    # both stripping and budget eviction, preserving historical behavior.
+    image_input_supported_resolver: Optional[Callable[[], Optional[bool]]] = Field(
+        default=None,
+        description="Callable returning whether the current model accepts native image input; "
+        "False strips image blocks from the request (history preserved), None leaves them untouched.",
+    )
+    # Image budget eviction is opt-in: both fields default to ``None``, which
+    # disables eviction and forwards the request's images unchanged. Callers
+    # (the host/config layer, e.g. jiuwenswarm) must set at least one of them
+    # to enable oldest-image eviction.
+    max_image_bytes_per_request: Optional[int] = Field(
+        default=None,
+        description="Per-request image byte budget; oldest images are evicted to text when exceeded. "
+        "None (default) disables eviction.",
+    )
+    max_images_per_request: Optional[int] = Field(
+        default=None,
+        description="Per-request image count budget; oldest images are evicted to text when exceeded. "
+        "None (default) disables eviction.",
     )
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
@@ -1511,6 +1533,7 @@ class ReActAgent(BaseAgent):
         # equally pass context_window.get_*() directly.)
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
+        ctx.inputs.messages = self._apply_image_input_policy(ctx.inputs.messages)
         self._last_model_tools = list(ctx.inputs.tools or [])
 
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
@@ -1738,9 +1761,9 @@ class ReActAgent(BaseAgent):
 
         if isinstance(value, dict):
             value_type = value.get("type")
-            if value_type in ("image", "image_url"):
+            if value_type in ("image", "image_url", "input_image"):
                 return True
-            if "image_url" in value or "image" in value:
+            if "image_url" in value or "image" in value or "input_image" in value:
                 return True
             for child in value.values():
                 if ReActAgent._json_like_contains_image_input(child, depth + 1):
@@ -1830,6 +1853,180 @@ class ReActAgent(BaseAgent):
             ),
             tool_calls=[],
         )
+
+    def _resolve_image_input_supported(self) -> Optional[bool]:
+        """Resolve whether the current model accepts native image input.
+
+        ``None`` means undetermined: the send path then leaves image blocks
+        untouched so an image-capable model is never stripped by accident.
+        """
+        resolver = getattr(self._config, "image_input_supported_resolver", None)
+        if resolver is None:
+            return None
+        try:
+            resolved = resolver()
+        except Exception as exc:  # pragma: no cover - defensive resolver guard
+            logger.debug("image input supported resolver failed: %s", exc)
+            return None
+        if resolved is None:
+            return None
+        return bool(resolved)
+
+    @staticmethod
+    def _content_block_is_image(block: Any) -> bool:
+        """Whether one content block carries an image in any accepted wire shape.
+
+        Keep the accepted types aligned with
+        :data:`openjiuwen.core.context_engine.token.image_tokens._IMAGE_BLOCK_TYPES`:
+        a block this helper misses is also missed by stripping, by the count/byte
+        budget and by the visual token estimator.
+        """
+        if not isinstance(block, dict):
+            return False
+        if block.get("type") in ("image", "image_url", "input_image"):
+            return True
+        return isinstance(block.get("image_url"), dict) or isinstance(
+            block.get("input_image"), (dict, str)
+        )
+
+    @staticmethod
+    def _image_block_byte_size(block: Any) -> int:
+        """Approximate decoded byte size of the image payload carried by *block*.
+
+        Covers the inline shapes this repo forwards: an OpenAI-style
+        ``image_url`` data URL (also used by ``input_image``) and an
+        Anthropic-style ``source`` holding ``base64`` data. Remote references
+        carry no payload and count as zero bytes.
+        """
+        if not isinstance(block, dict):
+            return 0
+        image_url = block.get("image_url")
+        if image_url is None:
+            image_url = block.get("input_image")
+        url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        payload = ""
+        if isinstance(url, str) and url.startswith("data:"):
+            _, _, payload = url.partition("base64,")
+        if not payload:
+            source = block.get("source")
+            if isinstance(source, dict) and isinstance(source.get("data"), str):
+                payload = source["data"]
+        if not payload:
+            return 0
+        return (len(payload) * 3) // 4
+
+    def _apply_image_input_policy(self, messages: List[Any]) -> List[Any]:
+        """Apply image support + budget policy to the outgoing message list.
+
+        When the current model is known to reject image input, image blocks are
+        stripped from a copy so the request stays text-only while history keeps
+        its base64. Otherwise, oldest images are evicted (converted to text) from
+        a copy when the request exceeds its per-request image budget; history
+        again keeps its base64.
+        """
+        if not messages:
+            return messages
+        if self._resolve_image_input_supported() is False:
+            return self._strip_image_blocks(messages)
+        return self._evict_images_over_budget(messages)
+
+    @classmethod
+    def _strip_image_blocks(cls, messages: List[Any]) -> List[Any]:
+        """Return a copy of *messages* with image blocks replaced by text."""
+        stripped: List[Any] = []
+        for message in messages:
+            content = getattr(message, "content", None)
+            if isinstance(message, dict):
+                content = message.get("content")
+            if not isinstance(content, list):
+                stripped.append(message)
+                continue
+            new_content = []
+            for block in content:
+                if cls._content_block_is_image(block):
+                    new_content.append({
+                        "type": "text",
+                        "text": "[image omitted: current model does not support image input]",
+                    })
+                else:
+                    new_content.append(block)
+            stripped.append(cls._message_with_content(message, new_content))
+        return stripped
+
+    @staticmethod
+    def _message_with_content(message: Any, content: Any) -> Any:
+        if isinstance(message, dict):
+            clone = dict(message)
+            clone["content"] = content
+            return clone
+        model_copy = getattr(message, "model_copy", None)
+        if callable(model_copy):
+            return model_copy(update={"content": content})
+        clone = copy.copy(message)
+        clone.content = content
+        return clone
+
+    def _evict_images_over_budget(self, messages: List[Any]) -> List[Any]:
+        """Return a copy of *messages* with the oldest images replaced by text.
+
+        Only the request copy is rewritten; like :meth:`_strip_image_blocks` the
+        stored history keeps its base64, so a later round can still re-admit the
+        image when the budget allows and a sharper render stays reproducible.
+
+        Eviction is opt-in: when no budget is configured (both config fields are
+        ``None``), *messages* is returned unchanged.
+        """
+        max_bytes = getattr(self._config, "max_image_bytes_per_request", None)
+        max_images = getattr(self._config, "max_images_per_request", None)
+        if max_bytes is None and max_images is None:
+            return messages
+
+        image_slots: List[Tuple[int, int, int]] = []
+        total_bytes = 0
+        for message_index, message in enumerate(messages):
+            content = getattr(message, "content", None)
+            if isinstance(message, dict):
+                content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block_index, block in enumerate(content):
+                if self._content_block_is_image(block):
+                    block_bytes = self._image_block_byte_size(block)
+                    image_slots.append((message_index, block_index, block_bytes))
+                    total_bytes += block_bytes
+
+        evicted: Dict[int, set] = {}
+        removed_bytes = 0
+        for offset, (message_index, block_index, block_bytes) in enumerate(image_slots):
+            remaining_images = len(image_slots) - offset
+            remaining_bytes = total_bytes - removed_bytes
+            within_images = max_images is None or remaining_images <= max_images
+            within_bytes = max_bytes is None or remaining_bytes <= max_bytes
+            if within_images and within_bytes:
+                break
+            removed_bytes += block_bytes
+            evicted.setdefault(message_index, set()).add(block_index)
+
+        if not evicted:
+            return messages
+
+        rebuilt: List[Any] = []
+        for message_index, message in enumerate(messages):
+            block_indexes = evicted.get(message_index)
+            content = getattr(message, "content", None)
+            if isinstance(message, dict):
+                content = message.get("content")
+            if not block_indexes or not isinstance(content, list):
+                rebuilt.append(message)
+                continue
+            new_content = list(content)
+            for block_index in block_indexes:
+                new_content[block_index] = {
+                    "type": "text",
+                    "text": "[image omitted: per-request image budget exceeded]",
+                }
+            rebuilt.append(self._message_with_content(message, new_content))
+        return rebuilt
 
     @staticmethod
     def _assistant_message_from_chunk(chunk: Any) -> AssistantMessage:

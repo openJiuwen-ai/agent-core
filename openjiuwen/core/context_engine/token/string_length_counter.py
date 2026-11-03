@@ -11,6 +11,7 @@ from typing import List
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.encode_guard import estimate_tokens
+from openjiuwen.core.context_engine.token.image_tokens import estimate_content_image_tokens
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
@@ -36,6 +37,9 @@ class StringLengthCounter(TokenCounter):
         for message in messages:
             content = self._content_text(message.content)
             total += self.count(f"<|start|>{message.role}\n{content}<|end|>")
+            # ``_content_text`` intentionally drops the base64 payload, so image
+            # blocks must be priced separately by their pixel dimensions.
+            total += estimate_content_image_tokens(message.content)
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 total += self.count(json.dumps([call.model_dump() for call in message.tool_calls], ensure_ascii=False))
         return total + 3

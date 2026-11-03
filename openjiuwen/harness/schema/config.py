@@ -271,6 +271,10 @@ class DeepAgentConfig:
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
     enable_read_image_multimodal: Optional[bool] = None
+    # Image budget eviction is opt-in: ``None`` (default) disables eviction on
+    # the send path. Set at least one to enable oldest-image eviction per request.
+    max_image_bytes_per_request: Optional[int] = None
+    max_images_per_request: Optional[int] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
     model_selection: Optional[Dict[Model, str]] = None
@@ -321,6 +325,10 @@ class SubAgentConfig:
     # None inherits the parent DeepAgent setting. Set explicitly when the
     # subagent uses a model with different native image capabilities.
     enable_read_image_multimodal: Optional[bool] = None
+    # None inherits the parent DeepAgent budget; otherwise overrides it. The
+    # effective budget is still opt-in at the parent level (see DeepAgentConfig).
+    max_image_bytes_per_request: Optional[int] = None
+    max_images_per_request: Optional[int] = None
     enable_task_loop: bool = False
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None

@@ -11,6 +11,7 @@ from typing import List
 
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text, sanitize_value_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.image_tokens import estimate_content_image_tokens
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
@@ -55,6 +56,8 @@ class NativeTokenizerCounter(TokenCounter):
             content = self.content_text(message.content)
             piece = f"<|start|>{message.role}\n{content}<|end|>"
             total += self.count(piece, model=model, **kwargs)
+            # ``content_text`` drops the image payload; price images separately.
+            total += estimate_content_image_tokens(message.content)
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 total += self.count(
                     json.dumps([call.model_dump() for call in message.tool_calls], ensure_ascii=False),
