@@ -74,6 +74,8 @@ class ReliabilityHandler(BaseCoordinationHandler):
         self._pingpong = pingpong
         # Route notices already delivered, keyed by ``_route_notice_key``.
         self._noticed: set[tuple[Any, Any, Any, Any]] = set()
+        # Route notices from the leader's own calls, waiting for its next input.
+        self._pending_route_notices: list[str] = []
 
     async def on_anomaly_detected(self, event: EventMessage) -> None:
         """Route a reported anomaly per policy into the leader loop."""
@@ -124,13 +126,30 @@ class ReliabilityHandler(BaseCoordinationHandler):
             if key in self._noticed:
                 return
             self._noticed.add(key)
+        await self._round.deliver_input(self._route_notice_text(summary, evidence))
+
+    @staticmethod
+    def _route_notice_text(summary: str, evidence: dict[str, Any] | None) -> str:
+        """Render a route notice the way the leader reads it."""
         pinned = (_route_verdict(evidence) or {}).get("pinned_model")
         scope = (
             t("reliability.route_notice_scope_pinned", model=pinned)
             if pinned
             else t("reliability.route_notice_scope_group")
         )
-        await self._round.deliver_input(t("reliability.route_notice", summary=summary, scope=scope))
+        return t("reliability.route_notice", summary=summary, scope=scope)
+
+    def take_pending_route_notices(self) -> list[str]:
+        """Return the leader's own route notices waiting for its next input, clearing them.
+
+        The reliability rail folds what this returns into the front of the
+        leader's next admitted input, so the notice neither starts its own
+        round (which would replace an answer the switch already produced) nor
+        is lost.
+        """
+        notices = self._pending_route_notices
+        self._pending_route_notices = []
+        return notices
 
     async def _route(self, severity: Severity, summary: str) -> None:
         """Deliver a report or escalation into the leader's own loop."""
@@ -147,17 +166,24 @@ class ReliabilityHandler(BaseCoordinationHandler):
         here in-process (bypassing the messager self-filter), and they go
         through the same policy routing as cross-process anomaly events.
 
-        A route notice about the leader's own call is delivered like a
-        member's: the router has already switched to a working model, so the
-        leader round it starts does not fail again. An unavailable verdict is
-        only logged: delivering it would start a leader round on the same
-        failing model, which fails and reports again. The failed round already
-        shows the user a readable error.
+        A route notice about the leader's own call waits for its next admitted
+        input instead of being delivered as its own round: that call already
+        answered on the model the router switched to, and a notice round would
+        replace that answer. Recording it still drops the same failure when a
+        member reports it later. An unavailable verdict is only logged:
+        delivering it would start a leader round on the same failing model,
+        which fails and reports again. The failed round already shows the user
+        a readable error.
         """
         if self._blueprint.role != TeamRole.LEADER:
             return
         if anomaly.kind == AnomalyKind.MODEL_ROUTE_NOTICE:
-            await self._deliver_route_notice(anomaly.summary, anomaly.evidence)
+            key = _route_notice_key(anomaly.evidence)
+            if key is not None:
+                if key in self._noticed:
+                    return
+                self._noticed.add(key)
+            self._pending_route_notices.append(self._route_notice_text(anomaly.summary, anomaly.evidence))
             return
         if anomaly.kind == AnomalyKind.MODEL_UNAVAILABLE:
             team_logger.warning("leader model anomaly (not delivered to leader): %s", anomaly.summary)

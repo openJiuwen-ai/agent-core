@@ -23,8 +23,8 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | openjiuwen/agent_teams/reliability/ |
-| 最近一次修订日期 | 2026-06-03 |
-| 关联 feature | F_29_reliability-framework.md / F_30_reliability-self-monitor-and-result-aware-repeat.md |
+| 最近一次修订日期 | 2026-11-03 |
+| 关联 feature | F_29_reliability-framework.md / F_30_reliability-self-monitor-and-result-aware-repeat.md / F_20261103_0928_model-group-routed-model.md |
 
 ## 范围 / 边界
 
@@ -56,6 +56,14 @@ opt-in：`TeamAgentSpec.reliability.enabled` 默认 `False`。
    `role.value in monitor_roles` 时挂载——leader 用 `LocalAnomalyReporter`（不需 messager），
    其余角色需 messager（`EventAnomalyReporter` 跨进程发布）。
 7. **检测分级边沿触发**：同一异常 severity 不上升时不重复产出，避免告警风暴。
+8. **路由通知双路投递（F_20261103_0928）**：模型组切换的通知按来源分两路——**成员**的切换
+   （确定性错误 / 流中断）立即经 `deliver_input` 告知 leader；**leader 自己**的切换只进
+   `ReliabilityHandler` 的待发队列，由 `ReliabilityRail.on_user_message` 搭在 leader 的**下一条
+   输入**最前面（`parts[0:0]`），绝不作为独立 round 投递——切换那次调用已在备用模型上答完，
+   通知 round 会顶掉该回答。去重键为
+   (router, deployment, reason, status)：leader 自己撞过的故障，成员再报同款直接丢弃。通知文案
+   只点名故障模型与原因，**不点名替代模型**——路由逐次现选，冷却恢复后可能回到更前顺位，
+   点名无法保证正确。
 
 ## 接口契约
 

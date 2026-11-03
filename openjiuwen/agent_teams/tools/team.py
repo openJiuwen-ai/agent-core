@@ -458,6 +458,12 @@ class TeamBackend:
             and isinstance((pool[0].metadata.get("client") or {}).get("intelli_router"), dict)
         )
 
+    def model_group_label(self) -> str | None:
+        """Name of the team's model group; ``None`` outside a model-group pool."""
+        from openjiuwen.agent_teams.models.pool import model_group_label
+
+        return model_group_label(self.get_model_pool())
+
     def update_model_allocator(self, allocator: Any | None) -> None:
         """Replace the allocator without rebuilding team tools."""
         self._model_allocator = allocator

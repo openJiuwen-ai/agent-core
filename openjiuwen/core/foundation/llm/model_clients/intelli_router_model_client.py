@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import time
 from dataclasses import dataclass, field, fields
 from threading import Lock
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
@@ -18,6 +19,9 @@ from openjiuwen.core.foundation.llm.routing.intelli_router_errors import (
     ROUTING_RECORD_EVENTS,
     record_routing_event,
     to_model_error,
+    cooldown_remaining,
+    pinned_route_tag,
+    routing_candidates,
 )
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage, AssistantMessage, UserMessage, UsageMetadata
@@ -45,6 +49,176 @@ except ImportError:
     Deployment = None
 
 
+ROUTED_MODEL_PLACEHOLDER = "<routed-model/>"
+"""Prompt text a model-group router replaces with the model it routed to.
+
+A model group picks its deployment inside each call, after the prompt is
+built, so a prompt cannot name that model up front. A prompt writes this
+placeholder instead; right before sending each attempt the router replaces it
+with :func:`routed_model_label` of the deployment that attempt goes to. A
+failover attempt therefore names its own model, never the failed one.
+"""
+
+
+def routed_model_label(deployment: Any) -> str:
+    """Name a deployment the way model-group members see it.
+
+    The deployment's ``fallback_tag`` is the model name configured for the
+    group (the names offered as selectable models); ``model_name`` is the
+    provider-facing name, used when no tag is configured.
+    """
+    return str(getattr(deployment, "fallback_tag", None) or getattr(deployment, "model_name", None) or "").strip()
+
+
+def has_routed_model_placeholder(text: str) -> bool:
+    """Whether ``text`` carries the routed-model placeholder."""
+    return ROUTED_MODEL_PLACEHOLDER in text
+
+
+def fill_routed_model(text: str, label: str) -> str:
+    """Replace every routed-model placeholder in ``text`` with ``label``."""
+    return text.replace(ROUTED_MODEL_PLACEHOLDER, label)
+
+
+def _fill_routed_model(messages: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    """Return ``messages`` with every placeholder replaced by ``label``.
+
+    Only messages that carry the placeholder are copied; ``messages`` itself
+    is never mutated, since the router reuses it for every attempt.
+    """
+    filled: list[dict[str, Any]] = []
+    changed = False
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str) and has_routed_model_placeholder(content):
+            message = {**message, "content": fill_routed_model(content, label)}
+            changed = True
+        elif isinstance(content, list) and any(
+            isinstance(part, dict) and has_routed_model_placeholder(str(part.get("text") or "")) for part in content
+        ):
+            parts = [
+                {**part, "text": fill_routed_model(part["text"], label)}
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+                else part
+                for part in content
+            ]
+            message = {**message, "content": parts}
+            changed = True
+        filled.append(message)
+    return filled if changed else messages
+
+
+class _RoutedModelAdapter:
+    """Provider adapter that fills the routed-model placeholder of a request."""
+
+    def __init__(self, adapter: Any) -> None:
+        self._adapter = adapter
+
+    def transform_request(self, model: str, messages: list[dict[str, Any]], deployment: Any, **kwargs: Any) -> Any:
+        # The label is never empty for a routed deployment (it falls back to
+        # the deployment's model name); the ``or`` guard is the boundary of
+        # the placeholder contract: even a malformed deployment must not send
+        # the literal ``<routed-model/>`` to a provider.
+        label = routed_model_label(deployment) or str(getattr(deployment, "model_name", "") or "unknown")
+        messages = _fill_routed_model(messages, label)
+        return self._adapter.transform_request(model=model, messages=messages, deployment=deployment, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._adapter, name)
+
+
+class _RoutedModelRouterMixin:
+    """Makes a ReliableRouter name the routed model in the request it sends.
+
+    Every attempt -- the first one and each failover -- builds its request
+    through ``_get_adapter(deployment).transform_request``, after the
+    deployment is chosen and before anything is sent: the one point where the
+    prompt can name exactly the model that will read it. Route events carry
+    the same name as ``routed_model``.
+
+    Each attempt is also announced as ``LLM_ROUTE_ATTEMPT`` when it is sent,
+    before any response: a request that fails before answering still names
+    the model it went to (``LLM_ROUTE`` only fires once a route answers).
+    """
+
+    def _get_adapter(self, deployment: Any) -> Any:
+        # The explicit two-argument super keeps ``self`` visible: the call is
+        # identical to bare ``super()`` but passes the instance checks that
+        # flag a method that never names its instance.
+        return _RoutedModelAdapter(super(_RoutedModelRouterMixin, self)._get_adapter(deployment))
+
+    def _route_metadata(self, deployment: Any, **extra: Any) -> dict[str, Any]:
+        metadata = super(_RoutedModelRouterMixin, self)._route_metadata(deployment, **extra)
+        label = routed_model_label(deployment)
+        if label:
+            metadata["routed_model"] = label
+        return metadata
+
+    async def _announce_route_attempt(self, deployment: Any) -> None:
+        try:
+            metadata = self._route_metadata(deployment)
+            if not metadata.get("model_group_id"):
+                return
+            metadata["status"] = "sending"
+            # Log first, then announce: an observer failing must not cost the
+            # log line. LLM_ROUTE_ATTEMPT has a subscriber whenever the
+            # observability extension is active (it maps onto the same
+            # handler as LLM_ROUTE); without one the trigger is a no-op and
+            # this log is the only record of the attempt.
+            self._log_route_selection(deployment, metadata)
+            await trigger(LLMCallEvents.LLM_ROUTE_ATTEMPT, route_metadata=metadata)
+        except Exception as exc:  # noqa: BLE001 - announcing must never fail the request
+            llm_logger.debug("model group route attempt announce failed: %s", exc)
+
+    def _log_route_selection(self, deployment: Any, metadata: dict[str, Any]) -> None:
+        """Log every model-group attempt, traced or not.
+
+        A group call made outside any trace context (background warmups,
+        session bootstrap) leaves no span and no event record; without this
+        line its only footprint -- the cooldown a failure of it sets -- is
+        invisible, and the next call skipping a position looks unexplained.
+        """
+        now = time.time()
+        selected = str(getattr(deployment, "id", ""))
+        skipped = []
+        for candidate in routing_candidates(self, pinned_route_tag(self), None):
+            candidate_id = str(getattr(candidate, "id", ""))
+            if candidate_id == selected:
+                continue
+            remaining = cooldown_remaining(self, candidate_id, now)
+            if remaining is not None:
+                skipped.append(f"{routed_model_label(candidate)}({remaining:.0f}s)")
+        llm_logger.info(
+            "model group route: group=%s model=%s route=%s%s",
+            metadata.get("model_group_id"),
+            metadata.get("routed_model") or metadata.get("model_name"),
+            metadata.get("route_id"),
+            f" cooldown_skipped={skipped}" if skipped else "",
+        )
+
+    async def _make_request(self, deployment: Any, request_body: Any) -> Any:
+        await self._announce_route_attempt(deployment)
+        return await super()._make_request(deployment, request_body)
+
+    async def acompletion_stream(self, model: str, messages: Any, deployment: Any = None, **kwargs: Any):
+        if deployment is not None:
+            await self._announce_route_attempt(deployment)
+        async for chunk in super().acompletion_stream(model=model, messages=messages, deployment=deployment, **kwargs):
+            yield chunk
+
+
+# ReliableRouter class -> its routed-model subclass (built on first use, so a
+# substituted ReliableRouter is subclassed too).
+_routed_model_router_classes: dict[type, type] = {}
+
+
+def _routed_model_router_class(base: type) -> type:
+    """Return ``base`` extended with :class:`_RoutedModelRouterMixin`."""
+    if base not in _routed_model_router_classes:
+        _routed_model_router_classes[base] = type(base.__name__, (_RoutedModelRouterMixin, base), {})
+    return _routed_model_router_classes[base]
+
+
 @dataclass
 class IntelliRouterClientConfig:
     """Typed config extracted from ModelClientConfig"""
@@ -59,6 +233,7 @@ class IntelliRouterClientConfig:
     verify_ssl: bool = True
     enable_observability: bool = False
     web_dashboard_port: int = 0
+    router_scope: Optional[str] = None
 
     @classmethod
     def from_model_client_config(cls, config: ModelClientConfig) -> "IntelliRouterClientConfig":
@@ -84,6 +259,7 @@ class IntelliRouterClientConfig:
                 verify_ssl=config.verify_ssl,
                 enable_observability=router_config.enable_observability,
                 web_dashboard_port=router_config.web_dashboard_port,
+                router_scope=getattr(router_config, "router_scope", None),
             )
 
         extra = config.__pydantic_extra__ or {}
@@ -169,6 +345,7 @@ class _CoreRoutingEventBridge:
         "route_id",
         "model_id",
         "model_name",
+        "routed_model",
         "provider",
         "attempt",
         "fallback_reason",
@@ -289,7 +466,7 @@ class IntelliRouterModelClient(BaseModelClient):
             f"{config.num_retries}|{config.timeout}|"
             f"{config.enable_health_check}|{config.health_check_interval}|"
             f"{config.verify_ssl}|{config.enable_observability}|"
-            f"{config.web_dashboard_port}"
+            f"{config.web_dashboard_port}|{config.router_scope}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -394,7 +571,7 @@ class IntelliRouterModelClient(BaseModelClient):
                 "web dashboard requires observability enabled"
             )
 
-        router = ReliableRouter(
+        router = _routed_model_router_class(ReliableRouter)(
             deployments=deployments,
             strategy=config.strategy,
             num_retries=config.num_retries,
@@ -555,6 +732,23 @@ class IntelliRouterModelClient(BaseModelClient):
                 **kwargs
             )
         except ROUTER_ERROR_TYPES as exc:
+            # Fire the terminal error event before converting, like the other
+            # clients: without it the open trace span is force-closed later
+            # with no error recorded, reading like a normal call that
+            # answered nothing. Guarded: the trigger framework re-raises
+            # AbortError, and an observer aborting here must not replace the
+            # model error this block is about to report.
+            try:
+                await trigger(
+                    LLMCallEvents.LLM_CALL_ERROR,
+                    model_name=model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    error=exc,
+                    error_message=str(exc) or None,
+                )
+            except Exception:  # noqa: BLE001 - the model error outranks the observer
+                llm_logger.debug("llm call error announce failed", exc_info=True)
             raise to_model_error(
                 exc, router=self._router, model_name=model_name, output_emitted=False,
             ) from exc
@@ -612,6 +806,20 @@ class IntelliRouterModelClient(BaseModelClient):
                         logger.debug(f"stream parser attempt failed: {exc}")
                 yield converted
         except ROUTER_ERROR_TYPES as exc:
+            # Same as invoke: name the error on the open trace span before
+            # converting, so a failed stream is marked as one. Guarded the
+            # same way: the model error outranks a failing observer.
+            try:
+                await trigger(
+                    LLMCallEvents.LLM_CALL_ERROR,
+                    model_name=model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=True,
+                    error=exc,
+                    error_message=str(exc) or None,
+                )
+            except Exception:  # noqa: BLE001 - the model error outranks the observer
+                llm_logger.debug("llm call error announce failed", exc_info=True)
             raise to_model_error(
                 exc, router=self._router, model_name=model_name, output_emitted=output_emitted,
             ) from exc

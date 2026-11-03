@@ -42,6 +42,7 @@ import re
 from typing import Any, Callable, Mapping, Sequence
 
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
+from openjiuwen.agent_teams.models.pool import INTELLI_ROUTER_UNIFIED_MODEL
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRole
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -590,6 +591,9 @@ class TeamWorkerBackend(AgentBackend):
         config = getattr(self._worker_base_spec, "model", None) if self._worker_base_spec is not None else None
         request = getattr(config, "model_request_config", None)
         name = getattr(request, "model_name", None) or getattr(request, "model", None)
+        if name == INTELLI_ROUTER_UNIFIED_MODEL and self._team_backend is not None:
+            # A model group picks the model per call; name the group, not "*".
+            name = self._team_backend.model_group_label() or name
         return str(name) if name else None
 
     def describe_model(self, opts: dict) -> str | None:

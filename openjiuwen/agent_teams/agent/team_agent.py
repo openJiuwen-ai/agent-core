@@ -211,6 +211,8 @@ class TeamAgent(BaseAgent):
             request_completion_poll_callback=self._request_completion_poll,
             member_startup_reconciler=self._reconcile_member_startup,
             task_board_probe=self.is_task_board_settled,
+            model_group_label_getter=self._model_group_label,
+            served_model_recorder=self._record_served_model,
         )
         self._coordination = CoordinationKernel(self)
 
@@ -793,10 +795,13 @@ class TeamAgent(BaseAgent):
 
         Leader self-monitoring routes the leader's own anomalies straight to
         the ReliabilityHandler instead of publishing an event the leader's
-        messager self-filter would drop. Runs after the dispatcher is built,
-        mirroring ``_register_team_completion_callbacks``. No-op when the
-        harness, dispatcher, or reliability handler is absent (reliability
-        disabled, or a non-leader member whose rail has no local reporter).
+        messager self-filter would drop. The handler's pending route notices
+        (the leader's own model-group switches) are bound the same way: the
+        rail folds them into the leader's next admitted input. Runs after the
+        dispatcher is built, mirroring ``_register_team_completion_callbacks``.
+        No-op when the harness, dispatcher, or reliability handler is absent
+        (reliability disabled, or a non-leader member whose rail has no local
+        reporter).
         """
         harness = self._configurator.harness
         dispatcher = self._coordination.dispatcher
@@ -809,6 +814,7 @@ class TeamAgent(BaseAgent):
 
         for rail in harness.find_rails(ReliabilityRail):
             rail.bind_local_sink(handler.handle_local_anomaly)
+            rail.bind_route_notice_source(handler.take_pending_route_notices)
 
     def _resolve_agent_spec(
         self,
@@ -1201,6 +1207,19 @@ class TeamAgent(BaseAgent):
         # above was a no-op: before ``build_team`` the leader has no row, but
         # it is still a member of its own team as far as idleness goes.
         await self.observe_member_status(self._member_name() or "", status)
+
+    def _model_group_label(self) -> Optional[str]:
+        """Name of the team's model group; ``None`` outside a model-group pool."""
+        backend = self.team_backend
+        return backend.model_group_label() if backend is not None else None
+
+    async def _record_served_model(self, model_name: str) -> bool:
+        """Persist the model the model group just routed this member to."""
+        backend = self.team_backend
+        member_name = self._member_name()
+        if backend is None or not member_name:
+            return False
+        return await backend.db.member.update_member_served_model(member_name, backend.team_name, model_name)
 
     async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
         """Record a member's status and drive the debounced team-idle marker.

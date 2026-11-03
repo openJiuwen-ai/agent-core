@@ -96,7 +96,8 @@ class TeamMember(SQLModel, table=True):
             "worktree: {isolation, path}, permissions_override: {bash: deny, ...}}"
         ),
     )
-    # Set on roster mutations only (create_member).  Status / execution
+    # Set on roster mutations only (create_member, and a model-group member's
+    # routed model changing — the leader's roster shows it).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)

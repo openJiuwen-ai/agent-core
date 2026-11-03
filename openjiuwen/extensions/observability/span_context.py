@@ -506,6 +506,11 @@ class LlmSpanState:
     stream_phase: tuple[str, str] | None = None
     stream_phase_last_sequence: int = 0
     stream_opened: bool = False
+    # Recorded input attributes as they held a model-group routed-model
+    # placeholder, before the first route filled it. Each later route attempt
+    # refills from these, so a failover renames the input to the route that
+    # actually received it rather than keeping the first attempt's name.
+    routed_input_original: dict[str, str] | None = None
 
 
 _root_span_ctx: ContextVar[Span | None] = ContextVar("observability_root_span", default=None)
