@@ -6,8 +6,8 @@
 |---|---|
 | 日期 | 2026-11-03 |
 | 范围 | `agent_teams/duplex/`（新增）、`agent_teams/harness/{control,state,protocol,native_harness,team_harness}.py`、`agent_teams/agent/coordination/{dispatcher.py,handlers/message.py}`、`agent_teams/group_chat/message_handler.py`、`agent_teams/schema/blueprint.py` |
-| 测试基线 | 新增 12 个用例全部通过；`tests/unit_tests/agent_teams`（除缺可选依赖的 cli/observability）3208 passed，140 failed 与基线 ce2aedda 完全相同（环境缺 `opentelemetry.exporter`） |
-| Refs | #1897 |
+| 测试基线 | `tests/unit_tests/agent_teams/duplex` 与 `harness/test_interrupt.py` 23 个用例全部通过；`tests/unit_tests/agent_teams` 4219 passed、14 failed，失败集合与 develop 619aafa1 完全相同（4196 passed、14 failed） |
+| Refs | #2027 |
 
 ## 背景
 
