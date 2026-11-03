@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.organization.events import (
 )
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers, get_process_org_manager
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+from openjiuwen.agent_teams.paths import organization_workspace_dir
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     OrgAssignmentType,
@@ -3323,6 +3324,9 @@ async def test_summary_execution_prompt_requires_source_aggregation_only(active_
     assert "org_create_task(parent_task_id=" not in prompts[0]
     assert "root_task and summary_task" in prompts[0]
     assert "Do not replace a requested artifact with a report" in prompts[0]
+    assert "Do not send that short text to source-integrator or delivery-drafter" in prompts[0]
+    assert "disagreements that would change the conclusion" in prompts[0]
+    assert str(organization_workspace_dir("org-1", session_id) / "summary") in prompts[0]
 
     runtime.schedule_summary_execution(
         team_id="summary-team",
@@ -3850,6 +3854,7 @@ async def test_summary_closeout_is_bounded_and_respects_stop(outcome):
         assignment=SimpleNamespace(team_id="owner"),
     )
     task_manager = SimpleNamespace(
+        organization_id="org",
         get_task=AsyncMock(side_effect=lambda task_id: root if task_id == "root" else task),
         get_summary_execution=AsyncMock(return_value=execution),
     )
@@ -3908,6 +3913,7 @@ async def test_summary_closeout_is_bounded_and_respects_stop(outcome):
             assert turns[1]["_org_summary_closeout"] is True
             assert "org_summary_complete" in turns[1]["query"]
             assert "Do not restart research" in turns[1]["query"]
+            assert str(organization_workspace_dir("org", "session") / "summary") in turns[1]["query"]
             runtime.schedule_summary_execution(
                 team_id="summary-team",
                 session_id="session",

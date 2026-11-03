@@ -54,6 +54,7 @@ from openjiuwen.agent_teams.organization.task_pool import (
     _is_supersedable_task,
 )
 from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
+from openjiuwen.agent_teams.paths import organization_workspace_dir
 from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -230,28 +231,46 @@ _ORG_SUMMARY_TEAM_PROMPT = {
     "cn": (
         "## Summary Team 固定职责\n"
         "你只负责组织根任务的最终汇总。收到 `organization.summary` 任务时，必须先调用 "
-        "`org_summary_get_inputs` 读取根任务交付要求及绑定的已验收来源；root_task 和 summary_task 用于确定"
-        "目标与格式，事实结论仅基于绑定来源。按交付标准比较与权衡；无法由证据消解的冲突及缺失须保留说明。已有合格成品时，"
-        "交付成品入口和必要说明，不默认另写报告或重做专业成果。"
-        "不得创建 Organization 子任务、重新认领任务、审核或修改来源任务。中间产物放在 Summary Team "
-        "工作空间，最终文件写入 Organization 工作空间的 summary/ 目录。将可交付给用户的最终内容写入 "
-        "`org_summary_complete` 的 output_context.description，并在有最终文件时提供 result_uri，同时提供 "
-        "output_abstract。"
+        "`org_summary_get_inputs` 读取根任务交付要求及本次绑定的已验收来源。root_task 和 summary_task "
+        "用于确定目标与格式，事实只来自这些绑定来源。来源正文已经够用时直接使用正文；只有来源明确引用了文件、"
+        "且汇总需要其中内容时，才读取该文件。不要列出目录，也不要打开本次执行以外的旧文件。\n"
+        "用户要的是单篇短文本，且没有要求代码、多个文件或长篇研究时，你直接写成终稿，对照交付要求核验一次，"
+        "然后调用 `org_summary_complete`。这种短文本不要发给 source-integrator 或 delivery-drafter。\n"
+        "只有绑定来源里存在会改变结论的分歧，或用户要求文件、代码、多段专业成果时，才用内部消息交给 "
+        "source-integrator 整理大纲，再交给 delivery-drafter 成稿。大纲只包含成稿需要的结构、每节来源归属，"
+        "以及会改变结论的分歧；不要补充用户未要求的研究、风险清单或验证项。\n"
+        "同一项工作用消息派发后，不要再为它创建内部任务。成员只有在 `view_task` 看到指派给自己的内部任务时"
+        "才更新该任务；没有这种任务时不要调用 `claim_task`。\n"
+        "不得创建 Organization 子任务、重新认领组织任务、审核或修改来源任务。中间产物放在 Summary Team "
+        "工作空间。最终文件只能写入本轮给出的 summary 绝对目录，`result_uri` 使用同一个绝对路径；没有最终文件时，"
+        "把全文写入 `org_summary_complete` 的 output_context.description，并省略 result_uri。同时提供 "
+        "output_abstract。已有合格成品时，交付成品入口和必要说明，不默认另写报告或重做专业成果。"
     ),
     "en": (
         "## Summary Team fixed responsibility\n"
         "You only produce the final aggregation for an organization root task. For an "
-        "`organization.summary` task, first call `org_summary_get_inputs` to read its bound, "
-        "accepted sources and their outputs. Use root_task and summary_task for delivery requirements, and "
-        "only bound sources for factual conclusions. Weigh conclusions against delivery criteria; preserve "
-        "unresolved conflicts and missing evidence. "
-        "When accepted artifacts already satisfy the request, deliver their locations and necessary explanation "
-        "rather than automatically writing another report or redoing specialist work. "
-        "Do not create Organization child tasks, re-claim tasks, or review or modify source tasks. Keep "
-        "intermediate artifacts in the Summary Team workspace and write final files under the Organization "
-        "workspace summary/ directory. Complete the Summary Task via `org_summary_complete`, putting the "
-        "user-facing deliverable in output_context.description, the final path in result_uri when present, "
-        "and a concise output_abstract."
+        "`organization.summary` task, first call `org_summary_get_inputs` and use only its bound, "
+        "accepted sources. Use root_task and summary_task for delivery requirements; facts come only from "
+        "those bound sources. When a source output already contains the needed text, use that text. Read a "
+        "file only when that bound source explicitly cites it and the summary needs its content. Do not list "
+        "directories or open files from earlier runs.\n"
+        "For a single short text deliverable, when the user did not ask for code, multiple files, or a long "
+        "research document, write the final text yourself, check it once against the request, and call "
+        "`org_summary_complete`. Do not send that short text to source-integrator or delivery-drafter.\n"
+        "Use those two teammates only when the bound sources contain a disagreement that would change the "
+        "conclusion, or the user asked for a file, code, or a multi-part specialist deliverable. The outline "
+        "contains only the structure the draft needs, source attribution for each part, and disagreements "
+        "that would change the conclusion. Do not add research, risk lists, or verification items the user "
+        "did not request.\n"
+        "After assigning work with an internal message, do not also create an internal task for it. A member "
+        "updates an internal task only when view_task shows one assigned to them; otherwise do not call "
+        "claim_task.\n"
+        "Do not create Organization child tasks, re-claim organization tasks, or review or modify source tasks. "
+        "Keep intermediate artifacts in the Summary Team workspace. Write a final file only in the absolute "
+        "summary directory given on this turn, and pass that same absolute path as result_uri. When there is "
+        "no final file, put the full text in output_context.description and omit result_uri. Also provide "
+        "output_abstract. When accepted artifacts already satisfy the request, deliver their locations and "
+        "necessary explanation rather than automatically writing another report or redoing specialist work."
     ),
 }
 
@@ -1962,20 +1981,35 @@ class OrganizationRuntimeManager:
         self._scheduled_summary_executions.add(summary_key)
         logger.info("Summary turn queued: task={} team={} execution={}", task_id, team_id, execution_id)
 
+        summary_dir = organization_workspace_dir(organization_id, session_id) / "summary"
         prompt = (
             f"Summary Task {task_id} (execution_id={execution_id}, root_task_id={root_task_id}) in "
             f"organization {organization_id} is ready for final aggregation. "
             f"Call org_summary_get_inputs(summary_task_id='{task_id}') before doing any synthesis. "
             "Use root_task and summary_task for the requested deliverable and output format; use only bound, "
-            "accepted source outputs for facts. Preserve source conflicts, limitations and artifact locations. "
+            "accepted source outputs for facts. When a source output already contains the needed text, use "
+            "that text. Read a file only when that bound source explicitly cites it and the summary needs its "
+            "content. Do not list directories or open files from earlier runs. "
+            "For a single short text deliverable, when the user did not ask for code, multiple files, or a "
+            "long research document, write the final text yourself, check it once against the request, and "
+            "call org_summary_complete in this turn. Do not send that short text to source-integrator or "
+            "delivery-drafter. Use those two teammates only when the bound sources contain a disagreement "
+            "that would change the conclusion, or the user asked for a file, code, or a multi-part specialist "
+            "deliverable. Send each such assignment once, by internal Team message, and include the "
+            "execution_id in the message. Do not also create an internal task for that same work. "
+            "The outline, when used, contains only the structure the draft needs, source attribution for each "
+            "part, and disagreements that would change the conclusion. Do not add research, risk lists, or "
+            "verification items the user did not request. "
             "Do not replace a requested artifact with a report. Do NOT create child tasks, delegate, "
-            "claim, review, or modify any source task. Send the bound source facts to the two fixed "
-            "Summary Team teammates through internal Team messages for source integration and drafting; "
-            "use the execution_id in their messages and intermediate artifact names. "
-            "Do not explore unrelated workspace directories. After both teammates report, verify their "
-            "work against the bound sources and then call "
+            "claim, review, or modify any source task. "
+            f"The only directory for a final file is {summary_dir}. Write it there and pass that same "
+            "absolute path as result_uri. If there is no final file, put the full text in "
+            "output_context.description and omit result_uri. "
+            "Do not explore unrelated workspace directories. After teammates report, verify their "
+            "work against the bound sources once and then call "
             "org_summary_complete in the same leader turn. Internal task completion, Team idle, or Team pause is "
             "not Summary Task completion: do not start another internal task cycle, wait, or poll instead. "
+            "A message reply completes a teammate's work when no internal task is assigned to that teammate. "
             "A Root Leader message may add delivery requirements, but it does not change this Team's two-tool "
             "protocol or authorize access to other organization tasks. "
             "Complete this Summary Task with org_summary_complete, placing the deliverable in "
@@ -2588,12 +2622,19 @@ class OrganizationRuntimeManager:
             language = getattr(getattr(entry.agent, "spec", None), "language", None) or "cn"
             workspace = getattr(getattr(entry.agent, "harness", None), "workspace", None)
             workspace_path = getattr(workspace, "root_path", None) or "(unavailable)"
+            organization_id = getattr(task_manager, "organization_id", None)
+            summary_dir = (
+                str(organization_workspace_dir(organization_id, session_id) / "summary")
+                if isinstance(organization_id, str) and organization_id
+                else "(unavailable)"
+            )
             closeout_inputs["query"] = (
                 load_template("org_summary_closeout", language)
                 .format({
                     "summary_task_id": summary_key[2],
                     "execution_id": execution.execution_id,
                     "workspace_path": str(workspace_path),
+                    "summary_dir": summary_dir,
                 })
                 .content
             )

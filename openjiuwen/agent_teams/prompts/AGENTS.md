@@ -62,7 +62,7 @@ Organization 的共享聚合规则使用 `org_root_aggregation.md`（cn/en 成�
 
 Organization 的单次汇总收尾补偿使用 `org_summary_closeout.md`（cn/en 成对），由
 `OrganizationRuntimeManager` 在自然暂停且汇总尚未提交时投递到对话，动态字段为
-`{{summary_task_id}}`、`{{execution_id}}`、`{{workspace_path}}`。它不参与常驻系统提示词装配。
+`{{summary_task_id}}`、`{{execution_id}}`、`{{workspace_path}}`、`{{summary_dir}}`。它不参与常驻系统提示词装配。
 
 Summary 成员错误经宿主转发到 `org_summary_member_failure.md`（cn/en），使用已有内部消息
 直接唤醒 Summary Leader，不等待任务板收敛。同一错误帧去重，最多一次恢复通知，再失败
