@@ -11,7 +11,7 @@ approved-date: 2026-11-03
 created: 2026-11-03
 updated: 2026-11-03
 domain: core
-modules: [core/context_engine, core/events, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter]
+modules: [core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter]
 tags: [compaction, session, extensions, cross-repository]
 scope: 原生主会话的压缩前扩展、候选准备与提交，以及 Server 的 session.compact 和 ops.session.compact
 plan: jiuwenswarm EXTV2-26
@@ -20,8 +20,7 @@ files:
   - openjiuwen/core/context_engine/context_engine.py
   - openjiuwen/core/context_engine/context/context.py
   - openjiuwen/core/context_engine/processor/base.py
-  - openjiuwen/core/events/bus.py
-  - openjiuwen/core/events/ops.py
+  - openjiuwen/core/extension/runtime.py
 type: D
 ---
 
@@ -48,7 +47,7 @@ type: D
 | `SessionModelContext.compress_context`、ADD/GET 自动处理器路径 | 使用处理器锁；处理器可以直接 `set_messages`，修改上下文和内部状态 | 仅在已有方法外包一层 EventBus 不足以支持 post-next skip/改写 |
 | `ContextEngine.recover_from_model_exception` | 确认上下文溢出、且流式未发出可见 chunk 时尝试一次压缩恢复 | 对应 auto；保留只恢复一次及不重复已输出前缀的条件 |
 | `register_window_mutator` | 在窗口处理器之后修改最终窗口 | 不能充当压缩前 veto，也不能覆盖主动压缩和 pending ADD 消息 |
-| Core EventBus / Ops | 已有 handler_ids 白名单；Ops 有包身份和 session_context，无当前 Handler 身份和排除列表 | 要精确跳过调用 compact 的那一个 Handler，需要小范围通用 API 增量 |
+| Core EventBus / Ops | 原设计基线有 handler_ids；当前上游已撤回该参数，Ops 只有包/会话公共属性 | 保持当前上游接口；调用有效性归 Extension Runtime，不增加 Handler 身份或排除参数 |
 
 现有压缩状态通知及 SDD-0022 的观测方向继续有效。压缩后的观测与本方案的压缩前决策是不同职责，本方案不替代 SDD-0022。
 
@@ -58,7 +57,7 @@ type: D
 | --- | --- |
 | 用户执行原 `/compact` 对应的 command.compact | trigger=manual；USER 补充“保留任务约束”，默认压缩生成候选，整条链返回后才安装 |
 | 原生引擎到达压缩阈值或发生可恢复的上下文溢出 | trigger=auto；进入同一事件链；被 skip 时本次压缩不改写上下文，不绕过插件偷偷再压一次 |
-| 插件在两轮之间调用 Ops | trigger=plugin；绑定当前真实会话，排除调用者当前 Handler，保留其它匹配 Handler；忙碌时拒绝 |
+| 插件在两轮之间调用 Ops | trigger=plugin；绑定当前真实会话，正常运行匹配的压缩 Handler；同会话重入和忙碌请求在触发前拒绝 |
 | 宿主发起后台预计算 | trigger=precompute；只准备和缓存候选，不安装、不写产品压缩历史；以后前缀仍有效才可能复用 |
 | USER 在 next 返回后改写结果或返回 skip | 默认 CORE 尚未替换真实上下文，因此最终结果仍能决定本次是否生效 |
 
@@ -126,7 +125,7 @@ sequenceDiagram
 
 **D-03：消息 handle 是本次调用内的原生消息引用。** 保留 handle 恢复完整消息并忽略其公开文本改写；去掉 handle 则按公开角色/文本/工具块重建。不能把 session.messages 查询结果当成完整 live snapshot。代价是要管理调用内句柄和 ToolMessage 投影，验证 C-04、C-11。
 
-**D-04：插件调用限制在空闲时，精确排除调用 Handler。** 由真实执行准入状态和当前调用身份判断，不能用“处理器锁没占用”代替空闲。新增通用 handler_id 和 exclude_handler_ids，默认兼容。auto 在已有执行内部触发，不套用外部空闲门禁。验证 C-08、C-09。
+**D-04：保持 EventBus 接口，插件调用限制在有效包 Handler 和空闲会话。** Runtime 包 Handler 包装记录当前 Ops、任务及有效期；Server 通过只读校验判断调用来源。原事件与 compact 事件天然分开，同会话压缩内重入在第二次事件前拒绝，不需要来源排除参数。不能用“处理器锁没占用”代替真实空闲；auto 不套用外部空闲门禁。验证 C-08、C-09。
 
 **D-05：预计算是可失效缓存，提交事实仍只有一处。** 保存原生候选而非公开 handle；安装时重新进入对应 manual/auto/plugin 决策链，默认 continuation 才可复用缓存。候选前缀、策略/模型/包代次变化则失效。代价是缓存和前缀验证；验证 C-10、C-13。
 
@@ -147,7 +146,7 @@ sequenceDiagram
 | 模块 | 新增/调整责任 | 继续复用 |
 | --- | --- | --- |
 | Core context_engine | 压缩前 Hook、draft、原生候选、安装/恢复边界、预计算缓存 | 上下文池、消息校验、真实压缩算法、TokenCounter、Session 保存 |
-| Core events | 每次 Ops 的当前 handler_id；trigger 的排除列表；失效调用识别 | USER→BUILTIN→CORE、matcher、冻结会话、故障隔离 |
+| Core extension Runtime | 活动 Handler 的 Ops/任务/有效期；只读 is_active_invocation 校验 | EventBus、Ops、Builder、matcher、执行顺序与故障隔离保持上游契约 |
 | Server 原生 Adapter/压缩服务 | 从已授权会话解析 engine；注册/注销 Hook；命令/Ops 共用准入和后处理 | 原 Worker、会话实例、目录/模型绑定、压缩历史与用量通知 |
 | Server event_types/session_compact.py（拟新增） | dataclass、matcher、输入输出校验、事件注册 | 不放 notify、真实 engine 查找或业务 trigger |
 | Server compact_dispatch.py（拟新增） | 私有调用状态、消息 codec、句柄解析、bus.trigger、结果转换 | 与 query/history 调用状态模式一致，但不复用其提前提交语义 |
@@ -233,11 +232,13 @@ handle 是每次事件的随机不透明标识，只能引用**本次快照或�
 
 ### 5.5 当前 Handler 及事件路由
 
-拟新增：`EventHandlerOps.handler_id: HandlerId | None`（只读）；`EventHandlerOpsBuilder.build(..., *, handler_id=None)`；`EventBus.trigger(..., handler_ids=None, exclude_handler_ids=None)`。排除集与 matcher/白名单取交差后使用，CORE 不受排除；ops.build 禁止传排除集。缺省参数保留旧行为。
+保持上游 EventBus.trigger(event, context)、EventHandlerOps 与 Builder.build 的公共接口和行为，不新增调用级筛选或排除参数。
 
-Bus 给每次实际进入的 Handler 绑定 invocation 身份和有效期。Server 私有代理核对当前 invocation，而不是仅信任用户能自行构建的 Ops 对象；Handler 返回即关闭有效期，复制到后台任务的旧 ContextVar/旧 Ops 不能继续取得压缩权限。
+Core Extension Runtime 的既有 _tracked_handler 包装已维护活动 Ops 和包在途计数；在同一包装内记录当前调用帧（Ops、asyncio Task、active）。新增 Runtime.is_active_invocation(ops) 只读校验：对象、当前嵌套层、任务及有效期必须一致。Handler 返回、异常或取消时关闭调用帧并恢复外层；复制 ContextVar 不延长寿命，子任务不能借父任务的 Ops。原 begin_calls/end_calls 及 store 行为不变。
 
-插件触发时只排除来源 Handler ID，不排除整个包；不同函数订阅了同一事件时仍会调用。同一会话压缩重入在等待锁之前报 COMPACT_REENTRANT；不允许 USER 在 compact Handler 内再发起一次 compact，即使来源 Handler 已排除也不能形成 A→B→A 循环。
+Server 装配通过回调注入此校验，compact 服务不接受用户传入校验器。只有 Runtime 发布的 USER/BUILTIN 包 Handler 可调用公开 compact Ops；宿主手动和自动入口仍使用已有可信服务。非受管直接注册、手工构造、后台复制和过期 Ops 均失败。
+
+原事件中的 Handler 本来不匹配 session.compact；压缩 Handler 内再次压缩同一会话在触发第二次事件之前拒绝（COMPACT_BUSY 或 COMPACT_REENTRANT）。不排除整个包、函数或任意匹配 Handler，不提供通用精确排除能力。
 
 ### 5.6 状态、准入与锁
 
@@ -269,7 +270,7 @@ Hook 期间默认只做候选计算，不能再调用需要当前同一处理器
 
 **手动：** command.compact → 原 Adapter 找到原生会话 → 公共压缩服务取得空闲独占 → Core compact_context(manual) → Hook 收集可信 SessionContext 和活跃消息快照 → Bus USER → 可选 BUILTIN → session_compact_core → Core 默认 prepare → USER 返回最终结果 → 校验/安装/commit → 原命令写一次历史边界并反馈。用户无需改原业务函数。
 
-**插件：** 已绑定空闲会话的用户入口 → USER 调用 ops.session.compact(instructions=...) → ops.build 登记的服务代理 → 校验本次 Ops/包/会话和空闲 → Core compact_context(plugin) → 同一 Hook/Bus，排除来源 Handler → 相同 prepare/最终安装 → 返回权威结果到调用者。没有 SessionContext 时明确报错；不从全局“最近一次会话”猜测。
+**插件：** 已绑定空闲会话的用户入口 → USER 调用 ops.session.compact(instructions=...) → ops.build 登记的服务代理 → 校验本次 Ops/包/会话和空闲 → Core compact_context(plugin) → 同一 Hook/普通 Bus 调用，不传筛选/排除参数 → 相同 prepare/最终安装 → 返回权威结果到调用者。没有 SessionContext 时明确报错；不从全局“最近一次会话”猜测。
 
 **自动：** 原生 ADD/GET trigger 判定需要摘要（或可恢复溢出）→ Core 建计划 → 宿主 Hook → session.compact(auto) → USER/CORE 候选 → 最终安装后继续原模型请求。skip 时不修改待压缩会话内容；若原请求仍超窗，按原模型失败/上下文不足语义结束，不能无限触发相同 auto 或绕过 skip。
 
@@ -316,7 +317,7 @@ Core 新 compact_context(trigger="precompute") 为真实入口。Server 默认�
 | --- | --- | --- |
 | 1 | Core context_engine 新增 compaction 原生协议、Hook 与候选安装协调器 | 本方案批准；旧 API 消费者回归 |
 | 2 | Core Processor draft/延迟副作用，接入主动、ADD、GET、溢出；每次 instructions 真正到达摘要请求 | 所有本期启用内置处理器逐个通过 skip/失败/状态验证 |
-| 3 | Core EventBus/Ops 的当前 Handler、排除集和调用有效期 | matcher/CORE 不可被误排除；旧调用不变 |
+| 3 | Core Extension Runtime 调用有效性校验 | 不改 EventBus/Ops/Builder；嵌套、子任务、过期及复制上下文校验 |
 | 4 | Server 注入压缩服务；Adapter 注册 Hook；新增事件、唯一 CORE、Ops 代理 | 依赖 Core 新提交，不自行复制 Core 内部实现 |
 | 5 | Server 原 command.compact、auto 状态后处理、opt-in 预计算和独立用户 ZIP 案例 | 原命令参数/响应兼容，所有真实入口联合验证 |
 | 6 | 两仓 specs/features、Server plan、既有本地 HTML | 补实际测试结果及版本，不能先写通过 |
@@ -351,7 +352,7 @@ Core 未注册 Hook 的消费者继续旧路径；注册 Hook 的宿主必须使
 | C-06 | offload/记忆 Processor 准备后 skip/取消 | 无可见记忆游标变化和 live 替换，无未引用暂存残留；不通过“先写后恢复”伪造 |
 | C-07 | 故障注入文件发布/Session 保存前后，提交阶段取消 | 只安装一次；确定失败与未知结果分开；未知时阻止后续执行，重载核对真实持久状态 |
 | C-08 | 真实空闲 USER 入口调用 Ops，同时另一请求尝试开始 | plugin 事件绑定正确会话；准入互斥；活跃回合内拒绝且不触发事件；并发锁释放 |
-| C-09 | 同包两个 Handler、其它包、CORE，以及 compact 内重入 | 仅调用 Handler 被排除，其它匹配者执行，CORE 保留；过期 Ops/后台复制身份拒绝；重入不死锁 |
+| C-09 | 同包多个 Handler、其它包、CORE，以及 compact 内重入 | 匹配链正常执行，CORE 保留；重入在第二次事件前拒绝；Runtime 拒绝过期、跨任务、非当前 Handler 和伪造 Ops |
 | C-10 | 真实 precompute 入口后安装，匹配与变化的前缀/模型/配置/包代次 | 预计算不修改 live/历史，tokens_after 缺失；合法 suffix 保留；失效时重算；安装事件仍能 veto |
 | C-11 | 无上下文、外部 Harness、直接 bus.trigger、非法字段 | 在预期边界拒绝；没有用缺依赖或初始化异常代替目标拒绝；无任意目标查询 |
 | C-12 | Core 无 Hook、旧压缩调用/消息校验/Session，Server 原手动/自动回归 | 原消费者兼容；新注册/注销后无泄漏；七查询、append、send/receive 不被改变 |
@@ -366,6 +367,8 @@ Core 未注册 Hook 的消费者继续旧路径；注册 Hook 的宿主必须使
 另一风险是持久化与文件不是同一事务，设计已将 uncertain 和回收单列；不能以单元测试保存成功声称具有崩溃原子性。预计算会产生可丢弃模型费用，默认关闭。主会话以外的 agent_id 路由、外部 Harness、Claude 经典 PreCompact Hook 的具体集成不在本期；公开 skip 语义对齐，不代表已实现 Claude 的经典 Hook 宿主。
 
 ## 10. 按日期记录的评审与设计修订
+
+- 2026-11-03：用户要求尽量保持 EventBus 接口，并明确确认替代方案、要求实施。本修订替代原 D-04 / 5.5 的 Handler 身份和排除集增量，改由 Extension Runtime 校验调用作用域、压缩模块拒绝同会话重入；其它压缩决策和持久化设计继续有效。
 
 2026-11-03：用户先选择完整 Core＋Server 设计，阅读本方案后明确要求“开发吧 验收后给我PR”，据此批准方案并进入开发；不代表运行验收已通过。
 

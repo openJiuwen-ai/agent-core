@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-03T16:04+08:00 -->
+<!-- generated-at: 2026-11-03T17:05+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -22,7 +22,7 @@ generated: true
 | [agent_teams](#module-2) | 7 |
 | [agent_teams/workflow](#module-3) | 15 |
 | [core/context_engine](#module-4) | 1 |
-| [core/events](#module-5) | 1 |
+| [core/extension](#module-5) | 1 |
 | [extensions/observability](#module-6) | 2 |
 | [harness](#module-7) | 3 |
 | [jiuwenswarm/extensions_v2](#module-8) | 1 |
@@ -100,7 +100,7 @@ generated: true
 
 <a id="module-5"></a>
 
-## core/events
+## core/extension
 
 <a id="module-6"></a>
 

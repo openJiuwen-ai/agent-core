@@ -19,7 +19,7 @@ generated: true
 | [agent_teams](#module-2) | 199 |
 | [agent_teams/workflow](#module-3) | 15 |
 | [core/context_engine](#module-4) | 3 |
-| [core/events](#module-5) | 2 |
+| [core/extension](#module-5) | 2 |
 | [extensions/observability](#module-6) | 2 |
 | [harness](#module-7) | 54 |
 | [jiuwenswarm/extensions_v2](#module-8) | 1 |
@@ -268,18 +268,18 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/events, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | — |
-| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/events | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
+| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
+| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
 | [S_context_engine_01_compaction](specs/context_engine/S_01_compaction.md) | S | 原生上下文压缩拦截与候选提交规约 | 刘瑜 | core/context_engine | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py | — |
 
 <a id="module-5"></a>
 
-## core/events
+## core/extension
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/events, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | — |
-| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/events | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
+| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
+| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
 
 <a id="module-6"></a>
 
@@ -357,7 +357,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/events, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | — |
+| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
 
 <a id="module-9"></a>
 
@@ -365,7 +365,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/events, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | — |
+| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
 
 <a id="module-10"></a>
 
