@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -95,6 +95,9 @@ def test_bind_protocol_member_team_tools_uses_codex_dynamic_gateway(monkeypatch)
     runtime = Mock()
     runtime.inject_mcp = True
     runtime.provider_name = "codex"
+    leader = Mock()
+    leader.infra.swarmflow = None
+    leader.background_task_controller = None
     teammate = Mock()
     teammate.infra.workspace_manager = None
     teammate.infra.messager = Mock()
@@ -126,6 +129,7 @@ def test_bind_protocol_member_team_tools_uses_codex_dynamic_gateway(monkeypatch)
 
     spawn_mod._bind_protocol_member_team_tools(
         runtime,
+        leader=leader,
         teammate=teammate,
         teammate_backend=teammate_backend,
         spec=spec,
@@ -137,8 +141,149 @@ def test_bind_protocol_member_team_tools_uses_codex_dynamic_gateway(monkeypatch)
     assert captured["session_id"] == "sess-1"
     assert captured["team_backend"] is teammate_backend
     assert captured["messager"] is teammate.infra.messager
+    # No shared swarmflow infrastructure: no host, no handles — the factory's
+    # resolver gate drops the tool exactly as before.
+    assert captured["parent_agent"] is None
+    assert "swarmflow_model_resolver" not in captured
     runtime.bind_tools.assert_called_once_with(gateway)
     runtime.bind_mcp_servers.assert_not_called()
+
+
+def test_bind_protocol_member_team_tools_hosts_swarmflow_over_infra(monkeypatch) -> None:
+    """Shared infra gives the CLI member the native swarmflow tool on a host."""
+    from openjiuwen.agent_teams.workflow.external_swarmflow_host import ExternalSwarmflowHost
+
+    runtime = Mock()
+    runtime.inject_mcp = True
+    runtime.provider_name = "codex"
+    leader = Mock()
+    infra = Mock()
+    leader.infra.swarmflow = infra
+    controller = Mock()
+    leader.background_task_controller = controller
+    teammate = Mock()
+    teammate.infra.workspace_manager = None
+    teammate.infra.messager = Mock()
+    teammate_backend = Mock()
+    gateway = Mock()
+    captured: dict[str, Any] = {}
+
+    def _fake_build_external_team_tool_gateway(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return gateway
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.tool_gateway.build_external_team_tool_gateway",
+        _fake_build_external_team_tool_gateway,
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+        build_context=BuildContext(member_name="boss", project_dir=None),
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.EXTERNAL_CLI,
+        member_name="codex-1",
+        cli_agent="codex",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    spawn_mod._bind_protocol_member_team_tools(
+        runtime,
+        leader=leader,
+        teammate=teammate,
+        teammate_backend=teammate_backend,
+        spec=spec,
+        ctx=ctx,
+        team_name="ext_team",
+        session_id="sess-1",
+    )
+
+    host = captured["parent_agent"]
+    assert isinstance(host, ExternalSwarmflowHost)
+    # The five shared handles ride the channel; the resolver gate sees a
+    # non-None resolver so the tool survives the factory subtraction.
+    assert captured["swarmflow_model_resolver"] is infra.model_resolver
+    assert captured["swarmflow_worker_base_spec"] is infra.worker_base_spec
+    assert captured["swarmflow_human_base_spec"] is infra.human_base_spec
+    assert captured["concurrency_governor"] is infra.concurrency_governor
+    assert captured["swarmflow_budget"] is infra.budget
+    # Host surfaces: per-member derived context (attribution key) and the
+    # session controller every in-process member shares.
+    assert host.build_context.member_name == "codex-1"
+    assert host.background_task_controller is controller
+
+
+def test_bind_protocol_member_team_tools_claude_channel_gets_host(monkeypatch) -> None:
+    """The claude MCP channel receives the same host + handles."""
+    runtime = Mock()
+    runtime.inject_mcp = True
+    runtime.provider_name = "claude-code"
+    runtime.mcp_server_name = "team"
+    leader = Mock()
+    infra = Mock()
+    leader.infra.swarmflow = infra
+    leader.background_task_controller = None
+    teammate = Mock()
+    teammate.team_backend = None
+    teammate.infra.workspace_manager = None
+    teammate.infra.messager = Mock()
+    captured: dict[str, Any] = {}
+
+    class _FakeServer:
+        server = object()
+
+    def _fake_tool_set(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _FakeServer()
+
+    monkeypatch.setattr(
+        # The spawn path resolves this builder with a function-local import
+        # at call time (external_cli_spawn imports it from the ``cli_agent.
+        # claude`` package, whose ``__init__`` re-exports it from ``sdk_mcp``),
+        # so patching the binding on that package is what intercepts the
+        # spawn call.
+        "openjiuwen.agent_teams.external.cli_agent.claude.build_claude_sdk_mcp_tool_set",
+        _fake_tool_set,
+    )
+    # The claude channel runs the real create_team_tools over the backend;
+    # MagicMock lets every backend attribute resolve (spec-list Mock would
+    # raise), and a None cache keeps the translator on framework defaults.
+    teammate_backend = MagicMock()
+    teammate_backend.member_name = "claude-1"
+    teammate_backend.workspace_cache = None
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.EXTERNAL_CLI,
+        member_name="claude-1",
+        cli_agent="claude",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    spawn_mod._bind_protocol_member_team_tools(
+        runtime,
+        leader=leader,
+        teammate=teammate,
+        teammate_backend=teammate_backend,
+        spec=spec,
+        ctx=ctx,
+        team_name="ext_team",
+        session_id="sess-1",
+    )
+
+    assert captured["swarmflow_model_resolver"] is infra.model_resolver
+    assert captured["parent_agent"] is not None
+    runtime.bind_mcp_servers.assert_called_once()
+    runtime.bind_tools.assert_not_called()
 
 
 @pytest.mark.asyncio

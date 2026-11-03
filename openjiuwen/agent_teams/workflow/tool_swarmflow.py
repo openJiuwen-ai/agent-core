@@ -121,11 +121,12 @@ class _StructuralDiff:
 
 
 class SwarmflowTool(AsyncTool):
-    """Leader tool that launches a swarmflow script as a background async tool.
+    """Team tool that launches a swarmflow script as a background async tool.
 
     Follows the team tools' conventions: description and parameter strings are
     resolved through the shared i18n ``Translator`` (``descs/<lang>/swarmflow.md``
-    + ``swarmflow.*`` STRINGS) so the surface honours the leader's language.
+    + ``swarmflow.*`` STRINGS) so the surface honours the member's language.
+    One schema, one invoke; the description is shared by leader and teammate.
     """
 
     def __init__(
@@ -347,6 +348,17 @@ class SwarmflowTool(AsyncTool):
                   [n for n in old_nodes if n not in new_nodes]
         return _StructuralDiff(changed_nodes=changed)
 
+    def _executor_member_name(self) -> str | None:
+        """The member name currently hosting the run (leader included).
+
+        Derived from the hosting harness's build context — the launcher on
+        a fresh launch, the relaunch host on a resume. It is the single
+        attribution key: narration routing, completion injections and resume
+        handoff all read it. None when the harness carries no team context.
+        """
+        ctx = getattr(self._parent_agent, "build_context", None)
+        return getattr(ctx, "member_name", None)
+
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         """Validate the script source, admit via governor, launch background run.
 
@@ -379,27 +391,36 @@ class SwarmflowTool(AsyncTool):
         ticket = admission.ticket
 
         # Steps below hold the governor ticket: every failure path releases it.
-        if not script_path and script:
-            # Materialise inline source now so the receipt reports the absolute
-            # path (a later re-run passes it instead of resending the source).
-            try:
-                script_path = await self._materialise_script(script)
-            except Exception as exc:  # noqa: BLE001 - never escape as an exception
-                await self._governor.release_workflow(ticket)
-                return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
-
+        # Seal guard first: a sealed resume_id is blanked so the fresh run_id
+        # minted below never replays a terminal run's cache. The guard resolves
+        # the journal from the disk script, or from the inline source's META.
+        resume_id = await self._seal_guard(script_path, script, resume_id)
+        run_id = resume_id or new_swarmflow_run_id()
+        # Re-run gate BEFORE materialisation: the lint must compare the inline
+        # edit against the PREVIOUS run's on-disk snapshot. Running it after
+        # would read back the just-written file (old == new) and the gate
+        # would never bite; worse, the materialised write would already have
+        # replaced the snapshot the comparison needed.
         try:
             self._check_rerun(script_path, script)
         except Exception as exc:  # noqa: BLE001 - never escape as an exception
             await self._governor.release_workflow(ticket)
             return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
-
-        resume_id = await self._seal_guard(script_path, resume_id)
+        if not script_path and script:
+            # The run_id is minted before materialisation so the inline script
+            # lands in a per-run file (script-{run_id}.py): two runs sharing a
+            # META.name must never overwrite each other's source snapshot.
+            try:
+                script_path = await self._materialise_script(script, run_id=run_id)
+            except Exception as exc:  # noqa: BLE001 - never escape as an exception
+                await self._governor.release_workflow(ticket)
+                return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
 
         enriched = self._enriched_inputs(
             inputs,
             script_path=script_path,
             resume_id=resume_id,
+            run_id=run_id,
             ticket=ticket,
             agent_gate=admission.agent_gate,
         )
@@ -432,9 +453,7 @@ class SwarmflowTool(AsyncTool):
         controller = getattr(self._parent_agent, "background_task_controller", None)
         if controller is None:
             return ToolOutput(success=False, error="Runtime controller not configured")
-        ops = {"pause": controller.pause, "resume": controller.resume, "stop": controller.stop}
-        op = ops.get(action)
-        if op is None:
+        if action not in ("pause", "resume", "stop"):
             return ToolOutput(success=False, error=f"unknown action {action!r}")
         # A paused run has already unwound, so the engine will never emit
         # WORKFLOW_STOPPED for it — whether the controller still holds its
@@ -442,12 +461,33 @@ class SwarmflowTool(AsyncTool):
         # Announce it here either way so the embedder's card closes; an active
         # run announces its own stop while unwinding.
         was_paused = action == "stop" and controller.is_paused(resume_id)
-        ok = await op(resume_id)
+        if action == "resume":
+            # Pin the relaunch host to the member issuing this call: its tool
+            # is alive (this invoke is on its stack), so the resumed run's
+            # narration and completion land back on the resuming member
+            # instead of whichever member's tool registered last.
+            ok = await controller.resume(resume_id, via=self)
+        else:
+            op = controller.pause if action == "pause" else controller.stop
+            ok = await op(resume_id)
         if action == "stop" and (was_paused or not ok):
             ok = await self._announce_stopped(resume_id) or ok
+        if ok:
+            return ToolOutput(
+                success=True,
+                data={"run_id": resume_id, "action": action, "status": "done"},
+            )
+        # A miss must read as a miss. Leaving error unset makes render_for_llm
+        # fall back to the generic "Failed to launch async tool", which hides
+        # the actual outcome from the caller that lost the race (e.g. the
+        # second member resuming a run the first one already relaunched).
         return ToolOutput(
-            success=ok,
-            data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
+            success=False,
+            error=(
+                f"no live control handle for run {resume_id} "
+                f"(already resumed/paused/stopped, completed, or unknown id)"
+            ),
+            data={"run_id": resume_id, "action": action, "status": "not_found"},
         )
 
     async def _announce_stopped(self, run_id: str) -> bool:
@@ -459,6 +499,11 @@ class SwarmflowTool(AsyncTool):
         this event to reach its terminal state. No journal seal: the pause
         record stays, so a manual ``resume_id + script_path`` relaunch remains
         possible.
+
+        ``executor`` here names the ACTING member (the one invoking the
+        stop), which is usually the launcher — but a cross-member cold stop
+        (e.g. the leader stopping a teammate's parked run after a session
+        restart) attributes the acting member.
         """
         if self._messager is None:
             return False
@@ -475,6 +520,7 @@ class SwarmflowTool(AsyncTool):
             team_name=self._team_name,
             kind=ProgressKind.WORKFLOW_STOPPED,
             run_id=run_id,
+            executor=self._executor_member_name(),
             text="workflow stopped",
         )
         message = EventMessage(
@@ -501,13 +547,13 @@ class SwarmflowTool(AsyncTool):
             return f"{pending[0]!r} is not supported yet; provide 'script_path' or inline 'script'"
         return None
 
-    async def _materialise_script(self, script: str) -> str:
-        """Write an inline ``script`` to disk; returns the absolute path."""
+    async def _materialise_script(self, script: str, *, run_id: str) -> str:
+        """Write an inline ``script`` to a per-run file; returns the absolute path."""
         from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.workflow.runner import materialize_swarmflow_script
 
         return await materialize_swarmflow_script(
-            script, team_name=self._team_name, session_id=get_session_id()
+            script, team_name=self._team_name, session_id=get_session_id(), run_id=run_id
         )
 
     def _check_rerun(self, script_path: str, script: str) -> None:
@@ -528,20 +574,24 @@ class SwarmflowTool(AsyncTool):
                 "[swarmflow] re-run impact: structural changes at %s", diff.changed_nodes
             )
 
-    async def _seal_guard(self, script_path: str, resume_id: str) -> str:
+    async def _seal_guard(self, script_path: str, script: str, resume_id: str) -> str:
         """Blank out a resume_id that points at a TERMINAL (sealed) run.
 
         Relaunching under it would wrongly replay the sealed cache. Reads the
         run's own journal snapshot + WAL (per-run_id paths): the seal record of
         ``resume_id`` lives in exactly those files, so the guard stays O(1)
-        with no cross-run scanning. Best-effort: failures only debug-log,
+        with no cross-run scanning. The journal path derives from the disk
+        script's ``META`` when one exists, else the inline source's (the
+        inline source is materialised after this guard, so its journal comes
+        from the source directly). Best-effort: failures only debug-log,
         never block the launch.
         """
-        if not (resume_id and script_path):
+        if not (resume_id and (script_path or script)):
             return resume_id
         try:
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.workflow.engine.journal import Journal
+            from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta
             from openjiuwen.agent_teams.workflow.runner import (
                 _resolve_journal_path,
                 _resolve_legacy_resume,
@@ -549,9 +599,24 @@ class SwarmflowTool(AsyncTool):
             )
 
             session_id = get_session_id()
-            journal_path = _resolve_journal_path(script_path, self._team_name, session_id, resume_id)
-            wal_path = _resolve_wal_path(script_path, self._team_name, session_id, resume_id)
-            legacy_path = _resolve_legacy_resume(script_path, self._team_name, session_id, resume_id)
+            if script_path:
+                journal_path = _resolve_journal_path(script_path, self._team_name, session_id, resume_id)
+                wal_path = _resolve_wal_path(script_path, self._team_name, session_id, resume_id)
+                legacy_path = _resolve_legacy_resume(script_path, self._team_name, session_id, resume_id)
+            else:
+                # Inline source (not yet materialised): the journal derives
+                # from the source's own META instead of a disk path.
+                from openjiuwen.agent_teams import paths
+
+                name = extract_workflow_meta(script).get("name")
+                if not name:
+                    return resume_id
+                sid = session_id or "default"
+                journal_path = str(
+                    paths.workflow_run_journal_path(self._team_name, sid, name, resume_id)
+                )
+                wal_path = str(paths.workflow_run_wal_path(self._team_name, sid, name, resume_id))
+                legacy_path = str(paths.workflow_journal_path(self._team_name, sid, name))
             journal = await Journal.load(journal_path, wal_path=wal_path, legacy_path=legacy_path)
             if journal.find_run_record(resume_id, "seal") is not None:
                 team_logger.warning(
@@ -568,6 +633,7 @@ class SwarmflowTool(AsyncTool):
         *,
         script_path: str,
         resume_id: str,
+        run_id: str,
         ticket: Any,
         agent_gate: Any,
     ) -> dict[str, Any]:
@@ -575,7 +641,7 @@ class SwarmflowTool(AsyncTool):
         ticket/gate, and the completion ctx the finished-run injection reads."""
         enriched = dict(inputs)
         enriched["script_path"] = script_path
-        enriched[_RUN_ID_INPUT_KEY] = resume_id or new_swarmflow_run_id()
+        enriched[_RUN_ID_INPUT_KEY] = run_id
         # resume_id without action = script-edit relaunch (same run_id): the
         # frontend resets the phase/agent tree, unlike a fresh launch.
         if resume_id:
@@ -629,12 +695,20 @@ class SwarmflowTool(AsyncTool):
         # so ``relaunch`` restores it — otherwise the resumed run would publish
         # progress on the wrong topic and resume from the wrong journal path.
         session_id = get_session_id()
+        # Run attribution: every progress event names the member currently
+        # hosting the run (leader included; the relaunch host on a resume).
+        executor = self._executor_member_name()
 
         controller = getattr(self._parent_agent, "background_task_controller", None)
         abort_event = AbortSignal()
 
         def _on_backend_ready(backend: Any) -> None:
-            """Register this run's control handle once its backend exists (pause path)."""
+            """Register this run's control handle once its backend exists (pause path).
+
+            ``owner_member`` is the controller's internal ``stop_by_owner`` key
+            (host member name, same value as the event's ``executor``); it is
+            not an event field.
+            """
             if controller is None:
                 return
             controller.register(
@@ -646,6 +720,8 @@ class SwarmflowTool(AsyncTool):
                     native=self._parent_agent,
                     inputs=inputs,
                     session_id=session_id,
+                    launcher=self,
+                    owner_member=getattr(getattr(self._parent_agent, "build_context", None), "member_name", None),
                 )
             )
 
@@ -659,6 +735,7 @@ class SwarmflowTool(AsyncTool):
                 kind=progress.kind,
                 run_id=run_id,
                 relaunch_kind=inputs.get(_RELAUNCH_KIND_KEY),
+                executor=executor,
                 workflow_name=name_box["name"],
                 description=name_box.get("description"),
                 script_path=progress.script_path,
@@ -855,6 +932,14 @@ class SwarmflowTool(AsyncTool):
 
         inputs[_RELAUNCH_KIND_KEY] = "resume"  # normal pause→resume: tree continues
         new_task_id = generate_id(self.card.name)
+        # Same terminal formatters as a fresh invoke, so the resumed run's
+        # completion injection carries the run_id + summary instead of the
+        # generic async-tool text: whoever hosts this relaunch (the run's
+        # member tool when alive, the leader fallback otherwise) learns WHICH run
+        # finished. Legacy tickets without a run_id fall back to the generic
+        # text, exactly as before.
+        run_id = inputs.get(_RUN_ID_INPUT_KEY)
+        completion_ctx = inputs.get(_COMPLETION_CTX_KEY) or {}
         token = set_session_id(session_id) if session_id else None
         try:
             self._parent_agent.launch_async_tool(
@@ -862,6 +947,14 @@ class SwarmflowTool(AsyncTool):
                 lambda: self.run_background(new_task_id, inputs),
                 tool_name=self.card.name,
                 description=f"{self.launched_description(inputs)} (resumed)",
+                format_completed=(
+                    lambda result: self.format_completed_injection(
+                        result, run_id=run_id, completion_ctx=completion_ctx
+                    )
+                ) if run_id else None,
+                format_failed=(
+                    lambda error: self.format_failed_injection(error, run_id=run_id)
+                ) if run_id else None,
             )
         finally:
             if token is not None:

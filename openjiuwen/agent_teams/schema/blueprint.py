@@ -577,13 +577,18 @@ class TeamAgentSpec(BaseModel):
     enable_swarmflow: bool = False
     """Spec-level capability gate for swarmflow orchestration.
 
-    True wires the leader-only ``swarmflow(script_path, args)`` tool, which
-    runs a swarmflow script (a multi-agent workflow) in the background. The
-    script's ``agent()`` calls execute as single-shot ``WORKER`` members via
-    the team worker backend, and phase progress is streamed back to the leader
-    (a spectator) which narrates it to the user. False (default) hides the
-    tool. Workers reuse the leader's model; no separate worker spec is required
-    for the MVP. See ``openjiuwen/agent_teams/workflow``.
+    True wires the ``swarmflow(script_path, args)`` tool on the leader AND on
+    every in-process teammate that received the shared team handles (the tool
+    factory drops the name again for members without them — subprocess /
+    external CLI). The tool runs a swarmflow script (a multi-agent workflow)
+    in the background. The script's ``agent()`` calls execute as single-shot
+    ``WORKER`` members via the team worker backend, and phase progress is
+    streamed back on the team topic: the leader (a spectator) narrates it to
+    the user, a teammate owner reports its run's result back to the
+    leader. False (default) hides the tool everywhere. Evolution direction:
+    this switch is meant to default-on and eventually disappear once teammate
+    orchestration is fully proven — do not add a second member-level switch.
+    See ``openjiuwen/agent_teams/workflow``.
     """
     swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
     """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""

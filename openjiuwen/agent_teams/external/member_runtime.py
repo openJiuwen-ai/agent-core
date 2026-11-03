@@ -1010,6 +1010,11 @@ class ExternalHarnessMemberRuntime:
         _ = controller
 
     @property
+    def background_task_controller(self) -> Optional[Any]:
+        """None: external harness members hold no controller of their own."""
+        return None
+
+    @property
     def workspace(self) -> Optional[Any]:
         return None
 

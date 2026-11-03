@@ -181,13 +181,24 @@ async def materialize_swarmflow_script(
     *,
     team_name: str,
     session_id: str | None,
+    run_id: str,
 ) -> str:
     """Persist an inline swarmflow ``script`` source to disk, return its path.
 
     Inline sources reuse the whole path-based execution pipeline (importlib
     module import + ``META``-derived resume journal) by being written to the
     same per-workflow directory that holds the journal:
-    ``{team_home}/sessions/{session_id}/workflows/{name}/script.py``.
+    ``{team_home}/sessions/{session_id}/workflows/{name}/script-{run_id}.py``.
+
+    The file name is per-run: that directory is shared by every run of the
+    same ``META.name``, and a fixed ``script.py`` let a second run overwrite
+    the first one's source — resuming the first then loaded the second's
+    script (every cache sig misses → wrong full re-run). With a per-run name
+    a resume relaunch keeps loading the exact source snapshot its run
+    launched with. Sessions from before this split only have the legacy
+    ``script.py``: existing tickets/journals pointing at it keep loading it
+    unchanged, and the legacy file is never deleted (it stays a resume asset
+    for those runs).
 
     Writing under the ``META`` name directory (not a random temp file) keeps
     the path stable across a pause/resume relaunch and colocates the script
@@ -202,6 +213,7 @@ async def materialize_swarmflow_script(
         source: The swarmflow script source text.
         team_name: Team identifier (script / journal namespacing).
         session_id: Current session id; falls back to ``"default"`` when empty.
+        run_id: Workflow run id the script is bound to (namespaced file name).
 
     Returns:
         Absolute path to the written script as a string.
@@ -219,7 +231,7 @@ async def materialize_swarmflow_script(
     sid = session_id or "default"
     run_dir = paths.workflow_run_dir(team_name, sid, name)
     await aiofiles.os.makedirs(run_dir, exist_ok=True)
-    script_file = run_dir / "script.py"
+    script_file = run_dir / f"script-{paths.safe_path_segment(run_id)}.py"
     async with aiofiles.open(script_file, "w", encoding="utf-8") as f:
         await f.write(source)
     return str(script_file)

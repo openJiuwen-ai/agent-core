@@ -6,8 +6,8 @@ status: draft
 stage: proposals
 reviewers: []
 created: 2026-10-27
-updated: 2026-10-31
-version: 3
+updated: 2026-11-03
+version: 4
 domain: core
 modules: [agent_teams, agent_teams/workflow]
 tags: [swarmflow, teammate, orchestration, attribution, executor, resume]
@@ -46,8 +46,8 @@ leader 代跑，run 的进展叙述、结果注入、暂停恢复全部落在 le
 4. **human 往返硬化**：human 节点的 timeout 只计"等人"，慢回复不再触发重复弹窗与
    重问。
 
-非目标：跨进程/external-cli worker 的工具开放；叙述去重表机制（重放即设计，去重
-移除）。
+非目标：跨进程/external-cli worker 的工具开放（后由 §8.1 打通 SDK 族发起者方向）；
+叙述去重表机制（重放即设计，去重移除）。
 
 ## 2. 共享设施与工具开放
 
@@ -181,7 +181,7 @@ paused）落终态并 seal，邻居 run 不受影响。
 |---|---|
 | `register` / `deregister` | active 表进出；deregister 保留 paused 句柄 |
 | `pause(run_id \| None)` | 三步：set `abort_event` → `backend.abort_sessions` → native cancel task，等任务真 unwind；句柄移入 `_paused` |
-| `resume(run_id \| None)` | 该 run 自己的 launcher 优先（`_launcher_alive` 探测）；launcher 已死回退当前周期全局槽位 |
+| `resume(run_id \| None)` | 该 run 自己的 launcher 优先（`_launcher_alive` 探测）；launcher 已死回退发起 resume 调用的成员工具（`via`，控制动作入参）；无调用方再回退当前周期全局槽位 |
 | `stop(run_id \| None)` | 终态：active 三步 abort，不入 paused；对已 paused 的句柄只丢弃重拉入口 |
 | `stop_by_owner(member_name, *, include_paused=False)` | owner 过滤版；`include_paused=True` 连 paused 句柄一起清（真拆除） |
 | `set_launcher(tool)` | 当前周期全局槽位（跨轮重建的回退宿主） |
@@ -399,12 +399,15 @@ flowchart TD
     D -->|重试耗尽| F[failed]
 ```
 
-- human 轮不被外层 `asyncio.timeout` 包裹；`options.timeout` 只剩"等人时限"语义，
+- human 轮不设外层 `asyncio.timeout`；`options.timeout` 只承担"等人时限"语义，
   超时返回 `skipped`、不重试。
 - `_human_reply_reuse` 缓存已拿到的原始回复，格式化轮失败重试时复用而不是再问。
 - 显式跳过：前端"跳过/取消"发 `{skip: true}`，映射为 `HUMAN_REPLY_SKIP` 哨兵，与超时
   同收口。
-- 代价：格式化轮自身失去 timeout 上限，模型卡死只能靠取消。
+- 等人之后的分类/格式化模型调用**不设节点级超时**：引擎对任何算子的模型
+  调用都不强制逐调用超时（未声明 `options.timeout` 的 agent 轮同样无上界），
+  模型调用挂死统一由控制面终结（pause/stop 的三步 abort 取消任务）。human 轮
+  与全局口径一致，不为它单独引入逐段超时。
 
 ### 6.3 弹窗去重与暂停窗口
 
@@ -431,12 +434,8 @@ flowchart TD
 
 ## 8. 边界与遗留
 
-- **三方成员不接入的原因**：`SwarmflowTool` 是 NativeHarness 的 `AsyncTool`——invoke
-  立即返回，run 在后台跑，终态结果作为 follow-up 注入下一轮。外部 CLI 成员的工具通道
-  是一轮 turn 内的同步请求/应答，既没有后台任务注册表，也没有 follow-up 注入通道，
-  承载不了这套契约。第一层原因更表面：external-CLI 成员不经 `inprocess_spawn`，拿不到
-  `SwarmflowInfra` 注入，工厂的 resolver gate 直接把工具摘掉。所以这是 inprocess-only
-  的能力边界。
+- **三方成员（SDK 族）发起支持**：外部 CLI 成员（claude/codex）经
+  `ExternalSwarmflowHost` 适配器持有 `swarmflow` 工具，见 §8.1。
 - **与小飞机（会话灯）的关系**：run 独立于对话轮存活，灯的开关不由 run 决定。灯由两道
   hold 撑住：任务进行中（框架层成员 BUSY）与 run-lamp（嵌入层 run 活跃）。teammate 的 run
   通常包在任务里，所以灯亮满 run 全程。用户已裁决灯语义 = 任务全部完成 + 对话输出完成，
@@ -448,6 +447,45 @@ flowchart TD
   后续批次统一脚本路径。
 - **swarmflow 提示词缺 human 节点参数说明**（遗留）：描述里没写 human 节点
   `options.timeout` 等参数的语义，模型不易正确使用；后续补提示词。
+
+### 8.1 三方成员 swarmflow 发起支持
+
+外部 CLI 成员（claude / codex SDK 族）作为发起者调 `swarmflow` 工具，语义与本进程
+成员一致：invoke 即还控、结果 follow-up 回灌、归因 `executor`=成员名、控制面走
+会话级共享 controller。CLI 子进程只承担发起决策；工具执行、run 引擎、infra、
+controller 全部留在 team 进程。
+
+`SwarmflowTool` 通过 `parent_agent` 读取五个宿主依赖。外部 CLI 成员没有
+NativeHarness，由 `ExternalSwarmflowHost`（`workflow/external_swarmflow_host.py`）
+提供同构面：
+
+| `SwarmflowTool` 探针 | host 提供 | NativeHarness 语义 |
+|---|---|---|
+| `launch_async_tool` | 自有 `AsyncToolRuntime`（协程在 team 进程跑） | harness 异步工具运行时 |
+| 完成注入 | `inject → member_runtime.send(immediate=False)` | follow-up 回灌 |
+| `build_context.member_name` | 从成员 spec 派生 | run 归因键 |
+| `model` | 恒 None（CLI 模型与池不对齐，worker 走 base spec/池解析） | 发起者模型 |
+| `background_task_controller` | 会话级共享控制器 | pause/stop/stop_by_owner |
+
+`SwarmflowTool`、两条工具通道（claude SDK MCP 桥 / codex ToolGateway）、工厂减法门
+零改动——工具对外一个名字、一个 schema、一个 invoke，差异全部收在 host 适配器。
+`external_cli_spawn._bind_protocol_member_team_tools` 两条通道各传 `parent_agent=host`
++ 五共享句柄（来自 `TeamInfra.swarmflow`，与 leader 同源：一个 governor、一个账本）。
+
+成员发起的 run 内再派三方 worker（`agent(options={"agent_type":...})`）：host 派生
+成员 context 后回写 `SWARMFLOW_EXTERNAL_CLI_AGENTS` / `SWARMFLOW_EXPERT_SPECS` 两个
+extras key（`_gate_agent_type` 的允许表从 build_context extras 读取，不回写则 inner
+节点按 "not declared" 拒绝）。
+
+边界：adapter 族（gemini/openclaw/hermes 等一次性子进程）与三方 harness provider 的
+工具在 out-of-band MCP server 独立进程执行，infra 状态会跨进程分裂，本设计不覆盖；
+配置面不注入该工具即保持现状，跨进程桥待另行立项。
+
+验证：UT（`test_external_swarmflow_host.py` host 探针 7 项 +
+`test_external_cli_spawn_wrapper.py` 接线 3 项）；ST 三层——回灌归属（成员 turn 收到
+结果而非错发 leader）、inner `agent_type` 节点真实执行（codex 节点产出结果）、
+codex+claude 双成员矩阵；Web UI 端到端（codex 成员发起→completed→成员汇报，run 卡
+归因 executor=成员名）。
 
 ## 9. 验证
 

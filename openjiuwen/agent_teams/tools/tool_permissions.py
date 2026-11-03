@@ -25,7 +25,6 @@ LEADER_ONLY_TOOLS: set[str] = {
     "list_checkpoints",  # List named checkpoints available for fork inheritance
     "create_task",  # Create tasks (batch / with deps)
     "update_task",  # Update task content / cancel tasks
-    "swarmflow",  # Run a swarmflow orchestration script (gated by enable_swarmflow)
     # Async-tool control — inspect / fetch / cancel background async tasks
     "async_tasks_list",
     "async_task_output",
@@ -75,6 +74,13 @@ SHARED_TOOLS: set[str] = {
     "send_message",  # Send a message (point-to-point or broadcast)
     "workspace_meta",  # Workspace lock management and version history
     "checkpoint",  # Snapshot conversation context for fork (gated by enable_fork)
+    # Orchestration script runner. The NAME is shared, the TOOL is wired per
+    # member by the factory's resolver gate: an in-process teammate that
+    # received the shared swarmflow handles (enable_swarmflow team) gets it,
+    # a member without them (subprocess / external CLI) has it dropped from
+    # its tool set. Members control their runs through the tool's own
+    # resume_id + action surface, so the async_task_* tools stay leader-only.
+    "swarmflow",
 }
 
 # Member-only tools under scheduled dispatch. The leader assigns every task,

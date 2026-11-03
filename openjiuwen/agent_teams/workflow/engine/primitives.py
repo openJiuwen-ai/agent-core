@@ -803,15 +803,26 @@ def _with_retry_feedback(prompt: str, feedback: str | None) -> str:
     return f"{prompt}\n\n{feedback}" if feedback else prompt
 
 
-async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
+async def _attempt_calls(
+    rt, opts, json_schema, model, make_call, *, is_human: bool = False,
+) -> _BackendCallResult:
     """Run ``make_call(feedback)`` with retries + schema validation.
 
     Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
     session path (``backend.send_turn``); the only difference between them is the
-    bound ``make_call`` closure. Returns a ``_BackendCallResult``: a
-    backend/timeout error or schema-validation failure retries up to
-    ``rt.retries`` extra times; a ``skipped`` result short-circuits to a
-    non-success with no retry, and so does a failed attempt that leaves a
+    bound ``make_call`` closure. A human turn (``is_human``) carries no
+    attempt-level ``asyncio.timeout``: its ``timeout`` option is the
+    person-wait limit by contract, enforced inside ``_await_human_reply``
+    (expiring as ``skipped`` with no retry), and the classify/format model
+    calls afterwards hold no per-call bound by design — the same contract
+    as any agent turn without a ``timeout`` option, a hung model call being
+    terminated by the control plane (pause/stop abort cancels the run task).
+    Wrapping the whole turn instead would bill the person's answer time to
+    the classify/format segment and turn a slow reply into a
+    retryable failure that re-asks the person. Returns a
+    ``_BackendCallResult``: a backend/timeout error or schema-validation failure
+    retries up to ``rt.retries`` extra times; a ``skipped`` result short-circuits
+    to a non-success with no retry, and so does a failed attempt that leaves a
     token ledger dry — the budget never refunds, so a retry can only fail
     again (and a human turn would re-ask the person).
 
@@ -839,7 +850,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         # Outside the try — an abort is not a retryable failure.
         _check_abort(rt)
         try:
-            if timeout is not None:
+            if timeout is not None and not is_human:
                 async with asyncio.timeout(timeout):  # py3.11+
                     res = await make_call(feedback)
             else:
@@ -875,7 +886,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             if ex is not None:
                 rt.log_sink(
                     f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: "
-                    f"{str(e)}; no retry — {ex[1]}"
+                    f"{str(last_err)}; no retry — {ex[1]}"
                 )
                 return _BackendCallResult(
                     result=None, succeeded=False, error_detail=ex[1], attempts=attempt,
@@ -883,7 +894,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                     model=getattr(last_err, "model", None) or None,
                 )
             rt.log_sink(
-                f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
+                f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(last_err)}"
             )
             continue
         # Token accounting here: the backend already billed this call to the
@@ -1757,6 +1768,7 @@ class AgentSession:
                 history=hist,
                 correlation_id=req.correlation_id,
             ),
+            is_human=self._human,
         )
 
     def _correlation_id(self, opts: dict) -> str:

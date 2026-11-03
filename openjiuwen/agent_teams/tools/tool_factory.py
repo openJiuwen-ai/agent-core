@@ -251,17 +251,20 @@ def create_team_tools(
         exclude_tools: Tool names to exclude from the allowed set.
         lang: Locale code ("cn" or "en") for tool descriptions.
         parent_agent: The owning ``NativeHarness`` (a ``DeepAgent``) that the
-            leader-only async ``swarmflow`` tool launches background work on.
-            Supplied at rail-init time; None for callers without a harness
-            (e.g. external CLI members), which never get ``swarmflow`` anyway.
+            async ``swarmflow`` tool launches background work on. Supplied at
+            rail-init time; None for callers without a harness (e.g. external
+            CLI members), which never get ``swarmflow`` anyway.
         messager: The member's messager — the ``swarmflow`` tool uses it to
             publish phase-progress events for the spectator leader.
         team_name: Team name used for swarmflow event routing / worker ids.
         swarmflow_model_resolver: Resolves an ``agent(model=...)`` name hint to a
-            worker ``Model``. Non-None only for a leader whose spec has
-            ``enable_swarmflow``; when None the ``swarmflow`` tool is gated out.
-        swarmflow_budget: The leader's shared ``BudgetLedger`` capping the tokens
-            its swarmflow runs may burn. Non-None only for a swarmflow leader.
+            worker ``Model``. Non-None only for a member whose swarmflow handles
+            are wired (the leader that constructed them, or an in-process
+            teammate that received the share); when None the ``swarmflow`` tool
+            is gated out.
+        swarmflow_budget: The team's shared ``BudgetLedger`` capping the tokens
+            its swarmflow runs may burn. Non-None only for a member whose
+            swarmflow handles are wired (same gate as the resolver).
         expert_catalog: The host's expert locating protocol. Non-None only for
             a leader whose host injected one; when None the expert tools
             (``view_experts`` / ``view_expert_groups`` / ``spawn_expert``) are
@@ -348,7 +351,10 @@ def create_team_tools(
         "member_complete_task": MemberCompleteTaskTool(task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]),
         # Messaging
         "send_message": send_message_cls(msg_mgr, t, team=agent_team),
-        # Swarmflow orchestration (leader-only, gated by swarmflow_model_resolver).
+        # Swarmflow orchestration. The name is in SHARED_TOOLS; the tool is
+        # wired only when the caller supplied a worker-model resolver (the
+        # leader that constructed the handles, or an in-process teammate that
+        # received them). Both roles share the same description.
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,
             messager=messager,

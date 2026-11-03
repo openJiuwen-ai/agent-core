@@ -101,6 +101,12 @@ _SCHEMA_TURN_NUDGE = (
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
 
+# Wire marker for an explicit skip: the person pressed "skip" instead of
+# answering, so the turn is skipped immediately rather than keeping the
+# question pending until the human timeout. Transports send this verbatim
+# (the host maps its own skip flag onto it); a real reply never equals it.
+HUMAN_REPLY_SKIP = "__swarmflow_skip__"
+
 # One-shot intent classification (see ``_classify_intent``): is the person's raw
 # reply a request to edit the script/flow and rerun, or a plain continue? Kept
 # as module constants (like the tiny-agent title/summary presets) — minimal.
@@ -242,6 +248,11 @@ class AvatarSessionManager:
         # usual path would drop them) are parked here and consumed by
         # ``_await_human_reply`` before it registers a new future.
         self._pending_reply_buffer: dict[str, str] = {}
+        # Raw replies already handed to a human turn, kept so a retry of a
+        # failed classify/format attempt reuses them instead of re-asking the
+        # person. Peeked (not popped): every retry of the same correlation
+        # reads the same reply; a newer buffered/waited reply overwrites it.
+        self._human_reply_reuse: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -774,6 +785,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -811,6 +823,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         live = [state for state in list(self._sessions.values()) if state.harness is not None]
 
         external = [state for state in list(self._sessions.values()) if state.external is not None]
@@ -1352,7 +1365,7 @@ class AvatarSessionManager:
         yields ``skipped`` so the engine returns ``None`` for the turn.
         """
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
-        if raw is None:  # timed out / no answer
+        if raw is None or raw == HUMAN_REPLY_SKIP:  # timed out / explicit skip
             return AgentResult(skipped=True)
         # NEW: classify intent before formatting (best-effort; any failure
         # degrades to the existing formatting path rather than failing the turn).
@@ -1441,12 +1454,17 @@ class AvatarSessionManager:
         # Consume a buffered reply first (don't re-push the prompt).
         buffered = self._pending_reply_buffer.pop(corr, None)
         if buffered is not None:
+            self._human_reply_reuse[corr] = buffered
             if self._on_human_replied is not None:
                 try:
                     self._on_human_replied(state.member_name, corr, buffered)
                 except Exception:
                     team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
             return buffered
+        # A retry of a failed classify/format attempt reuses the raw reply it
+        # already obtained instead of asking the person again.
+        if self._human_reply_reuse.get(corr) is not None:
+            return self._human_reply_reuse[corr]
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut
@@ -1472,6 +1490,7 @@ class AvatarSessionManager:
                 self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+        self._human_reply_reuse[corr] = raw
         return raw
 
     # ------------------------------------------------------------------
