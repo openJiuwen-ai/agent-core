@@ -577,6 +577,8 @@ class CoordinationKernel:
         await host.spawn_manager.shutdown_all_handles()
         if memory_manager:
             await memory_manager.close()
+        if self._dispatcher is not None:
+            await self._dispatcher.aclose()
         if self._event_bus is not None:
             await self._event_bus.stop()
         self.close_stream()
