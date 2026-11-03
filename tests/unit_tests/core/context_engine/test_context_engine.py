@@ -186,6 +186,30 @@ class TestContextEngine:
 
         assert ContextEngine.is_context_overflow_error(wrapped_error) is True
 
+    def test_context_overflow_matcher_reads_dashscope_input_length_error(self):
+        """Bailian/DashScope reports overflow as an input length range error (#1810)."""
+        httpx = pytest.importorskip("httpx")
+        openai = pytest.importorskip("openai")
+        body = {
+            "error": {
+                "code": "invalid_parameter_error",
+                "param": None,
+                "message": "Range of input length should be [1, 1000000]",
+                "type": "invalid_request_error",
+            }
+        }
+        request = httpx.Request("POST", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+        provider_error = openai.BadRequestError(
+            f"Error code: 400 - {body}",
+            response=httpx.Response(400, request=request, json=body),
+            body=body,
+        )
+        wrapped_error = RuntimeError("[181001] model call failed")
+        wrapped_error.__cause__ = provider_error
+
+        assert ContextEngine.is_context_overflow_error(provider_error) is True
+        assert ContextEngine.is_context_overflow_error(wrapped_error) is True
+
     @pytest.mark.parametrize(
         "message",
         [

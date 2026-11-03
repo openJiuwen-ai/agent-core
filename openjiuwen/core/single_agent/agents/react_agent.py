@@ -122,6 +122,12 @@ _IMAGE_SHOWN_ONCE_NOTE = "This image was shown once and is no longer attached."
 # few hundred milliseconds; the bar sits above that so an INFO line means a
 # genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
 SLOW_INVOKE_PREP_SECONDS = 1.0
+EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或检查上下文。"
+EMPTY_RESPONSE_MAX_RETRIES = 1
+_EMPTY_RESPONSE_NOTICE = (
+    "[EMPTY_RESPONSE] The previous turn had no content and no tool_calls. "
+    "Reply with user-visible content or a tool call."
+)
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -890,7 +896,9 @@ class ReActAgent(BaseAgent):
         if self._skill_util is None:
             return
 
-        if not rendered_system_prompt or not self._skill_util.has_skill():
+        # Skills are injected whenever any skill is registered; an empty
+        # rendered system prompt must not silently drop the skills section.
+        if not self._skill_util.has_skill():
             self.prompt_builder.remove_section(_SKILLS_SECTION)
             return
 
@@ -3083,6 +3091,7 @@ class ReActAgent(BaseAgent):
                     if hard_iteration_limit is not None:
                         iteration_limit = min(iteration_limit, hard_iteration_limit)
                     ctx.extra["_iteration_limit"] = iteration_limit
+                    empty_response_retries = 0
                     for iteration in range(start_iteration, iteration_limit):
                         logger.info(f"ReAct iteration {iteration + 1}")
                         ctx.extra["_react_iteration"] = iteration + 1
@@ -3155,6 +3164,36 @@ class ReActAgent(BaseAgent):
                                 ctx.extra["_last_image_unsupported"] = False
                                 await self.context_engine.save_contexts(session)
                                 continue
+                            if isinstance(ai_message.content, str) and not ai_message.content.strip():
+                                if (
+                                    empty_response_retries < EMPTY_RESPONSE_MAX_RETRIES
+                                    and iteration + 1 < iteration_limit
+                                ):
+                                    empty_response_retries += 1
+                                    await context.add_messages(
+                                        UserMessage(
+                                            content=_EMPTY_RESPONSE_NOTICE,
+                                            metadata={OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "empty_response"},
+                                        )
+                                    )
+                                    logger.info(
+                                        "[ReActAgent] empty no-tool turn; retry=%s/%s session_id=%s "
+                                        "iteration=%s reasoning_present=%s",
+                                        empty_response_retries,
+                                        EMPTY_RESPONSE_MAX_RETRIES,
+                                        session.get_session_id(),
+                                        iteration + 1,
+                                        bool(ai_message.reasoning_content),
+                                    )
+                                    continue
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = {
+                                    "output": EMPTY_RESPONSE_MSG,
+                                    "result_type": "error",
+                                    "finish_reason": ai_message.finish_reason or "null",
+                                    "reasoning_present": bool(ai_message.reasoning_content),
+                                }
+                                break
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             invoke_inputs.result = result

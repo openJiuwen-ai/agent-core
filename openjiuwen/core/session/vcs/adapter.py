@@ -62,6 +62,10 @@ async def _snapshot(session, context_engine) -> dict:
 async def _apply(session, context_engine, snapshot: dict) -> None:
     """Apply a ``{context, state}`` snapshot back onto the live `session`."""
     session_id = session.get_session_id()
+    # A snapshot is the complete context set at that point. Contexts created
+    # after the target must be removed too; loading only the snapshot's
+    # contexts leaves newer ones alive and makes rewind/fork diverge.
+    await context_engine.clear_context(session_id=session_id)
     for cid, cstate in snapshot.get(const.CONTEXT_KEY, {}).items():
         context = context_engine.get_context(cid, session_id)
         if context is None:

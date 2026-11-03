@@ -6,24 +6,22 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-02T10:49+08:00 -->
+<!-- generated-at: 2026-11-02T14:17+08:00 -->
 
 # 设计文档索引 (INDEX)
 
-> 开发前 12 · 开发中 1 · 开发后 12 · 已否决 0
-
-按模块目录分组，组内按生命周期展示；跨模块设计在各相关模块下列出，全局统计按文档去重。
+按模块目录分组，组内按生命周期展示；跨模块设计在各相关模块下列出。
 
 ## 模块目录
 
-| 模块 | 设计数 |
-|---|---|
-| [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 8 |
-| [agent_teams/workflow](#module-3) | 16 |
-| [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 3 |
-| [未分类](#module-6) | 1 |
+| 模块 |
+|---|
+| [agent_evolving](#module-1) |
+| [agent_teams](#module-2) |
+| [agent_teams/workflow](#module-3) |
+| [extensions/observability](#module-4) |
+| [harness](#module-5) |
+| [未分类](#module-6) |
 
 <a id="module-1"></a>
 

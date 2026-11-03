@@ -9,22 +9,23 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 288 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+按模块分组；跨模块文档在各相关分组展示。
 
 ## 模块导航
 
-| 模块 | 文档数 |
-|---|---|
-| [agent_evolving](#module-1) | 1 |
-| [agent_teams](#module-2) | 203 |
-| [agent_teams/workflow](#module-3) | 16 |
-| [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 64 |
-| [harness/subagents](#module-6) | 2 |
-| [harness/tools/browser_move](#module-7) | 1 |
-| [harness/tools/browser_move/decision](#module-8) | 1 |
-| [harness/tools/subagent](#module-9) | 1 |
-| [未分类](#module-10) | 6 |
+| 模块 |
+|---|
+| [agent_evolving](#module-1) |
+| [agent_evolving/ttse](#module-2) |
+| [agent_teams](#module-3) |
+| [agent_teams/workflow](#module-4) |
+| [extensions/observability](#module-5) |
+| [harness](#module-6) |
+| [harness/subagents](#module-7) |
+| [harness/tools/browser_move](#module-8) |
+| [harness/tools/browser_move/decision](#module-9) |
+| [harness/tools/subagent](#module-10) |
+| [未分类](#module-11) |
 
 <a id="module-1"></a>
 
@@ -35,6 +36,16 @@ generated: true
 | [SDD-0024](designs/proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | D | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | @alan_cheng | agent_evolving, harness | — | — |
 
 <a id="module-2"></a>
+
+## agent_evolving/ttse
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261029_1036_ttse-consult-prerequisites](features/F_20261029_1036_ttse-consult-prerequisites.md) | F | TTSE 经验检索前置提示词约束 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/render.py, openjiuwen/agent_evolving/ttse/consult.py | 无独立 D：根据用户明确要求加强复杂任务及使用 skill 前的经验检索提示词，属于局部提示词调整，无独立设计。 |
+| [F_20261031_1022_ttse-unbounded-bank](features/F_20261031_1022_ttse-unbounded-bank.md) | F | 移除 TTSE 经验库条数上限 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py, tests/unit_tests/agent_evolving/ttse/test_ttse_core.py, tests/unit_tests/agent_evolving/ttse/test_ttse_dream.py, tests/unit_tests/harness/rails/evolution/test_ttse_rail.py | 无独立 D：用户明确要求取消 max_facts 和 max_tips 上限，属于局部配置和写入策略调整，无独立设计。 |
+| [S_01_ttse-bank](specs/agent_evolving/S_01_ttse-bank.md) | S | TTSE 经验库容量与写入契约 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py | — |
+
+<a id="module-3"></a>
 
 ## agent_teams
 
@@ -244,7 +255,7 @@ generated: true
 | [S_28_group-conversation-and-delegation](specs/agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | openjiuwen/agent_teams | — | — |
 | [S_29_team-organization](specs/agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | openjiuwen/agent_teams | — | — |
 
-<a id="module-3"></a>
+<a id="module-4"></a>
 
 ## agent_teams/workflow
 
@@ -267,7 +278,7 @@ generated: true
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | agent_teams/workflow, agent_teams | — | — |
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | agent_teams, agent_teams/workflow | — | — |
 
-<a id="module-4"></a>
+<a id="module-5"></a>
 
 ## extensions/observability
 
@@ -276,7 +287,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | extensions/observability | — | — |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## harness
 
@@ -312,6 +323,7 @@ generated: true
 | [F_17_browser-runtime-reduction](features/harness/F_17_browser-runtime-reduction.md) | F | Browser runtime reduction | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_18_browser-receipts-and-local-continuity](features/harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](features/harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_20261027_1810_ttse-plugin-runtime](features/F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
@@ -347,7 +359,7 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## harness/subagents
 
@@ -356,7 +368,7 @@ generated: true
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-7"></a>
+<a id="module-8"></a>
 
 ## harness/tools/browser_move
 
@@ -364,7 +376,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-8"></a>
+<a id="module-9"></a>
 
 ## harness/tools/browser_move/decision
 
@@ -372,7 +384,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-9"></a>
+<a id="module-10"></a>
 
 ## harness/tools/subagent
 
@@ -380,7 +392,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-10"></a>
+<a id="module-11"></a>
 
 ## 未分类
 

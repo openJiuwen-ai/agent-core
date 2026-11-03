@@ -1,7 +1,7 @@
 ---
 title: 故障修复 B索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: xinyang_bali
+author_email: 835397263@qq.com
 generated: true
 ---
 
@@ -9,16 +9,16 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 15 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+按模块分组；跨模块文档在各相关分组展示。
 
 ## 模块导航
 
-| 模块 | 文档数 |
-|---|---|
-| [agent_teams](#module-1) | 14 |
-| [harness/subagents](#module-2) | 1 |
-| [harness/tools/browser_move/decision](#module-3) | 1 |
-| [harness/tools/subagent](#module-4) | 1 |
+| 模块 |
+|---|
+| [agent_teams](#module-1) |
+| [harness/subagents](#module-2) |
+| [harness/tools/browser_move/decision](#module-3) |
+| [harness/tools/subagent](#module-4) |
 
 <a id="module-1"></a>
 

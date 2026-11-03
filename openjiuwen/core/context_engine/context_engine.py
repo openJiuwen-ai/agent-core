@@ -55,6 +55,9 @@ class ContextEngine:
         "prompt too long",
         "input is too long",
         "input too long",
+        # Alibaba Cloud Bailian (DashScope) OpenAI-compatible endpoint:
+        # "Range of input length should be [1, 1000000]".
+        "range of input length",
     )
     _CONTEXT_OVERFLOW_FIELDS = (
         "message",

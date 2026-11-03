@@ -18,10 +18,16 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-10-15 |
+| 最近一次修订日期 | 2026-10-27 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
+
+`TTSERail.begin_close()` 停止新归纳和 dream 调度。宿主在反注册前调用
+`await rail.aclose(timeout=10, grace_timeout=5)`，以总等待预算与宽限预算收尾已有任务及目录附件。
+线程写入不能用取消 awaiter 证明停止，因此超时抛出 `TimeoutError` 并保留任务引用；
+宿主保持 closing、依赖和写权，重试关闭，不允许新 owner 接管。成功关闭后再执行同步 uninit。
+此约束仅属于 TTSE，不为其他 Rail 增加通用的异步关闭义务。
 
 本规约定义 `DeepAgent` 的 rail（行为约束层）的**跨子模块契约**：三层基类、
 事件命名空间路由、priority 梯队、挂载生命周期、两套平行拦截体系、rail 的编写清单。
