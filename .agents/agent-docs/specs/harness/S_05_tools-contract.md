@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-27 |
+| 最近一次修订日期 | 2026-11-02 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
@@ -175,7 +175,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
     逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。
-15. **Browser 输入与回执可恢复**：阶段条件按 kind 声明字段，set/verify 分开校验；错误包含
+15. **Browser 输入与回执可恢复**：常用交接只暴露 objective、当前对象/操作/字段值和读取词；
+    旧显式条件按 kind 声明字段，set/verify 的完整兼容入口仍分开严格校验；错误包含
     字段路径和修正方向，绑定目标来自同一当前 guarded registry。执行器确认的反馈文本保留
     在 journal，但不能替代业务读数。原生工具和 Batch 共用执行安全边界，见 F_17。
     `browser_phase verify` 的 `inspect_cart:true` 仅执行固定 DOM 读取，返回 reader 线索；不认证
@@ -612,6 +613,139 @@ budget, dates, object and stopping point; optional phase fields are handoff, not
   抛 `COMPONENT_TOOL_INIT_FAILED`。后端在第一次工具调用时才构建，pyautogui 在构建时才导入，所以构建
   工具与导入模块都不触碰显示器。输入始终是前台真实输入；所有阻塞调用经 `asyncio.to_thread` 执行。
 - **依赖**：`cua` extra（`pyautogui`、`psutil`；Windows 上 `pygetwindow`，Linux 上 `python-xlib`）。
+
+### Browser fact handoff and recovery (F_26, 2026-10-14)
+
+Every interrupted browser invocation preserves the shared execution journal, current page
+and bounded source observations. Failure classification controls recovery separately from
+fact projection. Wrapped transport errors can resume within existing task deadline/count
+limits; exhausted repeated-output recovery and fatal errors retain facts without starting
+another retry layer. Pending anomaly-rail retries keep their ownership. Neither an ACK nor
+an unknown write is replayed automatically. Resume denial describes this query's constraint,
+not global backend availability.
+
+An unknown exception escaping browser subagent execution is a tool failure, even when
+the retained task facts describe partial progress. TaskTool returns `success=False` with
+`browser_execution_error`, preserves the same observations/journal in data and query state,
+and includes the failure flag and error in its model-facing renderer. It logs the exception
+traceback and does not grant another resume. Classified model/transport interruptions keep
+their existing structured partial-result and bounded recovery semantics; cancellation still
+propagates. Fact retention and tool success are separate decisions.
+This failure flag is assigned at the caught-exception boundary. A normally returned,
+runtime-finalized partial/blocked result remains successful delivery of that result;
+its terminal-reason label alone must not be treated as an escaping TaskTool exception.
+
+Terminal source excerpts deduplicate retained records and cover source/scope diversity
+within the existing size limit. They retain raw recall references and source region; absence
+from an excerpt is not proof of missing work. Historical observations never grant live
+target bindings. Inspecting a candidate and selecting it for mutation are distinct local
+intents: the LLM uses existing optional phase operations/object bindings at that transition.
+No per-action phase requirement or runtime business certification is added.
+
+Existing browser LLM timing events expose first/last frame, productive-frame and output
+counts (no reasoning text). Client first/idle waits and the shared task deadline retain
+timeout ownership. URL literals handle prose delimiters without site rules or ASCII-only
+host restrictions. Parent delegation preserves exact inequalities and the user endpoint;
+focused recovery consumes retained/current observations before considering another action.
+
+
+### Local binding lifecycle and reader decisions (F_27, 2026-10-14)
+
+The existing phase contract records a pending local handoff when its bound document changes
+or an acknowledged LLM control action leaves its target scope. It offers one interpretation
+turn; the previous objective and values cease being the current instruction. Pending handoff
+keeps the explicit operation ceiling and allows fixed reads/viewport reveal, without
+rebinding old identities or releasing unknown-impact writes. Fresh LLM set replaces the
+fragment immediately; missing controls in a partial observation alone do not expire it.
+
+Optional read_queries carries at most six LLM-resolved literals for fixed find/control probes.
+Queries are not writable values or selectors. Existing PageState/receipt scopes suppress
+successful same-scope reads; explicit LLM reads and new document/scope/intent remain possible.
+Fixed reader heads describe reading ranges, parameters and returned facts. Provider schemas,
+single-request independent heads, both confidence thresholds and dispatch guards are unchanged.
+Observed clickable ARIA checkbox/switch controls with matching explicit checked state expose
+an existing click action; native checkbox inputs keep set_checked. Rechecking checked state
+before dispatch and the current operation/object scope remain required.
+See F_27 for replay boundaries and validation results.
+
+
+### Browser source and local continuity (F_28, 2026-10-16)
+
+1. Source history remains bounded at 20 retained records. Substantive source groups precede
+   metadata-only groups; latest broad content precedes local find/diagnostic records within
+   a source. The parent receives all deduplicated retained observations, not a second six-item
+   selection (F_29). Source text retains up to 12,000 characters per record; the parent text
+   budget is 96,000 characters shared across records, with lengths and truncation flags.
+   Sources, read scopes and recall handles survive text clipping. `read_scope` describes the
+   operation and optional query/target/viewport;
+   `observation_scope` still describes the observed page generation/revision. Repeated reads
+   refresh existing references, never live node permissions. Neither selection nor omission
+   certifies business completion or missing work.
+2. Output validation applies only to a successfully returned model attempt. Core's after
+   callback also runs on exceptions: those attempts remain owned by the existing exception/
+   retry path, without force-finishing an approved retry (F_29).
+   A normal model answer requires non-empty worker output; the legacy explicit progress-tool
+   path can return actual extracted values, never passive page metadata. Empty model endings use the
+   existing shared-fact interruption result, with model_output_incomplete for length and
+   model_output_empty otherwise. Retain ACKs and original observations; recovery stays under
+   existing deadline/count constraints and never automatically replays a browser write.
+3. Objective-only and bound phases share an observed document/route scope. On scope change,
+   use the existing one-time local handoff; pending scope allows fixed readers and allowed
+   scrolling, not arbitrary local UI. Same-document query/filter changes alone do not
+   expire the objective. LLM set supplies the replacement intent and exact objects.
+   Complete browser task snapshots use phase_contract.save with explicit Session-key
+   replacement. Omitted old handoff/recovery fields must not survive recursive merge.
+   This synchronous save affects only the browser-owned state key, never sibling state.
+4. Existing local receipts can retire a particular navigation undone by an acknowledged
+   LLM return, or a repeated identical scroll round trip. This is candidate-level avoidance,
+   not a global quota or a business progress claim. New intent/document/layout and explicit
+   LLM recovery remain available; fixed readers are not suppressed by navigation detours.
+5. An explicit phase binding may use a current-registry target observed in the same document
+   and interaction revision even when a bounded generic snapshot omits it. Only selected
+   exact identities supplement the Jev menu. Historical IDs, missing identity and changed
+   generations remain refusals; dispatch validation is unchanged.
+6. Page-operation argument-shape errors expose missing/unexpected/required fields and an
+   example with executed=false. A select_tab example is not an index/URL binding: use tabs.
+   Unknown dispatched effects keep their original reconciliation semantics.
+
+7. Targetless URL navigation validates the current page/document, arguments and any observed
+   link/order provenance, but does not depend on unchanged viewport/scroll geometry. Node
+   actions retain their exact node and actionability checks. See F_29 for lifecycle regressions.
+
+### Browser dispatch contract compatibility (F30)
+
+- Primitive batch steps preserve the native executor's exact preflight rejection as
+  executed=false. Failure after action dispatch remains unknown; arbitrary script text
+  cannot impersonate a native target-resolution receipt.
+- Closed page operations use the permission/registered-tool intersection of the current
+  runtime. Fixed observations require their compact transport; short waits are local.
+  Native capability resolution precedes dispatch marking, with an explicit unavailable
+  capability reason. Menus and direct page tools consume the same capability calculation.
+- Jev unknown/business-effect actions require an active exact target and operation
+  binding; broad objectives or merely opening a candidate do not grant that binding.
+  Fixed reads/local UI do not acquire a per-step phase requirement. Binding eligibility
+  diagnostics describe missing facts rather than overriding freshness or actionability.
+
+### Optional browser handoff and receipt diagnostics (2026-10-29)
+
+- The model-facing `browser_phase` card advertises only set/verify, objective,
+  target_ids, allowed_operations, bound_values and read_queries. The existing
+  full schema still validates explicit legacy conditions/phase_version/inspect_cart;
+  hiding advanced fields does not relax them or turn conditions into requirements.
+- Two consecutive completed, rejected-before-dispatch phase rounds omit this optional
+  tool from the next model request and instruct ordinary-tool recovery. Varying invalid
+  arguments does not evade this check. A normal tool round, successful phase, new user
+  input or unknown dispatched verification breaks the streak. Four consecutive rejected
+  rounds use the existing model-protocol partial/blocked result with retained facts.
+  This is not a page action/read budget or a new retry manager.
+- Batch receipts preserve execution_stage and keyboard binding (explicit_target versus
+  active_element); an available focus_before contains only structural attributes, not
+  field values. These are diagnostics, not fresh identities or proof of business effects.
+  An outer RPC timeout with no step receipts remains unknown. ACKed earlier steps in a
+  returned partial batch remain ACKed; their diagnostics are retained in the journal.
+- Dedicated browser logs append on reopen. Retargeting/disable closes the prior owned
+  handler, so a new test path cannot continue writing into the prior run. Callers use
+  OPENJIUWEN_BROWSER_AGENT_LOG_FILE for isolation; host rotation remains host-owned.
 
 ## 客户端执行的工具（client tools，当前契约）
 

@@ -176,7 +176,7 @@ def test_ax_materialization_error_does_not_publish_a_fake_selector():
     page = runtime.ensure_page_state()
     page.register_ax_snapshot('- textbox "Search" [ref=e1]')
     tool = SimpleNamespace(invoke=AsyncMock(return_value={"result": "### Error\nRef e1 not found"}))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=tool)
     target = page.resolve_target(generation_id="g0", ref="e1")
     with pytest.raises(ValueError, match="Ref e1"):
         _run(runtime._materialize_ax_target(target))
@@ -189,7 +189,7 @@ def test_native_ax_ref_aliases_use_the_same_batch_resolver(ref):
     page = runtime.ensure_page_state()
     page.register_ax_snapshot('- textbox "Search" [ref=e1]')
     tool = SimpleNamespace(invoke=AsyncMock(return_value={"result": True}))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=tool)
     steps = normalize_batch_steps([{"op": "type", "ref": ref, "text": "Singapore weather"}])
     assert BrowserAgentRuntime._validate_batch_target_contract(steps) == []
     resolved = _run(runtime._resolve_batch_steps(steps, generation_id="g0"))

@@ -22,7 +22,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from .browser_logging import browser_agent_log_info
 from .cart_verification import CART_READER as CART_READER  # compatibility export
 from .cart_verification import inspect_cart, read_cart
-from .evidence import observe_acceptance
+from .evidence import observe_acceptance, observed_label
 
 PHASE_KEY = "__browser_phase_budget_state__"
 OPERATIONS = {
@@ -91,9 +91,11 @@ PHASE_SCHEMA = _object_schema({
     "target_ids": {"type": "array", "maxItems": 30, "items": _TEXT, "uniqueItems": True},
     "bound_values": {"type": "array", "maxItems": 20,
                      "items": _object_schema({"target_id": _TEXT, "value": _TEXT}, ["target_id", "value"])},
+    "read_queries": {"type": "array", "maxItems": 6, "uniqueItems": True,
+                     "items": {"type": "string", "minLength": 1, "maxLength": 160}},
     "conditions": {"type": "array", "maxItems": 12, "items": {"oneOf": list(CONDITION_SCHEMAS.values())}},
 }, ["op"])
-_SET_ONLY_FIELDS = ("objective", "allowed_operations", "target_ids", "bound_values", "conditions")
+_SET_ONLY_FIELDS = ("objective", "allowed_operations", "target_ids", "bound_values", "read_queries", "conditions")
 PHASE_SCHEMA["oneOf"] = [
     {"properties": {"op": {"const": "set"}}, "required": ["objective"],
      "not": {"anyOf": [{"required": ["phase_version"]}, {"required": ["inspect_cart"]}]}},
@@ -101,11 +103,27 @@ PHASE_SCHEMA["oneOf"] = [
      "not": {"anyOf": [{"required": [k]} for k in _SET_ONLY_FIELDS]}},
 ]
 
+# Keep legacy conditions/verification callable without making them part of every
+# model request. The common handoff prepares a local choice, not business proof.
+HANDOFF_SCHEMA = _object_schema({
+    key: copy.deepcopy(PHASE_SCHEMA["properties"][key])
+    for key in ("op", "objective", "allowed_operations", "target_ids", "bound_values", "read_queries")
+}, ["op"])
+HANDOFF_SCHEMA["oneOf"] = [
+    {"properties": {"op": {"const": "set"}}, "required": ["objective"]},
+    {"properties": {"op": {"const": "verify"}},
+     "not": {"anyOf": [{"required": [key]} for key in _SET_ONLY_FIELDS if key != "conditions"]}},
+]
+
 
 class PhaseInputError(ValueError):
     def __init__(self, code: str, **details: Any):
         self.details = {"code": code, **details}
         super().__init__(f"{code}: {json.dumps(details, ensure_ascii=False)}")
+
+    def __str__(self) -> str:
+        details = {key: value for key, value in self.details.items() if key != "code"}
+        return f"{self.details['code']}: {json.dumps(details, ensure_ascii=False)}"
 
 
 def validate_request(args: dict[str, Any]) -> None:
@@ -124,8 +142,10 @@ def validate_request(args: dict[str, Any]) -> None:
     error = next(Draft202012Validator(PHASE_SCHEMA).iter_errors(args), None)
     if error:
         raise PhaseInputError("invalid_phase_request", path=".".join(map(str, error.absolute_path)) or "$",
-                              detail=error.message, correction='set: {"op":"set","objective":"..."}; '
-                              'verify: {"op":"verify"} (optional phase_version or inspect_cart:true).')
+                              detail=error.message, correction='Optional handoff: {"op":"set","objective":"..."}; '
+                              'fresh observation: {"op":"verify"}. No browser action was dispatched. '
+                              'Use an ordinary browser tool for the next step; do not repeat an invalid set. '
+                              'bound_values is for field inputs, not button labels.')
 
 
 def _is_bindable(control: dict[str, Any], counts: dict[str, int]) -> bool:
@@ -148,6 +168,8 @@ def binding_targets(controls: list[dict[str, Any]], *, limit: int = 30) -> dict[
                      "role": c.get("role"), "field": (c.get("decision_state") or {}).get("tag"),
                      "href": str(c.get("href") or (c.get("decision_state") or {}).get("href") or "")[:240],
                      "region": c.get("region"),
+                     "enabled": c.get("enabled"), "actionable": c.get("actionable"),
+                     "clickable": c.get("clickable"),
                      "nearby_text": str((c.get("decision_state") or {}).get("nearby_text") or "")[:240]}
                     for c in valid[:limit]],
         "omitted": max(0, len(valid) - limit), "unbound": len(controls) - len(valid),
@@ -161,7 +183,15 @@ def task_state(session: Any) -> dict[str, Any]:
 
 
 def save(session: Any, state: dict[str, Any]) -> None:
+    """Replace the complete browser-owned snapshot, not a recursive merge patch.
+
+    Session reads are copies; omitting a retired field from a later snapshot does
+    not delete it. None is Session's explicit deletion operation. Both updates are
+    synchronous in the serialized browser lifecycle, with no suspension between
+    them. Other session keys, including parent/working context, are untouched.
+    """
     if session is not None and callable(getattr(session, "update_state", None)):
+        session.update_state({PHASE_KEY: None})
         session.update_state({PHASE_KEY: state})
 
 
@@ -202,6 +232,8 @@ def project_phase(state: dict[str, Any]) -> dict[str, Any]:
         "version": contract.get("version", 0),
         "objective": contract.get("objective", ""),
         "allowed_operations": contract.get("allowed_operations", []),
+        "handoff": copy.deepcopy(contract.get("handoff") or {}),
+        "read_queries": [] if contract.get("handoff") else contract.get("read_queries", []),
         "bound_values": [
             {"field": b.get("name"), "value": b["value"], "source": b.get("source")}
             for b in contract.get("bindings", [])
@@ -253,7 +285,8 @@ def _text(value: Any, limit: int = 500) -> str:
     return value.strip()
 
 
-def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[str, Any]]) -> None:
+def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[str, Any]],
+              *, observation: dict[str, Any] | None = None) -> None:
     """Validate all input before updating state; cannot accept model-reported proof."""
     validate_request({"op": "set", **args})
     objective = _text(args.get("objective"), 2000)
@@ -265,6 +298,7 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
     if not isinstance(targets, list) or len(targets) > 30:
         raise ValueError("invalid_phase_targets")
     target_bindings = [node_identity(_control(controls, target)) for target in targets]
+    read_queries = list(dict.fromkeys(_text(value, 160) for value in args.get("read_queries", [])))
     bindings = []
     values = args.get("bound_values", [])
     if not isinstance(values, list) or len(values) > 20:
@@ -396,8 +430,15 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
         current.get("objective") == objective
         and current.get("allowed_operations") == list(dict.fromkeys(operations))
     )
+    documents = {node_identity(c)["document"] for c in controls if node_identity(c)["document"]}
+    document = ((observation or {}).get("page_guard") or {}).get("document")
+    document = document or (next(iter(documents)) if len(documents) == 1 else None)
+    source_url = (observation or {}).get("url") or ""
     same_targets = current.get("targets") == target_bindings and current.get("bindings") == bindings
-    if same_intent and same_targets and previous_specs == next_specs:
+    same_page = current.get("document") == document and current.get("source_url", "") == source_url
+    same_fragment = same_intent and same_targets and same_page
+    same_readers = previous_specs == next_specs and current.get("read_queries", []) == read_queries
+    if same_fragment and same_readers and not current.get("handoff"):
         return  # Repeating metadata is not a new intent or a policy re-entry.
     if current:
         history = state.setdefault("phase_history", [])
@@ -409,9 +450,12 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
     state["active_phase_contract"] = {
         "version": version,
         "objective": objective,
+        "document": document,
+        "source_url": source_url,
         "allowed_operations": list(dict.fromkeys(operations)),
         "targets": target_bindings,
         "bindings": bindings,
+        "read_queries": read_queries,
         "condition_ids": new_conditions,
         "status": "in_progress",
         "started_at": time.time(),
@@ -443,6 +487,38 @@ def _evidence_matches(slot: dict[str, Any], spec: dict[str, Any], query_id: str)
     return slot.get("status") not in {"missing", "unknown"} and slot.get("observation_status") != "not_observed"
 
 
+def require_local_handoff(state: dict[str, Any], reason: str) -> None:
+    """Expire local ownership, never rebind identities or infer a new objective."""
+    phase = state.get("active_phase_contract") or {}
+    if phase and not phase.get("handoff"):
+        phase["handoff"] = {"reason": reason, "offered": False}
+
+
+def observe_llm_scope(state: dict[str, Any], facts: list[dict[str, Any]]) -> None:
+    """An ACK on a different control signals interpretation has left this fragment."""
+    from .execution_journal import _is_dismiss_click
+
+    phase = state.get("active_phase_contract") or {}
+    targets = phase.get("targets") or []
+    if not targets or phase.get("handoff"):
+        return
+    for fact in facts:
+        control = fact.get("control") or {}
+        op = fact.get("op")
+        if fact.get("execution_state") not in {"acknowledged", "verified"}:
+            continue
+        if op not in {"click", "fill", "type", "press", "press_key", "select_option", "set_checked"}:
+            continue
+        if _is_dismiss_click(op, control, control.get("decision_state") or {}):
+            continue  # Dismissing an overlay alone is not a different local objective.
+        identity = node_identity(control)
+        if identity["document"] and identity["node"] is not None and not any(
+            same_node(target, control) for target in targets
+        ):
+            require_local_handoff(state, "llm_left_bound_scope")
+            return
+
+
 def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
     """Evaluate current-page facts and durable extraction evidence separately."""
     phase = state.get("active_phase_contract") or {}
@@ -455,7 +531,29 @@ def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> di
     if capture and capture != state.get("phase_last_capture"):
         state["phase_observation_sequence"] = int(state.get("phase_observation_sequence", 0)) + 1
         state["phase_last_capture"] = capture
+    documents = {node_identity(c)["document"] for c in controls if node_identity(c)["document"]}
+    document = (observation.get("page_guard") or {}).get("document")
+    if document:
+        documents.add(document)
+    bound_documents = {b.get("document") for b in [*phase.get("targets", []), *phase.get("bindings", [])]
+                       if b.get("document")}
+    if phase.get("document"):
+        bound_documents.add(phase["document"])
+    if capture and documents and bound_documents:
+        if documents.isdisjoint(bound_documents):
+            require_local_handoff(state, "bound_document_changed")
     url = observation.get("url") or ""
+    if capture and url and phase.get("source_url"):
+        if urlsplit(url)[:3] != urlsplit(phase["source_url"])[:3]:
+            # Same-page sort/filter/query changes alone do not require another phase.
+            require_local_handoff(state, "local_page_changed")
+    if phase and capture and not phase.get("handoff"):
+        # Objective-only fragments also belong to an observed page. Missing/partial
+        # captures cannot retire them or invent a new binding.
+        if document and not phase.get("document"):
+            phase["document"] = document
+        if url and not phase.get("source_url"):
+            phase["source_url"] = url
     current_ids = set(phase.get("condition_ids", []))
     for item in state.get("phase_requirements", []):
         # Completed historical phases retain evidence from that phase's page.
@@ -512,10 +610,27 @@ def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> di
 
 def constrain_actions(menu: Any, state: dict[str, Any], controls: list[dict[str, Any]]) -> None:
     """Narrow the menu in place; identifiers are never renumbered after filtering."""
+    from .execution_journal import _impact
+
     phase = state.get("active_phase_contract") or {}
+    current = {c.get("target_id"): c for c in controls}
+    fixed_reads = {"probe_cards", "probe_interactives", "read_text", "extract_text", "extract_value",
+                   "find", "snapshot", "tabs", "wait"}
+    for key, step in list(menu.steps.items()):
+        control = current.get(step.get("target_id"), {})
+        if step["op"] in fixed_reads or _impact(step["op"], control) in {"read", "local_ui"}:
+            continue
+        # An executable button is not an LLM-selected business operation. Reuse
+        # exact local bindings; do not infer authorization from the task's prose.
+        bound = (not phase.get("handoff") and step["op"] in phase.get("allowed_operations", [])
+                 and any(same_node(binding, control) for binding in phase.get("targets", [])))
+        if not bound:
+            menu.steps.pop(key)
+            menu.criteria.pop(key, None)
+            reason = "local_target_binding_required"
+            menu.excluded[reason] = menu.excluded.get(reason, 0) + 1
     if not phase:
         return
-    current = {c.get("target_id"): c for c in controls}
     selected_targets = []
     for item in state.get("phase_requirements", []):
         satisfied = item["id"] in phase["condition_ids"] and item["status"] == "satisfied"
@@ -527,22 +642,17 @@ def constrain_actions(menu: Any, state: dict[str, Any], controls: list[dict[str,
         # a confirmed fill still needs its subsequent search submission.
         # Local intent constrains mutations; fixed observations can establish
         # whether it is satisfied, like the existing VERIFY operation.
-        allowed = step["op"] in phase["allowed_operations"] or step["op"] in {
-            "probe_cards",
-            "probe_interactives",
-            "read_text",
-            "extract_text",
-            "extract_value",
-            "find",
-            "snapshot",
-            "tabs",
-            "wait",
-        }
-        if step["op"] == "navigate" and phase["targets"]:
+        fixed_read = step["op"] in fixed_reads
+        allowed = step["op"] in phase["allowed_operations"] or fixed_read
+        if phase.get("handoff"):
+            # Local UI impact does not imply relevance to the LLM's selected page.
+            # Keep observation/reveal operations while a replacement intent is pending.
+            allowed = allowed and (fixed_read or step["op"] == "scroll")
+        elif step["op"] == "navigate" and phase["targets"]:
             # A generic observed card must not evade the LLM's selected-object binding.
             allowed = allowed and any(c.get("href") == step.get("url") and any(
                 same_node(binding, c) for binding in phase["targets"]) for c in controls)
-        if control:
+        if control and not phase.get("handoff"):
             if phase["targets"]:
                 allowed = allowed and any(same_node(binding, control) for binding in phase["targets"])
             if any(
@@ -564,40 +674,18 @@ class BrowserPhaseTool(Tool):
             ToolCard(
                 name="browser_phase",
                 description=(
-                    "Optional local intent update or explicit fresh verification. Ordinary browser actions do not "
-                    "require this tool. Set requires op=set and objective; omit phase_version/inspect_cart from set. "
-                    "Verify uses op=verify with optional phase_version/inspect_cart, without set fields. "
-                    "allowed_operations, observed target_ids, "
-                    "bound_values [{target_id,value}] and conditions are optional. For complex work prepare one "
-                    "current executable fragment with resolved parameters and known completion conditions; "
-                    "update only when intent/bindings change, not before each action. Example: "
-                    '{"op":"set","objective":"Search the selected query and read its results"}. '
-                    "In normal interpretation/recovery, preserve the selected objects with target_ids and limit "
-                    "allowed_operations to remaining work. For read-only work: "
-                    '{"op":"set","objective":"Read details of the selected item",'
-                    '"allowed_operations":["read_text","find","snapshot"]}. '
-                    "target_ids bind operation controls, not merely matching object names: an item title link "
-                    "opens details and cannot stand in for a remove/edit button. If that control is missing, "
-                    "inspect with a targeted probe/snapshot or use an ordinary LLM tool; do not hand off an "
-                    "unbound mutation with every operation enabled. "
-                    "When source observations already answer the goal, answer directly instead of adding steps. "
-                    "Use current browser_state.phase_bindings target_ids, not native AX refs or historical card IDs. "
-                    "A navigation-only card is an observed object, not a guarded control binding: retain its "
-                    "primary_link in the objective and omit optional target_ids until a fresh control is observed. "
-                    'Example condition: {"kind":"url_query","key":"order","value":"pubdate"}. '
-                    'Example verify: {"op":"verify"}. To discover cart reader selectors without arbitrary scripts: '
-                    '{"op":"verify","inspect_cart":true}; hints do not establish a baseline. '
-                    "Each condition requires kind: control_value {kind,target_id,value}, "
-                    "control_selected {kind,target_id}, url_query {kind,key,value}, url {kind,value}, "
-                    "evidence {kind,field,variant,query OR source,entity?}, cart_delta {kind,items_selector,"
-                    "sku_attribute,quantity_selector,count_selector,deltas:{sku:integer},preserve_existing:true}. "
-                    "Conditions are advisory and replaced with the current intent. Normal observations reuse "
-                    "available facts; verify optionally reads fresh facts. Cart readers are optional, never a "
-                    "prerequisite for actions or completion. A delta needs a real pre-action baseline to be "
-                    "reported as verified; an unsupported reader is not a task blocker. "
-                    "Unknown execution effects survive intent changes. Never submit success/proof."
+                    "Optional local handoff to Jev. Search, read and ordinary LLM tool actions need no phase. "
+                    'Minimal set: {"op":"set","objective":"Read the selected item"}. '
+                    "For a selected business action, add its current phase_bindings target_ids and required "
+                    "allowed_operations. A candidate title is not selection of its business button. "
+                    "bound_values [{target_id,value}] supplies field inputs, never button labels; read_queries "
+                    "supplies up to six resolved text literals for fixed readers, not selectors. "
+                    "On missing_identity use the returned probe or an ordinary tool; do not repeat the same set. "
+                    "Update only when the remaining local work changes. If facts suffice, answer directly. "
+                    'For a needed fresh observation use {"op":"verify"}, without set fields. '
+                    "Neither operation certifies completion or clears unknown execution effects."
                 ),
-                input_params=copy.deepcopy(PHASE_SCHEMA),
+                input_params=copy.deepcopy(HANDOFF_SCHEMA),
             )
         )
         self._runtime = runtime
@@ -626,7 +714,8 @@ class BrowserPhaseTool(Tool):
             if op == "set":
                 if call_id.startswith("jev_"):
                     raise ValueError("jev_cannot_plan_or_certify")
-                set_phase(state, inputs, observation.get("controls", []))
+                observation = page.export_decision_observation(include_current_registry=True)
+                set_phase(state, inputs, observation.get("controls", []), observation=observation)
                 # Persist the accepted contract before an external read can fail.
                 save(session, state)
             elif op != "verify" or set(inputs) - {"op", "phase_version", "inspect_cart"} or stale_version:
@@ -692,6 +781,32 @@ class BrowserPhaseTool(Tool):
                 },
             )
         except Exception as exc:
+            if isinstance(exc, PhaseInputError) and exc.details.get("reason") == "not_in_current_observation":
+                target = page.get_target(str(exc.details.get("target_id") or ""))
+                if target is not None:
+                    guard = target.decision_state.get("node_guard") or {}
+                    exc.details["reason"] = (
+                        "stale_generation" if target.generation != page.generation
+                        else "missing_identity" if not guard.get("document") or guard.get("node") is None
+                        else "stale_observation"
+                    )
+                    exc.details["current_generation"] = page.generation_id
+            if isinstance(exc, PhaseInputError) and exc.details.get("reason") in {
+                "missing_identity", "not_in_current_observation", "stale_observation", "stale_generation",
+            }:
+                target = page.get_target(str(exc.details.get("target_id") or ""))
+                label = observed_label({"name": target.name, "text": target.text}) if target is not None else ""
+                exc.details["recovery_probe"] = {
+                    "tool": "browser_probe_interactives",
+                    "arguments": {"query": label[:160], "max_items": 20, "viewport_only": False},
+                }
+                exc.details["correction"] = (
+                    "No action was dispatched and the previous phase was not replaced. "
+                    "Use the fixed recovery_probe to observe the intended control, then select its current "
+                    "unique phase_bindings target_id. This query is an observed label, not authorization "
+                    "to rebind a same-name object. Ordinary LLM tools remain available; do not repeat set "
+                    "with the same unobserved identity."
+                )
             if reading:
                 state["phase_invalidated_capture"] = (page.decision_snapshot or {}).get("capture_id")
                 observe_conditions(state, {})
@@ -736,6 +851,10 @@ async def observe_runtime(runtime: Any, session: Any, captured: dict[str, Any]) 
     observation = captured.get("decision_observation") or {}
     if not captured.get("ok") or not observation.get("capture_id"):
         return  # No new proof; preserve prior evidence rather than inventing it.
+    entry = (state.get("execution_journal") or [{}])[-1]
+    if (entry.get("model_source") == "llm"
+            and entry.get("phase_version") == (state.get("active_phase_contract") or {}).get("version")):
+        observe_llm_scope(state, entry.get("steps") or [])
     observe_conditions(state, observation)
     observe_acceptance(state, observation)
     reconcile_observation(state, observation)

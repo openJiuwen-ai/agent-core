@@ -177,6 +177,8 @@ const {chromium} = require(args.package);
 async def test_fixed_read_receipt_and_compact_capture_share_one_vm_rpc(monkeypatch):
     runtime = vm_runtime(monkeypatch)
     runtime.call_playwright_run_code_unsafe = AsyncMock(side_effect=lambda code: execute_vm(code)["result"])
+    runtime.registered_playwright_tool_names = lambda: {"browser_run_code_unsafe"}
+    runtime.resolve_playwright_run_code_tool = AsyncMock()
     monkeypatch.setattr(
         "openjiuwen.harness.tools.browser_move.playwright_runtime.policy_page_action.fixed_text_script",
         lambda query="": "async page => ({ok:true,url:page.url(),title:'Fixture',text:'facts'})",
@@ -309,12 +311,14 @@ def test_action_head_can_read_actual_bound_operation_without_target_question():
 
 
 @pytest.mark.asyncio
-async def test_action_uncertainty_requests_local_handoff_and_new_objective_reenters():
+async def test_action_uncertainty_prefers_ordinary_tools_and_optional_new_objective_reenters():
     policy, llm, client, runtime, context, captured = setup_policy(goal="Open site, search, compare and read details")
     page = runtime.ensure_page_state()
     client.evaluate.side_effect = lambda payload, **_: grouped_answer(payload, "CLICK", confidence=0.4)
     await policy.invoke(await messages_for(policy, context, captured), tools=LOCAL_TOOLS)
-    assert "remaining local fragment" in llm.invoke.call_args.kwargs["messages"][-1].content
+    handoff = llm.invoke.call_args.kwargs["messages"][-1].content
+    assert "ordinary tool directly" in handoff
+    assert "Uncertainty does not require phase setup" in handoff
     set_phase(context.get_session_ref().get_state(""), {"objective": "点击销量排序"}, page.export_decision_targets())
     choose_operation(client, "CLICK")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=LOCAL_TOOLS)

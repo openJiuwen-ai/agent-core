@@ -312,6 +312,13 @@ async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome, e
         assert authority["terminal_reason"] == "no_task_observation"
         assert authority["retryable"]
         assert authority["summary"] == "Weather"
+    elif outcome == "provider_error":
+        # The runtime finalized this stream into a structured blocked result;
+        # it is not an unhandled TaskTool execution exception.
+        assert result.error is None
+        assert authority["terminal_reason"] == "browser_execution_error"
+        assert authority["retryable"]
+        assert authority["summary"] == "provider unavailable"
     elif outcome == "raw_weather":
         assert authority["missing_fields"] == []
         assert "26 C" in authority["summary"]

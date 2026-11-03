@@ -362,7 +362,7 @@ def test_single_batch_wait_preserves_mcp_outcome_through_browser_client_and_rail
             input_params={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
         ),
     )
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=native_tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=native_tool)
     helper = BrowserBatchInteractTool(runtime)
     rail = BrowserRuntimeRail(runtime)
     rail._status_logger = None
@@ -406,7 +406,7 @@ def test_single_batch_wait_preserves_mcp_outcome_through_browser_client_and_rail
     assert result.data["conditions"][0]["ok"] is expected_success
     assert inputs.tool_result["ok"] is expected_success
     assert inputs.tool_msg.metadata["success"] is expected_success
-    runtime._get_playwright_mcp_tool.assert_awaited_once_with("browser_wait_for")
+    runtime.resolve_playwright_tool.assert_awaited_once_with("browser_wait_for")
     assert client._session.call_tool.await_count == 2
     client._session.call_tool.assert_awaited_with("browser_wait_for", arguments={"text": "New results"})
 

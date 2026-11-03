@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（9 文件）、`openjiuwen/harness/tools/cua/`、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-10-15 |
+| 最近一次修订日期 | 2026-11-02 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary、F_20_react-iteration-limit、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -532,3 +532,91 @@ budget, dates, object and stopping point; optional phase fields are handoff, not
 `retryable`、处理超时和续跑，契约见 `S_05`。
 
 **平台**：Windows 与 Linux X11；其他平台在预检时失败。
+
+### Browser interrupted/normal result handoff (F_26, 2026-10-14)
+
+TaskTool uses the browser shared-state terminal path on model/invocation errors, preserving
+facts independently of recovery eligibility. Existing resume count/deadline and anomaly
+retry ownership remain intact. Query denial explains its local cause without declaring the
+backend unavailable. Normal results carry bounded, source-diverse excerpts and existing raw
+references; callers must not infer missing work from excerpt absence. See S_05, Browser fact
+handoff and recovery, for the receipt, local-binding and timing contracts.
+
+
+### Local binding lifecycle and reader decisions (F_27, 2026-10-14)
+
+The existing phase contract records a pending local handoff when its bound document changes
+or an acknowledged LLM control action leaves its target scope. It offers one interpretation
+turn; the previous objective and values cease being the current instruction. Pending handoff
+keeps the explicit operation ceiling and allows fixed reads/viewport reveal, without
+rebinding old identities or releasing unknown-impact writes. Fresh LLM set replaces the
+fragment immediately; missing controls in a partial observation alone do not expire it.
+
+Optional read_queries carries at most six LLM-resolved literals for fixed find/control probes.
+Queries are not writable values or selectors. Existing PageState/receipt scopes suppress
+successful same-scope reads; explicit LLM reads and new document/scope/intent remain possible.
+Fixed reader heads describe reading ranges, parameters and returned facts. Provider schemas,
+single-request independent heads, both confidence thresholds and dispatch guards are unchanged.
+See F_27 for replay boundaries and validation results.
+
+
+### Browser empty-output completion and local handoff (F_28, 2026-10-16)
+
+Successful browser model endings without answer or tool output cannot become completed from retained
+page metadata. Existing interrupted-result handling preserves the journal and observations;
+finish_reason=length is model_output_incomplete, other empty endings are model_output_empty.
+Parent recovery consumes retained facts and respects the same task deadline/resume limits.
+There is no added model retry loop, output audit model or automatic replay of ACKed actions.
+The core after callback also runs for failed attempts; a non-empty exception delegates to
+the existing exception/retry handler and never triggers the empty-answer check (F_29).
+
+Objective-only phases now share the observed-page lifecycle. Retiring an old fragment offers
+the existing LLM interpretation turn and keeps fixed observation available while a replacement
+is pending. Source selection, exact registry bindings and local candidate continuity follow
+S_05, Browser source and local continuity; F_28 records the rationale and regression boundaries.
+
+F_29 makes browser snapshot persistence explicit through the existing phase save helper,
+so a newly accepted fragment and subsequent policy reads see the same handoff state. The
+parent receives all retained, deduplicated observations within a declared text budget,
+including source scope, truncation and recall references. Delegation may add useful planning
+preferences without turning them into new hard requirements or changing the authorized endpoint.
+For parents with a configured browser subagent, ContextProcessorRail reuses the offloader's
+protected task-tool/argument pattern for this already bounded result. Other subagent results
+and whole-context compression remain unchanged; caller processor configs are not mutated.
+An independently cloned browser model defaults to max_tokens=8192 only if no total output
+limit is configured. The `max_tokens`, `max_completion_tokens` and `max_output_tokens` aliases
+are checked both on the request config and in its `extra_body` mapping. Any non-null explicit
+limit prevents default injection; empty/null entries alone are not a configured limit.
+Explicit provider-native limits and reasoning budgets are respected;
+the parent descriptor is not mutated. Client first/idle waits and task deadline still own
+timeouts. A token limit is not a whole-stream timer and does not replay browser mutations.
+
+### Browser core output-limit compatibility (F30)
+
+Core MODEL_CALL_FAILED output-limit details (length/max_tokens) enter the existing
+model_output_incomplete terminal path, including wrapped core causes. Preserve the
+finish reason, output token count, observations and ACKs. Retryability is governed by
+the original task deadline and resume count; it never schedules automatic write replay
+or a new retry allowance. Recovery first uses retained facts for a concise answer or
+only the still-unexecuted work. Failed attempts remain owned by the exception rail;
+genuinely empty successful output still cannot be completed.
+
+### Optional handoff recovery and invocation exits (2026-10-29)
+
+An unrelated business candidate excluded from Jev's menu must not make phase setup
+the primary recovery instruction for search/reading. LLM tools remain the direct path
+for a clear step; an exact object/operation handoff is needed only to delegate that
+business action to Jev. Current registry identity, operation guards and unknown effects
+are unchanged. Consecutive unperformed management failures use the existing completed
+tool rounds and model-protocol terminal path described in S_05.
+
+An approved explicit resume retires max_iterations_reached from the previous invocation's
+blockers. It preserves the original task deadline, resume allowance, all journal entries,
+source observations, unknown effects and live blockers. An expired deadline or non-resumable
+obstacle does not acquire permission through this cleanup. No new 600-second allowance
+or automatic replay is introduced. A current invocation reaching its own limit still ends.
+
+Local recovery reuses retained facts before any new reading; output-limit recovery remains
+within the existing model/resume policy. Prompts distinguish observed selected variants
+from family titles, confirmation dialogs from completed actions, and historical observations
+from later page state. Runtime does not infer which sort, specification or purchase is correct.
