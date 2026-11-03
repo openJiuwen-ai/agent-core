@@ -1,295 +1,83 @@
-# coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for TaskTool KV-cache affinity lifecycle."""
-
-from __future__ import annotations
-
-import re
+"""Independent task caches survive approval and are evicted at terminal cleanup."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.runner import Runner  # noqa: F401
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
 
-class _FakeSubAgent:
-    def __init__(
-            self,
-            agent_id: str,
-            *,
-            output: str = "done",
-            error: Exception | None = None,
-            result: dict | None = None,
-    ) -> None:
-        self.card = AgentCard(id=agent_id, name=agent_id, description=agent_id)
-        self.output = output
-        self.error = error
-        self.result = result
-        self.inputs: list[dict] = []
-
-    async def invoke(self, inputs: dict) -> dict:
-        self.inputs.append(dict(inputs))
-        if self.error:
-            raise self.error
-        if self.result is not None:
-            return self.result
-        return {"output": self.output}
-
-
-def _make_tool(*, enabled: bool = True, subagent: _FakeSubAgent | None = None) -> tuple[TaskTool, object]:
-    model = SimpleNamespace(name="model")
-
-    def create_subagent(*_args, **_kwargs):
-        return subagent or _FakeSubAgent("sub")
-
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["general-purpose", "browser_agent", "verification_agent"])
+@pytest.mark.parametrize("fails", [False, True])
+async def test_independent_task_evicts_cache_after_success_or_failure(kind, fails):
+    inputs_seen, cleaned = [], []
+    async def invoke(inputs):
+        inputs_seen.append(inputs)
+        if fails:
+            raise RuntimeError("boom")
+        return {"output": "done"}
+    async def cleanup():
+        cleaned.append(True)
+    model = object()
     parent = SimpleNamespace(
-        deep_config=SimpleNamespace(
-            model=model,
-            kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=enabled),
-        ),
-        create_subagent=create_subagent,
+        deep_config=SimpleNamespace(model=model, kv_cache_affinity_config=SimpleNamespace(enable_kv_cache_affinity=True)),
+        create_subagent=lambda *a, **kw: SimpleNamespace(invoke=invoke, cleanup_task_resources=cleanup),
     )
-    return TaskTool(ToolCard(id="task_tool", name="task_tool", description="task"), parent), model
-
-
-@pytest.mark.asyncio
-async def test_sticky_subagent_prefetches_before_invoke_and_offloads_after_success() -> None:
-    subagent = _FakeSubAgent("browser")
-    tool, model = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=True),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        result = await tool.invoke(
-            {"subagent_type": "browser_agent", "task_description": "run task"},
-            session=Session(session_id="parent_session"),
-        )
-
-    assert result.success is True
-    assert subagent.inputs[0]["conversation_id"] == "parent_session_sub_browser_agent"
-    assert subagent.inputs[0]["parent_session_id"] == "parent_session"
-    assert dispatch_mock.call_args_list == [
-        call(
-            model,
-            "prefetch",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-        call(
-            model,
-            "offload",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-    ]
-    evict_mock.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_sticky_subagent_failure_evicts_and_keeps_original_exception() -> None:
-    subagent = _FakeSubAgent("browser", error=RuntimeError("subagent boom"))
-    tool, model = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=True),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        with pytest.raises(Exception, match="subagent boom"):
-            await tool.invoke(
-                {"subagent_type": "browser_agent", "task_description": "run task"},
-                session=Session(session_id="parent_session"),
+    tool = TaskTool(ToolCard(id="task", name="task_tool", description="test"), parent)
+    with patch("openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache", new_callable=AsyncMock) as evict, patch(
+        "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal", new_callable=Mock,
+    ) as signal:
+        try:
+            result = await tool.invoke(
+                {"action": "dispatch", "tasks": [{"subagent_type": kind, "task_description": "work"}]},
+                session=Session(session_id="parent"), tool_call_id="work",
             )
-
-    dispatch_mock.assert_called_once_with(
-        model,
-        "prefetch",
-        session_id="parent_session_sub_browser_agent",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id="parent_session_sub_browser_agent",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_sticky_subagent_interrupt_offloads_resumable_cache() -> None:
-    interrupt_result = {
-        "result_type": "interrupt",
-        "interrupt_ids": ["inner-call"],
-        "state": [],
-    }
-    subagent = _FakeSubAgent("browser", result=interrupt_result)
-    tool, model = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=True),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        result = await tool.invoke(
-            {"subagent_type": "browser_agent", "task_description": "run task"},
-            session=Session(session_id="parent_session"),
-            tool_call_id="outer-call",
-        )
-
-    assert result is interrupt_result
-    assert dispatch_mock.call_args_list == [
-        call(
-            model,
-            "prefetch",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-        call(
-            model,
-            "offload",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-    ]
-    evict_mock.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_random_subagent_success_evicts_generated_sub_session() -> None:
-    subagent = _FakeSubAgent("code")
-    tool, model = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=True),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        result = await tool.invoke(
-            {"subagent_type": "code", "task_description": "run task"},
-            session=Session(session_id="parent_session"),
-        )
-
-    assert result.success is True
-    sub_session_id = subagent.inputs[0]["conversation_id"]
-    assert re.fullmatch(r"parent_session_sub_code_[0-9a-f]{8}", sub_session_id)
-    dispatch_mock.assert_not_called()
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id=sub_session_id,
-        parent_session_id="parent_session",
-        enabled=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_random_subagent_failure_evicts_generated_sub_session_and_keeps_original_exception() -> None:
-    subagent = _FakeSubAgent("code", error=RuntimeError("boom"))
-    tool, model = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=True),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        with pytest.raises(Exception, match="boom"):
-            await tool.invoke(
-                {"subagent_type": "code", "task_description": "run task"},
-                session=Session(session_id="parent_session"),
+            assert result.data["ready"][0]["status"] == ("failed" if fails else "completed")
+            assert cleaned == [True]
+            evict.assert_awaited_once_with(
+                model, session_id=inputs_seen[0]["conversation_id"], parent_session_id="parent", enabled=True,
             )
+            signal.assert_not_called()
+        finally:
+            await tool.close_task_groups("parent")
 
-    sub_session_id = subagent.inputs[0]["conversation_id"]
-    assert re.fullmatch(r"parent_session_sub_code_[0-9a-f]{8}", sub_session_id)
-    dispatch_mock.assert_not_called()
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id=sub_session_id,
-        parent_session_id="parent_session",
-        enabled=True,
+
+@pytest.mark.asyncio
+async def test_approval_keeps_same_child_and_cache_until_resumed():
+    children, cleaned = [], []
+    async def invoke(inputs):
+        if isinstance(inputs["query"], InteractiveInput):
+            return {"output": "approved"}
+        return {"result_type": "interrupt", "interrupt_ids": ["inner"], "state": []}
+    async def cleanup():
+        cleaned.append(True)
+    def create(*args, **kwargs):
+        child = SimpleNamespace(invoke=invoke, cleanup_task_resources=cleanup)
+        children.append(child)
+        return child
+    parent = SimpleNamespace(
+        deep_config=SimpleNamespace(model=object(), kv_cache_affinity_config=SimpleNamespace(enable_kv_cache_affinity=True)),
+        create_subagent=create,
     )
-
-
-@pytest.mark.asyncio
-async def test_kvc_helper_failure_does_not_override_success_result() -> None:
-    subagent = _FakeSubAgent("browser", output="kept")
-    tool, _ = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(side_effect=RuntimeError("signal failed")),
-    ), patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(side_effect=RuntimeError("evict failed")),
-    ):
-        result = await tool.invoke(
-            {"subagent_type": "browser_agent", "task_description": "run task"},
-            session=Session(session_id="parent_session"),
-        )
-
-    assert result.success is True
-    assert result.data["output"] == "kept"
-
-
-@pytest.mark.asyncio
-async def test_kvc_helper_failure_does_not_override_original_subagent_exception() -> None:
-    subagent = _FakeSubAgent("code", error=RuntimeError("original subagent error"))
-    tool, _ = _make_tool(subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(side_effect=RuntimeError("evict failed")),
-    ):
-        with pytest.raises(Exception, match="original subagent error"):
-            await tool.invoke(
-                {"subagent_type": "code", "task_description": "run task"},
-                session=Session(session_id="parent_session"),
-            )
-
-
-@pytest.mark.asyncio
-async def test_affinity_disabled_preserves_baseline_invoke_and_skips_helpers() -> None:
-    subagent = _FakeSubAgent("browser")
-    tool, _ = _make_tool(enabled=False, subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
-        new=Mock(return_value=False),
-    ) as dispatch_mock, patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=False),
-    ) as evict_mock:
-        result = await tool.invoke(
-            {"subagent_type": "browser_agent", "task_description": "run task"},
-            session=Session(session_id="parent_session"),
-        )
-
-    assert result.success is True
-    assert subagent.inputs == [
-        {
-            "query": "run task",
-            "conversation_id": "parent_session_sub_browser_agent",
-        }
-    ]
-    dispatch_mock.assert_not_called()
-    evict_mock.assert_not_awaited()
+    tool = TaskTool(ToolCard(id="task", name="task_tool", description="test"), parent)
+    args = {"action": "dispatch", "tasks": [{"subagent_type": "verification_agent", "task_description": "verify"}]}
+    session = Session(session_id="approval")
+    with patch("openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache", new_callable=AsyncMock) as evict:
+        try:
+            result = await tool.invoke(args, session=session, tool_call_id="original")
+            assert result["result_type"] == "interrupt"
+            evict.assert_not_awaited()
+            assert not cleaned
+            reply = InteractiveInput()
+            reply.update(result["interrupt_ids"][0], {"approved": True})
+            result = await tool.invoke({**args, "query": reply}, session=session, tool_call_id="original")
+            assert result.data["ready"][0]["output"] == "approved"
+            assert len(children) == 1 and cleaned == [True]
+            evict.assert_awaited_once()
+        finally:
+            await tool.close_task_groups("approval")
