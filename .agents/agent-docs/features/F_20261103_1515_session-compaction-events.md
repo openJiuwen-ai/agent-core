@@ -39,7 +39,7 @@ precompute 是内存候选，实际安装重新进入 Hook；会话消息前缀�
 - SQLite checkpoint 使用 `__BYTES__:` Base64 的 typed pickle；独立按生产序列化器解码，再用新的 Session/ContextEngine 加载其中的 context，恢复两条消息并读到安装后的标记。修正验收探针的 raw-byte 搜索后，基于最新 Server 装配重新跑完整真实入口，主执行与独立冷恢复复核退出码均为 0；较早失败记录仍保留。
 - 本地复核：`D:\work_space\.codex-temp\session-compact-20261103\acceptance-verified.json`；真实入口工件：`real-155942`；运行源文件 SHA256 与复核时一致，ui.render 0 次。未执行的 Claude 宿主或远端 CI 不列为通过。
 
-Core ContextEngine / Events 回归共 792 个不同用例通过：整组 791 项通过，另 1 项默认 import 子进程受 OpenBLAS 内存分配影响，限定该进程 OPENBLAS_NUM_THREADS=1 后单独复验通过。5 项 Windows 基线失败单独排除（4 项早期时间戳转换、1 项符号链接权限），均在干净目标基线复现。证据：core-final.xml、core-import-recheck.xml；未将该整组描述为一次全绿。Server 的完整字段、用户示例和对应回归范围在 Server F_30 / S_17 维护。
+Core ContextEngine / Events 回归共 792 个不同用例通过：整组 791 项通过，另 1 项默认 import 子进程受 OpenBLAS 内存分配影响，限定该进程 OPENBLAS_NUM_THREADS=1 后单独复验通过。5 项 Windows 基线失败单独排除（4 项早期时间戳转换、1 项符号链接权限），均在干净目标基线复现。证据：core-final.xml、core-import-recheck.xml；未将该整组描述为一次全绿。Server 的完整字段、用户示例和对应回归范围在 Server F_28 / S_15 维护。
 
 ## 保持 EventBus 接口的修订
 
@@ -54,3 +54,7 @@ Server 全组与命令回归 845 项通过、2 项跳过，1 项既有 Token Wea
 ## 交付与重验条件
 
 Core PR 先提供本协议；Server PR 标记依赖具体 Core 提交。任何影响 compaction/context/event dispatch 的运行代码变化都要重验相应边界；纯文档/提交不改变已核实的运行源指纹。批准、实现、测试通过、PR 创建和合入分别记录。
+
+## 文档编号修订
+
+2026-11-03 按用户要求接续 Server 当前目录，compact 特性文档改为 F_28_session-compact.md、规约改为 S_15_session-compact.md，原 F30/S17 为历史别名。Core 本文的日期编号、ContextEngine S_01 和设计 ID 保持稳定；此次仅同步跨仓引用，不改变压缩实现及原版本验收事实。
