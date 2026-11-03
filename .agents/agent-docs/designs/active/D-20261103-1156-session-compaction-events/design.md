@@ -151,7 +151,7 @@ sequenceDiagram
 | Core extension Runtime | 活动 Handler 的 Ops/任务/有效期；只读 is_active_invocation 校验 | EventBus、Ops、Builder、matcher、执行顺序与故障隔离保持上游契约 |
 | Server 原生 Adapter/压缩服务 | 从已授权会话解析 engine；注册/注销 Hook；命令/Ops 共用准入和后处理 | 原 Worker、会话实例、目录/模型绑定、压缩历史与用量通知 |
 | Server event_types/session_compact.py（拟新增） | dataclass、matcher、输入输出校验、事件注册 | 不放 notify、真实 engine 查找或业务 trigger |
-| Server compact_dispatch.py（拟新增） | 私有调用状态、消息 codec、句柄解析、bus.trigger、结果转换 | 与 query/history 调用状态模式一致，但不复用其提前提交语义 |
+| Server session_compaction/dispatch.py（共享实现） | 私有调用状态、消息 codec、句柄解析、bus.trigger、结果转换 | 与 query/history 调用状态模式一致，但不复用其提前提交语义 |
 | Server event_handlers/session_compact.py（拟新增） | 唯一 session_compact_core，校验固定事实、调用默认 prepare | 不直接替换 live context |
 | Server handler_ops/session_ops.py | ops.build 登记 compact 代理，调用绑定压缩服务 | 现有七项只读代理及 append 保持现有契约 |
 
