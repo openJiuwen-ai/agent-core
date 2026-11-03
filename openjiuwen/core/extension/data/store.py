@@ -8,12 +8,14 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from filelock import FileLock, Timeout
+from portalocker.exceptions import LockException
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.extension.data.files import replace_json, run_file_operation, sync_directory
+from openjiuwen.core.extension.data.files import (
+    package_data_path, package_file_lock, replace_json, resolve_data_path, run_file_operation, sync_directory,
+)
 from openjiuwen.core.extension.data.json_values import copy_json, encode_json, require_package_id
 
 STORE_MAX_BYTES = 4 * 1024 * 1024
@@ -37,7 +39,7 @@ class JsonStore:
 
     def __init__(self, directory: Path) -> None:
         """Remember the directory without creating it or accessing package files."""
-        self.directory = Path(directory).expanduser().resolve()
+        self.directory = resolve_data_path(Path(directory).expanduser())
 
     async def get(self, package_id: str, key: str, default: Any = None) -> Any:
         """Read a copied value, returning default only when the key is absent."""
@@ -82,16 +84,7 @@ class JsonStore:
             raise build_error(StatusCode.EXTENSION_DATA_INVALID, reason="package store exceeds 4 MiB")
 
     def _path(self, name: str) -> Path:
-        path = self.directory / name
-        if self.directory.resolve() != self.directory or path.is_symlink() or path.resolve().parent != self.directory:
-            raise build_error(
-                StatusCode.EXTENSION_DATA_PATH_INVALID, reason="store path is redirected outside its directory"
-            )
-        if path.exists() and not path.is_file():
-            raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="store path is not a regular file")
-        if path.exists() and path.resolve().name != name:
-            raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="store filename aliases another package")
-        return path
+        return package_data_path(self.directory, name)
 
     def _operate(self, package_id: str, operation: str, key: str = "", value: Any = None) -> Any:
         writing = operation in ("set", "delete")
@@ -109,7 +102,8 @@ class JsonStore:
                 return None
             self.directory.mkdir(parents=True, exist_ok=True)
             lock_path = self._path(f"{package_id}.json.lock")
-            with FileLock(lock_path, timeout=30):
+            with package_file_lock(lock_path):
+                path = self._path(f"{package_id}.json")
                 if operation == "cleanup":
                     path.unlink(missing_ok=True)
                     sync_directory(path.parent)
@@ -117,7 +111,7 @@ class JsonStore:
                 result = self._locked_operation(path, operation, key, value)
                 completed = True
             return result
-        except (OSError, Timeout) as exc:
+        except (OSError, LockException) as exc:
             if writing and completed:
                 raise build_error(
                     StatusCode.EXTENSION_DATA_COMMIT_UNKNOWN,

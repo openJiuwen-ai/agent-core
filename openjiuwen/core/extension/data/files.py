@@ -10,11 +10,41 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from portalocker import Lock
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 
 _T = TypeVar("_T")
+
+
+def resolve_data_path(path: Path) -> Path:
+    """Resolve paths consistently when Windows returns an extended-length prefix."""
+    resolved = path.resolve()
+    value = str(resolved)
+    if os.name == "nt":
+        if value.startswith("\\\\?\\UNC\\"):
+            return Path("\\\\" + value[8:])
+        if value.startswith("\\\\?\\"):
+            return Path(value[4:])
+    return resolved
+
+
+def package_data_path(directory: Path, name: str) -> Path:
+    """Require an unredirected regular package file inside its canonical directory."""
+    path = directory / name
+    resolved = resolve_data_path(path)
+    if resolve_data_path(directory) != directory or path.is_symlink() or resolved.parent != directory:
+        raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="package data path leaves its directory")
+    if path.exists() and (not path.is_file() or resolved.name != name):
+        raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="package data path aliases another file")
+    return path
+
+
+def package_file_lock(path: Path, *, timeout: float = 30) -> Lock:
+    """Lock a stable sidecar file without unlinking it on release on any platform."""
+    return Lock(path, mode="a+b", timeout=timeout)
 
 
 async def run_file_operation(operation: Callable[[], _T]) -> _T:

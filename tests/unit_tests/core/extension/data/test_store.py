@@ -12,7 +12,8 @@ import threading
 from pathlib import Path
 
 import pytest
-from filelock import FileLock
+from portalocker import Lock
+from portalocker.exceptions import LockException
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
@@ -249,15 +250,15 @@ async def test_temporary_file_flush_failure_never_replaces_old_data(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_lock_release_failure_after_commit_is_never_false(tmp_path: Path, monkeypatch) -> None:
-    original = FileLock.release
+    original = Lock.release
     should_fail = [True]
 
-    def release(lock, *args, **kwargs):
-        original(lock, *args, **kwargs)
+    def release(lock):
+        original(lock)
         if should_fail.pop() if should_fail else False:
             raise OSError("release failed after commit")
 
-    monkeypatch.setattr(FileLock, "release", release)
+    monkeypatch.setattr(Lock, "release", release)
     with pytest.raises(BaseError) as caught:
         await JsonStore(tmp_path).set("demo", "key", 1)
     assert caught.value.status is StatusCode.EXTENSION_DATA_COMMIT_UNKNOWN
@@ -336,3 +337,36 @@ async def test_cleanup_preserves_reload_shutdown_and_removes_only_package_data(t
     assert not (tmp_path / "demo.json").exists()
     assert (tmp_path / "demo.json.lock").exists()
     assert await store.get("other", "key") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length paths only")
+async def test_extended_path_prefix_does_not_change_the_package_directory(tmp_path: Path, monkeypatch) -> None:
+    original = Path.resolve
+
+    def extended(path: Path, strict: bool = False) -> Path:
+        resolved = original(path, strict=strict)
+        return Path("\\\\?\\" + str(resolved))
+
+    monkeypatch.setattr(Path, "resolve", extended)
+    store = JsonStore(tmp_path)
+    assert store.directory == tmp_path
+    assert await store.set("demo", "key", 1)
+    assert await store.get("demo", "key") == 1
+    assert (tmp_path / "demo.json.lock").is_file()
+
+
+@pytest.mark.asyncio
+async def test_lock_acquisition_failure_never_reports_a_successful_write(tmp_path: Path, monkeypatch) -> None:
+    import openjiuwen.core.extension.data.store as module
+
+    class UnavailableLock:
+        def __enter__(self):
+            raise LockException("lock unavailable")
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(module, "package_file_lock", lambda path: UnavailableLock())
+    assert not await JsonStore(tmp_path).set("demo", "key", 1)
+    assert not (tmp_path / "demo.json").exists()

@@ -461,6 +461,8 @@ async def _apply_load_locked(context: ManagementContext, request: ApplyRequest) 
         )
         return _failed(plan, published.error)
     _declare_mcp(plan.package.package_id, plan.mcp_servers)
+    if plan.operation == "reload" and plan.previous_generation is not None:
+        context.runtime.retire_generation(plan.package.package_id, plan.previous_generation)
     return ActivationReport(
         plan_id=plan.plan_id,
         package_id=plan.package.package_id,

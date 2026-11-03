@@ -19,7 +19,6 @@ import sys
 import threading
 import types
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -36,15 +35,6 @@ from openjiuwen.core.extension.selection import evaluate_reload
 
 _ALLOWED_LEVELS = {HandlerLevel.USER.value, HandlerLevel.BUILTIN.value}
 PackageResourceCleanup: TypeAlias = Callable[[str, int, str], Awaitable[None]]
-
-
-@dataclass(slots=True)
-class _HandlerInvocation:
-    """A package invocation whose copied contexts cannot extend its lifetime."""
-
-    ops: Any
-    task: asyncio.Task | None
-    active: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,9 +143,62 @@ class Runtime:
         self._management_locks: dict[str, asyncio.Lock] = {}
         self._uninstall_versions: dict[str, tuple[str, ...]] = {}
         self._active_ops: set[EventHandlerOps] = set()
-        self._current_invocation: ContextVar[_HandlerInvocation | None] = ContextVar(
-            "extension_handler_invocation", default=None,
-        )
+        self._ops_generations: dict[EventHandlerOps, tuple[str, int]] = {}
+        self._generation_waiters: dict[tuple[str, int], asyncio.Event] = {}
+        self._retirements: set[asyncio.Task[None]] = set()
+
+    def invocation_generation(self, ops: EventHandlerOps) -> int | None:
+        """Return a generation only while the original package handler is active."""
+        with self._lock:
+            if ops not in self._active_ops:
+                return None
+            facts = self._ops_generations.get(ops)
+            return None if facts is None else facts[1]
+
+    async def wait_generation_idle(self, package_id: str, generation: int) -> None:
+        """Wait for the old generation without delaying publication of its successor."""
+        key = (package_id, generation)
+        with self._lock:
+            if key not in self._ops_generations.values():
+                return
+            idle = self._generation_waiters.setdefault(key, asyncio.Event())
+        await idle.wait()
+
+    def retire_generation(self, package_id: str, generation: int) -> None:
+        """Schedule retriable old-generation resource cleanup after a hot switch."""
+        async def retire() -> None:
+            await self.wait_generation_idle(package_id, generation)
+            delay = 0.1
+            while True:
+                async with self.package_lock(package_id):
+                    record = self.get_active(package_id)
+                    if record is None or record.generation <= generation:
+                        return
+                    try:
+                        await self.cleanup_package_resources(package_id, generation, reason="reload")
+                        return
+                    except Exception:
+                        logger.exception("could not release replaced package generation %s/%s", package_id, generation)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 5.0)
+
+        task = asyncio.create_task(retire())
+        self._retirements.add(task)
+        task.add_done_callback(self._retirements.discard)
+
+    async def stop_retirements(self) -> None:
+        """Stop old-generation cleanup tasks when the host releases this Runtime."""
+        tasks = tuple(self._retirements)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _release_generation(self, ops: EventHandlerOps) -> None:
+        key = self._ops_generations.pop(ops, None)
+        if key is not None and key not in self._ops_generations.values():
+            idle = self._generation_waiters.pop(key, None)
+            if idle is not None:
+                idle.set()
 
     def package_lock(self, package_id: str) -> asyncio.Lock:
         """Return the management lock for one package on this Runtime's loop."""
@@ -212,28 +255,13 @@ class Runtime:
         with self._lock:
             self._active[record.package_id] = record
 
-    def is_active_invocation(self, ops: EventHandlerOps) -> bool:
-        """Whether Ops belongs to this Runtime's current handler and task.
-
-        This only recognizes handlers published through Runtime. Nested handlers
-        temporarily replace the current scope; copied contexts and child tasks
-        cannot authorize use of another invocation's Ops.
-        """
-        frame = self._current_invocation.get()
-        if not isinstance(ops, EventHandlerOps) or frame is None or not frame.active or frame.ops is not ops:
-            return False
-        try:
-            task = asyncio.current_task()
-        except RuntimeError:
-            return False
-        with self._lock:
-            return task is not None and frame.task is task and ops in self._active_ops
-
     def begin_calls(self, package_ids: Sequence[str], ops: EventHandlerOps | None = None) -> None:
         """Count one in-flight use of each package. The event layer will call this."""
         with self._lock:
             if ops is not None and ops not in self._active_ops:
-                raise ExtensionFailure(StatusCode.EVENTS_OPS_INVALID, reason="the package handler has already finished")
+                raise ExtensionFailure(
+                    StatusCode.EVENTS_OPS_INVALID, reason="the package handler has already finished",
+                )
             for package_id in package_ids:
                 if package_id in self._blocked:
                     raise ExtensionFailure(
@@ -266,7 +294,7 @@ class Runtime:
                     self._inflight[package_id] = remaining
 
     def inflight_count(self, package_id: str) -> int:
-        """Return the number of handlers and nested store calls still using a package."""
+        """Return the number of handlers and nested data calls still using a package."""
         with self._lock:
             return self._inflight.get(package_id, 0)
 
@@ -503,7 +531,7 @@ class Runtime:
             try:
                 handler_id = bus.register_event_handler(
                     declaration.event_type,
-                    self._tracked_handler(candidate.package_id, declaration.handler),
+                    self._tracked_handler(candidate.package_id, candidate.generation, declaration.handler),
                     declaration.match_pattern,
                     HandlerLevel(declaration.handler_level),
                     package_metadata=plan.package,
@@ -526,7 +554,9 @@ class Runtime:
             registered.append(handler_id)
         return registered, None
 
-    def _tracked_handler(self, package_id: str, handler: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
+    def _tracked_handler(
+        self, package_id: str, generation: int, handler: Callable[..., Any],
+    ) -> Callable[..., Awaitable[Any]]:
         wrapped = _async_handler(handler)
 
         @functools.wraps(handler)
@@ -534,15 +564,13 @@ class Runtime:
             self.begin_calls((package_id,))
             with self._lock:
                 self._active_ops.add(ops)
-            frame = _HandlerInvocation(ops, asyncio.current_task())
-            token = self._current_invocation.set(frame)
+                self._ops_generations[ops] = (package_id, generation)
             try:
                 return await wrapped(event, ops, event_next)
             finally:
-                frame.active = False
-                self._current_invocation.reset(token)
                 with self._lock:
                     self._active_ops.discard(ops)
+                    self._release_generation(ops)
                 self.end_calls((package_id,))
 
         return tracked
