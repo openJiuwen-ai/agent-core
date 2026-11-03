@@ -36,6 +36,7 @@ _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "erase", "rd", "rmdir", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+    "test", "[",
     "get-content", "gc",
     "set-content", "add-content", "out-file", "tee-object", "sc",
     "remove-item", "ri", "new-item", "ni",
@@ -59,6 +60,7 @@ _NT_CMD_SWITCH_COMMANDS = frozenset({
 
 _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
+    "test", "[",
     "get-content", "gc",
 })
 _WRITE_CMDS = frozenset({
@@ -74,6 +76,8 @@ _TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
 _WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WIN_USERPROFILE_RE = re.compile(r"%USERPROFILE%", re.IGNORECASE)
 _WIN_HOMEDRIVE_HOMEPATH_RE = re.compile(r"%HOMEDRIVE%%HOMEPATH%", re.IGNORECASE)
+# ``$HOME`` / ``${HOME}`` as the whole token or followed by a separator; ``$HOMEDIR`` is another variable.
+_SHELL_HOME_VAR_RE = re.compile(r"^\$(?:HOME|\{HOME\})(?=$|[/\\])")
 
 
 def _is_windows_abs_text(text: str) -> bool:
@@ -136,7 +140,7 @@ def _unglue_home_hidden(path_text: str) -> str:
 
 
 def _expand_home_token(tok: str) -> str:
-    """Expand ``~`` / ``~/`` / ``~\\`` and Windows home env vars to the user home path."""
+    """Expand ``~`` / ``~/`` / ``~\\``, ``$HOME`` / ``${HOME}`` and Windows home env vars to the user home path."""
     t = tok.strip().strip('"').strip("'")
     if not t:
         return t
@@ -144,6 +148,9 @@ def _expand_home_token(tok: str) -> str:
         return str(Path.home())
     if t.startswith(("~/", "~\\", "~.")):
         return _join_home_rest(t[1:])
+    home_var = _SHELL_HOME_VAR_RE.match(t)
+    if home_var:
+        return _join_home_rest(t[home_var.end():])
     expanded = _WIN_HOMEDRIVE_HOMEPATH_RE.sub(lambda _m: Path.home().as_posix(), t)
     expanded = _WIN_USERPROFILE_RE.sub(lambda _m: Path.home().as_posix(), expanded)
     if expanded == t:
@@ -152,7 +159,7 @@ def _expand_home_token(tok: str) -> str:
 
 
 def _looks_like_redirect_target(token: str) -> bool:
-    t = token.strip().strip('"').strip("'")
+    t = _expand_home_token(token)
     if not t or _FD_ALIAS_RE.match(t):
         return False
     if t.startswith("$") or _UNEXPANDED_VAR_RE.search(t):
@@ -296,11 +303,13 @@ def _path_aware_one_segment(
 
     def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
         tok = _strip_separator_residue(tok)
-        if not tok or _UNEXPANDED_VAR_RE.search(tok):
+        if not tok:
             return
         if require_path_shape and not _looks_like_path(tok):
             return
         tok = _expand_home_token(tok)
+        if _UNEXPANDED_VAR_RE.search(tok):
+            return
         p = Path(tok)
         win_abs = _is_windows_abs_text(tok)
         if not p.is_absolute() and not (win_abs and os.name != "nt"):
