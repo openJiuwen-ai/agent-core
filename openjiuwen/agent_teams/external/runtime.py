@@ -657,8 +657,11 @@ class CliRuntimeBase(ABC):
 
     @property
     def background_task_controller(self) -> Optional[Any]:
-        """None: external CLI members run their swarmflow work through the
-        ExternalSwarmflowHost, which holds the session controller itself."""
+        """None: external CLI members hold no controller of their own.
+
+        Their swarmflow work runs through the ExternalSwarmflowHost, which
+        holds the session controller itself.
+        """
         return None
 
     @property
