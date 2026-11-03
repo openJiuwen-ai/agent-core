@@ -182,7 +182,6 @@ class ExtensionEventBusProtocol(Protocol):
         session: "Session | SessionContext | None" = None,
         *,
         handler_ids: Sequence[HandlerId] | None = None,
-        exclude_handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None: ...
 ```
 
@@ -248,12 +247,6 @@ Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非
 
 本参数是宿主筛选机制，不认证包身份或代次，不保证一个包只初始化一次。宿主可用 Runtime.published_handlers 的公开 ID，但激活/并发/重试由宿主负责。验证见 tests/unit_tests/core/events/test_event_handler_selection.py。
 
-#### exclude_handler_ids 与当前调用身份
-
-宿主可提供调用内排除集，与 handler_ids 候选白名单及 matcher 结果共同作用；CORE 尾始终保留。None 保留旧行为；ops.build 禁止指定排除集。HandlerId 是注册身份，不是包 ID，也不构成授权，不按整个包跳过。
-
-Bus 为每个实际 USER/BUILTIN Handler 的 Ops 绑定 handler_id、当前任务和活动调用。invocation_active 仅在该视图确为当前 Handler、任务相同且作用域尚未退出时为 True；手工 build、后台子任务和过期 Ops 不满足这一条件。框架结束 Handler 时关闭调用身份，包括异常和取消路径。CORE 视图的 handler_id 为 None。
-
 ### 4.5 EventNext
 
 | 当前 Handler | `next(event)` | `to(event, BUILTIN)` | `to(event, CORE)` |
@@ -289,8 +282,6 @@ class EventHandlerOpsBuilder:
         self,
         package_metadata: PackageMetadata | None = None,
         session_context: SessionContext | None = None,
-        *,
-        handler_id: str | None = None,
     ) -> "EventHandlerOps": ...
 
 
@@ -300,12 +291,6 @@ class EventHandlerOps:
 
     @property
     def session_context(self) -> SessionContext | None: ...
-
-    @property
-    def handler_id(self) -> str | None: ...
-
-    @property
-    def invocation_active(self) -> bool: ...
 
     def __getattr__(self, namespace: str) -> Any: ...
 ```
@@ -389,5 +374,3 @@ Events 实现与专项测试已建立，以下按开发计划当前工作项编�
 - EV-08 宿主限定派发：handler_ids、顺序/快照、非法参数、取消/故障隔离及完整 Build → tests/unit_tests/core/events/test_event_handler_selection.py；集成证据见 [F_09 第 6 节](../features/F_09_handler-selection.md#6-验收与未决问题)。
 
 完整场景、执行命令、版本环境和实际结果由对应 feature 及[开发计划](../designs/events-development-plan.md)记录。
-
-压缩使用的调用身份、精确排除和有效期验证：tests/unit_tests/core/events/test_event_invocation_identity.py；跨仓消费见 D-20261103-1156-session-compaction-events。

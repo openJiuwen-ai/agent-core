@@ -18,7 +18,7 @@ from openjiuwen.core.common.exception.errors import ValidationError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.events.bootstrap import register_builtins
 from openjiuwen.core.events.event_next import EventNext
-from openjiuwen.core.events.ops import EventHandlerOpsBuilder, _CURRENT_OPS
+from openjiuwen.core.events.ops import EventHandlerOpsBuilder
 from openjiuwen.core.events.protocol import EventHandler
 from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
@@ -450,21 +450,14 @@ class ExtensionEventBus:
                 return downstream_output
 
             # Framework faults from Ops construction remain outside the handler fault boundary.
-            ops = None if self._builder is None else self._builder.build(
-                package_metadata, session_context, handler_id=handler_id,
-            )
+            ops = None if self._builder is None else self._builder.build(package_metadata, session_context)
             output: EventOutput | None = None
-            invocation_token = _CURRENT_OPS.set(ops)
             try:
                 with EventNext(event.event_type, handler_level, forward) as event_next:
                     output = await _await_handler_result(handler(event, ops, event_next))
             except Exception as handler_failure:
                 if validator_failure is None:
                     return await skip_handler(handler_failure)
-            finally:
-                if ops is not None:
-                    ops._close_invocation()
-                _CURRENT_OPS.reset(invocation_token)
 
             # A handler cannot swallow an event-definition failure or an invalid forwarded input.
             if validator_failure is not None:
@@ -519,7 +512,6 @@ class ExtensionEventBus:
         session: Session | SessionContext | None = None,
         *,
         handler_ids: Sequence[HandlerId] | None = None,
-        exclude_handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None:
         """Run matched handlers, optionally restricted by a call-local ID set.
 
@@ -528,8 +520,6 @@ class ExtensionEventBus:
             session: Trusted session facts bound to each entered handler.
             handler_ids: Optional candidate allowlist. None preserves normal
                 dispatch; an empty sequence leaves only the CORE tail.
-            exclude_handler_ids: Invocation-local exclusion set. The CORE tail
-                is never removed, including when every matched hook is excluded.
 
         Returns:
             The unchanged event-chain result.
@@ -547,9 +537,8 @@ class ExtensionEventBus:
         if not _run_validator(registration.input_validator, event.event_input, "input"):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="initial event input is invalid")
         selected_ids = _freeze_handler_ids(handler_ids)
-        excluded_ids = _freeze_handler_ids(exclude_handler_ids)
         if event.event_type == OPS_BUILD_EVENT_TYPE:
-            if selected_ids is not None or excluded_ids is not None:
+            if selected_ids is not None:
                 raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="ops.build cannot limit handler_ids")
             return await self._build(event, registration)
         if self._builder is None:
@@ -558,8 +547,6 @@ class ExtensionEventBus:
         # then handed to the framework chain; the chain never re-matches.
         session_context = _normalize_session(session)
         matched_handler_ids = self._match_handlers(event, registration, selected_ids)
-        if excluded_ids is not None:
-            matched_handler_ids = matched_handler_ids - excluded_ids
         return await registration.dispatch(
             event,
             matched_handler_ids=matched_handler_ids,

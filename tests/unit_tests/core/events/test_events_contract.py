@@ -174,7 +174,7 @@ def test_events_protocol_bus_signature():
     assert unregister_handler_return == "None"
 
     trigger, trigger_return = _method_signature(ExtensionEventBusProtocol.trigger)
-    assert [parameter.name for parameter in trigger] == ["event", "session", "handler_ids", "exclude_handler_ids"]
+    assert [parameter.name for parameter in trigger] == ["event", "session", "handler_ids"]
     assert trigger[0].annotation == "Event"
     assert trigger[1].annotation == "Session | SessionContext | None"
     assert trigger[1].default is None
@@ -207,9 +207,8 @@ def test_events_builder_ops_and_event_next_signatures():
     assert add_method_return == "None"
 
     build, build_return = _method_signature(EventHandlerOpsBuilder.build)
-    assert [parameter.name for parameter in build] == ["package_metadata", "session_context", "handler_id"]
-    assert [parameter.annotation for parameter in build] == ["PackageMetadata | None", "SessionContext | None", "str | None"]
-    assert build[2].kind is inspect.Parameter.KEYWORD_ONLY
+    assert [parameter.name for parameter in build] == ["package_metadata", "session_context"]
+    assert [parameter.annotation for parameter in build] == ["PackageMetadata | None", "SessionContext | None"]
     assert all(parameter.default is None for parameter in build)
     assert build_return == "EventHandlerOps"
 
@@ -225,7 +224,7 @@ def test_events_builder_ops_and_event_next_signatures():
     assert to_return == "EventOutput | None"
 
     ops_properties = {name for name, value in vars(EventHandlerOps).items() if isinstance(value, property)}
-    assert ops_properties == {"package_metadata", "session_context", "handler_id", "invocation_active"}
+    assert ops_properties == {"package_metadata", "session_context"}
     assert "__call__" not in vars(EventHandlerOps)
     assert inspect.signature(EventHandlerOps.package_metadata.fget).return_annotation == "PackageMetadata | None"
     assert inspect.signature(EventHandlerOps.session_context.fget).return_annotation == "SessionContext | None"
