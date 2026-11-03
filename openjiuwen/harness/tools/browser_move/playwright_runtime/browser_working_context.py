@@ -192,7 +192,8 @@ class BrowserWorkingContextStore:
     def __init__(self, config: BrowserWorkingContextConfig) -> None:
         self.config = config
 
-    def load(self, session: Any) -> BrowserWorkingContextState:
+    @staticmethod
+    def load(session: Any) -> BrowserWorkingContextState:
         if session is None:
             return BrowserWorkingContextState()
         raw_state = session.get_state(BROWSER_WORKING_CONTEXT_STATE_KEY)
@@ -535,8 +536,9 @@ class BrowserWorkingContextStore:
         self._commit_pending(state, [])
 
     def _limit_history(self, state: BrowserWorkingContextState) -> None:
-        if len(state.recent_steps) > self.config.max_recent_steps:
-            state.recent_steps = state.recent_steps[-self.config.max_recent_steps :]
+        overflow = len(state.recent_steps) - self.config.max_recent_steps
+        if overflow > 0:
+            del state.recent_steps[:overflow]
 
     def _infer_tool_error(self, content: Any) -> Optional[str]:
         text = self._message_content_to_text(content)
@@ -548,11 +550,13 @@ class BrowserWorkingContextStore:
 
         try:
             parsed = json.loads(text)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             parsed = None
         if isinstance(parsed, dict):
             error = parsed.get("error")
-            if error and (parsed.get("success") is False or parsed.get("ok") is False or parsed.get("isError") is True):
+            failed = any(parsed.get(key) is False for key in ("success", "ok"))
+            failed = failed or parsed.get("isError") is True
+            if error and failed:
                 return _bounded_text(error, self.config.max_item_chars)
 
         if "success=false" in lowered and "error=" in lowered:

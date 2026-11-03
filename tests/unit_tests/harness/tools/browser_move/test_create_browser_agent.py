@@ -16,6 +16,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
+    BROWSER_AGENT_CARD_ID,
     BROWSER_AGENT_FACTORY_NAME,
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
     DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT,
@@ -544,6 +545,17 @@ def test_build_browser_agent_config_uses_browser_factory() -> None:
     assert spec.system_prompt == DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"]
     assert spec.factory_name == BROWSER_AGENT_FACTORY_NAME
     assert spec.factory_kwargs["settings"] == settings
+
+
+def test_browser_agent_keeps_checkpoint_id_but_isolates_tool_owners() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    assert calls[0]["card"].id == calls[1]["card"].id == BROWSER_AGENT_CARD_ID
+    assert calls[0]["tool_owner_id"] != calls[1]["tool_owner_id"]
+    assert all(call["tool_owner_id"].startswith(f"{BROWSER_AGENT_CARD_ID}:") for call in calls)
 
 
 def test_build_browser_agent_config_fallback_uses_model_name_field() -> None:

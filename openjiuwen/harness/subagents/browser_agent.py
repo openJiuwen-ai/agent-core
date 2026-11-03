@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from uuid import uuid4
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ToolResultWindowProcessorConfig
@@ -492,6 +493,10 @@ def create_browser_agent(
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
+
+    # The card id must stay stable for checkpoint recovery, but each live
+    # browser agent owns a separate set of stateful tools in Runner.resource_mgr.
+    config_kwargs.setdefault("tool_owner_id", f"{final_card.id}:{uuid4().hex}")
 
     agent = create_deep_agent(
         model=browser_model,
