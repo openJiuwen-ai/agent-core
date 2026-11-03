@@ -150,12 +150,55 @@ _TOOL_SUBSTRINGS: tuple[str, ...] = ("Tool",)
 # KnowledgeRetrievalExecutable, MemoryRetrievalExecutable and future variants.
 _RETRIEVAL_SUBSTRINGS: tuple[str, ...] = ("Retrieval",)
 
+# GenAI request-parameter keys read from instance_info["request_params"], in
+# both span-creating and merge paths (single source for the two loops).
+_GEN_AI_REQUEST_PARAM_KEYS: tuple[tuple[str, str], ...] = (
+    ("temperature", GEN_AI_REQUEST_TEMPERATURE),
+    ("top_p", GEN_AI_REQUEST_TOP_P),
+    ("top_k", GEN_AI_REQUEST_TOP_K),
+    ("max_tokens", GEN_AI_REQUEST_MAX_TOKENS),
+    ("stop_sequences", GEN_AI_REQUEST_STOP_SEQUENCES),
+    ("reasoning_level", GEN_AI_REQUEST_REASONING_LEVEL),
+)
+
 # gen_ai.operation.name values (OTel GenAI semantic conventions) — constants so
 # no call site re-types the literal.
 _OPERATION_NAME_CHAT = "chat"
 _OPERATION_NAME_EXECUTE_TOOL = "execute_tool"
 _OPERATION_NAME_EMBEDDINGS = "embeddings"
 _OPERATION_NAME_RETRIEVAL = "retrieval"
+
+
+def _ambient_component_shell() -> trace.Span | None:
+    """Current ambient span if it is a recording workflow component shell.
+
+    OtelWorkflowHandler.on_call_start attaches component shells to the OTel
+    context for the duration of component execution, so anything the
+    component calls sees them here. Identification is by the
+    openjiuwen.workflow.component_id attribute: every component shell has
+    the key (empty string allowed), while workflow roots and the LLM spans
+    this handler creates ("llm.<model>") never set it.
+    """
+    ambient = trace.get_current_span(otel_context.get_current())
+    if not getattr(ambient, "is_recording", lambda: False)():
+        return None
+    if OJ_WORKFLOW_COMPONENT_ID in (getattr(ambient, "attributes", None) or {}):
+        return ambient
+    return None
+
+
+def _is_llm_component_shell(shell: trace.Span) -> bool:
+    """Whether an ambient component shell is LLM-type (merge-eligible).
+
+    Checked on top of _ambient_component_shell (recording + component_id
+    already guaranteed): gen_ai.operation.name == "chat" is set by
+    OtelWorkflowHandler.on_call_start only in its is_llm_component branch
+    — together with SpanKind.CLIENT — while tool / retrieval / plain
+    components carry their own operation names. Non-LLM shells return
+    False, so LLM calls under them keep creating normal child spans.
+    """
+    attrs = getattr(shell, "attributes", None) or {}
+    return str(attrs.get(GEN_AI_OPERATION_NAME, "")) == _OPERATION_NAME_CHAT
 
 
 def _serialize(value: Any) -> str:
@@ -232,58 +275,77 @@ def _unwrap_llm_payload(value: Any) -> Any:
     return normalized
 
 
-def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
+def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any, *, respect_existing: bool = False) -> None:
     """Set GenAI response / usage / cost / latency attributes on the span.
 
     Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
     read tokens, reasoning tokens, response model, per-kind costs,
     first-token timing) off an ``AssistantMessage`` payload, normalized via
     ``model_dump`` semantics. Present values are set unconditionally — a
-    recorded 0 is a fact, not an absence.
+    recorded 0 is a fact, not an absence. ``respect_existing=True`` (merge
+    mode) appends only: any key already on the span is left untouched, so
+    attributes owned by a merged shell span keep their single writer.
     """
+    def set_attr(key: str, value: Any) -> None:
+        if respect_existing and key in (otel_span.attributes or {}):
+            return
+        otel_span.set_attribute(key, value)
+
     obj = _unwrap_llm_payload(outputs)
-    if not isinstance(obj, dict):
-        return
-    finish_reason = obj.get("finish_reason")
-    # "null" is the schema default for AssistantMessage.finish_reason, i.e.
-    # "provider did not report one" — not a zero value, so it stays filtered.
-    if finish_reason and str(finish_reason) != "null":
-        otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
-    usage = obj.get("usage_metadata")
+    # Usage priority: container-level sibling FIRST — the traced-model
+    # decorator puts a usage snapshot beside "outputs" ({"outputs": ...,
+    # "usage_metadata": {...}}), fresher than any usage embedded in the
+    # result itself (it carries the measured ttft). Fall back to the result's
+    # own usage_metadata (rail container form; a stream chunk list has none,
+    # which is why the sibling exists at all).
+    sibling = outputs.get("usage_metadata") if isinstance(outputs, dict) else None
+    usage = sibling if isinstance(sibling, dict) else None
+    if usage is None:
+        usage = obj.get("usage_metadata") if isinstance(obj, dict) else None
+    if isinstance(obj, dict):
+        finish_reason = obj.get("finish_reason")
+        # "null" is the schema default for AssistantMessage.finish_reason, i.e.
+        # "provider did not report one" — not a zero value, so it stays filtered.
+        if finish_reason and str(finish_reason) != "null":
+            set_attr(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
     if not isinstance(usage, dict):
         return
-    otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
-    otel_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, int(usage.get("input_tokens") or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, int(usage.get("output_tokens") or 0))
+    set_attr(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
+    set_attr(GEN_AI_USAGE_INPUT_TOKENS, int(usage.get("input_tokens") or 0))
+    set_attr(GEN_AI_USAGE_OUTPUT_TOKENS, int(usage.get("output_tokens") or 0))
     # 0.1.17 UsageMetadata carries cache_tokens only (no read/write split);
     # the split keys stay schema-transparent for raw-dict callers.
-    otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(usage.get("cache_tokens") or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
-    # Streaming / reasoning latency. first_token_time is declared on
-    # UsageMetadata (no producer yet — parsed whenever it carries a number);
-    # the *_ms keys are schema-transparent: raw-dict callers and future
-    # UsageMetadata fields flow through unchanged. All parses are guarded —
-    # a malformed value skips its attribute; it must never raise and abort
-    # the span finalization that follows in on_llm_end.
-    first_token_time = str(usage.get("first_token_time") or "")
-    if first_token_time:
+    set_attr(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(usage.get("cache_tokens") or 0))
+    set_attr(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
+    set_attr(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
+    set_attr(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
+    set_attr(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
+    # Streaming / reasoning latency. TTFT comes from the semantically explicit
+    # `ttft_seconds` the traced-model decorator stamps into its usage
+    # snapshot (0.1.17 UsageMetadata itself has no such field — raw-dict
+    # callers flow through unchanged); `first_token_time` is kept as a
+    # **legacy fallback** only — by contract it is a "first token instant"
+    # (timestamp string), so a non-numeric value simply skips the attribute.
+    # All parses are guarded — a malformed value skips its attribute; it must
+    # never raise and abort the span finalization that follows in on_llm_end.
+    ttft_seconds = usage.get("ttft_seconds")
+    if ttft_seconds is None:
+        ttft_seconds = str(usage.get("first_token_time") or "")
+    if ttft_seconds != "":
         try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(first_token_time))
-        except ValueError:
+            set_attr(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
+        except (TypeError, ValueError):
             pass
     inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
         try:
-            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
+            set_attr(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
         except (TypeError, ValueError):
             pass
     reasoning_duration = usage.get("reasoning_duration_ms")
     if reasoning_duration is not None:
         try:
-            otel_span.set_attribute(OJ_GEN_AI_REASONING_DURATION_MS, float(reasoning_duration))
+            set_attr(OJ_GEN_AI_REASONING_DURATION_MS, float(reasoning_duration))
         except (TypeError, ValueError):
             pass
 
@@ -301,6 +363,16 @@ class OtelAgentHandler(TraceExtAgentHandler):
     all other types use ``SpanKind.INTERNAL`` and ``openjiuwen.agent.*``.
     """
 
+    # Capability marker for downstream integrators (e.g. the agent-studio
+    # traced model factory), probed with getattr(OtelAgentHandler, ...) /
+    # on an instance: its presence means this handler implements
+    # LLM-component-shell merge — the first LLM call inside an LLM-type
+    # workflow component shell reuses the shell span instead of opening a
+    # duplicate chat span (see on_llm_start). It is absent on older cores,
+    # which lets callers fall back to an undecorated model and keeps "one
+    # operation=chat span per real model call" true under any deploy mix.
+    LLM_SPAN_MERGE_CAPABILITY = "1"
+
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
         self._otel_tracer = otel_tracer
@@ -310,6 +382,16 @@ class OtelAgentHandler(TraceExtAgentHandler):
         # Bound later by the tracer registry via set_session_id(); declared
         # here so _start_and_push never depends on the base-class attribute.
         self._session_id: str | None = None
+        # LLM-shell merge bookkeeping (see on_llm_start). _llm_shell_claims:
+        # shell span id -> (claimed invoke_id, shell span); _llm_merge_targets:
+        # invoke_id -> shell span for on_llm_end / _mark_error_and_end lookup.
+        # A claim outlives the call that took it: a second LLM call inside the
+        # same component shell (e.g. Questioner reflection) must become a
+        # normal child span, not re-merge and risk touching shared keys.
+        # Entries are pruned lazily once the shell span has ended, so both
+        # dicts stay bounded by the open-plus-unpruned shells of this session.
+        self._llm_shell_claims: dict[int, tuple[str, trace.Span]] = {}
+        self._llm_merge_targets: dict[str, trace.Span] = {}
 
     # --- helper: resolve parent context via parent_invoke_id ---
 
@@ -385,6 +467,23 @@ class OtelAgentHandler(TraceExtAgentHandler):
     # --- helper: set error on span and end ---
 
     def _mark_error_and_end(self, invoke_id: str, error: Any) -> None:
+        shell = self._llm_merge_targets.get(invoke_id)
+        if shell is not None:
+            # Merge mode: record the failure as a span event and stop. The
+            # claim intentionally survives a failed attempt — a retry inside
+            # the same component becomes a normal child span — and the
+            # shell's status / lifecycle belong to
+            # OtelWorkflowHandler.on_call_done: the LLM side never
+            # error-statuses or ends the shell span.
+            if getattr(shell, "is_recording", lambda: False)():
+                shell.add_event(
+                    "llm.error",
+                    attributes={
+                        ERROR_TYPE: type(error).__name__,
+                        OJ_AGENT_ERROR_MESSAGE: str(error),
+                    },
+                )
+            return
         state = self._span_manager.pop(invoke_id)
         if state is None:
             return
@@ -463,7 +562,34 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            parent_ctx = self._resolve_parent_context(span)
+            ambient_shell = _ambient_component_shell()
+            if ambient_shell is not None and _is_llm_component_shell(ambient_shell):
+                shell_span_id = ambient_shell.get_span_context().span_id
+                self._prune_ended_shell_claims()
+                if shell_span_id not in self._llm_shell_claims:
+                    # First LLM call inside this component: reuse the shell
+                    # span (merge mode) instead of opening a second chat span
+                    # for the same call. The shell keeps every attribute it
+                    # owns; call-level truths are appended via the allowlist
+                    # in _write_merged_llm_start_attrs and
+                    # _set_llm_response_attrs(respect_existing=True). No span
+                    # is pushed to the manager — on_llm_end / on_llm_error
+                    # resolve this invoke through _llm_merge_targets.
+                    self._llm_shell_claims[shell_span_id] = (span.invoke_id, ambient_shell)
+                    self._llm_merge_targets[span.invoke_id] = ambient_shell
+                    self._write_merged_llm_start_attrs(ambient_shell, instance_info)
+                    return
+            # No ambient LLM shell, or it is already claimed by an earlier
+            # call of the same component (e.g. Questioner reflection): open a
+            # normal LLM span. Under any still-attached component shell —
+            # claimed LLM shell, tool, retrieval — parent onto the ambient
+            # span so per-call spans nest inside their component (the stated
+            # purpose of the on_call_start context attach); otherwise resolve
+            # through the parent_invoke_id chain as before.
+            if ambient_shell is not None:
+                parent_ctx = trace.set_span_in_context(ambient_shell)
+            else:
+                parent_ctx = self._resolve_parent_context(span)
             state = self._start_and_push(
                 name=f"llm.{instance_info.get('class_name', 'unknown')}",
                 kind=SpanKind.CLIENT,
@@ -482,14 +608,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # Agent identity + conversation facts, forwarded by OtelRail
             self._set_agent_identity_attrs(state.span, instance_info)
             # GenAI request parameters, forwarded by OtelRail.before_model_call
-            for param, key in (
-                ("temperature", GEN_AI_REQUEST_TEMPERATURE),
-                ("top_p", GEN_AI_REQUEST_TOP_P),
-                ("top_k", GEN_AI_REQUEST_TOP_K),
-                ("max_tokens", GEN_AI_REQUEST_MAX_TOKENS),
-                ("stop_sequences", GEN_AI_REQUEST_STOP_SEQUENCES),
-                ("reasoning_level", GEN_AI_REQUEST_REASONING_LEVEL),
-            ):
+            for param, key in _GEN_AI_REQUEST_PARAM_KEYS:
                 value = (instance_info.get("request_params") or {}).get(param)
                 if value is not None:
                     state.span.set_attribute(key, value)
@@ -520,6 +639,18 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_end(self, span: TraceAgentSpan, outputs, **kwargs):
         try:
+            shell = self._llm_merge_targets.get(span.invoke_id)
+            if shell is not None:
+                # Merge mode: append response / usage / ttft attributes to
+                # the shell span. Lifecycle stays with
+                # OtelWorkflowHandler.on_call_done — no end attrs, no status,
+                # no end() here. gen_ai.output.messages is intentionally not
+                # written in merge mode: the component's own outputs
+                # attribute already carries the content (see the merge
+                # design exclusion list).
+                if outputs is not None:
+                    _set_llm_response_attrs(shell, outputs, respect_existing=True)
+                return
             state = self._span_manager.get(span.invoke_id)
             if state is None:
                 return
@@ -541,6 +672,46 @@ class OtelAgentHandler(TraceExtAgentHandler):
             self._mark_error_and_end(span.invoke_id, error)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_error failed: %s", exc)
+
+    # --- helpers: LLM-component-shell merge (see on_llm_start) ---
+
+    def _prune_ended_shell_claims(self) -> None:
+        """Drop merge claims whose shell span has ended (component finished).
+
+        ReadableSpan.end_time stays None until end(), so an ended shell can
+        never be claimed again and its entry is pure bookkeeping. Runs on the
+        on_llm_start claim path only, which keeps both merge dicts bounded by
+        live-plus-recent shells of the current session.
+        """
+        for shell_span_id, (claimed_by, shell) in list(self._llm_shell_claims.items()):
+            if getattr(shell, "end_time", None) is not None:
+                del self._llm_shell_claims[shell_span_id]
+                self._llm_merge_targets.pop(claimed_by, None)
+
+    def _write_merged_llm_start_attrs(self, shell: trace.Span, instance_info: dict) -> None:
+        """Append-only start-side attributes for merge mode.
+
+        Allowlist only: identity / request params / message count — exactly
+        the start-side writes of on_llm_start that the shell never performs.
+        Keys the shell owns (gen_ai.request.model, gen_ai.operation.name,
+        inputs, end-time family) are not written here, so every key keeps a
+        single writer and no existing attribute can change value.
+        """
+        self._set_agent_identity_attrs(shell, instance_info)
+        # This branch's component shells write gen_ai.operation.name but not
+        # gen_ai.request.model (the develop branch's shells write both), so
+        # the merged shell would lose the request-model fact — append the
+        # real model name here, guarded so a value already on the shell (any
+        # future writer) always wins.
+        if GEN_AI_REQUEST_MODEL not in (shell.attributes or {}):
+            shell.set_attribute(GEN_AI_REQUEST_MODEL, str(instance_info.get("class_name") or ""))
+        for param, key in _GEN_AI_REQUEST_PARAM_KEYS:
+            value = (instance_info.get("request_params") or {}).get(param)
+            if value is not None:
+                shell.set_attribute(key, value)
+        message_count = instance_info.get("message_count")
+        if message_count is not None:
+            shell.set_attribute(OJ_LLM_PREV_MESSAGE_COUNT, int(message_count))
 
     # --- helper: start a non-LLM span, set attrs, push to manager ---
     #     extra_attrs: dict of additional OTel attributes specific to the event
