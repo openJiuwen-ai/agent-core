@@ -8,6 +8,7 @@ import stat
 import tempfile
 import uuid
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -15,7 +16,7 @@ from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.manifest import load_manifest
 from openjiuwen.core.extension.schema.manifest import Manifest
 
-# Align with jiuwenswarm extension/skill zip guards (anti zip-bomb / symlink).
+# Bound package archives and reject symbolic links before loading code.
 _MAX_ZIP_FILE_COUNT = 10_000
 _MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_ZIP_SINGLE_FILE_BYTES = 32 * 1024 * 1024
@@ -43,6 +44,7 @@ class OpenedSource:
         self._closed = False
 
     def close(self) -> None:
+        """Release the temporary extraction directory, if this source owns one."""
         if self._closed:
             return
         if self._cleanup_root is None:
@@ -170,8 +172,35 @@ class PackageManager:
             ) from exc
         return target
 
-    def remove_installed(self, package_id: str, version: str) -> None:
+    def managed_versions(self, package_id: str, *, known_versions: Sequence[str] = ()) -> tuple[str, ...]:
+        """Verify copies, retaining ownership facts from active or pending records."""
+        package_dir = self.store / package_id
+        if package_dir.is_symlink() or package_dir.resolve().parent != self.store or package_dir == self.store:
+            raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="invalid managed package directory")
+        if not package_dir.exists():
+            return ()
+        versions: list[str] = []
+        for root in sorted(package_dir.iterdir()):
+            if root.name.startswith(".") or not root.is_dir():
+                continue
+            if root.is_symlink() or root.resolve().parent != package_dir.resolve():
+                raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed version is redirected")
+            if root.name in known_versions:
+                versions.append(root.name)
+                continue
+            if not (root / "manifest.yaml").is_file():
+                continue
+            manifest = load_manifest(root)
+            if manifest.package_id != package_id or manifest.version != root.name:
+                raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed copy identity mismatch")
+            versions.append(root.name)
+        return tuple(versions)
+
+    def remove_installed(self, package_id: str, version: str, *, missing_ok: bool = False) -> None:
         """Delete one version directory inside the install store.
+
+        ``missing_ok`` is for verified uninstall retries: a partial removal
+        can already have removed the directory or its manifest.
 
         Raises:
             ExtensionFailure: The path would leave the store, or the directory
@@ -179,23 +208,43 @@ class PackageManager:
         """
         target = self.version_dir(package_id, version)
         store = self.store.resolve()
-        if not target.is_relative_to(store) or target == store:
+        original = self.store / package_id / version
+        unsafe_components = any(
+            (
+                original.is_symlink(),
+                original.parent.is_symlink(),
+                Path(package_id).name != package_id,
+                Path(version).name != version,
+            )
+        )
+        if not target.is_relative_to(store) or target == store or target.parent.parent != store or unsafe_components:
             raise ExtensionFailure(
                 StatusCode.EXTENSION_INSTALL_COPY_FAILED,
                 reason="refusing to delete a path outside the install store",
             )
-        if not target.is_dir() or not (target / "manifest.yaml").is_file():
+        if missing_ok and not target.exists():
+            return
+        if not target.is_dir() or (not missing_ok and not (target / "manifest.yaml").is_file()):
             raise ExtensionFailure(
                 StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
                 package_id=package_id,
                 reason=f"install store has no {package_id} {version}",
             )
-        shutil.rmtree(target)
-        package_dir = target.parent
-        if package_dir.exists() and not any(package_dir.iterdir()):
-            package_dir.rmdir()
+        _assert_no_symlinks(target)
+        try:
+            shutil.rmtree(target)
+            package_dir = target.parent
+            if package_dir.exists() and not any(package_dir.iterdir()):
+                package_dir.rmdir()
+        except OSError as exc:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                cause=exc,
+                reason="could not fully remove the managed install copy; retry uninstall",
+            ) from exc
 
     def version_dir(self, package_id: str, version: str) -> Path:
+        """Return the resolved install path; deletion validates its containment."""
         return (self.store / package_id / version).resolve()
 
     def _open_zip(self, source: Path) -> OpenedSource:

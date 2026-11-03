@@ -1073,6 +1073,12 @@ class StatusCode(Enum):
         "host version was not provided for requires.host, package_id='{package_id}', "
         "reason='{reason}'")
 
+    EXTENSION_DATA_INVALID = (201016, "extension data is invalid, reason='{reason}'")
+    EXTENSION_DATA_READ_FAILED = (201017, "extension data read failed, reason='{reason}'")
+    EXTENSION_DATA_COMMIT_UNKNOWN = (201018, "extension data commit is uncertain, reason='{reason}'")
+    EXTENSION_DATA_WRITE_FAILED = (201019, "extension data write failed, reason='{reason}'")
+    EXTENSION_DATA_PATH_INVALID = (201020, "extension data path is invalid, reason='{reason}'")
+
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.
 

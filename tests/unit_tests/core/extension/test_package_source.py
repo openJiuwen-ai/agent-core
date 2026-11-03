@@ -209,6 +209,21 @@ def test_manifest_rejects_entry_outside_the_package(tmp_path: Path) -> None:
     assert caught.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
 
 
+@pytest.mark.parametrize("package_id", ["CON", "nul.data", "demo.", "a..b", "../escape"])
+def test_manifest_rejects_package_ids_unsafe_for_store(tmp_path: Path, package_id: str) -> None:
+    write_package(tmp_path, "demo")
+    with pytest.raises(ExtensionFailure) as caught:
+        parse_manifest_mapping(
+            {
+                "schemaVersion": 1,
+                "package": {"id": package_id, "version": "1.0.0"},
+                "extensions": [],
+            },
+            tmp_path,
+        )
+    assert caught.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
+
+
 def test_manifest_rejects_bad_schema_and_runtime(tmp_path: Path) -> None:
     write_package(tmp_path, "demo")
     with pytest.raises(ExtensionFailure) as caught:

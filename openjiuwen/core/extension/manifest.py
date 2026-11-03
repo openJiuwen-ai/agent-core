@@ -14,6 +14,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.schema.manifest import ExtensionDecl, Manifest, PackageDependency
 from openjiuwen.core.extension.versions import parse_version, specifier_matches
+from openjiuwen.core.extension.data.json_values import valid_package_id
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -66,7 +67,7 @@ def parse_manifest_mapping(raw: Mapping[str, Any], package_root: Path) -> Manife
             StatusCode.EXTENSION_MANIFEST_INVALID,
             reason="package must be a mapping",
         )
-    package_id = _required_identifier(package.get("id"), "package.id", _ID_RE)
+    package_id = _required_package_id(package.get("id"))
     version = _required_version(package.get("version"), "package.version")
     display_name = _optional_text(package.get("displayName"), "package.displayName")
     description = _optional_text(package.get("description"), "package.description")
@@ -91,6 +92,16 @@ def parse_manifest_mapping(raw: Mapping[str, Any], package_root: Path) -> Manife
         requires_packages=requires_packages,
         extensions=extensions,
     )
+
+
+def _required_package_id(value: object) -> str:
+    """Require a package.id that is also a safe store filename."""
+    if not valid_package_id(value):
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason=f"package.id is invalid: {value!r}",
+        )
+    return value
 
 
 def _required_identifier(value: object, field: str, pattern: re.Pattern[str]) -> str:
