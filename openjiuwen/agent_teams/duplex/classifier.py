@@ -97,7 +97,6 @@ class ChoiceClassifier(Protocol):
         self, questions: Sequence[str], context: str, messages: Sequence[str]
     ) -> dict[str, ChoiceAnswer]:
         """Return one validated answer per question, or raise ``BaseError``."""
-        ...
 
 
 def _failed(reason: str, cause: BaseException | None = None) -> BaseError:
@@ -149,6 +148,7 @@ class _BaseClassifier:
     async def classify(
         self, questions: Sequence[str], context: str, messages: Sequence[str]
     ) -> dict[str, ChoiceAnswer]:
+        """Ask every question concurrently; any invalid answer fails the whole call."""
         unknown = [name for name in questions if name not in QUESTIONS]
         if not questions or unknown:
             raise build_error(

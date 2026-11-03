@@ -147,15 +147,30 @@ class DuplexScheduler:
     async def _run(self) -> None:
         while self._pending:
             batch, self._pending = self._pending, []
+            # A judgment failure (context, classifier, malformed answer) resolves
+            # the row with no answers, i.e. "deliver as usual". The batch always
+            # reaches the executor, which marks rows read and releases them.
             try:
                 answers = await self._judge(batch)
-                for judged in batch:
-                    judged.decision = resolve(
-                        judged.item.source, judged.plan, answers.get(judged.plan.questions), idle=judged.idle
-                    )
+            except Exception:  # noqa: BLE001 - judgment failure must not drop the batch
+                team_logger.error("duplex: judgment failed; delivering as usual", exc_info=True)
+                answers = {}
+            for judged in batch:
+                judged.decision = self._decide(judged, answers.get(judged.plan.questions))
+            try:
                 await self._execute(batch)
             except Exception:  # noqa: BLE001 - one bad batch must not stop the worker
                 team_logger.error("duplex: batch execution failed", exc_info=True)
+
+    @staticmethod
+    def _decide(judged: Judged, answer: Any) -> Decision:
+        try:
+            return resolve(judged.item.source, judged.plan, answer, idle=judged.idle)
+        except Exception:  # noqa: BLE001 - an unusable answer means "deliver as usual"
+            team_logger.error(
+                "duplex: resolve failed message_id={}; delivering as usual", judged.item.message_id, exc_info=True
+            )
+            return resolve(judged.item.source, judged.plan, None, idle=judged.idle)
 
     async def _judge(self, batch: list[Judged]) -> dict[tuple[str, ...], Any]:
         """One classifier request per question set; a failed group yields None."""

@@ -135,7 +135,7 @@ def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
     return None
 
 
-class NativeHarness(DeepAgent):
+class NativeHarness(DeepAgent):  # pylint: disable=too-many-public-methods
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
     The harness configures itself directly from a ``DeepAgentSpec`` (forward
@@ -1902,6 +1902,11 @@ class NativeHarness(DeepAgent):
         old_phase = self._st.phase
         if old_phase is new_phase:
             return
+        if new_phase not in (HarnessState.PAUSING, HarnessState.PAUSED):
+            # ``paused_query`` only describes a round that is pausing or paused.
+            # A pause / interrupt superseded by abort, a failed round or a
+            # resume must not leave it behind.
+            self._st.paused_query = None
         logger.info(
             "[NativeHarness] phase %s -> %s",
             old_phase.value,

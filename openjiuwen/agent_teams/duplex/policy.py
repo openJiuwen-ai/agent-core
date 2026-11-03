@@ -71,12 +71,10 @@ class AnswerLike(Protocol):
     @property
     def choice(self) -> str:
         """Selected label."""
-        ...
 
     @property
     def probabilities(self) -> Mapping[str, float]:
         """Probability of every label."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -97,14 +95,13 @@ class Decision:
 
 _DIRECTED = frozenset({MessageSource.DIRECT, MessageSource.GROUP_MENTION})
 _UNJUDGED = frozenset({MessageSource.USER, MessageSource.LEADER_BROADCAST})
+_FIXED = {MessageSource.SYSTEM: DeliveryAction.PASSTHROUGH, MessageSource.GROUP_PLAIN: DeliveryAction.VISIBLE_ONLY}
 
 
 def plan(source: MessageSource, *, idle: bool) -> Plan:
     """Decide whether the classifier is needed and which questions it gets."""
-    if source is MessageSource.SYSTEM:
-        return Plan((), DeliveryAction.PASSTHROUGH)
-    if source is MessageSource.GROUP_PLAIN:
-        return Plan((), DeliveryAction.VISIBLE_ONLY)
+    if source in _FIXED:
+        return Plan((), _FIXED[source])
     if source is MessageSource.BROADCAST:
         return Plan((RELEVANCE,) if idle else (RELEVANCE, URGENCY), None)
     if idle:

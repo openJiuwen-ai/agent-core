@@ -292,16 +292,15 @@ class DuplexDeliveryMixin:
         sender = str(msg.from_member_name)
         if await self._is_user_side(sender):
             return MessageSource.USER
-        meta = group_metadata(msg) if msg.broadcast else {}
+        if not msg.broadcast:
+            return MessageSource.DIRECT
+        meta = group_metadata(msg)
         if meta:
             mentioned = self._blueprint.member_name in (meta.get("mentions") or ())
             return MessageSource.GROUP_MENTION if mentioned else MessageSource.GROUP_PLAIN
-        if not msg.broadcast:
-            return MessageSource.DIRECT
         team_spec = self._blueprint.team_spec
-        if team_spec is not None and sender == team_spec.leader_member_name:
-            return MessageSource.LEADER_BROADCAST
-        return MessageSource.BROADCAST
+        from_leader = team_spec is not None and sender == team_spec.leader_member_name
+        return MessageSource.LEADER_BROADCAST if from_leader else MessageSource.BROADCAST
 
     async def _is_user_side(self, sender: str) -> bool:
         """The user, a HITT controller's avatar, or a passive human member."""

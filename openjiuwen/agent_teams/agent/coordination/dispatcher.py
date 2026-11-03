@@ -181,6 +181,9 @@ class PollController(Protocol):
         """Resume periodic polling on the event bus."""
         ...
 
+    async def enqueue(self, event: Any) -> None:
+        """Push an event into the event bus queue (e.g. a mailbox re-drain)."""
+
 
 @runtime_checkable
 class DispatcherHost(AgentRoundController, TeamLifecycleController, Protocol):
@@ -250,28 +253,7 @@ class EventDispatcher:
         # at assembly, exactly like the reliability handler below. Disabled
         # teams construct the original classes and behave as before.
         self.duplex_router = None
-        duplex_cfg = getattr(blueprint.spec, "duplex", None)
-        if (
-            duplex_cfg is not None
-            and duplex_cfg.active
-            and blueprint.role in self._DUPLEX_ROLES
-            and blueprint.member_name
-        ):
-            from openjiuwen.agent_teams.duplex.handlers import DuplexGroupMessageHandler, DuplexMessageHandler
-            from openjiuwen.agent_teams.duplex.router import DuplexRouter
-
-            self.duplex_router = DuplexRouter(
-                host,
-                infra,
-                blueprint.member_name,
-                duplex_cfg,
-                redrain=partial(poll_ctrl.enqueue, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)),
-            )
-            self.message = DuplexMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
-            self.group_message = DuplexGroupMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
-        else:
-            self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
-            self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
+        self._mount_mailbox_handlers(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -362,6 +344,37 @@ class EventDispatcher:
         """Release dispatcher-owned background work (the duplex judge worker)."""
         if self.duplex_router is not None:
             await self.duplex_router.aclose()
+
+    def _mount_mailbox_handlers(
+        self,
+        host: DispatcherHost,
+        blueprint: TeamAgentBlueprint,
+        infra: TeamInfra,
+        poll_ctrl: PollController,
+    ) -> None:
+        """Build the message / group-message handlers, routed through duplex when opted in."""
+        duplex_cfg = getattr(blueprint.spec, "duplex", None)
+        if (
+            duplex_cfg is not None
+            and duplex_cfg.active
+            and blueprint.role in self._DUPLEX_ROLES
+            and blueprint.member_name
+        ):
+            from openjiuwen.agent_teams.duplex.handlers import DuplexGroupMessageHandler, DuplexMessageHandler
+            from openjiuwen.agent_teams.duplex.router import DuplexRouter
+
+            self.duplex_router = DuplexRouter(
+                host,
+                infra,
+                blueprint.member_name,
+                duplex_cfg,
+                redrain=partial(poll_ctrl.enqueue, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)),
+            )
+            self.message = DuplexMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
+            self.group_message = DuplexGroupMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
+        else:
+            self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+            self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
 
     @property
     def dispatch_mode(self) -> str:

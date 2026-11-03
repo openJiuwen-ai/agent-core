@@ -278,3 +278,64 @@ async def test_classifier_is_built_once_and_closed_with_the_router() -> None:
     await router.aclose()
     assert factory.call_count == 1 and len(classifier.batches) == 2
     classifier.aclose.assert_awaited_once()
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_judgment_failure_delivers_as_usual_and_releases_the_row() -> None:
+    """A failing context or an unusable answer must not drop the batch or pin the watermark."""
+    host = FakeHost(running=False)
+    router, infra, _ = _router(host, FakeClassifier({"relevance": _answer("DELIVER", "SKIP", 0.9)}))
+
+    def broken_context() -> str:
+        raise RuntimeError("work summary unavailable")
+
+    router.scheduler._context = broken_context
+    held = RoutedMessage(
+        row=SimpleNamespace(message_id="b1", broadcast=True, timestamp=1),
+        text="<b1>",
+        source=MessageSource.BROADCAST,
+        sender="peer",
+        body="b1",
+    )
+    assert await router.submit(held) is False
+    await router.scheduler.wait_idle()
+    assert host.delivered == [("<b1>", True)]  # idle + no answer -> deliver now
+    assert _marked(infra) == ["b1"] and not router.owns("b1")
+    assert not router.blocks(SimpleNamespace(message_id="b2", broadcast=True, timestamp=2))
+
+    host.running = True
+    router, infra, _ = _router(host, FakeClassifier({"urgency": "not an answer"}))
+    await router.submit(_msg("m1", MessageSource.DIRECT))
+    await router.scheduler.wait_idle()
+    assert host.delivered[-1] == ("<m1>", False)  # busy + no answer -> queued
+    assert _marked(infra) == ["m1"] and not router.owns("m1")
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_redrain_uses_the_poll_controller_protocol() -> None:
+    """The duplex router re-drains through ``PollController.enqueue``, which the event bus implements."""
+    from openjiuwen.agent_teams.agent.coordination.dispatcher import PollController
+    from openjiuwen.agent_teams.agent.coordination.event_bus import EventBus, InnerEventType
+
+    class ProtocolPoll:
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        async def pause_polls(self) -> None: ...
+
+        async def resume_polls(self) -> None: ...
+
+        async def enqueue(self, event: Any) -> None:
+            self.events.append(event)
+
+    assert isinstance(EventBus(role=TeamRole.TEAMMATE), PollController)
+    poll = ProtocolPoll()
+    assert isinstance(poll, PollController)
+    spec = MagicMock(duplex=CONFIG, reliability=None, stale_claim_idle_timeout=600, stale_pending_idle_timeout=600)
+    blueprint = SimpleNamespace(spec=spec, role=TeamRole.TEAMMATE, member_name="dev")
+    dispatcher = EventDispatcher(MagicMock(), blueprint, MagicMock(), poll)
+    await dispatcher.duplex_router._redrain()
+    assert [event.event_type for event in poll.events] == [InnerEventType.POLL_MAILBOX]
+    await dispatcher.duplex_router.aclose()

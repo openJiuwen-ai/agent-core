@@ -31,10 +31,22 @@ class FakeInterruptible:
 
 
 def _group_row(mid: str, sender: str, mentions: list[str]) -> Any:
-    meta = {"type": "group_chat", "client_message_id": mid, "sender_name": sender, "mentions": mentions,
-            "attachments": []}
-    return SimpleNamespace(message_id=mid, from_member_name=sender, content=f"raw {mid}", broadcast=True,
-                           protocol="", meta=json.dumps(meta), timestamp=1.0)
+    meta = {
+        "type": "group_chat",
+        "client_message_id": mid,
+        "sender_name": sender,
+        "mentions": mentions,
+        "attachments": [],
+    }
+    return SimpleNamespace(
+        message_id=mid,
+        from_member_name=sender,
+        content=f"raw {mid}",
+        broadcast=True,
+        protocol="",
+        meta=json.dumps(meta),
+        timestamp=1.0,
+    )
 
 
 def _handler(router: Any) -> DuplexGroupMessageHandler:

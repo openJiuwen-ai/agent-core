@@ -120,7 +120,6 @@ class InterruptibleHarness(Protocol):
         ``INTERRUPT_APPLIED`` or ``INTERRUPT_UNAVAILABLE``. Raises when an
         explicit pause / abort / stop or a crash supersedes it.
         """
-        ...
 
 
 @runtime_checkable
@@ -129,7 +128,6 @@ class WorkSummarySource(Protocol):
 
     def work_summary(self) -> dict[str, str]:
         """Return phase, request and current plan step as plain strings."""
-        ...
 
 
 __all__ = [

@@ -54,3 +54,33 @@ async def test_tool_phase_interrupt_waits_for_tool_and_replans() -> None:
             await consumer
     finally:
         await Runner.stop()
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_interrupt_superseded_by_abort_leaves_no_paused_query() -> None:
+    """A tool-phase interrupt cut short by abort fails and does not leave a stale paused query."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=2, emit_tools=True, tool_sleep_seconds=0.3)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("design Kafka ingestion")
+            await wait_tool_running(fake)
+            interrupt = asyncio.create_task(harness.interrupt("REPLAN: use Redis Streams"))
+            assert await wait_for_state(harness, HarnessState.PAUSING)
+            assert harness.paused_query == "design Kafka ingestion"
+
+            await harness.abort()
+            with pytest.raises(Exception, match="interrupt not applied"):
+                await interrupt
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert harness.paused_query is None
+            assert "REPLAN: use Redis Streams" not in fake.seen_steers
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
