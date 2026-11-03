@@ -40,11 +40,11 @@ async def test_scope_isolation_restore_copies_and_clear_tombstone(tmp_path):
     disk = json.loads(
         (states.directory / "sample.counter" / "sessions" / "s1.json").read_text(encoding="utf-8")
     )
-    assert disk["entries"]["count"] == {"value": 10, "version": 3}
+    assert disk["count"] == {"value": 10, "version": 3}
     application_disk = json.loads(
         (states.directory / "sample.counter" / "application.json").read_text(encoding="utf-8")
     )
-    assert application_disk["entries"]["count"]["value"] == "shared"
+    assert application_disk["count"]["value"] == "shared"
 
 
 @pytest.mark.asyncio
@@ -85,11 +85,11 @@ async def test_invalid_version_is_rejected(tmp_path, version):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content", [
-    "not json", '{"format_version":1,"format_version":1}',
-    '{"format_version":true,"entries":{}}',
-    '{"format_version":1.0,"entries":{}}',
-    '{"format_version":1,"entries":{"x":{"value":0,"version":true}}}',
-    '{"format_version":1,"entries":[]}',
+    "not json", '{"count":{"value":1,"version":1},"count":{"value":2,"version":2}}',
+    '{"x":{"value":0,"version":true}}',
+    "[]",
+    '{"x":{"version":1}}',
+    '{"count":1}',
 ])
 async def test_corrupt_files_are_never_overwritten(tmp_path, content):
     path = tmp_path / "sample.counter" / "sessions" / "s1.json"

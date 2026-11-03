@@ -280,10 +280,9 @@ class JsonState:
                 if not path.exists() and operation in ("get", "clear"):
                     return self._absent(operation)
                 contents, previous = self._read(path)
-                entries = contents["entries"]
                 if operation == "clear":
                     return self._clear(path, contents, previous)
-                entry = entries.get(address.key)
+                entry = contents.get(address.key)
                 snapshot = StateSnapshot(False) if entry is None else StateSnapshot(
                     entry.get("exists", True), entry["value"], entry["version"],
                 )
@@ -294,7 +293,7 @@ class JsonState:
                     return StateSetResult(False, False, current, "version_conflict")
                 if snapshot.exists and _same_value(snapshot.value, value):
                     return StateSetResult(True, False, current)
-                entries[address.key] = {"value": value, "version": current + 1}
+                contents[address.key] = {"value": value, "version": current + 1}
                 data = encode_json(contents)
                 self._check_size(data)
                 saved = replace_json(path, data, previous)
@@ -313,7 +312,7 @@ class JsonState:
 
     def _clear(self, path: Path, contents: dict[str, Any], previous: bytes | None) -> dict[str, int]:
         changed: dict[str, int] = {}
-        for key, entry in contents["entries"].items():
+        for key, entry in contents.items():
             if entry.get("exists", True):
                 entry.update(exists=False, value=None, version=entry["version"] + 1)
                 changed[key] = entry["version"]
@@ -333,7 +332,7 @@ class JsonState:
             with path.open("rb") as stream:
                 data = stream.read(self.max_bytes + 1)
         except FileNotFoundError:
-            return {"format_version": 1, "entries": {}}, None
+            return {}, None
         except OSError as exc:
             raise build_error(
                 StatusCode.EXTENSION_DATA_READ_FAILED, cause=exc, reason=f"cannot read {path.name}",
@@ -350,14 +349,9 @@ class JsonState:
 
     @staticmethod
     def _validate_contents(contents: Any) -> None:
-        if not isinstance(contents, dict) or contents.get("format_version") != 1:
-            raise ValueError("unsupported state format")
-        if isinstance(contents["format_version"], bool) or not isinstance(contents["format_version"], int):
-            raise ValueError("state format version must be an integer")
-        entries = contents.get("entries")
-        if not isinstance(entries, dict):
-            raise ValueError("state entries must be an object")
-        for entry in entries.values():
+        if not isinstance(contents, dict):
+            raise ValueError("state file must be an object of keys")
+        for entry in contents.values():
             if not isinstance(entry, dict) or "value" not in entry:
                 raise ValueError("state entry requires value and version")
             version = entry.get("version")

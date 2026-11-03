@@ -20,7 +20,7 @@ auto 在有真实 SessionContext 时选择 session，否则选择 application；
 
 宿主显式传入 `JsonState(directory)`，SDK 不选择应用目录。每个包一个目录：
 应用状态为 `<package.id>/application.json`，会话状态为 `<package.id>/sessions/<session_id>.json`。
-文件顶层是 `format_version: 1` 和 `entries`，每个条目同时保存 value 和 version。
+文件内容就是该作用域的 key 对象，各 key 并列，每个 key 同时保存 value 和 version。
 从未设置的地址返回 exists=False、value=None、version=0。
 清空会话只改该会话文件，把条目记为不存在并递增版本，不保留旧值；应用状态不受影响。
 `JsonState(directory, *, max_bytes=4194304)` 可由宿主调整单个状态文件的容量；
