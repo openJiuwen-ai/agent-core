@@ -7,11 +7,11 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-11-03 |
-| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
+| 最近一次修订日期 | 2026-11-02 |
+| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_09 宿主限定派发](../features/F_09_handler-selection.md)、[F_14 store 持久化](../features/F_14_ops-store.md)；进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
-本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。`trigger` 由事件类型的 matcher 选择 Handler，不接受调用级 Handler ID 白名单。
+本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。 本次 handler_ids 限定派发的增量设计与验证见 [F_09](../features/F_09_handler-selection.md)。
 
 ## 1. 范围、术语与责任
 
@@ -52,7 +52,7 @@
 ### 2.1 类型与值对象
 
 ```python
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -118,7 +118,7 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 ### 2.2 标识与只读值
 
 - EventType 必须匹配 `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`。`ops.` 前缀由 Core 保留，调用方不得登记、覆盖或注销该前缀下的事件。
-- HandlerId 是所属 Bus 实例内唯一的不透明字符串，用于注销和宿主追踪注册记录，不构成授权。
+- HandlerId 是所属 Bus 实例内唯一的不透明字符串，用于注销和可选的派发候选白名单，不构成授权。
 - `PackageMetadata.package_id` 和 `SessionContext.session_id` 必须非空；缺失字段不得从 EventInput 推断。
 - `SessionContext.metadata` 和 MatchPattern 只允许 `None`、`bool`、`int`、`float`、`str`，以及由这些值递归组成的映射和序列。Bus 在边界复制并转成只读形态。
 - MatchPatternFunc 与 EventType 可选 Validator 必须同步、无阻塞、无业务副作用，并且返回严格的 `bool`。
@@ -180,6 +180,9 @@ class ExtensionEventBusProtocol(Protocol):
         self,
         event: Event,
         session: "Session | SessionContext | None" = None,
+        *,
+        handler_ids: Sequence[HandlerId] | None = None,
+        exclude_handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None: ...
 ```
 
@@ -237,6 +240,20 @@ Bus 按以下顺序处理普通调用：
 
 Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。
 
+#### handler_ids 可选候选白名单
+
+普通 trigger 可传仅关键字参数 handler_ids：Sequence[HandlerId] | None，默认 None 完整保留原行为。序列在首次 await 前复制并去重，只对其中仍注册且属于当前事件的 USER/BUILTIN 执行 matcher；未列入的 Handler 不执行 matcher/用户代码，也不构建 Ops。空序列只保留 CORE，未知/已注销或其他事件 ID 忽略，不按参数顺序重排。
+
+字符串整体、bytes/bytearray、非 Sequence 或含空字符串/非 str 元素报 EVENTS_PAYLOAD_INVALID。ops.build 对任何非 None 白名单报同码，不能部分装配。CORE、正常短路、EventNext 跳层、输入输出校验、异常和取消沿原规则；当前白名单不会被跳层或故障恢复扩大。调用方之后修改名单或注册表不影响已捕获调用。
+
+本参数是宿主筛选机制，不认证包身份或代次，不保证一个包只初始化一次。宿主可用 Runtime.published_handlers 的公开 ID，但激活/并发/重试由宿主负责。验证见 tests/unit_tests/core/events/test_event_handler_selection.py。
+
+#### exclude_handler_ids 与当前调用身份
+
+宿主可提供调用内排除集，与 handler_ids 候选白名单及 matcher 结果共同作用；CORE 尾始终保留。None 保留旧行为；ops.build 禁止指定排除集。HandlerId 是注册身份，不是包 ID，也不构成授权，不按整个包跳过。
+
+Bus 为每个实际 USER/BUILTIN Handler 的 Ops 绑定 handler_id、当前任务和活动调用。invocation_active 仅在该视图确为当前 Handler、任务相同且作用域尚未退出时为 True；手工 build、后台子任务和过期 Ops 不满足这一条件。框架结束 Handler 时关闭调用身份，包括异常和取消路径。CORE 视图的 handler_id 为 None。
+
 ### 4.5 EventNext
 
 | 当前 Handler | `next(event)` | `to(event, BUILTIN)` | `to(event, CORE)` |
@@ -272,6 +289,8 @@ class EventHandlerOpsBuilder:
         self,
         package_metadata: PackageMetadata | None = None,
         session_context: SessionContext | None = None,
+        *,
+        handler_id: str | None = None,
     ) -> "EventHandlerOps": ...
 
 
@@ -281,6 +300,12 @@ class EventHandlerOps:
 
     @property
     def session_context(self) -> SessionContext | None: ...
+
+    @property
+    def handler_id(self) -> str | None: ...
+
+    @property
+    def invocation_active(self) -> bool: ...
 
     def __getattr__(self, namespace: str) -> Any: ...
 ```
@@ -355,11 +380,14 @@ USER / BUILTIN Handler 在自身抛异常、返回非 awaitable、转发输入�
 
 ## 7. 验证索引
 
-Events 实现与专项测试已建立，以下按开发计划当前工作项编号定位；早期公共接口验收组曾使用 EV-08，现归 EV-01。宿主限定派发提案已撤回，不属于当前契约。
+Events 实现与专项测试已建立，以下按开发计划当前工作项编号定位；早期公共接口验收组曾使用 EV-08，现归 EV-01，不与当前 EV-08 宿主限定派发混用。
 
 - EV-01 公共接口契约：公共导出、模型只读、Protocol 签名和错误码 → tests/unit_tests/core/events/test_events_contract.py。
 - EV-02 EventBus 注册与执行引擎：注册、匹配、快照和 EventNext → tests/unit_tests/core/events/test_event_bus_registration.py 与 test_event_bus_execution.py。
 - EV-03 Builder/Ops（已实现）：公开具体类、`build(package_metadata, session_context)`、Ops 隔离与动态调用 → EV-03-V-01～04。
 - EV-04 完整调用链集成：预置自动注册、外部 `ops.build`、Builder 门禁、PackageMetadata、SessionContext、逐 Handler Ops 和嵌套事件 → EV-04 验收组。
+- EV-08 宿主限定派发：handler_ids、顺序/快照、非法参数、取消/故障隔离及完整 Build → tests/unit_tests/core/events/test_event_handler_selection.py；集成证据见 [F_09 第 6 节](../features/F_09_handler-selection.md#6-验收与未决问题)。
 
 完整场景、执行命令、版本环境和实际结果由对应 feature 及[开发计划](../designs/events-development-plan.md)记录。
+
+压缩使用的调用身份、精确排除和有效期验证：tests/unit_tests/core/events/test_event_invocation_identity.py；跨仓消费见 D-20261103-1156-session-compaction-events。
