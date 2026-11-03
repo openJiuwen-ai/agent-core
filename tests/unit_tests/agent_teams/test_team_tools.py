@@ -53,6 +53,14 @@ from openjiuwen.harness_providers import register_harness_provider, unregister_h
 
 
 @pytest.fixture
+def sdk_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registration tests independent of optional external CLI SDKs."""
+    from openjiuwen.agent_teams.external.cli_agent import backends
+
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
+
+
+@pytest.fixture
 def t() -> Translator:
     """Provide a default (cn) translator for tool construction."""
     return make_translator("cn")
@@ -572,6 +580,7 @@ class TestSpawnTools:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    @pytest.mark.usefixtures("sdk_installed")
     async def test_external_cli_success(self, db, message_bus, t):
         """A declared cli_agent registers the external-CLI member; prompt is optional."""
         await db.team.create_team(team_name="ext_cli_tools_team", display_name="Ext", leader_member_name="leader1")
@@ -795,6 +804,7 @@ async def test_external_cli_requires_current_model_when_present_and_compatible(d
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool(db, message_bus, t):
     """A per-agent current model outside the pool does not block fallback."""
     await db.team.create_team(
@@ -841,6 +851,7 @@ async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_native_mode_allows_null_without_compatible_fallback(db, message_bus, t):
     """Null explicitly selects native mode when no compatible fallback exists."""
     await db.team.create_team(
@@ -980,6 +991,7 @@ async def _model_group_codex_tool(db, message_bus, t):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, message_bus, t):
     """The logical "*" current model must not be forced as an external CLI fallback."""
     team, tool = await _model_group_codex_tool(db, message_bus, t)

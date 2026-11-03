@@ -135,6 +135,14 @@ class FakeCatalog:
 
 
 @pytest.fixture
+def sdk_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registration tests independent of optional external CLI SDKs."""
+    from openjiuwen.agent_teams.external.cli_agent import backends
+
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
+
+
+@pytest.fixture
 def packages(tmp_path: Path) -> dict[str, Path]:
     broken = tmp_path / "experts" / "broken"
     broken.mkdir(parents=True)
@@ -735,6 +743,7 @@ async def test_bound_group_rejects_non_members_and_the_leader(
 
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_expert_registers_an_external_cli_member_with_the_merged_config(
     db: TeamDatabase, catalog: FakeCatalog
 ) -> None:
@@ -808,6 +817,7 @@ def test_external_cli_schema_offers_builtin_models_only_when_declared(db: TeamDa
 
 @pytest.mark.level1
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_bound_external_member_spawns_more_instances_with_the_predefined_config(
     db: TeamDatabase, catalog: FakeCatalog, packages: dict[str, Path]
 ) -> None:
@@ -1122,6 +1132,7 @@ def test_spawn_teammate_cli_fields_match_the_inline_member(
 @pytest.mark.level0
 @pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDatabase, catalog: FakeCatalog) -> None:
     declared = ExternalCliAgentSpec(cli_agent="claude", env={"HOST_ONLY": "1"}, skills=[{"dir": "/host/skill"}])
     backend = _backend(db, declared)
@@ -1147,6 +1158,7 @@ async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDataba
 @pytest.mark.level0
 @pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_inline_cli_agent_member_registers_like_spawn_teammate(db: TeamDatabase, catalog: FakeCatalog) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
     tool = _scheduled_create_task(backend, catalog)
@@ -1169,6 +1181,7 @@ async def test_inline_cli_agent_member_registers_like_spawn_teammate(db: TeamDat
 @pytest.mark.level1
 @pytest.mark.usefixtures("inline_members_on")
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: FakeCatalog) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
     inline = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", prompt="")]})

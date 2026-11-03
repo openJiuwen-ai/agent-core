@@ -85,6 +85,15 @@ def test_switch_off_falsy_values(cfg, value, monkeypatch):
 @needs_adapter
 def test_enabled_rail_wires_env_config(cfg, monkeypatch):
     """Enabled rail carries the env-provided connection config."""
+    from jiuwen_memory_adapter.jiuwenswarm import agent_memory_provider
+
+    provider_options: dict[str, str | None] = {}
+
+    def build_provider(*, base_url: str | None, api_key: str, user_id: str):
+        provider_options.update({"base_url": base_url, "api_key": api_key, "user_id": user_id})
+        return AgentMemoryMemoryProvider(base_url=base_url, api_key=api_key, user_id=user_id)
+
+    monkeypatch.setattr(agent_memory_provider, "AgentMemoryMemoryProvider", build_provider)
     monkeypatch.setenv("JIUWEN_MEMORY_ENABLED", "1")
     monkeypatch.setenv("JIUWEN_MEMORY_BASE_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("JIUWEN_MEMORY_API_KEY", "secret")
@@ -97,7 +106,12 @@ def test_enabled_rail_wires_env_config(cfg, monkeypatch):
     provider = rail._provider
     assert isinstance(provider, AgentMemoryMemoryProvider)
     assert provider._base_url == "http://127.0.0.1:9999"
-    assert provider._api_key == "secret"
+    # Adapter versions need not retain constructor inputs as private fields.
+    assert provider_options == {
+        "base_url": "http://127.0.0.1:9999",
+        "api_key": "secret",
+        "user_id": "alice",
+    }
     assert rail._user_id == "alice"
     assert rail._scope_id == "tenant-x"
 
