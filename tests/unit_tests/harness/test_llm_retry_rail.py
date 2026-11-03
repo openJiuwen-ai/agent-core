@@ -162,6 +162,42 @@ async def test_stream_timeout_exception_retries_twice_then_resets():
 
 
 @pytest.mark.asyncio
+async def test_completed_model_call_restores_retry_budget():
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    timeout = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="LLM stream timeout: stream frame timeout: stage=idle_chunk",
+    )
+
+    for _ in range(3):
+        ctx.exception = timeout
+        await rail.on_model_exception(ctx)
+        ctx.exception = None
+        await rail.after_model_call(ctx)
+
+    assert ctx.request_retry.call_count == 3
+    assert rail.stream_timeout_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_model_call_keeps_retry_budget_consumed():
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="LLM stream timeout: stream frame timeout: stage=idle_chunk",
+    )
+
+    await rail.on_model_exception(ctx)
+    await rail.after_model_call(ctx)
+
+    assert rail.stream_timeout_retry_count == 1
+
+
+@pytest.mark.asyncio
 async def test_before_invoke_resets_retry_counters():
     rail = LLMRetryRail()
     rail.repeat_retry_count = 1
