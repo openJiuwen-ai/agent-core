@@ -30,9 +30,9 @@ type: D
 
 本方案已于 2026-11-03 获用户明确确认（“开发吧 验收后给我PR”），进入开发阶段。实现与验证证据另归实施文档。本文件不记录实现通过或上线结论。
 
-目标是让扩展参与一次真实的会话压缩：可以补充摘要要求、选择参与压缩的消息、返回自定义结果，或者用 `skip` 跳过本次压缩。手动压缩、自动压缩、插件调用和预计算共用同一条处理链。Server 的公开字段及用户案例详见本任务的 `jiuwenswarm/extensions_v2/docs/features/F_30_session-compact.md`，采用 session.append 的七节格式。这里维护跨仓职责、Core API 和提交机制，不另建 Server designs/session-compact 文档。
+目标是让扩展参与一次真实的会话压缩：可以补充摘要要求、选择参与压缩的消息、返回自定义结果，或者用 `skip` 跳过本次压缩。手动压缩、自动压缩、插件调用和预计算共用同一条处理链。Server 的公开字段及用户案例详见本任务的 `jiuwenswarm/extensions_v2/docs/features/F_28_session-compact.md`，采用 session.append 的七节格式。这里维护跨仓职责、Core API 和提交机制，不另建 Server designs/session-compact 文档。
 
-阅读顺序：第 2 节看当前入口和目标；第 4、5 节看候选与生效边界；Server F_30 看逐字段填写和完整调用示例；第 8 节看开发后如何取证。
+阅读顺序：第 2 节看当前入口和目标；第 4、5 节看候选与生效边界；Server F_28 看逐字段填写和完整调用示例；第 8 节看开发后如何取证。
 
 ## 2. 背景、目标与范围
 
@@ -76,7 +76,7 @@ Server 首次实现不开放按用户提供的 agent_id 定位子 Agent。字段
 3. `SessionContext` 提供当前会话身份和平台事实；`ops.session_context` 是 Core 绑定的只读属性，不是另一个收集/组装上下文的 Ops。压缩原始消息由绑定身份解析到的活跃 ContextEngine 读取。
 4. 不能通过改共享 processor prompt、注册表 monkeypatch 或“先真压缩再恢复”实现插件决策。已有 save_state/load_state 不构成外部文件、记忆库写入的事务回滚。
 5. 当前默认轨道含可能写文件/会话记忆的处理器。实现前必须逐个迁移其候选与延迟副作用接口；不支持安全准备的处理器在本能力启用时明确报不支持，不能退回提前修改 live context 的旧路径。
-6. 设计确认事项是本文件的 D-01～D-05、Server F_30 契约和第 8 节验收范围。API 名称为本方案的目标签名，尚未加入 SDK；开发中若关键语义变更须返回设计确认。
+6. 设计确认事项是本文件的 D-01～D-05、Server F_28 契约和第 8 节验收范围。API 名称为本方案的目标签名，尚未加入 SDK；开发中若关键语义变更须返回设计确认。
 
 确认依据：用户于 2026-11-03 明确要求按方案开发并验收交付 PR。处理器适配和真实模型效果仍待开发验证，不是已消除的实施风险。
 
@@ -220,7 +220,7 @@ instructions 作为每次摘要请求的独立附加要求传递到实际模型�
 
 ### 5.4 Server 字段映射与句柄
 
-Claude 的 agentId/tokensBefore/tokensAfter 对应 Python dataclass 的 agent_id/tokens_before/tokens_after；嵌套 SessionMessage 沿用现有七查询的 JSON 键 toolUses/toolResults/isError。完整必填、默认值、样例和改写权限由 Server F_30 第 3、4 节维护。
+Claude 的 agentId/tokensBefore/tokensAfter 对应 Python dataclass 的 agent_id/tokens_before/tokens_after；嵌套 SessionMessage 沿用现有七查询的 JSON 键 toolUses/toolResults/isError。完整必填、默认值、样例和改写权限由 Server F_28 第 3、4 节维护。
 
 handle 是每次事件的随机不透明标识，只能引用**本次快照或本次默认候选**的消息；不能是消息序号、会话 ID、文件路径或持久化权限凭据。映射持有原生副本，不直接暴露 live BaseMessage。CORE 生成的新摘要也进入本次映射，next 返回后的 Handler 才能保留它而不损失私有元数据。
 
@@ -328,7 +328,7 @@ Core 与 Server 分别提交 PR，Server 标记依赖具体 Core SHA/PR；Core A
 
 Core：本 D 负责目标方案；批准后由 jw-dev 新 F 记录实际实现与证据，当前有效契约落 Core specs/API 文档。索引使用仓库同步工具生成。
 
-Server：F_30 负责事件+Ops、字段、案例和验收；批准后新增 S_17 当前契约，plan EXTV2-26 记录依赖/进展。本期 F_30/S_17 的编号来自目标分支可追溯历史最大值 29/16 加一，旧 F_27～29/S_15～16 不重用、不重排；当前目录空缺不代表这些历史编号从未使用。合入前再核对并行新增。
+Server：F_28 负责事件+Ops、字段、案例和验收；S_15 维护当前契约，plan EXTV2-26 记录依赖/进展。2026-11-03 按用户要求以当前目录连续编号，接续已有 F_01～F_27 / S_01～S_14；原 F30/S17 仅作为历史别名。本次只调整尚未合入的 compact 文档及跨仓引用，已合入文档不重排；合入前再核对并行新增。
 
 本地《会话工作区Ops开发与完整调用链》在实现时增加 compact：启动登记、业务触发、上下文与消息来源、USER/BUILTIN/CORE、最终安装点、字段和具体函数。保留用户已有插件 A/B 等案例。设计阶段不把 HTML 状态标成已开发。
 
@@ -376,5 +376,5 @@ Core 未注册 Hook 的消费者继续旧路径；注册 Hook 的宿主必须使
 
 - Claude 公开契约：[固定 Mods 类型声明](https://github.com/anthropics/claude-code/blob/bf2323b3021c9d3db7a31e1e7d61068c3f704497/mods/types/claude-code.d.ts)，关注 SessionCompactArgs/Input/Result/Trigger、SessionMessage、ToolUseSummary/ToolResultSummary 和 session.compact 方法注释。
 - 已有观测职责：[SDD-0022](../../proposals/SDD-0022-trajectory-observability-framework/design.md)，仅作为相关观测设计，不据此宣称新 Hook 已实现。
-- Server 对照模板：`jiuwenswarm/extensions_v2/docs/features/F_16_session-append.md`；本方案详细用户契约：`F_30_session-compact.md`；计划：EXTV2-26。
+- Server 对照模板：`jiuwenswarm/extensions_v2/docs/features/F_16_session-append.md`；本方案详细用户契约：`F_28_session-compact.md`；计划：EXTV2-26。
 - 交接：按用户确认进入 jw-dev；Core/Server 分别实施并以 C-01～C-13 交付证据。实施与证据由 F_20261103_1515_session-compaction-events 维护；本文保留开发前设计，不回填运行结果。
