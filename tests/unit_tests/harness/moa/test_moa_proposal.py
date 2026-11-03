@@ -100,7 +100,7 @@ def primary(provider="OpenAI", api_mode=None):
         ({"reasoning": {"mode": "enabled", "budget_tokens": 2000}}, {"reasoning": None}, 777),
         ({}, {"extra_body": {"max_tokens": 5000}}, 5000),
         ({"extra_body": {"max_tokens": 5000}}, {"extra_body": {"max_tokens": 6000}}, 6000),
-        ({"max_tokens": None}, {}, 8192),
+        ({"max_tokens": None}, {}, 32768),
     ],
 )
 def test_anthropic_output_reserve_matches_actual_adapter(configured, overrides, expected):
@@ -124,6 +124,52 @@ def test_anthropic_output_reserve_matches_actual_adapter(configured, overrides, 
     wire = {**params, **params.get("extra_body", {})}
     assert wire["max_tokens"] == _output_tokens(model, overrides) == expected
     assert overrides == original
+
+
+@pytest.mark.parametrize(
+    "model_name, expected",
+    [
+        ("claude-3-opus-20240229", 4096),
+        ("claude-3-sonnet-20240229", 4096),
+        ("anthropic.claude-3-haiku-20240307-v1:0", 4096),
+        ("claude-3-5-sonnet-20241022", 8192),
+        ("anthropic/claude-3.5-haiku", 8192),
+        ("claude-3-7-sonnet-20250219", 32768),
+        ("claude-sonnet-4-5", 32768),
+        ("test-model", 32768),
+    ],
+)
+def test_anthropic_unset_max_tokens_follows_model_output_cap(model_name, expected):
+    model = primary(provider="Anthropic")
+    model.model_config.max_tokens = None
+    model.model_config.model_name = model_name
+    params = model._client._build_anthropic_params(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+    assert params["max_tokens"] == _output_tokens(model, {}) == expected
+
+
+def test_anthropic_explicit_max_tokens_ignores_old_model_output_cap():
+    model = primary(provider="Anthropic")
+    model.model_config.model_name = "claude-3-opus-20240229"
+    params = model._client._build_anthropic_params(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+    assert params["max_tokens"] == _output_tokens(model, {}) == 777
 
 
 @pytest.mark.parametrize(

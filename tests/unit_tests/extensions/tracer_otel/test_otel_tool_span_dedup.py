@@ -267,3 +267,33 @@ class TestToolSpanSingleEmission:
         span = spans[0]
         assert OJ_AGENT_ERROR_MESSAGE in span.attributes
         assert span.attributes[OJ_AGENT_NAME] == "get_weather"
+
+    async def test_dedupe_probe_failure_fails_open(self):
+        """A raising dedupe probe must fail open — the rail's tool span is
+        still created. Fail-closed (probe sharing the method's fallback)
+        would lose the sole execute_tool span for the call entirely."""
+        scenario = _ToolSpanDedupScenario(
+            "probe_fail_agent", _make_weather_tool(), with_rail=True
+        )
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("get_weather", '{"city": "Beijing"}'),
+            create_text_response("Beijing: 22C, sunny"),
+        ])
+
+        def _probe_raises(self, span, instance_info):
+            raise RuntimeError("probe exploded")
+
+        with patch.object(OtelAgentHandler, "_is_duplicate_tool_event", _probe_raises):
+            await scenario.run(mock_llm)
+
+        # Probe down → dedupe disabled for this run → both emitters export
+        # (rail + decorator). The rail span (tool-call id carrier) must
+        # survive — that is the fail-open contract.
+        spans = scenario.tool_spans()
+        assert any(
+            s.attributes.get(GEN_AI_TOOL_CALL_ID) for s in spans
+        ), "fail-open: rail tool span must survive a probe failure"
+        assert any(
+            not s.attributes.get(GEN_AI_TOOL_CALL_ID) for s in spans
+        ), "probe down: decorator twin is expected alongside (dedupe off)"

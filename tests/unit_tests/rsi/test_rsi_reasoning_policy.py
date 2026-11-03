@@ -36,7 +36,7 @@ def test_frontend_enabled_is_overridden_without_mutating_config(tmp_path, nested
     assert load_model_config_ref(str(path)) == with_rsi_output_budget(adjusted)
     built = load_member_optimizer_model(str(path))
     assert built.model_config.reasoning.mode == "disabled"
-    assert built.model_config.max_tokens is None
+    assert built.model_config.max_tokens == 100000
     request = adjusted.get("model", adjusted)["model_request_config"]
     assert request["extra_body"] == {"custom_option": "keep"}
     plan = resolve_reasoning_plan(ModelClientConfig(**model["model_client_config"]), ModelRequestConfig(**request))

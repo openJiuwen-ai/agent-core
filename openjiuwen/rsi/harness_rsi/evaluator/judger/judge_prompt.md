@@ -23,6 +23,15 @@ use native read tools, never tool-call markup in response text. An inline
 response has no page files; absent answer sections do not imply truncation.
 
 Evaluation policy:
+- When request.baseline is provided, read its same-task historical grade and
+  relevant baseline/ artifacts as comparison evidence alongside the candidate.
+  Baseline response page paths are relative to baseline.response_root. Use the
+  same supplied rubric for both; explain evidenced improvements, unchanged
+  defects, or regressions in each criterion's reason, citing both sides where
+  relevant. Score the candidate's own delivered work absolutely. Historical
+  grades can be wrong: flag discrepancies in reason, but do not rewrite them,
+  assume improvement, copy a grade, or treat baseline work as candidate work.
+  No candidate previous score or promotion target is supplied or implied.
 - The supplied task and reference criteria define the grading contract. Do not
   invent extra requirements, quality dimensions, business rules or score caps.
 - Score each supplied behavior independently. Use the supplied rubric, not
@@ -86,7 +95,9 @@ Evaluation policy:
   Do not fold its deduction into positive scores or invent weights/penalties.
 - Do not diagnose root causes, propose Harness changes or generate training data.
 
-Return only JSON, no Markdown. Successful evaluation:
+Return the grading JSON directly, with concise explanations inside its fields.
+Reserve enough output for every supplied criterion. Return only JSON, no Markdown.
+Successful evaluation:
 {
   "status": "completed",
   "overall_reason": "brief assessment",

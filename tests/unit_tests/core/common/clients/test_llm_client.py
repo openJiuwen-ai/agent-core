@@ -86,8 +86,8 @@ class TestHttpXConnectorPool:
 
     @pytest.fixture
     def mock_async_connection_pool(self):
-        """Mock AsyncConnectionPool."""
-        with patch('httpcore.AsyncConnectionPool') as mock_pool:
+        """Mock httpx.AsyncHTTPTransport."""
+        with patch('httpx.AsyncHTTPTransport') as mock_pool:
             mock_instance = AsyncMock()
             mock_pool.return_value = mock_instance
             yield mock_pool, mock_instance
@@ -109,18 +109,56 @@ class TestHttpXConnectorPool:
 
         pool = HttpXConnectorPool(basic_config)
 
-        # Verify AsyncConnectionPool was created with correct arguments
+        # Verify AsyncHTTPTransport was created with correct arguments
         mock_pool_class.assert_called_once()
         call_kwargs = mock_pool_class.call_args[1]
-        assert call_kwargs['max_connections'] == 100
-        assert call_kwargs['max_keepalive_connections'] == 20
-        assert call_kwargs['keepalive_expiry'] == 60
+        limits = call_kwargs['limits']
+        assert limits.max_connections == 100
+        assert limits.max_keepalive_connections == 20
+        assert limits.keepalive_expiry == 60
         assert 'proxy' not in call_kwargs or call_kwargs['proxy'] is None
 
         # Test conn() method
         assert pool.conn() == mock_instance
 
         # Test close
+        await pool.close()
+
+    @pytest.mark.asyncio
+    async def test_sync_pool_uses_http_transport(self, basic_config):
+        """Test that need_async=False creates a sync httpx.HTTPTransport."""
+        config = basic_config.model_copy(update={"need_async": False})
+        with patch('httpx.HTTPTransport') as mock_transport:
+            mock_instance = MagicMock()
+            mock_transport.return_value = mock_instance
+
+            pool = HttpXConnectorPool(config)
+
+            mock_transport.assert_called_once()
+            assert pool.conn() == mock_instance
+
+    @pytest.mark.asyncio
+    async def test_real_transport_is_valid_httpx_transport(self, basic_config):
+        """Regression: the pooled object must implement the httpx transport protocol.
+
+        Passing a raw httpcore.ConnectionPool as ``transport`` makes httpx fail with
+        ``'str' object has no attribute 'decode'`` on the first request without a proxy.
+        """
+        import httpx
+
+        pool = HttpXConnectorPool(basic_config)
+        assert isinstance(pool.conn(), httpx.AsyncBaseTransport)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="ok")
+
+        # Use a mock transport-level handler to make sure the request pipeline
+        # (httpx.Request -> transport) does not blow up on the method encoding.
+        with patch.object(pool.conn(), "handle_async_request",
+                          new=AsyncMock(side_effect=handler)):
+            async with httpx.AsyncClient(transport=pool.conn()) as client:
+                resp = await client.get("http://example.invalid/")
+                assert resp.status_code == 200
         await pool.close()
 
     @pytest.mark.asyncio
@@ -175,7 +213,7 @@ class TestHttpXConnectorPool:
 
             mock_ssl.assert_called_once_with("/path/to/cert.pem")
             call_kwargs = mock_pool_class.call_args[1]
-            assert call_kwargs['ssl_context'] == mock_ssl_context
+            assert call_kwargs['verify'] == mock_ssl_context
 
     @pytest.mark.asyncio
     async def test_initialization_with_extend_params(self, mock_async_connection_pool):
@@ -185,7 +223,7 @@ class TestHttpXConnectorPool:
         config = HttpXConnectorPoolConfig(
             extend_params={
                 'http2': True,
-                'ud': 'extra_param'
+                'uds': 'extra_param'
             }
         )
 
@@ -193,12 +231,12 @@ class TestHttpXConnectorPool:
 
         call_kwargs = mock_pool_class.call_args[1]
         assert call_kwargs['http2'] is True
-        assert call_kwargs['ud'] == 'extra_param'
+        assert call_kwargs['uds'] == 'extra_param'
 
     @pytest.mark.asyncio
     async def test_inherited_methods(self, basic_config):
         """Test inherited methods from ConnectorPool."""
-        with patch('httpcore.AsyncConnectionPool'):
+        with patch('httpx.AsyncHTTPTransport'):
             pool = HttpXConnectorPool(basic_config)
 
             # Test is_expired
@@ -261,9 +299,7 @@ class TestCreateHttpxClient:
 
             # Verify client was created with transport - now this will be a MagicMock, not a coroutine
             mock_httpx_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
+                transport=mock_pool.conn.return_value
             )
             assert client == mock_client_instance
 
@@ -293,9 +329,7 @@ class TestCreateHttpxClient:
 
             # Verify async client was created - now this will be a MagicMock, not a coroutine
             mock_async_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
+                transport=mock_pool.conn.return_value
             )
             assert client == mock_client_instance
 
@@ -530,9 +564,7 @@ class TestIntegration:
                 # Verify the factory was called correctly
                 mock_get_pool_manager.assert_called_once()
                 mock_httpx_client.assert_called_once_with(
-                    transport=mock_transport,  # Use the stored transport mock
-                    verify=False,
-                    proxy='http://proxy:8080'
+                    transport=mock_transport  # Use the stored transport mock
                 )
 
     @pytest.mark.asyncio
@@ -577,9 +609,7 @@ class TestIntegration:
 
             # Verify httpx client was created with the transport from mock_pool.conn.return_value
             mock_httpx_client.assert_called_once_with(
-                transport=mock_transport,  # Use the stored transport mock
-                verify=False,
-                proxy='http://proxy:8080'
+                transport=mock_transport  # Use the stored transport mock
             )
 
             # Verify OpenAI client was created (defaults: timeout=360, max_retries=0)

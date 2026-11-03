@@ -187,3 +187,37 @@ def test_runtime_workspace_metadata_is_not_solver_evidence() -> None:
     assert not _is_runtime_workspace_metadata("src/agent.py")
     assert not _skip_trace_snapshot_path("src/agent.py")
     assert not _skip_harvest_path("src/agent.py")
+
+
+def test_role_store_can_preserve_recovery_invocations(tmp_path):
+    store = RoleFileTrajectoryStore(tmp_path, "solver", merge_invocations=True)
+    for index in (1, 2):
+        store.save(_trajectory(str(index), [{
+            "traceId": "1" * 32, "spanId": str(index) * 16,
+            "name": "execute_tool probe", "attributes": attributes_from_map({
+                semconv.GEN_AI_OPERATION_NAME: "execute_tool",
+                semconv.GEN_AI_TOOL_NAME: f"probe_{index}",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {}, semconv.GEN_AI_TOOL_CALL_RESULT: "ok",
+            }),
+        }]))
+    saved = json.loads((tmp_path / "solver.jsonl").read_text())
+    assert [step["detail"]["tool_name"] for step in saved["steps"]] == ["probe_1", "probe_2"]
+
+
+def test_role_projection_does_not_invent_an_unobserved_tool_result(tmp_path):
+    from openjiuwen.rsi.harness_rsi.evaluator.trajectory_usage import collect_successful_tool_names
+
+    store = RoleFileTrajectoryStore(tmp_path, "solver")
+    store.save(_trajectory("partial", [{
+        "traceId": "1" * 32, "spanId": "1" * 16,
+        "name": "execute_tool probe", "attributes": attributes_from_map({
+            semconv.GEN_AI_OPERATION_NAME: "execute_tool",
+            semconv.GEN_AI_TOOL_NAME: "probe",
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {},
+        }),
+    }]))
+    archive = json.loads((tmp_path / "solver.jsonl").read_text())
+    names = set()
+    collect_successful_tool_names(archive, names)
+    assert names == set()
+    assert "call_result" not in archive["steps"][0]["detail"]

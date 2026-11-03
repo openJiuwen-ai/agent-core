@@ -102,6 +102,23 @@ def _contains_exact_tool_name(query: str, tool_name: str) -> bool:
     return False
 
 
+def _pair_documents_with_search_texts(
+    documents: Sequence[ToolInfo],
+    extra_search_texts: Sequence[str] | None,
+) -> list[tuple[ToolInfo, str]]:
+    """Align valid documents with their optional discovery-only text."""
+    if extra_search_texts is not None and len(extra_search_texts) != len(documents):
+        raise ValueError("extra_search_texts must align with documents")
+
+    pairs: list[tuple[ToolInfo, str]] = []
+    for index, document in enumerate(documents):
+        if document is None:
+            continue
+        extra_search_text = "" if extra_search_texts is None else extra_search_texts[index]
+        pairs.append((document, str(extra_search_text or "")))
+    return pairs
+
+
 class BM25ToolIndex:
     """In-memory BM25 index over model-facing tool schemas.
 
@@ -124,25 +141,44 @@ class BM25ToolIndex:
     def build(
         cls,
         documents: Sequence[ToolInfo],
+        *,
+        extra_search_texts: Sequence[str] | None = None,
     ) -> "BM25ToolIndex":
-        normalized_documents = [document for document in documents if document is not None]
+        pairs = _pair_documents_with_search_texts(documents, extra_search_texts)
+        normalized_documents = [document for document, _ in pairs]
+        normalized_extra_search_texts = [extra for _, extra in pairs]
         index = BM25Index.build(
-            [_tool_text(document) for document in normalized_documents]
+            [
+                " ".join((_tool_text(document), extra_search_text)).strip()
+                for document, extra_search_text in pairs
+            ]
         )
         return cls(
             normalized_documents,
             index,
-            source_fingerprint=cls.fingerprint(normalized_documents),
+            source_fingerprint=cls.fingerprint(
+                normalized_documents,
+                extra_search_texts=normalized_extra_search_texts,
+            ),
         )
 
     @staticmethod
-    def fingerprint(documents: Sequence[ToolInfo]) -> str:
+    def fingerprint(
+        documents: Sequence[ToolInfo],
+        *,
+        extra_search_texts: Sequence[str] | None = None,
+    ) -> str:
         """Return a deterministic fingerprint for the complete document set."""
-        document_fingerprints = sorted(
-            _tool_fingerprint(document)
-            for document in documents
-            if document is not None
-        )
+        pairs = _pair_documents_with_search_texts(documents, extra_search_texts)
+        document_fingerprints = []
+        for document, extra_search_text in pairs:
+            document_fingerprints.append(
+                (
+                    _tool_fingerprint(document),
+                    extra_search_text,
+                )
+            )
+        document_fingerprints.sort()
         serialized = json.dumps(
             document_fingerprints,
             ensure_ascii=False,

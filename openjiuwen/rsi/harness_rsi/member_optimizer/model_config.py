@@ -48,21 +48,29 @@ def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
-    """Let the provider choose output length for RSI, including legacy task files."""
+    """Copy RSI configuration while preserving explicitly configured output limits.
+
+    A missing or None limit remains provider-controlled; RSI must not erase a
+    configured max_tokens or max_completion_tokens, including extra_body.
+    """
     data = deepcopy(config_data)
     model_data = data.get("model", data)
-    if isinstance(model_data, dict):
-        request = model_data.get("model_request_config")
-        if request is None:
-            request = {}
-            model_data["model_request_config"] = request
-        if isinstance(request, dict):
-            request["max_tokens"] = None
-            request.pop("max_completion_tokens", None)
-            extra = request.get("extra_body")
-            if isinstance(extra, dict):
-                extra.pop("max_tokens", None)
-                extra.pop("max_completion_tokens", None)
+    if isinstance(model_data, dict) and isinstance(model_data.get("model_request_config"), dict):
+        model_data["model_request_config"] = rsi_output_options(model_data["model_request_config"])
+    return data
+
+
+def rsi_output_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Preserve explicit token limits and omit None controls on the wire."""
+    data = dict(options)
+    for values in (data, data.get("extra_body")):
+        if not isinstance(values, dict):
+            continue
+        if values is not data:
+            values = data["extra_body"] = dict(values)
+        for key in ("max_tokens", "max_completion_tokens"):
+            if key in values and values[key] is None:
+                values.pop(key)
     return data
 
 

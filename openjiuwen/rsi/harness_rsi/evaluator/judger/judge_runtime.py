@@ -15,7 +15,7 @@ from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.image_modality_probe import get_cached_image_support
 from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.tools.filesystem import GlobTool, GrepTool, ListDirTool, ReadFileTool
+from openjiuwen.harness.tools.filesystem import GlobTool, ListDirTool, ReadFileTool
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
@@ -25,10 +25,8 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     JudgeEvidenceTool,
     bound_tool_content,
 )
-from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
-    MissingJudgeVerdictError,
-    parse_judge_output,
-)
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_search import JudgeSearchTool
+from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import MissingJudgeVerdictError, parse_judge_output
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
 
 
@@ -55,10 +53,10 @@ class JudgeReadOnlyRail(SysOperationRail):
             ),
             ListDirTool(self.sys_operation, language, agent_id),
             GlobTool(self.sys_operation, language, agent_id),
-            GrepTool(self.sys_operation, language, agent_id),
         ]
         if self.evidence_workspace is not None:
-            self.tools.append(JudgeEvidenceTool(self.evidence_workspace, agent_id))
+            self.tools.extend([JudgeEvidenceTool(self.evidence_workspace, agent_id),
+                               JudgeSearchTool(self.evidence_workspace, agent_id)])
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
@@ -128,7 +126,7 @@ def _judge_model(config: EvaluatorConfig) -> Model:
     loaded = load_model_config_ref(ref)
     data = without_inner_sdk_retries(loaded.get("model", loaded))
     request = dict(data.get("model_request_config") or {})
-    request.update(temperature=0.0)
+    request.update(temperature=1.0)
     data["model_request_config"] = request
     spec = TeamModelConfig.model_validate(data)
     return GuardedJudgeModel(spec.model_client_config, spec.model_request_config)
@@ -150,6 +148,14 @@ async def repair_judge_json(config: EvaluatorConfig, raw: str, error: str) -> st
     return response.content or ""
 
 
+def _has_baseline(config: EvaluatorConfig, workspace: Path) -> bool:
+    """Keep the original grading prompt when no baseline is actually supplied."""
+    if config.score_mode != "continuous" or not config.judge_baseline_comparison:
+        return False
+    request = json.loads(_io_path(workspace / "request.json").read_text(encoding="utf-8"))
+    return isinstance(request.get("baseline"), dict)
+
+
 def build_judge_agent(
     config: EvaluatorConfig, workspace: Path, log_path: Path, *, budget: JudgeBudgetRail | None = None,
 ) -> Any:
@@ -157,7 +163,9 @@ def build_judge_agent(
     return create_deep_agent(
         model=_judge_model(config),
         card=AgentCard(name="evaluator_agent", description="Independent reference-based evaluator"),
-        system_prompt=Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8"),
+        system_prompt=Path(__file__).with_name(
+            "judge_prompt.md" if _has_baseline(config, workspace) else "judge_prompt.legacy.md"
+        ).read_text(encoding="utf-8"),
         workspace=str(workspace),
         restrict_to_work_dir=True,
         auto_create_workspace=False,
@@ -165,6 +173,7 @@ def build_judge_agent(
         enable_task_planning=False,
         enable_skill_discovery=False,
         max_iterations=budget.iterations,
+        invocation_log_dir=str(log_path.parent / "runtime_logs"),
         language="en",
         rails=[JudgeReadOnlyRail(workspace), budget],
     )
@@ -177,7 +186,9 @@ async def run_judge_agent(
 
     payload = await asyncio.to_thread(inline_evidence, workspace, include_images=True)
     if payload is not None:
-        return await _invoke_complete_evidence(_judge_model(config), payload)
+        return await _invoke_complete_evidence(
+            _judge_model(config), payload, legacy=not _has_baseline(config, workspace),
+        )
     budget = JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
     agent = build_judge_agent(config, workspace, log_path, budget=budget)
     try:
@@ -191,13 +202,19 @@ async def run_judge_agent(
                     raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
-        raw = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+        # The assessment loop owns persistence, parsing and bounded correction.
+        # Malformed JSON returns unchanged. Missing JSON is an iteration limit
+        # only after the reading budget has been spent.
+        text = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
         try:
-            parse_judge_output(raw)
+            parse_judge_output(text)
         except MissingJudgeVerdictError as exc:
             if budget.turns >= budget.iterations:
-                raise JudgeIterationLimitError("Judge reading iteration limit reached without a verdict") from exc
-        return raw
+                raise JudgeIterationLimitError("Judge reading iteration limit reached") from exc
+            return text
+        except ValueError:
+            return text
+        return text
     finally:
         for rail in agent.configured_rails():
             if isinstance(rail, JudgeReadOnlyRail):
@@ -206,7 +223,7 @@ async def run_judge_agent(
         Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
 
 
-async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
+async def run_judge_closeout(config: EvaluatorConfig, workspace: Path, *, feedback: str = "") -> str:
     """Grade once from the complete frozen snapshot without prior agent history."""
     model = _judge_model(config)
     payload = await asyncio.to_thread(
@@ -218,10 +235,14 @@ async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
     )
     if payload is None:  # ``required=True`` makes this defensive only.
         raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
-    return await _invoke_complete_evidence(model, payload)
+    return await _invoke_complete_evidence(
+        model, payload, feedback=feedback, legacy=not _has_baseline(config, workspace),
+    )
 
 
-async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
+async def _invoke_complete_evidence(
+    model: Model, payload: str | list, *, feedback: str = "", legacy: bool = False,
+) -> str:
     if isinstance(payload, list):
         declared = getattr(model.model_client_config, "supports_vision", None)
         supported = declared if isinstance(declared, bool) else get_cached_image_support(model)
@@ -230,9 +251,15 @@ async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
                 "Judge image evidence requires a vision-capable model with confirmed image support; "
                 "no evidence omitted and no score produced"
             )
-    policy = await asyncio.to_thread(Path(__file__).with_name("judge_prompt.md").read_text, encoding="utf-8")
+    policy = await asyncio.to_thread(
+        Path(__file__).with_name("judge_prompt.legacy.md" if legacy else "judge_prompt.md").read_text,
+        encoding="utf-8",
+    )
     policy = "All grading evidence is supplied inline. Evaluate it directly.\nEvaluation policy:" + policy.split(
         "Evaluation policy:", 1,
     )[1]
-    response = await model.invoke(messages=[SystemMessage(content=policy), UserMessage(content=payload)], tools=None)
+    messages = [SystemMessage(content=policy), UserMessage(content=payload)]
+    if feedback:
+        messages.append(UserMessage(content=feedback))
+    response = await model.invoke(messages=messages, tools=None)
     return response.content or ""

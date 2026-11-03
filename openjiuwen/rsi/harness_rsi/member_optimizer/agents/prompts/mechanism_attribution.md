@@ -109,6 +109,10 @@ These are heuristics, not hard laws. Use them only when supported by evidence.
   Evaluator/runtime metadata such as container reuse, Docker setup, timeout,
   solver process reuse, or judging behavior is NOT member harness config evidence
   unless the same controllable field is present in the role package files.
+  The supported runtime.yaml sidecar may be added when absent: max_iterations
+  and on_max_iterations are now controllable fields, bounded by the host ceiling.
+  Use their supplied effective runtime values and termination logs as evidence;
+  do not interpret every iteration-limit event as proof that more budget is needed.
 
 - Failure caused by role knowledge deficiency rather than a specific prompt or tool issue
   → mechanism_type=`knowledge`
