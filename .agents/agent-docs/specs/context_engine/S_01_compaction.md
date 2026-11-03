@@ -60,4 +60,4 @@ clear_context 在压缩在途时拒绝，并在可清理时释放候选缓存。
 
 CompactionError.code 使用 COMPACT_BUSY、COMPACT_REENTRANT、COMPACT_UNSUPPORTED、COMPACT_SESSION_UNAVAILABLE、COMPACT_INVALID_RESULT、COMPACT_STALE、COMPACT_CONTINUATION_REUSED、COMPACT_COMMIT_UNCERTAIN、COMPACT_NOTIFICATION_FAILED 等稳定符号。模型和文件错误保留真实异常，不伪装成 skip。新增数值状态码未分配。
 
-行为测试：`tests/unit_tests/core/context_engine/test_compaction_hook.py`；事件身份/排除测试：`tests/unit_tests/core/events/test_event_invocation_identity.py`。实际执行范围和真实 Server 消费证据在实施 F 文档唯一维护。
+行为测试：`tests/unit_tests/core/context_engine/test_compaction_hook.py`；扩展 Runtime 调用作用域测试：`tests/unit_tests/core/extension/test_invocation_scope.py`。实际执行范围和真实 Server 消费证据在实施 F 文档唯一维护。

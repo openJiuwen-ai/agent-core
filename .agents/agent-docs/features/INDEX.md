@@ -17,7 +17,7 @@ generated: true
 |---|---|
 | [agent_teams](#module-1) | 148 |
 | [core/context_engine](#module-2) | 1 |
-| [core/events](#module-3) | 1 |
+| [core/extension](#module-3) | 1 |
 | [harness](#module-4) | 32 |
 
 <a id="module-1"></a>
@@ -181,15 +181,15 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261103_1515_session-compaction-events](F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/events | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | [D-20261103-1156-session-compaction-events](../designs/active/D-20261103-1156-session-compaction-events/design.md) |
+| [F_20261103_1515_session-compaction-events](F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](../designs/active/D-20261103-1156-session-compaction-events/design.md) |
 
 <a id="module-3"></a>
 
-## core/events
+## core/extension
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261103_1515_session-compaction-events](F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/events | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/events/bus.py, openjiuwen/core/events/ops.py | [D-20261103-1156-session-compaction-events](../designs/active/D-20261103-1156-session-compaction-events/design.md) |
+| [F_20261103_1515_session-compaction-events](F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](../designs/active/D-20261103-1156-session-compaction-events/design.md) |
 
 <a id="module-4"></a>
 
