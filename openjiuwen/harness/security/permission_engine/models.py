@@ -161,6 +161,9 @@ class PermissionsSection(TypedDict, total=False):
 
     - 工具级策略由 :func:`openjiuwen.harness.security.permission_engine.toolguard.tool_policy.evaluate_tiered_policy` 评估。
     - 路径防护由 :mod:`openjiuwen.harness.security.file_guard` 评估（可独立关闭）。
+    - 宿主可在运行时副本上放 ``immutable_control_enabled``。这不是用户配置项，
+      缺省跟随 ``enabled``；为 false 时只跳过控制面写保护。``file_guard.enabled``
+      不控制这项保护。
 
     ``schema``（可选）：建议写 ``tiered_policy`` 等，便于人类阅读或与旧文档对齐；
     引擎**不**根据该字段切换实现路径。例如::

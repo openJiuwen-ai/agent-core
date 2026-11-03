@@ -118,8 +118,11 @@ class ToolPermissionHost:
     resolve_immutable_control_roots: Callable[[], list[Path]] | None = None
     """宿主控制面只读根目录。
 
-    该列表不属于用户 ``permissions`` 配置，普通权限开关、full access 和
-    会话授权均不得覆盖其写入拒绝。
+    该列表不属于用户 ``permissions`` 规则，会话授权不得覆盖其写入拒绝。
+    持久化的 ``permissions.enabled`` 为 false 时这项写保护不生效。宿主若必须
+    把引擎 ``enabled`` 保持为 true，应在运行时副本上带同样取值的
+    ``immutable_control_enabled``。这不是另一个用户开关。
+    ``file_guard.enabled`` 不控制它。
     """
 
     permission_yaml_path: Path | None = None
