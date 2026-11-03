@@ -10,6 +10,7 @@ package, so reload can hot-switch and uninstall can remove exactly its own
 registrations.
 """
 
+import asyncio
 import functools
 import hashlib
 import importlib.util
@@ -20,10 +21,11 @@ import types
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import HandlerId, HandlerLevel
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
@@ -32,6 +34,7 @@ from openjiuwen.core.extension.schema.records import ActivePackageRecord, Extens
 from openjiuwen.core.extension.selection import evaluate_reload
 
 _ALLOWED_LEVELS = {HandlerLevel.USER.value, HandlerLevel.BUILTIN.value}
+PackageResourceCleanup: TypeAlias = Callable[[str, int, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,7 @@ class ExtensionRegistrar:
         match_pattern: Mapping[str, object],
         handler_level: object = "user",
     ) -> str:
+        """Collect a USER or BUILTIN declaration without publishing it yet."""
         level = _level_name(handler_level)
         if level not in _ALLOWED_LEVELS:
             raise ExtensionFailure(
@@ -124,23 +128,66 @@ class ExtensionRegistrar:
 class Runtime:
     """Active-package facts, in-flight counts, and candidate loading.
 
-    Design asks for sequential root management inside one Registry (Q06 still
-    open). A re-entrant lock closes the uninstall_decision/drop_active and
-    begin_calls/end_calls TOCTOU windows on shared state.
+    Package management uses one asynchronous lock per package. A re-entrant
+    lock protects call accounting and synchronous publication changes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, cleanup_callbacks: Sequence[PackageResourceCleanup] = ()) -> None:
         self._lock = threading.RLock()
         self._active: dict[str, ActivePackageRecord] = {}
         self._inflight: dict[str, int] = {}
         self._published: dict[str, tuple[HandlerId, ...]] = {}
         self._load_serial = 0
+        self._cleanup_callbacks = tuple(cleanup_callbacks)
+        self._blocked: set[str] = set()
+        self._management_locks: dict[str, asyncio.Lock] = {}
+        self._uninstall_versions: dict[str, tuple[str, ...]] = {}
+        self._active_ops: set[EventHandlerOps] = set()
+
+    def package_lock(self, package_id: str) -> asyncio.Lock:
+        """Return the management lock for one package on this Runtime's loop."""
+        return self._management_locks.setdefault(package_id, asyncio.Lock())
+
+    def uninstall_versions(self, package_id: str, versions: Sequence[str] = ()) -> tuple[str, ...]:
+        """Remember verified versions or return those retained for cleanup retry."""
+        with self._lock:
+            remembered = self._uninstall_versions.get(package_id, ())
+            versions = tuple(dict.fromkeys((*remembered, *versions)))
+            if versions:
+                self._uninstall_versions[package_id] = versions
+            return versions
+
+    def stop_package_calls(self, package_id: str) -> None:
+        """Stop new uses before cleaning an inactive package's resources."""
+        with self._lock:
+            if self._inflight.get(package_id, 0):
+                raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id=package_id, reason="calls remain")
+            self._blocked.add(package_id)
+
+    def _finish_uninstall(self, package_id: str) -> None:
+        """Release pending removal facts after every cleanup step succeeds."""
+        with self._lock:
+            self._uninstall_versions.pop(package_id, None)
+            self._blocked.discard(package_id)
+
+    async def cleanup_package_resources(self, package_id: str, generation: int, *, reason: str) -> None:
+        """Await host callbacks followed by Core data cleanup in configured order.
+
+        Callers stop resource users first. Callbacks must be idempotent;
+        failures propagate so uninstall can retain its record for retry.
+        """
+        if reason not in ("uninstall", "reload", "shutdown"):
+            raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="invalid cleanup reason")
+        for callback in self._cleanup_callbacks:
+            await callback(package_id, generation, reason)
 
     def active_packages(self) -> tuple[ActivePackageRecord, ...]:
+        """Return active records sorted by package identifier."""
         with self._lock:
             return tuple(self._active[key] for key in sorted(self._active))
 
     def get_active(self, package_id: str) -> ActivePackageRecord | None:
+        """Return the active record, including an unfinished uninstall record."""
         with self._lock:
             return self._active.get(package_id)
 
@@ -152,9 +199,18 @@ class Runtime:
         with self._lock:
             self._active[record.package_id] = record
 
-    def begin_calls(self, package_ids: Sequence[str]) -> None:
+    def begin_calls(self, package_ids: Sequence[str], ops: EventHandlerOps | None = None) -> None:
         """Count one in-flight use of each package. The event layer will call this."""
         with self._lock:
+            if ops is not None and ops not in self._active_ops:
+                raise ExtensionFailure(StatusCode.EVENTS_OPS_INVALID, reason="the package handler has already finished")
+            for package_id in package_ids:
+                if package_id in self._blocked:
+                    raise ExtensionFailure(
+                        StatusCode.EXTENSION_PACKAGE_BUSY,
+                        package_id=package_id,
+                        reason="package resources are being removed",
+                    )
             for package_id in package_ids:
                 self._inflight[package_id] = self._inflight.get(package_id, 0) + 1
 
@@ -180,6 +236,7 @@ class Runtime:
                     self._inflight[package_id] = remaining
 
     def inflight_count(self, package_id: str) -> int:
+        """Return the number of handlers and nested store calls still using a package."""
         with self._lock:
             return self._inflight.get(package_id, 0)
 
@@ -191,19 +248,30 @@ class Runtime:
         with self._lock:
             return self._uninstall_decision_unlocked(package_id)
 
-    def drop_active(self, package_id: str) -> None:
+    def drop_active(self, package_id: str, *, missing_ok: bool = False) -> None:
         """Remove the active record when uninstall is allowed.
 
         Raises:
             ExtensionFailure: The package is missing, still required, or busy.
         """
         with self._lock:
+            if missing_ok and package_id not in self._active:
+                self._finish_uninstall(package_id)
+                return
             error = self._uninstall_decision_unlocked(package_id)
             if error is not None:
                 raise ExtensionFailure(error.status, **error.params)
             del self._active[package_id]
+            self._finish_uninstall(package_id)
 
     def check_reload(self, package_id: str, new_manifest: Manifest) -> OperationError | None:
+        """Check dependency compatibility before preparing a replacement."""
+        if self.uninstall_versions(package_id):
+            return operation_error(
+                StatusCode.EXTENSION_PACKAGE_BUSY,
+                package_id=package_id,
+                reason="an unfinished uninstall must be retried first",
+            )
         return evaluate_reload(self.active_packages(), package_id, new_manifest)
 
     def prepare(self, plan: ExtensionPlan) -> PrepareResult:
@@ -348,18 +416,43 @@ class Runtime:
         _unregister_batch(bus, previous)
         return PublishResult(tuple(registered), None)
 
-    def unpublish(self, package_id: str, bus: ExtensionEventBusProtocol) -> None:
-        """Remove every handler of one package, then drop its active record.
+    def unpublish(
+        self,
+        package_id: str,
+        bus: ExtensionEventBusProtocol,
+        *,
+        keep_record: bool = False,
+    ) -> None:
+        """Stop new calls and remove handlers, optionally retaining the record.
 
         Raises:
             ExtensionFailure: The package is missing, still required, or busy.
-                The handlers are removed first, so the caller must check
-                ``uninstall_decision`` before calling this.
+                Failed handler ids and the record remain available for retry.
         """
         with self._lock:
-            handler_ids = self._published.pop(package_id, ())
-        _unregister_batch(bus, handler_ids)
-        self.drop_active(package_id)
+            error = self._uninstall_decision_unlocked(package_id)
+            if error is not None:
+                raise ExtensionFailure(error.status, **error.params)
+            self._blocked.add(package_id)
+            handler_ids = self._published.get(package_id, ())
+            remaining = list(handler_ids)
+            failure: Exception | None = None
+            for handler_id in reversed(handler_ids):
+                try:
+                    bus.unregister_event_handler(handler_id)
+                    remaining.remove(handler_id)
+                except Exception as exc:
+                    failure = exc
+            self._published[package_id] = tuple(remaining)
+            if failure is not None:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_LOAD_FAILED,
+                    cause=failure,
+                    reason="could not unregister every package handler; retry uninstall",
+                ) from failure
+            self._published.pop(package_id, None)
+            if not keep_record:
+                self.drop_active(package_id)
 
     def abort(self, candidate: ActivationCandidate) -> None:
         """Drop a candidate that was not published. Package files stay in place.
@@ -380,7 +473,7 @@ class Runtime:
             try:
                 handler_id = bus.register_event_handler(
                     declaration.event_type,
-                    _async_handler(declaration.handler),
+                    self._tracked_handler(candidate.package_id, declaration.handler),
                     declaration.match_pattern,
                     HandlerLevel(declaration.handler_level),
                     package_metadata=plan.package,
@@ -402,6 +495,23 @@ class Runtime:
                 )
             registered.append(handler_id)
         return registered, None
+
+    def _tracked_handler(self, package_id: str, handler: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
+        wrapped = _async_handler(handler)
+
+        @functools.wraps(handler)
+        async def tracked(event: Any, ops: Any, event_next: Any) -> Any:
+            self.begin_calls((package_id,))
+            with self._lock:
+                self._active_ops.add(ops)
+            try:
+                return await wrapped(event, ops, event_next)
+            finally:
+                with self._lock:
+                    self._active_ops.discard(ops)
+                self.end_calls((package_id,))
+
+        return tracked
 
     def _active_record(
         self,

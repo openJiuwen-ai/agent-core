@@ -175,6 +175,15 @@
 - **验收标准：** 见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) 的 MCP 专项与 Events 回归结果。
 - **联合交付：** `mcp.*` 与 `fs.*` 同为宿主内置能力；JiuwenSwarm 插件接入由对端计划维护。
 
+### EV-14 store 持久化与卸载清理
+
+- **目标与范围：** 四个 store 事件与 Ops、宿主目录注入、JSON 文件持久化及 Core 卸载清理。
+- **方案与契约：** [F_14](../features/F_14_ops-store.md)、[S_02 store](../specs/S_02_store.md)，
+  卸载协作引用 [Extension S_02](../../../extension/docs/specs/S_02_registry-and-bus.md)。
+- **硬前置：** EV-04、EV-06 包信息及既有 Extension 发布与管理事件。
+- **验收：** F_14 第 4 节数据、文件、失败、事件、Ops、生命周期六组可独立运行，记录真实命令和结果。
+- **不交付：** state、package 身份调整、应用保存目录与界面接线、真实业务触发点。
+
 ## 3. 依赖关系与开发顺序
 
 ```mermaid
@@ -189,6 +198,10 @@ flowchart LR
     EV05 --> EV08["EV-08 宿主限定派发"]
     EV07 --> EV12["EV-12 FS 事件\n与 ops.fs 能力"]
     EV07 --> EV13["EV-13 MCP 事件\n与 ops.mcp 能力"]
+
+    EV04 --> EV14["EV-14 store 持久化与清理"]
+    PackageOps["EV-06 包信息"] --> EV14
+    Extension["Extension 包管理与发布"] --> EV14
 
     EV01 --> Contract["M-02-CONTRACT\nUI 事件与 Session 映射"]
     Contract --> Server["M-02-SERVER"]
@@ -258,6 +271,7 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-12 FS 事件与 `ops.fs` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | FS 专项 23 passed；Events 回归 138 passed | 六个 CORE 事件与 `ops.fs` 已实现；方案见 [F_12](../features/F_12_fs-ops-events.md) |
 | EV-13 MCP 事件与 `ops.mcp` 能力 | 已完成 | 李雷 | EV-04、EV-05、EV-07 | MCP 专项与 Events 回归见 [F_13 第 6 节](../features/F_13_mcp-ops-events.md#6-验证) | 两个 CORE 事件与 `ops.mcp` 已实现；包内 `mcp.json` 声明参与安装、reload、uninstall |
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
+| EV-14 store 持久化与卸载清理 | 已完成 | 未登记 | EV-04、EV-06、Extension | 修订后 640 passed、2 skipped；store 覆盖率 92% | 定义、登记与通用清理验证见 [F_14](../features/F_14_ops-store.md)；应用装配由消费方维护 |
 | M-02 Swarm 联合验收                  | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
 工作项逐项记录进度，交付节点单独记录联合验收结果。

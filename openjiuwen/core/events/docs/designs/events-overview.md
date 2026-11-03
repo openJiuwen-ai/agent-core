@@ -285,7 +285,10 @@ USER Handler 可以跳过 BUILTIN 或短路，因此 BUILTIN 层级本身不能�
 | 内置注册、宿主显式 Build、Session 规范化和完整业务调用 | 已实现 | `bootstrap.py`、`builtins/event_types/ops_build.py`、`bus.py`；`test_event_bus_integration.py` |
 | Events 单元测试基线 | 已记录通过 | F-04 与开发计划记录 `tests/unit_tests/core/events/` 67 passed；本次文档更新不重新执行该基线 |
 
-`builtins/event_types/`、`builtins/handler_ops/`、`builtins/event_handlers/` 已具备自动发现路径。当前稳定内置业务事件含 `ops.build`、`fs.*` 与 `mcp.*`；工作区中以 `TEMPORARY` 标记的 `manual_probe_*` 文件是 bootstrap 手工验证探针，不构成公开产品能力。
+`builtins/event_types/`、`builtins/handler_ops/`、`builtins/event_handlers/` 已具备自动发现路径。
+预置能力包括 `ops.build`、`fs.*`、`mcp.*`、包管理事件、package 信息和
+[store 持久化事件与 Ops](../features/F_14_ops-store.md)。store 使用宿主提供的目录，不绑定应用配置；
+定义和登记的验证不代表应用业务已接入。TEMPORARY 标记的 manual_probe_* 不构成公开产品能力。
 
 Core 已有[当前单智能体 Session](../../../session/agent.py)，EventBus 会投影其 session ID；宿主也可以直接提供 SessionContext。已有 [Tool 抽象](../../../foundation/tool/base.py)提供 `invoke()` 和 `stream()`，但尚未通过 Events 接入真实 `tool.call`，已有流式接口也不代表 Events 已有流式协议。
 

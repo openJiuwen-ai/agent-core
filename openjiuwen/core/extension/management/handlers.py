@@ -13,8 +13,10 @@ can request it separately and read the same result.
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import Event
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
@@ -86,6 +88,14 @@ async def handle_package_resolve(request: ResolveRequest) -> ResolveResult:
         )
     if request.operation == "uninstall":
         package_id = request.package_id or ""
+        if context.runtime.get_active(package_id) is None:
+            try:
+                if context.runtime.uninstall_versions(package_id) or context.package_manager.managed_versions(
+                    package_id
+                ):
+                    return ResolveResult(operation="uninstall")
+            except ExtensionFailure as exc:
+                return ResolveResult(operation="uninstall", error=exc.as_error())
         return ResolveResult(
             operation="uninstall",
             error=context.runtime.uninstall_decision(package_id),
@@ -210,15 +220,7 @@ async def handle_package_uninstall(request: UninstallRequest) -> PackageOperatio
         return _single("uninstall", package_id, resolved.error)
     record = context.runtime.get_active(package_id)
     if record is None:
-        return _single(
-            "uninstall",
-            package_id,
-            operation_error(
-                StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
-                package_id=package_id,
-                reason="package is not active",
-            ),
-        )
+        return await _uninstall_inactive(context, package_id)
     return await _plan_and_apply(bus, "uninstall", _manifest_for_record(record), record.root)
 
 
@@ -382,8 +384,46 @@ async def _install_one(
 
 
 async def _apply_load(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
+    """Serialize publication against resource cleanup of the same package."""
+    lock = context.runtime.package_lock(request.plan.package.package_id)
+    if lock.locked():
+        return _failed(
+            request.plan,
+            operation_error(
+                StatusCode.EXTENSION_PACKAGE_BUSY,
+                package_id=request.plan.package.package_id,
+                reason="another management operation is running",
+            ),
+        )
+    async with lock:
+        if context.runtime.uninstall_versions(request.plan.package.package_id):
+            return _failed(
+                request.plan,
+                operation_error(
+                    StatusCode.EXTENSION_PACKAGE_BUSY,
+                    package_id=request.plan.package.package_id,
+                    reason="an unfinished uninstall must be retried first",
+                ),
+            )
+        record = context.runtime.get_active(request.plan.package.package_id)
+        generation = None if record is None else record.generation
+        if generation != request.plan.previous_generation:
+            return _failed(request.plan, _invalid_result("stale extension plan"), current_generation=generation)
+        return await _apply_load_locked(context, request)
+
+
+async def _apply_load_locked(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
     """Load an install or reload plan and publish it in one pass."""
     plan = request.plan
+    if any(context.runtime.uninstall_versions(item.package_id) for item in request.manifest.requires_packages):
+        return _failed(
+            plan,
+            operation_error(
+                StatusCode.EXTENSION_DEPENDENCY_NOT_MET,
+                package_id=plan.package.package_id,
+                reason="a dependency is being uninstalled",
+            ),
+        )
     prepared = context.runtime.prepare(plan)
     if prepared.candidate is None:
         return _failed(plan, prepared.error or _invalid_result("prepare"))
@@ -432,27 +472,43 @@ async def _apply_load(context: ManagementContext, request: ApplyRequest) -> Acti
 
 
 async def _apply_uninstall(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
-    """Remove one package's MCP connections and handlers, then its files."""
+    """Hold the package lock through unregister, callbacks, and file removal."""
+    plan = request.plan
+    lock = context.runtime.package_lock(plan.package.package_id)
+    if lock.locked():
+        return _failed(
+            plan,
+            operation_error(
+                StatusCode.EXTENSION_PACKAGE_BUSY,
+                package_id=plan.package.package_id,
+                reason="another management operation is running",
+            ),
+            current_generation=plan.previous_generation,
+        )
+    async with lock:
+        return await _apply_uninstall_locked(context, request)
+
+
+async def _apply_uninstall_locked(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
+    """Remove one package from the Bus, then delete its version directory."""
     plan = request.plan
     package_id = plan.package.package_id
     decision = context.runtime.uninstall_decision(package_id)
     if decision is not None:
         return _failed(plan, decision, current_generation=plan.previous_generation)
-    stripped = await _remove_mcp_servers(declarations.specs_for(package_id))
-    if stripped is not None:
-        return _failed(plan, stripped, current_generation=plan.previous_generation)
     try:
-        context.runtime.unpublish(package_id, context.bus)
-    except ExtensionFailure as exc:
-        return _failed(plan, exc.as_error(), current_generation=plan.previous_generation)
-    declarations.withdraw(package_id)
-    version = plan.package.package_version or request.manifest.version
-    try:
-        if context.package_manager.version_dir(package_id, version).is_dir():
-            context.package_manager.remove_installed(package_id, version)
-    except ExtensionFailure as exc:
-        # The handlers are gone; only the files are left to clean up.
-        return _failed(plan, exc.as_error())
+        record = context.runtime.get_active(package_id)
+        if record is None or record.generation != plan.previous_generation:
+            return _failed(plan, _invalid_result("stale uninstall plan"))
+        active_version = plan.package.package_version or request.manifest.version
+        known_versions = (*context.runtime.uninstall_versions(package_id), active_version)
+        versions = context.package_manager.managed_versions(package_id, known_versions=known_versions)
+        context.runtime.uninstall_versions(package_id, (*versions, active_version))
+        context.runtime.unpublish(package_id, context.bus, keep_record=True)
+        await _remove_package_resources(context, package_id, record.generation)
+        context.runtime.drop_active(package_id)
+    except Exception as exc:
+        return _failed(plan, _cleanup_error(exc), current_generation=plan.previous_generation)
     return ActivationReport(
         plan_id=plan.plan_id,
         package_id=package_id,
@@ -525,6 +581,72 @@ def _resource_mgr_or_none() -> object | None:
         return require_resource_mgr()
     except RuntimeError:
         return None
+
+
+async def _remove_package_resources(context: ManagementContext, package_id: str, generation: int) -> None:
+    stripped = await _remove_mcp_servers(declarations.specs_for(package_id))
+    if stripped is not None:
+        raise ExtensionFailure(stripped.status, **stripped.params)
+    await context.runtime.cleanup_package_resources(package_id, generation, reason="uninstall")
+    for version in context.runtime.uninstall_versions(package_id):
+        context.package_manager.remove_installed(package_id, version, missing_ok=True)
+    declarations.withdraw(package_id)
+
+
+async def _uninstall_inactive(context: ManagementContext, package_id: str) -> PackageOperationResult:
+    lock = context.runtime.package_lock(package_id)
+    if lock.locked():
+        return _single(
+            "uninstall",
+            package_id,
+            operation_error(
+                StatusCode.EXTENSION_PACKAGE_BUSY,
+                package_id=package_id,
+                reason="another management operation is running",
+            ),
+        )
+    async with lock:
+        try:
+            versions = context.package_manager.managed_versions(
+                package_id,
+                known_versions=context.runtime.uninstall_versions(package_id),
+            )
+            if not versions and not context.runtime.uninstall_versions(package_id):
+                return _single(
+                    "uninstall",
+                    package_id,
+                    operation_error(
+                        StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
+                        package_id=package_id,
+                        reason="no managed install copy",
+                    ),
+                )
+            context.runtime.stop_package_calls(package_id)
+            context.runtime.uninstall_versions(package_id, versions)
+            await _remove_package_resources(context, package_id, 0)
+            context.runtime.drop_active(package_id, missing_ok=True)
+        except Exception as exc:
+            return _single("uninstall", package_id, _cleanup_error(exc))
+    return PackageOperationResult(
+        operation="uninstall",
+        reports=(
+            ActivationReport(
+                plan_id="",
+                package_id=package_id,
+                operation="uninstall",
+                status="SUCCESS",
+                previous_generation=None,
+                current_generation=None,
+            ),
+        ),
+    )
+
+
+def _cleanup_error(failure: Exception) -> OperationError:
+    if isinstance(failure, BaseError):
+        params: dict[str, Any] = dict(failure.params)
+        return operation_error(failure.status, **params)
+    return operation_error(StatusCode.EXTENSION_LOAD_FAILED, reason=f"package cleanup failed: {failure}")
 
 
 def _manifest_for_record(record: ActivePackageRecord) -> Manifest:

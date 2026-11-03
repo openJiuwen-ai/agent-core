@@ -509,3 +509,10 @@ def create_call_tool(bus: ExtensionEventBus) -> OpsMethod:
 Handler 可使用预置的 `ops.package` 能力读取所属包的根目录和包 ID。
 方法说明、调用前提、Handler 示例及登记流程见
 [F_06 包信息读取能力](../features/F_06_ops-package.md#5-使用方式与实现)。
+
+### 5.5 内置 store 能力
+
+`ops.store.get/set/delete/keys` 通过同名事件访问宿主配置的包持久化存储。
+输入、输出、匹配与失败规则见 [S_02](../specs/S_02_store.md)，
+实现与验证见 [F_14](../features/F_14_ops-store.md)。宿主通过 `Registry.init(store=JsonStore(directory))`
+注入明确目录，插件不需要传目录或包 ID。监听 store 事件时调用 next 获取下游结果，避免同名 Ops 递归。

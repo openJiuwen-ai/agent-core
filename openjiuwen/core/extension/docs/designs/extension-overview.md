@@ -231,6 +231,10 @@ Events 的[目标架构](../../../events/docs/designs/events-architecture.md)提
 
 Core 已有[工具抽象](../../../foundation/tool/base.py)，可作为工具事件接入的基础；仍需将实际工具调用接入事件入口，才能验证扩展是否参与执行。
 
+store 数据的宿主注入、在途计数及卸载失败重试已纳入 Core 管理链；契约见
+[Registry S_02](../specs/S_02_registry-and-bus.md#41-store-卸载清理)，设计与验证见
+[Events F_14](../../../events/docs/features/F_14_ops-store.md)。保存目录由宿主提供，重载和停机保留数据。
+
 ### 5.2 能力开放条件
 
 不同能力需要满足不同条件。先完成注册和回滚验证，才能开放基本加载；要支持业务调用或在线卸载，还需要补齐对应的执行与资源管理机制。
