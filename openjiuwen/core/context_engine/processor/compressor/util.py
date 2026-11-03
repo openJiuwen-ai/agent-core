@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -481,8 +482,12 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 
 
 def estimate_content_tokens(content: Any) -> int:
-    """Approximate token count when no token counter is available."""
-    return max(len(sanitize_content_for_text(content)) // 3, 1)
+    """Approximate token count when no token counter is available.
+
+    Delegates to :meth:`ContextUtils.estimate_tokens` so image blocks are priced
+    by their pixel dimensions instead of the sanitized base64 placeholder.
+    """
+    return ContextUtils.estimate_tokens(content)
 
 
 def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:

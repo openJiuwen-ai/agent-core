@@ -12,7 +12,6 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
@@ -452,7 +451,7 @@ class DialogueCompressor(ContextProcessor):
             parts.append(f"tool_calls={tool_call_names}")
         if isinstance(message, ToolMessage):
             parts.append(f"tool_call_id={message.tool_call_id}")
-        parts.append(f"content={message.content}")
+        parts.append(f"content={message_to_text(message)}")
         return " | ".join(parts)
 
     async def _build_json_replacements(
@@ -581,7 +580,7 @@ class DialogueCompressor(ContextProcessor):
 
     @staticmethod
     def _estimate_content_tokens(content: Any) -> int:
-        return max(len(sanitize_content_for_text(content)) // 3, 1)
+        return ContextUtils.estimate_tokens(content)
 
     @staticmethod
     def _is_valid_blocks_payload(parser_content: Any) -> bool:

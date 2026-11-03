@@ -13,6 +13,10 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
+from openjiuwen.core.context_engine.token.image_tokens import (
+    estimate_image_block_tokens,
+    is_image_block,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
 
 
@@ -657,9 +661,20 @@ class ContextUtils:
 
     @staticmethod
     def estimate_tokens(content: Any) -> int:
-        """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
-        text = sanitize_content_for_text(content)
-        return max(len(text) // 3, 1)
+        """估计内容的 token 数：文本按字符数 // 3，图片按视觉 token 计价。
+
+        图片（``image_url`` / ``image`` 块）必须按像素尺寸计价——base64 载荷被
+        sanitize 成占位符后只剩几十个字符，按字符估算会把一张图算成约 40 token，
+        远低于提供方的实际计费（约 1.5k），使压缩阈值与窗口占用被严重低估。
+        因此列表内容的估算 = 清洗后文本字符估算 + 各图片块视觉 token。
+        """
+        text_tokens = max(len(sanitize_content_for_text(content)) // 3, 1)
+        if not isinstance(content, list):
+            return text_tokens
+        image_tokens = sum(
+            estimate_image_block_tokens(part) for part in content if is_image_block(part)
+        )
+        return text_tokens + image_tokens
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

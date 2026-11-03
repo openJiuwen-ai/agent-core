@@ -300,6 +300,52 @@ async def test_ensure_initialized_uses_cached_read_image_multimodal(
     _mock_image_modality_probe.assert_not_called()
 
 
+def test_resolve_image_input_supported_is_unknown_until_probe_lands(monkeypatch) -> None:
+    """未判定（probe 未回）时返回 None，发送路径才会保留用户上传的图。"""
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+    )
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.get_cached_image_support", lambda llm: None)
+
+    assert agent._resolve_image_input_supported() is None
+    # read_file 侧仍保持保守降级（None 在 read_file 路径按 falsy 处理）。
+    assert should_enable_read_image_multimodal(agent) is False
+
+
+def test_resolve_image_input_supported_picks_up_late_probe_verdict(monkeypatch) -> None:
+    """init 之后才回填的 probe 结果，下一次发送即生效并同步 deep_config。"""
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+    )
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.get_cached_image_support", lambda llm: True)
+
+    assert agent._resolve_image_input_supported() is True
+    assert agent.deep_config.enable_read_image_multimodal is True
+
+
+def test_resolve_image_input_supported_honors_explicit_flag(monkeypatch) -> None:
+    """显式配置优先于 probe 缓存，切模型也不会被自动判定覆盖。"""
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            enable_read_image_multimodal=False,
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+    )
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.get_cached_image_support", lambda llm: True)
+
+    assert agent._resolve_image_input_supported() is False
+
+
 def test_configure_set_react_agent_and_is_initialized() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))
 
@@ -1749,6 +1795,51 @@ def test_create_subagent_unrestricted_when_both_unrestricted(tmp_path) -> None:
     call_kwargs = mock_create.call_args.kwargs
     # 父子均不限制，保持 False
     assert call_kwargs["restrict_to_work_dir"] is False
+
+
+def test_create_subagent_forwards_image_budgets_from_spec(tmp_path) -> None:
+    """SubAgentConfig 的图片预算必须转发到子代理的 create_deep_agent 调用。"""
+    from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
+
+    spec = build_explore_agent_config(model=_create_dummy_model())
+    spec.max_image_bytes_per_request = 1234
+    spec.max_images_per_request = 3
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[spec],
+        max_image_bytes_per_request=5000,
+        max_images_per_request=9,
+    )
+
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=object()) as mock_create:
+        parent.create_subagent("explore_agent", "sub_session_id")
+
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs["max_image_bytes_per_request"] == 1234
+    assert call_kwargs["max_images_per_request"] == 3
+
+
+def test_create_subagent_inherits_parent_image_budgets(tmp_path) -> None:
+    """子代理 spec 未设置预算时继承父代理的请求级图片预算。"""
+    from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
+
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[build_explore_agent_config(model=_create_dummy_model())],
+        max_image_bytes_per_request=5000,
+        max_images_per_request=9,
+    )
+
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=object()) as mock_create:
+        parent.create_subagent("explore_agent", "sub_session_id")
+
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs["max_image_bytes_per_request"] == 5000
+    assert call_kwargs["max_images_per_request"] == 9
 
 
 @pytest.mark.asyncio

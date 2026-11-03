@@ -901,7 +901,7 @@ class CurrentRoundCompressor(ContextProcessor):
         if total_tokens <= self._accumulated_summary_token_limit:
             return None
         merged_blocks = "\n\n".join(
-            f"[MEMORY_BLOCK_{i}]\n{msg.content}"
+            f"[MEMORY_BLOCK_{i}]\n{message_to_text(msg)}"
             for i, msg in enumerate(old_compress_messages or [], 1)
         )
         filled_prompt = (
