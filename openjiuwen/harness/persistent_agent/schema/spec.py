@@ -39,11 +39,17 @@ def _truncating_limits(config) -> list[str]:
     return [name for name in _WINDOW_TRUNCATION_LIMITS if read(name) is not None]
 
 
-def _share_file_rail(context: "PersistentBuildContext", workspace_access, max_bytes: int):
+def _share_file_rail(context: "PersistentBuildContext", workspace_access, max_bytes: int, permission_profile):
     """Files are listed for handoff under the read authorization; reading is not permission to publish."""
     from ..execution.share_file import ShareFileRail
 
-    return ShareFileRail(context.execution, workspace_access, context.binding.control.registrations, max_bytes)
+    return ShareFileRail(
+        context.execution,
+        workspace_access,
+        context.binding.control.registrations,
+        max_bytes,
+        permission_profile,
+    )
 
 
 def _record_rail(context: "PersistentBuildContext"):
@@ -191,7 +197,9 @@ class PersistentAgentSpec(DeepAgentSpec):
                     permission_profile=self.permission_profile,
                 )
             )
-            parts.rails.append(_share_file_rail(context, workspace_access, self.share_file_max_bytes))
+            parts.rails.append(
+                _share_file_rail(context, workspace_access, self.share_file_max_bytes, self.permission_profile)
+            )
         if "workspace_write" in self.enabled_features:
             workspace_write_access = context.ports.workspace_write_access
             if workspace_write_access is None:

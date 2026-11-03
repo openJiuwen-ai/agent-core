@@ -335,3 +335,20 @@ def test_the_size_limit_is_bounded_and_part_of_the_fingerprint():
         with pytest.raises(ValidationError):
             PersistentAgentSpec(card=card, share_file_max_bytes=invalid)
     assert PersistentAgentSpec(card=card, share_file_max_bytes=1024).fingerprint() != default.fingerprint()
+
+
+@pytest.mark.asyncio
+async def test_full_access_handoff_keeps_session_boundary(workspace):
+    access = Access(workspace, host_wide=True)
+    registrations = {}
+    tool = ShareFileTool(execution=execution(), workspace_access=access, registrations=registrations,
+                         max_bytes=MAX_BYTES, permission_profile="full_access")
+    denied = await share(tool, file_path="sessions/session-b/secret.md", share_mode="attachment")
+    assert denied.data == {"status": "forbidden"}
+    path = "sessions/session-a/draft.md"
+    assert (await share(tool, file_path=path, share_mode="attachment")).success
+    batch = await HANDOFF.prepare_batch(execution(), access, "chat-1", None, list(registrations.values()),
+                                        MAX_BYTES, permission_profile="full_access")
+    assert not batch.failures and batch.files[0][:2] == (path, "attachment")
+    mismatch = await share(tool_for(workspace, access=access), file_path=path, share_mode="attachment")
+    assert mismatch.data == {"status": "unknown"}
