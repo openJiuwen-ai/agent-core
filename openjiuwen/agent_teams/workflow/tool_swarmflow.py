@@ -449,9 +449,7 @@ class SwarmflowTool(AsyncTool):
         controller = getattr(self._parent_agent, "background_task_controller", None)
         if controller is None:
             return ToolOutput(success=False, error="Runtime controller not configured")
-        ops = {"pause": controller.pause, "resume": controller.resume, "stop": controller.stop}
-        op = ops.get(action)
-        if op is None:
+        if action not in ("pause", "resume", "stop"):
             return ToolOutput(success=False, error=f"unknown action {action!r}")
         # A paused run has already unwound, so the engine will never emit
         # WORKFLOW_STOPPED for it — whether the controller still holds its
@@ -459,7 +457,15 @@ class SwarmflowTool(AsyncTool):
         # Announce it here either way so the embedder's card closes; an active
         # run announces its own stop while unwinding.
         was_paused = action == "stop" and controller.is_paused(resume_id)
-        ok = await op(resume_id)
+        if action == "resume":
+            # Pin the relaunch host to the member issuing this call: its tool
+            # is alive (this invoke is on its stack), so the resumed run's
+            # narration and completion land back on the resuming member
+            # instead of whichever member's tool registered last.
+            ok = await controller.resume(resume_id, via=self)
+        else:
+            op = controller.pause if action == "pause" else controller.stop
+            ok = await op(resume_id)
         if action == "stop" and (was_paused or not ok):
             ok = await self._announce_stopped(resume_id) or ok
         if ok:

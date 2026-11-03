@@ -46,12 +46,12 @@ class SwarmflowRunHandle:
 
     ``launcher`` is the one exception to that purity: the SwarmflowTool that
     launched THIS run. With N teammates each tool is a distinct relaunch host,
-    so resume prefers it and only falls back to the current cycle's launcher
-    when the launching tool's harness is gone (leader cross-cycle rebuild) or
-    the handle predates the field. The reference is valid only while the
-    handle sits in the active/paused registries — deregister drops both — and
-    the handle is never serialized, so it does not widen the ticket's data
-    contract.
+    so resume prefers it and only falls back to the invoking tool (``via``)
+    or the current cycle's launcher when the launching tool's harness is gone
+    (leader cross-cycle rebuild) or the handle predates the field. The
+    reference is valid only while the handle sits in the active/paused
+    registries — deregister drops both — and the handle is never serialized,
+    so it does not widen the ticket's data contract.
     """
 
     task_id: str
@@ -169,18 +169,20 @@ class BackgroundTaskController:
                 self._active.pop(rid, None)
             return bool(targets)
 
-    async def resume(self, run_id: str | None = None) -> bool:
+    async def resume(self, run_id: str | None = None, *, via: Any = None) -> bool:
         """Resume paused run(s) — all when ``run_id`` is None, else just that one.
 
-        Relaunches ``run_background`` with the ticket's SAME inputs. With N
-        teammates the launching tool is the correct relaunch host for its own
-        run, so the ticket's ``launcher`` (the SwarmflowTool that launched it)
-        is preferred; it falls back to the current cycle's launcher when the
-        launching tool's harness is gone (leader cross-cycle rebuild: the tool
-        is still referenced but its harness can no longer accept work) or the
-        handle predates the field. The journal path is unchanged, so the
-        completed prefix is a cache hit and only the interrupted call reruns
-        live. No launcher at all is a no-op that leaves the ticket parked.
+        Relaunches ``run_background`` with the ticket's SAME inputs. The
+        relaunch host is, in order: the ticket's own ``launcher`` (the
+        SwarmflowTool that launched it) when its harness can still host work;
+        the invoking tool (``via`` — the member whose ``action="resume"`` call
+        is on the stack, alive by construction); the current cycle's global
+        launcher slot. Routing through ``via`` keeps the resumed run's
+        narration and completion injection on the member that decided to
+        resume instead of on whichever member's tool happened to register
+        last. The journal path is unchanged, so the completed prefix is a
+        cache hit and only the interrupted call reruns live. No launcher at
+        all is a no-op that leaves the ticket parked.
         """
         async with self._lock:
             if run_id is None:
@@ -193,11 +195,12 @@ class BackgroundTaskController:
             dispatched = False
             for rid, h in targets.items():
                 # Route through the run's own launching tool when it can still
-                # host work; fall back to the current cycle's global launcher
-                # when that tool's harness is gone or the handle predates the
-                # field (legacy tickets / test stubs).
+                # host work, then the invoking tool, then the current cycle's
+                # global launcher (dead/legacy launchers, stubs).
                 if h.launcher is not None and self._launcher_alive(h.launcher):
                     launcher = h.launcher
+                elif via is not None:
+                    launcher = via
                 else:
                     launcher = self._launcher
                 if launcher is None:

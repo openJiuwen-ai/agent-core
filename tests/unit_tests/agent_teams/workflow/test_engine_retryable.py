@@ -144,7 +144,7 @@ async def test_attempt_calls_human_turn_is_exempt_from_outer_timeout():
         return _OkAgentResult()
 
     out = await _p._attempt_calls(
-        _rt(), {"label": "h", "timeout": 0.05}, None, None, slow_call, human=True,
+        _rt(), {"label": "h", "timeout": 0.05}, None, None, slow_call, is_human=True,
     )
     assert out.succeeded is True
     assert out.result == "ok"

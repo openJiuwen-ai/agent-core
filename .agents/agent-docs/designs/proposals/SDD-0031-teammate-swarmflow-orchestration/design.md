@@ -181,7 +181,7 @@ paused）落终态并 seal，邻居 run 不受影响。
 |---|---|
 | `register` / `deregister` | active 表进出；deregister 保留 paused 句柄 |
 | `pause(run_id \| None)` | 三步：set `abort_event` → `backend.abort_sessions` → native cancel task，等任务真 unwind；句柄移入 `_paused` |
-| `resume(run_id \| None)` | 该 run 自己的 launcher 优先（`_launcher_alive` 探测）；launcher 已死回退当前周期全局槽位 |
+| `resume(run_id \| None)` | 该 run 自己的 launcher 优先（`_launcher_alive` 探测）；launcher 已死回退发起 resume 调用的成员工具（`via`，控制动作入参）；无调用方再回退当前周期全局槽位 |
 | `stop(run_id \| None)` | 终态：active 三步 abort，不入 paused；对已 paused 的句柄只丢弃重拉入口 |
 | `stop_by_owner(member_name, *, include_paused=False)` | owner 过滤版；`include_paused=True` 连 paused 句柄一起清（真拆除） |
 | `set_launcher(tool)` | 当前周期全局槽位（跨轮重建的回退宿主） |
@@ -399,12 +399,15 @@ flowchart TD
     D -->|重试耗尽| F[failed]
 ```
 
-- human 轮不被外层 `asyncio.timeout` 包裹；`options.timeout` 只剩"等人时限"语义，
+- human 轮不设外层 `asyncio.timeout`；`options.timeout` 只承担"等人时限"语义，
   超时返回 `skipped`、不重试。
 - `_human_reply_reuse` 缓存已拿到的原始回复，格式化轮失败重试时复用而不是再问。
 - 显式跳过：前端"跳过/取消"发 `{skip: true}`，映射为 `HUMAN_REPLY_SKIP` 哨兵，与超时
   同收口。
-- 代价：格式化轮自身失去 timeout 上限，模型卡死只能靠取消。
+- 等人之后的分类/格式化模型调用**不设节点级超时**：引擎对任何算子的模型
+  调用都不强制逐调用超时（未声明 `options.timeout` 的 agent 轮同样无上界），
+  模型调用挂死统一由控制面终结（pause/stop 的三步 abort 取消任务）。human 轮
+  与全局口径一致，不为它单独引入逐段超时。
 
 ### 6.3 弹窗去重与暂停窗口
 

@@ -34,7 +34,7 @@ author_email: xiajing22@huawei.com
 | 预算 rail | 挂载条件从 leader 角色放宽为持有账本即挂；成员 run 与成员自身普通轮都计入同一 session ledger，与 leader 共池同约束；session 总额是部署配置（TeamAgentSpec），单 run 限额由脚本 META 声明 |
 | executor 归因 | 事件 schema 单字段 `executor`；工具从 build_context 按当前宿主现算（leader 也填名）。叙述、注入、run 卡徽章、恢复转交全部读它：谁执行就进谁的上下文 |
 | 叙述边界 | run 的 started/phase/agent 叙述进当前宿主上下文；executor 为 None（无团队上下文）时 leader 兜底；paused/resumed 不叙述；终态不叙述（async-tool 注入回宿主） |
-| human 硬化 | timeout 只计等人（豁免外层 attempt 超时）；重试复用已获回复；HUMAN_REPLY_SKIP 哨兵；seal/pause WAL cancel-shielded |
+| human 硬化 | timeout 只计等人（分类/格式化与其余 agent 轮一致不设逐调用超时，挂死由 pause/stop 终结）；重试复用已获回复；HUMAN_REPLY_SKIP 哨兵；seal/pause WAL cancel-shielded |
 | 三方成员 | claude/codex 成员经 `ExternalSwarmflowHost` 持有 `swarmflow` 工具（发起语义与本进程成员一致），方案见 SDD-0031 §8.1 |
 | 与灯的边界 | run 宿主在成员 runtime + 团队 controller，不占对话轮，本特性不改灯；灯由任务在飞与 run 活跃两道 hold 撑住，teammate 的 run 通常包在任务里 |
 

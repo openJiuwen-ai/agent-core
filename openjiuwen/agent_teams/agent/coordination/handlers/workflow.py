@@ -66,8 +66,11 @@ class WorkflowHandler(BaseCoordinationHandler):
             return
         # Narration follows the current host: only the member loop matching
         # ``executor`` narrates (leader runs name the leader too) — everyone
-        # else stays out. ``executor=None`` (no team context / legacy events)
-        # falls back to the leader loop.
+        # else stays out. The two names cannot disagree: both read the
+        # member's TeamRuntimeContext.member_name (the event's executor via
+        # the hosting harness's BuildContext, this loop via its blueprint),
+        # so an in-team event matches exactly one loop. ``executor=None``
+        # (no team context / legacy events) falls back to the leader loop.
         if payload.executor is None:
             if self._blueprint.role != TeamRole.LEADER:
                 return

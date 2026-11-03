@@ -189,6 +189,34 @@ async def test_resume_legacy_handle_without_launcher_uses_global_slot():
 
 
 @pytest.mark.asyncio
+async def test_resume_prefers_invoking_tool_over_global_slot():
+    """A dead ticket launcher routes to the INVOKING tool (``via``), not the slot.
+
+    The invoking member's tool is alive by construction (its ``action="resume"``
+    call is on the stack), so pinning the relaunch host to it keeps narration
+    and completion injection on the member that decided to resume — instead of
+    on whichever member's tool happened to register as the global slot last
+    (possible whenever another member finishes a round between this member's
+    cycle start and its resume call).
+    """
+    ctl = BackgroundTaskController()
+    dead_tool = _ToolWithHarness(_StatefulHarness())
+    dead_tool._parent_agent.state = HarnessState.TERMINATED
+    invoker = _ToolWithHarness(_StatefulHarness())
+    other_member = _ToolWithHarness(_StatefulHarness())
+    ctl.register(_make_handle("wf_1", launcher=dead_tool))
+    await ctl.pause("wf_1")
+    ctl.set_launcher(other_member)  # registered after the invoker's cycle
+
+    ok = await ctl.resume("wf_1", via=invoker)
+
+    assert ok is True
+    assert dead_tool.relaunched == []
+    assert other_member.relaunched == []
+    assert invoker.relaunched == [({}, "s")]
+
+
+@pytest.mark.asyncio
 async def test_stop_unknown_returns_false():
     ctl = BackgroundTaskController()
     assert await ctl.stop("nope") is False
