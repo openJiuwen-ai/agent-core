@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from contextvars import ContextVar
-
 import inspect
 import keyword
 from collections.abc import Mapping
@@ -16,8 +13,6 @@ from typing import Any
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.events.types import OpsMethod, PackageMetadata, SessionContext
-
-_CURRENT_OPS = ContextVar("active_event_handler_ops", default=None)
 
 
 class EventHandlerOpsBuilder:
@@ -59,15 +54,13 @@ class EventHandlerOpsBuilder:
         self,
         package_metadata: PackageMetadata | None = None,
         session_context: SessionContext | None = None,
-        *,
-        handler_id: str | None = None,
     ) -> EventHandlerOps:
         """Build a new operations view over the catalog."""
         if package_metadata is not None and not isinstance(package_metadata, PackageMetadata):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="package_metadata must be PackageMetadata or None")
         if session_context is not None and not isinstance(session_context, SessionContext):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="session_context must be SessionContext or None")
-        return EventHandlerOps(self._catalog, package_metadata, session_context, handler_id=handler_id)
+        return EventHandlerOps(self._catalog, package_metadata, session_context)
 
     @staticmethod
     def _validate_name(name: str, kind: str) -> None:
@@ -83,29 +76,11 @@ class EventHandlerOps:
         catalog: Mapping[str, Mapping[str, OpsMethod]],
         package_metadata: PackageMetadata | None,
         session_context: SessionContext | None,
-        *,
-        handler_id: str | None = None,
     ) -> None:
         """Bind one catalog snapshot to package and session facts for this handler."""
         self._catalog = catalog
         self._package_metadata = package_metadata
         self._session_context = session_context
-        self._handler_id = handler_id
-        self._invocation_task = asyncio.current_task() if handler_id is not None else None
-        self._invocation_active = handler_id is not None
-
-    @property
-    def handler_id(self) -> str | None:
-        """Return the framework-assigned identity of the entered handler."""
-        return self._handler_id
-
-    @property
-    def invocation_active(self) -> bool:
-        """Whether this view belongs to a live invocation in the calling task."""
-        return self._invocation_active and _CURRENT_OPS.get() is self and asyncio.current_task() is self._invocation_task
-
-    def _close_invocation(self) -> None:
-        self._invocation_active = False
 
     @property
     def package_metadata(self) -> PackageMetadata | None:

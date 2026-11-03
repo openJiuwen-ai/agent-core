@@ -75,7 +75,6 @@ class ExtensionEventBusProtocol(Protocol):
         session: Session | SessionContext | None = None,
         *,
         handler_ids: Sequence[HandlerId] | None = None,
-        exclude_handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None:
         """Dispatch through matched handlers, optionally limited to an ID set."""
         ...
