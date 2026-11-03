@@ -2,10 +2,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from unittest.mock import patch
-import pytest
 
-from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig, ConnectorPoolManager, \
-    TcpConnectorPool
+import pytest
+import pytest_asyncio
+
+from openjiuwen.core.common.clients.connector_pool import (
+    ConnectorPool,
+    ConnectorPoolConfig,
+    ConnectorPoolManager,
+    TcpConnectorPool,
+)
 
 
 class TestConnectorPool:
@@ -40,8 +46,24 @@ class TestConnectorPool:
 
 @pytest.mark.asyncio
 class TestTcpConnectorPoolIntegration:
-    async def test_with_connector_pool_manager(self):
-        manager = ConnectorPoolManager(max_pools=5)
+    @pytest_asyncio.fixture
+    async def manager_factory(self):
+        managers = []
+
+        def create(max_pools=100):
+            # Each test owns its pools without replacing the process-wide singleton.
+            manager = type.__call__(ConnectorPoolManager, max_pools=max_pools)
+            managers.append(manager)
+            return manager
+
+        try:
+            yield create
+        finally:
+            for manager in managers:
+                await manager.close_all()
+
+    async def test_with_connector_pool_manager(self, manager_factory):
+        manager = manager_factory(max_pools=5)
         config = ConnectorPoolConfig(limit=50, limit_per_host=10)
         pool = await manager.get_connector_pool(config=config)
         assert isinstance(pool, TcpConnectorPool)
@@ -51,8 +73,8 @@ class TestTcpConnectorPoolIntegration:
         await manager.close_connector_pool(config=config)
         print(pool.get_stats())
 
-    async def test_multiple_pools_with_manager(self):
-        manager = ConnectorPoolManager(max_pools=3)
+    async def test_multiple_pools_with_manager(self, manager_factory):
+        manager = manager_factory(max_pools=3)
 
         configs = [
             ConnectorPoolConfig(limit=10),
@@ -75,8 +97,8 @@ class TestTcpConnectorPoolIntegration:
         await manager.close_connector_pool(config=configs[2])
 
 
-    async def test_reuse_same_config(self):
-        manager = ConnectorPoolManager()
+    async def test_reuse_same_config(self, manager_factory):
+        manager = manager_factory()
         config = ConnectorPoolConfig(limit=100)
         pool1 = await manager.get_connector_pool(config=config)
         pool2 = await manager.get_connector_pool(config=config)
