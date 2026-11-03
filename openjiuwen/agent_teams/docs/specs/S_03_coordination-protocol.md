@@ -33,6 +33,21 @@
 
 ## 不变量
 
+Pending tool approval handling must preserve the following constraints:
+
+- Pending interrupts suppress stale-task reminders and their escalation counters.
+- Deferred ordinary mail stays unread while the drain scans for direct Leader
+  approval replies. Neither mailbox ordering nor broadcast watermarks change.
+- Replies use `InteractiveInput` keyed by the interrupted tool-call ID and retain
+  the runtime's current-ID validation. A drain submits at most one reply and
+  acknowledges it only after admission returns; admission failure keeps it unread.
+- An in-flight round may temporarily clear interrupt state. During that window,
+  retain approval mail without submitting or acknowledging it. Only settled
+  rounds can classify replies as stale; control replies never become new queries.
+- The approval event fast path does not resume an in-flight round. Its producer
+  must persist the direct reply before publishing; a failed write returns failure
+  and publishes no approval event, preserving the durable fallback contract.
+
 下列断言在系统运行的任意时刻必须为真。任何破坏其中一条的改动都需要先废止本规约。
 
 1. **`EventBus.__init__` 不接受 `wake_callback`**。回调只在 `start(wake_callback=...)` 处绑定；不存在公开 setter。

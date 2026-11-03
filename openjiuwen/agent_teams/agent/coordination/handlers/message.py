@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.session import InteractiveInput
 
 
 class MessageHandler(BaseCoordinationHandler):
@@ -247,26 +248,48 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
-                    if self._round.has_pending_interrupt():
-                        # Approval messages are admitted to resume_interrupt;
-                        # all other messages are deferred until the interrupt clears.
-                        approval_data = self._try_parse_approval_payload(msg)
-                        if approval_data is not None:
+                    approval_data = self._try_parse_approval_payload(msg)
+                    if approval_data is not None:
+                        # Resume clears session state while the round is still
+                        # running. Keep other replies until that round settles.
+                        if self._round.has_in_flight_round():
+                            interrupted = True
+                            continue
+                        if self._round.has_pending_interrupt():
                             team_logger.info(
                                 "[{}] admitting approval message {} to resume interrupt",
                                 member_name,
                                 msg.message_id,
                             )
+                            reply = InteractiveInput()
+                            reply.update(
+                                approval_data["tool_call_id"],
+                                {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                            )
+                            try:
+                                await self._round.resume_interrupt(reply)
+                            except Exception:
+                                team_logger.error(
+                                    "[{}] approval message {} admission failed; keeping it unread",
+                                    member_name,
+                                    msg.message_id,
+                                    exc_info=True,
+                                )
+                                raise
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(approval_data)
-                            continue
+                            return
+                        # A settled runtime with no interrupt cannot use this
+                        # reply. Never feed stale control data as a new query.
+                        await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                        continue
+                    if interrupted or self._round.has_pending_interrupt():
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",
                             member_name,
                             msg.message_id,
                         )
                         interrupted = True
-                        break
+                        continue
                     # An external_runtime_failed JSON message is rendered as a
                     # <team-event> and never falls through to plain
                     # member-message rendering, so the leader sees a
@@ -667,23 +690,31 @@ class MessageHandler(BaseCoordinationHandler):
             note_text=note_text,
         )
 
-    @staticmethod
-    def _try_parse_approval_payload(msg: Any) -> dict | None:
-        """Try to parse a tool-approval result from a message.
-
-        Returns the parsed approval dict if the message is a
-        ``protocol="json"` message with ``type == "tool_approval_result"``,
-        or ``None`` otherwise.  Parses JSON only once.
-        """
-        if msg.protocol != "json" or not msg.content:
+    def _try_parse_approval_payload(self, msg: Any) -> dict | None:
+        """Validate a direct Leader approval before adapting it for resume."""
+        team_spec = self._blueprint.team_spec
+        leader = team_spec.leader_member_name if team_spec is not None else None
+        if msg.protocol != "json" or not msg.content or msg.broadcast or not leader or msg.from_member_name != leader:
             return None
         try:
             data = json.loads(msg.content)
         except (json.JSONDecodeError, TypeError):
             return None
-        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
-            return data
-        return None
+        if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
+            return None
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or type(data.get("approved")) is not bool:
+            return None
+        feedback = data.get("feedback", "")
+        auto_confirm = data.get("auto_confirm", False)
+        if not isinstance(feedback, str) or type(auto_confirm) is not bool:
+            return None
+        return {
+            "tool_call_id": tool_call_id,
+            "approved": data["approved"],
+            "feedback": feedback,
+            "auto_confirm": auto_confirm,
+        }
 
     @staticmethod
     def _render_external_runtime_failed(msg: Any) -> str | None:

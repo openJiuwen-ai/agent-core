@@ -89,6 +89,18 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 
 ### `MessageHandler`（4 个事件，无状态）
 
+Pending tool approvals are control messages, not ordinary queries. A drain scans
+past deferred ordinary mail without acknowledging it. Only direct, well-formed
+Leader replies become `InteractiveInput` values bound to a tool-call ID. While a
+round is in flight, retain those replies unread even if interrupt state is
+temporarily empty. Submit at most one approval per drain and acknowledge only
+after admission returns. Stale replies are consumed only after the round settles.
+The approval event fast path also waits for a settled round; `approve_tool` must
+successfully persist its mailbox copy before publishing that event or returning
+success. A failed mailbox write returns failure without publishing.
+Both stale-task handler variants suppress reminders and escalation bookkeeping
+when an interrupt is pending, including rechecks after awaited task/roster reads.
+
 三条投递路径（`on_message_or_broadcast` / `on_poll_mailbox` / `on_member_shutdown_drain`）
 **统一先过 `_harness_input_blocked` 闸门**。这是本目录最重要的一个闸门，**状态驱动而非事件
 驱动**——状态从 DB 读，不信 `MEMBER_SHUTDOWN` 事件的 payload，因为 `shutdown_member` 是先写
