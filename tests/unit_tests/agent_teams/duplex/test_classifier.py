@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from typing import Any, Callable
@@ -12,7 +13,7 @@ import httpx
 import pytest
 
 from openjiuwen.agent_teams.duplex import DuplexConfig
-from openjiuwen.agent_teams.duplex.classifier import build_classifier
+from openjiuwen.agent_teams.duplex.classifier import build_classifier, logprobs_support, reset_logprobs_support
 from openjiuwen.core.common.exception.errors import BaseError
 
 KEY_ENV = "DUPLEX_TEST_KEY"
@@ -34,6 +35,7 @@ def _transport(requests: list[dict], respond: Callable[[dict], dict]) -> httpx.M
 @pytest.fixture(autouse=True)
 def _key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(KEY_ENV, "mock-api-key")
+    reset_logprobs_support()
 
 
 @pytest.mark.level0
@@ -76,8 +78,9 @@ async def test_openai_format_uses_letter_logprobs() -> None:
     classifier.client._create_async_openai_client = lambda timeout=None: sdk
 
     answers = await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
-    body = requests[0]["body"]
-    assert requests[0]["url"].endswith("/chat/completions") and requests[0]["auth"] == "Bearer mock-api-key"
+    letter = next(r for r in requests if "tools" not in r["body"])
+    body = letter["body"]
+    assert letter["url"].endswith("/chat/completions") and letter["auth"] == "Bearer mock-api-key"
     assert body["max_tokens"] == 1 and body["logprobs"] is True and body["top_logprobs"] == 20
     assert "A = INTERRUPT" in body["messages"][0]["content"]
     assert answers["urgency"].choice == "INTERRUPT"
@@ -125,8 +128,8 @@ async def test_openai_without_logprobs_switches_to_choice_tool() -> None:
     classifier.client._create_async_openai_client = lambda timeout=None: sdk
 
     answers = await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
-    assert [("tools" in r["body"], r["body"].get("logprobs")) for r in requests] == [(False, True), (True, None)]
-    tool_body = requests[1]["body"]
+    assert sorted(("tools" in r["body"], r["body"].get("logprobs")) for r in requests) == [(False, True), (True, None)]
+    tool_body = next(r["body"] for r in requests if "tools" in r["body"])
     assert tool_body["tool_choice"] == "required"
     assert tool_body["tools"][0]["function"]["name"] == "record_choice"
     assert tool_body["tools"][0]["function"]["parameters"]["properties"]["choice"]["enum"] == ["INTERRUPT", "APPEND"]
@@ -153,7 +156,148 @@ async def test_openai_choice_tool_failure_raises() -> None:
 
     with pytest.raises(BaseError):
         await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
-    assert len(requests) == 2 and "tools" in requests[1]["body"]
+    assert sorted("tools" in r["body"] for r in requests) == [False, True]
+
+
+def _letter_reply(letter: str) -> dict:
+    top = [{"token": letter, "logprob": math.log(0.9), "bytes": None}]
+    choice = {
+        "index": 0,
+        "finish_reason": "length",
+        "message": {"role": "assistant", "content": letter},
+        "logprobs": {"content": [{"token": letter, "logprob": math.log(0.9), "bytes": None, "top_logprobs": top}]},
+    }
+    return {"id": "c1", "object": "chat.completion", "created": 0, "model": "m", "choices": [choice]}
+
+
+def _async_openai_sdk(requests: list[dict], respond: Callable[[dict], Any]) -> Any:
+    """SDK whose relay answers through an async handler, so a request can wait or hang."""
+    import openai
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append({"url": str(request.url), "body": body})
+        return httpx.Response(200, json=await respond(body))
+
+    return openai.AsyncOpenAI(
+        api_key="mock-api-key",
+        base_url="http://relay.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _tool_answer(body: dict) -> dict:
+    first, second = body["tools"][0]["function"]["parameters"]["properties"]["choice"]["enum"]
+    return _openai_tool_reply({"choice": first, "probabilities": {first: 0.8, second: 0.2}})
+
+
+def _openai_classifier(requests: list[dict], respond: Callable[[dict], Any], *, timeout: float = 8.0) -> Any:
+    config = _config("openai", "http://relay.invalid/v1").model_copy(update={"timeout_seconds": timeout})
+    classifier = build_classifier(config)
+    sdk = _async_openai_sdk(requests, respond)
+    classifier.client._create_async_openai_client = lambda timeout=None: sdk
+    return classifier
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_first_question_sends_logprobs_and_tool_together() -> None:
+    """Unknown support: both requests are in flight at once; valid logprobs win and are remembered."""
+    requests: list[dict] = []
+    tool_seen = asyncio.Event()
+
+    async def respond(body: dict) -> dict:
+        if "tools" in body:
+            tool_seen.set()
+            await asyncio.sleep(5)  # slower than the logprobs answer
+            return _tool_answer(body)
+        await asyncio.wait_for(tool_seen.wait(), 1)  # only answers once the tool request is also out
+        return _letter_reply("A")
+
+    classifier = _openai_classifier(requests, respond)
+    answers = await asyncio.wait_for(classifier.classify(("urgency",), "{}", ["from peer: use Redis"]), 2)
+    assert answers["urgency"].choice == "INTERRUPT" and answers["urgency"].probabilities["INTERRUPT"] == 1.0
+    assert sorted("tools" in r["body"] for r in requests) == [False, True]
+    assert logprobs_support("http://relay.invalid/v1", "m") is True
+
+    requests.clear()  # known to support logprobs: only the logprobs request from now on
+    await classifier.classify(("urgency", "relevance"), "{}", ["from peer: use Redis"])
+    assert len(requests) == 2 and all("tools" not in r["body"] for r in requests)
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_hung_logprobs_does_not_spend_the_deadline() -> None:
+    """A relay that hangs on the logprobs request: the tool answer comes back within the deadline."""
+    requests: list[dict] = []
+
+    async def respond(body: dict) -> dict:
+        if "tools" not in body:
+            await asyncio.sleep(60)  # the relay never answers this one
+        return _tool_answer(body)
+
+    classifier = _openai_classifier(requests, respond, timeout=0.5)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    answers = await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert loop.time() - started < 0.4
+    assert answers["urgency"].choice == "INTERRUPT"
+
+    await asyncio.sleep(0.7)  # the background probe hits its own deadline and records no support
+    assert logprobs_support("http://relay.invalid/v1", "m") is False
+    requests.clear()
+    await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert len(requests) == 1 and "tools" in requests[0]["body"]
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_logprobs_support_is_shared_across_classifiers() -> None:
+    """What one member's classifier learns about an endpoint, every other member's classifier reuses."""
+    requests: list[dict] = []
+
+    async def respond(body: dict) -> dict:
+        if "tools" not in body:
+            return _openai_reply({"content": "A"})  # the relay drops logprobs
+        return _tool_answer(body)
+
+    first = _openai_classifier(requests, respond)
+    await first.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert logprobs_support("http://relay.invalid/v1", "m") is False
+
+    requests.clear()
+    second = _openai_classifier(requests, respond)
+    answers = await second.classify(("urgency", "relevance"), "{}", ["from peer: use Redis"])
+    assert answers["relevance"].choice == "DELIVER"
+    assert len(requests) == 2 and all("tools" in r["body"] for r in requests)
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_openai_failure_on_both_paths_records_nothing() -> None:
+    """A wrong key fails both requests: that says nothing about logprobs, so the next question races again."""
+    import openai
+
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append({"body": json.loads(request.content)})
+        return httpx.Response(401, json={"error": {"message": "invalid key"}})
+
+    classifier = build_classifier(_config("openai", "http://relay.invalid/v1"))
+    sdk = openai.AsyncOpenAI(
+        api_key="bad",
+        base_url="http://relay.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    classifier.client._create_async_openai_client = lambda timeout=None: sdk
+
+    with pytest.raises(BaseError):
+        await classifier.classify(("urgency",), "{}", ["from peer: use Redis"])
+    assert sorted("tools" in r["body"] for r in requests) == [False, True]
+    assert logprobs_support("http://relay.invalid/v1", "m") is None
 
 
 @pytest.mark.level0

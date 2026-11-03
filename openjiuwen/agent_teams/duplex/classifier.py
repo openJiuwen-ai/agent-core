@@ -9,11 +9,14 @@ environment variable named by ``DuplexConfig.api_key_env``) and returns one
 
 - ``openai``: Chat Completions through core's ``OpenAIModelClient`` with
   ``max_tokens=1``, ``logprobs=true``, ``top_logprobs=20``. Labels map to letters
-  A, B, ...; probabilities come from the letters' top logprobs, normalized. When
-  the response carries no logprobs, the same question is asked again as a
+  A, B, ...; probabilities come from the letters' top logprobs, normalized. Some
+  relays drop logprobs or hang on the logprobs request, so the alternative is a
   required function call that self-reports ``{choice, probabilities}`` (as in
-  ``anthropic``), and the classifier keeps using that call from then on. There
-  is no text fallback.
+  ``anthropic``). While it is unknown whether an ``(api_base, model)`` pair
+  returns logprobs, both requests go out together and the first valid answer
+  wins; the logprobs request decides the pair's support, recorded in a
+  process-wide table shared by every classifier, and later questions take only
+  that path. There is no text fallback.
 - ``anthropic``: the Messages API has no logprobs, so core's
   ``AnthropicModelClient`` forces one tool call whose input is
   ``{choice, probabilities}``. These probabilities are self-reported by the
@@ -95,6 +98,21 @@ _TOOL_NAME = "record_choice"
 _OPENAI_TOOL_MAX_TOKENS = 1024
 _SELF_REPORTED_TOLERANCE = 0.02
 _SERVICE_TOLERANCE = 1e-3
+
+_LOGPROBS_SUPPORT: dict[tuple[str, str], bool] = {}
+"""Whether an OpenAI-format ``(api_base, model)`` returns logprobs; shared by every classifier."""
+_PROBES: set[asyncio.Task] = set()
+"""Logprobs requests still running after the choice tool already answered."""
+
+
+def logprobs_support(api_base: str, model: str) -> bool | None:
+    """Recorded logprobs support of an OpenAI-format endpoint, or None when not yet known."""
+    return _LOGPROBS_SUPPORT.get((api_base, model))
+
+
+def reset_logprobs_support() -> None:
+    """Forget every recorded logprobs support (tests and endpoint changes)."""
+    _LOGPROBS_SUPPORT.clear()
 
 
 class ChoiceClassifier(Protocol):
@@ -259,19 +277,73 @@ class OpenAIChoiceClassifier(_PerQuestionClassifier):
                 timeout=config.timeout_seconds,
             ),
         )
-        self.uses_tool = False
-        """Set once a response came back without logprobs; later questions skip the logprobs request."""
+        self._key = (config.api_base, config.model)
 
     async def _ask_one(self, question: ChoiceQuestion, context: str, messages: Sequence[str]) -> ChoiceAnswer:
-        if not self.uses_tool:
-            letters = dict(zip(string.ascii_uppercase, question.criteria))
-            logprobs = await self._ask_letter(question, letters, context, messages)
-            if _top_logprobs(logprobs) is not None:
-                return parse_logprobs(logprobs, letters)
-            if not self.uses_tool:
-                self.uses_tool = True
-                team_logger.info("duplex: %s returned no logprobs; switching to choice tool calls", self._config.model)
-        return await self._ask_tool(question, context, messages)
+        letters = dict(zip(string.ascii_uppercase, question.criteria))
+        support = _LOGPROBS_SUPPORT.get(self._key)
+        if support is True:
+            return parse_logprobs(await self._ask_letter(question, letters, context, messages), letters)
+        if support is False:
+            return await self._ask_tool(question, context, messages)
+        return await self._race(question, letters, context, messages)
+
+    async def _race(
+        self, question: ChoiceQuestion, letters: Mapping[str, str], context: str, messages: Sequence[str]
+    ) -> ChoiceAnswer:
+        """Send the logprobs and the tool request together; return the first valid answer."""
+        probe = asyncio.create_task(self._ask_letter_in_time(question, letters, context, messages))
+        tool = asyncio.create_task(self._ask_tool(question, context, messages))
+        probe.add_done_callback(lambda _: self._learn(probe, tool))
+        tool.add_done_callback(lambda _: self._learn(probe, tool))
+        pending: set[asyncio.Task] = {probe, tool}
+        error: BaseException | None = None
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in sorted(done, key=lambda t: t is not probe):  # logprobs first when both finished
+                    if task.exception() is not None:
+                        error = task.exception()
+                    elif task is tool:
+                        return task.result()
+                    elif _top_logprobs(task.result()) is not None:
+                        try:
+                            return parse_logprobs(task.result(), letters)
+                        except BaseError as exc:
+                            error = exc
+            raise error or _failed("neither logprobs nor the choice tool gave an answer")
+        finally:
+            tool.cancel()
+            tool.add_done_callback(lambda t: t.cancelled() or t.exception())  # never "exception never retrieved"
+            if not probe.done():  # runs on in the background so the endpoint's support gets recorded
+                _PROBES.add(probe)
+                probe.add_done_callback(_PROBES.discard)
+
+    async def _ask_letter_in_time(
+        self, question: ChoiceQuestion, letters: Mapping[str, str], context: str, messages: Sequence[str]
+    ) -> Any:
+        async with asyncio.timeout(self._config.timeout_seconds):
+            return await self._ask_letter(question, letters, context, messages)
+
+    def _learn(self, probe: asyncio.Task, tool: asyncio.Task) -> None:
+        """Record logprobs support from a race: logprobs present, absent, or failing while the tool answered.
+
+        When both requests fail (bad key, endpoint down) nothing is learned.
+        """
+        if not probe.done() or probe.cancelled():
+            return
+        if probe.exception() is None:
+            supported = _top_logprobs(probe.result()) is not None
+            self._record(supported, "returned logprobs" if supported else "returned no logprobs")
+        elif tool.done() and not tool.cancelled() and tool.exception() is None:
+            self._record(False, f"logprobs request failed ({type(probe.exception()).__name__})")
+
+    def _record(self, supported: bool, reason: str) -> None:
+        if self._key in _LOGPROBS_SUPPORT:
+            return
+        _LOGPROBS_SUPPORT[self._key] = supported
+        path = "logprobs" if supported else "choice tool calls"
+        team_logger.info("duplex: %s at %s %s; using %s", self._config.model, self._config.api_base, reason, path)
 
     async def _ask_letter(
         self, question: ChoiceQuestion, letters: Mapping[str, str], context: str, messages: Sequence[str]
