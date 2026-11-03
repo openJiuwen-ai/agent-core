@@ -951,8 +951,22 @@ class AvatarSessionManager:
                 member_name=state.member_name,
                 display_name=opts.get("label") or state.member_name,
             )
-            with execution_subject_scope(avatar_subject):
-                await harness.start(team_session=team_session)
+            from openjiuwen.extensions.observability.span_context import (
+                bind_root_span_context,
+                get_root_span,
+            )
+
+            team_root = (
+                get_root_span(session_id=self._session_id)
+                if self._session_id
+                else None
+            )
+            # The avatar callback looks up by its child session id. Bind the
+            # owning Team root only in the context copied by its supervisor;
+            # child ids are not globally unique across concurrent Team runs.
+            with bind_root_span_context(team_root, session_id=state.session_id):
+                with execution_subject_scope(avatar_subject):
+                    await harness.start(team_session=team_session)
             if fork_data is not None and fork_data.get("messages"):
                 await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(

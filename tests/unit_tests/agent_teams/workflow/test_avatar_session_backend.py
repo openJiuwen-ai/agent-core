@@ -1266,12 +1266,24 @@ def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatc
     """The avatar's supervisor starts under a ``team_member`` subject named by its label."""
     from openjiuwen.agent_teams.harness import team_harness as th_mod
     from openjiuwen.harness.execution_subject import current_execution_subject
+    from openjiuwen.extensions.observability.span_context import (
+        clear_root_span,
+        get_root_span,
+        reset_state,
+        set_root_span,
+    )
+    from opentelemetry.sdk.trace import TracerProvider
 
     start_subjects: list = []
+    start_roots: list = []
+    provider = TracerProvider()
+    team_root = provider.get_tracer("avatar-observability-test").start_span("team.t")
+    set_root_span(team_root, session_id="product-sess")
 
     class _SubjectRecordingHarness(_FakeHarness):
         async def start(self, *, team_session=None) -> None:
             start_subjects.append(current_execution_subject())
+            start_roots.append(get_root_span(session_id=team_session.get_session_id()))
             await super().start(team_session=team_session)
 
     def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
@@ -1289,13 +1301,20 @@ def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatc
         await mgr.aclose()
         return sid
 
-    sid = asyncio.run(scenario())
+    try:
+        sid = asyncio.run(scenario())
+    finally:
+        clear_root_span(session_id="product-sess", expected_span=team_root)
+        team_root.end()
+        reset_state()
+        provider.shutdown()
 
     subject = start_subjects[0]
     assert subject.subject_id == f"team-member:product-sess:t:{sid}"
     assert subject.display_name == "sre"
     assert subject.kind == "team_member"
     assert subject.session_id == "product-sess"
+    assert start_roots == [team_root]
     assert current_execution_subject() is None
 
 
