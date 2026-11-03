@@ -69,26 +69,34 @@ def _silent(_message: str) -> None:
     return None
 
 
-async def _await_uncancellable(write: Callable[[], Any]) -> None:
-    """Await a terminal-record write so task cancellation cannot kill it.
+async def _await_terminal_write(write: Callable[[], Any]) -> None:
+    """Await a terminal-record write with cancellation deferred to after it.
 
     The controller's three-step abort sets ``abort_event`` and then cancels the
-    engine task; when the abort checkpoint raises ``WorkflowAborted`` before the
-    cancel bites, the pending cancellation lands exactly on the seal/pause-write
+    engine task; the pending cancellation can land on the seal/pause-write
     await inside the exception handler (a second teardown cancel can land
     mid-write too). A cancelled coroutine cannot be resumed, so the write runs
-    in its own shielded task while this side keeps un-cancelling and re-awaiting
-    until the record is on disk. Only then is the cancellation allowed through.
+    in its own shielded task while this side keeps deferring the cancellation
+    until the record is on disk. A cancellation that arrived while the record
+    was in flight is re-raised once the write completes, so the stop request is
+    never dropped (CancelledError must not be swallowed silently).
     """
     task = asyncio.get_running_loop().create_task(write())
+    cancelled = False
     while True:
         try:
             await asyncio.shield(task)
-            return
+            break
         except asyncio.CancelledError:
+            cancelled = True
             current = asyncio.current_task()
             if current is not None:
                 current.uncancel()
+    if cancelled:
+        # The record is on disk now: let the stop request through. Without this
+        # re-raise the controller's cancel would be swallowed and the async-tool
+        # task would run on to natural completion instead of terminating.
+        raise asyncio.CancelledError()
 
 
 async def _write_seal_record(rt, *, terminal_status: str) -> None:
@@ -103,7 +111,7 @@ async def _write_seal_record(rt, *, terminal_status: str) -> None:
     """
     if rt.journal is None or rt.journal.wal_path is None:
         return
-    await _await_uncancellable(lambda: rt.journal.write_run_record(
+    await _await_terminal_write(lambda: rt.journal.write_run_record(
         rt.run_id or "", "seal",
         {"terminal_status": terminal_status, "final_spent": rt.workflow_budget.spent},
     ))
@@ -128,7 +136,7 @@ async def _write_pause_record(rt, *, pause_reason: str) -> None:
             "label": cur.get("label"),
             "tokens": rt.workflow_budget.spent - (cur.get("started_spent") or 0),
         }
-    await _await_uncancellable(lambda: rt.journal.write_run_record(
+    await _await_terminal_write(lambda: rt.journal.write_run_record(
         rt.run_id or "", "pause",
         {
             "pause_reason": pause_reason,

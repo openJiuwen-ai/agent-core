@@ -341,6 +341,16 @@ def _external_swarmflow_host(
         member_context.extras = dict(member_context.extras)
     else:
         member_context = None
+    # SwarmflowTool reads the external-CLI allowlist and expert table from its
+    # parent_agent.build_context.extras (the same keys the leader's
+    # inject_team_handles writes). Re-host both from the shared infra here, or
+    # the member's inner agent(agent_type=...) / agent_template nodes resolve
+    # against an empty allowlist and are rejected as "not declared".
+    if member_context is not None:
+        from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+        member_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = infra.external_cli_agents
+        member_context.extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = infra.expert_specs
     host = ExternalSwarmflowHost(
         build_context=member_context,
         background_task_controller=team_agent.background_task_controller,

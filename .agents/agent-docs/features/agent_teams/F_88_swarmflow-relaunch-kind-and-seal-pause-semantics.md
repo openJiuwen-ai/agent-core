@@ -82,6 +82,30 @@ stop 落在 LLM 调用中途时，`WorkflowAborted` 的 checkpoint（入口 gate
 `rt.abort_event.reason == "stop"`，若然则 `task.uncancel()` 后补写 seal 记录，再 raise——
 保证 stop 永远落 seal，resume 不回放已停的 run。
 
+### 终态写入的取消延迟（`_await_terminal_write`）
+
+seal/pause 记录是 run 终态事实，必须先于取消落地，否则同 run_id relaunch 会回放已停 run
+（seal 丢失）或恢复计费漂移（pause 丢失）。但控制器三步 abort 的第 3 步 cancel 与
+checkpoint 已抛出的 `WorkflowAborted` 异常处理器并发：pending cancellation 恰好落在
+handler 内 seal/pause 写入的 await 上（成员 teardown 还可能补第二刀）。asyncio 的
+cancelled 协程不可恢复，`asyncio.shield` 也不够——shield 自身被 cancel 时协程已死，
+没有后续代码能重新挂回 await。
+
+`_await_terminal_write`（`workflow/engine/runner.py`）的语义两条，缺一不可：
+
+1. **记录必须落盘**：写入放独立 task，shield 挂接，`uncancel()` 循环卸掉飞进来的
+   cancel 直到写入完成（cancel 可连发，故循环）。
+2. **取消不丢**（reviewer 曾误读为可省）：若写盘途中捕获过 CancelledError，写完后
+   **补一次 `raise CancelledError`**。不补的话，控制器 stop 的取消请求被静默吞掉，
+   async-tool 任务不终止而是跑到自然结束——`async_tools._run` 只认 CancelledError
+   打 cancelled 终态，吞掉后 record 标记错误、上层等待不解除。
+
+契约：seal/pause 记录完整性优先（写盘先行），stop 请求次之（迟到但不缺席）。
+对照实验（把 helper 退化成裸 `await`）：三个竞态测试中记录确实落不了盘
+（cancel 把 `_append_wal` 内的 await 杀死，写协程挂在半途）——证明该 helper 不是
+多余防御，是必要闸门。单 cancel 与双 cancel 两条时序均有测试锁定
+（`test_pause_resume.py::test_stop_seal_survives_cancel_during_seal_write` 参数化）。
+
 ### seal guard
 
 `SwarmflowTool._seal_guard(script_path, resume_id)`：invoke 时若 `resume_id` 指向一个已 seal
