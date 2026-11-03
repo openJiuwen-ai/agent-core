@@ -58,6 +58,22 @@ async def test_start_keeps_a_user_provided_task_completion_rail() -> None:
         await agent.stop()
 
 
+
+@pytest.mark.asyncio
+async def test_start_drops_a_second_queued_task_completion_rail() -> None:
+    agent = create_deep_agent(model=_model(), auto_create_workspace=False, enable_task_loop=True)
+    first = _task_completion_rails(agent)[0]
+    # config.rails is queued without add_rail()'s dedup, so a second instance can sit in the queue.
+    agent._pending_rails.append(TaskCompletionRail(goal_language="en"))
+
+    await agent.start()
+    try:
+        await agent._ensure_initialized()
+        assert _task_completion_rails(agent) == [first]
+        assert agent._task_completion_rail is first
+    finally:
+        await agent.stop()
+
 @pytest.mark.asyncio
 async def test_start_without_task_loop_still_registers_a_task_completion_rail() -> None:
     agent = create_deep_agent(model=_model(), auto_create_workspace=False)
