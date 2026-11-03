@@ -108,7 +108,7 @@ async def test_spawn_external_cli_agent_unknown_adapter_fails(make_backend):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_spawn_external_cli_agent_prompt_is_optional(make_backend):
+async def test_spawn_external_cli_agent_prompt_is_optional(make_backend, sdk_installed):
     """Like a native teammate, a CLI member without a private prompt works from the team policy alone."""
     backend = make_backend(["claude"])
     result = await backend.spawn_external_cli_agent(

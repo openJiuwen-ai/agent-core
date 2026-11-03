@@ -44,6 +44,14 @@ def _claude_spec(**overrides: object) -> ExternalCliAgentSpec:
     return ExternalCliAgentSpec(**values)
 
 
+@pytest.fixture
+def sdk_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registration tests independent of optional external CLI SDKs."""
+    from openjiuwen.agent_teams.external.cli_agent import backends
+
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
+
+
 @pytest_asyncio.fixture
 async def db() -> AsyncIterator[TeamDatabase]:
     token = set_session_id("builtin-session")
@@ -131,6 +139,7 @@ async def test_resolve_builtin_model_checks_catalog_and_applies_default_effort(d
 
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_spawn_persists_the_builtin_model(db: TeamDatabase) -> None:
     backend = _backend(db, _claude_spec())
     result = await _spawn(backend, builtin_model="sonnet", effort="low")
@@ -228,6 +237,7 @@ async def test_builtin_parameters_and_prose_follow_the_catalog_gate(db: TeamData
 
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_set_member_model_persists_then_switches_the_live_member(db: TeamDatabase) -> None:
     backend = _backend(db, _claude_spec())
     assert (await _spawn(backend, builtin_model="sonnet", effort="low")).success
@@ -258,6 +268,7 @@ async def test_set_member_model_persists_then_switches_the_live_member(db: TeamD
 
 @pytest.mark.level1
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_set_member_model_without_a_live_member_applies_at_next_start(db: TeamDatabase) -> None:
     backend = _backend(db, _claude_spec())
     assert (await _spawn(backend)).success

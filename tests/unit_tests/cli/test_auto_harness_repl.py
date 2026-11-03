@@ -23,6 +23,24 @@ from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
 )
 
 
+@pytest.fixture(autouse=True)
+def github_cli_ready(monkeypatch):
+    """Keep entry-point tests from invoking host authentication or package managers."""
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra import github_cli
+
+    monkeypatch.setattr(
+        github_cli,
+        "ensure_github_cli_ready",
+        lambda emit: github_cli.GitHubCliStatus(available=True, authenticated=True),
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_workspace(tmp_path, monkeypatch):
+    """Natural-language commands derive their workspace from the current directory."""
+    monkeypatch.chdir(tmp_path)
+
+
 def _install_prompt_toolkit_stubs() -> dict[str, types.ModuleType]:
     prompt_toolkit = types.ModuleType("prompt_toolkit")
     completion = types.ModuleType("prompt_toolkit.completion")
