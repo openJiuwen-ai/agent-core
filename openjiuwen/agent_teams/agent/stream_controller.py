@@ -30,6 +30,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.models.pool import INTELLI_ROUTER_UNIFIED_MODEL
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -64,6 +65,27 @@ _TEAM_IDLE_DEBOUNCE_SECONDS = 2.0
 _RETRY_QUERY = "刚才有异常状况，继续执行"
 _TASK_FAILED_PAYLOAD_TYPE = "task_failed"
 _ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
+# Stream chunks a model-group member's forwarder reads to name the model that
+# actually ran (see StreamController._name_model_group_model).
+_LLM_ROUTE_CHUNK_TYPE = "llm_route"
+_CONTEXT_USAGE_CHUNK_TYPE = "context.usage"
+
+
+def _rename_logical_model(value: Any, name: str) -> Any:
+    """Copy ``value`` with every ``"model": "*"`` entry renamed to ``name``.
+
+    A usage snapshot repeats the model at the top level and inside nested
+    aggregation keys (``kv_cache.session.aggregation_key``); all of them are
+    renamed so no ``"*"`` reaches a reader.
+    """
+    if isinstance(value, dict):
+        return {
+            key: name if key == "model" and item == INTELLI_ROUTER_UNIFIED_MODEL else _rename_logical_model(item, name)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_rename_logical_model(item, name) for item in value]
+    return value
 
 
 def _detect_task_failed(chunk: Any) -> "tuple[int | None, str] | None":
@@ -108,6 +130,8 @@ class StreamController:
         request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
         member_startup_reconciler: Optional[Callable[[], Awaitable[None]]] = None,
         task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,
+        model_group_label_getter: Optional[Callable[[], Optional[str]]] = None,
+        served_model_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
     ):
         self._get_blueprint = blueprint_getter
         self._state = state
@@ -132,6 +156,19 @@ class StreamController:
         # work still on the board. None means "unknown", which is what every
         # non-leader passes; it never schedules a marker anyway.
         self._task_board_probe = task_board_probe
+        # Model-group naming. A model-group pool runs every member on the
+        # logical "*" model and the router picks the real one per call, so the
+        # forwarder reads the route events off the stream to name what ran:
+        # the label getter returns the group's name (None outside a model
+        # group, which turns all of this off), the recorder persists a changed
+        # routed model so the leader's roster can show it.
+        self._model_group_label_getter = model_group_label_getter
+        self._served_model_recorder = served_model_recorder
+        # Route selected since the last post-call usage snapshot, i.e. the
+        # route of the model call that snapshot reports on.
+        self._pending_route: Optional[dict[str, Any]] = None
+        # Routed model last persisted by the recorder.
+        self._recorded_model: Optional[str] = None
 
         self.stream_queue: Optional[asyncio.Queue] = None
         # Observers fan-out chunks to external consumers (e.g. leader's
@@ -140,6 +177,8 @@ class StreamController:
         self._chunk_observers: list[ChunkObserver] = []
         # Background task pumping runtime.outputs() into the stream; per cycle.
         self._forward_task: Optional[asyncio.Task] = None
+        # In-flight served-model writes, kept so failures are observed.
+        self._served_model_tasks: set[asyncio.Task] = set()
         # Pending debounced team-idle marker (leader only). At most one is
         # ever alive: arming replaces, any movement cancels, and both stream
         # teardown paths cancel. See _schedule / _cancel below.
@@ -191,6 +230,74 @@ class StreamController:
             return chunk.model_copy(update={"source_member": member_name, "role": role})
         return TeamOutputSchema.from_output(chunk, source_member=member_name, role=role)
 
+    async def _name_model_group_model(self, chunk: Any) -> Any:
+        """Replace the logical ``"*"`` model with the model a model group ran.
+
+        Only active on a model-group pool. A selected ``llm_route`` event is
+        remembered (and persisted when the routed model changed); the next
+        post-call ``context.usage`` snapshot -- the one for that same call --
+        names its model and route. Any other ``"*"`` snapshot (no route was
+        selected, or no model call behind it) names the model group instead.
+        Every other chunk passes through untouched.
+        """
+        chunk_type = getattr(chunk, "type", None)
+        if chunk_type not in (_LLM_ROUTE_CHUNK_TYPE, _CONTEXT_USAGE_CHUNK_TYPE):
+            return chunk
+        payload = getattr(chunk, "payload", None)
+        if not isinstance(payload, dict) or self._model_group_label_getter is None:
+            return chunk
+        label = self._model_group_label_getter()
+        if label is None:
+            return chunk
+        if chunk_type == _LLM_ROUTE_CHUNK_TYPE:
+            if payload.get("status") == "selected" and payload.get("model_name"):
+                self._pending_route = payload
+                # The roster names models the way the group offers them (the
+                # same name the routed prompt received), not by provider name.
+                # The member-row write rides a background task: the stream the
+                # user is reading never waits for it.
+                self._record_served_model_soon(str(payload.get("routed_model") or payload["model_name"]))
+            return chunk
+        if payload.get("model") != INTELLI_ROUTER_UNIFIED_MODEL:
+            return chunk
+        route = None
+        if payload.get("phase") == "post_call":
+            route, self._pending_route = self._pending_route, None
+        # Name the model the way the group offers it (the name the routed
+        # prompt itself received); the provider-facing name is the fallback.
+        name = str(route.get("routed_model") or route["model_name"]) if route else label
+        named = _rename_logical_model(payload, name)
+        if route and route.get("route_id") and not named.get("deployment"):
+            named["deployment"] = str(route["route_id"])
+        return chunk.model_copy(update={"payload": named})
+
+    def _record_served_model_soon(self, model_name: str) -> None:
+        """Record the served model off the stream.
+
+        The write targets the member row in the team DB; it must never hold
+        up the chunk flow the user is reading. The task reference is kept so
+        a failure is observed rather than collected mid-flight.
+        """
+        task = asyncio.create_task(self._record_served_model(model_name))
+        self._served_model_tasks.add(task)
+        task.add_done_callback(self._served_model_tasks.discard)
+
+    async def _record_served_model(self, model_name: str) -> None:
+        """Persist ``model_name`` as this member's routed model when it changed."""
+        if self._served_model_recorder is None or model_name == self._recorded_model:
+            return
+        try:
+            recorded = await self._served_model_recorder(model_name)
+        except Exception:
+            team_logger.warning(
+                "[{}] failed to record routed model {}", self._member_name() or "?", model_name, exc_info=True
+            )
+            return
+        # A write that found no member row (the leader before build_team) is
+        # retried on the next route instead of being treated as done.
+        if recorded:
+            self._recorded_model = model_name
+
     # ------------------------------------------------------------------
     # Lifecycle: attach to / detach from the runtime for one run cycle
     # ------------------------------------------------------------------
@@ -219,6 +326,12 @@ class StreamController:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # Let in-flight served-model writes finish: they are quick and the
+        # record is cheaper to complete than to re-derive on the next route.
+        for write_task in list(self._served_model_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await write_task
+        self._served_model_tasks.clear()
 
     async def _forward_outputs(self) -> None:
         """Pump runtime.outputs() into the stream queue + observers for the cycle."""
@@ -234,6 +347,7 @@ class StreamController:
                     continue
                 if self._swallow_failed_round:
                     continue
+                chunk = await self._name_model_group_model(chunk)
                 tagged = self._tag_chunk(chunk)
                 if self.stream_queue is not None:
                     await self.stream_queue.put(tagged)

@@ -466,6 +466,10 @@ class _FakeTeamBackend:
         self.team_mtime_calls += 1
         return self._team_mtime
 
+    def model_group_label(self) -> str | None:
+        """A plain model pool: the leader roster names no models."""
+        return None
+
     async def get_team_updated_at_state(self) -> tuple[int, bool]:
         """Team-card mtime probe the team-info block's re-announce records.
 

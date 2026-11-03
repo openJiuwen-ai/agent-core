@@ -105,9 +105,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "（改用其他模型新建成员接手 / 等待恢复后重试 / 修复配置后重试 / 终止任务）；"
             "用户答复前，不要再给该成员派发任务或催促"
         ),
-        "reliability.model_route_switched": "模型组中{model}{reason}，已自动改用{alternatives}",
+        "reliability.model_route_switched": "模型组中{model}{reason}，已自动切换到组内其他可用模型",
         "reliability.model_route_interrupted": (
-            "模型组中{model}{reason}，本轮已中断，将自动重跑并由{alternatives}重新生成"
+            "模型组中{model}{reason}，本轮已中断，将自动重跑并由组内其他可用模型重新生成"
         ),
         "reliability.model_route_other": "组内其他模型",
         "reliability.model_not_in_group": "指定的模型不在当前模型组中",
@@ -595,11 +595,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "until the user answers, do not assign work to or nudge this member"
         ),
         "reliability.model_route_switched": (
-            "{model} in the model group {reason}; switched to {alternatives} automatically"
+            "{model} in the model group {reason}; switched to another available model "
+            "in the group automatically"
         ),
         "reliability.model_route_interrupted": (
             "{model} in the model group {reason}; this round was interrupted and will be re-run on "
-            "{alternatives} automatically"
+            "another available model in the group automatically"
         ),
         "reliability.model_route_other": "another model in the group",
         "reliability.model_not_in_group": "the pinned model is not in the current model group",

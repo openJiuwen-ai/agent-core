@@ -30,6 +30,18 @@ class MemberBuiltinModel(BaseModel):
     effort: str | None = None
 
 
+class MemberServedModel(BaseModel):
+    """A model a model-group member was routed to, from ``since`` (ms epoch) on."""
+
+    model: str
+    since: int
+
+
+# Served-model history entries kept per member: enough to tell a user about
+# recent switches, bounded so a flapping route cannot grow the row.
+MAX_SERVED_MODELS = 5
+
+
 class MemberWorktreeOptions(BaseModel):
     """Worktree isolation options stored on a team member."""
 
@@ -70,6 +82,13 @@ class TeamMemberOptions(BaseModel):
     model_ref: MemberModelRef | None = None
     fallback_model_ref: MemberModelRef | None = None
     builtin_model: MemberBuiltinModel | None = None
+    served_models: list[MemberServedModel] | None = Field(
+        default=None,
+        description=(
+            "Models the team's model group routed this member to, oldest first, one "
+            "entry per change of model (bounded). Written only on a model-group pool."
+        ),
+    )
     cli_agent: str | None = None
     worktree: MemberWorktreeOptions | None = None
     lifetime: MemberLifetime | None = Field(
@@ -209,6 +228,20 @@ def set_member_builtin_model(raw_options: str | None, builtin_model: MemberBuilt
     return dump_member_options(parsed)
 
 
+def append_member_served_model(raw_options: str | None, model: str, since: int) -> str | None:
+    """Record that a model-group member was routed to ``model`` from ``since`` on.
+
+    A model equal to the latest entry is not a change and leaves the options
+    as they are; the history keeps the newest ``MAX_SERVED_MODELS`` entries.
+    """
+    parsed = load_member_options(raw_options)
+    history = parsed.served_models or []
+    if history and history[-1].model == model:
+        return raw_options
+    parsed.served_models = [*history, MemberServedModel(model=model, since=since)][-MAX_SERVED_MODELS:]
+    return dump_member_options(parsed)
+
+
 def set_member_permissions_override(
     raw_options: str | None,
     *,
@@ -252,6 +285,11 @@ def promote_member_fallback_model(raw_options: str | None) -> str | None:
 def get_member_builtin_model(record: object) -> MemberBuiltinModel | None:
     """Return the member's built-in CLI model selection from options."""
     return get_member_options(record).builtin_model
+
+
+def get_member_served_models(record: object) -> list[MemberServedModel]:
+    """Return the models the team's model group routed the member to, oldest first."""
+    return get_member_options(record).served_models or []
 
 
 def get_member_cli_agent(record: object) -> str | None:

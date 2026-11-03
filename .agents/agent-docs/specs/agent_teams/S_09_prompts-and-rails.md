@@ -18,8 +18,8 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-10-24 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md` |
+| 最近一次修订日期 | 2026-11-03 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md`、`F_20261103_0928_model-group-routed-model.md` |
 
 ## 范围 / 边界
 
@@ -211,6 +211,13 @@ author_email: chengshuo5@huawei.com
     ReAct loop 触发的事件（`BEFORE_MODEL_CALL` / `ON_USER_MESSAGE` /
     `BEFORE_STEERING_DRAIN` …）一律进 `_BRIDGE_EVENTS`。
     `tests/unit_tests/harness/test_deep_agent_rail_event_routing.py` 强制这一条。
+31. **名册成员行携带模型组与服务模型历史（F_20261103_0928）**：模型组池上的成员行（leader 视角）
+    在 display_name / desc / role 之外追加 `model_group=`（组显示名，目录缺失回退组 id）与
+    `models_used=`（`MemberServedModel` 历史，去重、至多 5 条，最新一条标 latest call，未调用显示
+    none yet）。数据源是 `StreamController` 在 `llm_route(selected)` 上的后台记录
+    （`update_member_served_model`，只写去重后的变化、找不到成员行时下次路由重试），写成功即 bump
+    `updated_at` 触发 `TeamContextTracker` 的名册 diff 重投。leader 不列自己——它读
+    runtime.setting 的实时占位符（跨仓契约，见 F 文档）。
 
 ## 接口契约
 

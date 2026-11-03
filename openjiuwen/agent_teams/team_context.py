@@ -80,7 +80,9 @@ from openjiuwen.agent_teams.prompts.messages import (
     diff_roster,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.member_options import MemberServedModel, get_member_served_models
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -108,6 +110,20 @@ ROSTER_CHANGE_EVENT_KIND = "roster-change"
 
 # <team-note> kind carried by every roster message.
 ROSTER_NOTE_KIND = "announcement-only"
+
+
+def _render_served_models(history: list[MemberServedModel]) -> str:
+    """Render a member's served-model history for the leader's roster.
+
+    Oldest first, each with the absolute time it took over (the roster stays
+    in the conversation, so no relative time); the newest one is marked as
+    the model of the member's latest call.
+    """
+    if not history:
+        return "none yet"
+    parts = [f"{item.model} (since {format_absolute_time(item.since)})" for item in history]
+    parts[-1] = parts[-1][:-1] + ", latest call)"
+    return ", ".join(parts)
 
 
 class TeamContextTracker:
@@ -578,19 +594,31 @@ class TeamContextTracker:
         return self._render_roster_event(ROSTER_CHANGE_EVENT_KIND, body)
 
     async def _list_roster(self) -> list[dict[str, Any]]:
-        """Read the peer roster (the backend already excludes this member)."""
+        """Read the peer roster (the backend already excludes this member).
+
+        On a model-group pool the leader's roster also lists the models each
+        member's calls were routed to, with when each took over -- the pool's
+        ``"*"`` hides which model a member actually runs on, and the leader
+        answers "which model does X use" from here. The leader's own model is
+        not listed: its runtime prompt names the model of each call.
+        """
         if self._team_backend is None:
             return []
         members = await self._team_backend.list_members()
-        return [
-            {
+        label = self._team_backend.model_group_label() if self._role == TeamRole.LEADER else None
+        roster = []
+        for member in members:
+            entry = {
                 "member_name": member.member_name,
                 "display_name": member.display_name,
                 "desc": member.desc or "",
                 "role": member.role,
             }
-            for member in members
-        ]
+            if label is not None:
+                entry["model_group"] = label
+                entry["models_used"] = _render_served_models(get_member_served_models(member))
+            roster.append(entry)
+        return roster
 
     def _render_roster_snapshot(self, roster: list[dict[str, Any]]) -> str | None:
         """Render a full roster event, or ``None`` when there are no peers."""
