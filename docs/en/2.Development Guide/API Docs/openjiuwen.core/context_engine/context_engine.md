@@ -36,7 +36,7 @@ async create_context(
 ) -> ModelContext:
 ```
 
-Create or retrieve the `ModelContext` corresponding to the specified session and context_id. If it already exists in the pool, load the session state and return it; otherwise, create a new one and cache it.
+Create or retrieve the `ModelContext` corresponding to the specified session and context_id. If it already exists in the pool, load the session state and return it; otherwise, create a new one and cache it. When the cached context has no processors (for example, it was created only to seed `history_messages`), the `processors` passed in this call are attached to it; processors it already has are kept.
 
 **Parameters**:
 
