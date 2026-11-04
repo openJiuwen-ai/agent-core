@@ -163,3 +163,9 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
 装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
 见 [F_97](../../../.agents/agent-docs/features/agent_teams/F_97_native-harness-protocol-adapter.md)。
+
+## 成员工具环境
+
+NativeHarness 装配绑定成员 BuildContext 的 `resolve_execution_environment`，由 AbilityManager
+在每次工具调用开始时解析。team 会话设置由 `TeamDatabase.session_settings` 保存版本，
+平台可按调用读取，因此冷恢复和跨进程成员不依赖首轮请求上下文。见 `F_20261104_1721_session-execution-settings`。

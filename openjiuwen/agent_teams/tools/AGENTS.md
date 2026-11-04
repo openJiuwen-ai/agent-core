@@ -549,3 +549,6 @@ gate `builtin_models_enabled()`，F_113；参数行紧跟在 `external_cli_usage
 
 所有团队工具 ID 用 `team.{name}` 格式（如 `team.send_message`、`team.create_task`）。加新工具
 时保持一致 —— 下游接线（rail、日志、UI 标签）会解析这个前缀。
+
+- `database/session_settings_dao.py`：宿主拥有的会话 JSON 设置，独立静态表 `team_session_settings`；
+  按 session_id 查询，initialize 只写缺失行，replace 做版本 CAS；不作为模型工具暴露（F_20261104_1721_session-execution-settings）。

@@ -19,7 +19,7 @@ author_email: yangzequ1@huawei.com
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
 | 最近一次修订日期 | 2026-11-05 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
+| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata、F_20261104_1720_tool-execution-environment |
 
 ## 范围 / 边界
 
@@ -836,3 +836,14 @@ See F_27 for replay boundaries and validation results.
   错误，提示模型调用可能已生效、先确认现状。客户端调用等待时用户发纯文本，该调用以 `cancelled`
   结束，文本附在结果里交给模型。
 - 示例：`examples/client_tool/client_tool_demo.py`。
+
+## 执行环境作用域（F_20261104_1720_tool-execution-environment）
+
+1. 成员身份由所属 harness 的 BuildContext 解析，不从共享 session ID 或模型参数推断。
+2. `AbilityManager.execution_environment_resolver` 在每次实际工具调用前获取不可变快照；
+   `execution_environment_scope` 覆盖完整调用，取消和异常后恢复。无 resolver 时显式绑定空值。
+3. `ExecutionEnvironment.values` 是默认增量，显式参数覆盖默认值，`overrides` 是最高优先级策略。
+   null 表示从执行端基础环境删除变量。变量名采用可移植的 shell 标识符格式。
+4. 本地执行复制基础环境；沙箱只接收增量。普通、流式、后台命令使用相同规则。
+5. 通用执行层不认识 Git 身份；平台通过 resolver 提供策略，不改共享工具实例和 os.environ。
+6. 进程级环境、外部服务或不经过此调用链的独立 CLI 不会被自动配置。

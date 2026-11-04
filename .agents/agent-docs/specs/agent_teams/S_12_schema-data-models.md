@@ -1043,3 +1043,12 @@ TeamRuntimeContext.goal_enabled: bool | None     # 由 options.goal 带入成员
   `TaskListResult` / `MemberOpResult` / `TaskOpResult` / `TaskCreateResult` /
   `GraphMutationResult`；本规约钉死返回模型与写路径结果包装的形状，S_08
   钉死团队工具的描述契约与 ID 命名。
+
+
+## 会话执行设置（F_20261104_1721_session-execution-settings）
+
+静态表 `team_session_settings`：`session_id` 主键、`settings_json` JSON 文本、`version` 整数。
+设置独立于团队行与成员行，首轮 leader 执行工具前即可创建。`SessionSettingsDao.initialize`
+不覆盖已有行；`replace(..., expected_version=...)` 采用 CAS 并递增版本；`get` 返回已提交值。
+表由静态 schema 初始化创建，已有数据库无需修改旧表。全量 runtime-state 清理包含此表。
+暂停、成员重建和 session 动态表释放不删除设置。平台负责 settings JSON 的校验与策略解释。
