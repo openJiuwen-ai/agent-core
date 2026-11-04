@@ -11,6 +11,14 @@ instead of the legacy ``failed``.
 
 Marks expire, and an unmarked cancellation keeps the legacy ``failed``
 behaviour, so this registry never relabels a failure on its own.
+
+Marks are **not consumed** when resolved: a single pause/cancel can cancel
+several processors (including sub-session contexts) that each need to resolve
+the same mark. The flip side is a residual window — until the mark is cleared,
+overwritten, or expired (TTL), any *other* cancellation for that session also
+resolves to the marked cause. Entry points that resume a paused runtime must
+therefore call :func:`clear_cancellation_cause`, and marking entry points
+should only mark when a real cancellation is about to happen.
 """
 
 from __future__ import annotations
@@ -99,6 +107,11 @@ def resolve_cancellation_cause(session_id: object) -> Optional[CancellationCause
 
     Sub-sessions inherit their parent's cause: ``<parent>:<agent>`` (team
     protocol adapter) and ``<parent>_sub_<id>`` (subagent sessions).
+
+    The mark is deliberately left in place: one user action can cancel
+    several processors (including sub-session contexts) that all resolve the
+    same mark. Callers that resume the runtime are responsible for clearing
+    it via :func:`clear_cancellation_cause`.
     """
     sid = _normalize_session_id(session_id)
     if not sid:

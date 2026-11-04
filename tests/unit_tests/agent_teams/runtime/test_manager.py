@@ -705,3 +705,60 @@ class TestActivatePausedModelSelection:
             requested_pool=[self._entry(client_id="second-build", api_key="ROTATED")],
         )
         stop_team.assert_awaited_once_with(team_name="team-a", session_id="session-1")
+
+
+class TestResumeFromPauseClearsCancellationCause:
+    """Resuming a paused team must drop the team-level pause mark.
+
+    ``pause()`` marks the team session so a cancelled compression reports
+    ``paused``. The mark is not consumed on resolve; without an explicit
+    clear on resume, a post-resume internal cancellation inside the TTL
+    window would be misreported as ``user_pause``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_resume_from_pause_clears_pause_mark(self, monkeypatch):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            mark_cancellation_cause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        mark_cancellation_cause("session-1", CancellationCause.PAUSE)
+        try:
+            manager = TeamRuntimeManager()
+            team_spec = SimpleNamespace(model_pool=[], model_pool_strategy="by_model_name")
+            agent = SimpleNamespace(runtime_context=SimpleNamespace(team_spec=team_spec))
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.PAUSED,
+                )
+            )
+            monkeypatch.setattr(
+                manager,
+                "_inspect_session",
+                AsyncMock(return_value=(True, True, None)),
+            )
+            monkeypatch.setattr(manager, "_pre_run_with_inputs", AsyncMock())
+            org_manager = MagicMock()
+            org_manager.ensure_control_tools = AsyncMock()
+            org_manager.ensure_team_binding = AsyncMock()
+            monkeypatch.setattr(manager, "_organization_runtime_manager", org_manager)
+
+            spec = SimpleNamespace(
+                team_name="team-a",
+                model_pool=[],
+                model_pool_strategy="by_model_name",
+            )
+            activation = await manager.activate(spec, "session-1")
+
+            assert activation.agent is agent
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()

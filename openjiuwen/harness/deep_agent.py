@@ -106,7 +106,10 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
-from openjiuwen.harness.tools.subagent._control_registry import release_subagent_control
+from openjiuwen.harness.tools.subagent._control_registry import (
+    _CONTROL_ATTR,
+    release_subagent_control,
+)
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -3708,8 +3711,9 @@ class DeepAgent(BaseAgent):
             session: Parent session whose runtime subagents should be cancelled.
                 Falls back to the bound loop session when omitted.
         """
-        self._mark_cancellation_cause(CancellationCause.CANCEL)
         proposal_session = session or self._loop_session
+        if self._has_in_flight_abort_target(proposal_session):
+            self._mark_cancellation_cause(CancellationCause.CANCEL)
         if self._moa_scope_owner is not None:
             if proposal_session is None:
                 self._moa_scope_owner.close_all("aborted")
@@ -4298,6 +4302,27 @@ class DeepAgent(BaseAgent):
             logger.debug("[DeepAgent] cancel cause not bound to a session", exc_info=True)
             return
         mark_cancellation_cause(session_id, cause)
+
+    def _has_in_flight_abort_target(self, session: Optional[Session]) -> bool:
+        """Whether ``abort()`` has anything it can actually cancel right now.
+
+        The cancellation-cause mark must only be set when a real cancellation
+        is about to happen: a no-op abort would otherwise leave a stale mark
+        that relabels a later internal failure as ``user_cancel`` within the
+        registry TTL. Mirrors the three targets ``abort()`` cancels: the
+        active interaction round, the streaming task-loop background task,
+        and persistent subagent controls held for ``session``.
+        """
+        if self._active_interaction_round is not None:
+            return True
+        stream_task = self._stream_process_task
+        if stream_task is not None and not stream_task.done():
+            return True
+        if session is not None:
+            controls = getattr(self, _CONTROL_ATTR, None) or {}
+            if session.get_session_id() in controls:
+                return True
+        return False
 
     async def _cancel_active_round(
         self,

@@ -46,6 +46,22 @@ def test_clear_drops_the_mark():
     assert resolve_cancellation_cause("session-1") is None
 
 
+def test_resolve_does_not_consume_the_mark():
+    """One mark stays resolvable for every cancellation it causes.
+
+    A pause can cancel several processors (including sub-sessions); each
+    resolution must still see the cause. The residual window ends only via
+    clear / overwrite / TTL expiry — resume paths must call clear.
+    """
+    mark_cancellation_cause("session-1", CancellationCause.PAUSE)
+    assert resolve_cancellation_cause("session-1") is CancellationCause.PAUSE
+    assert resolve_cancellation_cause("session-1:member-a") is CancellationCause.PAUSE
+    assert resolve_cancellation_cause("session-1") is CancellationCause.PAUSE
+    clear_cancellation_cause("session-1")
+    assert resolve_cancellation_cause("session-1") is None
+    assert resolve_cancellation_cause("session-1:member-a") is None
+
+
 def test_expired_mark_is_not_resolved():
     mark_cancellation_cause("session-1", CancellationCause.PAUSE, ttl_seconds=0)
     assert resolve_cancellation_cause("session-1") is None

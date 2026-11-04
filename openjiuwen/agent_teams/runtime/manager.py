@@ -75,6 +75,7 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.context_engine.context.cancellation import (
     CancellationCause,
+    clear_cancellation_cause,
     mark_cancellation_cause,
 )
 from openjiuwen.core.session.agent_team import (
@@ -1338,6 +1339,10 @@ class TeamRuntimeManager:
         if kind is RunActionKind.RESUME_FROM_PAUSE:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
+            # The pause mark set by ``pause()`` is not consumed when resolved
+            # and only expires via TTL. Drop it here so a post-resume internal
+            # cancellation inside the TTL window is not misreported as user_pause.
+            clear_cancellation_cause(team_session.get_session_id())
             await self._pre_run_with_inputs(team_session, inputs)
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
