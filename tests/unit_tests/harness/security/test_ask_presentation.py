@@ -34,6 +34,26 @@ def test_path_ask_uses_path_title_and_write_summary() -> None:
     assert not pres.details
 
 
+def test_delete_rule_with_file_guard_uses_command_summary() -> None:
+    cmd = (
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1; "
+        "rm -rf ~/Desktop/a4p_scratch444.txt"
+    )
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule=(
+            "tiered_policy:builtin:builtin[shell_fs_recursive_or_forced_delete]"
+            "|file_guard:paths"
+        ),
+    )
+    pres = build_permission_ask_presentation("bash", {"command": cmd}, result)
+    assert pres.category == "shell"
+    assert pres.title == "检测到递归或强制删除，需要确认后才能执行"
+    assert pres.summary.startswith("bash:")
+    assert "rm -rf" in pres.summary
+    assert not pres.summary.lower().startswith("read ")
+
+
 def test_builtin_rule_title_names_the_risk() -> None:
     result = PermissionResult(
         permission=PermissionLevel.ASK,

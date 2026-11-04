@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import task_input
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
@@ -70,6 +71,7 @@ class CaseRunner:
         output_dir: str,
         team_skill_ref_path: str | Path | None = None,
         harness_refs: dict[str, str] | None = None,
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> EvaluationCaseTraceRef:
         """Run one case and persist final trace/result artifacts.
 
@@ -164,6 +166,7 @@ class CaseRunner:
                 member_id=member_identity["member_id"],
                 member_role=member_identity["member_role"],
                 role_traces=role_traces,
+                execution_evidence=behavior_trace["execution_evidence"],
             )
             _write_json(normalized_trace_path, normalized_trace)
             behavior_trace["normalized_trace_path"] = str(normalized_trace_path)
@@ -173,9 +176,15 @@ class CaseRunner:
                 case=case,
                 execution_result=execution_result,
                 output_dir=str(case_dir),
+                baseline_context=baseline_context,
             )
             final_status = _case_result_status(
                 execution_status=execution_result.execution_status,
+                judge_result=judge_result,
+            )
+            published_execution_status = _published_execution_status(
+                execution_status=execution_result.execution_status,
+                final_status=final_status,
                 judge_result=judge_result,
             )
 
@@ -199,6 +208,7 @@ class CaseRunner:
                 member_id=member_identity["member_id"],
                 member_role=member_identity["member_role"],
                 role_traces=role_traces,
+                execution_evidence=behavior_trace["execution_evidence"],
             )
             _write_json(normalized_trace_path, normalized_trace)
             behavior_trace["normalized_trace_summary"] = normalized_trace
@@ -209,7 +219,7 @@ class CaseRunner:
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
                 "status": final_status,
-                "execution_status": execution_result.execution_status,
+                "execution_status": published_execution_status,
                 "input": _case_inputs(case),
                 "response": response,
                 "error": execution_result.error,
@@ -228,7 +238,7 @@ class CaseRunner:
                 "case_id": case_id,
                 "session_id": session_id,
                 "status": final_status,
-                "execution_status": execution_result.execution_status,
+                "execution_status": published_execution_status,
                 "score": judge_result.score,
                 "evaluation": {
                     "method": judge_result.method,
@@ -262,9 +272,10 @@ class CaseRunner:
                 metadata={
                     "session_id": session_id,
                     "team_name": resolved_team_name,
-                    "execution_status": execution_result.execution_status,
+                    "execution_status": published_execution_status,
                     "evaluation_method": judge_result.method,
                     "evaluation_passed": judge_result.passed,
+                    "score_mode": judge_result.metadata.get("score_mode", "binary"),
                 },
             )
         except Exception as exc:
@@ -310,16 +321,25 @@ class CaseRunner:
         case: dict[str, Any],
         execution_result: CaseExecutionResult,
         output_dir: str,
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> JudgeResult:
         """Require an actual evaluation result, never a completion-based score."""
         if execution_result.judge_result is not None:
+            if baseline_context is not None:
+                raise EvaluationInfrastructureError("Backend grade cannot bypass baseline-aware LLM judging")
             result = execution_result.judge_result
         elif self.judger is not None:
-            result = await self.judger.judge(
-                case=case,
-                execution_result=execution_result,
-                output_dir=output_dir,
-            )
+            if baseline_context is not None:
+                if self.judger.method != "llm_as_judge":
+                    raise EvaluationInfrastructureError("Baseline comparison requires the LLM judger")
+                result = await self.judger.judge(
+                    case=case, execution_result=execution_result, output_dir=output_dir,
+                    baseline_context=baseline_context,
+                )
+            else:
+                result = await self.judger.judge(
+                    case=case, execution_result=execution_result, output_dir=output_dir,
+                )
         else:
             raise EvaluationInfrastructureError(
                 "Cannot score this case: no judger configured and no backend JudgeResult. "
@@ -348,9 +368,27 @@ def _case_result_status(
     judge_result: JudgeResult,
 ) -> str:
     """Return final evaluation status, keeping execution completion separate."""
-    if execution_status != "passed":
-        return "error"
-    return "passed" if judge_result.passed else "failed"
+    if execution_status == "passed":
+        return "passed" if judge_result.passed else "failed"
+    if judge_result.metadata.get("score_mode") == "continuous":
+        return "failed"
+    return "error"
+
+
+def _published_execution_status(
+    *,
+    execution_status: str,
+    final_status: str,
+    judge_result: JudgeResult,
+) -> str:
+    """Publish a graded harness failure as failed so promotion can consume the score."""
+    if (
+        final_status == "failed"
+        and execution_status != "passed"
+        and judge_result.metadata.get("score_mode") == "continuous"
+    ):
+        return "failed"
+    return execution_status
 
 
 def _expected_artifact_files(case: dict[str, Any]) -> list[str]:
@@ -450,6 +488,9 @@ def _needs_short_runtime_home(case_dir: Path) -> bool:
 def _behavior_trace(metadata: dict[str, Any]) -> dict[str, Any]:
     """Return bounded behavior evidence derived from backend metadata."""
     return {
+        "execution_evidence": metadata.get("execution_evidence") or {
+            "status": "incomplete", "reasons": ["capture_metadata_missing"],
+        },
         "command_log": list(metadata.get("command_log") or []),
         "workspace_changes": metadata.get("workspace_changes")
         or {
@@ -707,6 +748,7 @@ def _normalized_trace_from_events(
     member_id: str = "unattributed",
     member_role: str = "unattributed",
     role_traces: list[dict[str, Any]] | None = None,
+    execution_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Convert bounded case events into the analyzer's normalized trace contract."""
     messages: list[dict[str, Any]] = []
@@ -764,6 +806,12 @@ def _normalized_trace_from_events(
     )
     return {
         "case_id": case_id,
+        "execution_evidence": execution_evidence or {
+            "status": "incomplete", "reasons": ["capture_metadata_missing"],
+        },
+        "projection_complete": bool(role_traces) and all(
+            trace.get("projection_complete", False) for trace in role_traces
+        ),
         "traces": traces,
     }
 
@@ -801,6 +849,10 @@ def _normalized_role_traces_from_trajectory_dir(
                 "member_id": role,
                 "member_role": role,
                 "execution_id": case_id,
+                "projection_complete": len(messages) < _MAX_ROLE_TRACE_MESSAGES and all(
+                    message.get("step_pointer") not in {"trajectory_summary", "trajectory_tail"}
+                    for message in messages
+                ),
                 "step_count": len(messages),
                 "message_count": len(messages),
                 "messages": messages,
@@ -813,12 +865,12 @@ def _iter_role_trajectory_files(trajectory_dir: Path) -> list[tuple[str, Path]]:
     """Return flat and legacy nested per-role trajectory JSONL files."""
     files: list[tuple[str, Path]] = []
     for trajectory_path in sorted(path for path in trajectory_dir.glob("*.jsonl") if path.is_file()):
-        if trajectory_path.name == TRAJECTORY_EVENTS_FILE_NAME:
+        if trajectory_path.name == TRAJECTORY_EVENTS_FILE_NAME or trajectory_path.name.startswith("traces-"):
             continue
         files.append((trajectory_path.stem, trajectory_path))
 
     for trajectory_path in sorted(path for path in trajectory_dir.glob("*/*.jsonl") if path.is_file()):
-        if trajectory_path.name == TRAJECTORY_EVENTS_FILE_NAME:
+        if trajectory_path.name == TRAJECTORY_EVENTS_FILE_NAME or trajectory_path.name.startswith("traces-"):
             continue
         files.append((trajectory_path.parent.name, trajectory_path))
     return files

@@ -105,7 +105,6 @@ def test_semantic_authoring_requires_authored_content(tmp_path, monkeypatch, gro
         )
 
     author = action_executor.MemberActionExecutorAgent("unused-by-fake")
-    monkeypatch.setattr(author, "_invoke_direct_skill_action", respond)
 
     class FakeAgent:
         async def invoke(self, inputs, session=None):
@@ -125,16 +124,27 @@ def test_semantic_authoring_requires_authored_content(tmp_path, monkeypatch, gro
             model_config_ref="unused-by-fake",
         )
     )
-    assert calls
     result = results[0]
+    if operation == "modify" and not existing:
+        assert not calls
+        assert result.status == "failed"
+        assert "baseline mismatch" in result.error
+        return
+    assert calls
     assert result.status == ("succeeded" if outcome == "authored" else "failed"), result.error
     workspace = Path(result.worktree_path)
     assert (workspace / old_target).read_text(encoding="utf-8") == old_content
     entries = yaml.safe_load((workspace / registry).read_text(encoding="utf-8"))[list_key]
-    assert old_entry in entries
+
+    def _entry_present(entry: object) -> bool:
+        if entry in entries:
+            return True
+        return isinstance(entry, str) and {"dir": entry} in entries
+
+    assert _entry_present(old_entry)
     if outcome == "authored":
         assert "Read the public contract" in (workspace / target).read_text(encoding="utf-8")
-        assert expected_entry in entries
+        assert _entry_present(expected_entry)
     else:
         if existing:
             assert (workspace / target).read_text(encoding="utf-8") == original

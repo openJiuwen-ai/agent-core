@@ -218,6 +218,10 @@ def _resolve_category(
     rule = (result.matched_rule or "").strip()
     parts = [p.strip() for p in rule.split("|") if p.strip()] if rule else []
 
+    # A named command risk owns the dialog. file_guard may also be attached,
+    # but the body must describe the same command the title names.
+    if any(_RULE_RISK_LABELS.get(rid) for rid in _RULE_ID_RE.findall(rule)):
+        return "shell"
     if any("file_guard" in p for p in parts) or rule.startswith("file_guard"):
         return "path"
     if _is_network_category(rule, parts, tool_name):

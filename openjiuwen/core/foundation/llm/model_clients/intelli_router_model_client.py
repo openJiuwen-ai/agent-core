@@ -4,6 +4,7 @@
 IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
 """
 import atexit
+import asyncio
 import hashlib
 import inspect
 import json
@@ -12,6 +13,12 @@ from threading import Lock
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.routing.intelli_router_errors import (
+    ROUTER_ERROR_TYPES,
+    ROUTING_RECORD_EVENTS,
+    record_routing_event,
+    to_model_error,
+)
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage, AssistantMessage, UserMessage, UsageMetadata
 )
@@ -95,8 +102,23 @@ class IntelliRouterClientConfig:
         )
 
 
+@dataclass
+class _RouterCacheEntry:
+    """A cached router plus the event loop its httpx pool is bound to.
+
+    ReliableRouter creates its httpx.AsyncClient lazily on first request, so
+    pooled connections bind to the loop that first invoked it; reusing that
+    router on another loop reuses dead connections ("Event loop is closed").
+    ``loop`` stays None until first use; a mismatch with the running loop
+    then triggers a rebuild (see _ensure_router_for_current_loop).
+    """
+
+    router: "ReliableRouter"
+    loop: Optional[asyncio.AbstractEventLoop] = None
+
+
 # Module-level router cache: same config -> same ReliableRouter instance
-_router_cache: dict[str, "ReliableRouter"] = {}
+_router_cache: dict[str, "_RouterCacheEntry"] = {}
 _router_cache_lock: Lock = Lock()
 
 # Track web servers for lifecycle management (keyed by router cache key)
@@ -111,6 +133,22 @@ def _shutdown_web_servers():
         except Exception as e:
             logger.error(f"shutdown web server failed: {e}")
     _web_servers.clear()
+
+
+def _stop_web_server(cache_key: str) -> None:
+    """Stop the dashboard web server tied to an evicted router cache entry.
+
+    A rebuild re-runs _create_router for the same cache key; stopping the old
+    server first lets the replacement bind the dashboard port again and keeps
+    _web_servers free of orphans the atexit hook can no longer reach.
+    """
+    server = _web_servers.pop(cache_key, None)
+    if server is None:
+        return
+    try:
+        server.stop()
+    except (OSError, RuntimeError) as e:
+        logger.error(f"stop web server failed: {e}")
 
 
 atexit.register(_shutdown_web_servers)
@@ -142,8 +180,12 @@ class _CoreRoutingEventBridge:
         return self.__class__.__name__
 
     async def handle_event(self, event: Any) -> None:
-        if self._event_type_value(event) == "request_retried":
+        event_type = self._event_type_value(event)
+        if event_type == "request_retried":
             self._log_route_failover(event)
+        if event_type in ROUTING_RECORD_EVENTS:
+            # The router keeps no failure reasons; record them for error messages.
+            record_routing_event(event)
         payload = self._payload_from_event(event)
         if payload is None:
             return
@@ -230,9 +272,12 @@ class IntelliRouterModelClient(BaseModelClient):
         super().__init__(model_config, model_client_config)
         if router is not None:
             self._router = router
+            self._router_config = None
+            self._router_key = None
         else:
-            router_config = IntelliRouterClientConfig.from_model_client_config(model_client_config)
-            self._router = self._get_or_create_router(router_config)
+            self._router_config = IntelliRouterClientConfig.from_model_client_config(model_client_config)
+            self._router = self._get_or_create_router(self._router_config)
+            self._router_key = self._make_router_key(self._router_config)
 
     @staticmethod
     def _make_router_key(config: IntelliRouterClientConfig) -> str:
@@ -252,11 +297,24 @@ class IntelliRouterModelClient(BaseModelClient):
     def _get_or_create_router(cls, config: IntelliRouterClientConfig) -> "ReliableRouter":
         """Get a ReliableRouter from cache or create & cache a new one."""
         key = cls._make_router_key(config)
-        if key not in _router_cache:
+        entry = _router_cache.get(key)
+        if entry is None:
             with _router_cache_lock:
-                if key not in _router_cache:
-                    _router_cache[key] = cls._create_router(config, cache_key=key)
-        return _router_cache[key]
+                # Capture the entry under the lock and return it directly:
+                # another thread's eviction must not turn an unlocked
+                # ``_router_cache[key]`` read below into a KeyError.
+                entry = _router_cache.get(key)
+                if entry is None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None  # built from sync context; claimed on first use
+                    entry = _RouterCacheEntry(
+                        router=cls._create_router(config, cache_key=key),
+                        loop=loop,
+                    )
+                    _router_cache[key] = entry
+        return entry.router
 
     @classmethod
     def _create_router(cls, config: IntelliRouterClientConfig, cache_key: str = ""):
@@ -423,6 +481,43 @@ class IntelliRouterModelClient(BaseModelClient):
         }
         return {key: value for key, value in params.items() if value is not None}
 
+    async def _ensure_router_for_current_loop(self) -> None:
+        """Rebuild the cached router when the running event loop changed.
+
+        The cached router's httpx connection pool is bound to the loop that
+        first used it; loop-per-test runners (pytest-asyncio) carry dead
+        connections into a fresh loop, failing the first LLM call without a
+        real HTTP request. Concurrent use from multiple live loops is
+        unsupported (same as AsyncOpenAI); sequential reuse across retired
+        loops is the pattern guarded here.
+        """
+        router_config = self._router_config
+        if router_config is None or self._router_key is None:
+            return  # externally injected router: lifecycle owned by the caller
+        loop = asyncio.get_running_loop()
+        with _router_cache_lock:
+            entry = _router_cache.get(self._router_key)
+            if entry is not None:
+                if entry.loop is None:
+                    entry.loop = loop  # first real use: pool not bound to any loop yet
+                    self._router = entry.router
+                    return
+                if entry.loop is loop:
+                    self._router = entry.router  # follow a newer instance if replaced
+                    return
+                # Evict exactly the entry observed above; a replacement that
+                # another consumer installed after our read stays in the cache.
+                del _router_cache[self._router_key]
+        if entry is not None:  # evicted on loop mismatch (or cache cleared: rebuild only)
+            _stop_web_server(self._router_key)  # dashboard follows its router
+            try:
+                await entry.router.close()  # outside the lock, best-effort
+            except (RuntimeError, OSError) as e:
+                # Closing on a retired loop raises "Event loop is closed"; the
+                # pooled connections die with that loop either way.
+                logger.warning(f"Closing stale ReliableRouter failed: {e}")
+        self._router = self._get_or_create_router(router_config)
+
     # ------------------------------------------------------------------
     # Chat completion
     # ------------------------------------------------------------------
@@ -441,6 +536,7 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AssistantMessage:
+        await self._ensure_router_for_current_loop()
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
         params = self._build_call_params(
@@ -450,13 +546,18 @@ class IntelliRouterModelClient(BaseModelClient):
             stop=stop,
         )
 
-        result = await self._router.invoke(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
-            model=model_name,
-            **params,
-            **kwargs
-        )
+        try:
+            result = await self._router.invoke(
+                messages=converted_messages,
+                tools=self._convert_tools_to_dict(tools),
+                model=model_name,
+                **params,
+                **kwargs
+            )
+        except ROUTER_ERROR_TYPES as exc:
+            raise to_model_error(
+                exc, router=self._router, model_name=model_name, output_emitted=False,
+            ) from exc
 
         # Map intelli_router types -> openjiuwen types
         return await self._to_ow_assistant_message(result, output_parser)
@@ -475,6 +576,7 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
+        await self._ensure_router_for_current_loop()
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
         accumulated_for_parser = ""
@@ -485,26 +587,34 @@ class IntelliRouterModelClient(BaseModelClient):
             stop=stop,
         )
 
-        async for chunk in self._router.stream(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
-            model=model_name,
-            **params,
-            **kwargs
-        ):
-            converted = self._to_ow_chunk(chunk)
-            if output_parser and converted.content:
-                accumulated_for_parser += str(converted.content)
-                try:
-                    parsed = await output_parser.parse(accumulated_for_parser)
-                    if parsed is not None:
-                        converted = converted.model_copy(
-                            update={"parser_content": parsed}
-                        )
-                        accumulated_for_parser = ""
-                except Exception as exc:
-                    logger.debug(f"stream parser attempt failed: {exc}")
-            yield converted
+        output_emitted = False
+        try:
+            async for chunk in self._router.stream(
+                messages=converted_messages,
+                tools=self._convert_tools_to_dict(tools),
+                model=model_name,
+                **params,
+                **kwargs
+            ):
+                converted = self._to_ow_chunk(chunk)
+                if converted.carries_output_token():
+                    output_emitted = True
+                if output_parser and converted.content:
+                    accumulated_for_parser += str(converted.content)
+                    try:
+                        parsed = await output_parser.parse(accumulated_for_parser)
+                        if parsed is not None:
+                            converted = converted.model_copy(
+                                update={"parser_content": parsed}
+                            )
+                            accumulated_for_parser = ""
+                    except Exception as exc:
+                        logger.debug(f"stream parser attempt failed: {exc}")
+                yield converted
+        except ROUTER_ERROR_TYPES as exc:
+            raise to_model_error(
+                exc, router=self._router, model_name=model_name, output_emitted=output_emitted,
+            ) from exc
 
     async def generate_image(
         self,

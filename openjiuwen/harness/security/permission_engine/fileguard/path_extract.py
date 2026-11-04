@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 FileAction = Literal["read", "write", "exec"]
 
-_CHAIN_SPLIT_RE = re.compile(r"\s+(?:&&|\|\|)\s+")
+_SEPARATOR_RESIDUE_RE = re.compile(r"[;|&]+$")
 
 _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
@@ -168,6 +168,53 @@ def _index_in_quoted_span(index: int, spans: tuple[tuple[int, int], ...]) -> boo
     return any(start < index < end for start, end in spans)
 
 
+def _strip_separator_residue(token: str) -> str:
+    """Drop a shell separator glued onto an unquoted path token (``file;``)."""
+    stripped = _SEPARATOR_RESIDUE_RE.sub("", token)
+    return stripped if stripped else token
+
+
+def _ampersand_is_redirect(command: str, index: int) -> bool:
+    """True for ``>&`` / ``<&`` / ``&>`` rather than a command separator."""
+    prev = command[index - 1] if index > 0 else ""
+    nxt = command[index + 1] if index + 1 < len(command) else ""
+    return prev in "<>" or nxt == ">"
+
+
+def _split_unquoted_command_segments(command: str) -> list[str]:
+    """Split on ``;``, ``&``, ``|`` outside quotes. ``\\;`` stays in the segment."""
+    spans = _quoted_spans(command)
+    parts: list[str] = []
+    buf: list[str] = []
+    index = 0
+    length = len(command)
+    while index < length:
+        if _index_in_quoted_span(index, spans):
+            buf.append(command[index])
+            index += 1
+            continue
+        char = command[index]
+        if char == "\\" and index + 1 < length and command[index + 1] in ";|&":
+            buf.append(command[index:index + 2])
+            index += 2
+            continue
+        if char == "&" and _ampersand_is_redirect(command, index):
+            buf.append(char)
+            index += 1
+            continue
+        if char in ";|&":
+            if index + 1 < length and command[index + 1] == char and char != ";":
+                index += 1
+            parts.append("".join(buf))
+            buf = []
+            index += 1
+            continue
+        buf.append(char)
+        index += 1
+    parts.append("".join(buf))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def _collect_ps_path_tokens(tokens: list[str]) -> list[str]:
     out: list[str] = []
     first_positional = True
@@ -212,7 +259,7 @@ def _segments_for_extract(command: str) -> list[str]:
         return []
     pr = parse_shell_for_permission(text)
     inv = [sc.text.strip() for sc in (pr.subcommands or ()) if sc.text and sc.text.strip()]
-    heuristic = [p.strip() for p in _CHAIN_SPLIT_RE.split(text) if p.strip()]
+    heuristic = _split_unquoted_command_segments(text)
     if len(inv) >= 2:
         return inv
     if len(heuristic) >= 2:
@@ -238,7 +285,7 @@ def _path_aware_one_segment(
     path_tokens: list[tuple[Path, int]] = []
 
     def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
-        tok = tok.strip().strip('"').strip("'")
+        tok = _strip_separator_residue(tok.strip().strip('"').strip("'"))
         if not tok or _UNEXPANDED_VAR_RE.search(tok):
             return
         if require_path_shape and not _looks_like_path(tok):
@@ -341,7 +388,7 @@ def extract_shell_path_accesses(
     results: list[tuple[Path, FileAction]] = []
 
     def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
-        tok = tok.strip().strip('"').strip("'")
+        tok = _strip_separator_residue(tok.strip().strip('"').strip("'"))
         if redirect:
             if not _looks_like_redirect_target(tok):
                 return None
