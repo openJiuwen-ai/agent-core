@@ -72,9 +72,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_GEN_AI_REASONING_DURATION_MS,
     OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
@@ -1491,7 +1488,7 @@ class TestGenAiSemconvAttrs:
         assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
         assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
 
-    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+    async def test_llm_end_extracts_response_usage_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1525,9 +1522,11 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 22
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+        # Usage cost values stay business data only — never span attributes.
+        for key in ("openjiuwen.gen_ai.usage.total_cost",
+                    "openjiuwen.gen_ai.usage.input_cost",
+                    "openjiuwen.gen_ai.usage.output_cost"):
+            assert key not in s.attributes
 
     async def test_llm_end_sets_zero_usage_values(self):
         """Present-but-zero usage facts are recorded, not skipped.
@@ -1552,9 +1551,6 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
 
     async def test_llm_end_unwraps_outputs_container_into_content(self):
         """The {"outputs": AssistantMessage} wrapper must not swallow content."""

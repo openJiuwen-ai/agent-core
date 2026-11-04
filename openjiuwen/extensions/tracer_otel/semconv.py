@@ -66,9 +66,6 @@ ERROR_TYPE = "error.type"
 # project extensions (项目扩展，非上游标准) and use the openjiuwen.* namespace
 # — aligned with the observability extension — never gen_ai.* (issue #1833).
 OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
-OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
-OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
-OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 # Conversation facts carried by the Session: source-metadata user id and the
 # raw source metadata dict.
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"

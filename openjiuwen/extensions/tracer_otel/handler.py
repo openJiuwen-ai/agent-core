@@ -85,9 +85,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_GEN_AI_REASONING_DURATION_MS,
     OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
@@ -259,9 +256,6 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     # the split keys stay schema-transparent for raw-dict callers.
     otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(usage.get("cache_tokens") or 0))
     otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
     # Streaming / reasoning latency. first_token_time is declared on
     # UsageMetadata (no producer yet — parsed whenever it carries a number);
     # the *_ms keys are schema-transparent: raw-dict callers and future
