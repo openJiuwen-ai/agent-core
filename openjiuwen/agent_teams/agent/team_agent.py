@@ -512,6 +512,21 @@ class TeamAgent(BaseAgent):
             return None
         return time.monotonic() - idle_since
 
+    def arm_user_input_delivery(self) -> asyncio.Event:
+        """Start waiting until the next user sentence is handed to this leader."""
+        self._user_input_delivered = asyncio.Event()
+        return self._user_input_delivered
+
+    def note_user_input_delivered(self) -> None:
+        """Mark that a user sentence has reached this leader."""
+        event = getattr(self, "_user_input_delivered", None)
+        if event is not None and not event.is_set():
+            event.set()
+
+    def clear_user_input_delivery(self) -> None:
+        """Drop the delivery signal so a later review wait starts clean."""
+        self._user_input_delivered = None
+
     def refresh_idle_baseline(self) -> None:
         """Re-base the idle clock so a pause window is not counted as idle.
 
@@ -528,21 +543,6 @@ class TeamAgent(BaseAgent):
 
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
-
-    def arm_user_input_delivery(self) -> asyncio.Event:
-        """Start waiting until the next user sentence is handed to this leader."""
-        self._user_input_delivered = asyncio.Event()
-        return self._user_input_delivered
-
-    def note_user_input_delivered(self) -> None:
-        """Mark that a user sentence has reached this leader."""
-        event = getattr(self, "_user_input_delivered", None)
-        if event is not None and not event.is_set():
-            event.set()
-
-    def clear_user_input_delivery(self) -> None:
-        """Drop the delivery signal so a later review wait starts clean."""
-        self._user_input_delivered = None
 
     async def deliver_input(
         self,
