@@ -59,6 +59,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_AGENT_ERROR_MESSAGE,
+    OJ_GEN_AI_METADATA,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ID,
@@ -576,6 +577,24 @@ class TestDefinitionScopedIdentity:
 
         finished = _finished()
         assert len(finished) == 2, "nested call must not merge into the active llm span"
+
+    def test_metadata_is_write_if_absent(self):
+        """Identity metadata follows the same single-writer contract as the
+        workflow keys: an existing value (e.g. stamped by the first writer
+        on a span) is never overwritten by a later identity carrying a
+        different metadata dict."""
+        import json
+
+        scenario = _MergeScenario()
+        otel_span = scenario.agent._otel_tracer.start_span("probe")
+        scenario.agent._set_agent_identity_attrs(otel_span, {"metadata": {"a": 1}})
+        first = otel_span.attributes[OJ_GEN_AI_METADATA]
+        assert json.loads(first) == {"a": 1}
+        # A second identity with different metadata must not clobber it.
+        scenario.agent._set_agent_identity_attrs(otel_span, {"metadata": {"b": 2}})
+        assert json.loads(otel_span.attributes[OJ_GEN_AI_METADATA]) == {"a": 1}
+        assert first == otel_span.attributes[OJ_GEN_AI_METADATA]
+        otel_span.end()
 
 
 class TestResponseAttrs:

@@ -555,7 +555,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
         if info.get("user_id"):
             otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
-        if info.get("metadata"):
+        # Write-if-absent like the workflow keys below: on a merged shell the
+        # shell's own metadata writer wins; a standalone span gains it.
+        if info.get("metadata") and OJ_GEN_AI_METADATA not in (otel_span.attributes or {}):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
         existing = otel_span.attributes or {}
         for info_key, attr_key in (
