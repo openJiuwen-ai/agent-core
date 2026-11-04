@@ -48,6 +48,10 @@ from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete im
     LocalDeleteExecution,
     local_delete_execution,
 )
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 TOOL_NAME_ALIASES = {
@@ -540,7 +544,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     async def _verified_shell_execution(
         self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
     ) -> LocalDeleteExecution | None:
-        """Finish potentially asynchronous verification before binding a snapshot."""
+        """Verify the registered executor using the already bound arguments."""
         hook = self._host.resolve_shell_execution
         if hook is not None:
             try:
@@ -556,6 +560,51 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if isinstance(instances, dict) and name in instances:
             return local_delete_execution(instances[name], tool_args)
         return None
+
+    async def _bind_shell_type(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Pin a verified executor's dialect before checking or resuming approval."""
+        name = self._normalize_tool_name(getattr(tool_call, "name", ""))
+        if not is_shell_tool(name, shell_tools_from_config(self._engine.config)):
+            return tool_args
+        try:
+            selected = None
+            if self._host.resolve_shell_type is not None:
+                selected = self._host.resolve_shell_type(ctx, tool_call, tool_args)
+                selected = await selected if inspect.isawaitable(selected) else selected
+            if selected is None:
+                from openjiuwen.harness.tools.shell.bash import BashTool
+
+                manager = getattr(getattr(ctx, "agent", None), "ability_manager", None)
+                instances = getattr(manager, "_tool_instances", None)
+                tool = instances.get(getattr(tool_call, "name", "")) if isinstance(instances, dict) else None
+                if isinstance(tool, BashTool):
+                    selected = tool.resolve_shell_type(tool_args)
+                else:
+                    try:
+                        from openjiuwen.harness.tools.shell.powershell import PowerShellTool
+                    except ImportError:
+                        PowerShellTool = ()
+                    if isinstance(tool, PowerShellTool):
+                        # PowerShellTool ignores a model-supplied selector.
+                        selected = "powershell"
+            if selected is None:
+                return tool_args
+            if not isinstance(selected, str) or selected.strip().lower() not in {"cmd", "powershell", "bash", "sh"}:
+                raise ValueError("registered shell resolver returned an unsupported shell type")
+            selected = selected.strip().lower()
+        except Exception:
+            logger.warning("[PermissionEngine] permission.shell_type.unavailable tool=%s", name, exc_info=True)
+            return None
+        bound = {**tool_args, "shell_type": selected}
+        serialized = json.dumps(bound, ensure_ascii=False)
+        if tool_call is not None:
+            tool_call.arguments = serialized
+        inputs = getattr(ctx, "inputs", None)
+        if hasattr(inputs, "tool_args"):
+            inputs.tool_args = serialized
+        return bound
 
     async def resolve_interrupt(
         self,
@@ -582,8 +631,39 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name if tool_call is not None else ""
         normalized_name = self._normalize_tool_name(tool_name)
         tool_args = self.parse_tool_args(tool_call)
-        auto_confirm_key = self._get_auto_confirm_key(tool_call)
         session_id = self._resolve_session_id(ctx)
+        # Resolve the effective categories and switches before executor binding.
+        # Disk-only updates must not be overwritten with the old static config.
+        fresh = None
+        if self._host.get_permissions_snapshot is not None:
+            try:
+                snap = self._invoke_permissions_hook(self._host.get_permissions_snapshot, session_id=session_id)
+                fresh = snap if isinstance(snap, dict) else None
+            except Exception:
+                logger.debug("[PermissionEngine] permission.rail.snapshot_failed", exc_info=True)
+        if isinstance(fresh, dict):
+            self.update_config(fresh)
+        else:
+            if self._permissions_snapshot_required():
+                return self.reject(tool_result="[PERMISSION_DENIED] Required permission snapshot is unavailable")
+            self._engine.update_config(self._static_config)
+        effective_config = self._engine.config
+        bound = await self._bind_shell_type(ctx, tool_call, tool_args)
+        # An awaited host resolver may let another session update this rail.
+        if self._engine.config is not effective_config:
+            self.update_config(effective_config)
+            effective_config = self._engine.config
+        if bound is None and (not self._engine.enabled or not self._engine.permission_checks_active()):
+            bound = tool_args
+        if bound is None:
+            reason = "[PERMISSION_DENIED] Cannot verify the registered shell dialect"
+            if user_input is None:
+                await self._apply_host_evaluation(
+                    ctx, tool_call, PermissionResult(PermissionLevel.DENY, "shell_type_unavailable", reason),
+                )
+            return self.reject(tool_result=reason)
+        tool_args = bound
+        auto_confirm_key = self._get_auto_confirm_key(tool_call)
 
         logger.info(
             "[PermissionEngine] permission.rail.resolve tool=%s normalized=%s "
@@ -626,34 +706,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     return self.reject(tool_result=msg)
 
         if user_input is None:
-            # No snapshot/root may be held across an asynchronous host verifier:
-            # another session could refresh this rail while the verifier waits.
+            if self._engine.config is not effective_config:
+                self.update_config(effective_config)
             execution = await self._verified_shell_execution(ctx, tool_call, tool_args)
             logger.info(
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
             )
-            # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
-            # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
-            fresh: dict | None = None
-            if self._host.get_permissions_snapshot is not None:
-                try:
-                    snap = self._invoke_permissions_hook(
-                        self._host.get_permissions_snapshot,
-                        session_id=session_id,
-                    )
-                    fresh = snap if isinstance(snap, dict) else None
-                except Exception:
-                    logger.debug(
-                        "[PermissionEngine] permission.rail.snapshot_failed",
-                        exc_info=True,
-                    )
-            if isinstance(fresh, dict):
-                self.update_config(fresh)
-            else:
-                if self._permissions_snapshot_required():
-                    return self.reject(tool_result="[PERMISSION_DENIED] Required permission snapshot is unavailable")
-                self._engine.update_config(self._static_config)
+            # Restore this call's config/root after asynchronous verification.
+            self.update_config(effective_config)
             try:
                 execution_kwargs = {}
                 if isinstance(execution, LocalDeleteExecution):

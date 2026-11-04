@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,57 @@ from openjiuwen.harness.security.file_guard import (
 )
 from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows MSYS drive semantics")
+@pytest.mark.parametrize("selected", [None, "auto", "bash"])
+async def test_jiuwenbox_shell_is_bound_before_file_guard(tmp_path, selected):
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+    from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
+    from openjiuwen.core.sys_operation.config import PreDeployLauncherConfig
+    from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
+    from openjiuwen.harness.tools.shell.bash import BashTool
+
+    target = "D:/jiuwen/xiaoyi_work/ci_pipeline/JiuwenTest/test_file_guard_003_paths.js"
+    cfg = _native_cfg([{"path": target, "match": "glob", "exec": "deny"}],
+                      defaults={"read": "allow", "write": "allow", "exec": "allow"})
+    cfg["tools"] = {"bash": "allow"}
+    operation = SysOperation(SysOperationCard(
+        id="shell-dialect", mode=OperationMode.SANDBOX,
+        gateway_config=SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(
+            sandbox_type="jiuwenbox", base_url="http://localhost:8321",
+        )),
+    ))
+    args = {"command": 'cd "/d/jiuwen/xiaoyi_work/ci_pipeline/JiuwenTest" && node test_file_guard_003_paths.js'}
+    if selected is not None:
+        args["shell_type"] = selected
+    call = ToolCall(id="dialect", type="function", name="bash", arguments=json.dumps(args))
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(ability_manager=SimpleNamespace(_tool_instances={"bash": BashTool(operation)})),
+        session=None, extra={}, inputs=ToolCallInputs(tool_call=call, tool_name="bash", tool_args=call.arguments),
+    )
+    rail = PermissionInterruptRail(config=cfg, host=ToolPermissionHost(resolve_workspace_dir=lambda: tmp_path))
+    assert isinstance(await rail.resolve_interrupt(ctx, call, None), RejectResult)
+    assert json.loads(call.arguments)["shell_type"] == "bash"
+    assert ctx.inputs.tool_args == call.arguments
+
+
+@pytest.mark.asyncio
+async def test_native_local_shell_keeps_auto():
+    from openjiuwen.core.sys_operation import SysOperation, SysOperationCard
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.tools.shell.bash import BashTool
+
+    tool = BashTool(SysOperation(SysOperationCard(id="local-shell")))
+    call = SimpleNamespace(name="bash", arguments='{"command": "echo hello"}')
+    ctx = SimpleNamespace(agent=SimpleNamespace(ability_manager=SimpleNamespace(_tool_instances={"bash": tool})))
+    args = {"command": "echo hello"}
+    assert await PermissionInterruptRail(config={})._bind_shell_type(ctx, call, args) is args
+    assert call.arguments == '{"command": "echo hello"}'
 
 
 def _native_cfg(paths: list[dict], *, defaults: dict | None = None, enabled: bool = True) -> dict:
