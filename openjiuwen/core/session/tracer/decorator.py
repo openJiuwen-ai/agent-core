@@ -242,7 +242,17 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
     return create_wrap_decorator(handler)(_as_async_gen)
 
 
-def decorate_model_with_trace(model, agent_session):
+def decorate_model_with_trace(model, agent_session, identity: dict | None = None):
+    """Decorate a Model so every invoke/stream emits on_llm_* tracer events.
+
+    ``identity`` carries definition-scoped attribution keys (agent_id /
+    agent_name / workflow_id / workflow_name / metadata / ...). They are
+    merged flat into ``instance_info``; the handler stamps a span attribute
+    only for keys that are present (see
+    OtelAgentHandler._set_agent_identity_attrs — workflow keys only;
+    ``component_*`` must not be passed, see its docstring), so callers that
+    pass nothing keep the exact pre-identity wire format.
+    """
     if not agent_session or not hasattr(agent_session, "_inner"):
         return model
     session = getattr(agent_session, "_inner")
@@ -253,6 +263,8 @@ def decorate_model_with_trace(model, agent_session):
     except Exception:
         model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
+    if identity:
+        instance_info.update({k: v for k, v in identity.items() if v})
     proxy = _TraceProxy(model)
     proxy.invoke = async_trace(model.invoke, session, InvokeType.LLM, instance_info,
                                index=0, inputs_field_name="messages")

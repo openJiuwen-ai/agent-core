@@ -420,6 +420,57 @@ class TestDecator:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
 
+    async def test_decorate_model_identity_passthrough(self):
+        """identity= merges definition-scoped keys flat into instance_info.
+
+        Empty values are filtered; without identity= the wire format stays
+        exactly class_name/type (callers that pass nothing are unaffected).
+        """
+        model = MagicMock(LLMExecutable)
+        type(model).llm = property(lambda self: self._llm, lambda self, val: setattr(self, '_llm', val))
+        type(model).config = property(lambda self: self._config, lambda self, val: setattr(self, '_config', val))
+        model.llm = MockModel()
+        model.config = get_llm_config()
+        model.invoke = model.llm.invoke
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        mocked_model = decorate_model_with_trace(
+            model, mock_session,
+            identity={"workflow_id": "wf-1", "component_id": "node-2",
+                      "agent_id": "", "conversation_id": None},
+        )
+        await mocked_model.invoke(messages=[BaseMessage(role="aa")])
+        instance_info = results[0][2]["instance_info"]
+        assert instance_info["workflow_id"] == "wf-1"
+        assert instance_info["component_id"] == "node-2"
+        # Falsy identity values must not land as empty-string keys.
+        assert "agent_id" not in instance_info
+        assert "conversation_id" not in instance_info
+        # Base keys survive the merge untouched.
+        assert instance_info["class_name"] == "Qwen/Qwen3-32B"
+        assert instance_info["type"] == "llm"
+
+        # Without identity= the decorator keeps the exact pre-identity format.
+        results.clear()
+        plain_model = decorate_model_with_trace(model, mock_session)
+        await plain_model.invoke(messages=[BaseMessage(role="aa")])
+        assert results[0][2]["instance_info"] == {
+            "class_name": "Qwen/Qwen3-32B", "type": "llm",
+            "request_params": {},
+            "message_count": 1,
+        }
+
     async def test_decorate_model_stream_frame_selection(self):
         """Stream path picks TTFT from the first chunk and usage from the
         LAST usage-bearing frame; an engine-stamped ttft wins over the

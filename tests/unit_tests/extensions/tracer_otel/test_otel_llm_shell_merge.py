@@ -60,6 +60,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_AGENT_ERROR_MESSAGE,
     OJ_WORKFLOW_COMPONENT_ID,
+    OJ_WORKFLOW_COMPONENT_TYPE,
+    OJ_WORKFLOW_ID,
     OJ_WORKFLOW_OUTPUTS,
 )
 
@@ -357,6 +359,9 @@ class TestRailOpenedChatSpan:
                 "agent_id": "react_agent_1",
                 "agent_name": "ReAct Agent One",
                 "conversation_id": "s-1",
+                # Provenance marker the handler keys claimability on — the
+                # real rail sets it in OtelRail._build_common_info.
+                "rail_opened": True,
             },
         )
         return rail_span
@@ -431,15 +436,19 @@ class TestRailOpenedChatSpan:
         assert span.attributes[GEN_AI_AGENT_ID] == "react_agent_1"
 
     async def test_decorator_opened_span_is_never_claimed(self):
-        """Discriminator: only rail-opened spans (agent_id in instance_info)
-        register as claimable, so a decorator-opened span must never swallow
-        a nested on_llm_start."""
+        """Discriminator: only rail-opened spans (rail_opened in
+        instance_info) register as claimable. A decorator-opened span must
+        never swallow a nested on_llm_start — including when it carries agent
+        identity via decorate_model_with_trace identity=, which is why
+        claimability keys on the rail provenance marker, not agent_id."""
         scenario = _MergeScenario()
         outer = scenario.spans.create_agent_span()
         await scenario.agent.on_llm_start(
             span=outer,
             inputs={"inputs": [{"role": "user", "content": "hi"}]},
-            instance_info={"class_name": "qwen-max", "type": "llm"},
+            # agent_id without rail_opened = decorator-forwarded identity
+            instance_info={"class_name": "qwen-max", "type": "llm",
+                           "agent_id": "react_agent_1"},
         )
         inner = scenario.spans.create_agent_span(parent_span=outer)
         await scenario.agent.on_llm_start(
@@ -452,6 +461,121 @@ class TestRailOpenedChatSpan:
 
         finished = _finished()
         assert len(finished) == 2, "nested decorator spans must not merge"
+
+
+@pytest.mark.asyncio
+class TestDefinitionScopedIdentity:
+    """decorate_model_with_trace identity= keys on LLM spans.
+
+    Workflow keys reuse the shell wire keys, write-if-absent: a standalone
+    (orphan-family) span gains them — single-component debug spans stay
+    queryable by business id — while a merged component shell keeps the
+    values its own writer stamped (single writer wins). ``component_*``
+    identity keys are deliberately NOT stamped on LLM spans: component_id is
+    the component-shell discriminator (_ambient_component_shell), so an LLM
+    span carrying it while attached to the context would be misclassified as
+    a merge-eligible shell for nested calls."""
+
+    async def test_standalone_span_gains_workflow_and_agent_keys(self):
+        scenario = _MergeScenario()
+        span = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=span,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={
+                "class_name": "qwen-max", "type": "llm",
+                "workflow_id": "wf-77", "component_id": "node-9",
+                "component_type": "LLMComponent",
+                "agent_id": "app-1", "conversation_id": "conv-1",
+            },
+        )
+        await scenario.agent.on_llm_end(span=span, outputs=_decorator_end_payload(_assistant()))
+
+        finished = _finished()
+        assert len(finished) == 1
+        attrs = finished[0].attributes
+        assert attrs[OJ_WORKFLOW_ID] == "wf-77"
+        assert attrs[GEN_AI_AGENT_ID] == "app-1"
+        assert attrs[GEN_AI_CONVERSATION_ID] == "conv-1"
+        # component_* never lands on an LLM span even when the caller
+        # forwards it — it is the shell discriminator (see class docstring).
+        assert OJ_WORKFLOW_COMPONENT_ID not in attrs
+        assert OJ_WORKFLOW_COMPONENT_TYPE not in attrs
+
+    async def test_merged_shell_keeps_its_own_workflow_values(self):
+        scenario = _MergeScenario()
+        await scenario.start_llm_shell("node-1")  # stamps wf-1 / comp-node-1
+        span = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=span,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={
+                "class_name": "qwen-max", "type": "llm",
+                # decorator-forwarded values differ from the shell's own —
+                # the shell's writer must win on every merged key
+                "workflow_id": "wf-OTHER", "component_id": "node-OTHER",
+            },
+        )
+        await scenario.agent.on_llm_end(span=span, outputs=_decorator_end_payload(_assistant()))
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+
+        finished = _finished()
+        assert len(finished) == 1, "identity keys must not break the merge"
+        attrs = finished[0].attributes
+        assert attrs[OJ_WORKFLOW_ID] == "wf-1"
+        assert attrs[OJ_WORKFLOW_COMPONENT_ID] == "comp-node-1"
+
+    async def test_child_span_under_claimed_shell_gains_workflow_keys(self):
+        scenario = _MergeScenario()
+        await scenario.start_llm_shell("node-1")
+        await scenario.llm_call()  # first call merges, claims the shell
+        second = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=second,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={
+                "class_name": "qwen-max", "type": "llm",
+                "workflow_id": "wf-1", "component_id": "node-1",
+            },
+        )
+        await scenario.agent.on_llm_end(span=second, outputs=_decorator_end_payload(_assistant()))
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+
+        finished = _finished()
+        assert len(finished) == 2  # shell + child
+        child = _children(finished)[0]
+        assert child.attributes[OJ_WORKFLOW_ID] == "wf-1"
+
+    async def test_active_identity_child_is_not_a_merge_target(self):
+        """Nested call under an active identity-stamped LLM span.
+
+        The first span is still open (no on_llm_end) and attached to the
+        OTel context when the nested on_llm_start fires. If identity keys
+        ever stamped component_id onto LLM spans, this classifier would
+        mistake the open LLM span for an unclaimed component shell and the
+        nested call would merge into it — two real calls, one span."""
+        scenario = _MergeScenario()
+        first = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=first,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={
+                "class_name": "qwen-max", "type": "llm",
+                "workflow_id": "wf-1", "component_id": "node-1",
+                "component_type": "LLMComponent",
+            },
+        )
+        nested = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=nested,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={"class_name": "qwen-max", "type": "llm"},
+        )
+        await scenario.agent.on_llm_end(span=nested, outputs=_decorator_end_payload(_assistant()))
+        await scenario.agent.on_llm_end(span=first, outputs=_decorator_end_payload(_assistant()))
+
+        finished = _finished()
+        assert len(finished) == 2, "nested call must not merge into the active llm span"
 
 
 class TestResponseAttrs:

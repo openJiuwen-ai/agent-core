@@ -96,6 +96,12 @@ class OtelRail(AgentRail):
             "conversation_id": session_id,
             "session_id": session_id,
             "agent_description": str(getattr(card, "description", "") or ""),
+            # Provenance marker, never a wire attribute: the handler uses it
+            # (not agent_id) to register rail-opened chat spans as claimable,
+            # so a traced-model decorator that also carries agent identity
+            # (decorate_model_with_trace identity=) cannot turn its own spans
+            # into merge targets for nested calls.
+            "rail_opened": True,
         }
 
     # ------------------------------------------------------------------

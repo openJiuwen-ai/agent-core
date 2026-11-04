@@ -518,13 +518,27 @@ class OtelAgentHandler(TraceExtAgentHandler):
     # --- helper: set GenAI agent identity attributes on any span ---
 
     def _set_agent_identity_attrs(self, otel_span: trace.Span, instance_info: dict | None) -> None:
-        """Set agent identity / conversation attributes from OtelRail common info.
+        """Set agent identity / conversation attributes from instance info.
 
-        ``instance_info`` keys come from ``OtelRail._build_common_info``:
-        ``agent_id`` / ``agent_name`` / ``agent_description`` /
-        ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
-        without them (other rails, direct handler callers) simply skip the
-        attributes.
+        ``instance_info`` keys come from ``OtelRail._build_common_info``
+        (``agent_id`` / ``agent_name`` / ``agent_description`` /
+        ``conversation_id`` / ``user_id`` / ``metadata``) or, on
+        decorator-raised events, from the ``identity`` mapping of
+        ``decorate_model_with_trace`` (which may additionally carry
+        ``workflow_id`` / ``workflow_name`` — definition-scoped keys that let
+        standalone LLM spans, e.g. single-component debug, stay queryable by
+        business id). Events raised without them (other rails, direct handler
+        callers) simply skip the attributes.
+
+        The workflow keys reuse the wire keys the workflow tracer writes on
+        shell spans. They are write-if-absent: on a merged component shell the
+        shell's own value (single writer) always wins; a standalone or child
+        LLM span gains them. ``component_*`` keys are deliberately NOT mapped
+        here: ``_ambient_component_shell`` identifies component shells by the
+        ``openjiuwen.workflow.component_id`` attribute, so an LLM span
+        carrying it (while attached to the OTel context) would be
+        misclassified as a merge-eligible shell for nested calls. Component
+        attribution rides in ``metadata`` instead.
         """
         info = instance_info or {}
         agent_id = info.get("agent_id")
@@ -543,6 +557,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
         if info.get("metadata"):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+        existing = otel_span.attributes or {}
+        for info_key, attr_key in (
+            ("workflow_id", OJ_WORKFLOW_ID),
+            ("workflow_name", OJ_WORKFLOW_NAME),
+        ):
+            if info.get(info_key) and attr_key not in existing:
+                otel_span.set_attribute(attr_key, str(info[info_key]))
 
     # --- helper: set common agent attributes (non-LLM) ---
 
@@ -626,11 +647,15 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
             state.span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
-            # Rail-forwarded identity marks this chat span as rail-opened
-            # (OtelRail.before_model_call); the traced-model decorator path
-            # never carries agent_id. Register the span so a decorator firing
-            # inside the same model call can claim it (see on_llm_start).
-            if instance_info.get("agent_id"):
+            # The rail provenance marker (OtelRail._build_common_info sets
+            # rail_opened) marks this chat span as rail-opened. Claimability
+            # keys on the marker, NOT on agent_id: the traced-model decorator
+            # may also carry agent identity (decorate_model_with_trace
+            # identity=), and a decorator-opened span must stay unclaimable
+            # so nested real calls never merge into one span. Register the
+            # span so a decorator firing inside the same model call can claim
+            # it (see on_llm_start).
+            if instance_info.get("rail_opened"):
                 self._rail_chat_spans[state.span.get_span_context().span_id] = (span.invoke_id, state.span)
             # Trace display name: the executing agent (rail-forwarded), falling
             # back to the model name for direct on_llm_start callers.
@@ -736,8 +761,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
         on_llm_start until its on_llm_end, so a traced-model decorator firing
         inside the model call sees it here regardless of which session tracer
         created the decorator's own spans. Membership in _rail_chat_spans is
-        the discriminator: only chat spans this handler opened from
-        rail-forwarded identity are claimable, and each is claimable once.
+        the discriminator: only chat spans this handler opened with the rail
+        provenance marker (rail_opened) are claimable, and each is claimable
+        once.
         """
         ambient = trace.get_current_span(otel_context.get_current())
         if not getattr(ambient, "is_recording", lambda: False)():
