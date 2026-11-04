@@ -1,20 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from abc import abstractmethod
-from typing import List, Dict, Any, Tuple, Optional
+import json
 import os
 import uuid
-import json
+from abc import abstractmethod
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.context_engine import ModelContext, ContextWindow
+from openjiuwen.core.context_engine import ContextWindow, ModelContext
+from openjiuwen.core.context_engine.compaction import CompactionError
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.sys_operation import SysOperation
-
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
@@ -65,6 +65,9 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         self._config = config
         self._compression_usage: Dict[str, Any] | None = None
         self._model: Any = None
+        self._compaction_instructions: str | None = None
+        self._compaction_failures: list | None = None
+        self._compression_executor: Any = None
 
     # ------------------------------------------------------------------
     # Processing hooks
@@ -173,7 +176,6 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         so preparing a candidate cannot advance the live processor's counters.
         """
         import copy
-        from openjiuwen.core.context_engine.compaction import CompactionError, _InstructionModel
 
         if not type(self).__module__.startswith("openjiuwen.core.context_engine.processor."):
             raise CompactionError("COMPACT_UNSUPPORTED")
@@ -181,21 +183,24 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         for name, value in vars(self).items():
             if name not in ("_model", "_compression_executor"):
                 setattr(forked, name, copy.deepcopy(value))
-        forked._compaction_instructions = instructions
-        forked._compaction_failures = failures
-        model = getattr(self, "_model", None)
+        forked.configure_compaction(instructions, failures)
+        return forked
+
+    def configure_compaction(self, instructions: str | None, failures: list) -> None:
+        """Configure an isolated processor copy without changing borrowed clients."""
+        import copy
+
+        from openjiuwen.core.context_engine.compaction import _InstructionModel
+
+        self._compaction_instructions = instructions
+        self._compaction_failures = failures
+        model = self._model
         if model is not None:
-            forked._model = _InstructionModel(model, instructions, failures)
+            self._model = _InstructionModel(model, instructions, failures)
         executor = getattr(self, "_compression_executor", None)
         if executor is not None:
-            forked._compression_executor = copy.copy(executor)
-            forked._compression_executor._model = forked._model
-            forked._compression_executor._last_response = None
-        if instructions and hasattr(forked, "_session_memory_enabled"):
-            forked._session_memory_enabled = False
-        if instructions and self.processor_type() == "SessionMemoryCompressor":
-            forked._config = forked._config.model_copy(update={"enabled": False})
-        return forked
+            self._compression_executor = copy.copy(executor)
+            self._compression_executor.rebind_model(self._model)
 
     @property
     def config(self) -> BaseModel:
@@ -443,7 +448,7 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             offload_handle: str,
             offload_path: str,
             messages: List[BaseMessage],
-            sys_operation=None,
+            sys_operation: SysOperation | None = None,
     ) -> bool:
         """
         使用 SysOperation 写入 offload 内容到文件系统。

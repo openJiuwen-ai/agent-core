@@ -27,8 +27,8 @@ from openjiuwen.core.extension.schema.records import (
 class Orchestrator:
     """Turn one manifest into the ordered steps for a single package."""
 
+    @staticmethod
     def build_plan(
-        self,
         package_root: Path,
         manifest: Manifest,
         operation: Literal["install", "reload", "uninstall"],

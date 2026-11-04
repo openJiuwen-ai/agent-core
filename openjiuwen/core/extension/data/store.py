@@ -162,7 +162,7 @@ class JsonStore:
             if not isinstance(value, dict):
                 raise build_error(StatusCode.EXTENSION_DATA_READ_FAILED, reason="store JSON must be an object")
             return copy_json(value), data
-        except (ValueError, UnicodeError, RecursionError, BaseError) as exc:
+        except (ValueError, RecursionError, BaseError) as exc:
             raise build_error(
                 StatusCode.EXTENSION_DATA_READ_FAILED, cause=exc, reason=f"invalid store JSON in {path.name}"
             ) from exc

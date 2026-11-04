@@ -294,13 +294,16 @@ def _extension_requires(value: object, extension_id: str) -> tuple[str, ...]:
 
 def _ensure_entry_inside_root(package_root: Path, module: str, extension_id: str) -> None:
     relative = Path(module)
-    if (
+    has_bad_parts = any(part in ("", ".", "..") for part in relative.parts)
+    has_dotted_segments = any("." in part for part in relative.with_suffix("").parts)
+    invalid_entry = (
         relative.is_absolute()
         or relative.suffix != ".py"
         or relative.name == "__init__.py"
-        or any(part in ("", ".", "..") for part in relative.parts)
-        or any("." in part for part in relative.with_suffix("").parts)
-    ):
+        or has_bad_parts
+        or has_dotted_segments
+    )
+    if invalid_entry:
         raise ExtensionFailure(
             StatusCode.EXTENSION_MANIFEST_INVALID,
             reason=(

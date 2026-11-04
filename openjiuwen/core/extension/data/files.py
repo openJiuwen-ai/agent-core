@@ -25,9 +25,9 @@ def resolve_data_path(path: Path) -> Path:
     value = str(resolved)
     if os.name == "nt":
         if value.startswith("\\\\?\\UNC\\"):
-            return Path("\\\\" + value[8:])
+            return Path(value.replace("\\\\?\\UNC\\", "\\\\", 1))
         if value.startswith("\\\\?\\"):
-            return Path(value[4:])
+            return Path(value.replace("\\\\?\\", "", 1))
     return resolved
 
 
@@ -52,7 +52,7 @@ async def run_file_operation(operation: Callable[[], _T]) -> _T:
     worker = asyncio.create_task(asyncio.to_thread(operation))
     try:
         return await asyncio.shield(worker)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as error:
         while not worker.done():
             try:
                 await asyncio.shield(worker)
@@ -64,7 +64,7 @@ async def run_file_operation(operation: Callable[[], _T]) -> _T:
             worker.result()
         except Exception:
             logger.exception("extension store worker failed while its caller was cancelled")
-        raise
+        raise error
 
 
 def replace_json(path: Path, data: bytes, previous: bytes | None) -> bool:
@@ -100,7 +100,7 @@ def sync_directory(directory: Path) -> None:
     if os.name == "nt":
         return
     try:
-        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0), 0o644)
         try:
             os.fsync(descriptor)
         finally:

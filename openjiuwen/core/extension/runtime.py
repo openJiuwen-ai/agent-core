@@ -276,7 +276,10 @@ class Runtime:
         cannot authorize use of another invocation's Ops.
         """
         frame = self._current_invocation.get()
-        if not isinstance(ops, EventHandlerOps) or frame is None or not frame.active or frame.ops is not ops:
+        ops_ok = isinstance(ops, EventHandlerOps)
+        frame_active = frame is not None and frame.active
+        same_ops = frame is not None and frame.ops is ops
+        if not ops_ok or not frame_active or not same_ops:
             return False
         try:
             task = asyncio.current_task()
@@ -426,12 +429,13 @@ class Runtime:
                 package_id=package_id,
                 reason="package is not active",
             )
-        dependents = [
-            record.package_id
-            for record in self._active.values()
-            if record.package_id != package_id
-            and any(item.package_id == package_id for item in record.requires_packages)
-        ]
+        dependents = []
+        for record in self._active.values():
+            if record.package_id == package_id:
+                continue
+            if any(item.package_id == package_id for item in record.requires_packages):
+                dependents.append(record.package_id)
+
         if dependents:
             names = ", ".join(sorted(dependents))
             return operation_error(
@@ -542,7 +546,8 @@ class Runtime:
             if not keep_record:
                 self.drop_active(package_id)
 
-    def abort(self, candidate: ActivationCandidate) -> None:
+    @staticmethod
+    def abort(candidate: ActivationCandidate) -> None:
         """Drop a candidate that was not published. Package files stay in place.
 
         Calling this twice for the same candidate is harmless.
@@ -626,8 +631,8 @@ class Runtime:
             requires_packages=(),
         )
 
+    @staticmethod
     def active_record_for(
-        self,
         manifest: Manifest,
         root: Path,
         candidate: ActivationCandidate,
@@ -732,9 +737,9 @@ def _load_entry(root_name: str, package_root: Path, relative_module: str) -> tup
             search_locations=None,
             created=created,
         )
-    except Exception:
+    except Exception as error:
         _release_modules(created)
-        raise
+        raise error
     return entry_name, created
 
 

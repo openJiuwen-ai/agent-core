@@ -64,7 +64,11 @@ class EventHandlerOpsBuilder:
 
     @staticmethod
     def _validate_name(name: str, kind: str) -> None:
-        if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name) or name.startswith("_"):
+        is_str = isinstance(name, str)
+        is_identifier = is_str and name.isidentifier()
+        is_keyword = is_str and keyword.iskeyword(name)
+        starts_private = is_str and name.startswith("_")
+        if not all((is_str, is_identifier, not is_keyword, not starts_private)):
             raise_error(StatusCode.EVENTS_OPS_INVALID, reason=f"invalid {kind} name: {name!r}")
 
 

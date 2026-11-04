@@ -217,7 +217,10 @@ class PackageManager:
                 Path(version).name != version,
             )
         )
-        if not target.is_relative_to(store) or target == store or target.parent.parent != store or unsafe_components:
+        outside_store = not target.is_relative_to(store)
+        is_store_root = target == store
+        wrong_depth = target.parent.parent != store
+        if any((outside_store, is_store_root, wrong_depth, unsafe_components)):
             raise ExtensionFailure(
                 StatusCode.EXTENSION_INSTALL_COPY_FAILED,
                 reason="refusing to delete a path outside the install store",
@@ -247,15 +250,16 @@ class PackageManager:
         """Return the resolved install path; deletion validates its containment."""
         return (self.store / package_id / version).resolve()
 
-    def _open_zip(self, source: Path) -> OpenedSource:
+    @staticmethod
+    def _open_zip(source: Path) -> OpenedSource:
         temp = Path(tempfile.mkdtemp(prefix="openjiuwen-ext-"))
         try:
             _extract_zip(source, temp)
             _assert_no_symlinks(temp)
             manifest = load_manifest(temp)
-        except Exception:
+        except Exception as error:
             shutil.rmtree(temp, ignore_errors=True)
-            raise
+            raise error
         return OpenedSource(manifest, temp.resolve(), source, temp.resolve())
 
 

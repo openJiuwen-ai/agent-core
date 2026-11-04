@@ -1,20 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+import copy
 import hashlib
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, AsyncContextManager, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.compression_scope import context_compression_operation
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateInput,
@@ -24,9 +26,9 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
 from openjiuwen.core.context_engine.usage.models import ContextWindowTokenReport
-from openjiuwen.core.kv_cache.kv_cache_metadata import first_changed_index
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.kv_cache.kv_cache_metadata import first_changed_index
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
 
@@ -68,8 +70,7 @@ class SessionModelContext(ModelContext):
         self._model_context_window_tokens_override = config.model_context_window_tokens_override
         self._context_window_tokens = (
             self._global_context_window_tokens
-            if isinstance(self._global_context_window_tokens, int)
-            and self._global_context_window_tokens > 0
+            if isinstance(self._global_context_window_tokens, int) and self._global_context_window_tokens > 0
             else self._model_context_window_tokens_override
         )
         self._model_name = config.model_name
@@ -97,6 +98,8 @@ class SessionModelContext(ModelContext):
         self._compaction_coordinator = None
         self._compaction_draft = False
         self._compaction_uncertain = False
+        self._compaction_window: ContextWindow | None = None
+        self._last_compaction: dict[str, Any] = {}
         self._last_context_window_access_at: float | None = None
         self._last_llm_bound_context_window: ContextWindow | None = None
         self._offload_message_buffer = OffloadMessageBuffer()
@@ -153,14 +156,11 @@ class SessionModelContext(ModelContext):
         """
         self._model_name = model_name or None
         self._model_context_window_tokens_override = (
-            context_window_tokens
-            if isinstance(context_window_tokens, int) and context_window_tokens > 0
-            else None
+            context_window_tokens if isinstance(context_window_tokens, int) and context_window_tokens > 0 else None
         )
         self._context_window_tokens = (
             self._global_context_window_tokens
-            if isinstance(self._global_context_window_tokens, int)
-            and self._global_context_window_tokens > 0
+            if isinstance(self._global_context_window_tokens, int) and self._global_context_window_tokens > 0
             else self._model_context_window_tokens_override
         )
 
@@ -209,13 +209,16 @@ class SessionModelContext(ModelContext):
                 if not callable(rebind_processor):
                     continue
                 try:
-                    processors_rebound = bool(
-                        rebind_processor(
-                            model=model,
-                            model_config=model_config,
-                            model_client_config=model_client_config,
+                    processors_rebound = (
+                        bool(
+                            rebind_processor(
+                                model=model,
+                                model_config=model_config,
+                                model_client_config=model_client_config,
+                            )
                         )
-                    ) or processors_rebound
+                        or processors_rebound
+                    )
                 except TypeError:
                     # Third-party processors may not implement the optional
                     # model-rebind hook with the full keyword signature.
@@ -294,6 +297,138 @@ class SessionModelContext(ModelContext):
     def set_session_ref(self, session_ref):
         self._session_ref = session_ref
 
+    def sys_operation(self) -> Any:
+        """Return the system-operation provider used to publish staged resources."""
+        return self._sys_operation
+
+    def set_compaction_coordinator(self, coordinator: Any) -> None:
+        """Bind this context to its owning engine's compaction coordinator."""
+        self._compaction_coordinator = coordinator
+
+    def compaction_uncertain(self) -> bool:
+        """Return whether a failed commit requires authoritative state reload."""
+        return self._compaction_uncertain
+
+    def mark_compaction_uncertain(self) -> None:
+        """Freeze mutations after a compaction commit with an unknown outcome."""
+        self._compaction_uncertain = True
+
+    def processor_lock_held(self) -> bool:
+        """Return whether a processor operation currently owns this context."""
+        return self._processor_lock.locked()
+
+    def processor_guard(self, caller: str) -> AsyncContextManager[None]:
+        """Serialize an operation using the existing guarded processor lock."""
+        return self._guarded_processor_lock(caller)
+
+    def compaction_dependencies(self, processor_types: list[str] | None = None) -> str:
+        """Snapshot dependencies that invalidate a speculative candidate."""
+        from openjiuwen.core.context_engine.context.session_memory_manager import get_session_memory_runtime
+
+        return repr(
+            (
+                self._model_name,
+                processor_types,
+                [processor.config for processor in self._processors or []],
+                get_session_memory_runtime(self.get_session_ref()),
+            )
+        )
+
+    def fork_compaction(
+        self,
+        messages: Iterable[BaseMessage],
+        *,
+        workspace: str,
+        session_ref: Any,
+        instructions: str | None,
+        failures: list,
+        processor_types: list[str] | None = None,
+    ) -> "SessionModelContext":
+        """Create an isolated candidate context while borrowing shared clients."""
+        draft = copy.copy(self)
+        draft.configure_compaction(
+            messages,
+            workspace=workspace,
+            session_ref=session_ref,
+            instructions=instructions,
+            failures=failures,
+            processor_types=processor_types,
+        )
+        return draft
+
+    def configure_compaction(
+        self,
+        messages: Iterable[BaseMessage],
+        *,
+        workspace: str,
+        session_ref: Any,
+        instructions: str | None,
+        failures: list,
+        processor_types: list[str] | None = None,
+    ) -> None:
+        """Initialize the copied context's buffers, processors and deferred session."""
+        self._message_buffer = copy.deepcopy(self._message_buffer)
+        self._offload_message_buffer = OffloadMessageBuffer(copy.deepcopy(self._offload_message_buffer.get_all()))
+        self._workspace = SimpleNamespace(root_path=workspace)
+        self._sys_operation = None
+        self._processor_lock = asyncio.Lock()
+        self._compaction_coordinator = None
+        self._compaction_draft = True
+        self._compaction_window = None
+        self._usage_measurement_cache = {}
+        self._usage_report_cache = {}
+        self._session_ref = session_ref
+
+        def selected(processor):
+            return (processor_types is None or processor.processor_type() in processor_types) and (
+                ContextUtils.is_compression_processor(processor) or ContextUtils.is_offload_processor(processor)
+            )
+
+        self._processors = [
+            processor.fork_compaction(instructions, failures) if selected(processor) else processor
+            for processor in self._processors or []
+        ]
+        self.set_messages(copy.deepcopy(list(messages)))
+        self._configure_offload_message_buffer()
+
+    async def prepare_auto_compaction(
+        self,
+        processor_indices: Iterable[int],
+        *,
+        window: ContextWindow | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Run the selected draft processors with an optional protected window."""
+        if window is not None:
+            self._compaction_window = copy.deepcopy(window)
+        processors = [self._processors[index] for index in processor_indices]
+        await self._run_active_compression_processors(processors, **kwargs)
+
+    def restore_compaction_state(self, draft: "SessionModelContext", *, restore_processors: bool) -> None:
+        """Install draft offloads and restore only the state matching the final candidate."""
+        offload_buffer, processors = draft.compaction_state()
+        self._offload_message_buffer = offload_buffer
+        self._configure_offload_message_buffer()
+        if restore_processors:
+            for original, forked in zip(self._processors or [], processors):
+                if original is not forked:
+                    original.load_state(copy.deepcopy(forked.save_state()))
+            draft_session = draft.get_session_ref()
+            if draft_session is not None and self._session_ref is not None:
+                self._session_ref.update_state(draft_session.updates)
+        else:
+            for processor in self._processors or []:
+                processor.load_state({})
+
+    def compaction_state(self) -> tuple[OffloadMessageBuffer, tuple[ContextProcessor, ...]]:
+        """Return draft-owned state for installation by the live context."""
+        return self._offload_message_buffer, tuple(self._processors or [])
+
+    async def record_compaction(self, receipt: dict[str, Any], state: ContextProcessorStateInput) -> None:
+        """Record a committed receipt and emit its compression-state notification."""
+        self._last_compaction = receipt
+        await self._build_and_emit_compression_state(state)
+
     def _resolve_context_model_name(self, kwargs: dict) -> Optional[str]:
         return kwargs.get("model_name") or self._model_name
 
@@ -346,7 +481,6 @@ class SessionModelContext(ModelContext):
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(self, messages: BaseMessage | List[BaseMessage], **kwargs) -> List[BaseMessage]:
         if self._compaction_uncertain:
-            from openjiuwen.core.context_engine.compaction import CompactionError
             raise CompactionError("COMPACT_COMMIT_UNCERTAIN")
         ContextUtils.validate_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
@@ -406,10 +540,7 @@ class SessionModelContext(ModelContext):
         """Return whether the old retained messages remain an unchanged prefix."""
         if len(current_messages) < len(previous_messages):
             return False
-        return all(
-            current is previous
-            for current, previous in zip(current_messages, previous_messages)
-        )
+        return all(current is previous for current, previous in zip(current_messages, previous_messages))
 
     async def compress_context(
         self,
@@ -418,10 +549,10 @@ class SessionModelContext(ModelContext):
     ) -> str | dict[str, Any]:
         # TODO(compact): Keep direct native compression on the original path.
         # if self._has_compaction_hook():
-            # return await self._compaction_coordinator.engine.compress_context(
-                # self.context_id(), self.get_session_ref(), session_id=self.session_id(),
-                # processor_types=processor_types, **kwargs,
-            # )
+        #     return await self._compaction_coordinator.engine.compress_context(
+        #         self.context_id(), self.get_session_ref(), session_id=self.session_id(),
+        #         processor_types=processor_types, **kwargs,
+        #     )
         return_state = bool(kwargs.pop("return_state", False))
         compression_trigger = kwargs.get("compression_trigger")
         if compression_trigger is None:
@@ -649,7 +780,7 @@ class SessionModelContext(ModelContext):
             for processor in self._processors:
                 # TODO(compact): Retain original processor iteration until automatic GET integration.
                 # if compaction_handled and self._is_summary_processor(processor):
-                    # continue
+                #     continue
                 operation_id = None
                 started_at = None
                 before_messages = None
@@ -658,12 +789,12 @@ class SessionModelContext(ModelContext):
                     if await processor.trigger_get_context_window(self, window):
                         # TODO(compact): Do not intercept native automatic GET compression yet.
                         # if self._has_compaction_hook() and self._is_summary_processor(processor):
-                            # await self._intercept_auto_compaction([], window=window, **kwargs)
-                            # window.system_messages, window.context_messages = self._get_window_messages(
-                                # window.system_messages, window_size, dialogue_round,
-                            # )
-                            # compaction_handled = True
-                            # continue
+                        #     await self._intercept_auto_compaction([], window=window, **kwargs)
+                        #     window.system_messages, window.context_messages = self._get_window_messages(
+                        #         window.system_messages, window_size, dialogue_round,
+                        #     )
+                        #     compaction_handled = True
+                        #     continue
                         logger.info(f"trigger context processor {processor.processor_type()} on GET")
                         operation_id = uuid.uuid4().hex
                         started_at = time.time()
@@ -717,8 +848,8 @@ class SessionModelContext(ModelContext):
                         )
                 # TODO(compact): The legacy processor error policy remains active.
                 # except CompactionError:
-                    # raise
-                except asyncio.CancelledError:
+                # raise
+                except asyncio.CancelledError as cancelled:
                     if started_emitted:
                         await self._build_and_emit_processor_cancelled_state(
                             operation_id=operation_id,
@@ -735,7 +866,7 @@ class SessionModelContext(ModelContext):
                                 model_context_window_tokens=self._model_context_window_tokens,
                             ),
                         )
-                    raise
+                    raise cancelled
                 except Exception as e:
                     await self._build_and_emit_compression_state(
                         ContextProcessorStateInput(
@@ -1198,7 +1329,8 @@ class SessionModelContext(ModelContext):
     @staticmethod
     def _is_summary_processor(processor) -> bool:
         return ContextUtils.is_compression_processor(processor) and processor.processor_type() not in (
-            "MicroCompactProcessor", "SymphonyRetrievalCompactProcessor",
+            "MicroCompactProcessor",
+            "SymphonyRetrievalCompactProcessor",
         )
 
     async def _intercept_auto_compaction(self, pending, *, window=None, **kwargs) -> bool:
@@ -1215,24 +1347,28 @@ class SessionModelContext(ModelContext):
                 eligible = await processor.trigger_add_messages(self, pending, **kwargs)
             if eligible:
                 indices.append(index)
+
         async def prepare(draft):
-            if window is not None:
-                import copy
-                draft._compaction_window = copy.deepcopy(window)
-            processors = [draft._processors[index] for index in indices]
-            await draft._run_active_compression_processors(processors, **kwargs)
+            await draft.prepare_auto_compaction(indices, window=window, **kwargs)
+
         async def persist():
             session = self.get_session_ref()
             if session is not None:
                 await coordinator.engine.save_contexts(session, context_ids=[self.context_id()])
                 await session.commit()
+
         try:
             result = await coordinator.run(
-                self, "auto", None, prepare, messages=source, persist=persist,
+                self,
+                "auto",
+                None,
+                prepare,
+                messages=source,
+                persist=persist,
                 processor_types=[self._processors[index].processor_type() for index in indices],
             )
-        except CompactionError:
-            raise
+        except CompactionError as error:
+            raise error
         except Exception as error:
             raise CompactionError("COMPACT_EXECUTION_FAILED") from error
         return isinstance(result, CompactionCandidate)
@@ -1256,7 +1392,7 @@ class SessionModelContext(ModelContext):
         for processor in processors:
             # TODO(compact): Retain original processor iteration until automatic ADD integration.
             # if compaction_handled and self._is_summary_processor(processor):
-                # continue
+            #     continue
             operation_id = None
             started_at = None
             before_messages = None
@@ -1270,12 +1406,12 @@ class SessionModelContext(ModelContext):
                 if should_run:
                     # TODO(compact): Do not intercept native automatic ADD compression yet.
                     # if self._has_compaction_hook() and self._is_summary_processor(processor):
-                        # installed = await self._intercept_auto_compaction(messages_to_add, **kwargs)
-                        # if installed:
-                            # messages_to_add = []
-                            # changed = True
-                        # compaction_handled = True
-                        # continue
+                    #     installed = await self._intercept_auto_compaction(messages_to_add, **kwargs)
+                    #     if installed:
+                    #         messages_to_add = []
+                    #         changed = True
+                    #         compaction_handled = True
+                    #         continue
                     logger.info(
                         f"{'force trigger' if force else 'trigger'} "
                         f"context processor {processor.processor_type()} on ADD"
@@ -1340,8 +1476,8 @@ class SessionModelContext(ModelContext):
                         changed = True
             # TODO(compact): The legacy processor error policy remains active.
             # except CompactionError:
-                # raise
-            except asyncio.CancelledError:
+            # raise
+            except asyncio.CancelledError as cancelled:
                 if started_emitted:
                     await self._build_and_emit_processor_cancelled_state(
                         operation_id=operation_id,
@@ -1358,7 +1494,7 @@ class SessionModelContext(ModelContext):
                             model_context_window_tokens=self._model_context_window_tokens,
                         ),
                     )
-                raise
+                raise cancelled
             except Exception as e:
                 await self._build_and_emit_compression_state(
                     ContextProcessorStateInput(
@@ -1499,7 +1635,7 @@ class SessionModelContext(ModelContext):
                 )
                 if event is not None:
                     changed = True
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancelled:
                 if started_emitted:
                     await self._build_and_emit_processor_cancelled_state(
                         operation_id=operation_id,
@@ -1516,10 +1652,10 @@ class SessionModelContext(ModelContext):
                             model_context_window_tokens=self._model_context_window_tokens,
                         ),
                     )
-                raise
+                raise cancelled
             except Exception as e:
                 if self._compaction_draft:
-                    raise
+                    raise e
                 await self._build_and_emit_compression_state(
                     ContextProcessorStateInput(
                         operation_id=operation_id or uuid.uuid4().hex,

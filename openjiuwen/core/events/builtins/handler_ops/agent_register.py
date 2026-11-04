@@ -52,7 +52,8 @@ class _AgentRegistrationOps:
         output.validate()
         if output.deny is not None:
             raise RuntimeError(output.deny)
-        assert output.value is not None
+        if output.value is None:
+            raise RuntimeError("agent.register returned no value")
         return output.value
 
     async def build(

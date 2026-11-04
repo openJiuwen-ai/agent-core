@@ -109,7 +109,11 @@ def prepare_agent_register_input(data: AgentRegisterInput) -> AgentRegisterInput
         raise TypeError("effort must be a string or integer")
     for name in ("max_turns", "auto_compact_window"):
         value = getattr(data, name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be a positive integer")
+        if value <= 0:
             raise ValueError(f"{name} must be a positive integer")
     if data.hooks is not None and not isinstance(data.hooks, Mapping):
         raise TypeError("hooks must be a mapping")

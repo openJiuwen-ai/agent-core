@@ -84,7 +84,8 @@ class McpOpsFacade:
             output = await self._trigger("mcp.register", request, McpRegisterOutput)
         if output.deny is not None:
             raise RuntimeError(output.deny)
-        assert output.value is not None
+        if output.value is None:
+            raise RuntimeError("mcp.register returned no value")
         return output.value
 
     async def _trigger(self, event_type: str, request: object, output_type: type[_Output]) -> _Output:

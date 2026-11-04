@@ -64,7 +64,7 @@ def encode_json(value: Any) -> bytes:
     """Encode a validated JSON value as compact UTF-8 bytes."""
     try:
         return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError) as exc:
+    except (ValueError, TypeError, RecursionError, OverflowError) as exc:
         raise build_error(
             StatusCode.EXTENSION_DATA_INVALID, cause=exc, reason="value cannot be encoded as JSON UTF-8"
         ) from exc
