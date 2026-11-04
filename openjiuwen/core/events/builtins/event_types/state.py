@@ -46,7 +46,7 @@ def match_pattern_func(event_input: object, match_pattern: MatchPattern) -> bool
     address = event_input.address
     values = {"package_id": event_input.package_id, "ref.package": address.package, "ref.key": address.key,
               "scope": address.scope, "session_id": address.session_id}
-    return all(values[key] == value for key, value in match_pattern.items())
+    return all(values.get(key) == value for key, value in match_pattern.items())
 
 
 def _valid_input(request: object) -> bool:

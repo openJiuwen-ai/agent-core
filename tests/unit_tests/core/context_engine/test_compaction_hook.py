@@ -3,13 +3,18 @@
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from openjiuwen.core.context_engine import (
-    CompactionCandidate, CompactionError, CompactionSkipped, ContextEngine, ContextEngineConfig,
+    CompactionCandidate,
+    CompactionError,
+    CompactionSkipped,
+    ContextEngine,
+    ContextEngineConfig,
 )
 from openjiuwen.core.context_engine.compaction import message_fingerprint
 from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessorConfig
@@ -17,10 +22,11 @@ from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 from openjiuwen.core.session.agent import Session
 
 
-async def _engine(tmp_path=None):
+async def _engine(tmp_path=None, *, sys_operation=None):
     engine = ContextEngine(
         ContextEngineConfig(enable_tiktoken_counter=False, enable_openrouter_model_context_window_tokens=False),
         workspace=SimpleNamespace(root_path=str(tmp_path)) if tmp_path else None,
+        sys_operation=sys_operation,
     )
     context = await engine.create_context(session=Session(session_id="default_session_id"), history_messages=[
         UserMessage(content="Keep project constraints. " * 200),
@@ -287,6 +293,82 @@ def test_installed_forked_processors_have_isolated_candidate_state(name):
     assert candidate is not processor
     assert candidate.config is not processor.config
     assert candidate.save_state() == processor.save_state()
+
+
+@pytest.mark.parametrize("instructions", [None, "keep project constraints"])
+def test_compaction_instructions_change_only_draft_memory_policy(instructions):
+    from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
+    from openjiuwen.core.context_engine.processor.forked import SessionMemoryCompressor, SessionMemoryCompressorConfig
+
+    full = FullCompactProcessor(FullCompactProcessorConfig(session_memory_enabled=True))
+    memory = SessionMemoryCompressor(SessionMemoryCompressorConfig(enabled=True))
+    full_draft = full.fork_compaction(instructions, [])
+    memory_draft = memory.fork_compaction(instructions, [])
+
+    assert full._session_memory_enabled is True
+    assert memory.config.enabled is True
+    assert full_draft._session_memory_enabled is (instructions is None)
+    assert memory_draft.config.enabled is (instructions is None)
+
+
+@pytest.mark.asyncio
+async def test_forked_executor_keeps_live_response_and_applies_draft_instructions():
+    from openjiuwen.core.context_engine.processor.forked import DialogueCompressor, DialogueCompressorConfig
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionError,
+        CompressionRequest,
+    )
+
+    response = AssistantMessage(content="summary")
+    model = SimpleNamespace(invoke=AsyncMock(return_value=response))
+    processor = DialogueCompressor(DialogueCompressorConfig())
+    processor.rebind_model(model=model)
+    live_executor = processor._compression_executor
+    request = CompressionRequest(prompt="summarize", context_messages=[UserMessage(content="history")])
+    await live_executor.invoke(request)
+
+    failures = []
+    candidate = processor.fork_compaction("retain API contracts", failures)
+    draft_executor = candidate._compression_executor
+    assert draft_executor is not live_executor
+    assert draft_executor.last_response is None
+    assert live_executor.last_response is response
+
+    await draft_executor.invoke(request)
+    draft_messages = model.invoke.call_args.kwargs["messages"]
+    assert "retain API contracts" in draft_messages[0].content
+    assert request.context_messages[0].content == "history"
+
+    model.invoke.side_effect = OSError("provider failed")
+    with pytest.raises(CompressionError, match="provider failed"):
+        await draft_executor.invoke(request)
+    assert len(failures) == 1
+    assert isinstance(failures[0], OSError)
+    assert live_executor.last_response is response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write_code", [0, 1])
+async def test_compaction_publishes_resources_through_live_sys_operation(tmp_path, write_code):
+    fs = SimpleNamespace(write_file=AsyncMock(return_value=SimpleNamespace(code=write_code)))
+    provider = SimpleNamespace(fs=lambda: fs)
+    engine, context, _ = await _engine(tmp_path, sys_operation=provider)
+    before = message_fingerprint(context.get_messages())
+
+    async def prepare(draft):
+        resource = Path(draft.workspace_dir()) / "archive.txt"
+        resource.write_text("archived history", encoding="utf-8")
+        draft.set_messages([UserMessage(content=f"summary archive: {resource}")])
+
+    if write_code:
+        with pytest.raises(CompactionError, match="COMPACT_RESOURCE_WRITE_FAILED"):
+            await engine._compaction.run(context, "manual", None, prepare)
+        assert message_fingerprint(context.get_messages()) == before
+    else:
+        await engine._compaction.run(context, "manual", None, prepare)
+        assert str(tmp_path / "archive.txt") in context.get_messages()[0].content
+    fs.write_file.assert_awaited_once_with(str(tmp_path / "archive.txt"), "archived history")
+    assert context.sys_operation() is provider
 
 
 @pytest.mark.asyncio

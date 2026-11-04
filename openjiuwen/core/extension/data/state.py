@@ -18,7 +18,12 @@ from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.extension.data.dependencies import StateChanges
 from openjiuwen.core.extension.data.files import (
-    package_data_path, package_file_lock, replace_json, resolve_data_path, run_file_operation, sync_directory,
+    package_data_path,
+    package_file_lock,
+    replace_json,
+    resolve_data_path,
+    run_file_operation,
+    sync_directory,
 )
 from openjiuwen.core.extension.data.json_values import copy_json, encode_json, require_package_id, valid_package_id
 from openjiuwen.core.extension.data.state_models import (
@@ -75,7 +80,11 @@ class JsonState:
         return await run_file_operation(partial(self._operate, address, "get"))
 
     async def set(
-        self, address: StateAddress, value: Any, *, expected_version: int | None = None,
+        self,
+        address: StateAddress,
+        value: Any,
+        *,
+        expected_version: int | None = None,
     ) -> StateSetResult:
         """Compare, update and commit under the lock of one state file."""
         require_address(address)
@@ -146,9 +155,9 @@ class JsonState:
     def _packages(self) -> tuple[str, ...]:
         if not self.directory.is_dir():
             return ()
-        return tuple(sorted(
-            path.name for path in self.directory.iterdir() if path.is_dir() and valid_package_id(path.name)
-        ))
+        return tuple(
+            sorted(path.name for path in self.directory.iterdir() if path.is_dir() and valid_package_id(path.name))
+        )
 
     def _root_gate(self) -> Path:
         return self.directory.parent / f".{self.directory.name}.lock"
@@ -161,13 +170,18 @@ class JsonState:
         require_package_id(package_id)
         path = self.directory / package_id
         resolved = resolve_data_path(path)
-        if resolve_data_path(self.directory) != self.directory or path.is_symlink() or resolved.parent != self.directory:
+        if (
+            resolve_data_path(self.directory) != self.directory
+            or path.is_symlink()
+            or resolved.parent != self.directory
+        ):
             raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="state package path leaves its directory")
         if resolved.exists() and not resolved.is_dir():
             raise build_error(StatusCode.EXTENSION_DATA_PATH_INVALID, reason="state package path is not a directory")
         return resolved
 
-    def _data_file(self, package_dir: Path, address: StateAddress) -> Path:
+    @staticmethod
+    def _data_file(package_dir: Path, address: StateAddress) -> Path:
         if address.scope == "application":
             return package_data_path(package_dir, "application.json")
         _require_session_name(address.session_id, address.scope)
@@ -205,8 +219,6 @@ class JsonState:
                         self.directory.mkdir(parents=True, exist_ok=True)
                     return self._with_package_gate(address, operation, value, expected_version)
             return self._with_package_gate(address, operation, value, expected_version)
-        except _UnknownCommit:
-            raise
         except (OSError, LockException) as exc:
             if operation == "set":
                 logger.warning("extension state did not commit for package %s: %s", address.package, exc)
@@ -256,7 +268,8 @@ class JsonState:
             if package_dir.exists():
                 if package_dir.is_symlink() or not package_dir.is_dir():
                     raise build_error(
-                        StatusCode.EXTENSION_DATA_PATH_INVALID, reason="state package path is not a directory",
+                        StatusCode.EXTENSION_DATA_PATH_INVALID,
+                        reason="state package path is not a directory",
                     )
                 shutil.rmtree(package_dir)
                 sync_directory(self.directory)
@@ -283,8 +296,14 @@ class JsonState:
                 if operation == "clear":
                     return self._clear(path, contents, previous)
                 entry = contents.get(address.key)
-                snapshot = StateSnapshot(False) if entry is None else StateSnapshot(
-                    entry.get("exists", True), entry["value"], entry["version"],
+                snapshot = (
+                    StateSnapshot(False)
+                    if entry is None
+                    else StateSnapshot(
+                        entry.get("exists", True),
+                        entry["value"],
+                        entry["version"],
+                    )
                 )
                 current = snapshot.version
                 if operation == "get":
@@ -300,7 +319,10 @@ class JsonState:
                 if saved:
                     committed_version = current + 1
                 return StateSetResult(
-                    saved, saved, current + 1 if saved else current, None if saved else "storage_error",
+                    saved,
+                    saved,
+                    current + 1 if saved else current,
+                    None if saved else "storage_error",
                 )
         except (OSError, LockException) as exc:
             if committed_version is not None:
@@ -308,7 +330,7 @@ class JsonState:
             if operation == "set":
                 logger.warning("extension state did not commit for package %s: %s", address.package, exc)
                 return StateSetResult(False, False, current, "storage_error")
-            raise
+            raise exc
 
     def _clear(self, path: Path, contents: dict[str, Any], previous: bytes | None) -> dict[str, int]:
         changed: dict[str, int] = {}
@@ -335,16 +357,20 @@ class JsonState:
             return {}, None
         except OSError as exc:
             raise build_error(
-                StatusCode.EXTENSION_DATA_READ_FAILED, cause=exc, reason=f"cannot read {path.name}",
+                StatusCode.EXTENSION_DATA_READ_FAILED,
+                cause=exc,
+                reason=f"cannot read {path.name}",
             ) from exc
         try:
             self._check_size(data)
             contents = copy_json(json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object))
             self._validate_contents(contents)
             return contents, data
-        except (ValueError, UnicodeError, RecursionError, BaseError) as exc:
+        except (ValueError, RecursionError, BaseError) as exc:
             raise build_error(
-                StatusCode.EXTENSION_DATA_READ_FAILED, cause=exc, reason=f"invalid state JSON in {path.name}",
+                StatusCode.EXTENSION_DATA_READ_FAILED,
+                cause=exc,
+                reason=f"invalid state JSON in {path.name}",
             ) from exc
 
     @staticmethod
@@ -366,11 +392,10 @@ def _require_session_name(session_id: str | None, scope: str) -> None:
     """Keep a session file inside its package directory."""
     if scope != "session":
         return
-    if (
-        not isinstance(session_id, str)
-        or _SESSION_NAME.fullmatch(session_id) is None
-        or ".." in session_id
-        or session_id.endswith(".")
-        or session_id.split(".", 1)[0].upper() in _RESERVED_NAMES
-    ):
+    is_str = isinstance(session_id, str)
+    matches_pattern = is_str and _SESSION_NAME.fullmatch(session_id) is not None
+    has_parent_ref = is_str and ".." in session_id
+    ends_with_dot = is_str and session_id.endswith(".")
+    reserved = is_str and session_id.split(".", 1)[0].upper() in _RESERVED_NAMES
+    if not all((is_str, matches_pattern, not has_parent_ref, not ends_with_dot, not reserved)):
         raise build_error(StatusCode.EXTENSION_DATA_INVALID, reason="session_id is not a safe state filename")

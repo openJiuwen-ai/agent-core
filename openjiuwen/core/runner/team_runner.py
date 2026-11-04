@@ -703,6 +703,20 @@ class _TeamRunnerMixin:
         """
         return await self._get_team_runtime_manager().list_active_teams()
 
+    def set_team_extension_bus(self, bus: object) -> None:
+        """Inject the host extension bus into the team runtime manager.
+
+        The public host wiring point for the team extension mechanism: after
+        the host initializes its bus (events registered, ``ops.build`` run), a
+        single call here reaches every leader build path through the
+        manager. Passing ``None`` unwires the team side.
+
+        Args:
+            bus: A host-initialized extension bus, or None.
+        """
+        manager = self._get_team_runtime_manager()
+        manager.set_extension_bus(bus)
+
     async def delete_agent_team(
         self,
         *,
@@ -1222,8 +1236,7 @@ class _TeamRunnerClassMixin:
         Args:
             bus: A host-initialized extension bus, or None.
         """
-        manager = _global_runner()._get_team_runtime_manager()
-        manager.set_extension_bus(bus)
+        _global_runner().set_team_extension_bus(bus)
 
     @classmethod
     async def get_agent_team_monitor(

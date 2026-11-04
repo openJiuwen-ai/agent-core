@@ -16,7 +16,6 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Literal
 
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
@@ -66,6 +65,7 @@ def message_fingerprint(messages) -> str:
 
 def validate_compaction_messages(messages, source):
     """Reject forged tool outcomes and new unfinished calls before installation."""
+
     def inspect(values):
         pending = {}
         seen = set()
@@ -80,6 +80,7 @@ def validate_compaction_messages(messages, source):
                     raise CompactionError("COMPACT_INVALID_RESULT")
                 pending.pop(message.tool_call_id)
         return pending
+
     original_pending = inspect(source)
     for call_id, call in inspect(messages).items():
         if original_pending.get(call_id) != call:
@@ -139,7 +140,7 @@ class _InstructionModel:
             return await self.model.invoke(*positional, **kwargs)
         except Exception as error:
             self.failures.append(error)
-            raise
+            raise error
 
 
 class CompactionDraft:
@@ -152,28 +153,14 @@ class CompactionDraft:
         self.workspace = Path(context.workspace_dir()).resolve() if context.workspace_dir() else None
         self.failures = []
         self.seeded_files = set()
-        self.context = copy.copy(context)
-        draft = self.context
-        draft._message_buffer = copy.deepcopy(context._message_buffer)
-        draft._offload_message_buffer = copy.copy(context._offload_message_buffer)
-        draft._offload_message_buffer._in_memory_offload_messages = copy.deepcopy(
-            context._offload_message_buffer.get_all(),
+        self.context = context.fork_compaction(
+            messages,
+            workspace=str(self.root),
+            session_ref=_DraftSession(context.get_session_ref()) if context.get_session_ref() else None,
+            instructions=instructions,
+            failures=self.failures,
+            processor_types=processor_types,
         )
-        draft._workspace = SimpleNamespace(root_path=str(self.root))
-        draft._sys_operation = None
-        draft._processor_lock = asyncio.Lock()
-        draft._compaction_coordinator = None
-        draft._compaction_draft = True
-        draft._usage_measurement_cache = {}
-        draft._usage_report_cache = {}
-        draft._session_ref = _DraftSession(context.get_session_ref()) if context.get_session_ref() else None
-        from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-        def selected(processor):
-            return (processor_types is None or processor.processor_type() in processor_types) and (
-                ContextUtils.is_compression_processor(processor) or ContextUtils.is_offload_processor(processor)
-            )
-        draft._processors = [processor.fork_compaction(instructions, self.failures) if selected(processor) else processor
-                             for processor in context._processors or []]
         if self.workspace is not None:
             relative = Path("context") / (context.session_id() + "_context") / "session_memory" / "session_context.md"
             original_notes = self.workspace / relative
@@ -182,11 +169,10 @@ class CompactionDraft:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(original_notes, target)
                 self.seeded_files.add(relative)
-        draft.set_messages(copy.deepcopy(list(messages)))
-        draft._configure_offload_message_buffer()
 
     def normalized(self, messages):
         """Translate staged resource references to their eventual workspace paths."""
+
         def convert(value):
             if isinstance(value, str) and self.workspace is not None:
                 return value.replace(str(self.root), str(self.workspace))
@@ -195,6 +181,7 @@ class CompactionDraft:
             if isinstance(value, list):
                 return [convert(item) for item in value]
             return value
+
         return tuple(type(message).model_validate(convert(message.model_dump())) for message in messages)
 
     async def publish_files(self, messages):
@@ -216,10 +203,13 @@ class CompactionDraft:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
                     raise CompactionError("COMPACT_RESOURCE_CONFLICT")
-                if self.original._sys_operation is None:
+                sys_operation = self.original.sys_operation()
+                if sys_operation is None:
                     shutil.copyfile(source, target)
                 else:
-                    result = await self.original._sys_operation.fs().write_file(str(target), source.read_text(encoding="utf-8"))
+                    result = await sys_operation.fs().write_file(
+                        str(target), source.read_text(encoding="utf-8")
+                    )
                     if result.code != 0:
                         raise CompactionError("COMPACT_RESOURCE_WRITE_FAILED")
 
@@ -244,11 +234,13 @@ class CompactionCoordinator:
             raise CompactionError("COMPACT_HOOK_ALREADY_REGISTERED")
         self.hook = hook
         self.generation += 1
+
         def remove():
             if self.hook is hook:
                 self.hook = None
                 self.generation += 1
                 self.clear()
+
         return remove
 
     def clear(self):
@@ -259,6 +251,7 @@ class CompactionCoordinator:
     async def run(self, context, trigger, instructions, prepare, *, messages=None, persist=None, processor_types=None):
         """Run a host decision and install only after the entire hook returns."""
         from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+
         key = (context.session_id(), context.context_id())
         if key in self.active:
             raise CompactionError("COMPACT_REENTRANT")
@@ -280,17 +273,20 @@ class CompactionCoordinator:
         self.active.add(activity)
         started_at = time.time()
         operation_id = uuid.uuid4().hex
+
         def dependencies():
-            from openjiuwen.core.context_engine.context.session_memory_manager import get_session_memory_runtime
-            return repr((context._model_name, processor_types, [processor.config for processor in context._processors or []],
-                         get_session_memory_runtime(context.get_session_ref())))
+            return context.compaction_dependencies(processor_types)
+
         dependency_key = dependencies()
         try:
+
             async def default(value):
                 nonlocal draft, prepared, prepared_key
-                if not isinstance(value, CompactionRequest) or (
-                    value.session_id, value.context_id, value.trigger
-                ) != (request.session_id, request.context_id, request.trigger):
+                if not isinstance(value, CompactionRequest) or (value.session_id, value.context_id, value.trigger) != (
+                    request.session_id,
+                    request.context_id,
+                    request.trigger,
+                ):
                     raise CompactionError("COMPACT_INVALID_RESULT")
                 current_key = (message_fingerprint(value.messages), value.instructions)
                 if prepared_key is not None:
@@ -302,11 +298,16 @@ class CompactionCoordinator:
                 cached = self.cache.pop(key, None)
                 if cached is not None:
                     old_source, old_instructions, old_result, old_draft, old_dependencies = cached
-                    prefix = list(value.messages[:len(old_source)])
-                    suffix = list(value.messages[len(old_source):])
-                    if old_dependencies == dependency_key and old_instructions == value.instructions and message_fingerprint(prefix) == message_fingerprint(old_source) and not any(
+                    source_length = len(old_source)
+                    prefix = list(value.messages[:source_length])
+                    suffix = list(value.messages[source_length:])
+                    deps_match = old_dependencies == dependency_key
+                    instructions_match = old_instructions == value.instructions
+                    prefix_match = message_fingerprint(prefix) == message_fingerprint(old_source)
+                    suffix_clean = not any(
                         getattr(message, "tool_calls", None) or message.role == "tool" for message in suffix
-                    ):
+                    )
+                    if all((deps_match, instructions_match, prefix_match, suffix_clean)):
                         draft = old_draft
                         prepared = CompactionCandidate(tuple([*old_result.messages, *copy.deepcopy(suffix)]))
                         return copy.deepcopy(prepared)
@@ -338,7 +339,7 @@ class CompactionCoordinator:
                 raise CompactionError("COMPACT_STALE")
             current = context.get_messages()
             if message_fingerprint(current) != fingerprint and not (
-                trigger == "precompute" and message_fingerprint(current[:len(source)]) == fingerprint
+                trigger == "precompute" and message_fingerprint(current[: len(source)]) == fingerprint
             ):
                 raise CompactionError("COMPACT_STALE")
             counter = context.token_counter()
@@ -357,62 +358,87 @@ class CompactionCoordinator:
             if message_fingerprint(final) == message_fingerprint(source):
                 return CompactionSkipped("Conversation is unchanged")
             committed = False
+
             async def install():
                 nonlocal committed
                 if draft is not None:
                     await draft.publish_files(final)
-                if (hook_generation != self.generation or message_fingerprint(context.get_messages()) != fingerprint
-                        or self.engine.get_context(context_id=key[1], session_id=key[0]) is not context):
+                if (
+                    hook_generation != self.generation
+                    or message_fingerprint(context.get_messages()) != fingerprint
+                    or self.engine.get_context(context_id=key[1], session_id=key[0]) is not context
+                ):
                     raise CompactionError("COMPACT_STALE")
                 context.set_messages(final)
                 if draft is not None:
-                    context._offload_message_buffer = draft.context._offload_message_buffer
-                    context._configure_offload_message_buffer()
-                    if message_fingerprint(final) == message_fingerprint(draft.normalized(draft.context.get_messages())):
-                        for original, forked in zip(context._processors or [], draft.context._processors):
-                            if original is not forked:
-                                original.load_state(copy.deepcopy(forked.save_state()))
-                        if draft.context._session_ref is not None and context.get_session_ref() is not None:
-                            context.get_session_ref().update_state(draft.context._session_ref.updates)
-                    else:
-                        for processor in context._processors or []:
-                            processor.load_state({})
-                if draft is None or message_fingerprint(final) != message_fingerprint(draft.normalized(draft.context.get_messages())):
-                    from openjiuwen.core.context_engine.context.session_memory_manager import invalidate_session_memory_anchor
+                    context.restore_compaction_state(
+                        draft.context,
+                        restore_processors=message_fingerprint(final) == message_fingerprint(
+                            draft.normalized(draft.context.get_messages())
+                        ),
+                    )
+                if draft is None or message_fingerprint(final) != message_fingerprint(
+                    draft.normalized(draft.context.get_messages())
+                ):
+                    from openjiuwen.core.context_engine.context.session_memory_manager import (
+                        invalidate_session_memory_anchor,
+                    )
+
                     invalidate_session_memory_anchor(context.get_session_ref())
                 if persist is not None:
                     await asyncio.wait_for(persist(), timeout=30)
                 committed = True
                 original_ids = {message_fingerprint([message]) for message in source}
-                summary = "\n".join(str(message.content) for message in final
-                                    if message.role != "system" and message_fingerprint([message]) not in original_ids)
-                context._last_compaction = {
-                    "operation_id": operation_id, "trigger": trigger, "status": "completed",
-                    "compact_summary": summary, "before": {"tokens": before}, "after": {"tokens": after},
+                summary = "\n".join(
+                    str(message.content)
+                    for message in final
+                    if message.role != "system" and message_fingerprint([message]) not in original_ids
+                )
+                receipt = {
+                    "operation_id": operation_id,
+                    "trigger": trigger,
+                    "status": "completed",
+                    "compact_summary": summary,
+                    "before": {"tokens": before},
+                    "after": {"tokens": after},
                 }
                 from openjiuwen.core.context_engine.context.processor_state_recorder import ContextProcessorStateInput
-                await context._build_and_emit_compression_state(ContextProcessorStateInput(
-                    operation_id=operation_id, status="completed", phase="active_compress", trigger=trigger,
-                    processor=None, reason="compaction_committed", before_messages=source, after_messages=final,
-                    started_at=started_at, ended_at=time.time(), error=None, messages_to_modify=list(range(len(source))),
-                    force=trigger != "auto", context_max=context.context_window_tokens(), compact_summary=summary,
-                ))
+
+                await context.record_compaction(
+                    receipt,
+                    ContextProcessorStateInput(
+                        operation_id=operation_id,
+                        status="completed",
+                        phase="active_compress",
+                        trigger=trigger,
+                        processor=None,
+                        reason="compaction_committed",
+                        before_messages=source,
+                        after_messages=final,
+                        started_at=started_at,
+                        ended_at=time.time(),
+                        error=None,
+                        messages_to_modify=list(range(len(source))),
+                        force=trigger != "auto",
+                        context_max=context.context_window_tokens(),
+                        compact_summary=summary,
+                    )
+                )
+
             task = asyncio.create_task(install())
             try:
                 try:
                     await asyncio.shield(task)
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as cancelled:
                     await task
-                    raise
-            except asyncio.CancelledError:
-                raise
+                    raise cancelled
             except Exception as error:
                 if committed:
                     raise CompactionError("COMPACT_NOTIFICATION_FAILED") from error
                 if message_fingerprint(context.get_messages()) != fingerprint:
-                    context._compaction_uncertain = True
+                    context.mark_compaction_uncertain()
                     raise CompactionError("COMPACT_COMMIT_UNCERTAIN") from error
-                raise
+                raise error
             return result
         finally:
             self.active.discard(activity)

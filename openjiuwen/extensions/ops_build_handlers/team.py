@@ -355,9 +355,10 @@ def _build_team_methods(resolver: TeamResourceResolver) -> dict[str, Any]:
             visible = [message for message in visible if message.broadcast]
         filtered = [message for message in visible if _matches_filters(message, filters)]
         filtered.sort(key=lambda message: (message.timestamp, message.message_id), reverse=True)
-        page = filtered[offset : offset + limit]
+        end = offset + limit
+        page = filtered[offset:end]
         next_cursor = None
-        if offset + limit < len(filtered):
+        if end < len(filtered):
             next_cursor = _encode_cursor(
                 _MessageCursor(
                     session_id=resolved_session,

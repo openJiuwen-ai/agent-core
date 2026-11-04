@@ -150,7 +150,7 @@ class McpService:
             if not getattr(added, "added", False):
                 raise RuntimeError("MCP ability registration failed")
             ability_added = True
-        except BaseException:
+        except BaseException as error:
             try:
                 await _cleanup_failed_registration(
                     config,
@@ -161,7 +161,7 @@ class McpService:
                 )
             except BaseException as cleanup_error:
                 raise RuntimeError("MCP server registration failed and cleanup failed") from cleanup_error
-            raise
+            raise error
 
         return McpRegisterOutput(
             value=McpRegisterValue(server_id=config.server_id, server_name=config.server_name)
@@ -305,7 +305,8 @@ class McpService:
             )
         return None
 
-    def _resolve_spec(self, request: McpConnectInput) -> McpServerSpec | None:
+    @staticmethod
+    def _resolve_spec(request: McpConnectInput) -> McpServerSpec | None:
         """Find the package declaration a request points at."""
 
         from openjiuwen.core.extension.schema.mcp import declarations

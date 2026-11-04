@@ -260,7 +260,7 @@ def prepare_mcp_register_input(data: McpRegisterInput) -> McpRegisterInput:
         raise ValueError("invalid MCP server name")
     if data.transport not in MCP_TRANSPORT_CLIENT_TYPES:
         raise ValueError("unsupported MCP transport")
-    if type(data.include_image_content) is not bool:
+    if not isinstance(data.include_image_content, bool):
         raise TypeError("include_image_content must be a bool")
     if not timeout_is_valid(data.timeout_ms):
         raise ValueError("timeout_ms must be a positive integer or None")

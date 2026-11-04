@@ -65,5 +65,9 @@ def require_address(address: StateAddress) -> None:
 
 def require_version(version: int | None) -> None:
     """Reject booleans and negative values as version conditions."""
-    if version is not None and (isinstance(version, bool) or not isinstance(version, int) or version < 0):
+    if version is None:
+        return
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise build_error(StatusCode.EXTENSION_DATA_INVALID, reason="expected_version must be a non-negative integer")
+    if version < 0:
         raise build_error(StatusCode.EXTENSION_DATA_INVALID, reason="expected_version must be a non-negative integer")
