@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
-from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.foundation.tool.mcp.base import (
     MCPTool,
@@ -31,7 +30,6 @@ __all__ = [
     "MCPTool",
     # for tool info/tool call
     "ToolCard",
-    "ToolExposure",
     "RestfulApiCard",
     "ToolInfo",
     "ToolTimeoutResult",

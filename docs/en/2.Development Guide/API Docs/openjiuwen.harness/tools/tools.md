@@ -60,7 +60,8 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 
 | Tool | Description |
 |---|---|
-| `ToolSearchTool` | Search deferred tools and return their complete schemas. |
+| `SearchToolsTool` | Search for available tools by keyword. |
+| `LoadToolsTool` | Load additional tools into the active tool set. |
 
 ### Skills
 

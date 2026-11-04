@@ -182,39 +182,6 @@ _DEEP_EVENTS = frozenset(
 
 _SUB_AGENTS_DIR = "sub_agents"
 
-# Tools that remain visible to the model when progressive tool loading is
-# enabled.  The registration switch still decides whether a tool exists at
-# all; this list only controls exposure for tools that are registered.
-_DEFAULT_DIRECT_TOOL_NAMES = frozenset(
-    {
-        "tool_search",
-        "tool_call",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "glob",
-        "grep",
-        "bash",
-        "task_tool",
-        "ask_user",
-        "todo_create",
-        "todo_list",
-        "todo_get",
-        "todo_modify",
-        "skill_tool",
-        "memory_search",
-        "memory_get",
-        "paid_search",
-        "fetch_webpage",
-        "write_memory",
-        "edit_memory",
-        "read_memory",
-        "ltm_search",
-        "ltm_search_summary",
-        "send_file_to_user",
-    }
-)
-
 
 _ROUND_BOUNDARY = object()
 
@@ -423,14 +390,6 @@ class DeepAgent(BaseAgent):
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
         self._deep_config = config
-        # Exposure is an agent-level registration policy.  Configure it before
-        # the factory adds ``config.tools`` and before rails can register their
-        # own tools; the AbilityManager then resolves each card exactly once at
-        # registration time.
-        self.ability_manager.set_tool_exposure_policy(
-            config.progressive_tool_enabled,
-            direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES,
-        )
         if config.card is not None:
             self.card = config.card
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
@@ -442,11 +401,6 @@ class DeepAgent(BaseAgent):
         """Hot-reconfigure an already-running agent without restarting it."""
         previous_config = self._deep_config
         self._deep_config = config
-        self.ability_manager.set_tool_exposure_policy(
-            config.progressive_tool_enabled,
-            direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES,
-        )
-        self.ability_manager.refresh_tool_exposure_policy()
         if config.card is not None:
             self.card = config.card
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
@@ -467,27 +421,6 @@ class DeepAgent(BaseAgent):
 
         self._queue_pending_rails(config)
         self._sync_prompt_builder_references()
-        # SubagentRail is intentionally retained across partial hot reloads so
-        # its task/session tools and running subagents survive. Refresh the
-        # model-facing available-agents text after the parent registry and
-        # subagent configuration have changed, otherwise task_tool can keep
-        # advertising a stale tool-name snapshot.
-        self._refresh_subagent_tool_descriptions()
-
-    def _refresh_subagent_tool_descriptions(self) -> None:
-        """Refresh dynamic tool names embedded in subagent tool metadata."""
-
-        for rail in (*self._pending_rails, *self._registered_rails):
-            refresh = getattr(rail, "refresh_available_agents", None)
-            if not callable(refresh):
-                continue
-            try:
-                refresh(self)
-            except Exception as exc:
-                logger.warning(
-                    "[DeepAgent] Failed to refresh subagent tool descriptions: %s",
-                    exc,
-                )
 
     def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
         """Cycle stale rails out and prepare replacement rails during hot-reconfigure.
@@ -1230,12 +1163,7 @@ class DeepAgent(BaseAgent):
         # sort is stable, so rails sharing a priority keep the order the
         # caller listed them in.
         rail_init_timings: List[tuple] = []
-        initialized_rails = sorted(
-            self._pending_rails,
-            key=lambda r: r.priority,
-            reverse=True,
-        )
-        for rail_inst in initialized_rails:
+        for rail_inst in sorted(self._pending_rails, key=lambda r: r.priority, reverse=True):
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
@@ -1245,18 +1173,6 @@ class DeepAgent(BaseAgent):
                 (type(rail_inst).__name__, init_rail(rail_inst, self))
             )
             await self._register_rail_selective(rail_inst)
-
-        # ProgressiveToolRail owns the BM25 catalog. Build its initial
-        # snapshot only after every pending startup rail has registered its
-        # tools. Tools registered later are handled by the deferred-tool
-        # registry-version check on the next tool_search call.
-        seen_rails: set[int] = set()
-        for rail_inst in self._registered_rails:
-            if id(rail_inst) in seen_rails:
-                continue
-            seen_rails.add(id(rail_inst))
-            if isinstance(rail_inst, ProgressiveToolRail):
-                await rail_inst.finalize_startup_async(self)
         log_rail_init_breakdown(rail_init_timings)
         self._pending_rails.clear()
         self._sync_prompt_builder_references()

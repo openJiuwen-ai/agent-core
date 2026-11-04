@@ -8,30 +8,6 @@ from pydantic import Field, BaseModel
 
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.foundation.tool.tool import tool, ToolCard
-from openjiuwen.core.foundation.tool.exposure import ToolExposure
-
-
-def test_prebuilt_card_override_preserves_runtime_metadata():
-    card = ToolCard(
-        id="original-tool",
-        name="original_tool",
-        description="original",
-        exposure=ToolExposure.DEFERRED,
-        parallel_safe=False,
-        idempotent=True,
-        properties={"source": "review"},
-    )
-
-    @tool(card=card, description="updated")
-    def example():
-        return "ok"
-
-    assert example.card.description == "updated"
-    assert example.card.exposure is ToolExposure.DEFERRED
-    assert example.card.parallel_safe is False
-    assert example.card.idempotent is True
-    assert example.card.properties == {"source": "review"}
-    assert card.description == "original"
 
 
 @tool(
