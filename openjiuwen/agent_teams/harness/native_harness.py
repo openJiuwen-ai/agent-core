@@ -628,9 +628,12 @@ class NativeHarness(DeepAgent):
                 (False).
         """
         self._require_alive()
-        # Mirror pause(): the override never calls DeepAgent.abort, so without
-        # this mark a cancelled in-flight compression would report failed.
-        mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)
+        # The override never calls DeepAgent.abort, so it must mark by itself.
+        # Guard on an active round: _on_abort is a pure no-op from IDLE /
+        # PAUSED / without an active round, and a stray mark would relabel a
+        # later internal failure as user cancel within the registry TTL.
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdAbort(immediate=immediate, ack=ack))
         await ack

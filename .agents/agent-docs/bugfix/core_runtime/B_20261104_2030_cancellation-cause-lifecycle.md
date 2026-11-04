@@ -51,7 +51,17 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    CANCEL 打标在原生 harness 上永不执行，而团队主场景（`TeamHarness.abort`、
    `ProtocolAdapter._interrupt_turn`、`StreamController` 的停止/中断）恰都走这条
    覆写实现，与同文件 `pause()` 已打标的写法不对称（pause 打、abort 不打），
-   导致团队场景用户停止时压缩仍报 `failed`。
+   导致团队场景用户停止时压缩仍报 `failed`；
+5. `NativeHarness.abort()` 补标后为无条件打标：`_on_abort` 在 IDLE / PAUSED /
+   无活跃 round 时是纯 no-op（暂停落定后 round 经 `paused_query` 停放、
+   `_st.active` 已置 None），这些路径的 abort 留下 30 秒残留标记，把后续真实
+   内部取消误报为 `cancelled` / `user_cancel`，与 PR 目标反向；
+6. `stop_team` 对 team session 打 CANCEL 标记，但冷路径（COLD_RECOVER /
+   NEW_TEAM_IN_SESSION / CREATE）均无清除点：同 session 30 秒内重建团队时，
+   残留标记经前缀继承把新团队的内部失败误报为用户操作；
+7. `DeepAgent._mark_cancellation_cause` 忽略 `abort(session=...)` 的目标会话：
+   守卫检查 `proposal_session`，标记却固定落在绑定会话（`_resolve_context_session_id()`），
+   二者不一致使异会话 abort 路径的修复失效（当前全仓无该形态调用方，属契约级缺陷）。
 
 ## 关联设计与当前契约
 
@@ -90,8 +100,18 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
 4. `NativeHarness.abort()` 在 `_require_alive()` 之后、投递 `_CmdAbort` 之前补
    `mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)`，与同文件
    `pause()` 对称。备选"覆写内调用 `super().abort()`"被拒绝：父类实现走交互 round
-   取消链，与 native harness 的 supervisor 命令队列模型不匹配。无在飞 round 的
-   no-op abort 残留标记由 30 秒 TTL 兜底，与 `pause()` 的既有行为一致。
+   取消链，与 native harness 的 supervisor 命令队列模型不匹配。
+5. `NativeHarness.abort()` 打标增加 `self._st.active is not None` 守卫：IDLE /
+   PAUSED / 无活跃 round 三条 no-op 路径被同一条件精确排除（暂停落定后
+   `_st.active` 已置 None），RUNNING / PAUSING 的真实取消路径不受影响。决策 4 中
+   "no-op 残留由 TTL 兜底"的权衡据此收紧为守卫前置。
+6. `TeamRuntimeManager._apply_action` 冷路径分支入口统一
+   `clear_cancellation_cause(session_id)`：三条 kind 一次覆盖，CREATE 全新 session
+   时为无害 no-op；旧团队在 `stop_team` 中已 await `stop_coordination` 拆除完毕，
+   入口清理不会剥夺旧团队的取消归因。
+7. `_mark_cancellation_cause` 增加可选 `session` 参数，`abort()` 传入
+   `proposal_session`，使标记落点与守卫检查的会话一致；未传时维持绑定会话回退，
+   既有调用方（`cancel_round` 路径）行为不变。
 
 ## 回归证据与适用范围
 
@@ -111,11 +131,24 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
 - `tests/unit_tests/core/context_engine/test_context_compression_state_stream.py` +
   `tests/unit_tests/harness/test_deep_agent_interaction.py`：43 passed，
   确认 c4e52b7c 原有 paused/cancelled 端到端行为与交互回归无破坏；
-- `tests/unit_tests/agent_teams/harness/test_abort.py`：9 passed（含新增
-  `test_abort_marks_cancel_cause_on_harness_session`：覆写路径 abort 后
-  `resolve_cancellation_cause(harness.session_id)` 为 CANCEL）；
-  `tests/unit_tests/agent_teams/harness/test_pause.py`：17 passed，确认 pause /
-  resume 语义无回归。
+- `tests/unit_tests/agent_teams/harness/test_abort.py`：8 passed（含
+  `test_abort_marks_cancel_cause_on_harness_session` 覆写路径打标，及本轮新增
+  `test_idle_abort_does_not_mark_cancel_cause`、
+  `test_abort_from_paused_discards_round_without_cancel_mark`：IDLE no-op abort
+  不打标、PAUSED abort 丢弃 round 不叠加 CANCEL）；
+- `tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py`：
+  6 passed（含本轮新增 `test_abort_marks_target_session_not_bound_session`：
+  异会话 `abort(session=...)` 标记落在目标会话、绑定会话无标记）；
+- `tests/unit_tests/agent_teams/runtime/test_manager.py`：27 passed（含本轮新增
+  `TestColdActivationClearsCancellationCause`：残留 CANCEL 标记经 CREATE 冷路径
+  `activate()` 后被清理）；
+- `tests/unit_tests/agent_teams/harness/test_pause.py` +
+  `tests/unit_tests/core/context_engine/test_cancellation_cause.py` +
+  `tests/unit_tests/core/context_engine/test_context_compression_state_stream.py`：
+  26 passed，pause / resume / 注册表 / 压缩状态流无回归；
+- `tests/unit_tests/core/context_engine/test_compression_state_modified_messages.py`
+  中 4 例在 Windows 本机失败（`OSError: [Errno 22]`），已验证基线 d51ec659
+  同样失败，属环境既有问题，与本次改动无关。
 
 未验证范围：真实前端联调（`status` 新增 `paused`/`cancelled` 枚举值的展示）；
 多进程部署下注册表为进程内的语义边界。重验条件：涉及 abort/resume 生命周期

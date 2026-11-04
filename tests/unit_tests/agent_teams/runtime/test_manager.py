@@ -762,3 +762,54 @@ class TestResumeFromPauseClearsCancellationCause:
             assert resolve_cancellation_cause("session-1") is None
         finally:
             reset_cancellation_causes()
+
+
+class TestColdActivationClearsCancellationCause:
+    """Cold activations must not inherit stale stop/pause marks.
+
+    ``stop_team`` marks the team session with CANCEL and tears the runtime
+    down; a fresh team on the same session (COLD_RECOVER /
+    NEW_TEAM_IN_SESSION / CREATE) must clear the mark, else an internal
+    failure inside the TTL window is misreported as ``user_cancel``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_activation_clears_stale_cancel_mark(self, monkeypatch):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            mark_cancellation_cause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        mark_cancellation_cause("session-1", CancellationCause.CANCEL)
+        try:
+            manager = TeamRuntimeManager()
+            # Empty pool + fresh session + no team row -> RunActionKind.CREATE.
+            monkeypatch.setattr(
+                manager,
+                "_inspect_session",
+                AsyncMock(return_value=(False, False, None)),
+            )
+            monkeypatch.setattr(manager, "_pre_run_with_inputs", AsyncMock())
+            monkeypatch.setattr(manager, "_flush_team_manifest", AsyncMock())
+            org_manager = MagicMock()
+            org_manager.ensure_control_tools = AsyncMock()
+            org_manager.ensure_team_binding = AsyncMock()
+            monkeypatch.setattr(manager, "_organization_runtime_manager", org_manager)
+
+            agent = SimpleNamespace()
+            spec = SimpleNamespace(
+                team_name="team-a",
+                model_pool=[],
+                model_pool_strategy="by_model_name",
+                build=MagicMock(return_value=agent),
+            )
+            activation = await manager.activate(spec, "session-1")
+
+            assert activation.agent is agent
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()

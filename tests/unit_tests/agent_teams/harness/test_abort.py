@@ -19,6 +19,7 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
     make_spec,
     start_harness,
+    wait_completed_iterations,
     wait_for_state,
     wait_invoke_running,
 )
@@ -223,6 +224,72 @@ async def test_abort_marks_cancel_cause_on_harness_session() -> None:
             await harness.abort(immediate=True)
             assert await wait_for_state(harness, HarnessState.IDLE)
             assert resolve_cancellation_cause(harness.session_id) is CancellationCause.CANCEL
+        finally:
+            await harness.stop()
+            await consumer
+            reset_cancellation_causes()
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_abort_does_not_mark_cancel_cause() -> None:
+    """A no-op abort from IDLE must not leave a stale CANCEL mark.
+
+    ``_on_abort`` is a pure no-op from IDLE; an unconditional mark would
+    relabel a later internal failure as ``user_cancel`` within the registry
+    TTL (same defect class as the guarded ``DeepAgent.abort``).
+    """
+    await Runner.start()
+    try:
+        reset_cancellation_causes()
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert resolve_cancellation_cause(harness.session_id) is None
+        finally:
+            await harness.stop()
+            await consumer
+            reset_cancellation_causes()
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_abort_from_paused_discards_round_without_cancel_mark() -> None:
+    """Aborting a paused harness only discards the parked round.
+
+    No CancelledError lands anywhere in that flow, so the abort must not
+    stamp a CANCEL mark over the PAUSE mark set by ``pause()``.
+    """
+    await Runner.start()
+    try:
+        reset_cancellation_causes()
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=2, sleep_seconds=5.0)
+        fake.sleep_from_iteration = 1  # iteration 0 is fast, iteration 1 parks
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("first")
+            assert await wait_completed_iterations(fake, 1)
+            await wait_invoke_running(fake)  # iteration 1 inside its model call
+            await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+            assert resolve_cancellation_cause(harness.session_id) is CancellationCause.PAUSE
+
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            # The parked round was discarded without any cancellation; the
+            # CANCEL mark must not have been set over the PAUSE mark.
+            assert resolve_cancellation_cause(harness.session_id) is CancellationCause.PAUSE
         finally:
             await harness.stop()
             await consumer

@@ -1350,6 +1350,10 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
+        # A fresh runtime must not inherit a stale stop/pause mark left on
+        # this session by the previous team: within the registry TTL it
+        # would relabel the new team's internal failures as user actions.
+        clear_cancellation_cause(session_id)
         if kind is RunActionKind.COLD_RECOVER:
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.

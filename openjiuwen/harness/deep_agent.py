@@ -3713,7 +3713,9 @@ class DeepAgent(BaseAgent):
         """
         proposal_session = session or self._loop_session
         if self._has_in_flight_abort_target(proposal_session):
-            self._mark_cancellation_cause(CancellationCause.CANCEL)
+            self._mark_cancellation_cause(
+                CancellationCause.CANCEL, session=proposal_session
+            )
         if self._moa_scope_owner is not None:
             if proposal_session is None:
                 self._moa_scope_owner.close_all("aborted")
@@ -4294,10 +4296,23 @@ class DeepAgent(BaseAgent):
         await self._cancel_active_round(reason=reason)
         return True
 
-    def _mark_cancellation_cause(self, cause: CancellationCause) -> None:
-        """Tag the bound session so compression reports cancel instead of failed."""
+    def _mark_cancellation_cause(
+        self,
+        cause: CancellationCause,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Tag the target session so compression reports cancel instead of failed.
+
+        ``session`` overrides the bound context session: ``abort(session=...)``
+        may target a session other than the bound one, and the mark must land
+        on the same session the guard checked. Falls back to the bound
+        resolution when omitted.
+        """
         try:
-            session_id = self._resolve_context_session_id()
+            if session is not None:
+                session_id = session.get_session_id()
+            else:
+                session_id = self._resolve_context_session_id()
         except Exception:
             logger.debug("[DeepAgent] cancel cause not bound to a session", exc_info=True)
             return

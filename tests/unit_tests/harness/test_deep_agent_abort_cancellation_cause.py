@@ -98,3 +98,23 @@ async def test_abort_with_subagent_controls_marks_cancel():
     await agent.abort(session=session)
 
     assert resolve_cancellation_cause("session-abort") is CancellationCause.CANCEL
+
+
+@pytest.mark.asyncio
+async def test_abort_marks_target_session_not_bound_session():
+    """``abort(session=...)`` must tag the target session, not the bound one.
+
+    The in-flight guard checks the passed ``session``; the mark must land on
+    the same session or the foreign-session abort path is ineffective.
+    """
+    agent = _agent()
+    session = MagicMock()
+    session.get_session_id.return_value = "session-target"
+    control = MagicMock()
+    control.cancel_all = AsyncMock()
+    agent._subagent_controls = {"session-target": control}
+
+    await agent.abort(session=session)
+
+    assert resolve_cancellation_cause("session-target") is CancellationCause.CANCEL
+    assert resolve_cancellation_cause("session-abort") is None
