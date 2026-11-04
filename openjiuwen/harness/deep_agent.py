@@ -661,7 +661,76 @@ class DeepAgent(BaseAgent):
                     model=explicit_model,
                 )
         self._sync_prompt_builder_references()
+        # Propagate the new model to context processors (compressors,
+        # offloaders) so they don't stay pinned to the model that was active
+        # when ContextProcessorRail.init() first injected them. Without this,
+        # a hot-reload that switches the primary model leaves compressors using
+        # the old model — if that endpoint is down, compression silently fails
+        # (status=noop) and the context window grows unbounded. set_llm()
+        # already rebinds cached processors on the restore_model path.
+        self._hot_reload_context_processor_models(config, rebind_cached=not restore_model)
         logger.info("[DeepAgent] Model configuration hot reloaded")
+
+    def _hot_reload_context_processor_models(
+        self,
+        config: DeepAgentConfig,
+        *,
+        rebind_cached: bool = True,
+    ) -> None:
+        """Make context processors follow the hot-reloaded primary model.
+
+        ``ContextProcessorRail.init()`` injects the primary model into each
+        processor config (compressors, offloaders) only while ``model`` is
+        ``None``, and each model-backed processor builds its ``Model`` once in
+        ``__init__``. Two things therefore go stale on a model switch:
+
+        1. The processor config templates in ``react_agent.config.context_processors``,
+           which seed processors for contexts created later. Only configs that
+           already carry a model are updated, keeping the rail's injection semantics.
+        2. Processors already instantiated in the ``ContextEngine`` context pool.
+           These are rebound through the public chain
+           ``ReActAgent.update_model_context`` → ``ContextEngine.update_model_context``
+           → ``ModelContext.rebind_model`` → ``ContextProcessor.rebind_model``.
+           Errors propagate so an incomplete rebind is not silently masked.
+
+        Args:
+            config: The incoming DeepAgent config carrying the new model.
+            rebind_cached: Whether to rebind cached processors. ``False`` when the
+                caller already rebound them via ``ReActAgent.set_llm``.
+        """
+        if self._react_agent is None or config.model is None:
+            return
+        new_model_config = config.model.model_config
+        new_model_client_config = config.model.model_client_config
+        react_config = self._react_agent.config
+        updated = 0
+        for _key, cfg in getattr(react_config, "context_processors", None) or []:
+            changed = False
+            if getattr(cfg, "model", None) is not None:
+                cfg.model = new_model_config
+                changed = True
+            if getattr(cfg, "model_client", None) is not None:
+                cfg.model_client = new_model_client_config
+                changed = True
+            if changed:
+                updated += 1
+        if updated:
+            logger.info(
+                "[DeepAgent] Context processor configs rebound to new primary model: %d", updated,
+            )
+
+        update_model_context = getattr(self._react_agent, "update_model_context", None)
+        if not rebind_cached or not callable(update_model_context):
+            return
+        # Keep configure()'s resolved model name / window: update_model_context()
+        # overwrites both on the context engine and every cached context.
+        update_model_context(
+            model_name=react_config.model_name,
+            context_window_tokens=react_config.context_engine_config.model_context_window_tokens_override,
+            model=config.model,
+            model_config=new_model_config,
+            model_client_config=new_model_client_config,
+        )
 
     def _extension_bound_tool_names(self) -> set[str]:
         """Return tool names owned by successful Plugin / AgentTemplate loads."""
