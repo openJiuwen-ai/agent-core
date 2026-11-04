@@ -194,8 +194,12 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/dispatcher.py — stale-pending leader self-prompt
         "dispatcher.stale_pending_header": (
             "[催促建议] 以下任务已长时间处于 pending 状态未被认领（如需回顾详情用 view_task）。"
-            "请评估每个任务最适合哪位成员，并通过 send_message 工具点名"
-            "对方让其使用 claim_task 认领："
+            "请评估每个任务最适合哪位成员，并用 update_task(assignee=...) 指派——"
+            "指派会自动拉起该成员开工："
+        ),
+        "dispatcher.stale_never_started_header": (
+            "[催促建议] 以下任务已指派但承担成员从未启动（可能拉起失败被回滚）。"
+            "请用 send_message 点名该成员重试拉起，或用 update_task(assignee=...) 改派其他成员："
         ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "人类成员",
@@ -460,8 +464,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.stale_pending_header": (
             "[Nudge suggestion] The following tasks have been pending unclaimed for a long time "
             "(use view_task to review the details). "
-            "Decide which member fits each task best, then use send_message to call them out "
-            "and ask them to claim via claim_task:"
+            "Decide which member fits each task best, then assign with update_task(assignee=...) — "
+            "assigning launches that member automatically:"
+        ),
+        "dispatcher.stale_never_started_header": (
+            "[Nudge suggestion] The following tasks are assigned to members that never started "
+            "(the spawn may have failed and rolled back). "
+            "Retry the launch with send_message to the assignee, or reassign via "
+            "update_task(assignee=...):"
         ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "Human Member",
