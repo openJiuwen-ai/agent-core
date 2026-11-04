@@ -22,6 +22,7 @@ files:
   - tests/unit_tests/core/context_engine/test_context_compression_state_stream.py
   - tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py
   - tests/unit_tests/agent_teams/runtime/test_manager.py
+  - tests/unit_tests/agent_teams/harness/test_abort.py
 designs: []
 design_note: c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。
 ---
@@ -45,7 +46,12 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    `NativeHarness.resume()` 只清自身 harness session id，恢复后 TTL 窗口内的内部取消
    经 `<parent>:` 前缀继承被误报为 `paused` / `user_pause`；
 3. `resolve_cancellation_cause` 不消费标记且文档未注明该语义，调用方无从得知
-   resume 方必须显式 clear 的义务。
+   resume 方必须显式 clear 的义务；
+4. `NativeHarness.abort()` 覆写 `DeepAgent.abort()` 且未调用 `super()`：父类新增的
+   CANCEL 打标在原生 harness 上永不执行，而团队主场景（`TeamHarness.abort`、
+   `ProtocolAdapter._interrupt_turn`、`StreamController` 的停止/中断）恰都走这条
+   覆写实现，与同文件 `pause()` 已打标的写法不对称（pause 打、abort 不打），
+   导致团队场景用户停止时压缩仍报 `failed`。
 
 ## 关联设计与当前契约
 
@@ -81,6 +87,11 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    与 `NativeHarness.resume()` 形成对称闭环。
 3. docstring 注明残留窗口语义（不改行为）；备选"resolve 精确命中主 session 时消费
    标记"被拒绝：会破坏子会话多次 resolve 同一标记的场景。
+4. `NativeHarness.abort()` 在 `_require_alive()` 之后、投递 `_CmdAbort` 之前补
+   `mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)`，与同文件
+   `pause()` 对称。备选"覆写内调用 `super().abort()`"被拒绝：父类实现走交互 round
+   取消链，与 native harness 的 supervisor 命令队列模型不匹配。无在飞 round 的
+   no-op abort 残留标记由 30 秒 TTL 兜底，与 `pause()` 的既有行为一致。
 
 ## 回归证据与适用范围
 
@@ -99,7 +110,12 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
   团队级 PAUSE 标记被清理）；
 - `tests/unit_tests/core/context_engine/test_context_compression_state_stream.py` +
   `tests/unit_tests/harness/test_deep_agent_interaction.py`：43 passed，
-  确认 c4e52b7c 原有 paused/cancelled 端到端行为与交互回归无破坏。
+  确认 c4e52b7c 原有 paused/cancelled 端到端行为与交互回归无破坏；
+- `tests/unit_tests/agent_teams/harness/test_abort.py`：9 passed（含新增
+  `test_abort_marks_cancel_cause_on_harness_session`：覆写路径 abort 后
+  `resolve_cancellation_cause(harness.session_id)` 为 CANCEL）；
+  `tests/unit_tests/agent_teams/harness/test_pause.py`：17 passed，确认 pause /
+  resume 语义无回归。
 
 未验证范围：真实前端联调（`status` 新增 `paused`/`cancelled` 枚举值的展示）；
 多进程部署下注册表为进程内的语义边界。重验条件：涉及 abort/resume 生命周期

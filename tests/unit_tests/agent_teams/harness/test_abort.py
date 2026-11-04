@@ -8,6 +8,11 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    reset_cancellation_causes,
+    resolve_cancellation_cause,
+)
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     aborted_markers,
@@ -188,5 +193,39 @@ async def test_immediate_abort_no_completed_round_clears_to_baseline() -> None:
         finally:
             await harness.stop()
             await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_abort_marks_cancel_cause_on_harness_session() -> None:
+    """abort() tags the harness session so compression reports cancelled.
+
+    ``NativeHarness.abort`` overrides ``DeepAgent.abort`` without calling
+    ``super()``, so the parent's guarded mark never runs on the native
+    harness. The override must mark by itself, symmetric with ``pause()``;
+    otherwise a cancelled in-flight compression resolves to ``failed`` on the
+    team paths (TeamHarness.abort, ProtocolAdapter, StreamController) that
+    all route through this override.
+    """
+    await Runner.start()
+    try:
+        reset_cancellation_causes()
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, sleep_seconds=5.0)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("longjob")
+            await wait_invoke_running(fake)
+            assert resolve_cancellation_cause(harness.session_id) is None
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert resolve_cancellation_cause(harness.session_id) is CancellationCause.CANCEL
+        finally:
+            await harness.stop()
+            await consumer
+            reset_cancellation_causes()
     finally:
         await Runner.stop()
