@@ -163,6 +163,15 @@ class ToolPermissionHost:
     falling back to a less-specific executor. Model fields are not proof.
     """
 
+    resolve_shell_type: Callable[[Any, Any, dict[str, Any]], str | None | Awaitable[str | None]] | None = None
+    """Resolve a host wrapper's fixed shell from the registered tool instance.
+
+    The rail binds the returned dialect into both permission and execution args.
+    Called only for shell tools; synchronous and asynchronous callbacks are
+    supported. None preserves native inference and ordinary local ``auto``
+    behavior. Errors or invalid dialects reject the shell call without fallback.
+    """
+
 
 __all__ = [
     "PermissionEvaluatedHook",

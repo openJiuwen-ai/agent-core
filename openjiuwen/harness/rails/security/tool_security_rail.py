@@ -48,6 +48,10 @@ from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete im
     LocalDeleteExecution,
     local_delete_execution,
 )
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 TOOL_NAME_ALIASES = {
@@ -557,6 +561,58 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return local_delete_execution(instances[name], tool_args)
         return None
 
+    async def _bind_shell_type(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Pin a verified executor's dialect before checking or resuming approval."""
+        name = self._normalize_tool_name(getattr(tool_call, "name", ""))
+        if not is_shell_tool(name, shell_tools_from_config(self._engine.config)):
+            return tool_args
+        try:
+            selected = None
+            if self._host.resolve_shell_type is not None:
+                selected = self._host.resolve_shell_type(ctx, tool_call, tool_args)
+                selected = await selected if inspect.isawaitable(selected) else selected
+            if selected is None:
+                from openjiuwen.core.sys_operation import OperationMode, SysOperation
+                from openjiuwen.harness.tools.shell.bash import BashTool
+
+                manager = getattr(getattr(ctx, "agent", None), "ability_manager", None)
+                instances = getattr(manager, "_tool_instances", None)
+                tool = instances.get(getattr(tool_call, "name", "")) if isinstance(instances, dict) else None
+                if isinstance(tool, BashTool):
+                    operation = tool._operation
+                    if type(operation) is SysOperation and operation.mode == OperationMode.SANDBOX:
+                        launcher = operation._run_config.config.launcher_config
+                        if launcher.sandbox_type == "jiuwenbox":
+                            selected = tool._parse_inputs(tool_args).shell_type
+                            if selected == "auto":
+                                selected = "bash"
+                else:
+                    try:
+                        from openjiuwen.harness.tools.shell.powershell import PowerShellTool
+                    except ImportError:
+                        PowerShellTool = ()
+                    if isinstance(tool, PowerShellTool):
+                        # PowerShellTool ignores a model-supplied selector.
+                        selected = "powershell"
+            if selected is None:
+                return tool_args
+            if not isinstance(selected, str) or selected.strip().lower() not in {"cmd", "powershell", "bash", "sh"}:
+                raise ValueError("registered shell resolver returned an unsupported shell type")
+            selected = selected.strip().lower()
+        except Exception:
+            logger.warning("[PermissionEngine] permission.shell_type.unavailable tool=%s", name, exc_info=True)
+            return None
+        bound = {**tool_args, "shell_type": selected}
+        serialized = json.dumps(bound, ensure_ascii=False)
+        if tool_call is not None:
+            tool_call.arguments = serialized
+        inputs = getattr(ctx, "inputs", None)
+        if hasattr(inputs, "tool_args"):
+            inputs.tool_args = serialized
+        return bound
+
     async def resolve_interrupt(
         self,
         ctx: AgentCallbackContext,
@@ -582,6 +638,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name if tool_call is not None else ""
         normalized_name = self._normalize_tool_name(tool_name)
         tool_args = self.parse_tool_args(tool_call)
+        tool_args = await self._bind_shell_type(ctx, tool_call, tool_args)
+        if tool_args is None:
+            reason = "[PERMISSION_DENIED] Cannot verify the registered shell dialect"
+            if user_input is None:
+                await self._apply_host_evaluation(
+                    ctx, tool_call, PermissionResult(PermissionLevel.DENY, "shell_type_unavailable", reason),
+                )
+            return self.reject(tool_result=reason)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
         session_id = self._resolve_session_id(ctx)
 
