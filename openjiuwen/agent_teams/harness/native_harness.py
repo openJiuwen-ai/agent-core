@@ -628,12 +628,14 @@ class NativeHarness(DeepAgent):
                 (False).
         """
         self._require_alive()
-        # The override never calls DeepAgent.abort, so it must mark by itself.
-        # Guard on an active round: _on_abort is a pure no-op from IDLE /
-        # PAUSED / without an active round, and a stray mark would relabel a
-        # later internal failure as user cancel within the registry TTL.
         if self._st.active is not None:
             mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)
+        elif self._st.phase is HarnessState.PAUSED:
+            # Aborting a paused harness discards the parked round without
+            # any cancellation; the PAUSE mark's purpose ends here — drop
+            # it so the next round inside the TTL window is not mislabeled
+            # as user_pause.
+            clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdAbort(immediate=immediate, ack=ack))
         await ack
@@ -652,7 +654,12 @@ class NativeHarness(DeepAgent):
         coroutine returns only once PAUSED has been reached.
         """
         self._require_alive()
-        mark_cancellation_cause(self.session_id, CancellationCause.PAUSE)
+        # Guard on an active round, mirroring abort(): _on_pause is a no-op
+        # from IDLE / PAUSED / without an active round, and a stray mark
+        # would relabel a later internal failure as user pause within the
+        # registry TTL.
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.PAUSE)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdPause(ack=ack))
         await ack

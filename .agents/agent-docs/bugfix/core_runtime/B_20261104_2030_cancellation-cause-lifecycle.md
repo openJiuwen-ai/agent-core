@@ -61,7 +61,13 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    残留标记经前缀继承把新团队的内部失败误报为用户操作；
 7. `DeepAgent._mark_cancellation_cause` 忽略 `abort(session=...)` 的目标会话：
    守卫检查 `proposal_session`，标记却固定落在绑定会话（`_resolve_context_session_id()`），
-   二者不一致使异会话 abort 路径的修复失效（当前全仓无该形态调用方，属契约级缺陷）。
+   二者不一致使异会话 abort 路径的修复失效（当前全仓无该形态调用方，属契约级缺陷）；
+8. `NativeHarness.pause()` 无条件打 PAUSE 标记（c4e52b7c 存量）：`_on_pause` 在
+   非 RUNNING 或无活跃 round 时是 no-op，这些路径的 pause 留下 30 秒残留标记，
+   后续真实内部取消被误报为 `paused` / `user_pause`；
+9. `NativeHarness.abort()` 从 PAUSED 丢弃停放 round 后不清除 PAUSE 标记：
+   丢弃不产生任何 CancelledError，标记失去用途成为纯残留，同 session 新 round
+   在 TTL 窗口内的内部失败被误报为用户暂停；相关测试曾以断言固化该残留行为。
 
 ## 关联设计与当前契约
 
@@ -112,6 +118,13 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
 7. `_mark_cancellation_cause` 增加可选 `session` 参数，`abort()` 传入
    `proposal_session`，使标记落点与守卫检查的会话一致；未传时维持绑定会话回退，
    既有调用方（`cancel_round` 路径）行为不变。
+8. `NativeHarness.pause()` 打标增加与 `abort()` 对称的 `self._st.active is not None`
+   守卫：非 RUNNING 或无活跃 round 的 no-op pause 不再打标（PAUSING 中重复
+   pause 会刷新既有标记，语义仍为用户暂停，可接受）。
+9. `NativeHarness.abort()` 增加 `elif phase is PAUSED: clear_cancellation_cause`
+   分支：abort 是 PAUSED 的另一出口（resume 之外），丢弃停放 round 时同步清除
+   PAUSE 标记，与"标记者即清理者"对称原则闭环；对应测试断言从固化残留
+   （`resolve is PAUSE`）改为防残留（`resolve is None`）。
 
 ## 回归证据与适用范围
 
@@ -131,11 +144,15 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
 - `tests/unit_tests/core/context_engine/test_context_compression_state_stream.py` +
   `tests/unit_tests/harness/test_deep_agent_interaction.py`：43 passed，
   确认 c4e52b7c 原有 paused/cancelled 端到端行为与交互回归无破坏；
-- `tests/unit_tests/agent_teams/harness/test_abort.py`：8 passed（含
-  `test_abort_marks_cancel_cause_on_harness_session` 覆写路径打标，及本轮新增
+- `tests/unit_tests/agent_teams/harness/test_abort.py`：9 passed（含
+  `test_abort_marks_cancel_cause_on_harness_session` 覆写路径打标，
   `test_idle_abort_does_not_mark_cancel_cause`、
-  `test_abort_from_paused_discards_round_without_cancel_mark`：IDLE no-op abort
-  不打标、PAUSED abort 丢弃 round 不叠加 CANCEL）；
+  `test_abort_from_paused_discards_round_without_residual_marks`：
+  IDLE no-op abort 不打标、PAUSED abort 丢弃 round 后 CANCEL 与 PAUSE 标记
+  均无残留，及 `test_idle_pause_does_not_mark_pause_cause`：IDLE no-op pause
+  不打标）；
+- `tests/unit_tests/agent_teams/harness/test_pause.py`：9 passed，真实
+  pause / resume 路径（含打标）无回归；
 - `tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py`：
   6 passed（含本轮新增 `test_abort_marks_target_session_not_bound_session`：
   异会话 `abort(session=...)` 标记落在目标会话、绑定会话无标记）；

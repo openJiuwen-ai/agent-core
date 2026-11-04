@@ -262,11 +262,12 @@ async def test_idle_abort_does_not_mark_cancel_cause() -> None:
 
 
 @pytest.mark.asyncio
-async def test_abort_from_paused_discards_round_without_cancel_mark() -> None:
+async def test_abort_from_paused_discards_round_without_residual_marks() -> None:
     """Aborting a paused harness only discards the parked round.
 
-    No CancelledError lands anywhere in that flow, so the abort must not
-    stamp a CANCEL mark over the PAUSE mark set by ``pause()``.
+    No CancelledError lands anywhere in that flow, so no CANCEL mark may be
+    set; and since the parked round is gone, the PAUSE mark set by
+    ``pause()`` must be dropped as well — no mark may survive an abort.
     """
     await Runner.start()
     try:
@@ -288,8 +289,36 @@ async def test_abort_from_paused_discards_round_without_cancel_mark() -> None:
             await harness.abort(immediate=True)
             assert await wait_for_state(harness, HarnessState.IDLE)
             # The parked round was discarded without any cancellation; the
-            # CANCEL mark must not have been set over the PAUSE mark.
-            assert resolve_cancellation_cause(harness.session_id) is CancellationCause.PAUSE
+            # abort must leave neither a CANCEL nor the spent PAUSE mark.
+            assert resolve_cancellation_cause(harness.session_id) is None
+        finally:
+            await harness.stop()
+            await consumer
+            reset_cancellation_causes()
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_pause_does_not_mark_pause_cause() -> None:
+    """A no-op pause from IDLE must not leave a stale PAUSE mark.
+
+    ``_on_pause`` is a no-op from IDLE; an unconditional mark would relabel
+    a later internal failure as ``user_pause`` within the registry TTL.
+    """
+    await Runner.start()
+    try:
+        reset_cancellation_causes()
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await harness.pause()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert resolve_cancellation_cause(harness.session_id) is None
         finally:
             await harness.stop()
             await consumer
