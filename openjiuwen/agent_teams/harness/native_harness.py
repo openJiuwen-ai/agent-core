@@ -243,6 +243,8 @@ class NativeHarness(DeepAgent):
         # Apply config + tools + spec rails directly onto this instance — no
         # throwaway template DeepAgent.
         apply_deep_agent_parts(self, parts)
+        if build_context is not None:
+            self.ability_manager.execution_environment_resolver = build_context.resolve_execution_environment
         # Transitional team-side rails not yet declared in ``agent_spec.rails``.
         # Mounted after the spec rails so init order matches the legacy path.
         for rail in self._extra_rails:
