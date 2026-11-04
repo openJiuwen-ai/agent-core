@@ -110,14 +110,6 @@ MCP 清理失败保留声明和 store，不继续执行宿主回调或数据删�
 当前未增加 WebUI、后台刷新任务、state 数据或通用停机入口。
 store 细节及本次验证见 [Events F_14](../../../events/docs/features/F_14_ops-store.md)。
 
-### 4.2 当前包 Handler 调用有效性
-
-Runtime.is_active_invocation(ops: EventHandlerOps) -> bool 只读判断此 Runtime 发布的当前 Handler 调用是否有效；不注册、触发或筛选事件。Handler 包装建立调用帧并沿用原活动 Ops / 包在途计数。只有本层 Ops 对象、活动标记和 asyncio Task 同时匹配时返回 True。
-
-嵌套 Handler 临时替换当前帧，退出后恢复父帧；子任务即使继承 ContextVar 也不匹配原 Task。返回、异常或取消都会关闭原帧，因此复制上下文不能延长调用寿命。其它 Runtime、手工构造、非受管直接注册或过期的 Ops 返回 False。调用只发生在包装的真实执行期间；它不是恶意 Python 代码隔离。
-
-EventBus、EventHandlerOps 和 Builder 的公共接口不受影响；begin_calls/end_calls 的既有计数与 store 校验语义不变。宿主可通过回调使用此只读校验，业务准入和重入控制仍由所属业务模块负责。验证：tests/unit_tests/core/extension/test_invocation_scope.py。
-
 ## 5. 验证索引
 
 | 主题 | 测试文件 |

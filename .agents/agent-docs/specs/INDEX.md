@@ -9,15 +9,14 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 51 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 50 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
 | 模块 | 文档数 |
 |---|---|
 | [agent_teams](#module-1) | 31 |
-| [core/context_engine](#module-2) | 1 |
-| [harness](#module-3) | 19 |
+| [harness](#module-2) | 19 |
 
 <a id="module-1"></a>
 
@@ -58,14 +57,6 @@ generated: true
 | [S_29_team-organization](agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | openjiuwen/agent_teams | — | — |
 
 <a id="module-2"></a>
-
-## core/context_engine
-
-| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|---|
-| [S_context_engine_01_compaction](context_engine/S_01_compaction.md) | S | 原生上下文压缩拦截与候选提交规约 | 刘瑜 | core/context_engine | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py | — |
-
-<a id="module-3"></a>
 
 ## harness
 

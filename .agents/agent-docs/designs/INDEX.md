@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-04T09:49+08:00 -->
+<!-- generated-at: 2026-10-29T10:23+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -21,13 +21,9 @@ generated: true
 | [agent_evolving](#module-1) | 1 |
 | [agent_teams](#module-2) | 7 |
 | [agent_teams/workflow](#module-3) | 15 |
-| [core/context_engine](#module-4) | 1 |
-| [core/extension](#module-5) | 1 |
-| [extensions/observability](#module-6) | 2 |
-| [harness](#module-7) | 3 |
-| [jiuwenswarm/extensions_v2](#module-8) | 1 |
-| [jiuwenswarm/server/runtime/agent_adapter](#module-9) | 1 |
-| [未分类](#module-10) | 1 |
+| [extensions/observability](#module-4) | 2 |
+| [harness](#module-5) | 3 |
+| [未分类](#module-6) | 1 |
 
 <a id="module-1"></a>
 
@@ -96,14 +92,6 @@ generated: true
 
 <a id="module-4"></a>
 
-## core/context_engine
-
-<a id="module-5"></a>
-
-## core/extension
-
-<a id="module-6"></a>
-
 ## extensions/observability
 
 ### 开发前 (proposals)
@@ -113,7 +101,7 @@ generated: true
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0023](proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | draft | @alan_cheng | observability | 2026-09-15 |
 
-<a id="module-7"></a>
+<a id="module-5"></a>
 
 ## harness
 
@@ -130,15 +118,7 @@ generated: true
 |---|---|---|---|---|---|
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
-<a id="module-8"></a>
-
-## jiuwenswarm/extensions_v2
-
-<a id="module-9"></a>
-
-## jiuwenswarm/server/runtime/agent_adapter
-
-<a id="module-10"></a>
+<a id="module-6"></a>
 
 ## 未分类
 
