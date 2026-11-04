@@ -2124,6 +2124,72 @@ async def test_stale_pending_teammate_skips_check():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_stale_pending_throttle_survives_starting_transition():
+    """A never-started task mid-retry keeps its throttle.
+
+    Leader retries the launch → assignee CAS UNSTARTED→STARTING → the task
+    stays PENDING but leaves the swept set. If the GC keyed off the swept
+    set it would drop the throttle entry here; a spawn failure rolling the
+    member back to UNSTARTED would then re-nudge the leader on the very
+    next poll — a ~30s nag loop under persistent spawn failures. The entry
+    must survive until the task leaves PENDING entirely.
+    """
+    agent = _make_leader()
+    stuck = _make_pending_task("p-10", updated_at=0, assignee="dev-1", title="Flaky spawn")
+    _set_idle(agent, 700)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stuck])
+    agent.deliver_input = AsyncMock()
+    handler = agent._coordination.dispatcher.stale_task
+
+    # Round 1: assignee UNSTARTED → swept → nudge fires, throttle stamped.
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+    await handler._check_stale_pending_tasks()
+    agent.deliver_input.assert_awaited_once()
+    assert "p-10" in handler._last_pending_nudge
+
+    # Round 2: retry in flight (STARTING) — the task leaves the swept set,
+    # but the throttle entry must survive.
+    _stub_roster(agent, [("dev-1", MemberStatus.STARTING.value)])
+    await handler._check_stale_pending_tasks()
+    assert "p-10" in handler._last_pending_nudge
+    agent.deliver_input.assert_awaited_once()  # no new prompt
+
+    # Round 3: spawn failed again, rolled back to UNSTARTED — inside the
+    # throttle window, so no re-nudge.
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+    await handler._check_stale_pending_tasks()
+    agent.deliver_input.assert_awaited_once()  # still only the round-1 prompt
+    assert "p-10" in handler._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_throttle_gc_when_task_leaves_pending():
+    """The throttle entry is dropped once the task leaves PENDING entirely
+    (claimed, completed, cancelled) — the GC did not go stale-bound."""
+    agent = _make_leader()
+    _set_idle(agent, 700)
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+
+    stuck = _make_pending_task("p-11", updated_at=0, assignee="dev-1")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stuck])
+    agent.deliver_input = AsyncMock()
+    handler = agent._coordination.dispatcher.stale_task
+
+    await handler._check_stale_pending_tasks()
+    assert "p-11" in handler._last_pending_nudge
+
+    # Task claimed → no longer PENDING → entry GC'd.
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    await handler._check_stale_pending_tasks()
+    assert "p-11" not in handler._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_refresh_idle_baseline_prevents_false_stall_after_resume():
     """Resuming a team must not bill the pause window as idle time.
 

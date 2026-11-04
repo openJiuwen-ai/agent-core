@@ -340,10 +340,16 @@ class StaleTaskHandler(BaseCoordinationHandler):
         ]
         swept = unassigned + never_started
 
-        # GC throttle entries for tasks that left the swept set — assigned,
-        # completed, cancelled, or the assignee finally came up.
-        current_ids = {tk.task_id for tk in swept}
-        for tid in [k for k in self._last_pending_nudge if k not in current_ids]:
+        # GC throttle entries only for tasks that left PENDING entirely —
+        # completed, cancelled, or claimed. A task that stays PENDING keeps
+        # its throttle: the never-started slice drops out of the swept set
+        # while its assignee is STARTING (a launch retry in flight), and
+        # popping the entry there would let a spawn-failure rollback
+        # (STARTING back to UNSTARTED) re-nudge the leader on the very next
+        # poll — a ~30s nag loop under persistent spawn failures, exactly
+        # what this throttle exists to prevent.
+        pending_ids = {tk.task_id for tk in all_pending}
+        for tid in [k for k in self._last_pending_nudge if k not in pending_ids]:
             self._last_pending_nudge.pop(tid, None)
 
         if not swept:
