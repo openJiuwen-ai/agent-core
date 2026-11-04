@@ -76,10 +76,10 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 
 
 def _make_leader(
-    lifecycle: str = "temporary",
-    *,
-    team_name: str = "test-team",
-    member_name: str = "leader-1",
+        lifecycle: str = "temporary",
+        *,
+        team_name: str = "test-team",
+        member_name: str = "leader-1",
 ) -> TeamAgent:
     team_spec = TeamSpec(
         team_name=team_name,
@@ -1500,11 +1500,11 @@ def test_format_message_uses_human_template_when_human_agent():
 
 
 def _make_claimed_task(
-    task_id: str,
-    assignee: str,
-    *,
-    updated_at: int | None,
-    title: str = "Fix bug",
+        task_id: str,
+        assignee: str,
+        *,
+        updated_at: int | None,
+        title: str = "Fix bug",
 ):
     task = MagicMock()
     task.task_id = task_id
@@ -1517,11 +1517,11 @@ def _make_claimed_task(
 
 
 def _make_pending_task(
-    task_id: str,
-    *,
-    updated_at: int | None,
-    title: str = "Pending work",
-    assignee: str | None = None,
+        task_id: str,
+        *,
+        updated_at: int | None,
+        title: str = "Pending work",
+        assignee: str | None = None,
 ):
     task = MagicMock()
     task.task_id = task_id
@@ -1534,11 +1534,11 @@ def _make_pending_task(
 
 
 def _stub_tasks_by_status(
-    agent: TeamAgent,
-    *,
-    planning: list | None = None,
-    in_progress: list | None = None,
-    pending: list | None = None,
+        agent: TeamAgent,
+        *,
+        planning: list | None = None,
+        in_progress: list | None = None,
+        pending: list | None = None,
 ) -> MagicMock:
     """Stub ``list_tasks`` so each condition query returns its own rows.
 
@@ -1920,8 +1920,7 @@ async def test_stale_pending_leader_self_nudges_with_hint():
     assert "p-1" in content
     assert "Argue for ACP" in content
     assert "Work on p-1" not in content
-    assert "send_message" in content
-    assert "claim_task" in content
+    assert "update_task" in content
     assert "p-1" in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
@@ -1951,7 +1950,8 @@ async def test_stale_pending_skipped_when_every_member_is_busy():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_pending_skips_already_assigned_task():
-    """A PENDING task that already has an assignee is nobody's stall."""
+    """A PENDING task whose assignee is up (READY) is nobody's stall — the
+    member-side sweep owns that backlog, the leader stays out."""
     agent = _make_leader()
     assigned = _make_pending_task("p-7", updated_at=0, assignee="dev-1")
     _set_idle(agent, 700)
@@ -1965,6 +1965,86 @@ async def test_stale_pending_skips_already_assigned_task():
 
     agent.deliver_input.assert_not_called()
     assert "p-7" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
+
+
+def _stub_roster(agent: TeamAgent, members: list[tuple[str, str]]) -> None:
+    """Give the leader a roster of (member_name, status) entries."""
+    backend = MagicMock()
+    backend.list_member_roster = AsyncMock(
+        return_value=[
+            MemberRosterEntry(member_name=name, display_name=name, status=status)
+            for name, status in members
+        ],
+    )
+    agent._configurator.team_backend = backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_unstarted_roster_counts_as_free_capacity():
+    """Spawn-on-delegation leaves a fresh roster parked at UNSTARTED; gating
+    on READY alone would silence the sweep exactly then. UNSTARTED members
+    are spawnable capacity (assignment launches them), so unclaimed work
+    still prompts."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-8", updated_at=0)
+    _set_idle(agent, 700)
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    assert "p-8" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_never_started_assignee_nudges_leader():
+    """Assigned to a member that never came up (spawn failed and rolled back
+    to UNSTARTED): no member-side net can see it, so the leader is prompted
+    to retry the launch or reassign — and this slice is not capacity-gated."""
+    agent = _make_leader()
+    stuck = _make_pending_task("p-9", updated_at=0, assignee="dev-1", title="Stuck assignment")
+    _set_idle(agent, 700)
+    # dev-1 UNSTARTED: zero READY members — the free-capacity gate must not
+    # shield the assigned-but-never-started slice.
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stuck])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "p-9" in content
+    assert "dev-1" in content
+    assert "p-9" in agent._coordination.dispatcher.stale_task._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_assigned_to_starting_member_skipped():
+    """A spawn in flight (STARTING) is not a stall: the member-side nets
+    engage the moment the runtime is up."""
+    agent = _make_leader()
+    assigned = _make_pending_task("p-10", updated_at=0, assignee="dev-1")
+    _set_idle(agent, 700)
+    _stub_roster(agent, [("dev-1", MemberStatus.STARTING.value)])
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[assigned])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert "p-10" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
 @pytest.mark.asyncio
@@ -2044,6 +2124,72 @@ async def test_stale_pending_teammate_skips_check():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_stale_pending_throttle_survives_starting_transition():
+    """A never-started task mid-retry keeps its throttle.
+
+    Leader retries the launch → assignee CAS UNSTARTED→STARTING → the task
+    stays PENDING but leaves the swept set. If the GC keyed off the swept
+    set it would drop the throttle entry here; a spawn failure rolling the
+    member back to UNSTARTED would then re-nudge the leader on the very
+    next poll — a ~30s nag loop under persistent spawn failures. The entry
+    must survive until the task leaves PENDING entirely.
+    """
+    agent = _make_leader()
+    stuck = _make_pending_task("p-10", updated_at=0, assignee="dev-1", title="Flaky spawn")
+    _set_idle(agent, 700)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stuck])
+    agent.deliver_input = AsyncMock()
+    handler = agent._coordination.dispatcher.stale_task
+
+    # Round 1: assignee UNSTARTED → swept → nudge fires, throttle stamped.
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+    await handler._check_stale_pending_tasks()
+    agent.deliver_input.assert_awaited_once()
+    assert "p-10" in handler._last_pending_nudge
+
+    # Round 2: retry in flight (STARTING) — the task leaves the swept set,
+    # but the throttle entry must survive.
+    _stub_roster(agent, [("dev-1", MemberStatus.STARTING.value)])
+    await handler._check_stale_pending_tasks()
+    assert "p-10" in handler._last_pending_nudge
+    agent.deliver_input.assert_awaited_once()  # no new prompt
+
+    # Round 3: spawn failed again, rolled back to UNSTARTED — inside the
+    # throttle window, so no re-nudge.
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+    await handler._check_stale_pending_tasks()
+    agent.deliver_input.assert_awaited_once()  # still only the round-1 prompt
+    assert "p-10" in handler._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_throttle_gc_when_task_leaves_pending():
+    """The throttle entry is dropped once the task leaves PENDING entirely
+    (claimed, completed, cancelled) — the GC did not go stale-bound."""
+    agent = _make_leader()
+    _set_idle(agent, 700)
+    _stub_roster(agent, [("dev-1", MemberStatus.UNSTARTED.value)])
+
+    stuck = _make_pending_task("p-11", updated_at=0, assignee="dev-1")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stuck])
+    agent.deliver_input = AsyncMock()
+    handler = agent._coordination.dispatcher.stale_task
+
+    await handler._check_stale_pending_tasks()
+    assert "p-11" in handler._last_pending_nudge
+
+    # Task claimed → no longer PENDING → entry GC'd.
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    await handler._check_stale_pending_tasks()
+    assert "p-11" not in handler._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_refresh_idle_baseline_prevents_false_stall_after_resume():
     """Resuming a team must not bill the pause window as idle time.
 
@@ -2116,8 +2262,8 @@ async def test_team_cleaned_event_ignored_by_leader():
 
 
 def _make_member_status_handler(
-    lifecycle: str,
-    members: list[SimpleNamespace],
+        lifecycle: str,
+        members: list[SimpleNamespace],
 ) -> tuple[MagicMock, MemberHandler]:
     backend = MagicMock()
     backend.list_members = AsyncMock(return_value=members)
@@ -2244,9 +2390,9 @@ def _external_runtime(backend: MagicMock) -> _FakeExternalRuntime:
 
 
 def _make_external_member_context_handler(
-    *,
-    harness: Any,
-    backend: MagicMock | None = None,
+        *,
+        harness: Any,
+        backend: MagicMock | None = None,
 ) -> tuple[MagicMock, SimpleNamespace, MemberHandler]:
     backend = backend if backend is not None else _external_backend()
     host = SimpleNamespace(

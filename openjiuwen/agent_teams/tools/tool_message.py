@@ -128,7 +128,7 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
-        await self._auto_start_members()
+        await self._auto_start_members(None)
         msg_id = await self.message_manager.broadcast_message(content=content)
         if not msg_id:
             return ToolOutput(success=False, error="Failed to broadcast message")
@@ -149,7 +149,7 @@ class _SendMessageBase(TeamTool, ABC):
         if self._team and to != USER_PSEUDO_MEMBER_NAME:
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
-        await self._auto_start_members()
+        await self._auto_start_members([to])
         msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
@@ -211,8 +211,6 @@ class _SendMessageBase(TeamTool, ABC):
                     ),
                 )
 
-        await self._auto_start_members()
-
         # Split into existing members (valid) and not-found up front — the
         # existence check is a read. The valid set is then written in ONE
         # batched transaction (one fsync) instead of one write per recipient.
@@ -224,6 +222,10 @@ class _SendMessageBase(TeamTool, ABC):
                     failed.append({"to": name, "reason": f"Member '{name}' not found"})
                     continue
             valid.append(name)
+
+        # Spawn-on-delivery: start only the members actually addressed,
+        # after validation so a typo'd name never launches a process.
+        await self._auto_start_members(valid)
 
         delivered: list[str] = []
         if valid:
@@ -249,12 +251,37 @@ class _SendMessageBase(TeamTool, ABC):
             },
         )
 
-    async def _auto_start_members(self) -> None:
-        """Auto-start unstarted members if leader with startup callback."""
-        if self._team and self._on_teammate_created and self._team.is_leader:
+    async def _auto_start_members(self, targets: list[str] | None) -> None:
+        """Auto-start the members a message is addressed to (leader only).
+
+        ``targets=None`` is the broadcast case: the message goes to the
+        whole roster, so every unstarted member is brought up via
+        ``startup()``. A concrete list starts only those members, one
+        ``autostart_member`` per name — a direct message to one member
+        must not launch teammates the leader never addressed. The
+        ``user`` pseudo-member is filtered out: it represents the human
+        caller and has no agent process to start. Per-member best-effort:
+        a spawn failure is logged and the remaining targets still start,
+        so one broken member never silences the team's channel.
+        """
+        if not self._team or not self._on_teammate_created or not self._team.is_leader:
+            return
+        if targets is None:
             started = await self._team.startup(on_created=self._on_teammate_created)
             if started:
                 team_logger.info(f"Auto-started members: {started}")
+            return
+        started = []
+        for name in dict.fromkeys(n for n in targets if n and n != USER_PSEUDO_MEMBER_NAME):
+            try:
+                if await self._team.autostart_member(name):
+                    started.append(name)
+            except Exception as e:
+                team_logger.error(
+                    "send_message failed to auto-start member {}: {}", name, e, exc_info=True
+                )
+        if started:
+            team_logger.info(f"Auto-started message recipients: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
         d = output.data
