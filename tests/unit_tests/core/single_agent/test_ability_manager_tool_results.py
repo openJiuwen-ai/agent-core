@@ -18,7 +18,8 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import ClientToolRequest, InterruptRequest
+from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer, RESUME_INTERRUPT_ANSWERS_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent
 
 RAW = "RAW-TOOL-OUTPUT"
@@ -286,3 +287,30 @@ async def test_without_a_callback_execution_is_unchanged(monkeypatch):
     manager = _manager(monkeypatch, Step("upload"))
     results = await manager.execute(_ctx(callbacks), [_call("call-a", "upload")], None)
     assert RAW in results[0][1].content and len(callbacks.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_client_answer_retains_only_the_unprocessed_note(monkeypatch):
+    tool = Step("upload")
+    tool.card.execution = "client"
+    manager = _manager(monkeypatch, tool)
+    callbacks = Callbacks(hold_after=asyncio.Event())
+    ctx = _ctx(callbacks)
+    call = _call("client-1", "upload")
+    request = ClientToolRequest(message="run upload", tool_name=call.name)
+    answer = InterruptAnswer(owner=request.interrupt_owner, kind=request.interrupt_kind, value=RAW, request=request)
+    ctx.extra[RESUME_INTERRUPT_ANSWERS_KEY] = {call.id: {answer.owner: answer}}
+    seen, record = _recorder()
+
+    batch = asyncio.create_task(manager.execute(ctx, call, None, on_tool_result=record))
+    try:
+        await asyncio.wait_for(callbacks.after_reached.wait(), 5)
+    finally:
+        batch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await batch
+
+    assert callbacks.events == [(AgentCallbackEvent.AFTER_TOOL_CALL, call.id)]
+    assert [call_id for call_id, _ in seen] == [call.id, call.id]
+    assert seen[0][1] is None and seen[1][1].startswith(RETURNED_NOTE)
+    _no_raw(seen)
