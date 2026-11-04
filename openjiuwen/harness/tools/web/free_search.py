@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Async free web search tool (DuckDuckGo / Bing / jina proxy).
+"""Async free web search tool (DuckDuckGo / Bing).
 
 Network I/O is aiohttp-native via the shared ``_request`` coroutine; HTML
 parsing runs directly in the event loop (web search is low-frequency and pages
@@ -20,22 +20,26 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urlencode, urljoin, urlparse
+from uuid import uuid4
 
 import aiohttp
 from bs4 import BeautifulSoup
+from markdown_it import MarkdownIt
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.web._common import (
     _FREE_SEARCH_BING_ENABLED_ENV,
+    _FREE_SEARCH_BING_MARKET_ENV,
+    _FREE_SEARCH_BING_FALLBACK_MARKET_ENV,
     _FREE_SEARCH_DDG_ENABLED_ENV,
     _FREE_SEARCH_DEBUG_DIR_ENV,
     _FREE_SEARCH_DEBUG_ENV,
-    _contains_cjk,
     _decode_ddg_redirect,
     _decode_bing_redirect,
     _duckduckgo_search_url,
@@ -49,53 +53,9 @@ from openjiuwen.harness.tools.web._common import (
 )
 from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._decode import _decode_response_text
-
-_QUERY_STOPWORDS = {
-    "the",
-    "and",
-    "for",
-    "with",
-    "news",
-    "latest",
-    "today",
-    "热点",
-    "新闻",
-    "最新",
-    "今日",
-    "今天",
-}
-_TIMELY_QUERY_HINTS = {
-    "news",
-    "latest",
-    "today",
-    "breaking",
-    "update",
-    "updates",
-    "新闻",
-    "最新",
-    "今日",
-    "今天",
-    "动态",
-    "快讯",
-    "头条",
-    "热点",
-    "天气",
-    "weather",
-    "forecast",
-}
-_LOW_CONFIDENCE_RESULT_DOMAINS = {
-    "zhihu.com",
-    "baike.baidu.com",
-    "tieba.baidu.com",
-    "zhidao.baidu.com",
-    "douban.com",
-    "bilibili.com",
-    "weibo.com",
-}
-_LOW_FETCH_VALUE_DOMAINS = {
-    "mp.weixin.qq.com",
-    "so.html5.qq.com",
-}
+from openjiuwen.harness.tools.web._budget import WebResearchBudget, get_web_budget
+from openjiuwen.harness.tools.web._assessment import SearchAssessment, assess_candidates, resolve_search_model
+from openjiuwen.harness.tools.web._quality import WebContentError, challenge_reason
 
 # These endpoints are used only when the caller has explicitly constrained
 # search to domestic academic domains.  They deliberately stay in this
@@ -108,6 +68,7 @@ _DOMESTIC_SEARCH_DOMAINS = (
     "wanfangdata.com.cn",
 )
 _DOMESTIC_ENGINE_NAMES = frozenset({"baidu-scholar", "baidu-web", "cnki", "wanfang"})
+_BING_MARKETS = {"en-US": ("en-US", "US"), "zh-CN": ("zh-Hans", "CN")}
 
 
 @dataclass(frozen=True)
@@ -121,24 +82,115 @@ class _FreeSearchRequest:
     proxy_url: str | None = None
     allowed_domains: tuple[str, ...] | None = None
     enabled_engines: frozenset[str] | tuple[str, ...] | None = None
+    provider: str = "auto"
+    budget: WebResearchBudget | None = None
+    model: Model | None = None
+    original_task: str = ""
 
 
-def _is_low_fetch_value_url(url: str) -> bool:
-    """Whether a URL is likely to be a shell page or parameter-gated fetch target."""
-    domain = _normalized_domain(url)
-    return any(domain == item or domain.endswith(f".{item}") for item in _LOW_FETCH_VALUE_DOMAINS)
+def _select_search_candidates(
+    query: str,
+    rows: list[dict[str, str]],
+    *,
+    max_results: int | None = None,
+    allowed_domains: tuple[str, ...] | None = None,
+    assessment: SearchAssessment | None = None,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """Validate targets deterministically; semantic labels come only from the model."""
+    judgments = {item.id: item for item in assessment.results} if assessment else {}
+    order = {item.id: rank for rank, item in enumerate(assessment.results)} if assessment else {}
+    assessment_status = assessment.status if assessment else "unavailable"
+    unavailable_reason = (assessment.reason if assessment else "") or "assessment_unavailable"
+    decisions: list[dict[str, Any]] = []
+    ranked: list[tuple[int, int, int, dict[str, str]]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        url = str(row.get("url", "") or "").strip()
+        title = str(row.get("title", "") or "").strip()
+        if not title or not url or urlparse(url).scheme not in {"https", "http"} or not urlparse(url).hostname:
+            relevance, reasons = "rejected", ["invalid_target"]
+        elif url in seen:
+            relevance, reasons = "rejected", ["duplicate_url"]
+        elif _is_search_navigation_url(url):
+            relevance, reasons = "rejected", ["search_navigation"]
+        elif not _domain_allowed(url, allowed_domains):
+            relevance, reasons = "rejected", ["outside_allowed_domains"]
+        else:
+            seen.add(url)
+            judgment = judgments.get(index)
+            relevance = judgment.relevance if judgment else "uncertain"
+            reasons = [judgment.reason] if judgment else [unavailable_reason]
+        decisions.append({"index": index, "row": dict(row), "relevance": relevance, "reasons": reasons, "selected": False})
+        if relevance == "rejected":
+            continue
+        candidate = dict(row, url=url, relevance=relevance, relevance_reason="; ".join(reasons))
+        candidate["assessment_status"] = assessment_status
+        ranked.append((int(relevance == "uncertain"), order.get(index, index), index, candidate))
+    selected = []
+    uncertain_count = 0
+    for _, _, index, row in sorted(ranked, key=lambda entry: (entry[0], entry[1])):
+        decision = decisions[index]
+        if max_results is not None and len(selected) >= max_results:
+            decision["reasons"] = decision["reasons"] + ["result_limit"]
+        elif assessment_status == "ok" and row["relevance"] == "uncertain" and uncertain_count >= 2:
+            decision["reasons"] = decision["reasons"] + ["uncertain_limit"]
+        else:
+            selected.append(row)
+            decision["selected"] = True
+            uncertain_count += int(row["relevance"] == "uncertain")
+    return selected, decisions
 
 
-def _is_timely_query(query: str) -> bool:
-    """Whether the query is asking for current or news-like information."""
-    lowered = (query or "").lower()
-    return any(hint in lowered for hint in _TIMELY_QUERY_HINTS)
+def _parse_ddg_reader(text: str, max_results: int) -> list[dict[str, str]]:
+    """Bind each DDG Markdown heading to its own summary, not adjacent links."""
+    markdown = text.partition("Markdown Content:")[2] if "Markdown Content:" in text else text
+    soup = _parse_html(MarkdownIt("commonmark", {"html": False}).render(markdown))
+    headings = [heading for heading in soup.select("h1, h2, h3, h4") if heading.find("a", href=True)]
+    blocks = headings or (soup.body or soup).find_all("p", recursive=False)
+    rows = []
+    seen = set()
+    for block in blocks:
+        anchor = block.find("a", href=True)
+        if anchor is None or anchor.find("img") is not None:
+            continue
+        href = _decode_ddg_redirect(unescape(str(anchor["href"]))).strip()
+        parsed = urlparse(href)
+        host = (parsed.hostname or "").casefold()
+        title = " ".join(anchor.get_text(" ", strip=True).split())
+        if not title or parsed.scheme not in {"http", "https"} or not host:
+            continue
+        if host == "duckduckgo.com" or host.endswith(".duckduckgo.com") or href in seen:
+            continue
+        snippets = []
+        for sibling in block.next_siblings:
+            if getattr(sibling, "name", None) in {"h1", "h2", "h3", "h4"}:
+                break
+            if getattr(sibling, "name", None) != "p":
+                continue
+            anchors = sibling.find_all("a", href=True)
+            targets = {_decode_ddg_redirect(unescape(str(link["href"]))).strip() for link in anchors}
+            if targets and targets != {href}:
+                if not headings:
+                    break
+                continue
+            snippet = " ".join(sibling.get_text(" ", strip=True).split())
+            display_url = re.sub(r"^https?://", "", href).rstrip("/")
+            if snippet and snippet != title and snippet.rstrip("/") != display_url:
+                snippets.append(snippet)
+        rows.append({"title": title, "url": href, "snippet": " ".join(snippets), "source": "duckduckgo-jina"})
+        seen.add(href)
+        if len(rows) >= max_results:
+            break
+    return rows
 
 
-def _is_low_confidence_result_domain(url: str) -> bool:
-    """Whether a result domain is a low-confidence generic/UGC source."""
-    domain = _normalized_domain(url)
-    return any(domain == item or domain.endswith(f".{item}") for item in _LOW_CONFIDENCE_RESULT_DOMAINS)
+def _is_search_navigation_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    engine_host = any(host == domain or host.endswith("." + domain) for domain in (
+        "bing.com", "duckduckgo.com",
+    ))
+    return engine_host and parsed.path.rstrip("/") in {"", "/s", "/ns", "/search", "/html", "/link"}
 
 
 def _is_debug_enabled() -> bool:
@@ -267,60 +319,25 @@ def _write_debug_payload(run_id: str, engine: str, stage: str, payload: dict[str
         tool_logger.warning("Failed to write free_search debug payload: %s", exc)
 
 
-def _query_terms(query: str) -> list[str]:
-    """Extract lightweight query terms for scoring and diagnostics."""
-    raw_terms = re.findall(r"[A-Za-z0-9一-鿿]+", (query or "").lower())
-    terms: list[str] = []
-    for term in raw_terms:
-        expanded_terms: list[str] = []
-        if _contains_cjk(term):
-            numeric_terms = re.findall(r"\d{4}|\d+月|\d+日|\d+", term)
-            expanded_terms.extend(numeric_terms)
-            cjk_chunks = re.findall(r"[一-鿿]+", term)
-            for chunk in cjk_chunks:
-                if 2 <= len(chunk) <= 4:
-                    expanded_terms.append(chunk)
-                    expanded_terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))
-                elif len(chunk) > 4:
-                    expanded_terms.append(chunk[:2])
-                    expanded_terms.append(chunk[:4])
-                    expanded_terms.append(chunk[-2:])
-        else:
-            expanded_terms.append(term)
-        for expanded in expanded_terms:
-            if len(expanded) < 2 or expanded in _QUERY_STOPWORDS:
-                continue
-            if expanded not in terms:
-                terms.append(expanded)
-    return terms[:12]
-
-
-def _query_core_terms(query: str) -> list[str]:
-    """Extract query core terms used for simple relevance checks."""
-    core_terms: list[str] = []
-    for term in _query_terms(query):
-        if term.isdigit():
-            continue
-        if re.fullmatch(r"\d+月|\d+日", term):
-            continue
-        if len(term) < 2:
-            continue
-        if term not in core_terms:
-            core_terms.append(term)
-    return core_terms[:8]
-
-
-def _match_term_count(query: str, row: dict[str, str]) -> int:
-    """Count how many distinct query terms appear in the row."""
-    haystack = " ".join(
-        [
-            str(row.get("title", "") or "").lower(),
-            str(row.get("snippet", "") or "").lower(),
-            str(row.get("url", "") or "").lower(),
-            str(row.get("origin", "") or "").lower(),
-        ]
-    )
-    return sum(1 for term in _query_terms(query) if term in haystack)
+def _record_search_response(
+    run_id: str | None,
+    engine: str,
+    query: str,
+    request_url: str,
+    final_url: str,
+    status: int,
+    text: str,
+    truncated: bool,
+) -> None:
+    """Record source-stage evidence without credentials or request headers."""
+    if not _is_debug_enabled():
+        return
+    _write_debug_payload(run_id or uuid4().hex, engine, "response", {
+        "query": query, "request_url": request_url, "final_url": final_url,
+        "status_code": status, "response_truncated": truncated,
+        "source_chars": len(text), "excerpt_truncated": len(text) > 30000,
+        "raw_html": text,
+    })
 
 
 def _build_bing_row(
@@ -599,6 +616,8 @@ def _parse_domestic_search_html(
 class WebFreeSearchTool(Tool):
     """Free search via global engines or constrained domestic academic portals."""
 
+    accepts_tool_callback_context = True
+
     def __init__(
         self,
         language: str = "cn",
@@ -607,10 +626,12 @@ class WebFreeSearchTool(Tool):
         proxy_url: str | None = None,
         allowed_domains: tuple[str, ...] | None = None,
         enabled_engines: tuple[str, ...] | None = None,
+        model: Model | None = None,
     ):
         super().__init__(
             card or build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id)
         )
+        self._model = model
         self._proxy_url = str(proxy_url or "").strip() or None
         self._allowed_domains = allowed_domains
         self._enabled_engines = (
@@ -639,24 +660,26 @@ class WebFreeSearchTool(Tool):
         max_results: int,
         timeout_seconds: int,
         proxy_url: str | None = None,
+        *,
+        debug_run_id: str | None = None,
     ) -> list[dict[str, str]]:
         """Search the DuckDuckGo HTML endpoint and parse results."""
         url = _duckduckgo_search_url(query)
-        status, headers, body, _final_url, _truncated = await _http.request(
+        status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
             proxy_url=proxy_url,
+            max_bytes=2_000_000,
         )
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
+        _record_search_response(debug_run_id, "duckduckgo", query, url, final_url, status, html, truncated)
         if WebFreeSearchTool._is_ddg_challenge_page(status, html):
-            raise build_error(
-                StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR,
-                engine="duckduckgo",
-                reason="anti-bot challenge page returned",
-            )
+            raise WebContentError("blocked", "DuckDuckGo requires human verification; do not bypass it via another endpoint.")
+        if truncated:
+            raise WebContentError("truncated", "DuckDuckGo response exceeded the search response size limit.")
         if status != 200:
             raise build_error(
                 StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR,
@@ -672,41 +695,31 @@ class WebFreeSearchTool(Tool):
         max_results: int,
         timeout_seconds: int,
         proxy_url: str | None = None,
+        *,
+        debug_run_id: str | None = None,
     ) -> list[dict[str, str]]:
         """Search DuckDuckGo via the jina.ai proxy and parse markdown results."""
         url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
-        status, headers, body, _final_url, _truncated = await _http.request(
+        status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
             proxy_url=proxy_url,
+            max_bytes=2_000_000,
         )
-        _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
         text = _decode_response_text(body, content_type=headers.get("Content-Type", "")) or ""
-
-        matches = re.findall(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", text, flags=re.IGNORECASE)
-
-        rows: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for title_raw, href in matches:
-            title = _strip_tags(title_raw)
-            if not title or title.startswith("Image "):
-                continue
-            decoded = _decode_ddg_redirect(href)
-            parsed = urlparse(decoded)
-            if not parsed.scheme.startswith("http"):
-                continue
-            if "duckduckgo.com" in parsed.netloc.lower():
-                continue
-            if decoded in seen:
-                continue
-            seen.add(decoded)
-            rows.append({"title": title, "url": decoded, "snippet": "", "source": "duckduckgo-jina"})
-            if len(rows) >= max_results:
-                break
-        return rows
+        _record_search_response(debug_run_id, "duckduckgo-jina", query, url, final_url, status, text, truncated)
+        blocked = challenge_reason(text, status=status)
+        if blocked:
+            raise WebContentError("blocked", blocked)
+        _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
+        if truncated:
+            raise WebContentError("truncated", "Reader response exceeded the search response size limit.")
+        if re.search(r"(?im)^Warning:.*returned error [45]\d{2}", text):
+            raise WebContentError("source_error", "Reader could not retrieve the requested search page.")
+        return _parse_ddg_reader(text, max_results)
 
     @staticmethod
     async def _search_bing(
@@ -717,24 +730,36 @@ class WebFreeSearchTool(Tool):
         *,
         debug_run_id: str | None = None,
         proxy_url: str | None = None,
+        market: str | None = None,
     ) -> list[dict[str, str]]:
         """Search Bing and parse standard SERP result blocks."""
-        if _contains_cjk(query):
-            url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=zh-Hans&mkt=zh-CN&cc=CN"
-        else:
-            url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en-US&mkt=en-US&cc=US"
+        market = market or WebFreeSearchTool._bing_market_candidates()[0]
+        if market not in _BING_MARKETS:
+            raise WebContentError("invalid_input", "Unsupported Bing market; use en-US or zh-CN.")
+        language, country = _BING_MARKETS[market]
+        url = "https://www.bing.com/search?" + urlencode({
+            "q": query, "setlang": language, "mkt": market, "cc": country,
+        })
 
-        status, headers, body, _final_url, _truncated = await _http.request(
+        status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
             proxy_url=proxy_url,
+            max_bytes=2_000_000,
         )
-        _http.raise_for_status_with_body(status, body, engine="bing")
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
+        _record_search_response(debug_run_id, "bing", query, url, final_url, status, html, truncated)
         soup = _parse_html(html)
+        title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        blocked = challenge_reason(html, title=title, status=status)
+        if blocked:
+            raise WebContentError("blocked", blocked)
+        _http.raise_for_status_with_body(status, body, engine="bing")
+        if truncated:
+            raise WebContentError("truncated", "Bing response exceeded the search response size limit.")
         results_area = _extract_bing_results_area(soup)
 
         _write_debug_payload(
@@ -752,12 +777,6 @@ class WebFreeSearchTool(Tool):
 
         rows: list[dict[str, str]] = []
         seen: set[str] = set()
-
-        for row in _extract_bing_answer_cards(soup, url):
-            row_url = str(row.get("url", "") or "")
-            if row_url and row_url not in seen:
-                seen.add(row_url)
-            rows.append(row)
 
         for item in results_area.select("li.b_algo"):
             anchor = item.select_one("h2 a[href]")
@@ -784,6 +803,12 @@ class WebFreeSearchTool(Tool):
                     date=date,
                 )
             )
+
+        for row in _extract_bing_answer_cards(soup, url):
+            row_url = str(row.get("url", "") or "")
+            if row_url != url and row_url not in seen:
+                seen.add(row_url)
+                rows.append(row)
 
         rows = rows[:max_results]
         _write_debug_payload(
@@ -853,90 +878,46 @@ class WebFreeSearchTool(Tool):
         )
 
     @staticmethod
-    def _score_row(query: str, row: dict[str, str]) -> float:
-        """Lightweight scoring used only for page-quality judgement/debug."""
-        title = str(row.get("title", "") or "")
-        snippet = str(row.get("snippet", "") or "")
-        url = str(row.get("url", "") or "")
-        origin = str(row.get("origin", "") or "")
-        haystack = " ".join([title.lower(), snippet.lower(), url.lower(), origin.lower()])
-
-        score = 0.0
-        if title:
-            score += 2.0
-        if snippet:
-            score += 1.0
-        if origin:
-            score += 0.5
-        if str(row.get("source", "") or "") == "bing-card":
-            score += 1.0
-        if _is_low_confidence_result_domain(url):
-            score -= 1.5
-
-        for term in _query_terms(query):
-            if term in haystack:
-                score += 0.35
-        return score
-
-    @staticmethod
-    def _filter_ranked_rows(query: str, rows: list[dict[str, str]]) -> list[dict[str, str]]:
-        """Filter rows lightly while preserving original engine order."""
-        preferred: list[dict[str, str]] = []
-        deferred: list[dict[str, str]] = []
-        seen_urls: set[str] = set()
-        for row in rows:
-            url = str(row.get("url", "") or "")
-            title = str(row.get("title", "") or "").strip()
-            if not url or not title or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            if _is_low_fetch_value_url(url):
-                deferred.append(row)
-            else:
-                preferred.append(row)
-        # Keep engine order. Only push low-fetch-value shell pages behind real pages.
-        return preferred + deferred
-
-    @staticmethod
     def _rows_are_usable(query: str, rows: list[dict[str, str]]) -> bool:
         """Decide whether a result page is good enough to stop engine fallback."""
-        if not rows:
-            return False
-        timely_query = _is_timely_query(query)
-        top_rows = rows[:3]
-        if not timely_query:
-            return True
-        for row in top_rows:
-            url = str(row.get("url", "") or "")
-            if str(row.get("source", "") or "") == "bing-card":
-                return True
-            if not _is_low_confidence_result_domain(url):
-                if _match_term_count(query, row) >= 1:
-                    return True
-                if row.get("date") or row.get("origin"):
-                    return True
-        return False
+        return bool(rows)
 
     @staticmethod
-    def _bing_query_candidates(query: str) -> list[str]:
-        """Return Bing query candidates. Keep only original query."""
-        normalized = (query or "").strip()
-        return [normalized] if normalized else []
+    def _bing_market_candidates() -> list[str]:
+        """Choose at most two market profiles, independently of query language."""
+        primary = (os.environ.get(_FREE_SEARCH_BING_MARKET_ENV) or "en-US").strip() or "en-US"
+        fallback = (os.environ.get(_FREE_SEARCH_BING_FALLBACK_MARKET_ENV) or "").strip()
+        if not fallback:
+            fallback = "zh-CN" if primary.lower() == "en-us" else "en-US"
+        supported = {name.lower(): name for name in _BING_MARKETS}
+        markets: list[str] = []
+        for name, value in (
+            (_FREE_SEARCH_BING_MARKET_ENV, primary),
+            (_FREE_SEARCH_BING_FALLBACK_MARKET_ENV, fallback),
+        ):
+            if name == _FREE_SEARCH_BING_FALLBACK_MARKET_ENV and value.lower() == "none":
+                break
+            market = supported.get(value.lower())
+            if market is None:
+                raise WebContentError("invalid_input", f"Unsupported {name}; use en-US or zh-CN (fallback also accepts none).")
+            if market not in markets:
+                markets.append(market)
+        return markets
 
     @staticmethod
     async def _search_free(request: _FreeSearchRequest) -> tuple[str, list[dict[str, str]]]:
-        """Search using multiple free search engines with best-effort fallback."""
+        """Search configured sources, rejecting unrelated results before fallback."""
         session = request.session
         query = request.query
         max_results = request.max_results
+        candidate_limit = min(30, max(10, max_results * 3))
         timeout_seconds = request.timeout_seconds
         proxy_url = request.proxy_url
         allowed_domains = request.allowed_domains
         enabled_engines = request.enabled_engines
         errors: list[str] = []
-        debug_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        best_engine = ""
-        best_rows: list[dict[str, str]] = []
+        debug_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f") + "_" + uuid4().hex[:8]
+        failures: list[str] = []
 
         engines: list[tuple[str, Any]] = []
         configured_engines = (
@@ -955,6 +936,9 @@ class WebFreeSearchTool(Tool):
             else _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False)
         )
         domestic_scope = _domestic_scope_requested(allowed_domains)
+        budget = request.budget or WebResearchBudget.from_env()
+        if domestic_scope and request.budget is None:
+            budget.max_engines = len(_DOMESTIC_ENGINE_NAMES)
         if domestic_scope:
             for engine_name in ("baidu-scholar", "baidu-web", "cnki", "wanfang"):
                 engines.append((engine_name, WebFreeSearchTool._search_domestic))
@@ -967,20 +951,37 @@ class WebFreeSearchTool(Tool):
             )
         if not domestic_scope and bing_enabled:
             engines.append(("bing", WebFreeSearchTool._search_bing))
+        provider = request.provider.strip().lower()
+        if provider == "ddg":
+            provider = "duckduckgo"
+        if provider != "auto":
+            if provider not in {"bing", "duckduckgo"}:
+                raise WebContentError("invalid_input", "Unknown free-search provider; use auto, bing, or duckduckgo.")
+            engines = [(name, runner) for name, runner in engines if name == provider or (provider == "duckduckgo" and name == "duckduckgo-jina")]
 
         if not engines:
-            raise build_error(
-                StatusCode.TOOL_WEB_SEARCH_ALL_ENGINES_FAILED,
-                errors="all free search engines are disabled",
+            reason = (
+                "all free search engines are disabled"
+                if provider == "auto"
+                else "The requested free-search provider is disabled or outside the configured source scope."
             )
+            raise WebContentError("disabled", reason)
 
+        blocked_providers: set[str] = set()
         for engine_name, runner in engines:
-            candidate_queries = [query]
-            if engine_name == "bing":
-                candidate_queries = WebFreeSearchTool._bing_query_candidates(query)
-
-            for effective_query in candidate_queries:
+            provider_name = "duckduckgo" if engine_name == "duckduckgo-jina" else engine_name
+            if provider_name in blocked_providers:
+                continue
+            markets = WebFreeSearchTool._bing_market_candidates() if engine_name == "bing" else [None]
+            for market_index, market in enumerate(markets):
+                effective_query = query
+                # Preserve both attempts instead of overwriting primary-market evidence.
+                attempt_run_id = f"{debug_run_id}_{market}" if market else debug_run_id
                 try:
+                    # An alternate market belongs to the same budgeted search.
+                    if market_index == 0:
+                        budget.reserve_search(engine_name)
+                    attempt_timeout = budget.remaining(timeout_seconds)
                     if allowed_domains and engine_name not in _DOMESTIC_ENGINE_NAMES:
                         effective_query = (
                             f"{effective_query} ({' OR '.join(f'site:{domain}' for domain in allowed_domains)})"
@@ -993,86 +994,92 @@ class WebFreeSearchTool(Tool):
                         rows = await runner(
                             session,
                             effective_query,
-                            max_results,
-                            timeout_seconds,
+                            candidate_limit,
+                            attempt_timeout,
                             engine=engine_name,
                             proxy_url=proxy_url,
                             allowed_domains=allowed_domains,
                         )
                     elif engine_name == "bing":
-                        rows = await runner(session, effective_query, max_results, timeout_seconds,
-                                            debug_run_id=debug_run_id, proxy_url=proxy_url)
+                        rows = await runner(session, effective_query, candidate_limit, attempt_timeout,
+                                            debug_run_id=attempt_run_id, proxy_url=proxy_url, market=market)
                     else:
                         rows = await runner(
                             session,
                             effective_query,
-                            max_results,
-                            timeout_seconds,
+                            candidate_limit,
+                            attempt_timeout,
                             proxy_url=proxy_url,
+                            debug_run_id=attempt_run_id,
                         )
                 except Exception as exc:  # noqa: BLE001
+                    status = exc.status if isinstance(exc, WebContentError) else "transport_error"
+                    failures.append(status)
+                    if status == "blocked":
+                        blocked_providers.add(provider_name)
                     errors.append(f"{engine_name}: {exc}")
                     _write_debug_payload(
-                        debug_run_id,
+                        attempt_run_id,
                         engine_name,
                         "error",
-                        {"query": query, "effective_query": effective_query, "error": str(exc)},
+                        {"query": query, "effective_query": effective_query, "market": market, "error": str(exc)},
                     )
-                    continue
+                    break
 
-                if allowed_domains:
-                    rows = [
-                        row
-                        for row in rows
-                        if _domain_allowed(str(row.get("url", "") or ""), allowed_domains)
-                    ]
-                filtered_rows = WebFreeSearchTool._filter_ranked_rows(query, rows)[:max_results]
                 _write_debug_payload(
-                    debug_run_id,
+                    attempt_run_id,
                     engine_name,
                     "candidate",
                     {
                         "query": query,
                         "effective_query": effective_query,
-                        "query_core_terms": _query_core_terms(query),
-                        "query_terms": _query_terms(query),
-                        "row_summary": _summarize_rows(filtered_rows),
-                        "rows": filtered_rows,
+                        "market": market,
+                        "row_summary": _summarize_rows(rows),
+                        "rows": rows,
                     },
                 )
+                _, structural_decisions = _select_search_candidates(query, rows, allowed_domains=allowed_domains)
+                candidates = [(item["index"], item["row"]) for item in structural_decisions if item["relevance"] != "rejected"]
+                assessment_timeout = max(1, min(_safe_int(os.environ.get("FREE_SEARCH_ASSESSMENT_TIMEOUT_SECONDS"), 15), 60))
+                assessment = await assess_candidates(
+                    request.model, query, candidates, original_task=request.original_task,
+                    timeout_seconds=budget.remaining(assessment_timeout),
+                )
+                budget.remaining(assessment_timeout)
+                filtered_rows, decisions = _select_search_candidates(
+                    query, rows, max_results=max_results, allowed_domains=allowed_domains, assessment=assessment,
+                )
+                tool_logger.info(
+                    "[FreeSearchAssessment] engine=%s market=%s status=%s candidates=%s selected=%s elapsed_ms=%s reason=%s error_type=%s",
+                    engine_name, market, assessment.status, len(candidates), len(filtered_rows),
+                    assessment.elapsed_ms, assessment.reason, assessment.error_type,
+                )
                 _write_debug_payload(
-                    debug_run_id,
+                    attempt_run_id,
                     engine_name,
                     "filtered",
                     {
                         "query": query,
                         "effective_query": effective_query,
-                        "query_core_terms": _query_core_terms(query),
-                        "query_terms": _query_terms(query),
+                        "market": market,
+                        "candidate_count": len(rows),
+                        "selected_count": len(filtered_rows),
+                        "decisions": decisions,
+                        "assessment": {"status": assessment.status, "reason": assessment.reason, "elapsed_ms": assessment.elapsed_ms, "error_type": assessment.error_type},
                         "row_summary": _summarize_rows(filtered_rows),
-                        "rows": [
-                            {
-                                **row,
-                                "score": WebFreeSearchTool._score_row(query, row),
-                                "match_count": _match_term_count(query, row),
-                            }
-                            for row in filtered_rows
-                        ],
+                        "rows": filtered_rows,
                     },
                 )
 
-                if filtered_rows and not best_rows:
-                    best_engine = engine_name
-                    best_rows = filtered_rows
-
                 if WebFreeSearchTool._rows_are_usable(query, filtered_rows):
                     _write_debug_payload(
-                        debug_run_id,
+                        attempt_run_id,
                         engine_name,
                         "decision",
                         {
                             "query": query,
                             "effective_query": effective_query,
+                            "market": market,
                             "decision": "accepted",
                             "row_summary": _summarize_rows(filtered_rows),
                             "rows": filtered_rows,
@@ -1080,21 +1087,16 @@ class WebFreeSearchTool(Tool):
                     )
                     return engine_name, filtered_rows
 
-                errors.append(f"{engine_name}: low-quality or empty result")
-
-        if best_rows:
-            _write_debug_payload(
-                debug_run_id,
-                best_engine or "fallback",
-                "decision",
-                {
-                    "query": query,
-                    "decision": "best_effort",
-                    "row_summary": _summarize_rows(best_rows),
-                    "rows": best_rows,
-                },
-            )
-            return best_engine, best_rows
+                status = "low_relevance" if rows else "empty"
+                failures.append(status)
+                attempt_name = f"{engine_name} ({market})" if market else engine_name
+                errors.append(f"{attempt_name}: {status}")
+                _write_debug_payload(attempt_run_id, engine_name, "decision", {
+                    "query": query, "effective_query": effective_query, "market": market,
+                    "decision": status, "rejected_count": len(rows),
+                })
+                if status != "low_relevance":
+                    break
 
         _write_debug_payload(
             debug_run_id,
@@ -1102,7 +1104,8 @@ class WebFreeSearchTool(Tool):
             "decision",
             {"query": query, "decision": "error", "errors": errors},
         )
-        raise build_error(StatusCode.TOOL_WEB_SEARCH_ALL_ENGINES_FAILED, errors=" | ".join(errors))
+        status = next((value for value in ("budget_exhausted", "blocked", "truncated", "source_error", "low_relevance", "empty") if value in failures), "transport_error")
+        raise WebContentError(status, " | ".join(errors) + ". No usable evidence returned. Do not fetch rejected results or repeatedly reformulate the same query; report what is missing.")
 
     @staticmethod
     def _engine_display_name(engine: str) -> str:
@@ -1130,6 +1133,9 @@ class WebFreeSearchTool(Tool):
         max_results = max(1, min(max_results, 20))
         timeout_seconds = max(5, min(timeout_seconds, 60))
         try:
+            callback = kwargs.get("_tool_callback_context")
+            budget = get_web_budget(callback)
+            model = resolve_search_model(callback, self._model)
             async with _http.new_session() as session:
                 engine_used, rows = await WebFreeSearchTool._search_free(
                     _FreeSearchRequest(
@@ -1140,20 +1146,37 @@ class WebFreeSearchTool(Tool):
                         proxy_url=self._proxy_url,
                         allowed_domains=self._allowed_domains,
                         enabled_engines=self._enabled_engines,
+                        provider=str(inputs.get("provider", "auto") or "auto"),
+                        budget=budget,
+                        model=model,
+                        original_task=budget.original_task if budget else "",
                     ),
                 )
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: free search failed: {exc}"
 
         if not rows:
-            return f"No search results for: {query}"
+            return f"Content status: empty. No search results for: {query}"
 
+        self._on_search_results(rows)
         lines = [f"Free search results ({WebFreeSearchTool._engine_display_name(engine_used)}) for: {query}"]
+        if any(row.get("relevance") != "uncertain" for row in rows):
+            lines.append("Content status: ok. These are discovery candidates, not verified facts. Publication/market time is unverified until read at the source.")
+        else:
+            lines.append("Content status: uncertain. Only provisional candidates were found. Verify one promising source before answering; do not treat them as relevant or current facts yet.")
+        assessment_unavailable = any(row.get("assessment_status") == "unavailable" for row in rows)
+        if assessment_unavailable:
+            lines.append("Assessment status: unavailable. Relevance was not assessed; these are unverified leads, not a successful relevance check. Do not retry markets just because assessment failed.")
+            lines.append("Candidates are retained up to max_results in source order, not relevance order. Compare all leads for the requested entity, evidence and original source before choosing a page; do not fetch every candidate.")
         for idx, row in enumerate(rows, 1):
             lines.append(f"{idx}. {row['title']}")
             lines.append(f"   URL: {row['url']}")
             if row.get("snippet"):
                 lines.append(f"   Snippet: {row['snippet']}")
+            if row.get("date"):
+                lines.append(f"   Search-reported date (unverified): {row['date']}")
+            if row.get("relevance") == "uncertain":
+                lines.append(f"   Relevance: uncertain ({row['relevance_reason']}); verify at the source.")
 
         top_fetch_urls: list[str] = []
         for row in rows:
@@ -1165,15 +1188,20 @@ class WebFreeSearchTool(Tool):
                 break
         lines.append("")
         lines.append(
-            "Required next step: before reformulating the query, fetch at least 2 relevant URLs from the top "
-            "results. If the first fetch fails, is a dynamic shell page, or is still incomplete, continue with "
-            "the next recommended URLs instead of searching again."
+            "Next step: fetch only a relevant source needed to verify the requested fact. Stop when evidence "
+            "is sufficient; a second fetch is not mandatory. Check entity, publication/observation time, "
+            "and missing fields. Do not guess article URLs or treat a search snippet as a current quote. "
+            "Respect retrieval limits; do not switch to paid search unless authorized."
         )
-        if top_fetch_urls:
+        if top_fetch_urls and not assessment_unavailable:
             lines.append("Recommended fetch targets:")
             for idx, url in enumerate(top_fetch_urls, 1):
                 lines.append(f"{idx}. {url}")
         return "\n".join(lines)
+
+    def _on_search_results(self, rows: list[dict[str, str]]) -> None:
+        """Hook for host provenance recording after successful quality filtering."""
+        return None
 
     async def stream(self, inputs: dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         """Stream is not supported for this tool."""
