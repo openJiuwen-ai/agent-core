@@ -68,7 +68,29 @@ def _llm_usage_snapshot(item: Any) -> dict | None:
     return dumped if isinstance(dumped, dict) else None
 
 
-def _llm_end_payload(result: Any, ttft_seconds: float | None, usage: dict | None = None) -> dict:
+def _mean_inter_token_latency_ms(usage: dict | None, first_chunk_at: float | None,
+                                 last_chunk_at: float | None, chunk_count: int) -> float | None:
+    """Mean inter-token latency (TPOT) in ms for a streamed LLM call.
+
+    Token 口径优先（output_tokens - 1，与 ReAct 引擎回填同口径、跨模型可比）；
+    usage 缺 token 数时回退块级（chunk_count - 1，与 planner 侧同口径，块大小
+    因模型而异仅作近似）。单块 / 零间隔 / 无时间戳返回 None——缺席即诚实，不造 0。
+    """
+    if first_chunk_at is None or last_chunk_at is None:
+        return None
+    span_s = last_chunk_at - first_chunk_at
+    if span_s <= 0:
+        return None
+    output_tokens = (usage or {}).get("output_tokens")
+    if isinstance(output_tokens, (int, float)) and output_tokens > 1:
+        return span_s / (output_tokens - 1) * 1000
+    if chunk_count > 1:
+        return span_s / (chunk_count - 1) * 1000
+    return None
+
+
+def _llm_end_payload(result: Any, ttft_seconds: float | None, usage: dict | None = None,
+                     tpot_ms: float | None = None) -> dict:
     """Build the on_llm_end outputs payload with usage as a "outputs" sibling.
 
     The tracer-otel handler reads a container-level "usage_metadata" fallback
@@ -78,7 +100,8 @@ def _llm_end_payload(result: Any, ttft_seconds: float | None, usage: dict | None
     time to first (== final) response. Streams pass the snapshot taken off
     the last usage-bearing chunk via ``usage``. A ttft already stamped by a
     streaming producer (e.g. the ReAct engine, #1833) is authoritative and
-    is never overwritten."""
+    is never overwritten; the same precedence applies to the wrapper-measured
+    mean inter-token latency (``tpot_ms``)."""
     payload = {"outputs": result}
     if usage is None:
         usage = _llm_usage_snapshot(result)
@@ -88,6 +111,8 @@ def _llm_end_payload(result: Any, ttft_seconds: float | None, usage: dict | None
         # unreported ttft as None instead of the measured one.
         if ttft_seconds is not None and usage.get("ttft_seconds") is None:
             usage["ttft_seconds"] = max(ttft_seconds, 0.0)
+        if tpot_ms is not None and usage.get("inter_token_latency_ms") is None:
+            usage["inter_token_latency_ms"] = round(tpot_ms, 6)
         payload["usage_metadata"] = usage
     return payload
 
@@ -171,11 +196,16 @@ def _make_trace_stream_wrap_handler(
             results = []
             started_at = time.monotonic() if invoke_type == InvokeType.LLM else None
             first_chunk_at = None
+            last_chunk_at = None
+            chunk_count = 0
             final_usage = None
             async for item in call_next(*args, **call_kwargs):
                 if invoke_type == InvokeType.LLM:
+                    now = time.monotonic()
                     if first_chunk_at is None:
-                        first_chunk_at = time.monotonic()
+                        first_chunk_at = now
+                    last_chunk_at = now
+                    chunk_count += 1
                     # Usage-only final frame: keep the freshest snapshot seen.
                     if getattr(item, "usage_metadata", None) is not None:
                         final_usage = _llm_usage_snapshot(item)
@@ -183,7 +213,10 @@ def _make_trace_stream_wrap_handler(
                 yield item
             if invoke_type == InvokeType.LLM:
                 ttft = (first_chunk_at - started_at) if first_chunk_at is not None else None
-                end_outputs = _llm_end_payload(results, ttft, usage=final_usage)
+                tpot_ms = _mean_inter_token_latency_ms(
+                    final_usage, first_chunk_at, last_chunk_at, chunk_count
+                )
+                end_outputs = _llm_end_payload(results, ttft, usage=final_usage, tpot_ms=tpot_ms)
             else:
                 end_outputs = {"outputs": results}
             await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_end",

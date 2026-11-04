@@ -482,3 +482,137 @@ class TestDecator:
             # Older schema without the engine-stamp field: the wrapper's
             # measured first-chunk time fills the ttft in.
             assert usage["ttft_seconds"] >= 0
+
+    @staticmethod
+    def _tpot_mock_env(results):
+        """Shared mock tracer/session for the TPOT stream tests."""
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+        return mock_session
+
+    async def test_decorate_model_stream_tpot_measured(self):
+        """Streamed LLM calls carry inter_token_latency_ms (TPOT): token-level
+        denominator (output_tokens - 1) when usage reports tokens; a
+        non-streaming invoke has no first-token event and stays honestly
+        absent."""
+        import asyncio
+
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial-1")
+                await asyncio.sleep(0.02)
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=7),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return AssistantMessage(
+                    content="all-at-once",
+                    usage_metadata=UsageMetadata(input_tokens=3, output_tokens=5),
+                )
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _StreamModel(), self._tpot_mock_env(results)
+        )
+
+        consumed = [
+            item
+            async for item in mocked_model.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 2
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # Measured span (~20 ms) over output_tokens - 1 == 6: a small positive
+        # token-level TPOT, never 0 (that would mean "instant generation").
+        assert 0 < usage["inter_token_latency_ms"] < 100
+
+        results.clear()
+        await mocked_model.invoke([BaseMessage(role="user", content="hi")])
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # Non-streaming: TPOT is undefined, absent rather than fabricated.
+        # model_dump may carry the key as None on schemas that declare it.
+        assert usage.get("inter_token_latency_ms") is None
+
+    async def test_decorate_model_stream_tpot_precedence_and_absence(self):
+        """A TPOT already stamped by a streaming producer wins (same rule as
+        ttft); a single-chunk stream has no inter-token interval and stays
+        honestly absent."""
+        import asyncio
+
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        stamp_kwargs = {"input_tokens": 10, "output_tokens": 7}
+        if "inter_token_latency_ms" in UsageMetadata.model_fields:
+            stamp_kwargs["inter_token_latency_ms"] = 42.0
+
+        class _StampedStreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial")
+                await asyncio.sleep(0.02)
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(**stamp_kwargs),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("stamp test must not hit invoke")
+
+        class _SingleChunkModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(
+                    content="all-in-one",
+                    usage_metadata=UsageMetadata(input_tokens=3, output_tokens=5),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("single-chunk test must not hit invoke")
+
+        results = []
+        mock_session = self._tpot_mock_env(results)
+
+        stamped = decorate_model_with_trace(_StampedStreamModel(), mock_session)
+        consumed = [
+            item
+            async for item in stamped.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 2
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        if "inter_token_latency_ms" in UsageMetadata.model_fields:
+            # Engine-stamped TPOT is authoritative, never overwritten.
+            assert usage["inter_token_latency_ms"] == pytest.approx(42.0)
+        else:
+            # Older schema without the field: the wrapper's own measurement
+            # fills the gap in.
+            assert 0 < usage["inter_token_latency_ms"] < 100
+
+        results.clear()
+        single = decorate_model_with_trace(_SingleChunkModel(), mock_session)
+        consumed = [
+            item
+            async for item in single.stream([BaseMessage(role="user", content="hi")])
+        ]
+        assert len(consumed) == 1
+        usage = results[1][2]["outputs"]["usage_metadata"]
+        # One chunk: first == last timestamp, no interval to average — absent.
+        assert usage.get("inter_token_latency_ms") is None
