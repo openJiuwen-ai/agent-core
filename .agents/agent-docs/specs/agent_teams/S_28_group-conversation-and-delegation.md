@@ -1,6 +1,18 @@
+---
+title: S_28 群聊输入与文件归档
+author: openJiuwen-bot
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_28_group-conversation-and-delegation
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: cla@openjiuwen.com
+---
+
 # S_28 群聊输入与文件归档
 
-最近修订：2026-10-22。关联特性：[F_112](../features/F_112_group-conversation-and-delegation.md)。
+最近修订：2026-10-22。关联特性：[F_112](../../features/agent_teams/F_112_group-conversation-and-delegation.md)。
 
 ## 职责与入口
 

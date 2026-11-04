@@ -30,7 +30,7 @@
 | [S_02 事件与结果交接](../specs/S_02_events-and-result-handoff.md)、[S_08 工具意图](../specs/S_08_tool-effects-and-intent.md) | 业务记账和外部效果边界；原生退出不能代替这些事实 |
 | [F_01 构造](F_01_spec-and-deep-agent-construction.md)、[F_02 协议](F_02_execution-protocol.md)、[F_04 契约收敛](F_04_contract-convergence.md) | 最小构造基础、历史协议及现行契约的替代关系 |
 | [F_05 执行入口](F_05_execution-entries.md)、[F_15 写前意图](F_15_tool-intent-before-side-effect.md) | 当前接缝消费者及后续 Rails 对低层调用的影响 |
-| Harness [F_06 可选流任务生命周期](../../../docs/features/F_06_opt-in-stream-task-lifecycle.md)、[F_07 Session checkpointer 注入](../../../docs/features/F_07_session-checkpointer-injection.md) | 共享原生接缝，以及后续正式执行使用的 Session 隔离 |
+| Harness [F_06 可选流任务生命周期](../../../../../.agents/agent-docs/features/harness/F_06_opt-in-stream-task-lifecycle.md)、[F_07 Session checkpointer 注入](../../../../../.agents/agent-docs/features/harness/F_07_session-checkpointer-injection.md) | 共享原生接缝，以及后续正式执行使用的 Session 隔离 |
 
 F_03 负责在进入原生 API 前核对归属、占用同一实例、隔离停止和清理，并在显式关闭流时等待登记的单轮生产者及原生 Session 收尾。AgentServer 负责身份鉴别、Request 排队、同一业务 Session 的单一执行者、新 runtime Session 与实例的分配、资源生命周期及持久记录。不同实例的低层并行能力不等于允许宿主并发执行同一业务 Session。
 

@@ -1,3 +1,17 @@
+---
+title: 可选流式后台任务生命周期
+author: yan_zj
+author_email: yanzhijun5@huawei.com
+id: F_06_opt-in-stream-task-lifecycle
+type: F
+modules:
+- openjiuwen/harness
+files:
+- openjiuwen/harness/deep_agent.py
+designs: null
+design_note: 历史设计关联待核实
+---
+
 # F_06 可选流式后台任务生命周期
 
 | 项 | 内容 |

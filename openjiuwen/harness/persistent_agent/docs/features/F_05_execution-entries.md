@@ -32,7 +32,7 @@
 | [S_07 构造与绑定](../specs/S_07_construction-and-binding.md) | 原生 DeepAgent、调用上下文、单次绑定与资源收敛 |
 | [S_08 工具意图](../specs/S_08_tool-effects-and-intent.md)、[S_09 群聊与知识](../specs/S_09_group-chat-and-knowledge.md) | 已接入协同组件的职责及外部事实边界 |
 | [F_01 构造](F_01_spec-and-deep-agent-construction.md)、[F_02 协议](F_02_execution-protocol.md)、[F_03 绑定](F_03_invocation-binding-and-isolation.md)、[F_04 契约收敛](F_04_contract-convergence.md) | PA-05 的配置、类型与调用隔离基础 |
-| Harness [F_07 Session checkpointer 注入](../../../docs/features/F_07_session-checkpointer-injection.md) | 每次 Execution 注入 NoopCheckpointer，保留原生生命周期 |
+| Harness [F_07 Session checkpointer 注入](../../../../../.agents/agent-docs/features/harness/F_07_session-checkpointer-injection.md) | 每次 Execution 注入 NoopCheckpointer，保留原生生命周期 |
 
 PA-05 组合已有构造、原生流和清理接缝，负责入口校验、事件出口、预算消费、结局判定及收尾顺序。窗口内容与存储格式、回复到原生载荷的转换、文件交接、续做查证分别由后续特性承担。AgentServer 负责配置发布、Request 受理、身份鉴别、Session 串行调度、真实端口、预算账户、候选保存和渠道投递。
 

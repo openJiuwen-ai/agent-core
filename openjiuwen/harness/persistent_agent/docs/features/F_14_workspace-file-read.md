@@ -24,7 +24,7 @@
 | [S_04 办公空间授权与读取](../specs/S_04_tools-and-workspace.md) | 本特性的端口、路径和结果契约，以及当前公共导出限制 |
 | [S_07 构造与绑定](../specs/S_07_construction-and-binding.md) | 配置指纹、能力快照、真实 Session、调用独立实例及 owner 生命周期 |
 | [S_08 工具副作用与意图](../specs/S_08_tool-effects-and-intent.md)、[F_15](F_15_tool-intent-before-side-effect.md) | 只读分类、写前意图、只读调用完成事件及原生重试边界 |
-| [Harness 工作空间](../../../docs/specs/S_09_workspace.md)、[工具](../../../docs/specs/S_05_tools-contract.md)、[安全引擎](../../../docs/specs/S_08_security-engine.md) | Workspace / SysOperation 和既有文件工具、安全 Rail 的公共机制 |
+| [Harness 工作空间](../../../docs/specs/S_09_workspace.md)、[工具](../../../../../.agents/agent-docs/specs/harness/S_05_tools-contract.md)、[安全引擎](../../../docs/specs/S_08_security-engine.md) | Workspace / SysOperation 和既有文件工具、安全 Rail 的公共机制 |
 
 架构描述的是整体方案，并非每段均已实现。本次以相关代码和测试核对当前行为；不修改架构方案，不把对端拟议规约写成已存在接口。
 

@@ -1,3 +1,15 @@
+---
+title: S_05 工具契约
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_05_tools-contract
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_05 工具契约
 
 ## 元信息
@@ -6,7 +18,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-27 |
+| 最近一次修订日期 | 2026-11-02 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
@@ -85,6 +97,13 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
    - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
+     Bash 前台命令的执行期限统一取输入 `timeout`，经既有校验后默认 300 秒，
+     上限由 `BASH_TOOL_MAX_TIMEOUT_SECONDS` 控制（默认 3600 秒）。本地 Shell 的普通与
+     流式执行均直接使用调用方传入的期限，不再读取 `JW_EXECUTE_CMD_MAX_TIMEOUT` 截断。
+     `Tool.get_call_timeout(inputs, default_timeout=...)` 是实例级调用预算扩展点：默认保留
+     AbilityManager 从卡片或默认值解析的预算；Bash 前台覆写为执行期限加 30 秒清理窗口，
+     供杀进程、收集已有输出和回传结果使用，执行本身不会延长。注册与资源回退两条调用路径
+     均使用该扩展点；后台启动继续使用原调用预算，不受命令 `timeout` 控制。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
@@ -156,7 +175,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
     逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。
-15. **Browser 输入与回执可恢复**：阶段条件按 kind 声明字段，set/verify 分开校验；错误包含
+15. **Browser 输入与回执可恢复**：常用交接只暴露 objective、当前对象/操作/字段值和读取词；
+    旧显式条件按 kind 声明字段，set/verify 的完整兼容入口仍分开严格校验；错误包含
     字段路径和修正方向，绑定目标来自同一当前 guarded registry。执行器确认的反馈文本保留
     在 journal，但不能替代业务读数。原生工具和 Batch 共用执行安全边界，见 F_17。
     `browser_phase verify` 的 `inspect_cart:true` 仅执行固定 DOM 读取，返回 reader 线索；不认证
@@ -176,7 +196,7 @@ authoritative_browser_result 保留兼容名，但权威范围限于执行/观�
 效果仍禁止盲重放。该行为同时适用于 llm/hybrid，不再由 strict/lean 切换执行真值。
 
 此前 F_10/F_12/F_13/F_16 中与本节冲突的预算、自动证明和试验开关约定由本节取代。
-详见 [F_17](../features/F_17_browser-runtime-reduction.md)。
+详见 [F_17](../../features/harness/F_17_browser-runtime-reduction.md)。
 
 ## 接口契约
 
@@ -255,6 +275,15 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 - `get_or_create_plan_slug` 缺 workspace_root → 抛；plan 文件路径经 `resolve_plan_file_path`
   固定解析（`<workspace_root>/<slug>/plan.md` 形态，实际以 `agent_mode_tools.py` 为准）。
 - `WorktreeManager` 操作失败抛 `GitError` / `WorktreeLockTimeout`（`tools/worktree/`）。
+  `GitBackend` 基线解析默认**本地优先**、不读 `origin/HEAD`、不 fetch：当前检出的本地
+  分支 → 本地 `main/master/develop` → 已存在的 `origin/main/master/develop` → 游离 HEAD
+  → 空仓库建空初始提交；每一步都按全限定引用（`refs/heads/…` / `refs/remotes/origin/…`）
+  验证可解析。成员因此能看到用户未推送的本地提交。`GitBackend(remote_base=True)` 是
+  远程 worktree 节点专用的**远端优先**解析（`WorktreeRemoteHandler` 构造时置位）：节点
+  上框架自己的克隆从不推进本地分支，故沿用 `get_default_branch`（验证 `origin/HEAD`，回退
+  依次识别 `main/master/develop`、最后才是当前分支）→ 缺失时 fetch → fetch 成功也须再次
+  解析 `origin/<branch>`，失败回退本地 HEAD，不用不受控的 `FETCH_HEAD`。两种解析都以已
+  解析的固定 SHA 创建工作树，展示元数据保留基线引用名，不切换或修改用户分支。
 
 ## 数据结构
 
@@ -426,7 +455,7 @@ Jev 候选避免重交页面已经观察到的同一搜索，默认把回到已�
 已执行的新输入/选择、显式新局部目标可表达后续工作；固定读取和其他局部动作继续开放。
 LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普通查询无需额外阶段调用。
 
-详见 [F_18](../features/F_18_browser-receipts-and-local-continuity.md)。
+详见 [F_18](../../features/harness/F_18_browser-receipts-and-local-continuity.md)。
 
 ## Browser 默认观察与结果交接（F_19，当前契约）
 
@@ -439,7 +468,7 @@ LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普�
 统一终态携带 worker 判断、执行回执、来源观察和 summary；字段诊断不替代原文。阻断列表不是完备枚举，
 为空不能证明没有页面障碍。父层与 resume 保留同一结果；模型渲染只展示一次结果，避免三份重复投影。
 常用等待使用已有目标/文本/URL 条件；缺目标仍拒绝，旧目标校验、串行派发、权限和真实未知效果保护保留。
-本节取代 F_17 中继续默认维护 inferred 诊断和语义反证的部分，详见 [F_19](../features/F_19_browser-observation-first-results.md)。
+本节取代 F_17 中继续默认维护 inferred 诊断和语义反证的部分，详见 [F_19](../../features/harness/F_19_browser-observation-first-results.md)。
 
 ### October 9 decision observation handoff (F_21)
 
@@ -455,7 +484,7 @@ Initial tabs and scoped reader content use existing task/cache state to avoid st
 and repeat reads caused only by unrelated control observations. Same-query ACK search
 submits are retired locally; LLM recovery, new bindings and changed scope remain possible.
 
-See [F_21](../features/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
+See [F_21](../../features/harness/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
 
 
 ### Browser receipt and current binding consistency (2026-10-09)
@@ -584,3 +613,161 @@ budget, dates, object and stopping point; optional phase fields are handoff, not
   抛 `COMPONENT_TOOL_INIT_FAILED`。后端在第一次工具调用时才构建，pyautogui 在构建时才导入，所以构建
   工具与导入模块都不触碰显示器。输入始终是前台真实输入；所有阻塞调用经 `asyncio.to_thread` 执行。
 - **依赖**：`cua` extra（`pyautogui`、`psutil`；Windows 上 `pygetwindow`，Linux 上 `python-xlib`）。
+
+### Browser fact handoff and recovery (F_26, 2026-10-14)
+
+Every interrupted browser invocation preserves the shared execution journal, current page
+and bounded source observations. Failure classification controls recovery separately from
+fact projection. Wrapped transport errors can resume within existing task deadline/count
+limits; exhausted repeated-output recovery and fatal errors retain facts without starting
+another retry layer. Pending anomaly-rail retries keep their ownership. Neither an ACK nor
+an unknown write is replayed automatically. Resume denial describes this query's constraint,
+not global backend availability.
+
+An unknown exception escaping browser subagent execution is a tool failure, even when
+the retained task facts describe partial progress. TaskTool returns `success=False` with
+`browser_execution_error`, preserves the same observations/journal in data and query state,
+and includes the failure flag and error in its model-facing renderer. It logs the exception
+traceback and does not grant another resume. Classified model/transport interruptions keep
+their existing structured partial-result and bounded recovery semantics; cancellation still
+propagates. Fact retention and tool success are separate decisions.
+This failure flag is assigned at the caught-exception boundary. A normally returned,
+runtime-finalized partial/blocked result remains successful delivery of that result;
+its terminal-reason label alone must not be treated as an escaping TaskTool exception.
+
+Terminal source excerpts deduplicate retained records and cover source/scope diversity
+within the existing size limit. They retain raw recall references and source region; absence
+from an excerpt is not proof of missing work. Historical observations never grant live
+target bindings. Inspecting a candidate and selecting it for mutation are distinct local
+intents: the LLM uses existing optional phase operations/object bindings at that transition.
+No per-action phase requirement or runtime business certification is added.
+
+Existing browser LLM timing events expose first/last frame, productive-frame and output
+counts (no reasoning text). Client first/idle waits and the shared task deadline retain
+timeout ownership. URL literals handle prose delimiters without site rules or ASCII-only
+host restrictions. Parent delegation preserves exact inequalities and the user endpoint;
+focused recovery consumes retained/current observations before considering another action.
+
+
+### Local binding lifecycle and reader decisions (F_27, 2026-10-14)
+
+The existing phase contract records a pending local handoff when its bound document changes
+or an acknowledged LLM control action leaves its target scope. It offers one interpretation
+turn; the previous objective and values cease being the current instruction. Pending handoff
+keeps the explicit operation ceiling and allows fixed reads/viewport reveal, without
+rebinding old identities or releasing unknown-impact writes. Fresh LLM set replaces the
+fragment immediately; missing controls in a partial observation alone do not expire it.
+
+Optional read_queries carries at most six LLM-resolved literals for fixed find/control probes.
+Queries are not writable values or selectors. Existing PageState/receipt scopes suppress
+successful same-scope reads; explicit LLM reads and new document/scope/intent remain possible.
+Fixed reader heads describe reading ranges, parameters and returned facts. Provider schemas,
+single-request independent heads, both confidence thresholds and dispatch guards are unchanged.
+Observed clickable ARIA checkbox/switch controls with matching explicit checked state expose
+an existing click action; native checkbox inputs keep set_checked. Rechecking checked state
+before dispatch and the current operation/object scope remain required.
+See F_27 for replay boundaries and validation results.
+
+
+### Browser source and local continuity (F_28, 2026-10-16)
+
+1. Source history remains bounded at 20 retained records. Substantive source groups precede
+   metadata-only groups; latest broad content precedes local find/diagnostic records within
+   a source. The parent receives all deduplicated retained observations, not a second six-item
+   selection (F_29). Source text retains up to 12,000 characters per record; the parent text
+   budget is 96,000 characters shared across records, with lengths and truncation flags.
+   Sources, read scopes and recall handles survive text clipping. `read_scope` describes the
+   operation and optional query/target/viewport;
+   `observation_scope` still describes the observed page generation/revision. Repeated reads
+   refresh existing references, never live node permissions. Neither selection nor omission
+   certifies business completion or missing work.
+2. Output validation applies only to a successfully returned model attempt. Core's after
+   callback also runs on exceptions: those attempts remain owned by the existing exception/
+   retry path, without force-finishing an approved retry (F_29).
+   A normal model answer requires non-empty worker output; the legacy explicit progress-tool
+   path can return actual extracted values, never passive page metadata. Empty model endings use the
+   existing shared-fact interruption result, with model_output_incomplete for length and
+   model_output_empty otherwise. Retain ACKs and original observations; recovery stays under
+   existing deadline/count constraints and never automatically replays a browser write.
+3. Objective-only and bound phases share an observed document/route scope. On scope change,
+   use the existing one-time local handoff; pending scope allows fixed readers and allowed
+   scrolling, not arbitrary local UI. Same-document query/filter changes alone do not
+   expire the objective. LLM set supplies the replacement intent and exact objects.
+   Complete browser task snapshots use phase_contract.save with explicit Session-key
+   replacement. Omitted old handoff/recovery fields must not survive recursive merge.
+   This synchronous save affects only the browser-owned state key, never sibling state.
+4. Existing local receipts can retire a particular navigation undone by an acknowledged
+   LLM return, or a repeated identical scroll round trip. This is candidate-level avoidance,
+   not a global quota or a business progress claim. New intent/document/layout and explicit
+   LLM recovery remain available; fixed readers are not suppressed by navigation detours.
+5. An explicit phase binding may use a current-registry target observed in the same document
+   and interaction revision even when a bounded generic snapshot omits it. Only selected
+   exact identities supplement the Jev menu. Historical IDs, missing identity and changed
+   generations remain refusals; dispatch validation is unchanged.
+6. Page-operation argument-shape errors expose missing/unexpected/required fields and an
+   example with executed=false. A select_tab example is not an index/URL binding: use tabs.
+   Unknown dispatched effects keep their original reconciliation semantics.
+
+7. Targetless URL navigation validates the current page/document, arguments and any observed
+   link/order provenance, but does not depend on unchanged viewport/scroll geometry. Node
+   actions retain their exact node and actionability checks. See F_29 for lifecycle regressions.
+
+### Browser dispatch contract compatibility (F30)
+
+- Primitive batch steps preserve the native executor's exact preflight rejection as
+  executed=false. Failure after action dispatch remains unknown; arbitrary script text
+  cannot impersonate a native target-resolution receipt.
+- Closed page operations use the permission/registered-tool intersection of the current
+  runtime. Fixed observations require their compact transport; short waits are local.
+  Native capability resolution precedes dispatch marking, with an explicit unavailable
+  capability reason. Menus and direct page tools consume the same capability calculation.
+- Jev unknown/business-effect actions require an active exact target and operation
+  binding; broad objectives or merely opening a candidate do not grant that binding.
+  Fixed reads/local UI do not acquire a per-step phase requirement. Binding eligibility
+  diagnostics describe missing facts rather than overriding freshness or actionability.
+
+### Optional browser handoff and receipt diagnostics (2026-10-29)
+
+- The model-facing `browser_phase` card advertises only set/verify, objective,
+  target_ids, allowed_operations, bound_values and read_queries. The existing
+  full schema still validates explicit legacy conditions/phase_version/inspect_cart;
+  hiding advanced fields does not relax them or turn conditions into requirements.
+- Two consecutive completed, rejected-before-dispatch phase rounds omit this optional
+  tool from the next model request and instruct ordinary-tool recovery. Varying invalid
+  arguments does not evade this check. A normal tool round, successful phase, new user
+  input or unknown dispatched verification breaks the streak. Four consecutive rejected
+  rounds use the existing model-protocol partial/blocked result with retained facts.
+  This is not a page action/read budget or a new retry manager.
+- Batch receipts preserve execution_stage and keyboard binding (explicit_target versus
+  active_element); an available focus_before contains only structural attributes, not
+  field values. These are diagnostics, not fresh identities or proof of business effects.
+  An outer RPC timeout with no step receipts remains unknown. ACKed earlier steps in a
+  returned partial batch remain ACKed; their diagnostics are retained in the journal.
+- Dedicated browser logs append on reopen. Retargeting/disable closes the prior owned
+  handler, so a new test path cannot continue writing into the prior run. Callers use
+  OPENJIUWEN_BROWSER_AGENT_LOG_FILE for isolation; host rotation remains host-owned.
+
+## 客户端执行的工具（client tools，当前契约）
+
+- **声明**：`ToolCard(execution="client")`（`execution` 不进模型看到的 `ToolInfo`）。需要定制时继承
+  `ClientTool`：`build_request(arguments, context) -> dict` 生成发给客户端的请求，
+  `complete(arguments, result, context)` 把客户端结果变成工具输出，`context` 为
+  `ClientToolContext(tool_call, session, agent, callback_context)`。`build_request` 抛
+  `ClientToolUnavailable(message)` 时调用直接以工具错误结束，不联系客户端。参数必须是 JSON 对象。
+- **执行**：所有 `before_tool_call` rail 放行后，`AbilityManager` 不调 `invoke`，而是抛
+  `client_tool` 中断，请求为 `ClientToolRequest(tool_name, arguments, client_request)`，`arguments`
+  是 rail 改写后的最终参数。权限 rail 把客户端工具当普通调用：放行 / 询问（批准后才发客户端请求）/
+  拒绝（客户端收不到请求）。
+- **恢复**：宿主用 `InteractiveInput.answer(interrupt_id, result)` 回答，结果经
+  `ClientToolResult.coerce` 成为该调用的正常输出（键全属于 `status` / `content` / `is_error` /
+  `data` 的 dict 是信封；其余 dict 整体作为结果，以 JSON 交给模型）。
+  答复后的调用**不再经过 `before_tool_call`**：它在暂停时已经过了 rail，之后规则变化只影响后续
+  调用，与已在执行的服务端工具一致。事件顺序：`before_tool_call` 一次、`after_tool_call`
+  （`ctx.is_paused`）、带结果的 `after_tool_call`。
+- **并行与部分回答**：一次恢复可只回答部分并行客户端调用；其余保持暂停、不重放（请求、
+  `interrupt_id` 与载荷不变）。同一轮的图片消息等所有调用都有结果后才追加。
+- **`parallel_safe=False`**：客户端暂停不阻塞同一批中排在后面的调用。
+- **超时 / 断开 / 取消**：`timeout` / `client_gone` / `cancelled` 转成 `data["retryable"]=True` 的工具
+  错误，提示模型调用可能已生效、先确认现状。客户端调用等待时用户发纯文本，该调用以 `cancelled`
+  结束，文本附在结果里交给模型。
+- 示例：`examples/client_tool/client_tool_demo.py`。

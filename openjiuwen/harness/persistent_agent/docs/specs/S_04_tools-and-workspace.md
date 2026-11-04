@@ -19,7 +19,7 @@ PA-14 只读组件已实现：复用 Harness ReadFileTool / ListDirTool，并注
 
 启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。workspace_write 另须开启 workspace_write 并提供写授权端口。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail 与 `share_file`；普通 DeepAgent 仍遵循通用行为。full_access 仅可由宿主提供与权限 Spec 匹配的 host_wide 读写 scope；所有路径仍受服务 OS 用户权限约束。`share_file`（PA-08）随读取能力装配，不新增能力标记，见第 4.3 节。
 
-公共 [工具](../../../docs/specs/S_05_tools-contract.md)、[安全](../../../docs/specs/S_08_security-engine.md)、[工作空间](../../../docs/specs/S_09_workspace.md)机制继续由 Harness 负责，本模块补充业务身份、私有 Session 路径及来源。Shell、CLI、MCP、写工具和子进程不因注册本读取 Rail 就获得相同的沙箱隔离保证。
+公共 [工具](../../../../../.agents/agent-docs/specs/harness/S_05_tools-contract.md)、[安全](../../../docs/specs/S_08_security-engine.md)、[工作空间](../../../docs/specs/S_09_workspace.md)机制继续由 Harness 负责，本模块补充业务身份、私有 Session 路径及来源。Shell、CLI、MCP、写工具和子进程不因注册本读取 Rail 就获得相同的沙箱隔离保证。
 
 DeepAgent 工具路径还须遵守既有 allow / ask / deny 及配置范围；宿主 scope=allowed 本身不表示审批完成或授予扩大后的能力。直接调用读取包装器不能证明已经经过完整的原生权限 Rail 链。
 
