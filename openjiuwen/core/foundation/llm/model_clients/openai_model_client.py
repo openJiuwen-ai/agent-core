@@ -1086,6 +1086,17 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_openrouter_profile(params)
 
+        # 打开工具流式：stream=True 的请求如果带 tools，
+        # 必须同时下发与 stream 平级的 tool_stream=true，否则兼容网关（方舟/火山等）
+        # 会等到整段工具调用生成完才回帧，容易撞上流式超时。
+        # 塞进 extra_body，由 openai SDK 摊平成请求 JSON 的顶层字段（与 stream 平级）；
+        # 仅流式 + 带 tools 生效，openai.com 官方端点跳过（官方会以未知参数 400 拒绝）。
+        if stream and params.get("tools"):
+            if "openai.com" not in api_base:
+                extra_body = dict(params.get("extra_body") or {})
+                extra_body.setdefault("tool_stream", True)
+                params["extra_body"] = extra_body
+
         return params
 
     def _apply_openrouter_profile(self, params: dict) -> None:
