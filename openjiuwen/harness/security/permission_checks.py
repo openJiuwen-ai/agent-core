@@ -36,6 +36,9 @@ def merge_permission_results(results):
         strongest.reason,
         warnings=sorted({warning for result in results for warning in result.warnings or []}),
         external_paths=sorted({path for result in results for path in result.external_paths or []}),
+        ask_accesses=sorted({
+            item for result in results for item in (result.ask_accesses or [])
+        }),
     )
 
 

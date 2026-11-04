@@ -464,49 +464,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         """Deep copy of the config registered under this rail's key."""
         return deepcopy(dict(get_permission_manager().get_config(self._key)))
 
-    def _collect_file_guard_persist_accesses(
+    def _persist_allow_always(
         self,
         normalized_name: str,
         tool_args: dict,
-        permissions_cfg: dict[str, Any] | PermissionsSection,
-    ) -> list[tuple[str, str]]:
-        """若本次调用路径层为 ASK，返回 ``(path, action)`` 供按轴写入 file_guard。"""
-        from openjiuwen.harness.security.file_guard import build_file_guard_checker
-
-        if self._host.resolve_workspace_dir is None:
-            return []
-        try:
-            workspace = self._host.resolve_workspace_dir()
-        except Exception:
-            logger.debug(
-                "[PermissionEngine] permission.persist.external.workspace_resolve_failed",
-                exc_info=True,
-            )
-            return []
-        # Use the trusted_dirs the host put into the registered config's
-        # ``runtime`` so persist-time external-path detection matches the
-        # runtime check.
-        runtime = self._registered_config().get("runtime")
-        raw_dirs = runtime.get("trusted_dirs") if isinstance(runtime, dict) else None
-        trusted_dirs = [Path(d) for d in raw_dirs] if isinstance(raw_dirs, list) else []
-        try:
-            checker = build_file_guard_checker(
-                permissions_cfg,
-                workspace_root=workspace,
-                trusted_dirs=trusted_dirs,
-            )
-            if checker is None:
-                return []
-            return list(checker.collect_ask_accesses(normalized_name, tool_args))
-        except Exception:
-            logger.warning(
-                "[PermissionEngine] permission.persist.external.check_failed",
-                exc_info=True,
-            )
-            return []
-
-    def _persist_allow_always(
-        self, normalized_name: str, tool_args: dict
+        ask_accesses: list[tuple[str, str]] | None = None,
     ) -> bool:
         """工具级「始终允许」与 file_guard 路径白名单：先合并磁盘，再写盘。"""
         from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
@@ -532,9 +494,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         cfg, ok_tool = merge_permission_allow_rule_into_permissions(
             base_cfg, normalized_name, tool_args
         )
-        accesses = self._collect_file_guard_persist_accesses(
-            normalized_name, tool_args, cfg
-        )
+        accesses = list(ask_accesses or ())
         ok_ext = False
         if accesses:
             cfg, ok_ext = merge_file_guard_access_allows(cfg, accesses)
@@ -732,7 +692,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm and confirm_payload.persist_allow:
                         with self.permission_persist_context(ctx):
-                            persisted = self._persist_allow_always(normalized_name, tool_args)
+                            persisted = self._persist_allow_always(
+                                normalized_name, tool_args, result.ask_accesses
+                            )
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s "
                         "confirm_path=hosted persisted=%s persist_allow=%s",
@@ -799,7 +761,21 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         persisted = False
         if payload.approved and payload.auto_confirm and payload.persist_allow:
             with self.permission_persist_context(ctx):
-                persisted = self._persist_allow_always(normalized_name, tool_args)
+                ask_accesses: list[tuple[str, str]] = []
+                try:
+                    confirm_result = await self._check_tool_permission(
+                        normalized_name, tool_args, ctx
+                    )
+                    ask_accesses = list(confirm_result.ask_accesses or ())
+                except Exception:  # noqa: BLE001 — best-effort path collection; persist the rule anyway
+                    logger.warning(
+                        "[PermissionEngine] permission.persist.ask_accesses_failed tool=%s",
+                        tool_name,
+                        exc_info=True,
+                    )
+                persisted = self._persist_allow_always(
+                    normalized_name, tool_args, ask_accesses
+                )
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s persist_allow=%s",
                 tool_name,

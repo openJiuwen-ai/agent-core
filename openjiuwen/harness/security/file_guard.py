@@ -760,6 +760,7 @@ class ReadDenyOnlyFileGuard:
             matched_rule=result.matched_rule,
             reason=result.reason,
             external_paths=external,
+            ask_accesses=list(result.ask_accesses or ()),
         )
 
     def collect_ask_accesses(
