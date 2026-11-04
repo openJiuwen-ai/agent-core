@@ -47,6 +47,8 @@ from openjiuwen.harness.security.permission_key import DEFAULT_KEY
 from openjiuwen.harness.security.permission_checks import fail_closed_permission_callback
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
+_MISSING = object()
+
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
     "paid_search": "mcp_paid_search",
@@ -203,6 +205,22 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     existing_runtime = None
             if existing_runtime is not None:
                 merged["runtime"] = deepcopy(existing_runtime)
+        # Hot patches (trusted_dirs / workspace_root) and sparse YAML snapshots
+        # often omit these keys. Missing shell_allowlist re-enables default-30;
+        # dropping host_guard disables HostGuard. Preserve from the last publish.
+        for keep_key in ("shell_allowlist", "host_guard", "package_builtin_rules"):
+            if keep_key in merged:
+                continue
+            existing_val = self._static_config.get(keep_key, _MISSING)
+            if existing_val is _MISSING:
+                try:
+                    existing_val = get_permission_manager().get_config(self._key).get(
+                        keep_key, _MISSING
+                    )
+                except KeyError:
+                    existing_val = _MISSING
+            if existing_val is not _MISSING:
+                merged[keep_key] = deepcopy(existing_val)
         get_permission_manager().update_config(merged, self._key)
         self._static_config = deepcopy(merged)
         self._registration_released = False
@@ -625,21 +643,33 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 raise
 
+            # 无论 allow / ask / deny，先落一条对称的裁决日志（进 permissions.log）。
+            decision_text = (
+                "allow"
+                if result.permission == PermissionLevel.ALLOW
+                else "deny"
+                if result.permission == PermissionLevel.DENY
+                else "ask"
+            )
+            _result_log = (
+                logger.warning if result.permission == PermissionLevel.DENY else logger.info
+            )
+            _result_log(
+                "[PermissionEngine] permission.rail.result tool=%s decision=%s "
+                "matched_rule=%s key=%s",
+                tool_name,
+                decision_text,
+                result.matched_rule,
+                self._key,
+            )
+
             if result.permission == PermissionLevel.ALLOW:
-                logger.info(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=allow matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
-                )
                 return self.approve()
 
             if result.permission == PermissionLevel.DENY:
-                logger.warning(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=deny matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
+                return self.reject(
+                    tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}"
                 )
-                return self.reject(tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}")
 
             if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
                 logger.info(
