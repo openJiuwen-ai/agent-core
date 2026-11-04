@@ -11,14 +11,17 @@ import pathlib
 import shutil
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler
 from openjiuwen.agent_teams.agent.spawn_manager import _template_fields
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.experts import (
     PackageLocation,
@@ -28,16 +31,19 @@ from openjiuwen.agent_teams.experts import (
     load_agent_group_package,
     template_snapshot,
 )
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.external import external_cli_agent_spec_from_template, merge_external_cli_config
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.rails.team_context import ExpertBinding
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     ExternalCliAgentSpec,
     ExternalCliBuiltinModel,
     ExternalCliMemberSpec,
     TeamMemberSpec,
     TeamRole,
+    TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.spawn.external_cli_spawn import _external_cli_config_for_member
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
@@ -48,6 +54,7 @@ from openjiuwen.agent_teams.tools.tool_expert import _rank_by_query
 from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
 from openjiuwen.agent_teams.tools.tool_member import SpawnTeammateTool
 from openjiuwen.agent_teams.tools.tool_permissions import EXPERT_TOOLS
+from openjiuwen.core.foundation.llm.schema.message import SystemMessage, UserMessage
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec, WorkspaceSpec
 
@@ -189,7 +196,9 @@ def inline_members_on(monkeypatch):
     monkeypatch.setattr(constants, "INLINE_TASK_MEMBER_ENABLED", True)
 
 
-def _backend(db: TeamDatabase, *external: ExternalCliAgentSpec) -> TeamBackend:
+def _backend(
+    db: TeamDatabase, *external: ExternalCliAgentSpec, enable_fork: bool = False, dispatch_mode: str = "autonomous"
+) -> TeamBackend:
     return TeamBackend(
         team_name=_TEAM,
         member_name="leader1",
@@ -197,6 +206,8 @@ def _backend(db: TeamDatabase, *external: ExternalCliAgentSpec) -> TeamBackend:
         db=db,
         messager=AsyncMock(spec=Messager),
         external_cli_agents=list(external),
+        enable_fork=enable_fork,
+        dispatch_mode=dispatch_mode,
     )
 
 
@@ -454,6 +465,125 @@ def test_rank_by_query_keeps_catalog_order_on_ties() -> None:
 # ---------------------------------------------------------------------------
 # 4-5. spawn_expert — member rows and rejections
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("dispatch_mode", "source"), [("scheduled", "researcher"), ("autonomous", None)])
+async def test_spawn_expert_injects_registration_snapshot_on_first_start(
+    db: TeamDatabase, catalog: FakeCatalog, dispatch_mode: str, source: str | None
+) -> None:
+    backend = _backend(db, enable_fork=True, dispatch_mode=dispatch_mode)
+    leader = TeamAgent(AgentCard())
+    leader._configurator = MagicMock(member_name="leader1", team_backend=backend)
+    source_agent = leader if source is None else MagicMock()
+    messages = [SystemMessage(content="source persona"), UserMessage(content="prior findings")]
+    native = source_agent.resources.harness.get_deep_agent.return_value
+    native.get_current_context.return_value = messages
+    native.capture_completed_turn_fork.return_value = ForkContext.from_agent(native)
+    native.get_current_context.reset_mock()
+    spawn_manager = MagicMock(spawned_handles={}, lookup_inprocess_agent=MagicMock(return_value=source_agent))
+    spawn_manager.build_context_from_db = AsyncMock(
+        return_value=TeamRuntimeContext(role=TeamRole.TEAMMATE, member_name="finance-1")
+    )
+    spawn_manager.spawn_teammate = AsyncMock(side_effect=[RuntimeError("startup failed"), None])
+    leader._spawn_manager = spawn_manager
+    backend.set_expert_fork_capture(leader._capture_expert_fork)
+    tools = _tools(backend, catalog, dispatch_mode=dispatch_mode)
+    tool = tools["spawn_expert"]
+    assert {"fork", "fork_source"} <= tool.card.input_params["properties"].keys()
+    assert "fork_source" in tool.card.description
+
+    inputs = {"expert": "finance", "member_name": "finance-1", "fork": True}
+    if source is not None:
+        inputs["fork_source"] = source
+    result = await tool.invoke(inputs)
+    assert result.success, result.error
+    row = await backend.get_member("finance-1")
+    assert row.status == MemberStatus.UNSTARTED.value
+    assert get_member_agent_template(row).ref == {"name": "finance", "group": None}
+    messages.append(UserMessage(content="after registration"))
+    assert not (await tool.invoke(inputs)).success
+    duplicate = await tools["spawn_teammate"].invoke(
+        {"member_name": "finance-1", "display_name": "Finance", "desc": "Duplicate", "fork": True}
+    )
+    assert not duplicate.success
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await backend.startup_member("finance-1", leader._on_teammate_created)
+    if dispatch_mode == "scheduled":
+        task = await tools["create_task"].invoke(
+            {"tasks": [{"title": "Review findings", "content": "Check the evidence", "assignee": "finance-1"}]}
+        )
+        assert task.success, task.error
+        scheduler = TeamScheduler(
+            leader,
+            blueprint=SimpleNamespace(spec=TeamAgentSpec(team_name=_TEAM, agents={"leader": DeepAgentSpec()})),
+            infra=SimpleNamespace(
+                task_manager=backend.task_manager,
+                message_manager=backend.message_manager,
+                team_backend=backend,
+            ),
+        )
+        await scheduler.activate()
+    else:
+        assert await backend.startup_member("finance-1", leader._on_teammate_created)
+    assert spawn_manager.spawn_teammate.await_count == 2
+    assert backend.pending_fork_on_spawn("finance-1") is None
+    ctx = spawn_manager.spawn_teammate.call_args.args[0]
+    snapshot = spawn_manager.spawn_teammate.call_args.kwargs["fork_from"]
+    assert ctx.fork_source == (source or "leader1")
+    assert snapshot.to_messages() == [UserMessage(content="prior findings")]
+    if source is not None:
+        spawn_manager.lookup_inprocess_agent.assert_called_with(source)
+        native.capture_completed_turn_fork.assert_called()
+        native.get_current_context.assert_not_called()
+    else:
+        native.get_current_context.assert_called()
+        native.capture_completed_turn_fork.assert_not_called()
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_spawn_expert_busy_source_does_not_register_member(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    backend = _backend(db, enable_fork=True)
+    backend.set_expert_fork_capture(MagicMock(side_effect=ValueError("member must be idle")))
+    result = await _tools(backend, catalog)["spawn_expert"].invoke(
+        {"expert": "finance", "member_name": "finance-1", "fork": True, "fork_source": "researcher"}
+    )
+    assert not result.success
+    assert "member must be idle" in result.error
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_spawn_expert_rejects_fork_when_capture_is_unavailable(
+    db: TeamDatabase, catalog: FakeCatalog, lang: str
+) -> None:
+    backend = _backend(db, enable_fork=True)
+    tool = _tools(backend, catalog, lang=lang)["spawn_expert"]
+    assert {"fork", "fork_source"}.isdisjoint(tool.card.input_params["properties"])
+    assert "fork_source" not in tool.card.description
+    result = await tool.invoke({"expert": "finance", "member_name": "finance-1", "fork": True})
+    assert not result.success
+    assert "in-process" in result.error
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_spawn_expert_rejects_fork_into_external_expert(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"), enable_fork=True)
+    capture = MagicMock()
+    backend.set_expert_fork_capture(capture)
+    tool = _tools(backend, catalog)["spawn_expert"]
+    result = await tool.invoke({"expert": "claude-expert", "member_name": "cli-1", "fork": True})
+    assert not result.success
+    assert "native expert" in result.error
+    capture.assert_not_called()
+    assert await _member_count(db) == 0
 
 
 @pytest.mark.level0

@@ -34,9 +34,11 @@ def test_recovery_spawn_uses_current_seed(
         agents={"leader": {}},
         build_context=live,
         build_context_seed=copy.deepcopy(new_seed),
+        enable_fork=True,
     )
     saved = runtime.model_dump(mode="json")
     saved["build_context_seed"] = old_seed
+    saved["enable_fork"] = False
     session = create_agent_team_session(session_id=sid, team_id=team_name)
     write_team_namespace(session, team_name, {
         "spec": saved,
@@ -64,6 +66,7 @@ def test_recovery_spawn_uses_current_seed(
         recovered = captured["spec"]
         assert recovered.build_context is live
         assert recovered.build_context_seed == new_seed
+        assert recovered.enable_fork is True
         payload = SpawnPayloadBuilder(recovered, captured["context"]).build_spawn_config(captured["context"])
         child = TeamAgentSpec.model_validate(payload.payload["spec"])
         child.materialize_build_context()

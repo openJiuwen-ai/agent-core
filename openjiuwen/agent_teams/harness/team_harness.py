@@ -71,6 +71,7 @@ class TeamHarness:
         initial_plan_mode: bool = False,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
         goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> None:
         self._agent_spec = agent_spec
         # Goal mode, applied to every native this harness builds (a stopped
@@ -86,6 +87,7 @@ class TeamHarness:
         self._initial_plan_mode_seeded = False
         # The member's task notice tracker, owned by its TeamAgent (F_129).
         self._task_event_tracker = task_event_tracker
+        self._track_completed_turn_fork = track_completed_turn_fork
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
@@ -109,6 +111,7 @@ class TeamHarness:
         build_context: "BuildContext | None" = None,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
         goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> "TeamHarness":
         """Construct the native via forward construction and configure it.
 
@@ -119,6 +122,8 @@ class TeamHarness:
         every other rail — no hand-mounting here. The native configures itself
         synchronously in its constructor, so the configurator can read
         ``workspace`` / ``sys_operation`` right after construction.
+
+        Set ``track_completed_turn_fork`` for members that can serve as a fork source.
         """
         native = NativeHarness(agent_spec, build_context)
         return cls(
@@ -130,6 +135,7 @@ class TeamHarness:
             initial_plan_mode=initial_plan_mode,
             task_event_tracker=task_event_tracker,
             goal=goal,
+            track_completed_turn_fork=track_completed_turn_fork,
         )
 
     # ------------------------------------------------------------------
@@ -160,6 +166,7 @@ class TeamHarness:
             self._native.enable_goal(self._goal, ready=self._goal_ready)
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
+        self._native.track_completed_turn_fork = self._track_completed_turn_fork
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()

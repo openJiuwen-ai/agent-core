@@ -1017,6 +1017,9 @@ class AgentConfigurator:
             build_context=member_build_context,
             task_event_tracker=self._resources.task_event_tracker,
             goal=to_stop_config(goal_spec) if goal_spec is not None else None,
+            track_completed_turn_fork=(
+                spec.enable_fork and spec.spawn_mode == "inprocess" and ctx.role == TeamRole.TEAMMATE
+            ),
         )
 
         # A member's own model calls (decision / tool use / script generation)

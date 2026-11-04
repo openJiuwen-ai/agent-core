@@ -584,15 +584,16 @@ class TeamAgentSpec(BaseModel):
     enable_fork: bool = False
     """Spec-level capability gate for context inheritance (fork).
 
-    True opens three surfaces at once, all keyed off this one flag:
+    True opens the following surfaces:
 
     - the ``checkpoint(name)`` tool, which lets any member save a named
       snapshot of its own conversation position;
-    - the ``fork`` / ``fork_source`` / ``compact`` properties on
-      ``spawn_teammate``'s schema;
-    - the "context inheritance" section of ``spawn_teammate``'s description.
+    - the ``fork`` / ``fork_source`` / ``fork_mode`` properties and
+      context inheritance instructions on ``spawn_teammate``;
+    - for in-process teams, the ``fork`` / ``fork_source`` properties and
+      context inheritance instructions on ``spawn_expert``.
 
-    False (default) removes all three. Schema and prose are gated on the same
+    False (default) removes these surfaces. Schema and prose are gated on the same
     signal deliberately: a leader that reads about ``fork`` but has no
     ``fork`` property to fill deliberates over a mechanism it cannot invoke,
     which is worse than never mentioning it.

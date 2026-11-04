@@ -86,6 +86,9 @@ round 在跑之前 `session.commit()` 一次，进程中途死掉也不会复用
 v2 event 再从 span 父链继承。外部 CLI 成员（`external/member_runtime.py`）每个 provider turn 开一个
 新 turn，经 `start_turn(turn=...)` 交给 claude/codex bridge 打到 turn span 及其子 span 上。
 
+团队开启进程内 fork 时，原生队友在 Turn 正常结束、进入空闲或切换到下一个 Turn 前保存 fork 快照。
+运行中、已暂停或等待交互的队友拒绝被 fork。中止和中断保留上一次正常结束的快照。
+
 ## 异步工具框架（`async_tools.py`）
 
 照搬 Claude Code 两段式范式的通用异步后台工具框架，**限定在 NativeHarness 范围、零

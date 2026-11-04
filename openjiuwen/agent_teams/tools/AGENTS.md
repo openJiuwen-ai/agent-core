@@ -257,7 +257,8 @@ schema 复用走模块级纯函数，不是复制粘贴：
   （`send_message.md` / `send_message_scheduled.md`），形态类自己选 key。
 - **capability 槽**：描述一个可选能力的槽，构造工具时传
   `t(desc_key, omit={"<slot>"})` 让它收敛为空串（`spawn_teammate` 的
-  `fork_usage`，gate 是 `fork_enabled()`；`update_task` 的
+  `fork_usage`，gate 是 `fork_enabled()`；`spawn_expert` 的
+  `spawn_expert_fork`，gate 是 `expert_fork_enabled()`；`update_task` 的
   `update_task_verify_gate` 与 `build_team` 的 `build_team_verify_gate`，gate 都是
   `dispatch_mode == "scheduled"`）。**omit 用的信号必须与塑造 schema
   的那个信号同源**——参数与讲这个参数的散文一起出现、一起消失。**omit 掉的槽不留痕迹**：渲染后
@@ -467,6 +468,8 @@ descs/<lang>/
 `test_tool_message.py` 断言，改常量必须同步改片段）、
 `create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
 `fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）、
+`spawn_expert_fork`（**capability 槽**，`spawn_expert` 专用，gate `expert_fork_enabled()`，
+同时暴露 `fork` / `fork_source`，登记时继承 Leader 的实时对话或空闲队友最近完成的 Turn，首次启动时注入）、
 `external_cli_usage`（**capability 槽**，`spawn_teammate` 专用，gate `external_cli_kinds()` 非空，F_127）、
 `builtin_model_param_rows` / `builtin_model_usage`（**capability 槽**，`spawn_teammate` 专用，
 gate `builtin_models_enabled()`，F_113；参数行紧跟在 `external_cli_usage` 片段末尾的参数表之后）、
