@@ -392,6 +392,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
         # dicts stay bounded by the open-plus-unpruned shells of this session.
         self._llm_shell_claims: dict[int, tuple[str, trace.Span]] = {}
         self._llm_merge_targets: dict[str, trace.Span] = {}
+        # Rail-opened chat spans: span id -> (creating invoke_id, span).
+        # OtelRail.before_model_call opens one chat span per model call; a
+        # traced-model decorator firing inside that same call claims it as a
+        # merge target instead of opening a second chat span (see
+        # on_llm_start). Only spans this handler opened from rail-forwarded
+        # identity (instance_info carries agent_id) are registered, so
+        # decorator-opened spans stay unclaimable even when nested.
+        self._rail_chat_spans: dict[int, tuple[str, trace.Span]] = {}
 
     # --- helper: resolve parent context via parent_invoke_id ---
 
@@ -579,6 +587,23 @@ class OtelAgentHandler(TraceExtAgentHandler):
                     self._llm_merge_targets[span.invoke_id] = ambient_shell
                     self._write_merged_llm_start_attrs(ambient_shell, instance_info)
                     return
+            # Rail-opened chat span: OtelRail.before_model_call wraps each
+            # model call of an agent (e.g. ReAct) in its own chat span,
+            # attached to the OTel context until its on_llm_end. A
+            # traced-model decorator firing inside that same call must merge
+            # into it — not open a second chat span for the same model call.
+            # The start side is already complete (the rail's on_llm_start
+            # wrote identity / request params / inputs itself), so claiming
+            # alone suffices; the decorator contributes the end side (usage /
+            # ttft) through merge mode.
+            if ambient_shell is None:
+                self._prune_ended_shell_claims()
+                rail_span = self._claimable_rail_chat_span()
+                if rail_span is not None:
+                    rail_span_id = rail_span.get_span_context().span_id
+                    self._llm_shell_claims[rail_span_id] = (span.invoke_id, rail_span)
+                    self._llm_merge_targets[span.invoke_id] = rail_span
+                    return
             # No ambient LLM shell, or it is already claimed by an earlier
             # call of the same component (e.g. Questioner reflection): open a
             # normal LLM span. Under any still-attached component shell —
@@ -601,6 +626,12 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
             state.span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
+            # Rail-forwarded identity marks this chat span as rail-opened
+            # (OtelRail.before_model_call); the traced-model decorator path
+            # never carries agent_id. Register the span so a decorator firing
+            # inside the same model call can claim it (see on_llm_start).
+            if instance_info.get("agent_id"):
+                self._rail_chat_spans[state.span.get_span_context().span_id] = (span.invoke_id, state.span)
             # Trace display name: the executing agent (rail-forwarded), falling
             # back to the model name for direct on_llm_start callers.
             agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
@@ -683,17 +714,41 @@ class OtelAgentHandler(TraceExtAgentHandler):
     # --- helpers: LLM-component-shell merge (see on_llm_start) ---
 
     def _prune_ended_shell_claims(self) -> None:
-        """Drop merge claims whose shell span has ended (component finished).
+        """Drop merge claims / registrations whose span has ended.
 
-        ReadableSpan.end_time stays None until end(), so an ended shell can
+        ReadableSpan.end_time stays None until end(), so an ended span can
         never be claimed again and its entry is pure bookkeeping. Runs on the
-        on_llm_start claim path only, which keeps both merge dicts bounded by
+        on_llm_start claim path only, which keeps the merge dicts bounded by
         live-plus-recent shells of the current session.
         """
         for shell_span_id, (claimed_by, shell) in list(self._llm_shell_claims.items()):
             if getattr(shell, "end_time", None) is not None:
                 del self._llm_shell_claims[shell_span_id]
                 self._llm_merge_targets.pop(claimed_by, None)
+        for rail_span_id, (_, rail_span) in list(self._rail_chat_spans.items()):
+            if getattr(rail_span, "end_time", None) is not None:
+                del self._rail_chat_spans[rail_span_id]
+
+    def _claimable_rail_chat_span(self) -> trace.Span | None:
+        """Current ambient span if it is an unclaimed rail-opened chat span.
+
+        The rail chat span stays attached to the OTel context from its
+        on_llm_start until its on_llm_end, so a traced-model decorator firing
+        inside the model call sees it here regardless of which session tracer
+        created the decorator's own spans. Membership in _rail_chat_spans is
+        the discriminator: only chat spans this handler opened from
+        rail-forwarded identity are claimable, and each is claimable once.
+        """
+        ambient = trace.get_current_span(otel_context.get_current())
+        if not getattr(ambient, "is_recording", lambda: False)():
+            return None
+        attrs = getattr(ambient, "attributes", None) or {}
+        if str(attrs.get(GEN_AI_OPERATION_NAME, "")) != _OPERATION_NAME_CHAT:
+            return None
+        span_id = ambient.get_span_context().span_id
+        if span_id not in self._rail_chat_spans or span_id in self._llm_shell_claims:
+            return None
+        return ambient
 
     def _write_merged_llm_start_attrs(self, shell: trace.Span, instance_info: dict) -> None:
         """Append-only start-side attributes for merge mode.

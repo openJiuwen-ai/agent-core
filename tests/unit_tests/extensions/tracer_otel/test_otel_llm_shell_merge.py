@@ -22,7 +22,14 @@ Contract pinned (mirrors the merge design):
 - non-LLM shells (tool / retrieval) never merge: inner LLM calls become
   child spans as before;
 - ttft_seconds is read off the usage snapshot (this branch's addition to
-  _set_llm_response_attrs), with first_token_time as the legacy fallback.
+  _set_llm_response_attrs), with first_token_time as the legacy fallback;
+- the same contract covers rail-opened chat spans: OtelRail.before_model_call
+  wraps every model call of a rail-registered agent (e.g. ReAct) in its own
+  chat span; a traced-model decorator firing inside that call merges into it
+  (identity / params stay rail-written, usage / ttft append, the rail's own
+  on_llm_end closes the span), keeping rail+decorator stacks at one span per
+  call. Decorator-opened spans carry no rail identity and are never
+  claimable, so nested decorator spans never merge.
 """
 
 import pytest
@@ -41,6 +48,9 @@ from openjiuwen.extensions.tracer_otel.handler import (
     _set_llm_response_attrs,
 )
 from openjiuwen.extensions.tracer_otel.semconv import (
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
@@ -267,6 +277,122 @@ class TestNonLlmShellNeverMerges:
         assert child.parent.span_id == tool_shell.context.span_id
         assert GEN_AI_USAGE_OUTPUT_TOKENS in child.attributes
         assert GEN_AI_USAGE_OUTPUT_TOKENS not in (tool_shell.attributes or {})
+
+
+@pytest.mark.asyncio
+class TestRailOpenedChatSpan:
+    """OtelRail.before_model_call opens one chat span per model call of a
+    rail-registered agent (e.g. ReAct), carrying rail-forwarded identity. A
+    traced-model decorator firing inside that same call claims the span as a
+    merge target instead of opening a second chat span — the agent-rail
+    counterpart of the component-shell merge above."""
+
+    async def _rail_open(self, scenario):
+        rail_span = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=rail_span,
+            inputs={"messages": [{"role": "user", "content": "hi"}]},
+            instance_info={
+                "class_name": "qwen-max",
+                "type": "llm",
+                "agent_id": "react_agent_1",
+                "agent_name": "ReAct Agent One",
+                "conversation_id": "s-1",
+            },
+        )
+        return rail_span
+
+    async def _decorator_call(self, scenario, *, error=None, request_event=False) -> None:
+        # Fires while the rail span is still attached to the OTel context,
+        # exactly like a decorator wrapping the model call itself.
+        span = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=span,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={"class_name": "qwen-max", "type": "llm"},
+        )
+        if request_event:
+            await scenario.agent.on_llm_request(span=span, llm_params="stop=END&temperature=0.3")
+        if error is not None:
+            await scenario.agent.on_llm_error(span=span, error=error)
+        else:
+            await scenario.agent.on_llm_end(span=span, outputs=_decorator_end_payload(_assistant(), ttft=0.42))
+
+    async def test_decorator_merges_into_rail_span(self):
+        scenario = _MergeScenario()
+        rail_span = await self._rail_open(scenario)
+        await self._decorator_call(scenario, request_event=True)
+        # The rail closes its span with the raw response container it builds.
+        await scenario.agent.on_llm_end(span=rail_span, outputs={"outputs": _assistant()})
+
+        finished = _finished()
+        assert len(finished) == 1, "decorator must not add a second chat span"
+        span = finished[0]
+        assert span.name == "llm.qwen-max"  # this branch's LLM span naming
+        # Identity / conversation stay rail-written; usage / ttft append.
+        assert span.attributes[GEN_AI_AGENT_ID] == "react_agent_1"
+        assert span.attributes[GEN_AI_AGENT_NAME] == "ReAct Agent One"
+        assert span.attributes[GEN_AI_CONVERSATION_ID] == "s-1"
+        assert span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
+        assert span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 5
+        assert span.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+        # Rail end payload wrote the completion content; request event parity.
+        assert GEN_AI_OUTPUT_MESSAGES in span.attributes
+        request_events = [e for e in span.events if e.name == "llm.request"]
+        assert len(request_events) == 1
+
+    async def test_each_call_claims_its_own_rail_span(self):
+        scenario = _MergeScenario()
+        rail_1 = await self._rail_open(scenario)
+        await self._decorator_call(scenario)
+        await scenario.agent.on_llm_end(span=rail_1, outputs={"outputs": _assistant()})
+        rail_2 = await self._rail_open(scenario)
+        await self._decorator_call(scenario)
+        await scenario.agent.on_llm_end(span=rail_2, outputs={"outputs": _assistant()})
+
+        finished = _finished()
+        assert len(finished) == 2, "two real calls == two rail spans, each merged"
+        for span in finished:
+            assert span.attributes[GEN_AI_AGENT_ID] == "react_agent_1"
+            assert span.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+
+    async def test_failed_call_records_event_and_rail_ends_with_error(self):
+        scenario = _MergeScenario()
+        rail_span = await self._rail_open(scenario)
+        await self._decorator_call(scenario, error=RuntimeError("boom"))
+        assert _finished() == [], "decorator error must not end the rail span"
+        # The rail consumes its span on the exception path.
+        await scenario.agent.on_llm_error(span=rail_span, error=RuntimeError("boom"))
+
+        finished = _finished()
+        assert len(finished) == 1
+        span = finished[0]
+        assert "llm.error" in [e.name for e in span.events]
+        assert span.status.status_code.name == "ERROR"
+        assert span.attributes[GEN_AI_AGENT_ID] == "react_agent_1"
+
+    async def test_decorator_opened_span_is_never_claimed(self):
+        """Discriminator: only rail-opened spans (agent_id in instance_info)
+        register as claimable, so a decorator-opened span must never swallow
+        a nested on_llm_start."""
+        scenario = _MergeScenario()
+        outer = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=outer,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={"class_name": "qwen-max", "type": "llm"},
+        )
+        inner = scenario.spans.create_agent_span(parent_span=outer)
+        await scenario.agent.on_llm_start(
+            span=inner,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={"class_name": "qwen-max", "type": "llm"},
+        )
+        await scenario.agent.on_llm_end(span=inner, outputs=_decorator_end_payload(_assistant()))
+        await scenario.agent.on_llm_end(span=outer, outputs=_decorator_end_payload(_assistant()))
+
+        finished = _finished()
+        assert len(finished) == 2, "nested decorator spans must not merge"
 
 
 class TestResponseAttrs:
