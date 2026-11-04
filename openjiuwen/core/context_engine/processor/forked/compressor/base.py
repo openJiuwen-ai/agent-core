@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.context_engine.image_refs import append_image_refs_block
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
@@ -57,6 +58,7 @@ _AUTO_COMPRESSION_FALLBACK_ERROR_KINDS = {
     CompressionErrorKind.TIMEOUT,
     CompressionErrorKind.SERVER_UNSTABLE,
     CompressionErrorKind.EMPTY_RESPONSE,
+    CompressionErrorKind.UNKNOWN,
 }
 
 
@@ -347,6 +349,11 @@ class PrefixCompactProcessor(ContextProcessor):
             context=context,
             original_messages=original_messages,
             span=span,
+        )
+        summary = append_image_refs_block(
+            summary,
+            span.messages_to_compress,
+            session_id=context.session_id() if hasattr(context, "session_id") else None,
         )
         memory_message = UserMessage(
             content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)

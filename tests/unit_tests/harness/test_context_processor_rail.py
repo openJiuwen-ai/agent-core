@@ -154,6 +154,7 @@ async def test_init_processors_merge(tmp_path: Path):
             True,
             None,
             [
+                "ImageWindowOffloader",
                 "MessageSummaryOffloader",
                 "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
@@ -166,6 +167,7 @@ async def test_init_processors_merge(tmp_path: Path):
             True,
             [("d", DialogueCompressorConfig(messages_threshold=99))],
             [
+                "ImageWindowOffloader",
                 "MessageSummaryOffloader",
                 "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
@@ -179,6 +181,7 @@ async def test_init_processors_merge(tmp_path: Path):
             True,
             [("c", DialogueCompressorConfig(messages_to_keep=5))],
             [
+                "ImageWindowOffloader",
                 "MessageSummaryOffloader",
                 "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
@@ -192,6 +195,7 @@ async def test_init_processors_merge(tmp_path: Path):
             True,
             [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
             [
+                "ImageWindowOffloader",
                 "MessageSummaryOffloader",
                 "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
@@ -698,6 +702,7 @@ def test_build_preset_processors_default_forked_chain(tmp_path: Path):
 
     keys = [k for k, _ in presets]
     assert keys == [
+        "ImageWindowOffloader",
         "MessageSummaryOffloader",
         "SessionMemoryCompressor",
         "ReasoningToolLoopCompactProcessor",

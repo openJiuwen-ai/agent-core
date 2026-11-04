@@ -9,6 +9,8 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
 )
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
 def _make_client() -> OpenAIModelClient:
@@ -288,3 +290,93 @@ class TestExtractReasoningContent:
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+def _assistant_with_tool_call_and_reasoning() -> AssistantMessage:
+    """Assistant turn carrying both a tool call and a non-empty reasoning_content."""
+    return AssistantMessage(
+        content="",
+        reasoning_content="let me think step by step",
+        tool_calls=[
+            ToolCall(id="call_1", type="function", name="search", arguments="{}")
+        ],
+    )
+
+
+class TestConvertMessagesReasoningContentGate:
+    """Gate whether prior assistant reasoning_content is echoed into the request payload.
+
+    Regression coverage for the chain-of-thought leak: providers such as
+    DeepSeek-reasoner reject (HTTP 400) requests whose prior assistant turns carry
+    ``reasoning_content``. The field must be stripped by default and only echoed
+    when ``reasoning_content_in_request`` is explicitly enabled.
+    """
+
+    def test_default_strips_reasoning_content(self):
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [_assistant_with_tool_call_and_reasoning()]
+        )
+        assistant_dict = converted[0]
+        assert assistant_dict["role"] == "assistant"
+        assert assistant_dict["tool_calls"][0]["function"]["name"] == "search"
+        assert "reasoning_content" not in assistant_dict
+
+    def test_explicit_default_false_strips_reasoning_content(self):
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [_assistant_with_tool_call_and_reasoning()],
+            include_reasoning_content=False,
+        )
+        assert "reasoning_content" not in converted[0]
+
+    def test_enabled_echoes_reasoning_content(self):
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [_assistant_with_tool_call_and_reasoning()],
+            include_reasoning_content=True,
+        )
+        assert converted[0]["reasoning_content"] == "let me think step by step"
+
+    def test_enabled_skips_empty_reasoning_content(self):
+        msg = AssistantMessage(
+            content="",
+            reasoning_content=None,
+            tool_calls=[
+                ToolCall(id="call_1", type="function", name="search", arguments="{}")
+            ],
+        )
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [msg], include_reasoning_content=True
+        )
+        assert "reasoning_content" not in converted[0]
+
+    def test_assistant_without_tool_calls_never_carries_reasoning_content(self):
+        msg = AssistantMessage(content="final answer", reasoning_content="hidden cot")
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [msg], include_reasoning_content=True
+        )
+        assert "reasoning_content" not in converted[0]
+
+    def test_tool_message_never_carries_reasoning_content(self):
+        msg = ToolMessage(content="42", tool_call_id="call_1")
+        converted = OpenAIModelClient._convert_messages_to_dict(
+            [msg], include_reasoning_content=True
+        )
+        assert "reasoning_content" not in converted[0]
+
+    def test_client_config_default_is_disabled(self):
+        client = _make_client()
+        assert client.model_client_config.reasoning_content_in_request is False
+
+    def test_build_request_params_respects_disabled_config(self):
+        client = _make_client()
+        params = client._build_request_params(
+            messages=[_assistant_with_tool_call_and_reasoning()],
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model="MiniMax-M3",
+            stop=None,
+            max_tokens=None,
+            stream=False,
+        )
+        for entry in params["messages"]:
+            assert "reasoning_content" not in entry

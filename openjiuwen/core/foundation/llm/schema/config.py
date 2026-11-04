@@ -82,6 +82,14 @@ class ModelClientConfig(BaseModel):
         default=None,
         description="Developer-provided headers merged per LLM call"
     )
+    reasoning_content_in_request: bool = Field(
+        default=False,
+        description="Whether to echo the assistant reasoning_content (chain-of-thought) back into the "
+                    "request payload. Default False: providers such as DeepSeek-reasoner reject requests "
+                    "(HTTP 400) that include reasoning_content, and the CoT is not meant to re-enter the "
+                    "context. Set True only for OpenAI-compatible endpoints that explicitly require the "
+                    "field in prior assistant turns."
+    )
     model_config = {"extra": "allow"}  # Allow extra fields injected by core/provider (e.g. default headers)
 
     @model_validator(mode='after')

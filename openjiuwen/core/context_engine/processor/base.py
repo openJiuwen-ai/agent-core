@@ -52,6 +52,13 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     re-entrant for concurrent contexts.
     """
 
+    # Set to True on processors that manage the context window (fold/offload
+    # content) rather than compress it: their operations then emit no
+    # ``context.compression_state`` events at all - no session-stream push,
+    # no callback-framework trigger, no recorder history entry - so clients
+    # only surface compression indicators for real compression.
+    suppress_state_events: bool = False
+
     def __init__(self, config: BaseModel):
         """
         Store the processor-specific configuration.

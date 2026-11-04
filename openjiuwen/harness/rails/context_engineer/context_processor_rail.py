@@ -36,6 +36,9 @@ from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_c
 from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
     MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
+from openjiuwen.core.context_engine.processor.offloader.image_window_offloader import (
+    ImageWindowOffloaderConfig,
+)
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -209,6 +212,9 @@ class ContextProcessorRail(DeepAgentRail):
         # forked processor so threshold/span/retry/before-after records are all
         # persisted to the same debug directory.
         presets: List[Tuple[str, BaseModel]] = [
+            # Must precede the compressors: folds old images before they measure the
+            # context, and renders image summaries into the window they compress.
+            ("ImageWindowOffloader", ImageWindowOffloaderConfig()),
             (
                 "MessageSummaryOffloader",
                 ForkedMessageSummaryOffloaderConfig(
