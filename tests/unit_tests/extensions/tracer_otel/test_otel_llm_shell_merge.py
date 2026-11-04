@@ -175,6 +175,28 @@ class TestFirstCallMergesIntoShell:
         assert OJ_AGENT_ERROR_MESSAGE not in (shell.attributes or {})
         assert shell.status.status_code.name != "ERROR"
 
+    async def test_request_event_lands_on_claimed_shell(self):
+        """Merge mode keeps llm.request parity: the mid-call request event
+        is appended to the claimed shell instead of being dropped."""
+        scenario = _MergeScenario()
+        await scenario.start_llm_shell("node-1")
+        span = scenario.spans.create_agent_span()
+        await scenario.agent.on_llm_start(
+            span=span,
+            inputs={"inputs": [{"role": "user", "content": "hi"}]},
+            instance_info={"class_name": "qwen-max", "type": "llm"},
+        )
+        await scenario.agent.on_llm_request(span=span, llm_params="stop=END&temperature=0.3")
+        await scenario.agent.on_llm_end(span=span, outputs=_decorator_end_payload(_assistant(), ttft=0.42))
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+
+        finished = _finished()
+        assert len(finished) == 1  # request event must not spawn a second span
+        shell = _shell(finished)
+        request_events = [e for e in shell.events if e.name == "llm.request"]
+        assert len(request_events) == 1
+        assert (request_events[0].attributes or {}).get("llm_params") == "stop=END&temperature=0.3"
+
 
 @pytest.mark.asyncio
 class TestSecondCallUnderClaimedShell:
@@ -320,10 +342,15 @@ class TestDecoratorPayload:
             {"temperature": 0.2, "top_p": None, "stop": "END", "max_tokens": 512},
         )
         assert info["class_name"] == "m"
-        assert info["request_params"] == {"temperature": 0.2, "max_tokens": 512, "stop_sequences": "END"}
+        # stop_sequences keeps the OtelRail shape contract: always a str list,
+        # even when the caller passed a single stop string.
+        assert info["request_params"] == {"temperature": 0.2, "max_tokens": 512, "stop_sequences": ["END"]}
         assert info["message_count"] == 2
         # Non-list prompts carry no invented count.
         assert "message_count" not in _llm_call_info({"class_name": "m"}, "one prompt", {})
+        # A list-valued stop passes through normalized to str elements.
+        list_info = _llm_call_info({"class_name": "m"}, [], {"stop": ["END", "STOP"]})
+        assert list_info["request_params"]["stop_sequences"] == ["END", "STOP"]
 
 
 def test_capability_marker_probeable():

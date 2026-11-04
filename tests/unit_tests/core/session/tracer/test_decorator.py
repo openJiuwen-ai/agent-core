@@ -419,3 +419,66 @@ class TestDecator:
         for item in results:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
+
+    async def test_decorate_model_stream_frame_selection(self):
+        """Stream path picks TTFT from the first chunk and usage from the
+        LAST usage-bearing frame; an engine-stamped ttft wins over the
+        wrapper's own measurement."""
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(content="partial-1")
+                yield AssistantMessage(
+                    content="partial-2",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5),
+                )
+                yield AssistantMessage(content="partial-3")
+                yield AssistantMessage(
+                    content="final",
+                    usage_metadata=UsageMetadata(
+                        input_tokens=11, output_tokens=7, ttft_seconds=0.1
+                    ),
+                )
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("stream test must not hit invoke")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_agent_span_manager = MagicMock()
+        mock_tracer.tracer_agent_span_manager = mock_agent_span_manager
+
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        mocked_model = decorate_model_with_trace(_StreamModel(), mock_session)
+
+        consumed = [item async for item in mocked_model.stream([BaseMessage(role="user", content="hi")])]
+        assert len(consumed) == 4  # wrapper passes every chunk through
+
+        events = [r[1] for r in results]
+        assert events == ["on_llm_start", "on_llm_end"]
+        end_payload = results[1][2]["outputs"]
+        usage = end_payload["usage_metadata"]
+        # Usage comes from the LAST usage-bearing frame, not the first.
+        assert usage["input_tokens"] == 11
+        assert usage["output_tokens"] == 7
+        if "ttft_seconds" in UsageMetadata.model_fields:
+            # Engine-stamped ttft is authoritative, never overwritten.
+            assert usage["ttft_seconds"] == pytest.approx(0.1)
+        else:
+            # Older schema without the engine-stamp field: the wrapper's
+            # measured first-chunk time fills the ttft in.
+            assert usage["ttft_seconds"] >= 0

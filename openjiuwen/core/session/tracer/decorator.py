@@ -41,8 +41,12 @@ def _llm_call_info(instance_info: dict, inputs_value: Any, kwargs: dict) -> dict
     """
     call_info = dict(instance_info)
     request_params = {key: kwargs[key] for key in _LLM_REQUEST_PARAM_KWARGS if kwargs.get(key) is not None}
-    if kwargs.get("stop") is not None:
-        request_params["stop_sequences"] = kwargs["stop"]
+    stop = kwargs.get("stop")
+    if stop is not None:
+        # Same shape contract as OtelRail._extract_request_params: the
+        # gen_ai.request.stop_sequences semconv attribute is a str list.
+        stops = stop if isinstance(stop, (list, tuple)) else [stop]
+        request_params["stop_sequences"] = [str(s) for s in stops]
     call_info["request_params"] = request_params
     if isinstance(inputs_value, (list, tuple)):
         call_info["message_count"] = len(inputs_value)

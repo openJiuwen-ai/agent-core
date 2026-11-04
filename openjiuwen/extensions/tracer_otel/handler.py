@@ -630,6 +630,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_request(self, span: TraceAgentSpan, **kwargs):
         try:
+            shell = self._llm_merge_targets.get(span.invoke_id)
+            if shell is not None:
+                # Merge mode: append the request event to the claimed shell
+                # (same parity as the non-merge llm span; add_event only —
+                # no attributes are touched).
+                shell.add_event("llm.request", attributes=kwargs)
+                return
             state = self._span_manager.get(span.invoke_id)
             if state is None or not state.recorded:
                 return
