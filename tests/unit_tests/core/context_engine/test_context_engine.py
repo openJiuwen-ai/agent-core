@@ -719,6 +719,42 @@ class TestContextEngine:
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
+    async def test_create_context_attaches_processors_to_context_seeded_without_them(self, engine, session):
+        seeded = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            history_messages=[UserMessage(content="earlier turn")],
+        )
+
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
+            )],
+        )
+        result = await engine.compress_context(context_id="ctx", session=session)
+
+        assert context is seeded
+        assert result == "compressed"
+        assert context.get_messages()[0].content == "[COMPRESSED]"
+
+    @pytest.mark.asyncio
+    async def test_create_context_keeps_processors_of_cached_context(self, engine, session):
+        processors = [(
+            "ActiveCompactingCompressor",
+            ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
+        )]
+        context = await engine.create_context(context_id="ctx", session=session, processors=processors)
+        original = list(getattr(context, "_processors"))
+
+        cached = await engine.create_context(context_id="ctx", session=session, processors=processors)
+
+        assert cached is context
+        assert getattr(cached, "_processors") == original
+
+    @pytest.mark.asyncio
     async def test_compress_context_force_executes_registered_compressor_ignoring_threshold(self, engine, session):
         context = await engine.create_context(
             context_id="ctx",
