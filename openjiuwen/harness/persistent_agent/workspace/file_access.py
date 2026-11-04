@@ -33,6 +33,7 @@ class WorkspaceWritePreflight:
     """Internal handoff from the file authorization check to the writer."""
 
     tool_name: str
+    requested_path: str
     relative_path: str
     source_ref: str
     backend_path: Path
@@ -84,7 +85,9 @@ class WorkspaceWriteAdapter(Tool):
             return self._failure("unknown")
 
         delegated_inputs = dict(inputs or {})
-        if delegated_inputs.get("file_path") != preflight.relative_path:
+        # Full-access resolution can turn a relative input into an absolute path.
+        # Bind dispatch to the original authorized spelling, never a new target.
+        if delegated_inputs.get("file_path") != preflight.requested_path:
             return self._failure("unknown")
         delegated_inputs["file_path"] = os.fspath(preflight.backend_path)
         condition = self._condition(preflight)
@@ -353,6 +356,7 @@ class PersistentWorkspaceWriteRail(DeepAgentRail):
 
         preflight = WorkspaceWritePreflight(
             tool_name=tool_name,
+            requested_path=requested_path,
             relative_path=resolved.relative_path,
             source_ref=resolved.source_ref,
             backend_path=resolved.path,
