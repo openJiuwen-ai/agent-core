@@ -196,6 +196,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | openjiuwen/extensions/tracer_otel, openjiuwen/extensions/observability, openjiuwen/harness_providers | openjiuwen/extensions/tracer_otel/handler.py, openjiuwen/extensions/tracer_otel/semconv.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/extensions/observability/semconv.py, openjiuwen/harness_providers/trajectory.py, tests/unit_tests/extensions/tracer_otel/test_handler.py, tests/unit_tests/extensions/tracer_otel/test_otel_rail.py, tests/unit_tests/extensions/observability/test_callback_handler.py | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+| [F_20261104_2034_converge-tpot-attr-key](F_20261104_2034_converge-tpot-attr-key.md) | F | TPOT 属性键收敛（inter_token_latency_ms → tpot_ms） | weixin_39960157 | openjiuwen/extensions/tracer_otel | openjiuwen/extensions/tracer_otel/handler.py, openjiuwen/extensions/tracer_otel/semconv.py, openjiuwen/extensions/tracer_otel/AGENTS.md, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：键名纠错类变更；"one fact, one key / no reader fallback chain" 的规范依据为 observability/semconv.py 成文评注（b0134c30d 引入、544ea2838 重申），无独立方案取舍需要设计文档。 |
 
 <a id="module-4"></a>
 
