@@ -126,17 +126,6 @@ def _validate_handler_package_metadata(package_metadata: PackageMetadata | None)
         )
 
 
-def _freeze_handler_ids(handler_ids: Sequence[HandlerId] | None) -> frozenset[HandlerId] | None:
-    """Capture a call-local allowlist without accepting string-like sequences."""
-    if handler_ids is None:
-        return None
-    if not isinstance(handler_ids, Sequence) or isinstance(handler_ids, (str, bytes, bytearray)):
-        raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="handler_ids must be a sequence of handler ids")
-    if any(not isinstance(value, str) or not value for value in handler_ids):
-        raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="handler_ids must contain non-empty strings")
-    return frozenset(handler_ids)
-
-
 def _run_validator(
     validator: Callable[[object], bool] | None,
     value: object,
@@ -510,19 +499,15 @@ class ExtensionEventBus:
         self,
         event: Event,
         session: Session | SessionContext | None = None,
-        *,
-        handler_ids: Sequence[HandlerId] | None = None,
     ) -> EventOutput | None:
-        """Run matched handlers, optionally restricted by a call-local ID set.
+        """Run handlers matched by the event type's matcher.
 
         Args:
             event: Registered business event and its input.
             session: Trusted session facts bound to each entered handler.
-            handler_ids: Optional candidate allowlist. None preserves normal
-                dispatch; an empty sequence leaves only the CORE tail.
 
         Returns:
-            The unchanged event-chain result.
+            The event-chain result.
         """
         if (
             not isinstance(event, Event)
@@ -536,17 +521,14 @@ class ExtensionEventBus:
             raise_error(StatusCode.EVENTS_UNKNOWN_EVENT_INVALID, reason=f"unknown event type: {event.event_type}")
         if not _run_validator(registration.input_validator, event.event_input, "input"):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="initial event input is invalid")
-        selected_ids = _freeze_handler_ids(handler_ids)
         if event.event_type == OPS_BUILD_EVENT_TYPE:
-            if selected_ids is not None:
-                raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="ops.build cannot limit handler_ids")
             return await self._build(event, registration)
         if self._builder is None:
             raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build has not succeeded")
         # Session and match results are fixed here, before the first await, and
         # then handed to the framework chain; the chain never re-matches.
         session_context = _normalize_session(session)
-        matched_handler_ids = self._match_handlers(event, registration, selected_ids)
+        matched_handler_ids = self._match_handlers(event, registration)
         return await registration.dispatch(
             event,
             matched_handler_ids=matched_handler_ids,
@@ -574,13 +556,11 @@ class ExtensionEventBus:
         self,
         event: Event,
         registration: _EventRegistration,
-        selected_ids: frozenset[HandlerId] | None = None,
     ) -> frozenset[HandlerId]:
         candidates = [
             (handler_id, handler_registration)
             for handler_id, handler_registration in self._handlers.items()
             if handler_registration.event_type == event.event_type
-            and (selected_ids is None or handler_id in selected_ids)
         ]
         matched_handler_ids: set[HandlerId] = set()
         for handler_id, handler_registration in candidates:

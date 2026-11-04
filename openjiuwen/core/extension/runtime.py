@@ -19,6 +19,7 @@ import sys
 import threading
 import types
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -35,6 +36,15 @@ from openjiuwen.core.extension.selection import evaluate_reload
 
 _ALLOWED_LEVELS = {HandlerLevel.USER.value, HandlerLevel.BUILTIN.value}
 PackageResourceCleanup: TypeAlias = Callable[[str, int, str], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class _HandlerInvocation:
+    """A package invocation whose copied contexts cannot extend its lifetime."""
+
+    ops: Any
+    task: asyncio.Task | None
+    active: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +153,9 @@ class Runtime:
         self._management_locks: dict[str, asyncio.Lock] = {}
         self._uninstall_versions: dict[str, tuple[str, ...]] = {}
         self._active_ops: set[EventHandlerOps] = set()
+        self._current_invocation: ContextVar[_HandlerInvocation | None] = ContextVar(
+            "extension_handler_invocation", default=None,
+        )
         self._ops_generations: dict[EventHandlerOps, tuple[str, int]] = {}
         self._generation_waiters: dict[tuple[str, int], asyncio.Event] = {}
         self._retirements: set[asyncio.Task[None]] = set()
@@ -254,6 +267,23 @@ class Runtime:
         """
         with self._lock:
             self._active[record.package_id] = record
+
+    def is_active_invocation(self, ops: EventHandlerOps) -> bool:
+        """Whether Ops belongs to this Runtime's current handler and task.
+
+        This only recognizes handlers published through Runtime. Nested handlers
+        temporarily replace the current scope; copied contexts and child tasks
+        cannot authorize use of another invocation's Ops.
+        """
+        frame = self._current_invocation.get()
+        if not isinstance(ops, EventHandlerOps) or frame is None or not frame.active or frame.ops is not ops:
+            return False
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return False
+        with self._lock:
+            return task is not None and frame.task is task and ops in self._active_ops
 
     def begin_calls(self, package_ids: Sequence[str], ops: EventHandlerOps | None = None) -> None:
         """Count one in-flight use of each package. The event layer will call this."""
@@ -565,9 +595,13 @@ class Runtime:
             with self._lock:
                 self._active_ops.add(ops)
                 self._ops_generations[ops] = (package_id, generation)
+            frame = _HandlerInvocation(ops, asyncio.current_task())
+            token = self._current_invocation.set(frame)
             try:
                 return await wrapped(event, ops, event_next)
             finally:
+                frame.active = False
+                self._current_invocation.reset(token)
                 with self._lock:
                     self._active_ops.discard(ops)
                     self._release_generation(ops)
