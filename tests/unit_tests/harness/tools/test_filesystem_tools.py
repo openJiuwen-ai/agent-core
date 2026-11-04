@@ -1420,3 +1420,149 @@ async def test_write_file_overlong_path_returns_tool_error(sys_op) -> None:
     )
     assert res.success is False
     assert "file_path" in (res.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_read_file_auto_decodes_gbk_text(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "gbk_auto.csv")
+    expected = "id,客户名称,授信金额\n1,中国工商银行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("gbk"))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert "客户名称" in result.data["content"]
+    assert "中国工商银行" in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_decodes_big5_text(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big5_auto.csv")
+    expected = "id,客戶名稱,授信金額\n1,中國工商銀行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("big5"))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert "客戶名稱" in result.data["content"]
+    assert "中國工商銀行" in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_unknown_binary_reports_decode_error(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "payload.dat")
+    with open(file_path, "wb") as file:
+        file.write(b"\x81\x40\x00\x01")
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "decode" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_known_binary_extension(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "artifact.pyc")
+    with open(file_path, "wb") as file:
+        file.write(b"\x81\x40\x00\x01")
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "Binary files cannot be read as text" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_read_file_xlsx_document(sys_op, temp_dir):
+    from openpyxl import Workbook
+
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "credit.xlsx")
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "授信"
+    worksheet.append(["客户名称", "授信金额"])
+    worksheet.append(["中国工商银行", 1000])
+    workbook.save(file_path)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    content = result.data["content"]
+    assert "## 授信" in content
+    assert "客户名称" in content
+    assert "中国工商银行" in content
+    assert "1000" in content
+
+
+@pytest.mark.asyncio
+async def test_read_file_docx_document(sys_op, temp_dir):
+    from docx import Document
+
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "credit.docx")
+    document = Document()
+    document.add_heading("授信报告", level=1)
+    document.add_paragraph("客户名称：中国工商银行")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "字段"
+    table.cell(0, 1).text = "值"
+    table.cell(1, 0).text = "授信金额"
+    table.cell(1, 1).text = "1000"
+    document.save(file_path)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    content = result.data["content"]
+    assert "授信报告" in content
+    assert "客户名称：中国工商银行" in content
+    assert "| 字段 | 值 |" in content
+    assert "| 授信金额 | 1000 |" in content
+
+
+@pytest.mark.asyncio
+async def test_read_file_xlsx_respects_offset_and_limit(sys_op, temp_dir):
+    from openpyxl import Workbook
+
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "credit_offset.xlsx")
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "授信"
+    worksheet.append(["客户名称", "授信金额"])
+    worksheet.append(["中国工商银行", 1000])
+    workbook.save(file_path)
+
+    result = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+
+    assert result.success is True
+    assert "客户名称" in result.data["content"]
+    assert "中国工商银行" not in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_utf8_skips_encoding_detection(sys_op, temp_dir, monkeypatch):
+    from openjiuwen.core.sys_operation.local import fs_operation as fs_operation_module
+
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "utf8_fast_path.txt")
+    expected = "第一行\n第二行\n"
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(expected)
+
+    def _unexpected_detection(*args, **kwargs):
+        raise AssertionError("UTF-8 reads must not pay for encoding detection")
+
+    monkeypatch.setattr(fs_operation_module, "detect_text_encoding", _unexpected_detection)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert "第一行" in result.data["content"]

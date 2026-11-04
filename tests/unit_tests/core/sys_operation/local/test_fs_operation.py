@@ -1551,3 +1551,79 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_gbk_text(sys_op, work_dir):
+    """encoding='auto' decodes GBK/ANSI text without changing the default."""
+    file_path = os.path.join(work_dir, "gbk_auto.csv")
+    expected = "id,客户名称,授信金额\n1,中国工商银行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("gbk"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+    selected = await sys_op.fs().read_file(
+        path=file_path, encoding="auto", line_range=(2, 2)
+    )
+    assert selected.code == StatusCode.SUCCESS.code
+    assert "中国工商银行" in selected.data.content
+    assert "客户名称" not in selected.data.content
+
+    head = await sys_op.fs().read_file(path=file_path, encoding="auto", head=1)
+    assert head.code == StatusCode.SUCCESS.code
+    assert "客户名称" in head.data.content
+    assert "中国工商银行" not in head.data.content
+
+    tail = await sys_op.fs().read_file(path=file_path, encoding="auto", tail=1)
+    assert tail.code == StatusCode.SUCCESS.code
+    assert "中国工商银行" in tail.data.content
+    assert "客户名称" not in tail.data.content
+
+    chunks = []
+    async for chunk in sys_op.fs().read_file_stream(path=file_path, encoding="auto"):
+        assert chunk.code == StatusCode.SUCCESS.code
+        chunks.append(chunk.data.chunk_content)
+    assert "".join(chunks) == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_big5_text(sys_op, work_dir):
+    """encoding='auto' distinguishes Big5 from the wider GB18030 byte space."""
+    file_path = os.path.join(work_dir, "big5_auto.csv")
+    expected = "id,客戶名稱,授信金額\n1,中國工商銀行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("big5"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_utf8_bom(sys_op, work_dir):
+    """encoding='auto' strips a UTF-8 BOM and leaves UTF-8 content unchanged."""
+    import codecs
+
+    file_path = os.path.join(work_dir, "utf8_bom_auto.txt")
+    expected = "第一行\n第二行\n"
+    with open(file_path, "wb") as file:
+        file.write(codecs.BOM_UTF8 + expected.encode("utf-8"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_default_encoding_stays_utf8(sys_op, work_dir):
+    """The existing UTF-8 default is preserved for callers that do not opt in."""
+    file_path = os.path.join(work_dir, "gbk_default.csv")
+    with open(file_path, "wb") as file:
+        file.write("中文内容".encode("gbk"))
+
+    result = await sys_op.fs().read_file(path=file_path)
+    assert result.code != StatusCode.SUCCESS.code
+    assert "utf-8" in result.message.lower()

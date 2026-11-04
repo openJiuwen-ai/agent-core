@@ -31,6 +31,14 @@ from openjiuwen.core.sys_operation.result import (
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+from openjiuwen.core.sys_operation.local._text_encoding import detect_text_encoding
+
+_AUTO_ENCODING = "auto"
+
+
+def _uses_auto_encoding(encoding: str) -> bool:
+    """Return whether the caller requested automatic text encoding detection."""
+    return str(encoding).strip().lower() == _AUTO_ENCODING
 
 
 class _ListItemsSpec(BaseModel):
@@ -223,6 +231,7 @@ class FsOperation(BaseFsOperation):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
@@ -267,6 +276,10 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                if mode == "text" and _uses_auto_encoding(validated_params.encoding):
+                    validated_params.encoding = await asyncio.to_thread(
+                        detect_text_encoding, file_path
+                    )
                 if mode == "bytes":
                     final_content = await self._read_bytes(file_path, validated_params.chunk_size)
                 else:
@@ -319,6 +332,7 @@ class FsOperation(BaseFsOperation):
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
+                Use "auto" (local backend) to detect BOM, UTF-8, GB18030/GBK and Big5.
             chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
             options: Extended configuration options (dict, optional).
 
@@ -363,6 +377,10 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                if mode == "text" and _uses_auto_encoding(validated_params.encoding):
+                    validated_params.encoding = await asyncio.to_thread(
+                        detect_text_encoding, file_path
+                    )
                 # bytes mode
                 if mode != "text":
                     async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
