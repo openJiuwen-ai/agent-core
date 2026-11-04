@@ -99,6 +99,11 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         # approve_tool persisted the reply; mailbox polling handles it after
         # the active round settles without queuing a duplicate resume query.
         if self._round.has_in_flight_round():
+            team_logger.debug(
+                "[{}] deferring approval event for tool_call_id={} to the durable mailbox during an active round",
+                member_name,
+                payload.tool_call_id,
+            )
             return
 
         from openjiuwen.core.session import InteractiveInput
