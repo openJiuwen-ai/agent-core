@@ -1426,7 +1426,7 @@ async def test_write_file_overlong_path_returns_tool_error(sys_op) -> None:
 async def test_read_file_auto_decodes_gbk_text(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
     file_path = os.path.join(temp_dir, "gbk_auto.csv")
-    expected = "客户名称,授信金额\n中国工商银行,1000\n"
+    expected = "id,客户名称,授信金额\n1,中国工商银行,1000\n"
     with open(file_path, "wb") as file:
         file.write(expected.encode("gbk"))
 
@@ -1435,6 +1435,47 @@ async def test_read_file_auto_decodes_gbk_text(sys_op, temp_dir):
     assert result.success is True
     assert "客户名称" in result.data["content"]
     assert "中国工商银行" in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_decodes_big5_text(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big5_auto.csv")
+    expected = "id,客戶名稱,授信金額\n1,中國工商銀行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("big5"))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert "客戶名稱" in result.data["content"]
+    assert "中國工商銀行" in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_unknown_binary_reports_decode_error(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "payload.dat")
+    with open(file_path, "wb") as file:
+        file.write(b"\x81\x40\x00\x01")
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "decode" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_known_binary_extension(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "artifact.pyc")
+    with open(file_path, "wb") as file:
+        file.write(b"\x81\x40\x00\x01")
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "Binary files cannot be read as text" in (result.error or "")
 
 
 @pytest.mark.asyncio

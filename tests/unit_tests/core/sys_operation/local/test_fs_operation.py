@@ -1590,6 +1590,19 @@ async def test_fs_read_auto_encoding_gbk_text(sys_op, work_dir):
 
 
 @pytest.mark.asyncio
+async def test_fs_read_auto_encoding_big5_text(sys_op, work_dir):
+    """encoding='auto' distinguishes Big5 from the wider GB18030 byte space."""
+    file_path = os.path.join(work_dir, "big5_auto.csv")
+    expected = "id,客戶名稱,授信金額\n1,中國工商銀行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("big5"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+
+@pytest.mark.asyncio
 async def test_fs_read_auto_encoding_utf8_bom(sys_op, work_dir):
     """encoding='auto' strips a UTF-8 BOM and leaves UTF-8 content unchanged."""
     import codecs
