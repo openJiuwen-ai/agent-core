@@ -70,11 +70,13 @@ OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
 # raw source metadata dict.
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
 OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
-# Latency facts the GenAI standard does not model: trace display name,
-# inter-token latency, and reasoning duration (毫秒). first-token latency IS
-# standard-modeled (gen_ai.response.time_to_first_chunk, above).
+# Latency facts the GenAI standard does not model: trace display name, TPOT
+# (mean time per output token), and reasoning duration (毫秒). first-token
+# latency IS standard-modeled (gen_ai.response.time_to_first_chunk, above).
+# tpot_ms deliberately reuses the observability extension's published key for
+# the same fact — one fact, one key, no reader fallback chain.
 OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
-OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS = "openjiuwen.gen_ai.response.inter_token_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 
