@@ -12,6 +12,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.token.tiktoken_counter import _image_block_tokens
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -255,14 +256,38 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
     return [i for i, msg in enumerate(messages) if is_summary_message(msg, summary_marker)]
 
 
+def _image_content_tokens(content: Any) -> int:
+    """Dimension-priced token add for image blocks in list content, else 0.
+
+    Shared by ``estimate_content_tokens`` and ``_len4`` so the two estimators
+    agree on how much a multimodal image block contributes. Only top-level
+    ``image_url``/``image`` blocks are priced (via ``_image_block_tokens``);
+    non-list content contributes nothing extra here.
+    """
+    if not isinstance(content, list):
+        return 0
+    total = 0
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if not (ptype in ("image_url", "image") or "image_url" in part or "image" in part):
+            continue
+        total += _image_block_tokens(part)
+    return total
+
+
 def estimate_content_tokens(content: Any) -> int:
     """Approximate token count when no token counter is available.
 
     Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
-    with thresholds scaled to real context-window token counts.
+    with thresholds scaled to real context-window token counts. Image blocks in
+    multimodal list content are additionally priced by dimension via
+    ``_image_content_tokens`` (same rule as ``_len4``), so the fallback path does
+    not under-count image-heavy contexts by ~1400 tokens per image.
     """
     text = sanitize_content_for_text(content)
-    return max(len(text) // 4, 1)
+    return max(len(text) // 4, 1) + _image_content_tokens(content)
 
 
 def count_messages_tokens(
@@ -321,9 +346,25 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
 
 def _len4(message: BaseMessage) -> int:
     """Estimate a single message's tokens with ``len // 4`` (mirrors the
-    fallback coefficient used elsewhere in this module)."""
+    fallback coefficient used elsewhere in this module).
+
+    Image blocks in multimodal list content are priced by dimension via
+    ``_image_content_tokens`` (max of OpenAI tile / Claude patch formulas) instead
+    of collapsing to the ~6-token placeholder ``sanitize_content_for_text``
+    would leave. Without this, a base64 image counts ~6 tokens here while its
+    payload still bloats the wire body, so the compression trigger's usage fast
+    path never fires on image-heavy contexts (gateway 413). Non-list content
+    keeps the original text-only estimate.
+
+    Note: ``base`` already includes the image placeholder's ~6 tokens (``sanitize_content_for_text``
+    keeps the block structure with ``[image:data-url-omitted]``), and ``_image_content_tokens``
+    adds the dimension estimate (~1445) on top. This double-counts ~6 tokens per image;
+    it is intentional (kept for simplicity, since reusing ``sanitize_content_for_text``
+    avoids re-implementing its block serialization) and negligible (~0.4% of one image).
+    """
     content = getattr(message, "content", "")
-    return len(sanitize_content_for_text(content)) // 4
+    base = len(sanitize_content_for_text(content)) // 4
+    return base + _image_content_tokens(content)
 
 
 def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:

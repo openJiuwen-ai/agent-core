@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.content_sanitize import sanitize_value_for_text
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 
@@ -167,15 +168,73 @@ class CompressionExecutor:
         which is correct for a direct model call.  A ReAct agent receives the
         prompt through ``agent.invoke`` instead, so agent executors need the
         system/context prefix without duplicating the prompt.
+
+        Image base64 payloads in multimodal list content are removed (image
+        blocks dropped, inline base64 collapsed) via ``_strip_image_payloads`` on
+        a per-message copy: compression summaries need only text, not image
+        pixels, so base64 is dead weight that bloats the request body (gateway
+        413) and yields saved=0%. Original messages are never mutated.
         """
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
             keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
             context_messages = context_messages[:keep_count]
         return [
-            *list(request.system_messages or []),
-            *context_messages,
+            *CompressionExecutor._strip_image_payloads(list(request.system_messages or [])),
+            *CompressionExecutor._strip_image_payloads(context_messages),
         ]
+
+    @staticmethod
+    def _strip_image_payloads(messages: list[BaseMessage]) -> list[BaseMessage]:
+        """Return copies of *messages* with image payloads removed.
+
+        Multimodal list content has its image ``image_url``/``image`` blocks
+        dropped outright: a placeholder string stuffed into the structured
+        ``url``/``source.data`` slot is not a valid image for strict providers
+        (they can return HTTP 400 and silently kill compression), and a text-only
+        summary has no use for pixels. Residual inline data URLs in list text and
+        in string content are collapsed by ``sanitize_value_for_text`` so they
+        cannot bloat the request body (gateway 413). A message with nothing to
+        strip keeps its original object reference; original messages are never
+        mutated.
+        """
+        stripped: list[BaseMessage] = []
+        for message in messages:
+            content = getattr(message, "content", None)
+            if isinstance(content, str):
+                sanitized = sanitize_value_for_text(content)
+                if sanitized != content:
+                    stripped.append(message.model_copy(update={"content": sanitized}))
+                else:
+                    stripped.append(message)
+                continue
+            if not isinstance(content, list):
+                stripped.append(message)
+                continue
+            sanitized = sanitize_value_for_text(content)
+            new_content, removed = CompressionExecutor._remove_image_blocks(sanitized)
+            if not removed and new_content == content:
+                stripped.append(message)
+            else:
+                stripped.append(message.model_copy(update={"content": new_content}))
+        return stripped
+
+    @staticmethod
+    def _remove_image_blocks(content: list) -> tuple[list, bool]:
+        """Drop multimodal image blocks from a list-content payload.
+
+        Returns ``(new_content, changed)``. Only top-level blocks whose ``type``
+        is ``image_url`` or ``image`` are removed; all other blocks (text, etc.)
+        are preserved as-is.
+        """
+        new_content: list = []
+        changed = False
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
+                changed = True
+                continue
+            new_content.append(part)
+        return new_content, changed
 
     @staticmethod
     def build_messages(request: CompressionRequest) -> list[BaseMessage]:

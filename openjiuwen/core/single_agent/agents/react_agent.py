@@ -40,6 +40,11 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
     ModelContext
 )
+from openjiuwen.core.context_engine.image_refs import (
+    IMAGE_METADATA_KEY,
+    READ_FILE_IMAGE_TEXT_PREFIX,
+    build_image_entry,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     is_strict_context_overflow,
 )
@@ -1661,6 +1666,7 @@ class ReActAgent(BaseAgent):
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
         content: List[dict[str, Any]] = []
         loaded_paths: List[str] = []
+        image_entries: List[dict[str, Any]] = []
 
         for tool_result in tool_results:
             for item in ReActAgent._iter_multimodal_image_items(tool_result):
@@ -1670,8 +1676,17 @@ class ReActAgent(BaseAgent):
                 content.append(
                     {
                         "type": "text",
-                        "text": f"Image loaded from read_file: {source_path}",
+                        "text": f"{READ_FILE_IMAGE_TEXT_PREFIX}{source_path}",
                     }
+                )
+                image_entries.append(
+                    build_image_entry(
+                        source_path,
+                        data_url,
+                        len(content),
+                        width=item.get("width"),
+                        height=item.get("height"),
+                    )
                 )
                 content.append(
                     {
@@ -1691,8 +1706,10 @@ class ReActAgent(BaseAgent):
                 *[f"{index}. {path}" for index, path in enumerate(loaded_paths, start=1)],
             ]
             content.insert(0, {"type": "text", "text": "\n".join(summary_lines)})
+            for entry in image_entries:
+                entry["block_index"] += 1
 
-        return UserMessage(content=content)
+        return UserMessage(content=content, metadata={IMAGE_METADATA_KEY: image_entries})
 
     @staticmethod
     def _iter_multimodal_image_items(tool_result: Any) -> List[dict[str, Any]]:
