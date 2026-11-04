@@ -72,11 +72,15 @@ OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
 # regime — openjiuwen.*, never gen_ai.*).
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
 OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
-# Latency facts the registry does not model: trace display name,
-# inter-token latency, and reasoning duration (毫秒). first-token latency IS
-# registry-modeled (gen_ai.response.time_to_first_chunk, re-exported above).
+# Latency facts the registry does not model: trace display name, TPOT
+# (mean time per output token), and reasoning duration (毫秒). first-token
+# latency IS registry-modeled (gen_ai.response.time_to_first_chunk, re-exported
+# above). tpot_ms reuses the observability extension's published key for the
+# same fact — one fact, one key, no reader fallback chain; the rename from
+# inter_token_latency_ms is a wire-format change for span readers, made
+# before any external consumer shipped.
 OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
-OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS = "openjiuwen.gen_ai.response.inter_token_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 

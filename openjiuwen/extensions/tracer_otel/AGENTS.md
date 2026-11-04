@@ -40,10 +40,11 @@ facts with different wire formats, and that is intentional:
   authoritative definition per standard key. Only standard keys carried by the
   pinned registry in `observability/gen_ai_semconv.py` may be re-exported this
   way; facts the registry does not model are defined here as this package's own
-  `openjiuwen.*` extensions (`openjiuwen.gen_ai.usage.*_cost`,
-  `openjiuwen.llm.prev_message_count`, `openjiuwen.gen_ai.user.id`,
-  `openjiuwen.gen_ai.metadata`, `openjiuwen.trace.name`,
-  `openjiuwen.gen_ai.response.inter_token_latency_ms`,
+  `openjiuwen.*` extensions (`openjiuwen.llm.prev_message_count`,
+  `openjiuwen.gen_ai.user.id`, `openjiuwen.gen_ai.metadata`,
+  `openjiuwen.trace.name`, `openjiuwen.gen_ai.response.tpot_ms` (converged
+  onto the observability stack's published key for the same fact; the interim
+  `inter_token_latency_ms` shipped with no external reader),
   `openjiuwen.gen_ai.reasoning.duration_ms`) — project extensions never ride
   the `gen_ai.*` prefix. Do not grow the re-export list casually.
   `gen_ai.provider.name` (`"openjiuwen"`) is set on every span; the
