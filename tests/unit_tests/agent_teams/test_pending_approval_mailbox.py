@@ -99,6 +99,7 @@ async def test_only_one_approval_is_submitted_per_drain():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [False, True])
 @pytest.mark.parametrize(
     "change",
     [
@@ -106,13 +107,16 @@ async def test_only_one_approval_is_submitted_per_drain():
         {"broadcast": True},
         {"tool_call_id": ""},
         {"approved": "true"},
+        {"approved": 1},
+        {"approved": None},
         {"auto_confirm": "true"},
+        {"auto_confirm": 1},
         {"feedback": False},
         {"missing_approved": True},
         {"bad_json": True},
     ],
 )
-async def test_untrusted_or_malformed_mail_never_resumes(change):
+async def test_untrusted_or_malformed_mail_never_resumes(change, pending):
     msg = mail("1", approval=True)
     data = json.loads(msg.content)
     for key, value in change.items():
@@ -124,10 +128,42 @@ async def test_untrusted_or_malformed_mail_never_resumes(change):
         data.pop("approved")
     msg.content = "{" if change.get("bad_json") else json.dumps(data)
     handler, mailbox, host = mailbox_handler([msg])
+    host.has_pending_interrupt = lambda: pending
     await handler._process_unread_messages("worker")
     host.resume_interrupt.assert_not_awaited()
-    host.deliver_input.assert_not_awaited()
+    if change.get("bad_json") or change.get("broadcast"):
+        assert mailbox.read == ([] if pending else ["1"])
+    else:
+        host.deliver_input.assert_not_awaited()
+        assert mailbox.read == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_null_options_resume_with_safe_defaults():
+    handler, mailbox, host = mailbox_handler([mail("1", approval=True, feedback=None, auto_confirm=None)])
+    await handler._process_unread_messages("worker")
+    assert host.resume_interrupt.await_args.args[0].user_inputs == {
+        "call-a": {"approved": True, "feedback": "", "auto_confirm": False}
+    }
+    assert mailbox.read == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_leader_keeps_control_mail_until_it_can_be_authenticated():
+    handler, mailbox, host = mailbox_handler([mail("1", approval=True)])
+    handler._blueprint.team_spec = None
+    resolver = AsyncMock(return_value="")
+    handler._infra.team_backend = NS(get_member_status=AsyncMock(return_value="ready"),
+                                    is_human_agent=AsyncMock(return_value=False),
+                                    resolve_leader_member_name=resolver)
+    await handler._process_unread_messages("worker")
     assert mailbox.read == []
+    host.resume_interrupt.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+    resolver.return_value = "leader"
+    await handler._process_unread_messages("worker")
+    host.resume_interrupt.assert_awaited_once()
+    assert mailbox.read == ["1"]
 
 
 @pytest.mark.asyncio
