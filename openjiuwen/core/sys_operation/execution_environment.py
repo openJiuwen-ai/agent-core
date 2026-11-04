@@ -37,11 +37,16 @@ class ExecutionEnvironment:
         object.__setattr__(self, "overrides", _freeze(self.overrides))
 
     def merge(self, explicit: Mapping[str, str | None] | None = None) -> dict[str, str | None]:
-        """Merge defaults, explicit arguments, then policy overrides."""
+        """Merge layers without assuming the execution host's case rules.
+
+        Reinsert overwritten keys so iteration order preserves layer precedence
+        when a Windows execution host later folds differently cased names.
+        """
         result = {}
         for layer in (self.values, explicit or {}, self.overrides):
             for key, value in _freeze(layer).items():
-                result[key.upper() if os.name == "nt" else key] = value
+                result.pop(key, None)
+                result[key] = value
         return result
 
 

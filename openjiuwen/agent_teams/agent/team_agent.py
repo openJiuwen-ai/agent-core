@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
@@ -2113,7 +2114,9 @@ class TeamAgent(BaseAgent):
             runtime_spec: Optional live spec from the current process. Used to
                 reinject ``build_context`` and ``memory.embedding_config``, which
                 are ``Field(exclude=True)`` and never survive the checkpoint
-                round-trip. When omitted the recovered spec is used as-is
+                round-trip. Its context seed replaces the checkpoint seed too,
+                so later process spawns reconstruct the same platform context.
+                When omitted the recovered spec is used as-is
                 (rebuilding context from its seed).
 
         Raises:
@@ -2139,6 +2142,9 @@ class TeamAgent(BaseAgent):
         # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
+            # Process-spawn payloads exclude the live context. Keep its seed in
+            # sync so recovered members do not reconstruct checkpoint-era policy.
+            spec.build_context_seed = copy.deepcopy(runtime_spec.build_context_seed)
         # embedding_config is also Field(exclude=True) — reinject from the
         # live spec so resolve_embedding_config can find it during configure.
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:

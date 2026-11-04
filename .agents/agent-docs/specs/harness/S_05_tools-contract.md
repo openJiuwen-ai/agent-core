@@ -844,6 +844,7 @@ See F_27 for replay boundaries and validation results.
    `execution_environment_scope` 覆盖完整调用，取消和异常后恢复。无 resolver 时显式绑定空值。
 3. `ExecutionEnvironment.values` 是默认增量，显式参数覆盖默认值，`overrides` 是最高优先级策略。
    null 表示从执行端基础环境删除变量。变量名采用可移植的 shell 标识符格式。
-4. 本地执行复制基础环境；沙箱只接收增量。普通、流式、后台命令使用相同规则。
+4. 本地执行复制基础环境；沙箱只接收增量。shell 的普通/流式/后台命令与 code 的普通/流式执行使用相同规则。
+   传输保留变量名大小写及覆盖顺序；只有实际 Windows 执行端合并基础环境时按大小写不敏感处理。
 5. 通用执行层不认识 Git 身份；平台通过 resolver 提供策略，不改共享工具实例和 os.environ。
 6. 进程级环境、外部服务或不经过此调用链的独立 CLI 不会被自动配置。

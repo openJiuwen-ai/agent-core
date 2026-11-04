@@ -22,7 +22,7 @@ design_note: 无独立 D；在现有 harness 工具调用与 team 会话存储�
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-11-04 |
-| 范围 | AbilityManager、BuildContext、shell 本地与沙箱执行 |
+| 范围 | AbilityManager、BuildContext、shell/code 本地与沙箱执行 |
 | 测试 | `tests/unit_tests/core/sys_operation/test_execution_environment.py` |
 
 ## 背景
@@ -39,7 +39,8 @@ Spec 构建和 NativeHarness 装配把 resolver 绑定到本 agent 的 AbilityMa
 实际执行单个工具时获取快照，在 context manager 中绑定，异常和取消均恢复原作用域。
 无 resolver 的 agent 显式建立空环境，不能继承另一个成员的身份。
 
-本地 shell 在 prepare_environment 合并到环境副本；沙箱只传增量，不能复制宿主机环境。
+本地 shell/code 在 prepare_environment 合并到环境副本；沙箱两类接口只传增量，不能复制宿主机环境。
+增量保留原始变量名和覆盖顺序，Windows 大小写规则只在实际执行端应用；不会按客户端平台改写远程变量名。
 工具构造、模型 schema 和权限 rail 不需要新增环境参数。后台命令继承启动时快照。
 执行日志中 environment 的值脱敏。
 

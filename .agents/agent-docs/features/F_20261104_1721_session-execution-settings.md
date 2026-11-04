@@ -35,6 +35,7 @@ team 子 session 共享 session ID，成员身份来自各自 BuildContext。会
 replace 以 expected_version 做 CAS，成功后版本递增；get 读取已提交状态。
 
 NativeHarness 装配将成员 BuildContext 的 resolver 绑定到 AbilityManager。
+冷恢复替换 live context 时同步深拷贝当前 seed，确保后续子进程派生使用相同策略；当前 seed 为空时清除旧 seed。
 平台 resolver 每次工具执行读取共享数据库，不缓存会话开关，因此远程成员不用依赖广播到达。
 跨机器部署必须使用同一团队数据库；数据库不可达时 resolver 失败，不能静默退回旧设置。
 Core 不解释 settings JSON 的产品字段，Git 策略由 Swarm 实现。

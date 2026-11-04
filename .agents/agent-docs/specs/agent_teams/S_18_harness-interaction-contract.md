@@ -271,3 +271,6 @@ BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
 `TeamDatabase.session_settings` 以 session_id 保存 JSON settings 与 version。initialize 不覆盖已有行，
 replace 使用 expected_version 做 CAS。平台应在成员执行前初始化，远程成员从同一数据库读取已提交值；
 读取失败不得执行带旧策略的命令。Core 不解释平台 JSON 字段。
+
+冷恢复接入当前 runtime_spec.build_context 时，build_context_seed 同步深拷贝当前值（包括 None），
+避免 leader 使用新策略而进程派生成员从 checkpoint 的旧 seed 重建。见 `B_20261104_2054_recovered-context-seed-and-execution-environment`。

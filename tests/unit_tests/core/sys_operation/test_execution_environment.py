@@ -7,6 +7,7 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
@@ -53,6 +54,66 @@ def test_windows_environment_names_are_case_insensitive(monkeypatch: pytest.Monk
     overlay = snapshot.merge({"PATH": "explicit", "Remove": None})
     result = environment.apply_environment_overlay({"Path": "host", "REMOVE": "old"}, overlay)
     assert result == {"PATH": "policy"}
+
+
+def test_windows_overwritten_key_retains_policy_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.core.sys_operation import execution_environment as environment
+
+    snapshot = ExecutionEnvironment({"Path": "default"}, {"Path": "policy"})
+    overlay = snapshot.merge({"PATH": "explicit"})
+    assert list(overlay) == ["PATH", "Path"]
+    monkeypatch.setattr(environment, "os", SimpleNamespace(name="nt"))
+    assert environment.apply_environment_overlay({"path": "host"}, overlay) == {"PATH": "policy"}
+
+
+@pytest.mark.asyncio
+async def test_windows_client_preserves_linux_sandbox_variable_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.core.sys_operation import execution_environment as environment
+    from openjiuwen.core.sys_operation.sandbox.shell_operation import ShellOperation as SandboxShell
+
+    shell = object.__new__(SandboxShell)
+    invoke = AsyncMock(return_value={"code": 0, "message": "ok", "data": None})
+    monkeypatch.setattr(shell, "invoke", invoke)
+    with monkeypatch.context() as client:
+        client.setattr(environment, "os", SimpleNamespace(name="nt"))
+        with execution_environment_scope(ExecutionEnvironment({"memberToken": "alice", "removeMe": None})):
+            await shell.execute_cmd("git status")
+    overlay = invoke.call_args.kwargs["environment"]
+    assert overlay == {"memberToken": "alice", "removeMe": None}
+    with monkeypatch.context() as server:
+        server.setattr(environment, "os", SimpleNamespace(name="posix"))
+        assert environment.apply_environment_overlay({"removeMe": "old"}, overlay) == {"memberToken": "alice"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_sandbox_code_transports_environment_policy(
+    monkeypatch: pytest.MonkeyPatch, stream: bool,
+) -> None:
+    from openjiuwen.core.sys_operation.sandbox.code_operation import CodeOperation
+
+    operation = object.__new__(CodeOperation)
+    received = []
+    invoke = AsyncMock(return_value={"code": 0, "message": "ok", "data": None})
+
+    async def invoke_stream(method: str, **params: object) -> AsyncIterator[dict[str, object]]:
+        received.append(params["environment"])
+        yield {"code": 0, "message": "ok", "data": None}
+
+    monkeypatch.setattr(operation, "invoke", invoke)
+    monkeypatch.setattr(operation, "invoke_stream", invoke_stream)
+    monkeypatch.setenv("JW_HOST_SECRET", "do-not-send")
+    snapshot = ExecutionEnvironment({"memberToken": "default", "removeMe": None}, {"GIT_AUTHOR_NAME": "alice"})
+    with execution_environment_scope(snapshot):
+        explicit = {"memberToken": "explicit", "GIT_AUTHOR_NAME": "other"}
+        if stream:
+            results = [item async for item in operation.execute_code_stream("pass", environment=explicit)]
+            assert len(results) == 1
+        else:
+            await operation.execute_code("pass", environment=explicit)
+            received.append(invoke.call_args.kwargs["environment"])
+    assert received == [{"memberToken": "explicit", "removeMe": None, "GIT_AUTHOR_NAME": "alice"}]
+    assert execution_environment_overlay() == {}
 
 
 @pytest.mark.parametrize("values", [{"": "x"}, {"A=B": "x"}, {"A": 1}, {"A": "x\0y"}])
