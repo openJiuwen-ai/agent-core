@@ -846,6 +846,27 @@ class OtelAgentHandler(TraceExtAgentHandler):
         except Exception as exc:
             session_logger.warning("otel agent handler: on_retriever_error failed: %s", exc)
 
+    def drop_agent_span(self, invoke_id: str) -> None:
+        """Best-effort close of an agent span whose end/error event never arrived.
+
+        Degradation-tolerant emitters (e.g. studio's retrieval tool) fire
+        on_retriever_end / on_retriever_error through ``Tracer.trigger``; when
+        the trigger itself raises, the emitter can only drop the span on its
+        side. Without this hook the OTel span opened by on_*_start stays
+        half-open in this manager forever. The span is closed with OK status
+        (the business call may well have succeeded — only telemetry delivery
+        failed) plus a drop marker event. Never raises.
+        """
+        try:
+            state = self._span_manager.get(invoke_id)
+            if state is not None and state.recorded:
+                state.span.add_event(
+                    "oj.span.dropped", attributes={"reason": "end event undelivered by emitter"}
+                )
+            self._end_and_pop(invoke_id)
+        except Exception as exc:
+            session_logger.warning("otel agent handler: drop_agent_span failed: %s", exc)
+
     # ================================================================
     # Embedding events — INTERNAL span, embeddings operation (issue #1833).
     # Core emitter: APIEmbedding._get_embeddings fires these under a traced

@@ -273,6 +273,64 @@ class TestOtelAgentHandler:
         assert OJ_INVOKE_ID in finished[0].attributes
         assert OJ_TRACE_ID in finished[0].attributes
 
+    async def test_drop_agent_span_ends_open_retriever_span(self):
+        """drop_agent_span closes a span whose end event was never delivered.
+
+        Emitter degradation path (studio retrieval tool): trigger() raised so
+        on_retriever_end never ran. The span must be closed with OK status
+        plus a drop marker instead of staying half-open.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_retriever_start(
+            span=agent_span,
+            inputs={"query": "hello"},
+            instance_info={"class_name": "knowledge_retrieval_tool"},
+        )
+        assert len(_EXPORTER.get_finished_spans()) == 0  # still open
+
+        handler.drop_agent_span(agent_span.invoke_id)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retriever.knowledge_retrieval_tool"
+        # Business call outcome is unknown; dropped ≠ error
+        assert s.status.status_code == trace.StatusCode.OK
+        drop_events = [e for e in s.events if e.name == "oj.span.dropped"]
+        assert len(drop_events) == 1
+        assert drop_events[0].attributes["reason"] == "end event undelivered by emitter"
+
+    async def test_drop_agent_span_unknown_invoke_id_is_noop(self):
+        """Dropping an id the handler never saw (or already ended) never raises."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        handler.drop_agent_span("never-existed")
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+    async def test_drop_agent_span_after_normal_end_is_noop(self):
+        """A span already ended by on_retriever_end is gone; drop is a no-op."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_retriever_start(
+            span=agent_span,
+            inputs={"query": "hello"},
+            instance_info={"class_name": "knowledge_retrieval_tool"},
+        )
+        await handler.on_retriever_end(span=agent_span, outputs={"document_count": 1})
+        assert len(_EXPORTER.get_finished_spans()) == 1
+
+        handler.drop_agent_span(agent_span.invoke_id)  # no raise, no dup span
+        assert len(_EXPORTER.get_finished_spans()) == 1
+
     async def test_agent_llm_prompt_redaction(self):
         """When redaction_enabled=True, inputs are hashed."""
         config = OtelTracerConfig(redaction_enabled=True)
