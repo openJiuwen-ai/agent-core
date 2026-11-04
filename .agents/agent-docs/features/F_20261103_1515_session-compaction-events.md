@@ -8,6 +8,7 @@ modules: [core/context_engine, core/extension]
 files: [openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py]
 designs: [D-20261103-1156-session-compaction-events]
 created: 2026-11-03
+updated: 2026-11-04
 ---
 
 # 原生压缩候选与 Server 扩展联动实施
@@ -69,3 +70,21 @@ Core PR 先提供本协议；Server PR 标记依赖具体 Core 提交。任何�
 Core 31 项定向与 139 项原生 ContextEngine/ContextModel/FullCompact 回归通过，共 170 个不同用例。验证注册 Hook 后原生 ADD/GET/两个 legacy 压缩入口仍不触发 Hook，显式 API 的候选、post-next skip、安全边界仍可独立使用。Server 85 项回归加实际安装包调用 1 项通过，共 86 项；默认活动 Ops 报 COMPACT_NOT_INTEGRATED，测试显式绑定后完整 USER→BUILTIN→CORE 链返回结果。证据在 `D:\work_space\.codex-temp\session-compact-interface-only-20261103` 的 core-interface-final.xml、core-native-regression.xml、server-interface-final.xml、server-installed-package.xml。
 
 本轮未启用生产真实压缩，未重跑真实模型/SQLite 压缩恢复；上文原完整接入版本的证据仅保留历史含义。早期测试启动遗漏 asyncio_mode 及两个新增断言不准确的失败工件保留，修正后受影响范围全部通过。恢复生产入口后需重新做主流程和持久化验收，远端 CI 不作为本地通过证据。
+
+
+## 2026-11-04 目标分支冲突适配
+
+用户要求先修复 Core !125 与目标分支的冲突，再联合验证和重提 Server PR。目标为 6b36731b3a83ca5a3520a4d31698b1c16c6df3fb，新增 State 依赖追踪与包代次退休。唯一代码冲突在 Extension Runtime：保留目标分支的 _ops_generations / wait_generation_idle / retire_generation 和三参数 _tracked_handler，同时保留本 PR 的 Task/当前层调用帧；两类状态在同一个 finally 中成对释放，不回退 State 的热切换和清理逻辑。
+
+更新原调用帧测试的包代次参数，补充嵌套 7/8 两代、当前层权限恢复、各代空闲等待互不提前结束的回归。当前 Core 210 项定向（压缩接口、原生 ContextEngine/ContextModel/FullCompact、调用帧及 State）通过；Registry、包管理事件与 Bus 发布另 31 项通过，共 241 个不同用例。证据：D:\work_space\.codex-temp\session-compact-reissue-20261104 的 core-focused-first.xml 与 core-management.xml。未将历史完整主流程/真实模型证据当成本轮重新验证。
+
+主流程停用范围不变：传统手动压缩、ADD/GET 自动压缩和溢出恢复不重定向到本新增 Hook；显式 compact_context 及类型导出是此 PR 提供的接口。Server 在 Core !125 未合入时不能无条件导入这些类型。Server 重提将同时验证“当前目标 Core 未导出这些类型”与“本 PR 已导出”的两种组合，接口层提供兼容边界，不靠注释业务调用规避模块导入问题。
+
+
+## 2026-11-04 联合验证与 Server 重提
+
+Core 冲突修复已在本 PR 推送，运行实现提交为 b21e5d7b9394abc5369faefc368ae1ec23798a5f；后续本节只补文档，不改变运行代码。重新提交 [Server !116](https://gitcode.com/huenrui_/jiuwenswarm/pull/116)，替代已经回退的 Server !109。Server 通用层不无条件导入 Core 新压缩类型，仅显式 bind_native 才核对能力和注册 Hook；旧目标 Core 仍可启动并得到明确未接入结果。
+
+两仓当前组合的 Server 定向 90 项通过，包含实际 Ops→Core→Server Event→默认 continuation→候选后置 skip / 放行提交，以及原 legacy 入口不触发新 Hook；这些使用受控模型，不代表生产接入已开启。Server 配当前未合入接口的 Core 目标，87 项通过、3 项原生桥接测试跳过。Server 全组 982 通过、2 平台跳过，3 项用量/渲染既有失败在干净相同基线复现，未称整组全绿。
+
+两种 Core 都通过真实非 stub Front/Supervisor/Worker 的 AGENT_READY、ZIP 安装、session.create/switch→attach USER→Ops 默认 NOT_INTEGRATED，记录实际加载路径及 PID/创建时间，并确认真实退出和端口释放。使用占位模型配置，未发送模型 query，ui.render 为 0。证据与完整字段/调用链由 Server F_28/S_15 第 6 节及 D:\work_space\.codex-temp\session-compact-reissue-20261104 维护。Core 传统入口的注释/停用范围继续保持，未把旧真实模型/SQLite 证据计入本轮通过。
