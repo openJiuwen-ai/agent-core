@@ -209,6 +209,65 @@ class TestFirstCallMergesIntoShell:
 
 
 @pytest.mark.asyncio
+class TestForeignTracerInitMidRun:
+    """A fresh session's Tracer.init() broadcasts set_trace_id/set_session_id
+    to every registered handler singleton. When the broadcast lands while a
+    workflow run is live (build_traced_model creates its lightweight agent
+    session inside the running LLM component), it must not reset the live
+    run: no stale-span cleanup, no ambient detach, no cached-context clear.
+    """
+
+    async def test_foreign_init_keeps_live_shell_claimable(self):
+        scenario = _MergeScenario()
+        await scenario.start_llm_shell("node-1")
+        # The traced-model decorator's fresh session init fires mid-run.
+        scenario.workflow.set_trace_id("foreign-round")
+        scenario.workflow.set_session_id("foreign-session")
+        await scenario.llm_call()
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+
+        finished = _finished()
+        assert len(finished) == 1, "foreign init must not unclaim the live shell"
+        shell = finished[0]
+        assert shell.name == "component.node-1"
+        assert shell.attributes[GEN_AI_OPERATION_NAME] == "chat"
+        assert shell.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
+
+    async def test_foreign_init_spares_live_span_and_cache(self):
+        scenario = _MergeScenario()
+        await scenario.workflow.on_call_start(
+            "wf-root", metadata={"workflow_id": "wf-1", "workflow_name": "wf"}, inputs={"query": "hi"}
+        )
+        assert scenario.workflow._cached_root_ctx is not None
+        await scenario.start_llm_shell("node-1")
+        state = scenario.workflow._component_spans["node-1"]
+        scenario.workflow.set_trace_id("foreign-round")
+        scenario.workflow.set_session_id("foreign-session")
+
+        assert state.span.is_recording(), "live span must not be force-ended"
+        assert "node-1" in scenario.workflow._component_spans, "live state must stay tracked"
+        assert scenario.workflow._cached_root_ctx is not None, "cached context must survive"
+        assert scenario.workflow._trace_id != "foreign-round"
+        assert scenario.workflow._session_id != "foreign-session"
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+
+    async def test_idle_handler_still_rebinds_on_new_round(self):
+        """After the run finishes (all spans ended), init broadcasts rebind
+        and clean leftover state as before — the guard is live-run-only."""
+        scenario = _MergeScenario()
+        await scenario.start_llm_shell("node-1")
+        await scenario.llm_call()
+        await scenario.workflow.on_call_done("node-1", outputs={"answer": "ok"})
+        assert not scenario.workflow._has_live_spans()
+
+        scenario.workflow.set_trace_id("next-round")
+        scenario.workflow.set_session_id("next-session")
+        assert scenario.workflow._trace_id == "next-round"
+        assert scenario.workflow._session_id == "next-session"
+        assert scenario.workflow._cached_root_ctx is None
+
+
+@pytest.mark.asyncio
 class TestSecondCallUnderClaimedShell:
     async def test_becomes_child_span_nested_under_shell(self):
         scenario = _MergeScenario()
