@@ -21,7 +21,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.name_sanitize import (
     is_llm_safe_tool_name,
@@ -159,90 +159,9 @@ class AbilityManager:
         # never collide with raw keys because every raw key is pre-taken during
         # sanitization.
         self._llm_tool_aliases: Dict[str, str] = {}
-        # Monotonic registry revision used by startup-built indexes. A rail can
-        # compare this value without rebuilding its index on every model call.
-        self._registry_revision = 0
-        # Progressive disclosure is an agent-level registration policy.  It is
-        # deliberately kept here instead of changing ToolCard's global default:
-        # a normal (non-progressive) agent must continue to expose new tools
-        # directly unless a card explicitly says otherwise.
-        self._progressive_tool_enabled = False
-        self._direct_tool_names = {"tool_search"}
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
         self._owner_id: Optional[str] = owner_id
-
-    @property
-    def registry_revision(self) -> int:
-        """Return the revision of the registered ability-card catalog."""
-        return self._registry_revision
-
-    def _mark_registry_changed(self) -> None:
-        self._registry_revision += 1
-
-    def set_tool_exposure_policy(
-            self,
-            progressive_tool_enabled: bool,
-            direct_tool_names: Optional[Iterable[str]] = None,
-    ) -> None:
-        """Set the default exposure policy used by subsequent registrations.
-
-        Explicit ``ToolCard(exposure=...)`` values always win.  Existing cards
-        are intentionally not rewritten: exposure is a registration-time
-        decision, so a hot-reconfigure only affects cards registered after the
-        new policy is applied.
-        """
-        self._progressive_tool_enabled = bool(progressive_tool_enabled)
-        if direct_tool_names is not None:
-            self._direct_tool_names = {
-                str(name).strip()
-                for name in direct_tool_names
-                if str(name).strip()
-            }
-
-    def refresh_tool_exposure_policy(self) -> None:
-        """Reapply a changed policy to cards without explicit exposure values."""
-        for card in self._tools.values():
-            if not card.get_exposure_policy_defaulted():
-                continue
-            resolved = (
-                ToolExposure.DIRECT
-                if card.name in self._direct_tool_names or not self._progressive_tool_enabled
-                else ToolExposure.DEFERRED
-            )
-            if card.exposure != resolved:
-                card.exposure = resolved
-                self._mark_registry_changed()
-
-    def _apply_tool_exposure_policy(self, card: ToolCard) -> ToolExposure:
-        """Resolve and assign the card's exposure at registration time."""
-        name = str(getattr(card, "name", "") or "")
-        current = getattr(card, "exposure", ToolExposure.DIRECT)
-        declared_marker = card.get_exposure_declared()
-        if declared_marker is None:
-            declared_marker = "exposure" in getattr(card, "model_fields_set", set())
-            card.set_exposure_declared(declared_marker)
-            card.set_exposure_policy_defaulted(not declared_marker)
-        # Identify an explicitly supplied value before this registration policy
-        # mutates the card. The resolved value is stored on ToolCard itself so
-        # every later consumer reads the same registration-time decision.
-        if declared_marker:
-            return current
-
-        if name in self._direct_tool_names:
-            resolved = ToolExposure.DIRECT
-        else:
-            resolved = (
-                ToolExposure.DEFERRED
-                if self._progressive_tool_enabled
-                else ToolExposure.DIRECT
-            )
-
-        card.exposure = resolved
-        # Treat the resolved value as fixed for this card. This keeps a shared
-        # stateless card stable if another agent registers the same instance.
-        card.set_exposure_declared(True)
-        return resolved
 
     def set_owner_id(self, owner_id: Optional[str]) -> None:
         """Set the owner agent id used to qualify stateful tool ids."""
@@ -704,21 +623,6 @@ class AbilityManager:
 
         def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
-                old_registered = self._tools.get(_ability.name)
-                if old_registered is not None and old_registered.id != _ability.id:
-                    logger.warning(
-                        f"Duplicate tool ability detected: "
-                        f"name='{_ability.name}', "
-                        f"existing_id='{old_registered.id}', "
-                        f"new_id='{_ability.id}'. "
-                        f"Keep existing ability and skip new one."
-                    )
-                    return AddAbilityResult(
-                        name=_ability.name,
-                        added=False,
-                        reason="duplicate_tool",
-                    )
-                self._apply_tool_exposure_policy(_ability)
                 existing = self._tools.get(_ability.name)
                 if existing is not None and existing.id == _ability.id:
                     # Same registry id: this is a re-registration of one logical
@@ -735,14 +639,25 @@ class AbilityManager:
                         f"Rebind to the new ability."
                     )
                     self._tools[_ability.name] = _ability
-                    self._mark_registry_changed()
                     return AddAbilityResult(
                         name=_ability.name,
                         added=True,
                         reason="refreshed_tool",
                     )
+                if existing is not None:
+                    logger.warning(
+                        f"Duplicate tool ability detected: "
+                        f"name='{_ability.name}', "
+                        f"existing_id='{existing.id}', "
+                        f"new_id='{_ability.id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=False,
+                        reason="duplicate_tool",
+                    )
                 self._tools[_ability.name] = _ability
-                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -765,7 +680,6 @@ class AbilityManager:
                         reason="duplicate_workflow",
                     )
                 self._workflows[_ability.name] = _ability
-                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -788,7 +702,6 @@ class AbilityManager:
                         reason="duplicate_agent",
                     )
                 self._agents[_ability.name] = _ability
-                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -811,7 +724,6 @@ class AbilityManager:
                         reason="duplicate_mcp_server",
                     )
                 self._mcp_servers[_ability.server_name] = _ability
-                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.server_name,
                     added=True,
@@ -985,12 +897,10 @@ class AbilityManager:
                         if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                     ]
                     for tool_name in tools_to_remove:
-                        removed_card = self._tools.pop(tool_name, None)
+                        self._tools.pop(tool_name, None)
                     self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
             self._gc_llm_tool_aliases()
-            if removed is not None:
-                self._mark_registry_changed()
             return removed
         elif isinstance(name, list):
             result = []
@@ -1013,13 +923,11 @@ class AbilityManager:
                             if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                         ]
                         for tool_name in tools_to_remove:
-                            removed_card = self._tools.pop(tool_name, None)
+                            self._tools.pop(tool_name, None)
                         self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
             self._gc_llm_tool_aliases()
-            if any(item is not None for item in result):
-                self._mark_registry_changed()
             return result
         else:
             return None
@@ -1248,38 +1156,9 @@ class AbilityManager:
                     # ToolInfo objects must never be modified here (a cached
                     # or shared instance would compound the prefix per call).
                     exposed = mcp_tool.model_copy(update={"name": mcp_tool_name})
-                    existing_card = self._tools.get(mcp_tool_name)
-                    if (
-                        existing_card is None
-                        or (
-                            existing_card.id,
-                            existing_card.description,
-                            existing_card.input_params,
-                        ) != (
-                            mcp_tool_id,
-                            exposed.description,
-                            exposed.parameters or {},
-                        )
-                    ):
-                        # MCP cards materialize lazily. New cards use normal
-                        # registration; changed schemas replace the cached
-                        # card without triggering add()'s collision guard.
-                        existing_card = ToolCard(
-                            id=mcp_tool_id,
-                            name=mcp_tool_name,
-                            description=exposed.description,
-                            input_params=exposed.parameters or {},
-                        )
-                        if self._tools.get(mcp_tool_name) is None:
-                            self.add(existing_card)
-                        else:
-                            # A refreshed MCP schema is the same model-facing
-                            # tool, even when its raw server id changed. The
-                            # ordinary add() name-collision guard must not
-                            # discard this replacement.
-                            self._apply_tool_exposure_policy(existing_card)
-                            self._tools[mcp_tool_name] = existing_card
-                            self._mark_registry_changed()
+                    self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
+                                                          description=exposed.description,
+                                                          input_params=exposed.parameters or {})
                     tool_infos.append(exposed)
 
         # Last line of defense: never hand a non-LLM-safe name to a provider —
@@ -1636,7 +1515,6 @@ class AbilityManager:
             tool_call=tool_call,
             session=session,
             tag=tag,
-            callback_context=ctx,
         )
 
         if isinstance(ctx.inputs, ToolCallInputs):
@@ -1686,13 +1564,8 @@ class AbilityManager:
         result = workflow_output.result if isinstance(workflow_output, WorkflowOutput) else workflow_output
         return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
 
-    async def _execute_single_tool_call(
-            self,
-            tool_call: ToolCall,
-            session: Session,
-            tag=None,
-            callback_context: Optional[AgentCallbackContext] = None,
-    ) -> Tuple[Any, ToolMessage]:
+    async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
+                                        tag=None) -> Tuple[Any, ToolMessage]:
         tool_name = tool_call.name
 
         mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
@@ -1732,19 +1605,12 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                invoke_kwargs = {"session": session, "tool_call_id": tool_call.id}
-                # The fixed progressive ``tool_call`` wrapper needs the active
-                # callback context to dispatch its discovered target through
-                # this AbilityManager.  Keep the extra kwarg opt-in so ordinary
-                # tools and third-party tools retain their existing invocation
-                # contract.
-                if (
-                    callback_context is not None
-                    and getattr(tool, "accepts_tool_callback_context", False)
-                ):
-                    invoke_kwargs["_tool_callback_context"] = callback_context
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(tool_args, **invoke_kwargs)
+                    result = await tool.invoke(
+                        tool_args,
+                        session=session,
+                        tool_call_id=tool_call.id,
+                    )
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
@@ -1756,8 +1622,6 @@ class AbilityManager:
                 # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
                 # round cancellation) propagate correctly through anyio CancelScope.
                 logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
-                raise
-            except ToolInterruptException:
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"

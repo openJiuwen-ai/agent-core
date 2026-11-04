@@ -96,12 +96,25 @@ def _parent_model(context: Any) -> Any:
 class ProgressiveToolInput(ConstructionInput):
     """Construction inputs for progressive tool disclosure."""
 
-    search_limit: int = param_field(
-        default=5,
-        description=(
-            "Server-side maximum number of matching tools returned by tool_search "
-            "(capped at 20; not exposed to the model)."
-        ),
+    planning_tool_names: list[str] | None = param_field(
+        default=None,
+        description="Alias for progressive_tool_default_visible_tools.",
+    )
+    executor_tool_names: list[str] | None = param_field(
+        default=None,
+        description="Alias for progressive_tool_always_visible_tools.",
+    )
+    default_visible_tools: list[str] | None = param_field(
+        default=None,
+        description="Tools visible by default under progressive disclosure.",
+    )
+    always_visible_tools: list[str] | None = param_field(
+        default=None,
+        description="Tools always kept visible.",
+    )
+    max_loaded_tools: int | None = param_field(
+        default=None,
+        description="Maximum number of concurrently loaded tools.",
     )
 
 
@@ -115,7 +128,16 @@ def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> Progre
         language=getattr(context, "language", None) or "cn",
     )
     config.progressive_tool_enabled = True
-    config.tool_search_limit = p.get("search_limit", 5)
+    if p.get("planning_tool_names") is not None:
+        config.progressive_tool_default_visible_tools = list(p["planning_tool_names"])
+    if p.get("executor_tool_names") is not None:
+        config.progressive_tool_always_visible_tools = list(p["executor_tool_names"])
+    if p.get("default_visible_tools") is not None:
+        config.progressive_tool_default_visible_tools = list(p["default_visible_tools"])
+    if p.get("always_visible_tools") is not None:
+        config.progressive_tool_always_visible_tools = list(p["always_visible_tools"])
+    if p.get("max_loaded_tools") is not None:
+        config.progressive_tool_max_loaded_tools = int(p["max_loaded_tools"])
     return ProgressiveToolRail(config)
 
 
