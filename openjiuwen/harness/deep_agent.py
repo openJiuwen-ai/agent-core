@@ -287,6 +287,8 @@ class DeepAgent(BaseAgent):
         self._interaction_started = False
         self._agent_ras_setting: Any = None
         self._subagent_tool_binding = None
+        # Hosts set this before the first spawn. None uses SubagentRuntimeConfig defaults.
+        self.subagent_runtime_config = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []

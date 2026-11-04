@@ -158,3 +158,19 @@ async def test_fork_copies_caller_and_keeps_task_out_of_the_seed(runner) -> None
         if tool.card.name == "subagent_spawn"
     )
     assert spawn._runtime_binding.caller_kind == "fork"
+
+
+def test_copy_rails_does_not_share_the_parent_instance() -> None:
+    from openjiuwen.harness.subagent_runtime.fork_build import _copy_rails
+
+    class _SkillRail:
+        def __init__(self) -> None:
+            self.system_prompt_builder = "parent-builder"
+
+    parent_rail = _SkillRail()
+    caller = SimpleNamespace(configured_rails=lambda: [parent_rail])
+    copied = _copy_rails(caller, task_description="task", seed=[])
+    fork_rail = next(rail for rail in copied if isinstance(rail, _SkillRail))
+    fork_rail.system_prompt_builder = "fork-builder"
+    assert fork_rail is not parent_rail
+    assert parent_rail.system_prompt_builder == "parent-builder"

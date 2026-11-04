@@ -1114,6 +1114,9 @@ async def test_hydrate_live_record_becomes_parent_ended() -> None:
                     task_description="hello",
                     created_at_ms=1.0,
                     updated_at_ms=2.0,
+                    parent_id="gp-1",
+                    depth=2,
+                    kind="fork",
                 ).to_dict(),
             },
         },
@@ -1123,6 +1126,9 @@ async def test_hydrate_live_record_becomes_parent_ended() -> None:
 
     record = control._closed_records["sid-live"]
     assert record.closed_reason == "parent_ended"
+    assert record.parent_id == "gp-1"
+    assert record.depth == 2
+    assert record.kind == "fork"
     payload = control.describe_one("sid-live")
     assert payload is not None
     assert payload["closed_reason"] == "parent_ended"

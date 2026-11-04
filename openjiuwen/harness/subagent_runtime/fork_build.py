@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import copy
+import threading
 from typing import Any, Callable
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -36,12 +39,25 @@ _DROP_RAIL_NAMES = frozenset({
 _inherited_tool_filter: Callable[[list[Any]], list[Any]] | None = None
 
 
+_filter_lock = threading.Lock()
+
+
 def register_inherited_tool_filter(
     tool_filter: Callable[[list[Any]], list[Any]] | None,
 ) -> None:
-    """Install the product filter that strips leader-only tools from a fork."""
+    """Install the process-wide filter that strips leader-only tools from a fork.
+
+    One process runs one product. A later registration replaces the earlier
+    one. agent-core itself does not register a filter.
+    """
     global _inherited_tool_filter
-    _inherited_tool_filter = tool_filter
+    with _filter_lock:
+        _inherited_tool_filter = tool_filter
+
+
+def _current_inherited_tool_filter() -> Callable[[list[Any]], list[Any]] | None:
+    with _filter_lock:
+        return _inherited_tool_filter
 
 
 def fork_placeholder_spec(language: str = "cn") -> SubAgentConfig:
@@ -105,10 +121,26 @@ def _copy_tools(caller: Any) -> list[Any]:
     config = getattr(caller, "deep_config", None)
     tools = list(getattr(config, "tools", None) or [])
     kept = [tool for tool in tools if _tool_name(tool) not in _RUNTIME_TOOL_NAMES]
-    if _inherited_tool_filter is None:
+    tool_filter = _current_inherited_tool_filter()
+    if tool_filter is None:
         return kept
-    filtered = _inherited_tool_filter(kept)
+    filtered = tool_filter(kept)
     return list(filtered or [])
+
+
+def _rail_for_fork(rail: Any) -> Any:
+    """Return a rail the fork can init without writing on the parent's instance."""
+    fork_for_agent = getattr(rail, "fork_for_agent", None)
+    if callable(fork_for_agent):
+        return fork_for_agent()
+    try:
+        return copy.copy(rail)
+    except Exception as exc:
+        logger.warning(
+            "[fork_build] rail copy failed, sharing parent instance: %s",
+            exc,
+        )
+        return rail
 
 
 def _copy_rails(caller: Any, *, task_description: str, seed: list[Any]) -> list[Any]:
@@ -122,8 +154,7 @@ def _copy_rails(caller: Any, *, task_description: str, seed: list[Any]) -> list[
             continue
         if getattr(rail, "inherit_to_subagents", True) is False:
             continue
-        fork_for_agent = getattr(rail, "fork_for_agent", None)
-        kept.append(fork_for_agent() if callable(fork_for_agent) else rail)
+        kept.append(_rail_for_fork(rail))
     if not any(isinstance(rail, SysOperationRail) for rail in kept):
         kept.insert(0, SysOperationRail())
     kept.append(ForkInstructionRail(task_description, seed))

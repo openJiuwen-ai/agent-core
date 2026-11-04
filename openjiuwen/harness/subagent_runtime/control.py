@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from dataclasses import replace
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -750,17 +751,11 @@ class SubagentControl:
         record = SubagentRecord.from_dict(raw)
         if record.closed_at_ms is None:
             fallback_ms = record.updated_at_ms or record.created_at_ms
-            record = SubagentRecord(
-                subagent_id=record.subagent_id,
-                subagent_type=record.subagent_type,
-                display_name=record.display_name,
-                role=record.role,
-                task_description=record.task_description,
-                created_at_ms=record.created_at_ms,
+            record = replace(
+                record,
                 updated_at_ms=record.updated_at_ms or fallback_ms,
                 closed_at_ms=fallback_ms,
                 closed_reason="parent_ended",
-                create_options=record.create_options,
             )
         self._closed_records[sid] = record
 
