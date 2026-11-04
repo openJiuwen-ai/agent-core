@@ -3351,7 +3351,12 @@ class ReActAgent(BaseAgent):
                         if boundary_finish is not None:
                             invoke_inputs.result = boundary_finish.result
                         else:
-                            result = {"output": "Max iterations reached without completion", "result_type": "error"}
+                            # browser_move matches this text (MAX_ITERATION_MESSAGE); keep them in sync.
+                            result = {
+                                "output": "Max iterations reached without completion",
+                                "result_type": "error",
+                                "finish_reason": "max_iterations",
+                            }
                             invoke_inputs.result = result
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
