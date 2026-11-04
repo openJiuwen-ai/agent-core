@@ -67,9 +67,6 @@ GEN_AI_PROVIDER_NAME_VALUE = "openjiuwen"
 # ---------------------------------------------------------------------------
 
 OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
-OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
-OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
-OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 # Conversation facts the registry does not model: session-carried user id and
 # the raw source metadata dict (value follows the project extension naming
 # regime — openjiuwen.*, never gen_ai.*).

@@ -17,9 +17,12 @@ generated: true
 |---|
 | [agent_evolving/ttse](#module-1) |
 | [agent_teams](#module-2) |
-| [harness](#module-3) |
-| [harness/subagents](#module-4) |
-| [harness/tools/browser_move](#module-5) |
+| [extensions/observability](#module-3) |
+| [extensions/tracer_otel](#module-4) |
+| [harness](#module-5) |
+| [harness/subagents](#module-6) |
+| [harness/tools/browser_move](#module-7) |
+| [harness_providers](#module-8) |
 
 <a id="module-1"></a>
 
@@ -188,6 +191,22 @@ generated: true
 
 <a id="module-3"></a>
 
+## extensions/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | openjiuwen/extensions/tracer_otel, openjiuwen/extensions/observability, openjiuwen/harness_providers | openjiuwen/extensions/tracer_otel/handler.py, openjiuwen/extensions/tracer_otel/semconv.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/extensions/observability/semconv.py, openjiuwen/harness_providers/trajectory.py, tests/unit_tests/extensions/tracer_otel/test_handler.py, tests/unit_tests/extensions/tracer_otel/test_otel_rail.py, tests/unit_tests/extensions/observability/test_callback_handler.py | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-4"></a>
+
+## extensions/tracer_otel
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | openjiuwen/extensions/tracer_otel, openjiuwen/extensions/observability, openjiuwen/harness_providers | openjiuwen/extensions/tracer_otel/handler.py, openjiuwen/extensions/tracer_otel/semconv.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/extensions/observability/semconv.py, openjiuwen/harness_providers/trajectory.py, tests/unit_tests/extensions/tracer_otel/test_handler.py, tests/unit_tests/extensions/tracer_otel/test_otel_rail.py, tests/unit_tests/extensions/observability/test_callback_handler.py | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
+
+<a id="module-5"></a>
+
 ## harness
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -236,7 +255,7 @@ generated: true
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | openjiuwen/harness | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/policy_page_action.py, tests/unit_tests/harness/tools/browser_move/test_browser_contract_compatibility.py | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 
-<a id="module-4"></a>
+<a id="module-6"></a>
 
 ## harness/subagents
 
@@ -244,10 +263,18 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-5"></a>
+<a id="module-7"></a>
 
 ## harness/tools/browser_move
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-8"></a>
+
+## harness_providers
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261104_1638_drop-llm-span-cost-attrs](F_20261104_1638_drop-llm-span-cost-attrs.md) | F | LLM span 去掉 usage cost 属性（openjiuwen.gen_ai.usage.*_cost） | weixin_39960157 | openjiuwen/extensions/tracer_otel, openjiuwen/extensions/observability, openjiuwen/harness_providers | openjiuwen/extensions/tracer_otel/handler.py, openjiuwen/extensions/tracer_otel/semconv.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/extensions/observability/semconv.py, openjiuwen/harness_providers/trajectory.py, tests/unit_tests/extensions/tracer_otel/test_handler.py, tests/unit_tests/extensions/tracer_otel/test_otel_rail.py, tests/unit_tests/extensions/observability/test_callback_handler.py | 无独立 D：纯删减类变更（去掉一处已定属性的发射），无方案级取舍需要独立设计；键的引入背景与命名迁移见 |
