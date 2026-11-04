@@ -23,8 +23,13 @@ class SubagentRuntimeConfig:
     """Tunable runtime limits for subagent instances."""
 
     max_subagents: int = 10
+    # Spawn fails when this many turns are already running or reserved.
+    # It does not queue. send_input still waits on the running semaphore.
+    # Before this field, extra spawns were created and waited to enter stream.
     max_concurrent_running: int = 10
-    # Main session is depth 0. 1 keeps delegation on the main session only.
+    # Depth cap. Before this field, nesting had no depth limit.
+    # Main session is depth 0. Default 2 allows one fork under general-purpose.
+    # 1 keeps delegation on the main session only.
     max_spawn_depth: int = 2
     turn_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
     spawn_slot_wait_timeout_s: float = TURN_TIMEOUT_S_DEFAULT

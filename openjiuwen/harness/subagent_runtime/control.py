@@ -358,6 +358,7 @@ class SubagentControl:
         return live + self._concurrent_reservations
 
     async def _reserve_concurrent(self) -> None:
+        """Reject this spawn when another start would exceed the running cap."""
         async with self._quota_lock:
             if self._committed_running() >= self._config.max_concurrent_running:
                 raise build_subagent_runtime_error(CONCURRENT_LIMIT_REACHED)

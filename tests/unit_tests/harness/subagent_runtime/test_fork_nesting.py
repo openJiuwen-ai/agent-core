@@ -162,3 +162,69 @@ def test_refresh_keeps_fork_leaf_allowed_type() -> None:
     rail.refresh_available_agents(_Agent())
     assert rail.tools[0].allowed == frozenset({"fork"})
     assert "不能再派" in rail.tools[0].card.description
+
+
+def test_configure_clears_tool_binding_outside_a_spawn_frame() -> None:
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.subagent_runtime.binding import ToolBinding, push_creation, pop_creation
+    from openjiuwen.harness.subagent_runtime.binding import SpawnFrame
+
+    class _Agent(DeepAgent):
+        def _initial_configure(self, config) -> None:
+            _ = config
+
+        def _hot_reconfigure(self, config) -> None:
+            _ = config
+
+    agent = DeepAgent.__new__(_Agent)
+    agent._deep_config = None
+    agent._subagent_tool_binding = ToolBinding(
+        control=object(),
+        caller_id="old",
+        caller_depth=1,
+        caller_kind="general-purpose",
+    )
+    agent.configure(SimpleNamespace(tools=None))
+    assert agent._subagent_tool_binding is None
+
+    frame = SpawnFrame(
+        caller_agent=object(),
+        caller_depth=0,
+        caller_kind="",
+        caller_session_id=None,
+        child_id="child",
+        child_depth=1,
+        child_kind="general-purpose",
+        control=object(),
+    )
+    binding = ToolBinding(
+        control=frame.control,
+        caller_id="child",
+        caller_depth=1,
+        caller_kind="general-purpose",
+    )
+    tokens = push_creation(frame, binding)
+    try:
+        agent.configure(SimpleNamespace(tools=None))
+    finally:
+        pop_creation(*tokens)
+    assert agent._subagent_tool_binding is binding
+
+
+@pytest.mark.asyncio
+async def test_fork_rail_awaits_clearing_background_messages() -> None:
+    from openjiuwen.harness.subagent_runtime.fork_rail import ForkInstructionRail
+
+    rail = ForkInstructionRail("task", ["seed-msg"])
+
+    class _Session:
+        def __init__(self) -> None:
+            self.data = None
+
+        async def update_state(self, data):
+            self.data = data
+
+    session = _Session()
+    await rail.before_model_call(SimpleNamespace(session=session))
+    assert session.data == {"background_messages": None}
+    assert rail.pending_seed == ["seed-msg"]

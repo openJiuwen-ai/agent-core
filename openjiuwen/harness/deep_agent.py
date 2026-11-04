@@ -286,6 +286,7 @@ class DeepAgent(BaseAgent):
         self._interaction_lease_hold = False
         self._interaction_started = False
         self._agent_ras_setting: Any = None
+        self._subagent_tool_binding = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
@@ -346,9 +347,8 @@ class DeepAgent(BaseAgent):
         self._filter_disabled_tools(config)
         from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
 
-        binding = current_tool_binding()
-        if binding is not None:
-            self._subagent_tool_binding = binding
+        # None outside a spawn frame clears a binding left by an earlier configure.
+        self._subagent_tool_binding = current_tool_binding()
         if self._deep_config is None:
             self._initial_configure(config)
         else:

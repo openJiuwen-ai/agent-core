@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -29,5 +30,8 @@ class ForkInstructionRail(DeepAgentRail):
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         session = getattr(ctx, "session", None)
         update_state = getattr(session, "update_state", None)
-        if callable(update_state):
-            update_state({"background_messages": None})
+        if not callable(update_state):
+            return
+        result = update_state({"background_messages": None})
+        if asyncio.iscoroutine(result):
+            await result
