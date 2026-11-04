@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-02 |
+| 最近一次修订日期 | 2026-11-03 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
@@ -379,6 +379,64 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
 因此该设置不是网络访问隔离边界。严格访问隔离应由网络层实施。
 
 决策与限制见 `../features/F_01_task-scoped-web-research.md`。
+
+### Web 检索质量与预算
+
+- `free_search.provider` 为 `auto` / `bing` / `duckduckgo`，显式来源不能跳过启用开关或来源作用域。
+  免费引擎为 DuckDuckGo（含 reader 入口）与 Bing；不得自动调用付费工具。
+  已移除的来源不能通过遗留环境变量或任务级 `enabled_engines` 重新启用；未知 provider 明确报错且不发网络请求。
+- Bing 的主市场由 `FREE_SEARCH_BING_MARKET` 配置（默认 `en-US`），不再按查询是否含 CJK 选择市场。
+  当前支持 `en-US` / `zh-CN` 两种市场配置，查询和按查询语言生成的 Accept-Language 保持不变。
+  `FREE_SEARCH_BING_FALLBACK_MARKET` 缺省选择另一市场，`none` 禁用备用；相同市场去重，非法配置明确失败。
+  每次搜索仅在原始候选非空且筛选后全不合格时切换一次备用市场；成功、uncertain、空结果、访问限制和传输异常不触发。
+  主市场请求调用一次既有 `reserve_search("bing")`；一次备用市场属于同一次逻辑搜索，不额外扣次数。
+  每次市场请求都检查剩余时间；主请求未获得额度时不能执行备用请求，不退还已用额度。
+  默认每源 2 次允许最多 2 次 Bing 逻辑搜索（各至多 2 个市场请求），后续改词须重新取得额度。
+  两次候选仍不合格时明确失败；仅 `provider=auto` 可继续其他已启用来源。预算拒绝优先报告 `budget_exhausted`。
+  调试文件按市场区分响应、候选和拒绝原因，不能覆盖第一份证据。
+- 候选先做 URL、去重、搜索导航与域范围检查；不再使用主题别名、领域意图词或特定 query 规则判断语义。
+  每页最多 30 条有效候选通过当前 callback agent 的 `get_llm()` 批量评估；显式构造参数 `model` 用于
+  无 Agent 上下文的调用。模型在每次 invoke 解析，工具实例不缓存其他会话或热切换前的模型。
+  `WebResearchBudgetRail` 在 invocation 内保留原始任务，评估输入为原任务、当前查询和有界候选摘要，
+  不携带主对话历史、不提供工具。URL query/fragment/userinfo 不作为评估输入。
+  返回完整、不重复的整数候选 ID、`relevant/uncertain/rejected` 和短理由；JSON/schema/ID 不合法时整批失败，
+  不能让模型增加候选、URL、预算或执行操作。排序在相关性分组内采用模型返回顺序。
+  `FREE_SEARCH_ASSESSMENT_TIMEOUT_SECONDS` 默认 15 秒，限制为 1-60 秒，且受既有检索总时限约束。
+  评估单次调用通过 SDK 能力映射优先关闭思考；不可关闭时选 minimal/low，没有可用档位时保持 auto。
+  不修改主 Agent 配置；输出上限随候选数限制在 4096-8192 tokens。finish_reason 表示长度截断时
+  返回 `assessment_output_truncated`，即使残留文本看似 JSON 也不采信为完整评估。
+  不增加评估层重试；取消向上传播。诊断记录评估状态、耗时、逐条理由，不持久化原始模型错误中的凭据。
+  无模型、超时或无效输出返回 `Assessment status: unavailable`，按原来源顺序保留至 `max_results` 条
+  通过结构检查的 uncertain 未核验线索，不输出推荐抓取排名；提醒比较全部线索而非抓取全部候选。
+  不宣称 `ok/low_relevance`，不因为评估故障追加市场或引擎请求。调用方未提供模型时不会隐式创建新客户端。
+  正常评估的 uncertain 同样限量两条；相关候选不是事实验证，时效、数值与证据充分性仍需正文核验。
+  只有候选明确全被拒绝才触发已有低相关回退；数量、来源、市场与 fetch 预算保持不变。
+- Jina Reader 的 DDG Markdown 通过 Markdown 解析器按结果块绑定标题、链接及摘要，不能将正文链接视为独立标题或跨块串摘要。
+  `FREE_SEARCH_DEBUG` 开启时记录请求/最终 URL、响应状态和有截断标志的原文摘要、过滤前候选，以及每条拒绝/降权/限额原因。
+  默认关闭，不记录认证头或代理凭据；调试数据包含查询与页面内容，应按运行数据保存而不是提交源码。
+  验证码与访问限制必须返回 `blocked`，不能换同源入口绕过验证。
+- `WebFreeSearchTool._on_search_results(rows)` 是宿主子类的成功候选扩展点，仅在质量过滤后且非空时调用，
+  先于文本渲染；宿主可记录来源，不应复制 SDK 网络、策略与渲染实现。该记录不是事实真实性证明。
+- Fetch 对 HTTP 200 也执行内容检查；验证码、WAF、401/403/407/429/499 返回 `blocked`，
+  空正文返回 `empty`，动态空壳返回 `dynamic_shell`。只对无访问限制的公开 JS 空壳尝试一次 reader，
+  并检查 reader 是否仍是空内容或验证码。受限域名模式不走 reader。
+  直接响应同时检查原文与 HTML 提取后文本；reader 在剥离元数据后再次检查正文，防止包装后的 WAF 被报为成功。
+  MIME 或文件头识别的 PDF/二进制响应返回 `unsupported_content`，不返回原始二进制作为证据，
+  不自动调用 reader 或下载工具；PDF 正文解析仍需合适的文档工具。正常 HTML/JSON 中提及 PDF/WAF 不据此拒绝。
+- 正文保留绝对 HTTP(S) 链接、表格行列、定义列表及 `[missing]` 空值，不能从相邻字段推测未知值。
+  HTTP transport 单响应头字段上限 64 KiB；环境代理重试与 reader 回退不重置剩余超时。
+- 可选 `WebResearchBudgetRail` 在 `before_invoke` 创建独立预算，通过 `RunContext.extra` 传入 DeepAgent
+  内层各轮；`before_model_call` 为直接内层调用补齐预算。AbilityManager 对 `extra` 的浅拷贝让并行工具
+  引用同一预算对象。工具实例不持有跨会话计数；每次新 invocation 重建预算，原始调用方 RunContext 不被修改。
+- 默认每来源 2 次、最多 2 个来源、3 次 fetch、首次检索起 90 秒，分别由 `WEB_RESEARCH_SEARCHES_PER_ENGINE`、
+  `WEB_RESEARCH_MAX_ENGINES`、`WEB_RESEARCH_MAX_FETCHES`、`WEB_RESEARCH_TIMEOUT_SECONDS` 配置。
+  DDG 和 DDG reader 共用计数；计数在 await 前预留，耗尽返回 `budget_exhausted`，不再请求网络。
+  缺少 Rail 时，仅单次 free-search 回退有局部预算，不保证多次直接调用共享上限。
+- 该策略不替代用户授权，不管理付费/浏览器/自定义 MCP，不保证整个多智能体团队或长期会话的总配额，
+  也不强制终止 LLM 推理。证据充分可停止，缺失证据应说明，不再强制抓取两页。
+
+回归：`tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py`、`test_web_tools_v2.py`。
+实施记录：`F_20261103_1124_web-retrieval-quality`。
 
 ## Jev 分段交接补充（F_08，2026-09-23）
 
