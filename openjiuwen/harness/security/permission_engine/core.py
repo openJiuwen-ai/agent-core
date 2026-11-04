@@ -303,6 +303,10 @@ class PermissionEngine:
         """由宿主 / :class:`PermissionInterruptRail` 注入：当前上下文是否应执行工具权限校验。"""
         self._permission_checks_active = fn
 
+    def permission_checks_active(self) -> bool:
+        """Return whether the host enables ordinary tool checks in this context."""
+        return self._permission_checks_active is None or bool(self._permission_checks_active())
+
     def check_tool_permission_directly(
         self,
         tool_name: str,
@@ -462,8 +466,7 @@ class PermissionEngine:
                 tool_name,
             )
 
-        active_fn = self._permission_checks_active
-        if active_fn is not None and not active_fn():
+        if not self.permission_checks_active():
             logger.info(
                 "[PermissionEngine] permission.check.skip reason=permission_checks_inactive decision=allow",
             )

@@ -70,6 +70,10 @@ class SysOperation(card: SysOperationCard)
 
 * **card**([SysOperationCard](#class-sysoperationcard))：系统操作配置卡片。
 
+### sandbox_type
+
+只读属性，返回已配置的沙箱提供方类型（如 `"jiuwenbox"`）；本地模式返回 `None`。调用方无需读取内部运行配置。
+
 ### fs
 
 ```python

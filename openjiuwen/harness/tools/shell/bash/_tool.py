@@ -133,6 +133,13 @@ class BashTool(Tool):
 
     # ── input parsing ─────────────────────────────────────────
 
+    def resolve_shell_type(self, inputs: Dict[str, Any]) -> str | None:
+        """Return the known executor dialect; preserve local auto selection."""
+        if isinstance(self._operation, SysOperation) and self._operation.sandbox_type == "jiuwenbox":
+            selected = self._parse_inputs(inputs).shell_type
+            return "bash" if selected == "auto" else selected
+        return None
+
     @staticmethod
     def _resolve_timeout(raw_value: Any, default: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
         """Parse and validate a timeout value."""

@@ -74,6 +74,11 @@ System operation entry class, providing access to file, code, and Shell operatio
 
 * **card** ([SysOperationCard](#class-sysoperationcard)): System operation configuration card.
 
+### sandbox_type
+
+Read-only property returning the configured sandbox provider type (for example, `"jiuwenbox"`),
+or `None` in local mode. Callers do not need to inspect the internal run configuration.
+
 ### fs
 
 ```python

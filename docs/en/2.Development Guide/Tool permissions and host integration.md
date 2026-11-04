@@ -188,10 +188,21 @@ Hosts that wrap tools or own a bound command adapter can provide
 `ToolPermissionHost.resolve_shell_execution(ctx, tool_call, args)`. It returns
 `LocalDeleteExecution` or None, synchronously or asynchronously. A configured
 hook replaces native inference; failure, None or an untyped result never falls
-back to a less-specific executor. Verification finishes before the final live
-snapshot/root is bound, so an asynchronous verifier cannot reuse another
+back to a less-specific executor. The rail reads the permission snapshot before
+dialect binding and executor verification, then restores that call's configuration
+and workspace root after asynchronous verification. It does not reuse another
 session's refresh. Swarm uses this for its fixed-shell wrappers and its owned
 local `mcp_exec_command`; external MCP names establish no executor identity.
+
+`ToolPermissionHost.resolve_shell_type(ctx, tool_call, args)` accepts a synchronous
+or asynchronous resolver for Shell calls. It returns `bash`, `sh`, `cmd` or
+`powershell` (case-insensitive, with surrounding whitespace ignored), or `None`
+for native inference. Successful binding updates both checked and executed
+arguments, even when checks are disabled. Resolver errors or invalid dialects
+reject while checks are enabled; otherwise the original arguments continue to
+the engine, preserving its disabled-check contract. Native inference uses
+`BashTool.resolve_shell_type(inputs)`: JiuwenBox `auto` resolves to Bash, while
+local mode returns `None` to preserve local selection.
 Currently the finite subset is `rm -- <literal files>` on native POSIX shells,
 or `Remove-Item -LiteralPath <one literal file>` on Windows PowerShell. Remote
 providers, MCP terminals, Windows POSIX path translation, recursive deletion,
