@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 275 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 272 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -18,13 +18,9 @@ generated: true
 | [agent_evolving](#module-1) | 1 |
 | [agent_teams](#module-2) | 199 |
 | [agent_teams/workflow](#module-3) | 15 |
-| [core/context_engine](#module-4) | 3 |
-| [core/extension](#module-5) | 2 |
-| [extensions/observability](#module-6) | 2 |
-| [harness](#module-7) | 54 |
-| [jiuwenswarm/extensions_v2](#module-8) | 1 |
-| [jiuwenswarm/server/runtime/agent_adapter](#module-9) | 1 |
-| [未分类](#module-10) | 6 |
+| [extensions/observability](#module-4) | 2 |
+| [harness](#module-5) | 54 |
+| [未分类](#module-6) | 6 |
 
 <a id="module-1"></a>
 
@@ -264,25 +260,6 @@ generated: true
 
 <a id="module-4"></a>
 
-## core/context_engine
-
-| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
-| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
-| [S_context_engine_01_compaction](specs/context_engine/S_01_compaction.md) | S | 原生上下文压缩拦截与候选提交规约 | 刘瑜 | core/context_engine | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py | — |
-
-<a id="module-5"></a>
-
-## core/extension
-
-| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
-| [F_20261103_1515_session-compaction-events](features/F_20261103_1515_session-compaction-events.md) | F | 原生压缩候选与 Server 扩展联动实施 | 刘瑜 | core/context_engine, core/extension | openjiuwen/core/context_engine/compaction.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/extension/runtime.py | [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) |
-
-<a id="module-6"></a>
-
 ## extensions/observability
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -290,7 +267,7 @@ generated: true
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0023](designs/proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | D | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | @alan_cheng | extensions/observability | — | — |
 
-<a id="module-7"></a>
+<a id="module-5"></a>
 
 ## harness
 
@@ -351,23 +328,7 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
-<a id="module-8"></a>
-
-## jiuwenswarm/extensions_v2
-
-| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
-
-<a id="module-9"></a>
-
-## jiuwenswarm/server/runtime/agent_adapter
-
-| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
-|---|---|---|---|---|---|---|
-| [D-20261103-1156-session-compaction-events](designs/active/D-20261103-1156-session-compaction-events/design.md) | D | Core 与 Server 会话压缩扩展方案 | 刘瑜 | core/context_engine, core/extension, jiuwenswarm/extensions_v2, jiuwenswarm/server/runtime/agent_adapter | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/processor/base.py, openjiuwen/core/extension/runtime.py | — |
-
-<a id="module-10"></a>
+<a id="module-6"></a>
 
 ## 未分类
 
