@@ -22,6 +22,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -293,8 +294,11 @@ class SessionsSpawnTool(Tool):
                 reason=f"Invalid inputs type: {type(inputs)}",
             )
 
+        # Resolve before the browser check and before storing metadata so the
+        # submit and execute sides agree on one registered name.
+        subagent_type = resolve_subagent_type_name(self._parent_agent, subagent_type)
         browser_capabilities: Optional[List[str]] = None
-        if str(subagent_type) == "browser_agent":
+        if subagent_type == "browser_agent":
             raw_capabilities = inputs.get("browser_capabilities")
             if raw_capabilities is None:
                 browser_capabilities = []

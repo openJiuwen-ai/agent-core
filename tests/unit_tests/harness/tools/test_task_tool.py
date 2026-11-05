@@ -989,6 +989,23 @@ class TestTaskToolSync(unittest.TestCase):
             self.assertIsNotNone(re.fullmatch(rf"parent_sub_{non_sticky}_[0-9a-f]{{8}}", first))
             self.assertNotEqual(first, second)
 
+    def test_sub_session_id_normalizes_unicode_dash_like_runtime(self) -> None:
+        from openjiuwen.harness.subagent_runtime.ids import build_subagent_id
+
+        pattern = r"parent_sub_general-purpose_[0-9a-f]{8}"
+        self.assertIsNotNone(
+            re.fullmatch(
+                pattern,
+                TaskTool._build_sub_session_id("parent", "general\u2011purpose"),
+            )
+        )
+        self.assertIsNotNone(
+            re.fullmatch(
+                pattern,
+                build_subagent_id("parent", "general\u2011purpose", sticky=False),
+            )
+        )
+
     def test_create_task_tool(self) -> None:
         parent_agent = SimpleNamespace(deep_config=None)
         tools = create_task_tool(

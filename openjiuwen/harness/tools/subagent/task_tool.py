@@ -41,7 +41,7 @@ from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
 )
-from openjiuwen.harness.subagent_type import resolve_subagent_type_name
+from openjiuwen.harness.subagent_type import normalize_subagent_type, resolve_subagent_type_name
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 try:
@@ -245,7 +245,7 @@ class TaskTool(Tool):
         subagent_type: str,
         resume_task_id: str = "",
     ) -> str:
-        normalized_type = str(subagent_type or "").strip()
+        normalized_type = normalize_subagent_type(subagent_type)
         normalized_resume_id = str(resume_task_id or "").strip()
         if normalized_resume_id:
             expected_prefix = f"{parent_session_id}_sub_{normalized_type}_"

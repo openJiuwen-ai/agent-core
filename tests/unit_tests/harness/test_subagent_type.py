@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +17,7 @@ from openjiuwen.harness.subagent_type import (
     canonical_subagent_key,
     normalize_subagent_type,
     resolve_subagent_type_name,
+    subagent_spec_name,
 )
 
 
@@ -105,6 +107,24 @@ def test_resolve_subagent_type_name_falls_back_to_allowed_set():
     assert (
         resolve_subagent_type_name(parent, "general_purpose", {"other_agent"})
         == "general_purpose"
+    )
+
+
+def test_subagent_spec_name_ignores_dynamic_mock_attributes():
+    spec = MagicMock()
+    spec.card.name = MagicMock()
+
+    assert subagent_spec_name(spec) == ""
+    assert subagent_spec_name(SimpleNamespace(agent_card=SimpleNamespace(name=123))) == ""
+
+
+def test_resolve_subagent_type_name_tolerates_mock_parent_agent():
+    parent = MagicMock()
+
+    assert resolve_subagent_type_name(parent, " general_purpose ") == "general_purpose"
+    assert (
+        resolve_subagent_type_name(parent, "general_purpose", {"general-purpose"})
+        == "general-purpose"
     )
 
 

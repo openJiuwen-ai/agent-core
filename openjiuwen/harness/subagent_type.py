@@ -48,9 +48,17 @@ def canonical_subagent_key(value: object) -> str:
 
 
 def subagent_spec_name(spec: object) -> str:
-    """Return the registered name from a SubAgentConfig or DeepAgent-like spec."""
+    """Return the registered name from a SubAgentConfig or DeepAgent-like spec.
+
+    Only real strings are accepted. Tests and host integrations may replace the
+    parent agent with a mock, whose dynamically created attributes are not
+    registered names and must not leak into session ids or tool arguments.
+    """
     card = getattr(spec, "agent_card", None) or getattr(spec, "card", None)
-    return str(getattr(card, "name", "") or "")
+    name = getattr(card, "name", None)
+    if not isinstance(name, str):
+        return ""
+    return name
 
 
 def resolve_subagent_type_name(
