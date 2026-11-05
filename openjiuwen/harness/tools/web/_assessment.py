@@ -10,13 +10,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.llm import Model, ReasoningConfig, get_reasoning_capability
 from openjiuwen.core.foundation.llm.reasoning import provider_identity, resolve_reasoning_protocol
+from openjiuwen.harness.tools.web._common import _parse_http_url
 
 
 _SYSTEM_PROMPT = """Assess search candidates for the given task and search query.
@@ -75,9 +76,15 @@ def resolve_search_model(context: Any, fallback: Model | None = None) -> Model |
 
 
 def _candidate_payload(index: int, row: dict[str, str]) -> dict[str, Any]:
-    parsed = urlsplit(str(row.get("url", "")))
-    # URL query strings can repeat the query or contain tokens; neither is evidence.
-    source = urlunsplit((parsed.scheme, parsed.hostname or "", parsed.path, "", ""))
+    parsed = _parse_http_url(str(row.get("url", "")))
+    source = ""
+    if parsed is not None:
+        host = parsed.hostname or ""
+        authority = f"[{host}]" if ":" in host else host
+        if parsed.port is not None:
+            authority = f"{authority}:{parsed.port}"
+        # Preserve the source authority, but never expose credentials/query/fragment.
+        source = urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
     return {
         "id": index,
         "title": str(row.get("title", ""))[:300],

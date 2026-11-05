@@ -18,7 +18,7 @@ import os
 import re
 from html import unescape
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import SplitResult, parse_qs, quote_plus, unquote, urlparse, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -122,6 +122,19 @@ def _parse_html(html: str) -> BeautifulSoup:
         return BeautifulSoup(html, "html.parser")
 
 
+def _parse_http_url(url: str) -> SplitResult | None:
+    """Parse an untrusted result target without letting one URL abort its batch."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        # Port validation is lazy in urllib; hostname alone does not validate it.
+        _ = parsed.port
+        return parsed
+    except ValueError:
+        return None
+
+
 def _normalized_domain(url: str) -> str:
     """Return a normalized domain for ranking/filtering."""
     hostname = (urlparse(url).hostname or "").lower().strip()
@@ -159,7 +172,11 @@ def _domain_allowed(url: str, allowed_domains: tuple[str, ...] | list[str] | Non
 
 def _decode_ddg_redirect(url: str) -> str:
     """Decode DuckDuckGo redirect URLs."""
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        # Preserve the original target for candidate-level structural rejection.
+        return url
     if parsed.path != "/l/":
         return url
     query = parse_qs(parsed.query)
@@ -171,7 +188,10 @@ def _decode_ddg_redirect(url: str) -> str:
 
 def _decode_bing_redirect(url: str) -> str:
     """Decode Bing redirect URLs to extract the actual target URL."""
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
     if "bing.com" not in parsed.netloc.lower() or parsed.path != "/ck/a":
         return url
 

@@ -47,6 +47,7 @@ from openjiuwen.harness.tools.web._common import (
     _env_flag,
     _normalized_domain,
     _parse_html,
+    _parse_http_url,
     _safe_int,
     _search_request_headers,
     _strip_tags,
@@ -107,7 +108,7 @@ def _select_search_candidates(
     for index, row in enumerate(rows):
         url = str(row.get("url", "") or "").strip()
         title = str(row.get("title", "") or "").strip()
-        if not title or not url or urlparse(url).scheme not in {"https", "http"} or not urlparse(url).hostname:
+        if not title or _parse_http_url(url) is None:
             relevance, reasons = "rejected", ["invalid_target"]
         elif url in seen:
             relevance, reasons = "rejected", ["duplicate_url"]
@@ -154,11 +155,11 @@ def _parse_ddg_reader(text: str, max_results: int) -> list[dict[str, str]]:
         if anchor is None or anchor.find("img") is not None:
             continue
         href = _decode_ddg_redirect(unescape(str(anchor["href"]))).strip()
-        parsed = urlparse(href)
-        host = (parsed.hostname or "").casefold()
+        parsed = _parse_http_url(href)
         title = " ".join(anchor.get_text(" ", strip=True).split())
-        if not title or parsed.scheme not in {"http", "https"} or not host:
+        if not title or parsed is None:
             continue
+        host = (parsed.hostname or "").casefold()
         if host == "duckduckgo.com" or host.endswith(".duckduckgo.com") or href in seen:
             continue
         snippets = []
@@ -414,8 +415,8 @@ def _extract_bing_answer_cards(soup: BeautifulSoup, fallback_url: str) -> list[d
         if anchor is not None:
             href_raw = unescape(str(anchor.get("href", "") or ""))
             href = _decode_bing_redirect(href_raw)
-            parsed = urlparse(href)
-            if not parsed.scheme.startswith("http") or "bing.com" in parsed.netloc.lower():
+            parsed = _parse_http_url(href)
+            if parsed is None or "bing.com" in parsed.netloc.lower():
                 href = ""
         title_parts: list[str] = []
         for selector in (".b_focusLabel", ".b_focusTextLarge", ".b_focusTextMedium", ".b_focusTextSmall", "h2", "h3"):
@@ -574,9 +575,11 @@ def _parse_domestic_search_html(
         href = str(anchor.get("href", "") or "").strip()
         if not href or href.startswith(("#", "javascript:", "mailto:")):
             continue
-        absolute = urljoin(base_url, unescape(href))
-        parsed = urlparse(absolute)
-        if parsed.scheme not in {"http", "https"}:
+        try:
+            absolute = urljoin(base_url, unescape(href))
+        except ValueError:
+            continue
+        if _parse_http_url(absolute) is None:
             continue
         if allowed_domains and not _domain_allowed(absolute, allowed_domains):
             continue
