@@ -636,6 +636,45 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return local_delete_execution(instances[name], tool_args)
         return None
 
+    async def _shell_count_cwd(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
+    ) -> str | None:
+        """Best-effort execution cwd, used only to expand deletion counting."""
+        hook = self._host.resolve_shell_cwd
+        if hook is not None:
+            try:
+                cwd = hook(ctx, tool_call, tool_args)
+                cwd = await cwd if inspect.isawaitable(cwd) else cwd
+                if cwd:
+                    return str(cwd)
+            except Exception:
+                logger.warning("[PermissionEngine] permission.shell_cwd.unavailable", exc_info=True)
+        manager = getattr(getattr(ctx, "agent", None), "ability_manager", None)
+        instances = getattr(manager, "_tool_instances", None)
+        tool = instances.get(getattr(tool_call, "name", "")) if isinstance(instances, dict) else None
+        try:
+            from openjiuwen.harness.tools.shell.bash import BashTool
+        except ImportError:
+            return None
+        try:
+            from openjiuwen.harness.tools.shell.powershell import PowerShellTool
+        except ImportError:
+            PowerShellTool = ()
+        if not isinstance(tool, (BashTool, PowerShellTool)):
+            return None
+        try:
+            workdir = tool.resolve_workdir(tool_args)
+        except Exception:
+            return None
+        if workdir:
+            return str(workdir)
+        try:
+            from openjiuwen.core.sys_operation.cwd import get_cwd
+
+            return get_cwd()
+        except Exception:
+            return None
+
     async def _bind_shell_type(
         self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], tool_args: dict[str, Any],
     ) -> dict[str, Any] | None:
@@ -784,6 +823,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if self._engine.config is not effective_config:
                 self.update_config(effective_config)
             execution = await self._verified_shell_execution(ctx, tool_call, tool_args)
+            count_cwd = None
+            if execution is None and is_shell_tool(normalized_name, shell_tools_from_config(self._engine.config)):
+                # rm -rf 等复合命令拿不到严格执行证明；计数仍按真实执行目录展开。
+                count_cwd = await self._shell_count_cwd(ctx, tool_call, tool_args)
             logger.info(
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
@@ -806,6 +849,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         inputs = getattr(ctx, "inputs", None)
                         if hasattr(inputs, "tool_args"):
                             inputs.tool_args = serialized
+                elif count_cwd:
+                    execution_kwargs["delete_count_cwd"] = count_cwd
                 result = await self._engine.check_permission(
                     tool_name=normalized_name,
                     tool_args=tool_args,

@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from openjiuwen.harness.security.permission_engine.delguard.del_count import (
     _entry_cost,
     count_deletion_targets,
@@ -19,6 +21,29 @@ def _mk(tmp_path, name: str, content: bytes = b"x") -> str:
     p = tmp_path / name
     p.write_bytes(content)
     return str(p)
+
+
+def _try_symlink(target: Path, link: Path, *, target_is_directory: bool = False) -> bool:
+    try:
+        os.symlink(str(target), str(link), target_is_directory=target_is_directory)
+    except (OSError, NotImplementedError):
+        return False
+    return True
+
+
+def _try_dir_link(target: Path, link: Path) -> bool:
+    """目录链接：优先 symlink，Windows 无创建权限时退到免提权的 junction."""
+    if _try_symlink(target, link, target_is_directory=True):
+        return True
+    if os.name == "nt":
+        import subprocess
+
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0 and os.path.lexists(link)
+    return False
 
 
 def test_entry_cost_file_symlink_dir(tmp_path) -> None:
@@ -170,3 +195,123 @@ def test_posix_single_segment_paths_are_not_cmd_switches() -> None:
 def test_count_unexpanded_var_skip(tmp_path) -> None:
     count, _ = count_deletion_targets("rm $TARGET", "bash", str(tmp_path))
     assert count == 0
+
+
+def test_count_symlink_to_dir_counts_one_and_keeps_link_identity(tmp_path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    for i in range(3):
+        (target / f"f{i}").write_bytes(b"x")
+    link = tmp_path / "link"
+    if not _try_dir_link(target, link):
+        pytest.skip("symlink creation is not permitted on this host")
+
+    count, paths = count_deletion_targets(f"rm -rf {link}", "bash", str(tmp_path))
+    assert count == 1
+    # 审批列表必须展示链接本体，而不是它指向的目录。
+    assert [os.path.normcase(p) for p in paths] == [
+        os.path.normcase(os.path.normpath(str(link))),
+    ]
+
+
+def test_count_trailing_slash_link_counts_target_contents(tmp_path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    for i in range(3):
+        (target / f"f{i}").write_bytes(b"x")
+    link = tmp_path / "link"
+    if not _try_dir_link(target, link):
+        pytest.skip("symlink creation is not permitted on this host")
+
+    # 尾分隔符强制按目录解析并跟随链接（GNU rm FTS_COMFOLLOW），删除的是目标目录内容。
+    count, paths = count_deletion_targets(f"rm -rf {link}/", "bash", str(tmp_path))
+    assert count == 3
+    assert [os.path.normcase(p) for p in paths] == [
+        os.path.normcase(os.path.realpath(str(link))),
+    ]
+
+    # 无尾分隔符仍按链接本体计 1，两种写法语义必须区分开。
+    count_link, _ = count_deletion_targets(f"rm -rf {link}", "bash", str(tmp_path))
+    assert count_link == 1
+
+
+def test_count_powershell_trailing_sep_junction_counts_target_contents(tmp_path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "f0").write_bytes(b"x")
+    (target / "f1").write_bytes(b"x")
+    link = tmp_path / "junction"
+    if not _try_dir_link(target, link):
+        pytest.skip("symlink creation is not permitted on this host")
+
+    # PowerShell 接受正斜杠路径分隔，尾分隔符语义与 bash 一致：进入目标目录。
+    count, _ = count_deletion_targets(
+        f"Remove-Item {link.as_posix()}/ -Recurse -Force", "powershell", str(tmp_path),
+    )
+    assert count == 2
+
+    if os.name == "nt":
+        count_bs, _ = count_deletion_targets(
+            f"Remove-Item {link}\\ -Recurse -Force", "powershell", str(tmp_path),
+        )
+        assert count_bs == 2
+
+
+def test_count_dangling_symlink_counts_one(tmp_path) -> None:
+    link = tmp_path / "dangling"
+    if not _try_symlink(tmp_path / "missing", link):
+        pytest.skip("symlink creation is not permitted on this host")
+
+    count, paths = count_deletion_targets(f"rm {link}", "bash", str(tmp_path))
+    assert count == 1
+    assert len(paths) == 1
+
+
+def test_count_link_and_target_are_separate_targets(tmp_path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "inner").write_bytes(b"x")
+    link = tmp_path / "link"
+    if not _try_dir_link(target, link):
+        pytest.skip("symlink creation is not permitted on this host")
+    plain = tmp_path / "plain.txt"
+    plain.write_bytes(b"x")
+
+    # plain.txt = 1, link = 1, target 目录内容 = 1（链接不展开，目录本身不计）。
+    count, paths = count_deletion_targets(f"rm -rf {plain} {link} {target}", "bash", str(tmp_path))
+    assert count == 3
+    assert len(paths) == 3
+
+
+def test_count_dir_containing_symlink_does_not_follow_it(tmp_path) -> None:
+    outer = tmp_path / "outer"
+    nested_target = outer / "nested_target"
+    nested_target.mkdir(parents=True)
+    (nested_target / "deep1").write_bytes(b"x")
+    (nested_target / "deep2").write_bytes(b"x")
+    link = outer / "nested_link"
+    if not _try_dir_link(nested_target, link):
+        pytest.skip("symlink creation is not permitted on this host")
+    (outer / "plain").write_bytes(b"x")
+
+    # plain = 1, nested_link = 1, nested_target 不被链接展开，但目标目录本身在树里，递归得 2。
+    count, _ = count_deletion_targets(f"rm -rf {outer}", "bash", str(tmp_path))
+    assert count == 4
+
+
+def test_count_cd_changes_relative_base(tmp_path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    victim = sub / "x.txt"
+    victim.write_bytes(b"x")
+
+    count, paths = count_deletion_targets("cd sub && rm -f x.txt", "bash", str(tmp_path))
+    assert count == 1
+    assert [os.path.normcase(p) for p in paths] == [os.path.normcase(str(victim))]
+
+
+def test_count_pipeline_accumulates(tmp_path) -> None:
+    a = _mk(tmp_path, "a")
+    b = _mk(tmp_path, "b")
+    count, _ = count_deletion_targets(f"rm {a} | rm {b}", "bash", str(tmp_path))
+    assert count == 2

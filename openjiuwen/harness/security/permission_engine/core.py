@@ -444,6 +444,7 @@ class PermissionEngine:
         *,
         workspace_delete_execution: LocalDeleteExecution | None = None,
         file_accesses: list[tuple[Path, FileGuardAction]] | None = None,
+        delete_count_cwd: str | None = None,
     ) -> PermissionResult:
         """Return a complete policy decision, including denial on analysis limits.
 
@@ -455,11 +456,13 @@ class PermissionEngine:
         try:
             if file_accesses is None:
                 return await self._check_permission(
-                    tool_name, tool_args, workspace_delete_execution=workspace_delete_execution,
+                    tool_name, tool_args,
+                    workspace_delete_execution=workspace_delete_execution, delete_count_cwd=delete_count_cwd,
                 )
             return await self._check_permission(
-                tool_name, tool_args, workspace_delete_execution=workspace_delete_execution,
-                file_accesses=file_accesses,
+                tool_name, tool_args,
+                workspace_delete_execution=workspace_delete_execution,
+                file_accesses=file_accesses, delete_count_cwd=delete_count_cwd,
             )
         except BaseError as exc:
             if not isinstance(exc.details, dict) or exc.details.get("rule_id") != "file_guard:analysis_limit":
@@ -475,6 +478,7 @@ class PermissionEngine:
         *,
         workspace_delete_execution: LocalDeleteExecution | None = None,
         file_accesses: list[tuple[Path, FileGuardAction]] | None = None,
+        delete_count_cwd: str | None = None,
     ) -> PermissionResult:
         """检查工具调用权限.
 
@@ -638,8 +642,15 @@ class PermissionEngine:
         del_result = None
         if self._deletion_guard is not None:
             delete_args = tool_args
-            if exact_paths.get("literal_delete_targets") and workspace_delete_execution is not None:
-                delete_args = {**tool_args, "workdir": str(workspace_delete_execution.cwd)}
+            # 删除计数必须按实际执行目录展开相对路径；file_guard 的
+            # literal_delete_targets 只是它自己的门槛，与计数无关。没有严格
+            # 执行证明时，退回宿主提供的计数目录（仅计数，不授权）。
+            count_cwd = (
+                str(workspace_delete_execution.cwd)
+                if workspace_delete_execution is not None else delete_count_cwd
+            )
+            if count_cwd:
+                delete_args = {**tool_args, "workdir": count_cwd}
             del_result = self._deletion_guard.evaluate(tool_name, delete_args)
             if del_result is not None:
                 del_rule = del_result.matched_rule or "del_guard"
