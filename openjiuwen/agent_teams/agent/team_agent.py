@@ -57,8 +57,61 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
+
+
+def team_member_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    member_name: str,
+    display_name: str,
+    is_leader: bool = False,
+) -> "ExecutionSubject":
+    """Build the trajectory owner identity of one Team member execution.
+
+    Shared by long-lived members, swarmflow workers and avatars so they land
+    in the same trajectory lane.
+    """
+    from openjiuwen.harness.execution_subject import ExecutionSubject
+
+    return ExecutionSubject(
+        subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+        display_name=display_name,
+        kind="team_leader" if is_leader else "team_member",
+        parent_subject_id="",
+        session_id=session_id,
+    )
+
+
+def team_reviewer_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    task_id: str,
+    reviewer: str,
+    review_round: int,
+    attempt: int = 0,
+    assignee: str | None = None,
+) -> "ExecutionSubject":
+    """Build the trajectory owner identity of one temp reviewer harness run."""
+    from openjiuwen.harness.execution_subject import ExecutionSubject
+
+    parent = (
+        f"team-member:{session_id}:{team_name}:{assignee}" if assignee else ""
+    )
+    return ExecutionSubject(
+        subject_id=(
+            f"team-reviewer:{session_id}:{team_name}:{task_id}:"
+            f"{reviewer}:r{review_round}:a{attempt}"
+        ),
+        display_name=reviewer,
+        kind="team_reviewer",
+        parent_subject_id=parent,
+        session_id=session_id,
+    )
 
 
 # pylint: disable=too-many-public-methods
@@ -446,6 +499,19 @@ class TeamAgent(BaseAgent):
             return
         await harness.send(content, immediate=use_steer)
 
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller` — the spawn path
+        reads it off the leader to attach the SAME session-level controller to
+        an in-process teammate after its configure, so every member's
+        swarmflow runs register in one registry. None before any attach (or
+        when no runtime is built yet).
+        """
+        harness = self.harness
+        return harness.background_task_controller if harness is not None else None
+
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
 
@@ -456,6 +522,54 @@ class TeamAgent(BaseAgent):
         harness = self.harness
         if harness is not None:
             harness.set_background_task_controller(controller)
+
+    def share_workspace_cache_with(self, other: "TeamAgent") -> None:
+        """Share the team-level workspace manager with an in-process teammate.
+
+        Must run **before** ``teammate.configure(...)``.
+        """
+        own = self._configurator.workspace_manager
+        if own is not None:
+            other.attach_workspace_manager(own)
+
+    def attach_workspace_manager(self, manager: "TeamWorkspaceManager | None") -> None:
+        """Adopt a shared workspace manager (in-process member share)."""
+        self._configurator.workspace_manager = manager
+
+    def share_checkpoints_with(self, other: "TeamAgent") -> None:
+        """Share the leader's checkpoint namespace with another agent.
+
+        No-op until this tree grows a shared named-checkpoint store; the
+        spawn path still calls this so hosts / tests can observe ordering.
+        """
+        named = getattr(self, "_named_checkpoints", None)
+        setter = getattr(other, "set_checkpoints_from", None)
+        if named is not None and callable(setter):
+            setter(named)
+
+    def share_swarmflow_with(self, other: "TeamAgent") -> None:
+        """Share the team-level swarmflow infrastructure with an in-process teammate.
+
+        The leader constructs the shared swarmflow objects (governor /
+        budget ledger / model resolver / base specs / expert table) once at
+        its setup; in-process teammates reuse the same instance by reference
+        so concurrent runs from any member draw down one budget pool under
+        one L1/L3 authority. Must run **before** ``teammate.configure(...)``:
+        afterwards the teammate's setup has already run without it.
+        """
+        own = self._configurator.swarmflow
+        if own is not None:
+            other.attach_swarmflow(own)
+
+    def attach_swarmflow(self, infra: "SwarmflowInfra | None") -> None:
+        """Adopt the shared team-level swarmflow infrastructure (in-process member share).
+
+        Called by the leader's ``share_swarmflow_with`` — the
+        teammate's ``setup_agent`` reads the injected instance instead of
+        constructing its own (construction is leader-only; a member without
+        injection keeps every field empty).
+        """
+        self._configurator.swarmflow = infra
 
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
@@ -1287,4 +1401,4 @@ class TeamAgent(BaseAgent):
         return agent
 
 
-__all__ = ["TeamAgent"]
+__all__ = ["TeamAgent", "team_member_execution_subject", "team_reviewer_execution_subject"]
