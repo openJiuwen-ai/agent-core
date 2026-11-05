@@ -303,18 +303,27 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
     read/write tokens, reasoning tokens, response model, per-kind costs,
     first-token timing) off an ``AssistantMessage`` payload, normalized via
-    ``model_dump`` semantics. Present values are set unconditionally — a
-    recorded 0 is a fact, not an absence.
+    ``model_dump`` semantics; decorator-measured streams instead carry usage
+    as a container-level ``usage_metadata`` sibling of ``outputs`` (see the
+    note at the unwrap call below). Present values are set unconditionally —
+    a recorded 0 is a fact, not an absence.
     """
     obj = _unwrap_llm_payload(outputs)
-    if not isinstance(obj, dict):
-        return
-    finish_reason = obj.get("finish_reason")
-    # "null" is the schema default for AssistantMessage.finish_reason, i.e.
-    # "provider did not report one" — not a zero value, so it stays filtered.
-    if finish_reason and str(finish_reason) != "null":
-        otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
-    usage = obj.get("usage_metadata")
+    # Decorator-measured streams attach usage as a container-level sibling of
+    # "outputs": unwrap drills into the chunk list, which cannot carry usage
+    # itself, so the sibling is read before the unwrapped-object fallback
+    # (rail payloads embed usage on the message and keep that path). A chunk
+    # list also skips the finish_reason block instead of aborting the read.
+    sibling = outputs.get("usage_metadata") if isinstance(outputs, dict) else None
+    usage = sibling if isinstance(sibling, dict) else None
+    if usage is None:
+        usage = obj.get("usage_metadata") if isinstance(obj, dict) else None
+    if isinstance(obj, dict):
+        finish_reason = obj.get("finish_reason")
+        # "null" is the schema default for AssistantMessage.finish_reason, i.e.
+        # "provider did not report one" — not a zero value, so it stays filtered.
+        if finish_reason and str(finish_reason) != "null":
+            otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
     if not isinstance(usage, dict):
         return
     otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
@@ -371,6 +380,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
     LLM spans use ``SpanKind.CLIENT`` and ``gen_ai.*`` semantic conventions;
     all other types use ``SpanKind.INTERNAL`` and ``openjiuwen.agent.*``.
     """
+
+    # Capability probe for embedding applications (e.g. agent-studio's
+    # trace-compat gate): this build consumes decorator-measured llm spans —
+    # a container-level "usage_metadata" sibling on the end payload and
+    # workflow_id/workflow_name identity keys — as pure additions, without
+    # any span-merge logic. Bump when the consumed shape changes.
+    LLM_SPAN_DECORATOR_CAPABILITY = 1
 
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
@@ -485,7 +501,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         ``agent_id`` / ``agent_name`` / ``agent_description`` /
         ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
         without them (other rails, direct handler callers) simply skip the
-        attributes.
+        attributes. Decorator-measured llm spans forward the same info plus
+        ``workflow_id`` / ``workflow_name``; ``component_*`` keys are
+        deliberately not mapped — ``openjiuwen.workflow.component_id`` is the
+        backend's shell discriminator and inner llm spans must not claim it.
         """
         info = instance_info or {}
         agent_id = info.get("agent_id")
@@ -502,8 +521,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
         if info.get("user_id"):
             otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
-        if info.get("metadata"):
+        # First writer wins for metadata: decorator identity stamps it at span
+        # start, and a later rail-forwarded info must not clobber it.
+        if info.get("metadata") and OJ_GEN_AI_METADATA not in (otel_span.attributes or {}):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+        # Workflow context from decorator-forwarded identity: written only when
+        # absent so the start-time value survives a second identity forward.
+        existing = otel_span.attributes or {}
+        if info.get("workflow_id") and OJ_WORKFLOW_ID not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_ID, str(info["workflow_id"]))
+        if info.get("workflow_name") and OJ_WORKFLOW_NAME not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_NAME, str(info["workflow_name"]))
 
     # --- helper: set common agent attributes (non-LLM) ---
 

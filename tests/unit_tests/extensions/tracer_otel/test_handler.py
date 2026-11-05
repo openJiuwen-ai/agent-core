@@ -91,6 +91,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_ERROR_MESSAGE,
     OJ_WORKFLOW_ID,
     OJ_WORKFLOW_INVOKE_DATA,
+    OJ_WORKFLOW_NAME,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
@@ -1556,6 +1557,67 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[OJ_GEN_AI_USER_ID] == "u-9"
         assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-9", "channel": "web"}
 
+    async def test_llm_start_sets_workflow_identity_attrs(self):
+        """Decorator-forwarded identity adds workflow_id/workflow_name;
+        component_* keys are deliberately excluded — the backend's shell
+        discriminator must not appear on inner llm spans."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "workflow_id": "wf-7",
+                "workflow_name": "triage-flow",
+                "component_id": "comp-1",
+                "component_name": "llm-node",
+                "metadata": {"origin": "decorator"},
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[OJ_WORKFLOW_ID] == "wf-7"
+        assert s.attributes[OJ_WORKFLOW_NAME] == "triage-flow"
+        assert OJ_WORKFLOW_COMPONENT_ID not in s.attributes
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"origin": "decorator"}
+
+    async def test_agent_identity_workflow_keys_and_metadata_first_writer_wins(self):
+        """workflow_id/workflow_name/metadata are write-if-absent: a second
+        identity forward must not clobber the start-time values."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span = _OTEL_TRACER.start_span(name="identity-probe")
+        span.set_attribute(OJ_WORKFLOW_ID, "wf-first")
+        span.set_attribute(OJ_GEN_AI_METADATA, json.dumps({"origin": "first"}))
+
+        handler._set_agent_identity_attrs(
+            span,
+            {
+                "workflow_id": "wf-second",
+                "workflow_name": "late-flow",
+                "metadata": {"origin": "second"},
+            },
+        )
+
+        assert span.attributes[OJ_WORKFLOW_ID] == "wf-first"
+        # Absent keys are still written.
+        assert span.attributes[OJ_WORKFLOW_NAME] == "late-flow"
+        assert json.loads(span.attributes[OJ_GEN_AI_METADATA]) == {"origin": "first"}
+        span.end()
+
+    async def test_llm_span_decorator_capability_constant(self):
+        """Embedding applications (agent-studio's trace-compat gate) probe
+        this constant to decide whether decorator-measured llm spans are safe
+        to emit; the attribute missing means an older handler build."""
+        assert OtelAgentHandler.LLM_SPAN_DECORATOR_CAPABILITY >= 1
+
     async def test_llm_start_without_params_sets_no_request_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
@@ -1611,6 +1673,75 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
         assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
         assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+
+    async def test_llm_end_reads_usage_sibling_of_chunk_list(self):
+        """Decorator-measured streams: usage rides the container next to
+        "outputs" as a sibling; the chunk list itself cannot carry usage and
+        must not abort the read (baseline gap: a non-dict unwrapped obj
+        early-returned before any usage extraction)."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={
+                "outputs": [{"content": "to"}, {"content": "ken"}],
+                "usage_metadata": {
+                    "model_name": "stream-test",
+                    "input_tokens": 4,
+                    "output_tokens": 2,
+                    "ttft_seconds": 0.42,
+                    "inter_token_latency_ms": 12.5,
+                },
+            },
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "stream-test"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 4
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 2
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+        assert s.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        # A chunk list carries no finish_reason — skipped, not fatal.
+        assert GEN_AI_RESPONSE_FINISH_REASONS not in s.attributes
+
+    async def test_llm_end_sibling_usage_takes_precedence_over_embedded(self):
+        """The sibling is the decorator's freshest snapshot; a usage embedded
+        on the message (stale or provider-reported) must not win."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="answer",
+            finish_reason="stop",
+            usage_metadata=UsageMetadata(model_name="embedded", input_tokens=1, output_tokens=1),
+        )
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={
+                "outputs": message,
+                "usage_metadata": {"model_name": "sibling", "input_tokens": 9, "output_tokens": 8},
+            },
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "sibling"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 9
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 8
+        # finish_reason still read off the message itself.
+        assert list(s.attributes[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
 
     async def test_llm_end_unwraps_outputs_container_into_content(self):
         """The {"outputs": AssistantMessage} wrapper must not swallow content."""
