@@ -1318,7 +1318,10 @@ class AnthropicModelClient(BaseModelClient):
             if isinstance(extra_reasoning, str) and extra_reasoning:
                 reasoning_content = extra_reasoning
 
-        usage_metadata = self._usage_from_anthropic(getattr(response, "usage", None))
+        usage_metadata = self._usage_from_anthropic(
+            getattr(response, "usage", None),
+            str(getattr(response, "model", "") or ""),
+        )
 
         parser_content = None
         if parser and content:
@@ -1365,12 +1368,18 @@ class AnthropicModelClient(BaseModelClient):
             provider_metadata=provider_metadata,
         )
 
-    def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
+    def _usage_from_anthropic(
+            self, usage: Any, served_model: str = ""
+    ) -> Optional[UsageMetadata]:
         """Build ``UsageMetadata`` from Anthropic's usage object.
 
         OJ's ``input_tokens`` field is treated as the total prompt seen by the
         model (uncached + cache-read + cache-write). ``cache_tokens`` is the
         read count (the cheap part).
+
+        ``served_model`` is the model reported by the response body; when
+        present it wins over the request-side config for ``model_name``
+        (gen_ai.response.model semantics).
         """
         if usage is None:
             return None
@@ -1393,7 +1402,8 @@ class AnthropicModelClient(BaseModelClient):
         cache_miss = uncached + cache_write
 
         return UsageMetadata(
-            model_name=self.model_config.model_name,
+            # Served model wins; see docstring for the semantics.
+            model_name=served_model or self.model_config.model_name,
             input_tokens=total_input,
             output_tokens=output,
             total_tokens=total_input + output,
@@ -1433,7 +1443,9 @@ class AnthropicModelClient(BaseModelClient):
         if etype == "message_start":
             msg = getattr(event, "message", None)
             usage = getattr(msg, "usage", None) if msg is not None else None
-            usage_metadata = self._usage_from_anthropic(usage)
+            usage_metadata = self._usage_from_anthropic(
+                usage, str(getattr(msg, "model", "") or "")
+            )
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
