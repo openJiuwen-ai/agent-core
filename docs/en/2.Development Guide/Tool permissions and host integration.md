@@ -224,6 +224,30 @@ This is neither a global Shell allow nor a remembered
 approval, and it never rewrites a final ASK to ALLOW. Disabling the workspace or
 its source removes this contribution on refresh. V1 has no such exception.
 
+### 6.2 Host outbound redirects and opaque readers
+
+Host applications publish `permissions.net_guard` through the outbound policy registry.
+While host enforcement is active, built-in HTTP clients check every redirect target before
+connecting. Web fetch reports an `OutboundBlockedError` as `[PERMISSION_DENIED]`, retaining
+the `outbound blocked` reason and matched rule instead of treating it as a transport failure.
+
+The async fetch tool does not retry HTTP 401/403/429 through `r.jina.ai` while host enforcement
+is active. The shared exit also rejects direct or redirected reader wrappers, including
+canonical hostname variants, even if the outer reader domain has an allow rule. Remote
+reader redirects cannot be checked locally; validating only the embedded URL cannot secure
+the subsequent chain. Ordinary allowed redirects retain their existing behavior.
+
+Reader fallback remains available in `unset`, `disabled` and `not_enforced` modes. Its WARNING
+records source/reader hostnames and status, without full query URLs. A policy-build error
+remains fail-closed. This is host-process HTTP enforcement, not an OS-level sandbox guarantee.
+
+Hosts can import `check_reader_url` and `reader_fallback_allowed` from
+`openjiuwen.harness.security.outbound`; delegate to these helpers rather than copying hostname
+normalization or policy-state checks. Core maintains the immutable `OPAQUE_READER_HOSTS`
+registry in `outbound/policy.py`. Review and add future opaque reader domains there; the
+registry is code-owned, not a user-configurable permission exemption. Paid search at
+`deepsearch.jina.ai` is a separate service and is not in this registry.
+
 ## 7. Source index
 
 | Path | Notes |

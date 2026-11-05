@@ -26,7 +26,9 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
+
+from openjiuwen.core.common.logging import tool_logger
 
 from openjiuwen.harness.security.outbound.limits import (
     DEFAULT_MAX_REQUEST_MB,
@@ -51,6 +53,10 @@ STATE_ACTIVE = "active"
 STATE_ERROR = "error"
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+# Code-owned: each new reader needs review because its server-side redirects
+# cannot be inspected locally. Hosts must not maintain separate copies.
+OPAQUE_READER_HOSTS: frozenset[str] = frozenset({"r.jina.ai"})
 
 # Code-side constant on purpose: making exemptions configurable would let a
 # wildcard entry switch the whole layer off.
@@ -171,6 +177,30 @@ def reset_host_exit_policy() -> None:
     _set_state(HostExitState(mode=STATE_UNSET))
 
 
+def reader_fallback_allowed() -> bool:
+    """Permit opaque readers only when host outbound enforcement is off."""
+    return _state.mode in {STATE_UNSET, STATE_DISABLED, STATE_NOT_ENFORCED}
+
+
+def check_reader_url(url: str) -> None:
+    """Apply the shared opaque-reader restriction, including hostname normalization."""
+    state = _state
+    if state.mode == STATE_ERROR:
+        raise OutboundBlockedError(url, f"host exit policy unavailable: {state.error}", "host_exit:error")
+    if state.mode != STATE_ACTIVE:
+        return
+    reader_host = unquote(url_hostname(url) or "").lower().rstrip(".")
+    try:
+        reader_host = reader_host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return  # The transport owns invalid-host errors.
+    if reader_host in OPAQUE_READER_HOSTS:
+        tool_logger.warning("[HostExit] host_exit.deny host=%s matched_rule=host_exit:opaque_reader", reader_host)
+        raise OutboundBlockedError(
+            url, "Reader-side redirects cannot be verified by host egress policy", "host_exit:opaque_reader",
+        )
+
+
 def check_outbound_url(url: str, *, is_redirect: bool = False) -> None:
     """Validate one hop before connecting; raise :class:`OutboundBlockedError` on deny."""
     state = _state
@@ -193,6 +223,9 @@ def check_outbound_url(url: str, *, is_redirect: bool = False) -> None:
     if result is not None and result.is_denied:
         logger.warning("[HostExit] host_exit.deny url=%s matched_rule=%s", url, result.matched_rule)
         raise OutboundBlockedError(url, result.reason or "net_guard denied", result.matched_rule)
+    # A reader fetches and follows redirects on its own servers. Checking its
+    # outer URL (or even its embedded target) cannot enforce our per-hop policy.
+    check_reader_url(url)
     if result is not None and result.needs_approval and is_redirect:
         # The tool approval covers its input URL, not an arbitrary server-chosen
         # destination. The synchronous exit cannot open a permission interrupt.
@@ -251,6 +284,7 @@ def describe_host_exit() -> dict[str, Any]:
 
 __all__ = [
     "HOST_EXIT_EXEMPTIONS",
+    "OPAQUE_READER_HOSTS",
     "STATE_ACTIVE",
     "STATE_DISABLED",
     "STATE_ERROR",
@@ -261,8 +295,10 @@ __all__ = [
     "OutboundRequestPolicy",
     "check_mcp_server_url",
     "check_outbound_url",
+    "check_reader_url",
     "describe_host_exit",
     "get_host_exit_state",
     "publish_host_exit_policy",
+    "reader_fallback_allowed",
     "reset_host_exit_policy",
 ]

@@ -16,26 +16,32 @@ enforced on every hop (initial URL and each redirect target)::
 
 from openjiuwen.harness.security.outbound.policy import (
     HOST_EXIT_EXEMPTIONS,
+    OPAQUE_READER_HOSTS,
     HostExitState,
     OutboundBlockedError,
     OutboundRequestPolicy,
     check_mcp_server_url,
     check_outbound_url,
+    check_reader_url,
     describe_host_exit,
     get_host_exit_state,
     publish_host_exit_policy,
+    reader_fallback_allowed,
     reset_host_exit_policy,
 )
 
 __all__ = [
     "HOST_EXIT_EXEMPTIONS",
+    "OPAQUE_READER_HOSTS",
     "HostExitState",
     "OutboundBlockedError",
     "OutboundRequestPolicy",
     "check_mcp_server_url",
     "check_outbound_url",
+    "check_reader_url",
     "describe_host_exit",
     "get_host_exit_state",
     "publish_host_exit_policy",
+    "reader_fallback_allowed",
     "reset_host_exit_policy",
 ]
