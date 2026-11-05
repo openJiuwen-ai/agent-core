@@ -41,6 +41,7 @@ from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
 )
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 try:
@@ -522,7 +523,11 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason="Both 'subagent_type' and 'task' are required",
             )
-        normalized_type = str(subagent_type).strip()
+        normalized_type = resolve_subagent_type_name(
+            self.parent_agent,
+            subagent_type,
+            self._allowed_subagent_types,
+        )
         if self._allowed_subagent_types is not None and normalized_type not in self._allowed_subagent_types:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,

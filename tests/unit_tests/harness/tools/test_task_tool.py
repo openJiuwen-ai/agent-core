@@ -1021,6 +1021,33 @@ class TestTaskToolSync(unittest.TestCase):
             frozenset({"browser_agent"}),
         )
 
+    def test_parse_invocation_inputs_resolves_subagent_type_variant(self) -> None:
+        parent = DeepAgent(AgentCard(name="parent"))
+        parent._deep_config = SimpleNamespace(
+            subagents=[
+                SubAgentConfig(
+                    agent_card=AgentCard(name="general-purpose"),
+                    system_prompt="test",
+                )
+            ]
+        )
+        tool = TaskTool(
+            ToolCard(id="task", name="task_tool", description=""),
+            parent_agent=parent,
+            allowed_subagent_types={"general-purpose"},
+        )
+
+        normalized_type, task_description, resume_task_id, browser_capabilities = (
+            tool._parse_invocation_inputs(
+                {"subagent_type": "general_purpose", "task_description": "run"}
+            )
+        )
+
+        self.assertEqual(normalized_type, "general-purpose")
+        self.assertEqual(task_description, "run")
+        self.assertEqual(resume_task_id, "")
+        self.assertIsNone(browser_capabilities)
+
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]
         mcps = [

@@ -12,6 +12,9 @@ import pytest
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
 from openjiuwen.harness.subagent_runtime.models import (
     ResumeResult,
@@ -112,6 +115,87 @@ async def test_subagent_spawn_delegates_to_control() -> None:
     assert result.data["sub_session_id"] == "parent_sub_explore"
     assert result.data["status"] == SubagentStatusKind.PENDING_INIT.value
     assert "output" not in result.data
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_resolves_subagent_type_variant() -> None:
+    parent = DeepAgent(AgentCard(name="parent"))
+    parent._deep_config = SimpleNamespace(
+        subagents=[
+            SubAgentConfig(
+                agent_card=AgentCard(name="general-purpose"),
+                system_prompt="test",
+            )
+        ]
+    )
+    tool = SubagentSpawnTool(
+        ToolCard(id="subagent_spawn", name="subagent_spawn", description="spawn"),
+        parent,
+        allowed_subagent_types={"general-purpose"},
+    )
+    control = _control_mock(
+        spawn=AsyncMock(
+            return_value=SpawnResult(
+                subagent_id="parent_sub_general-purpose",
+                task_id="task1",
+                status=SubagentStatus.pending_init(),
+            ),
+        ),
+    )
+    session = Session(session_id="parent_sess")
+
+    with patch(
+        "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control",
+        return_value=control,
+    ):
+        result = await tool.invoke(
+            {
+                "subagent_type": "general_purpose",
+                "task_description": "hello",
+                "display_name": "General",
+                "role": "worker",
+            },
+            session=session,
+        )
+
+    control.spawn.assert_awaited_once_with(
+        "general-purpose",
+        "hello",
+        display_name="General",
+        role="worker",
+        browser_capabilities=None,
+    )
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_rejects_unknown_type_variant() -> None:
+    parent = DeepAgent(AgentCard(name="parent"))
+    parent._deep_config = SimpleNamespace(
+        subagents=[
+            SubAgentConfig(
+                agent_card=AgentCard(name="general-purpose"),
+                system_prompt="test",
+            )
+        ]
+    )
+    tool = SubagentSpawnTool(
+        ToolCard(id="subagent_spawn", name="subagent_spawn", description="spawn"),
+        parent,
+        allowed_subagent_types={"general-purpose"},
+    )
+    session = Session(session_id="parent_sess")
+
+    with pytest.raises(Exception, match="not available through subagent_spawn"):
+        await tool.invoke(
+            {
+                "subagent_type": "general-purpos",
+                "task_description": "hello",
+                "display_name": "General",
+                "role": "worker",
+            },
+            session=session,
+        )
 
 
 @pytest.mark.asyncio
