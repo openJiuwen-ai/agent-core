@@ -311,7 +311,8 @@ async def test_discard_confirmation_preserves_results_and_metadata(target):
     assert await api.discard_persistent_confirmation(backend, **args) is False
 
 
-def test_carried_answers_round_trip_preserves_native_payloads_and_request_subclasses():
+@pytest.mark.parametrize("unaddressed", [None, False, True])
+def test_carried_answers_round_trip_preserves_native_payloads_and_request_subclasses(unaddressed):
     from openjiuwen.core.single_agent.interrupt.state import InterruptAnswer
     from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 
@@ -322,9 +323,14 @@ def test_carried_answers_round_trip_preserves_native_payloads_and_request_subcla
     )
     scene.interrupted_tools["call-1"].carried_answers = {"call-1": {"tool-policy": InterruptAnswer(
         owner="tool-policy", kind="confirm", value=ConfirmPayload(approved=True), request=request, carried=True,
+        unaddressed=bool(unaddressed),
     )}}
-    restored = RECORD.decode_interruption(json.loads(json.dumps(RECORD.encode_interruption(scene))))
+    encoded = json.loads(json.dumps(RECORD.encode_interruption(scene)))
+    if unaddressed is None:
+        del encoded["interrupted_tools"]["call-1"]["carried_answers"]["call-1"]["tool-policy"]["unaddressed"]
+    restored = RECORD.decode_interruption(encoded)
     answer = restored.interrupted_tools["call-1"].carried_answers["call-1"]["tool-policy"]
+    assert answer.unaddressed is bool(unaddressed)
     assert answer.owner == "tool-policy" and answer.carried is True
     assert answer.value == {"approved": True, "feedback": "", "auto_confirm": False, "persist_allow": None}
     assert type(answer.request) is AskUserRequest and answer.request.questions == [{"question": "which?"}]

@@ -1,9 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
+from contextlib import contextmanager
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
+    Callable,
     TYPE_CHECKING,
     Union,
 )
@@ -58,6 +61,7 @@ class Session:
         # Only an explicit injection changes pre_run; the default keeps the global lookup at run time.
         self._checkpointer_injected = checkpointer is not None
         self._card = card
+        self._output_observer: Callable[[OutputSchema], Awaitable[None]] | None = None
         self._pre_run_done = False
         self._post_run_done = False
         self._interaction = None
@@ -241,12 +245,24 @@ class Session:
     def dump_state(self) -> dict:
         return self._inner.state().dump()
 
+    @contextmanager
+    def observe_output(self, observer: Callable[[OutputSchema], Awaitable[None]]):
+        """Observe this session's output in the producing task before it can advance."""
+        previous = self._output_observer
+        self._output_observer = observer
+        try:
+            yield
+        finally:
+            self._output_observer = previous
+
     async def write_stream(self, data: Union[dict, OutputSchema]):
         stream_data = self._normalize_output_stream(self._tag_stream_payload(data))
         from openjiuwen.core.runner.callback import trigger
         await trigger(self._session_id + "write_stream", data=stream_data)
         await self._inner.stream_writer_manager().get_writer(BaseStreamMode.OUTPUT).write(
             stream_data)
+        if self._output_observer is not None:
+            await self._output_observer(stream_data)
 
     async def write_custom_stream(self, data: dict):
         stream_data = self._tag_stream_payload(data)

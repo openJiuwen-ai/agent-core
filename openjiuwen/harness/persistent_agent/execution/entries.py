@@ -256,19 +256,24 @@ async def _run_native(agent, context: PersistentBuildContext, native_input) -> _
     if control.abort_reason is not None:
         return _lock(control, _abort_outcome(control.abort_reason))
     emitter = control.emitter
+
+    async def record_delta(chunk) -> None:
+        # The native producer can finish the model call before its stream queue is drained.
+        if chunk.type == "llm_output" and isinstance(chunk.payload, dict):
+            text = chunk.payload.get("content")
+            if isinstance(text, str):
+                await emitter.emit_text(EventType.REPLY_DELTA, text)
+
     result, intercepted = None, []
     try:
-        async with aclosing(stream_bound(agent, native_input, context=context)) as chunks:
-            async for chunk in chunks:
-                chunk_type, payload = _chunk_parts(chunk)
-                if chunk_type == "llm_output" and isinstance(payload, dict):
-                    text = payload.get("content")
-                    if isinstance(text, str):
-                        await emitter.emit_text(EventType.REPLY_DELTA, text)
-                elif chunk_type == INTERACTION:
-                    intercepted.append(_intercepted_call(payload))
-                elif chunk_type == "answer" and isinstance(payload, dict):
-                    result = dict(payload)
+        with context.session.observe_output(record_delta):
+            async with aclosing(stream_bound(agent, native_input, context=context)) as chunks:
+                async for chunk in chunks:
+                    chunk_type, payload = _chunk_parts(chunk)
+                    if chunk_type == INTERACTION:
+                        intercepted.append(_intercepted_call(payload))
+                    elif chunk_type == "answer" and isinstance(payload, dict):
+                        result = dict(payload)
     except asyncio.CancelledError:
         if control.abort_reason is None:
             raise
