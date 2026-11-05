@@ -33,7 +33,7 @@ from openjiuwen.agent_evolving.signal.from_conv import (
     ConversationSignalDetector,
     detect_tool_error_signals,
 )
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.foundation.llm.model import Model
 
 from .config import TTSEConfig
