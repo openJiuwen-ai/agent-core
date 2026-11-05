@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-11-03 |
+| 最近一次修订日期 | 2026-11-05 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
@@ -395,6 +395,9 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
   两次候选仍不合格时明确失败；仅 `provider=auto` 可继续其他已启用来源。预算拒绝优先报告 `budget_exhausted`。
   调试文件按市场区分响应、候选和拒绝原因，不能覆盖第一份证据。
 - 候选先做 URL、去重、搜索导航与域范围检查；不再使用主题别名、领域意图词或特定 query 规则判断语义。
+  URL 检查必须显式校验 hostname 与延迟解析的 port；畸形 IPv6、非法 netloc 或端口只拒绝当前目标，
+  不得中断整批解码、结构筛选和评估。评估 source 去除 userinfo/query/fragment，保留合法端口和 IPv6 方括号；
+  直接评估非法 URL 时 source 为空，不能回退为可能含凭据的原文，也不拖累同批其它候选。
   每页最多 30 条有效候选通过当前 callback agent 的 `get_llm()` 批量评估；显式构造参数 `model` 用于
   无 Agent 上下文的调用。模型在每次 invoke 解析，工具实例不缓存其他会话或热切换前的模型。
   `WebResearchBudgetRail` 在 invocation 内保留原始任务，评估输入为原任务、当前查询和有界候选摘要，
@@ -411,6 +414,11 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
   不宣称 `ok/low_relevance`，不因为评估故障追加市场或引擎请求。调用方未提供模型时不会隐式创建新客户端。
   正常评估的 uncertain 同样限量两条；相关候选不是事实验证，时效、数值与证据充分性仍需正文核验。
   只有候选明确全被拒绝才触发已有低相关回退；数量、来源、市场与 fetch 预算保持不变。
+- 固定语料 benchmark 复用同一结构预筛选并保留原候选 ID；判定来源由预筛选成员集合与模型结果记录，
+  不能从模型自由文本 reason 猜测。`classification_accuracy` 与兼容字段 `assessed_accuracy` 仅以成功模型判定为
+  分母，`false_rejection` 也只统计该集合；结构拒绝、评估不可用单独计数，不能伪装成模型判断。
+  `relevant_retention` / `selected_count` 仍表示整条筛选流水线；数量上限导致未选中不算模型误拒绝。
+  无成功判定时准确率沿用 0，同时 `assessed_candidates=0`，不代表模型实际答错全部候选。
 - Jina Reader 的 DDG Markdown 通过 Markdown 解析器按结果块绑定标题、链接及摘要，不能将正文链接视为独立标题或跨块串摘要。
   `FREE_SEARCH_DEBUG` 开启时记录请求/最终 URL、响应状态和有截断标志的原文摘要、过滤前候选，以及每条拒绝/降权/限额原因。
   默认关闭，不记录认证头或代理凭据；调试数据包含查询与页面内容，应按运行数据保存而不是提交源码。
@@ -436,7 +444,6 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
   也不强制终止 LLM 推理。证据充分可停止，缺失证据应说明，不再强制抓取两页。
 
 回归：`tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py`、`test_web_tools_v2.py`。
-实施记录：`F_20261103_1124_web-retrieval-quality`。
 
 ## Jev 分段交接补充（F_08，2026-09-23）
 
