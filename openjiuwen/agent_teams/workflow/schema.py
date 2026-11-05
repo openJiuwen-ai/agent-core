@@ -27,6 +27,11 @@ class AgentActivity(BaseModel):
 
     label: str | None = None
     prompt: str | None = None
+    #: Deterministic per-node id reused from the engine's journal key. The only
+    #: sound key to attribute ``AGENT_ACTIVITY`` to its node when same-label
+    #: nodes run in a loop / parallel; ``None`` when the producer omitted it
+    #: (then the fold falls back to label matching).
+    agent_id: str | None = None
     activity: list[str] = Field(default_factory=list)
     outcome: str | None = None
     status: str = "running"  # "running" until its AGENT_COMPLETED arrives
@@ -78,7 +83,12 @@ def build_workflow_run_from_events(events: list[WorkflowProgressEvent]) -> Workf
             phase_for(ev.phase)
         elif ev.kind == ProgressKind.AGENT_STARTED:
             phase_for(ev.phase).agents.append(
-                AgentActivity(label=ev.label, prompt=ev.prompt, status="running")
+                AgentActivity(
+                    label=ev.label,
+                    prompt=ev.prompt,
+                    agent_id=ev.agent_id,
+                    status="running",
+                )
             )
         elif ev.kind == ProgressKind.AGENT_COMPLETED:
             activity = _latest_running(phase_for(ev.phase), ev.label)
@@ -90,6 +100,10 @@ def build_workflow_run_from_events(events: list[WorkflowProgressEvent]) -> Workf
             if activity is not None:
                 activity.outcome = ev.message
                 activity.status = "failed"
+        elif ev.kind == ProgressKind.AGENT_ACTIVITY:
+            target = _find_activity(phase_for(ev.phase), ev.agent_id, ev.label)
+            if target is not None and ev.message:
+                target.activity.append(ev.message)
         elif ev.kind == ProgressKind.LOG:
             rec = phase_for(ev.phase)
             target = _latest_running(rec, None) or (rec.agents[-1] if rec.agents else None)
@@ -106,6 +120,22 @@ def _latest_running(rec: PhaseRecord, label: str | None) -> AgentActivity | None
         if label is None or activity.label == label:
             return activity
     return None
+
+
+def _find_activity(
+    rec: PhaseRecord, agent_id: str | None, label: str | None
+) -> AgentActivity | None:
+    """Locate the agent a mid-run ``AGENT_ACTIVITY`` event belongs to.
+
+    Prefers the deterministic ``agent_id`` (the only sound key when same-label
+    nodes run in a loop / ``parallel``), and falls back to the latest running
+    agent with the label for producers that omit the id.
+    """
+    if agent_id is not None:
+        for activity in reversed(rec.agents):
+            if activity.agent_id == agent_id:
+                return activity
+    return _latest_running(rec, label)
 
 
 __all__ = [

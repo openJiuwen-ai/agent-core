@@ -8,6 +8,7 @@ hands it a fully-rendered prompt, the call's ``opts``, and (when the call
 requested structured output) the JSON-Schema dict; it returns an
 :class:`AgentResult`.
 """
+
 from __future__ import annotations
 
 import abc
@@ -25,6 +26,12 @@ class AgentResult:
     * ``structured`` - a JSON-able object conforming to the schema, when one was.
     * ``tokens``     - tokens this one call consumed, for reporting. The engine
       does **not** accumulate it — see :meth:`AgentBackend.bind_budget`.
+    * ``input_tokens`` / ``output_tokens`` - the prompt / completion split of
+      ``tokens`` for display (``None`` when the provider reported no split).
+    * ``model``      - the model the backend actually ran this call on, as
+      reported by the provider (an external CLI); display-only for
+      ``AGENT_COMPLETED`` / ``AGENT_FAILED``, never journaled. ``None`` for
+      native backends (they do not report it).
     * ``skipped``    - the backend declined to answer; the call returns ``None``
       (also how a human turn signals a timeout / no answer).
     """
@@ -32,6 +39,10 @@ class AgentResult:
     text: str | None = None
     structured: Any = None
     tokens: int = 0
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model: str | None = None
     skipped: bool = False
 
 
@@ -52,16 +63,38 @@ class AgentBackend(abc.ABC):
     #: else, so a typo never silently no-ops. Empty by default.
     KNOWN_OPTIONS: frozenset[str] = frozenset()
 
+    def model_pool_names(self) -> list[str] | None:
+        """Names this backend accepts for the ``model`` option hint.
+
+        ``None`` (default) means the backend has no model-pool concept and
+        hints pass unvalidated (MockBackend, test stubs). A list means the
+        engine fails fast on a hint not in it — symmetric with
+        ``KNOWN_OPTIONS``' unknown-KEY fail-fast, applied to the VALUE.
+        """
+        return None
+
     def __init__(self) -> None:
         self._budget = BudgetLedger()
+        self._workflow_budget: BudgetLedger | None = None
+        self._progress_sink: Any = None
 
     @property
     def budget(self) -> BudgetLedger:
-        """The run's token ledger — unbounded until ``run_workflow`` binds one."""
+        """The run's session-wide token ledger — unbounded until ``run_workflow`` binds one."""
         return self._budget
 
+    @property
+    def workflow_budget(self) -> BudgetLedger | None:
+        """The run's per-run token ledger (resets each ``swarmflow`` invocation).
+
+        ``None`` for backends that do not participate in per-run accounting
+        (older implementations); the engine's own ``_check_budget`` gate still
+        reads ``rt.workflow_budget`` directly regardless of this binding.
+        """
+        return self._workflow_budget
+
     def bind_budget(self, budget: BudgetLedger) -> None:
-        """Adopt the run's ledger; called once by ``run_workflow`` before the run.
+        """Adopt the run's session-wide ledger; called once by ``run_workflow`` before the run.
 
         **The backend is the ledger's only writer.** It is the only layer that
         knows what a call really cost: one ``agent()`` is a whole agent loop, so
@@ -75,25 +108,129 @@ class AgentBackend(abc.ABC):
         """
         self._budget = budget
 
+    def bind_workflow_budget(self, workflow_budget: BudgetLedger) -> None:
+        """Adopt the run's per-run ledger (companion to :meth:`bind_budget`).
+
+        Bound by ``run_workflow`` alongside the session ledger. The per-run
+        ledger resets to ``spent=0`` on each new ``swarmflow`` invocation and
+        caps a single run independently of the session budget. Backends fan it
+        out into the same rails that bill the session ledger (so every model
+        call is reported to both); overriding is only needed to fan out further.
+        """
+        self._workflow_budget = workflow_budget
+
+    @property
+    def progress_sink(self) -> Any:
+        """The run's progress sink, or ``None`` when not bound (``run_workflow``)."""
+        return self._progress_sink
+
+    def bind_progress_sink(self, progress_sink: Any) -> None:
+        """Adopt the run's progress sink; called once by ``run_workflow``.
+
+        Lets the backend emit ``WorkflowProgressEvent`` mid-call (e.g. live
+        worker activity from rails attached to the agents it spawns) instead of
+        only the engine's start/end hooks. ``None`` means the backend stays
+        silent (a no-op), which is fine for test backends.
+        """
+        self._progress_sink = progress_sink
+
+    def describe_base_model(self) -> str | None:
+        """Name the model a no-hint native call runs on, for lock messages.
+
+        ``None`` = "cannot name it" — the engine falls back to the generic
+        phrase. Overridden by backends that hold a base spec.
+        """
+        return None
+
+    def describe_model(self, opts: dict) -> str | None:
+        """Name the model this backend would assemble for ``opts``, for progress events.
+
+        The engine emits ``AGENT_STARTED`` before it calls the backend, so the
+        raw ``opts["model"]`` hint is all it knows; a backend that resolves the
+        model elsewhere (an external CLI's configured default) reports it here.
+        ``None`` keeps the raw hint.
+        """
+        return None
+
+    def describe_agent_template(self, opts: dict) -> str | None:
+        """Display name of the expert ``opts["agent_template"]`` resolves to, for progress events.
+
+        ``None`` (default) = this backend has no expert table; the engine emits the
+        raw member name alone.
+        """
+        return None
+
     @abc.abstractmethod
     async def run(
-        self, prompt: str, opts: dict, schema_json: dict | None
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
     ) -> AgentResult:
         """Execute one single-shot agent call.
 
         ``schema_json`` is the JSON-Schema dict when structured output was
         requested (pydantic models are already lowered to JSON Schema by the
         engine), else ``None``.
+
+        ``call_key`` is the engine's structural call-path key for this
+        invocation. It is deterministic across replays of the same script
+        (cache hits consume their key slot too), so a backend that derives
+        per-call identity — e.g. worker member names feeding worktree slugs —
+        MUST hash it rather than count invocations: a counter drifts on resume
+        because hit calls never reach the backend. Backends that mint no
+        identity may ignore it.
         """
         raise NotImplementedError
 
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Eagerly snapshot a session's context per ``fork_mode`` / ``keep_rounds``.
+
+        Called at ``AgentSession.fork()`` time so the parent's context is frozen
+        at the fork point (a later lazy capture would pick up the parent's own
+        evolution). Returns a serializable ``fork_data`` dict (``messages`` + the
+        compact split/direction when a compact mode was requested) for injection
+        into a fresh child session, or ``None`` when the session has no
+        captureable context — the caller then falls back to the engine's history
+        mirror (degraded, no ToolMessage).
+
+        The default rejects forking so a session-less / single-shot-only backend
+        fails clearly rather than silently producing an empty fork.
+        """
+        raise NotImplementedError("backend does not support forking sessions")
+
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Reserve this session's member identity without building its avatar.
+
+        Called on a session's **first turn regardless of cache hit** so the
+        engine knows the session's stable member name even when every turn is a
+        journal replay (no avatar is ever built). This name is what ``fork()``
+        needs to locate the parent's persisted context after a fully-hit resume
+        — without it, a parent that never re-ran could not be restored.
+
+        Unlike :meth:`open_session` this must NOT build a harness, call an LLM,
+        or hold a spawn/budget slot — it is pure in-process bookkeeping (a
+        counter increment + name mint). The default rejects so a single-shot-only
+        backend fails clearly; a session-capable backend implements it.
+        """
+        raise NotImplementedError("backend does not support stateful sessions")
+
     async def open_session(
-        self, *, kind: str, instructions: str | None, opts: dict
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
     ) -> str:
         """Open a stateful session; return its backend-scoped session id.
 
         ``kind`` is ``"agent"`` (LLM-driven) or ``"human"`` (each turn's input
-        comes from a real person); the engine forwards it opaquely. The default
+        comes from a real person); the engine forwards it opaquely.
+        ``fork_data`` is an optional context snapshot captured by
+        :meth:`capture_fork`; a backend that supports forking seeds the new
+        session's context from it (and compacts when requested). ``member_name``
+        is the identity already reserved by :meth:`ensure_member_name` on the
+        first turn — a backend that tracks names reuses it (rather than minting a
+        fresh one, which would drift the counter across a resume). The default
         rejects sessions so a single-shot-only backend fails clearly.
         """
         raise NotImplementedError("backend does not support stateful sessions")

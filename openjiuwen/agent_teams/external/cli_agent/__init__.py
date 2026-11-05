@@ -14,3 +14,13 @@ Side-channel injection uses the CLI's **stdin pipe** (Unix-first; the
 CLIs that read stdin continuously support mid-turn steer; others degrade to
 turn-boundary delivery.
 """
+
+from __future__ import annotations
+
+#: Logical name every CLI registers the team's MCP server under. The member's
+#: system prompt names it to say which server its bare tool names belong to,
+#: so the name the prompt states and the name the server is registered with
+#: have to be the same one.
+TEAM_MCP_SERVER_NAME = "openjiuwen-team"
+
+__all__ = ["TEAM_MCP_SERVER_NAME"]

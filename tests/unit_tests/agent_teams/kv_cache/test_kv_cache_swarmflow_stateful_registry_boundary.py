@@ -173,15 +173,16 @@ async def test_stateful_worker_stays_outside_team_registry_actions(monkeypatch: 
 
     await manager.close_session(session_id)
 
+    # Team registry owns team-member KVC; stateful avatar close only disposes
+    # (session.release_kvc, not model.evict_kvc).
     assert events == [
         "stateful:start",
         "stateful:send",
         "team:offload",
         "team:evict",
-        "stateful:evict",
         "stateful:dispose",
     ]
-    assert len(stateful_model.evict_calls) == 1
+    assert stateful_model.evict_calls == []
     assert team_record.state is TeamKVCState.EVICTED
     assert await registry.snapshot() == [team_record]
 
@@ -198,9 +199,9 @@ async def test_stateful_close_and_aclose_are_idempotent(monkeypatch: pytest.Monk
     await manager.close_session(session_id)
     await manager.close_session(session_id)
 
-    assert len(model.evict_calls) == 1
+    assert model.evict_calls == []
     assert harnesses[0].dispose_calls == 1
-    assert events == ["stateful:start", "stateful:send", "stateful:evict", "stateful:dispose"]
+    assert events == ["stateful:start", "stateful:send", "stateful:dispose"]
 
     events.clear()
     model2 = _ActionModel(events, "stateful")
@@ -210,9 +211,9 @@ async def test_stateful_close_and_aclose_are_idempotent(monkeypatch: pytest.Monk
     await manager2.aclose()
     await manager2.aclose()
 
-    assert len(model2.evict_calls) == 1
+    assert model2.evict_calls == []
     assert harnesses2[0].dispose_calls == 1
-    assert events == ["stateful:start", "stateful:evict", "stateful:dispose"]
+    assert events == ["stateful:start", "stateful:dispose"]
 
 
 @pytest.mark.asyncio
@@ -229,13 +230,9 @@ async def test_stateful_aclose_cleans_multiple_live_sessions_independently(
     await manager.aclose()
 
     assert [harness.dispose_calls for harness in harnesses] == [1, 1]
-    assert len(model.evict_calls) == 2
-    assert {call["session_id"] for call in model.evict_calls} == {
-        harness.started_identity.cache_id for harness in harnesses if harness.started_identity is not None
-    }
+    assert model.evict_calls == []
     assert events == [
-        "stateful:start", "stateful:start", "stateful:evict", "stateful:dispose",
-        "stateful:evict", "stateful:dispose",
+        "stateful:start", "stateful:start", "stateful:dispose", "stateful:dispose",
     ]
 
 
@@ -249,6 +246,7 @@ async def test_stateful_close_evict_failure_still_disposes(monkeypatch: pytest.M
 
     await manager.close_session(session_id)
 
-    assert len(model.evict_calls) == 1
+    # Even when model.evict_kvc would fail, close does not call it; dispose still runs.
+    assert model.evict_calls == []
     assert harnesses[0].dispose_calls == 1
-    assert events == ["stateful:start", "stateful:evict", "stateful:dispose"]
+    assert events == ["stateful:start", "stateful:dispose"]
