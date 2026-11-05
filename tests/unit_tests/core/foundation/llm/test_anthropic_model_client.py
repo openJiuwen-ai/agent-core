@@ -430,6 +430,44 @@ class TestUsageFromAnthropic:
     def test_none_usage_returns_none(self):
         assert _make_client()._usage_from_anthropic(None) is None
 
+    def test_served_model_wins_over_request_config(self):
+        usage = MagicMock()
+        usage.model_dump.return_value = {"input_tokens": 10, "output_tokens": 5}
+        meta = _make_client()._usage_from_anthropic(usage, "claude-served-4")
+        assert meta is not None
+        assert meta.model_name == "claude-served-4"
+
+    def test_missing_served_model_falls_back_to_request_config(self):
+        usage = MagicMock()
+        usage.model_dump.return_value = {"input_tokens": 10, "output_tokens": 5}
+        meta = _make_client()._usage_from_anthropic(usage)
+        assert meta is not None
+        assert meta.model_name == "claude-opus-4"
+
+    def test_empty_served_model_falls_back_to_request_config(self):
+        usage = MagicMock()
+        usage.model_dump.return_value = {"input_tokens": 10, "output_tokens": 5}
+        meta = _make_client()._usage_from_anthropic(usage, "")
+        assert meta is not None
+        assert meta.model_name == "claude-opus-4"
+
+    def test_message_start_event_passes_served_model(self):
+        usage = MagicMock()
+        usage.model_dump.return_value = {"input_tokens": 10, "output_tokens": 5}
+        event = MagicMock()
+        event.type = "message_start"
+        msg = MagicMock()
+        msg.id = "msg-1"
+        msg.model = "claude-served-4"
+        msg.usage = usage
+        event.message = msg
+
+        chunk = _make_client()._event_to_chunk(event, {})
+
+        assert chunk is not None
+        assert chunk.usage_metadata is not None
+        assert chunk.usage_metadata.model_name == "claude-served-4"
+
 
 # ---------------------------------------------------------------------------
 # E. Client registration / identity
