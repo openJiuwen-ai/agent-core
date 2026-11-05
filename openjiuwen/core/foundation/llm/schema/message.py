@@ -24,6 +24,14 @@ class UsageMetadata(BaseModel):
     input_cost: float = 0.
     output_cost: float = 0.
     total_cost: float = 0.
+    #: 首 chunk 的**相对延迟**（秒）。与 `first_token_time` 是两种东西：后者是「首 token
+    #: 时刻」（与 `request_start_time` 同族的时刻字符串），这里是「等了多久」。分开之后
+    #: OTel 侧（gen_ai.response.time_to_first_chunk 单位秒）与按字段名理解的下游
+    #: 不会对同一字段给出两种解释。
+    ttft_seconds: Optional[float] = None
+    #: 流式 token 间平均延迟（毫秒）。同一 `usage_metadata` 里的 `total_latency`
+    #: 是秒，两者不可混用。回填方为 ReAct 引擎流式路径，tracer_otel 据此盖 span 属性。
+    inter_token_latency_ms: Optional[float] = None
 
 
 class BaseMessage(BaseModel):
