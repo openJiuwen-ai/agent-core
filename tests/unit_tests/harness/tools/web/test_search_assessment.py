@@ -4,8 +4,10 @@
 
 import asyncio
 import json
+from html import escape
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import pytest
 
@@ -18,7 +20,13 @@ from openjiuwen.harness.rails.web_research_rail import WebResearchBudgetRail
 from openjiuwen.harness.tools.web import WebFreeSearchTool, _http
 from openjiuwen.harness.tools.web._assessment import CandidateAssessment, SearchAssessment, assess_candidates
 from openjiuwen.harness.tools.web._budget import WEB_RESEARCH_BUDGET_KEY, WebResearchBudget
-from openjiuwen.harness.tools.web.free_search import _select_search_candidates
+from openjiuwen.harness.tools.web._common import _parse_html
+from openjiuwen.harness.tools.web.free_search import (
+    _extract_bing_answer_cards,
+    _parse_ddg_reader,
+    _parse_domestic_search_html,
+    _select_search_candidates,
+)
 
 
 def candidate(index):
@@ -46,6 +54,107 @@ async def test_one_bounded_batch_keeps_original_task_and_strips_url_secrets():
     assert call["tools"] == [] and call["temperature"] == 0 and call["timeout"] == 15
     assert call["reasoning"] == ReasoningConfig(mode="disabled")
     assert 4096 <= call["max_tokens"] <= 8192
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("url", "source"), [
+    ("https://user:secret@source.invalid:8443/doc?token=secret#secret", "https://source.invalid:8443/doc"),
+    ("http://source.invalid:0/doc", "http://source.invalid:0/doc"),
+    ("https://user:secret@[2001:db8::1]:8443/doc?token=secret", "https://[2001:db8::1]:8443/doc"),
+    ("https://[2001:db8::1]/doc", "https://[2001:db8::1]/doc"),
+    ("https://[broken/doc?token=secret", ""),
+    ("https://source.invalid:port/doc?token=secret", ""),
+    ("https://source.invalid:65536/doc?token=secret", ""),
+    ("https://source.invalid\uff1a443/doc?token=secret", ""),
+    ("file:///private/secret", ""),
+])
+async def test_candidate_source_is_safe_and_preserves_valid_authority(url, source):
+    model = model_reply([
+        {"id": 0, "relevance": "uncertain", "reason": "Check source"},
+        {"id": 1, "relevance": "relevant", "reason": "Useful"},
+    ])
+    result = await assess_candidates(model, "query", [(0, dict(candidate(0), url=url)), (1, candidate(1))])
+    assert result.status == "ok"
+    model.invoke.assert_awaited_once()
+    payload = json.loads(model.invoke.call_args.kwargs["messages"][1]["content"])
+    assert payload["candidates"][0]["source"] == source
+    assert payload["candidates"][1]["source"] == candidate(1)["url"]
+    assert "secret" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("url", [
+    "https://[broken/doc", "https://source.invalid:port/doc", "https://source.invalid:65536/doc",
+    "https://source.invalid\uff1a443/doc", "https:///missing-host", "file:///document",
+])
+def test_invalid_target_is_rejected_without_losing_other_candidates(url):
+    rows = [dict(candidate(0), url=url), candidate(1)]
+    selected, decisions = _select_search_candidates("query", rows)
+    assert [row["url"] for row in selected] == [rows[1]["url"]]
+    assert decisions[0]["reasons"] == ["invalid_target"]
+    assert not decisions[0]["selected"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["bing", "duckduckgo"])
+@pytest.mark.parametrize("bad_url", ["https://[broken/doc", "https://source.invalid:port/doc"])
+@pytest.mark.parametrize("redirect", [False, True])
+async def test_malformed_search_url_does_not_fail_whole_tool(monkeypatch, engine, bad_url, redirect):
+    href = bad_url
+    if redirect:
+        prefix = "https://www.bing.com/ck/a?u=" if engine == "bing" else "https://duckduckgo.com/l/?uddg="
+        href = prefix + quote(bad_url, safe="")
+    if engine == "bing":
+        page = (
+            f'<li class="b_algo"><h2><a href="{escape(href, quote=True)}">Broken</a></h2></li>'
+            '<li class="b_algo"><h2><a href="https://source.invalid/valid">Valid source</a></h2></li>'
+        )
+    else:
+        page = (
+            f'<div class="result"><a class="result__a" href="{escape(href, quote=True)}">Broken</a></div>'
+            '<div class="result"><a class="result__a" href="https://source.invalid/valid">Valid source</a></div>'
+        )
+    calls = []
+
+    async def request(session, method, url, **kwargs):
+        calls.append(url)
+        return 200, {}, page.encode(), url, False
+
+    monkeypatch.setattr(_http, "request", request)
+    monkeypatch.delenv("FREE_SEARCH_DEBUG", raising=False)
+    model = model_reply([{"id": 1, "relevance": "relevant", "reason": "Useful"}])
+    result = await WebFreeSearchTool(enabled_engines=(engine,), model=model).invoke({"query": "query"})
+    assert "Content status: ok" in result and "Valid source" in result
+    assert "Broken" not in result and "[ERROR]" not in result
+    assert len(calls) == 1
+    model.invoke.assert_awaited_once()
+    payload = json.loads(model.invoke.call_args.kwargs["messages"][1]["content"])
+    assert [row["id"] for row in payload["candidates"]] == [1]
+
+
+def test_jina_skips_malformed_urls_without_dropping_valid_result():
+    text = (
+        "## [Bad source](https://source.invalid:port/doc)\n\nBad snippet.\n\n"
+        "## [Broken IPv6](https://duckduckgo.com/l/?uddg=https%3A%2F%2F%5Bbroken%2Fdoc)\n\nBad snippet.\n\n"
+        "## [Valid source](https://source.invalid:8443/doc)\n\nUseful snippet.\n"
+    )
+    rows = _parse_ddg_reader(text, 8)
+    assert [row["url"] for row in rows] == ["https://source.invalid:8443/doc"]
+    assert rows[0]["snippet"] == "Useful snippet."
+
+
+@pytest.mark.parametrize("bad_url", ["https://[broken/doc", "https://source.invalid:port/doc"])
+def test_secondary_search_parsers_isolate_invalid_targets(bad_url):
+    html = (
+        f'<div class="b_ans"><h2><a href="{escape(bad_url, quote=True)}">Broken source</a></h2></div>'
+        '<div class="b_ans"><h2><a href="https://source.invalid/valid">Valid source</a></h2></div>'
+    )
+    cards = _extract_bing_answer_cards(_parse_html(html), "https://bing.com/search?q=test")
+    selected, _ = _select_search_candidates("query", cards)
+    assert [row["url"] for row in selected] == ["https://source.invalid/valid"]
+    rows = _parse_domestic_search_html(
+        html, 8, base_url="https://scholar.baidu.com/", source="baidu-scholar", allowed_domains=None,
+    )
+    assert [row["url"] for row in rows] == ["https://source.invalid/valid"]
 
 
 @pytest.mark.asyncio
