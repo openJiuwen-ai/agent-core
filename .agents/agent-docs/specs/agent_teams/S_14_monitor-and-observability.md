@@ -18,8 +18,8 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
-| 最近一次修订日期 | 2026-11-03 |
-| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md、B_01_team-root-adopts-foreign-session-root.md、F_124_monitor-message-template-meta.md、F_20261103_0928_model-group-routed-model.md |
+| 最近一次修订日期 | 2026-11-05 |
+| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md、B_01_team-root-adopts-foreign-session-root.md、F_112_harness-protocol-trajectory-observation.md、F_124_monitor-message-template-meta.md、F_20261103_0928_model-group-routed-model.md、B_20261105_0911_swarmflow-thirdparty-trajectory.md |
 
 ## 范围 / 边界
 
@@ -288,6 +288,20 @@ flush / close**，**不走 `team_logger`**。
   chunk 之间计算。以上耗时均以 LLM span 打开时刻为起点，属于客户端端到端测量。
 - request id、消息计数、reasoning wall-clock 等非标准信息使用 `openjiuwen.*`，不得占用
   `gen_ai.*` 命名空间。
+
+#### 三方 Harness 的 Swarmflow 轨迹归属
+
+- Swarmflow 的三方单轮 `agent(options={"agent_type": ...})` 与有状态
+  `agent_session(options={"agent_type": ...})`，必须在 external runtime `start()` 前绑定
+  `HarnessTrajectoryRecorder`。协议事件由 recorder 转成 turn / inference / tool 轨迹；单纯设置
+  `execution_subject_scope` 不会替代这条协议事件记录路径。
+- 两种入口使用 `team_member_execution_subject`：subject 的 `session_id` 是外层 Team 产品会话，
+  `team_name` 是所属 Team，`member_name` 是成员隔离身份；`label` 只作为 `display_name`。不得用
+  label 充当 subject identity，也不得用 avatar 的 child session id 替代外层 Team session id。
+- `HarnessTrajectoryRecorder` 为每个 member turn 建立独立 trace root；subject 负责按 Team session
+  与 member lane 分类，绑定 recorder 不会自动把这些 turn span 变成 Team root 的子 span。观测未初始化时
+  recorder 为 `None`，不影响执行。模型调用是否可见仍取决于 provider 是否实现并发出
+  `ModelRequestEvent`。
 
 ## 数据结构
 

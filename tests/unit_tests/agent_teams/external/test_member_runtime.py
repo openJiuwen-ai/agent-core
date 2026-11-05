@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +19,10 @@ from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.external.member_runtime import (
     ExternalHarnessMemberRuntime,
     TeamContextAwareRuntime,
+    _bind_harness_trajectory_recorder,
 )
+from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
 from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
@@ -50,6 +54,7 @@ from openjiuwen.harness_protocol import (
     TurnStatus,
     UnsupportedHarnessCapabilityError,
 )
+from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
 from tests.test_logger import logger
 
 # Pinned clock so the current-time anchor every send carries is predictable.
@@ -780,6 +785,93 @@ def test_runtime_satisfies_member_and_team_context_protocols() -> None:
     assert isinstance(harness, HarnessProtocol)
     assert isinstance(runtime, MemberRuntime)
     assert isinstance(runtime, TeamContextAwareRuntime)
+
+
+def test_bind_harness_trajectory_recorder_uses_host_identity_and_backend(monkeypatch):
+    recorder = object()
+    create_calls: list[dict] = []
+    bound: list = []
+
+    def _create(cls, **kwargs):
+        create_calls.append(kwargs)
+        return recorder
+
+    monkeypatch.setattr(HarnessTrajectoryRecorder, "create", classmethod(_create))
+    runtime = SimpleNamespace(provider_name="codex", bind_trajectory_recorder=bound.append)
+    subject = team_member_execution_subject(
+        session_id="team-session",
+        team_name="review-team",
+        member_name="wf-review-7",
+        display_name="Reviewer",
+    )
+
+    _bind_harness_trajectory_recorder(
+        runtime,
+        subject=subject,
+        team_name="review-team",
+        member_name="wf-review-7",
+    )
+
+    assert bound == [recorder]
+    assert create_calls == [
+        {
+            "subject": subject,
+            "agent_name": "Reviewer",
+            "agent_mode": "team",
+            "attributes": {
+                AT_TEAM_NAME: "review-team",
+                AT_MEMBER_NAME: "wf-review-7",
+                "agentteam.backend": "codex",
+            },
+        }
+    ]
+
+
+def test_bind_harness_trajectory_recorder_skips_missing_session(monkeypatch):
+    create_calls: list = []
+    bound: list = []
+
+    def _create(cls, **kwargs):
+        create_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(HarnessTrajectoryRecorder, "create", classmethod(_create))
+    runtime = SimpleNamespace(provider_name="codex", bind_trajectory_recorder=bound.append)
+
+    _bind_harness_trajectory_recorder(
+        runtime,
+        subject=SimpleNamespace(session_id="", display_name="reviewer"),
+        team_name="review-team",
+        member_name="wf-review-7",
+    )
+
+    assert create_calls == []
+    assert bound == []
+
+
+def test_bind_harness_trajectory_recorder_binds_none_when_observability_is_off(monkeypatch):
+    bound: list = []
+    monkeypatch.setattr(
+        HarnessTrajectoryRecorder,
+        "create",
+        classmethod(lambda cls, **kwargs: None),
+    )
+    runtime = SimpleNamespace(provider_name="codex", bind_trajectory_recorder=bound.append)
+    subject = team_member_execution_subject(
+        session_id="team-session",
+        team_name="review-team",
+        member_name="wf-review-7",
+        display_name="Reviewer",
+    )
+
+    _bind_harness_trajectory_recorder(
+        runtime,
+        subject=subject,
+        team_name="review-team",
+        member_name="wf-review-7",
+    )
+
+    assert bound == [None]
 
 
 def _auth_fallback_request() -> ProviderInteractionRequest:

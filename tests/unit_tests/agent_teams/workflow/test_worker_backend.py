@@ -1061,6 +1061,89 @@ def test_external_worker_binds_activity_sink_with_node_identity(monkeypatch):
     assert binds == [(sink, "n1", "run", "x", None)]
 
 
+def test_external_worker_binds_trajectory_before_runtime_start(monkeypatch):
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+    from openjiuwen.agent_teams.workflow.backends import team_worker_backend as backend_module
+    from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalTurnOutcome
+    from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+
+    recorder = object()
+    create_calls: list[dict] = []
+    events: list[tuple[str, Any]] = []
+
+    def _create(cls, **kwargs):
+        create_calls.append(kwargs)
+        return recorder
+
+    monkeypatch.setattr(HarnessTrajectoryRecorder, "create", classmethod(_create))
+
+    class _Runtime:
+        provider_name = "codex"
+
+        def __init__(self):
+            self.recorder = None
+
+        def bind_trajectory_recorder(self, value):
+            self.recorder = value
+            events.append(("bind", value))
+
+    runtime = _Runtime()
+
+    class _Turns:
+        def __init__(self, member_runtime, *, member_name, auth_hint_models=None):
+            self.runtime = member_runtime
+            self.reported_model = None
+
+        async def start(self, team_session):
+            events.append(("start", self.runtime.recorder))
+            assert self.runtime.recorder is recorder
+
+        async def run_turn(self, prompt, *, schema_json=None):
+            return ExternalTurnOutcome(text="ok", structured=None, tokens=0)
+
+        async def stop(self):
+            events.append(("stop", None))
+
+    async def _build(**kwargs):
+        return runtime
+
+    monkeypatch.setattr(backend_module, "ExternalMemberTurns", _Turns)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.spawn.build_cli_workflow_runtime",
+        _build,
+    )
+    entry = ExternalCliAgentSpec(cli_agent="codex")
+    backend = TeamWorkerBackend(
+        model=None,
+        team_name="t",
+        session_id="product-session",
+        external_cli_agents=(entry,),
+    )
+
+    class _BudgetRail:
+        def bill(self, *args, **kwargs):
+            return None
+
+    result = asyncio.run(
+        backend._execute_external_worker(
+            "do the work",
+            member_name="wf-coder-abc",
+            entry=entry,
+            agent_type="codex",
+            opts={"label": "Coder"},
+            schema_json=None,
+            budget_rail=_BudgetRail(),
+        )
+    )
+
+    assert result.text == "ok"
+    assert [kind for kind, _ in events] == ["bind", "start", "stop"]
+    assert events[0][1] is recorder
+    subject = create_calls[0]["subject"]
+    assert subject.subject_id == "team-member:product-session:t:wf-coder-abc"
+    assert subject.display_name == "Coder"
+
+
 def test_execute_worker_runs_under_its_own_trajectory_subject(monkeypatch):
     """A native worker runs under a ``team_member`` subject shown by its call label."""
     from openjiuwen.agent_teams.harness import team_harness as th_mod
