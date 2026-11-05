@@ -1088,7 +1088,25 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._cached_trace_id: str | None = None
         self._cached_session_id: str | None = None
 
+    def _has_live_spans(self) -> bool:
+        """Whether any tracked workflow span is still recording.
+
+        Tracer.init() broadcasts set_trace_id/set_session_id to every
+        registered handler singleton, including handlers currently tracing a
+        live run for another session (e.g. a fresh lightweight agent session
+        created inside a running workflow component). Resetting caches or
+        force-cleaning spans at that moment would detach the live run's
+        ambient context mid-node and force-end in-flight spans, so resets
+        must be deferred while any tracked span is still recording.
+        """
+        tracked = list(self._layer_root_spans.values()) + list(self._component_spans.values())
+        return any(state.span.is_recording() for state in tracked)
+
     def set_trace_id(self, trace_id: str) -> None:
+        if self._has_live_spans():
+            # A live run is being traced for another session; a foreign
+            # tracer's init must not clear caches or force-clean its spans.
+            return
         if trace_id and trace_id != self._trace_id:
             self._cached_root_ctx = None
             self._cached_trace_id = None
@@ -1096,6 +1114,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         super().set_trace_id(trace_id)
 
     def set_session_id(self, session_id: str) -> None:
+        if self._has_live_spans():
+            # Per-event session binding keeps serving the live run; rebind
+            # once the run finishes.
+            return
         if session_id and session_id != self._cached_session_id:
             self._cached_root_ctx = None
             self._cached_trace_id = None

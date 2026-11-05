@@ -10,6 +10,7 @@ relationships, and error marking.
 import json
 
 import pytest
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
@@ -1502,6 +1503,93 @@ class TestWorkflowIsolation:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 2
+
+
+class TestSessionRebindDuringLiveRun:
+    """Foreign session/trace rebind mid-run must not wipe the live run's maps.
+
+    部署实证缺陷③的结构性成因：嵌入侧每次模型调用都新建裸会话，其
+    Tracer.init() 向全局注册的 WF handler 扇出 set_trace_id/set_session_id；
+    原逻辑见到不同 id 即 _cleanup_stale_spans，清空 _layer_root_spans/
+    _component_spans 并强关在途 span——后续组件（end）逻辑父查找落空，落
+    环境回退误挂到 llm span 上。守卫语义：工作流仍有 span 在录制时忽略
+    外来重绑（缓存与映射不动），跑完后再按原语义重绑/清理。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+
+    async def test_foreign_rebind_keeps_end_parent(self):
+        """外来重绑打在运行中：end 组件仍须挂在 wf 根下，而非环境里的 llm span。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        await self.handler.on_call_start(
+            invoke_id="node_llm",
+            metadata={
+                "workflow_id": "wf-1",
+                "component_id": "node_llm",
+                "component_type": "llm",
+                "component_name": "llm-node",
+            },
+            parent_node_id="wf_root",
+        )
+        root_span = self.handler._layer_root_spans["wf_root"].span
+        llm_state = self.handler._component_spans["node_llm"]
+        # 部署形态：llm 组件 span 在途且是环境当前 span（组件执行期 attach）
+        token = otel_context.attach(trace.set_span_in_context(llm_state.span))
+        try:
+            # 嵌入裸会话 Tracer.init() 扇出：随机 trace id + 不同 session id
+            self.handler.set_trace_id("3f2a8c1d" * 4)
+            self.handler.set_session_id("embedded-bare-session")
+
+            # 多轮续链缓存也不得被外来重绑打掉
+            assert self.handler._cached_root_ctx is not None
+
+            await self.handler.on_call_start(
+                invoke_id="node_end",
+                metadata={
+                    "workflow_id": "wf-1",
+                    "component_id": "node_end",
+                    "component_type": "end",
+                    "component_name": "end-node",
+                },
+                parent_node_id="wf_root",
+            )
+        finally:
+            otel_context.detach(token)
+
+        end_span = self.handler._component_spans["node_end"].span
+        assert end_span.parent is not None
+        assert end_span.parent.span_id == root_span.context.span_id
+
+    async def test_foreign_rebind_defers_until_run_ends(self):
+        """守卫只延迟不吞掉：跑完后同一外来 session id 照常完成重绑。"""
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf-1", "workflow_name": "demo"},
+        )
+        await self.handler.on_call_start(
+            invoke_id="node_llm",
+            metadata={
+                "workflow_id": "wf-1",
+                "component_id": "node_llm",
+                "component_type": "llm",
+            },
+            parent_node_id="wf_root",
+        )
+
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id != "embedded-bare-session"
+
+        await self.handler.on_call_done(invoke_id="node_llm", outputs={})
+        await self.handler.on_call_done(invoke_id="wf_root", outputs={})
+
+        self.handler.set_session_id("embedded-bare-session")
+        assert self.handler._cached_session_id == "embedded-bare-session"
 
 
 class TestMultiRoundConversationTraceContinuity:
