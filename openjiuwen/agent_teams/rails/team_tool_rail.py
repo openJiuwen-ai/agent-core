@@ -80,7 +80,6 @@ class TeamToolRail(DeepAgentRail):
         swarmflow_concurrency_governor: Optional[Any] = None,
         swarmflow_budget: Optional[Any] = None,
         team_permissions_enabled: bool = False,
-        extension_bus: Optional[Any] = None,
     ) -> None:
         super().__init__()
         self._team_backend = team_backend
@@ -103,7 +102,6 @@ class TeamToolRail(DeepAgentRail):
         self._swarmflow_concurrency_governor = swarmflow_concurrency_governor
         self._swarmflow_budget = swarmflow_budget
         self._team_permissions_enabled = team_permissions_enabled
-        self._extension_bus = extension_bus
         self._tools: list[Tool] | None = None
 
     def init(self, agent: Any) -> None:
@@ -144,7 +142,6 @@ class TeamToolRail(DeepAgentRail):
             concurrency_governor=self._swarmflow_concurrency_governor,
             swarmflow_budget=self._swarmflow_budget,
             team_permissions_enabled=self._team_permissions_enabled,
-            extension_bus=self._extension_bus,
         )
 
         if self._workspace_manager is not None:

@@ -1,35 +1,28 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import functools
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
+import functools
 
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import LogEventType, context_engine_logger
+from openjiuwen.core.common.logging import context_engine_logger, LogEventType
+from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.compaction import (
-    CompactionDecision,
-    CompactionError,
-    CompactionHook,
-    CompactionTrigger,
-)
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter
-from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
-from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
-from openjiuwen.core.runner.callback import trigger as callback_trigger
+from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
-from openjiuwen.core.session.agent import Session
 
 
 class ContextEngine:
@@ -82,78 +75,25 @@ class ContextEngine:
         "__context__",
     )
 
-    def __init__(
-        self,
-        config: ContextEngineConfig = None,
-        workspace=None,
-        sys_operation=None,
-    ):
+    def __init__(self,
+                 config: ContextEngineConfig = None,
+                 workspace=None,
+                 sys_operation=None,
+                 ):
         self._config = config or ContextEngineConfig()
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
-        from openjiuwen.core.context_engine.compaction import CompactionCoordinator
-
-        self._compaction = CompactionCoordinator(self)
-        self._window_mutators: List[Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]] = []
+        self._window_mutators: List[
+            Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
+        ] = []
 
     def register_window_mutator(
-        self,
-        mutator: Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]],
+            self,
+            mutator: Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]],
     ) -> None:
         """Register an instance-level final-window mutator."""
         self._window_mutators.append(mutator)
-
-    def register_compaction_hook(self, hook: CompactionHook) -> Callable[[], None]:
-        """Register a host hook for explicit compact_context calls.
-
-        Legacy/manual/automatic entry-point integration is deliberately deferred.
-
-        Returns:
-            An idempotent function removing this registration and its cache.
-        """
-        return self._compaction.register(hook)
-
-    def invalidate_compaction_candidates(self) -> None:
-        """Discard speculative candidates after host policy or model changes."""
-        self._compaction.clear()
-
-    async def compact_context(
-        self,
-        context_id: str = "default_context_id",
-        session: Session = None,
-        *,
-        session_id: str = None,
-        trigger: CompactionTrigger = "manual",
-        instructions: str | None = None,
-        processor_types: List[str] = None,
-    ) -> CompactionDecision:
-        """Prepare, intercept and persist a native compaction exactly once."""
-        resolved_id = session.get_session_id() if session else (session_id or "default_session_id")
-        context = self.get_context(context_id=context_id, session_id=resolved_id)
-        if not isinstance(context, SessionModelContext) or context.compaction_uncertain():
-            raise CompactionError("COMPACT_SESSION_UNAVAILABLE")
-        key = (resolved_id, context_id)
-        if key in self._compaction.active:
-            raise CompactionError("COMPACT_REENTRANT")
-        if context.processor_lock_held():
-            raise CompactionError("COMPACT_BUSY")
-
-        async def prepare(draft):
-            await draft.compress_context(processor_types=processor_types)
-
-        async def persist():
-            effective_session = session or context.get_session_ref()
-            if effective_session is not None:
-                await self.save_contexts(effective_session, context_ids=[context_id])
-                await effective_session.commit()
-
-        if trigger == "precompute":
-            return await self._compaction.run(context, trigger, instructions, prepare, processor_types=processor_types)
-        async with context.processor_guard("compact_context"):
-            return await self._compaction.run(
-                context, trigger, instructions, prepare, persist=persist, processor_types=processor_types
-            )
 
     def clear_window_mutators(self) -> None:
         """Clear instance-level final-window mutators."""
@@ -163,7 +103,10 @@ class ContextEngine:
     def _select_token_counter(config: ContextEngineConfig) -> TokenCounter:
         """Select a local-only counter for a context-engine configuration."""
         has_model_tokenizer_target = bool(
-            config.model_name or config.model_provider or config.tokenizer_spec or config.tokenizer_registry
+            config.model_name
+            or config.model_provider
+            or config.tokenizer_spec
+            or config.tokenizer_registry
         )
         try:
             return TokenizerSelector(
@@ -182,7 +125,10 @@ class ContextEngine:
                 # context. Configured model contexts use native-or-string
                 # resolution and never initialize a remote/default tiktoken
                 # counter here.
-                allow_tiktoken_fallback=(config.enable_tiktoken_counter and not has_model_tokenizer_target),
+                allow_tiktoken_fallback=(
+                    config.enable_tiktoken_counter
+                    and not has_model_tokenizer_target
+                ),
             ).select()
         except Exception as exc:  # noqa: BLE001 - context must fail open
             context_engine_logger.warning(
@@ -213,7 +159,9 @@ class ContextEngine:
         context_updates = {
             "model_name": model_name or None,
             "model_context_window_tokens_override": (
-                context_window_tokens if isinstance(context_window_tokens, int) and context_window_tokens > 0 else None
+                context_window_tokens
+                if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                else None
             ),
         }
         model_provider = getattr(model_client_config, "client_provider", None)
@@ -250,13 +198,13 @@ class ContextEngine:
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
-        self,
-        context_id: str = "default_context_id",
-        session: Session = None,
-        *,
-        processors: List[Tuple[str, BaseModel]] = None,
-        history_messages: List[BaseMessage] = None,
-        token_counter: TokenCounter = None,
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            processors: List[Tuple[str, BaseModel]] = None,
+            history_messages: List[BaseMessage] = None,
+            token_counter: TokenCounter = None,
     ) -> ModelContext:
         """
         Create or retrieve a ModelContext for the given session & context ID.
@@ -324,7 +272,6 @@ class ContextEngine:
             window_mutators=self._window_mutators,
         )
         self._load_state_from_session(context, session, history_messages)
-        context.set_compaction_coordinator(self._compaction)
         self._context_pool[full_context_id] = context
         return context
 
@@ -350,7 +297,9 @@ class ContextEngine:
             raise TypeError("config must be a ContextEngineConfig")
 
         self._config = config
-        normalized_context_id = self._process_context_id(context_id) if context_id is not None else None
+        normalized_context_id = (
+            self._process_context_id(context_id) if context_id is not None else None
+        )
         token_counter = self._select_token_counter(config)
         rebound = 0
         for context in self._context_pool.values():
@@ -386,7 +335,9 @@ class ContextEngine:
         return rebound
 
     def get_context(
-        self, context_id: str = "default_context_id", session_id: str = "default_session_id"
+            self,
+            context_id: str = "default_context_id",
+            session_id: str = "default_session_id"
     ) -> Optional[ModelContext]:
         """
         Retrieve an existing ModelContext from the pool.
@@ -403,13 +354,13 @@ class ContextEngine:
         return self._context_pool.get(full_context_id, None)
 
     async def compress_context(
-        self,
-        context_id: str = "default_context_id",
-        session: Session = None,
-        *,
-        session_id: str = None,
-        processor_types: List[str] = None,
-        **kwargs,
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            session_id: str = None,
+            processor_types: List[str] = None,
+            **kwargs,
     ) -> str | dict[str, Any]:
         """
         Actively run registered compression processors for an existing context.
@@ -432,49 +383,17 @@ class ContextEngine:
         A successful compression is saved to the resolved session and committed
         before this method returns. Contexts without a session remain in-memory only.
         """
-        # TODO(compact): Native compress_context does not enter the extension bridge in this stage.
-        # if self._compaction.hook is not None:
-        # from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
-        # trigger_name = kwargs.pop("compression_trigger", "manual")
-        # trigger_name = "auto" if trigger_name in ("passive", "model_context_overflow") else trigger_name
-        # try:
-        # decision = await self.compact_context(
-        # context_id, session, session_id=session_id, trigger=trigger_name,
-        # instructions=kwargs.pop("instructions", None), processor_types=processor_types,
-        # )
-        # except CompactionError as error:
-        # if error.code != "COMPACT_BUSY":
-        # raise
-        # return {"result": "busy"} if kwargs.get("return_state") else "busy"
-        # code = "compressed" if isinstance(decision, CompactionCandidate) else "noop"
-        # if kwargs.get("return_state"):
-        #     session_id_for_ctx = (
-        #         session.get_session_id() if session else (session_id or "default_session_id")
-        #     )
-        #     context = self.get_context(
-        #         context_id=context_id, session_id=session_id_for_ctx
-        #     )
-        #     state = (
-        #         getattr(context, "_last_compaction", {}) if code == "compressed" else {}
-        #     )
-        #     return {
-        #         "result": code,
-        #         "skip": getattr(decision, "skip", None),
-        #         "state": state,
-        #         "compact_summary": state.get("compact_summary"),
-        #     }
-        # return code
         resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
         context = self.get_context(context_id=context_id, session_id=resolved_session_id)
         if context is None:
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg=f"cannot find context '{context_id}' in session '{resolved_session_id}'",
+                error_msg=f"cannot find context '{context_id}' in session '{resolved_session_id}'"
             )
         if not hasattr(context, "compress_context"):
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg=f"context '{context_id}' does not support active compression",
+                error_msg=f"context '{context_id}' does not support active compression"
             )
         result = await context.compress_context(
             processor_types=processor_types,
@@ -491,15 +410,15 @@ class ContextEngine:
         return result
 
     async def recover_from_model_exception(
-        self,
-        *,
-        context_id: str = "default_context_id",
-        session: Session = None,
-        context: ModelContext = None,
-        exception: Exception = None,
-        streaming: bool = False,
-        stream_chunks_emitted: int = 0,
-        **kwargs,
+            self,
+            *,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            context: ModelContext = None,
+            exception: Exception = None,
+            streaming: bool = False,
+            stream_chunks_emitted: int = 0,
+            **kwargs,
     ) -> bool:
         """Recover from a model context-window rejection by compressing once.
 
@@ -517,7 +436,8 @@ class ContextEngine:
         # stream chunk is visible.
         if streaming and stream_chunks_emitted > 0:
             context_engine_logger.warning(
-                "skip model context recovery after streaming output was emitted, stream_chunks_emitted=%s",
+                "skip model context recovery after streaming output was emitted, "
+                "stream_chunks_emitted=%s",
                 stream_chunks_emitted,
             )
             return False
@@ -526,7 +446,9 @@ class ContextEngine:
             return False
 
         compression_kwargs = dict(kwargs)
-        compression_kwargs.setdefault("compression_trigger", "model_context_overflow")
+        compression_kwargs.setdefault(
+            "compression_trigger", "model_context_overflow"
+        )
         result = await self.compress_context(
             context_id=context_id,
             session=session,
@@ -559,9 +481,13 @@ class ContextEngine:
             message = value.casefold().replace("_", " ").replace("-", " ")
             if any(phrase in message for phrase in cls._CONTEXT_OVERFLOW_PHRASES):
                 return True
-            if "token limit" in message and not any(term in message for term in ("output", "completion", "response")):
+            if "token limit" in message and not any(
+                term in message for term in ("output", "completion", "response")
+            ):
                 return True
-            if "too long" in message and any(term in message for term in ("context", "prompt", "input")):
+            if "too long" in message and any(
+                term in message for term in ("context", "prompt", "input")
+            ):
                 return True
             if ("exceed" in message or "over limit" in message) and any(
                 term in message for term in ("context", "prompt", "input")
@@ -571,11 +497,11 @@ class ContextEngine:
 
     @classmethod
     def _iter_exception_texts(
-        cls,
-        value: Any,
-        *,
-        depth: int = 0,
-        seen: Set[int] = None,
+            cls,
+            value: Any,
+            *,
+            depth: int = 0,
+            seen: Set[int] = None,
     ) -> Iterator[str]:
         """Yield text from common provider error wrappers without recursion loops."""
         if value is None or depth > 6:
@@ -606,12 +532,18 @@ class ContextEngine:
         elif isinstance(value, dict):
             fields = ()
             for key, nested_value in value.items():
-                yield from cls._iter_exception_texts(key, depth=depth + 1, seen=seen)
-                yield from cls._iter_exception_texts(nested_value, depth=depth + 1, seen=seen)
+                yield from cls._iter_exception_texts(
+                    key, depth=depth + 1, seen=seen
+                )
+                yield from cls._iter_exception_texts(
+                    nested_value, depth=depth + 1, seen=seen
+                )
         elif isinstance(value, (list, tuple, set, frozenset)):
             fields = ()
             for nested_value in value:
-                yield from cls._iter_exception_texts(nested_value, depth=depth + 1, seen=seen)
+                yield from cls._iter_exception_texts(
+                    nested_value, depth=depth + 1, seen=seen
+                )
         else:
             fields = cls._CONTEXT_OVERFLOW_FIELDS
 
@@ -629,9 +561,15 @@ class ContextEngine:
                 continue
             if nested_value is None or nested_value is value or callable(nested_value):
                 continue
-            yield from cls._iter_exception_texts(nested_value, depth=depth + 1, seen=seen)
+            yield from cls._iter_exception_texts(
+                nested_value, depth=depth + 1, seen=seen
+            )
 
-    async def clear_context(self, context_id: str = None, session_id: str = None):
+    async def clear_context(
+            self,
+            context_id: str = None,
+            session_id: str = None
+    ):
         """
         Remove contexts from the internal pool.
 
@@ -653,39 +591,34 @@ class ContextEngine:
         --------
         Logs a warning when the requested session or context cannot be found.
         """
-        if self._compaction.active:
-            raise CompactionError("COMPACT_BUSY")
-        self._compaction.clear()
         if session_id is None:
             cleared_count = len(self._context_pool)
             self._context_pool.clear()
-            await callback_trigger(
-                ContextEvents.CONTEXT_CLEARED, context_id=context_id, session_id=session_id, cleared_count=cleared_count
-            )
+            await trigger(ContextEvents.CONTEXT_CLEARED,
+                       context_id=context_id, session_id=session_id,
+                       cleared_count=cleared_count)
             return
 
         if context_id is None:
             delete_context_list = [
-                context.context_id() for _, context in self._context_pool.items() if context.session_id() == session_id
+                context.context_id() for _, context in self._context_pool.items()
+                if context.session_id() == session_id
             ]
 
             if not delete_context_list:
                 context_engine_logger.warning(
                     "Delete context failed, session does not exist",
                     event_type=LogEventType.CONTEXT_CLEAR,
-                    metadata={"session_id": session_id},
+                    metadata={"session_id": session_id}
                 )
                 return
 
             for context_id in delete_context_list:
                 full_context_id = f"{session_id}_{context_id}"
                 del self._context_pool[full_context_id]
-            await callback_trigger(
-                ContextEvents.CONTEXT_CLEARED,
-                context_id=context_id,
-                session_id=session_id,
-                cleared_count=len(delete_context_list),
-            )
+            await trigger(ContextEvents.CONTEXT_CLEARED,
+                       context_id=context_id, session_id=session_id,
+                       cleared_count=len(delete_context_list))
             return
 
         context_id = self._process_context_id(context_id)
@@ -694,15 +627,19 @@ class ContextEngine:
             context_engine_logger.warning(
                 "Delete context failed, context does not exist",
                 event_type=LogEventType.CONTEXT_CLEAR,
-                metadata={"session_id": session_id},
+                metadata={"session_id": session_id}
             )
             return
 
         del self._context_pool[full_context_id]
-        await callback_trigger(ContextEvents.CONTEXT_CLEARED, context_id=context_id, session_id=session_id)
+        await trigger(ContextEvents.CONTEXT_CLEARED,
+                   context_id=context_id, session_id=session_id)
 
     @_fw.emit_after(ContextEvents.CONTEXT_OFFLOADED, result_key="result")
-    async def save_contexts(self, session: Session, context_ids: List[str] = None):
+    async def save_contexts(self,
+                            session: Session,
+                            context_ids: List[str] = None
+                            ):
         """
         Batch-persist multiple contexts and their runtime states.
 
@@ -723,8 +660,7 @@ class ContextEngine:
         states = dict()
         if context_ids is None:
             context_ids = [
-                context.context_id()
-                for context_id, context in self._context_pool.items()
+                context.context_id() for context_id, context in self._context_pool.items()
                 if context.session_id() == session_id
             ]
 
@@ -770,32 +706,37 @@ class ContextEngine:
             A decorator that accepts the processor class and returns it unchanged
             after registration (allowing normal class-definition syntax).
         """
-
         @functools.wraps(processor_class)
         def register_processor_class(processor_class: type[ContextProcessor]):
             cls._PROCESSOR_MAP[processor_class.processor_type()] = processor_class
             return processor_class
-
         return register_processor_class
 
     def _create_processor(self, processor_type: str, config: BaseModel):
         processor_class = self._PROCESSOR_MAP.get(processor_type)
         if not processor_class:
             raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR, error_msg=f"cannot find processor type '{processor_type}'"
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"cannot find processor type '{processor_type}'"
             )
 
         try:
             processor = processor_class(config)
         except Exception as e:
             raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR, error_msg=f"init processor type '{processor_type}' failed", cause=e
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"init processor type '{processor_type}' failed",
+                cause=e
             ) from e
 
         return processor
 
     @staticmethod
-    def _load_state_from_session(context: ModelContext, session: Session, history_messages: List[BaseMessage] = None):
+    def _load_state_from_session(
+            context: ModelContext,
+            session: Session,
+            history_messages: List[BaseMessage] = None
+    ):
         if not session:
             return
         states = None
@@ -812,12 +753,15 @@ class ContextEngine:
 
         if history_messages is not None:
             context_id = context.context_id()
-            states[context_id]["messages"] = history_messages
+            states[context_id]['messages'] = history_messages
 
         context.load_state(states)
 
     @staticmethod
-    def _save_state_to_session(session, states: dict):
+    def _save_state_to_session(
+            session,
+            states: dict
+    ):
         if not session:
             return
         if hasattr(session, "update_state"):

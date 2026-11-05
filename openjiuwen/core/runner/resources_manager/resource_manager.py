@@ -965,8 +965,7 @@ class ResourceMgr:
                              server_config: McpServerConfig | list[McpServerConfig],
                              *,
                              tag: Optional[Tag | list[Tag]] = None,
-                             expiry_time: Optional[float] = None,
-                             timeout: Optional[float] = None  # noqa: ASYNC109
+                             expiry_time: Optional[float] = None
                              ) -> Result[str, Exception] | list[Result[str, Exception]]:
         """
         Add MCP (Model Context Protocol) server configuration(s).
@@ -976,8 +975,6 @@ class ResourceMgr:
             tag: Optional tag(s) for categorizing the server(s).
             expiry_time: Optional Unix timestamp when the server configuration expires.
                 If None, the configuration does not expire.
-            timeout: Optional budget in seconds for connecting and listing tools.
-                If None, the MCP client default applies.
 
         Returns:
             Result[str, Exception] or list[Result[str, Exception]]:
@@ -994,9 +991,7 @@ class ResourceMgr:
         for config in server_configs:
             try:
                 # atomic process
-                cards = await self._resource_registry.tool().add_tool_server(
-                    config, expiry_time=expiry_time, timeout=timeout
-                )
+                cards = await self._resource_registry.tool().add_tool_server(config, expiry_time=expiry_time)
                 for card in cards:
                     self._id_to_card[card.id] = card
                     self._tag_mgr.tag_resource(card.id, tag if tag else GLOBAL)

@@ -32,9 +32,6 @@ from openjiuwen.agent_teams.tools.database.engine import (
     create_cur_session_tables as _create_cur_session_tables,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
-    cur_session_table_exists as _cur_session_table_exists,
-)
-from openjiuwen.agent_teams.tools.database.engine import (
     drop_cur_session_tables as _drop_cur_session_tables,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
@@ -219,18 +216,6 @@ class TeamDatabase:
         if self._sessions is None:
             return False
         return await _create_cur_session_tables(self._sessions)
-
-    async def has_cur_session_tables(self, table_kind: str) -> bool:
-        """Check whether the bound session's dynamic tables of one kind exist.
-
-        ``table_kind`` is ``"task"`` or ``"message"``. Read-only: read paths
-        use it to answer empty for sessions that never ran a team instead
-        of surfacing a missing-table error — reads never run DDL.
-        """
-        await self._ensure_initialized()
-        if self._sessions is None:
-            return False
-        return await _cur_session_table_exists(self._sessions, table_kind)
 
     async def drop_cur_session_tables(self) -> None:
         """Drop dynamic tables for current session."""

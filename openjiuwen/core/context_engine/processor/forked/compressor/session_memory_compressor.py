@@ -47,12 +47,6 @@ class SessionMemoryCompressor(ContextProcessor):
     def __init__(self, config: SessionMemoryCompressorConfig):
         super().__init__(config)
 
-    def configure_compaction(self, instructions: str | None, failures: list) -> None:
-        """Disable the session-memory shortcut when instructions require a model call."""
-        super().configure_compaction(instructions, failures)
-        if instructions:
-            self._config = self._config.model_copy(update={"enabled": False})
-
     async def trigger_get_context_window(
         self,
         context: ModelContext,

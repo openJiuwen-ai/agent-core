@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
-
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -22,11 +21,11 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.compressor.util import (
-    TEAM_POLICY_LABEL,
     FullCompactStateReinjector,
+    TEAM_POLICY_LABEL,
     build_plan_mode_reinjected_content,
-    build_skill_reinjected_content,
     build_task_status_reinjected_content,
+    build_skill_reinjected_content,
     build_team_policy_reinjected_messages,
 )
 from openjiuwen.core.foundation.llm import (
@@ -288,12 +287,6 @@ class FullCompactProcessor(ContextProcessor):
         self._model: Model | None = None
         if config.model is not None and config.model_client is not None:
             self._model = Model(config.model_client, config.model)
-
-    def configure_compaction(self, instructions: str | None, failures: list) -> None:
-        """Use per-call instructions instead of session-memory preparation."""
-        super().configure_compaction(instructions, failures)
-        if instructions:
-            self._session_memory_enabled = False
 
     def rebind_model(
         self,

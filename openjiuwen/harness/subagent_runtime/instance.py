@@ -11,7 +11,6 @@ from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
@@ -131,13 +130,10 @@ class SubagentInstance:
             self._worker_task = asyncio.create_task(self._worker_main())
 
     async def shutdown(self, reason: str) -> None:
-        try:
-            await self.interrupt()
-            await self.enqueue(ShutdownOp(reason=reason))
-            if self._worker_task is not None:
-                await self._worker_task
-        finally:
-            get_agent_runtime().unbind(self.subagent_id, self._agent)
+        await self.interrupt()
+        await self.enqueue(ShutdownOp(reason=reason))
+        if self._worker_task is not None:
+            await self._worker_task
 
     def is_evictable(self) -> bool:
         if self._closed:

@@ -4,10 +4,6 @@
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.compaction import (
-    CompactionCandidate, CompactionDecision, CompactionError, CompactionHook,
-    CompactionNext, CompactionRequest, CompactionSkipped, CompactionTrigger,
-)
 
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
 from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
@@ -152,6 +148,4 @@ __all__ = (
     + _TOKEN_COUNTER
     + _PROCESSORS_CLASSES
     + _USAGE_CLASSES
-    + ["CompactionCandidate", "CompactionDecision", "CompactionError", "CompactionHook",
-       "CompactionNext", "CompactionRequest", "CompactionSkipped", "CompactionTrigger"]
 )
