@@ -161,7 +161,7 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 | sweep | 覆盖 | 全部前置 |
 |---|---|---|
 | `_check_stale_claimed_tasks`（**self-only**，每个成员扫自己） | `_own_stalled_tasks()`：持有的 `{PLANNING, IN_PROGRESS}`；**一个活跃任务都没有时**回落到名下最早的**一个** `PENDING(assignee=self)`（F_69） | 本成员 `idle_seconds() >= stale_claim_idle_timeout` + per-task 节流 |
-| `_check_stale_pending_tasks`（**leader-only**） | **`assignee` 为空**的 `PENDING` | leader 自己 idle 超 `stale_pending_idle_timeout` **且** roster 里至少一个非 leader 成员 READY |
+| `_check_stale_pending_tasks`（**leader-only**） | 两片：`assignee` 为空的 `PENDING`（受空闲容量闸）；**`assignee` 仍 UNSTARTED 的 `PENDING`**（拉起失败回滚，成员侧兜底全不可见，不受容量闸） | leader 自己 idle 超 `stale_pending_idle_timeout`；未指派片另需 roster 里至少一个非 leader 成员处于 READY/UNSTARTED/STARTING（可拉起容量，spawn-on-delegation 后全新名册恰是 UNSTARTED） |
 
 几条不能改错的判断：
 

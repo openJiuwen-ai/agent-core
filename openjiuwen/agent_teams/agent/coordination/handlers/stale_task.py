@@ -22,10 +22,12 @@ Two sweeps, both throttled per task:
   check in, reassign, or replace the assignee. The leader never reaches
   across processes to nudge a member directly (F_53) — the stalled member
   reports its own stall instead.
-- **stale pending (leader-only)**: a leader idle past the threshold while
-  unassigned PENDING tasks exist *and* at least one member is free
-  self-prompts to assign them. The free-member precondition keeps the
-  prompt away from a team whose members are simply all busy.
+- **stale pending (leader-only)**: a leader idle past the threshold
+  self-prompts about parked PENDING work — unassigned tasks (while the
+  roster has free capacity, where UNSTARTED/STARTING members count as
+  spawnable capacity since assignment launches them), plus assigned tasks
+  whose assignee never started (spawn failed and rolled back — only the
+  leader can retry the launch or reassign).
 
 Scheduled dispatch keeps the legacy ``updated_at`` claim sweep — see
 ``ScheduledStaleTaskHandler``.
@@ -69,6 +71,17 @@ class StaleTaskHandler(BaseCoordinationHandler):
     # case in-process (only the assignee can push its own task); escalating
     # after repeated windows surfaces the ones self-nudging cannot fix.
     _STALE_CLAIM_ESCALATE_STREAK: ClassVar[int] = 3
+    # Roster states that count as free capacity for the stale-pending sweep.
+    # UNSTARTED/STARTING qualify because assignment now launches the assignee
+    # (``update_task`` -> ``autostart_member``): a roster parked at UNSTARTED
+    # is spawnable capacity, not a busy team. Gating on READY alone would
+    # silence the sweep exactly when spawn-on-delegation left every member
+    # unstarted — the common shape of a fresh team.
+    _FREE_CAPACITY_STATES: ClassVar[frozenset] = frozenset({
+        MemberStatus.READY.value,
+        MemberStatus.UNSTARTED.value,
+        MemberStatus.STARTING.value,
+    })
 
     def __init__(
         self,
@@ -273,15 +286,28 @@ class StaleTaskHandler(BaseCoordinationHandler):
         )
 
     async def _check_stale_pending_tasks(self) -> None:
-        """Leader-only: self-prompt about unclaimed work while someone is free.
+        """Leader-only: self-prompt about parked work nobody is pushing.
+
+        Two slices of PENDING are swept:
+
+        - **Unassigned** — claimable work sitting in the shared pool,
+          prompted only while the roster has free capacity
+          (``_FREE_CAPACITY_STATES``: READY, or UNSTARTED/STARTING members
+          that assignment itself will launch). The capacity precondition
+          keeps the prompt away from a team whose members are simply all
+          busy — a normal queue, not a stall.
+        - **Assigned-but-never-started** — the assignee is still UNSTARTED,
+          meaning its spawn failed and rolled back (or predates the
+          auto-start funnel). No member-side net can see it: the self-sweep
+          and the initial task poll both require the member's runtime to be
+          up, so the leader is the only one who can retry the launch
+          (``send_message`` to the assignee) or reassign (``update_task``).
+          Not capacity-gated — the stall is real regardless of who is free.
 
         Fires off the *leader's own* idle clock: how long the leader has sat
         idle is the run-time measure of "the team has been quiet this long",
         and unlike any ``updated_at``-based measure it cannot be inflated by
-        a pause window. Two further preconditions keep the prompt honest —
-        there must be unassigned PENDING work, and at least one member must
-        actually be free to take it. A team whose members are simply all busy
-        has a normal queue, not a stall, and must not be prompted about it.
+        a pause window.
 
         The list stays minimal (id + title); the model reads each task's
         details via ``view_task`` and picks the assignee off the roster
@@ -300,47 +326,70 @@ class StaleTaskHandler(BaseCoordinationHandler):
             return
 
         all_pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value)
-        pending = [tk for tk in all_pending if not tk.assignee]
 
-        # GC throttle entries for tasks that are no longer unassigned-pending.
-        current_ids = {tk.task_id for tk in pending}
+        # ``list_member_roster`` already drops the caller, so the leader's
+        # own status never counts here.
+        roster = await team_backend.list_member_roster()
+        status_by_member = {entry.member_name: entry.status for entry in roster}
+
+        unassigned = [tk for tk in all_pending if not tk.assignee]
+        never_started = [
+            tk
+            for tk in all_pending
+            if tk.assignee and status_by_member.get(tk.assignee) == MemberStatus.UNSTARTED.value
+        ]
+        swept = unassigned + never_started
+
+        # GC throttle entries for tasks that left the swept set — assigned,
+        # completed, cancelled, or the assignee finally came up.
+        current_ids = {tk.task_id for tk in swept}
         for tid in [k for k in self._last_pending_nudge if k not in current_ids]:
             self._last_pending_nudge.pop(tid, None)
 
-        if not pending:
+        if not swept:
             return
 
-        # ``list_member_roster`` already drops the caller, so the leader's own
-        # READY status never counts as a free worker here.
-        roster = await team_backend.list_member_roster()
-        if not any(entry.status == MemberStatus.READY.value for entry in roster):
-            return
+        has_free_capacity = any(entry.status in self._FREE_CAPACITY_STATES for entry in roster)
 
         now = time.time()
-        fresh: list = []
-        for task in pending:
+        fresh_unassigned: list = []
+        fresh_never_started: list = []
+        for task in swept:
             last = self._last_pending_nudge.get(task.task_id, 0.0)
             if now - last < self._idle_pending_seconds:
                 continue
-            fresh.append(task)
+            if not task.assignee and not has_free_capacity:
+                # Everyone is genuinely busy — a normal queue, not a stall.
+                # Left unthrottled so the task is re-evaluated next poll.
+                continue
+            self._last_pending_nudge[task.task_id] = now
+            (fresh_never_started if task.assignee else fresh_unassigned).append(task)
 
-        if not fresh:
+        if not fresh_unassigned and not fresh_never_started:
             return
 
-        for task in fresh:
-            self._last_pending_nudge[task.task_id] = now
-
         now_ms = get_current_time()
-        lines = [t("dispatcher.stale_pending_header")]
-        for task in fresh:
-            time_info = format_time_context(task.updated_at, now_ms)
-            lines.append(f"- [{task.task_id}] {task.title} ({time_info})")
+        lines: list[str] = []
+        if fresh_unassigned:
+            lines.append(t("dispatcher.stale_pending_header"))
+            for task in fresh_unassigned:
+                time_info = format_time_context(task.updated_at, now_ms)
+                lines.append(f"- [{task.task_id}] {task.title} ({time_info})")
+        if fresh_never_started:
+            lines.append(t("dispatcher.stale_never_started_header"))
+            for task in fresh_never_started:
+                time_info = format_time_context(task.updated_at, now_ms)
+                lines.append(
+                    f"- [{task.task_id}] {task.title} (assignee={task.assignee}, {time_info})"
+                )
         content = "\n".join(lines)
 
         await self._round.deliver_input(render_event(kind="stale-pending", body=content), use_steer=False)
         team_logger.info(
-            "[leader] self-prompted about {} unclaimed pending task(s) after {}s idle",
-            len(fresh),
+            "[leader] self-prompted about {} unclaimed + {} assigned-never-started "
+            "pending task(s) after {}s idle",
+            len(fresh_unassigned),
+            len(fresh_never_started),
             int(idle),
         )
 

@@ -239,7 +239,7 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        await self._auto_start_members()
+        await self._auto_start_members([task.assignee for task in result.tasks])
 
         briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
         if len(briefs) == 1:
@@ -249,33 +249,36 @@ class TaskCreateTool(TeamTool):
             data={"tasks": briefs, "count": len(briefs)},
         )
 
-    async def _auto_start_members(self) -> None:
-        """Bring unstarted members up now that the board has work on it.
+    async def _auto_start_members(self, assignees: list[str | None]) -> None:
+        """Bring up the members this batch of tasks was delegated to.
 
-        Under autonomous dispatch, work reaches members two ways: a message
-        the leader writes, and a task it puts on the board. Only the first
-        used to start anybody, so a leader that created tasks and then never
-        broadcast left the whole roster parked at UNSTARTED — with nothing
-        subscribed, the TaskCreatedEvent went out to nobody, and the
-        leader-side stale-pending sweep could not recover it either (that
-        sweep requires at least one READY member). Members are started here
-        for the same reason the message path starts them: an unstarted member
-        cannot be handed anything.
+        Spawn-on-delegation: only the explicit assignees of the just-created
+        tasks are started, one ``autostart_member`` per distinct name — the
+        create-time counterpart of ``update_task``'s ``_autostart_assignee``.
+        Starting the whole roster here used to spawn teammates the leader
+        never addressed: every member came up for a standby round even with
+        no work pointed at it. Unassigned tasks go to the shared claim pool
+        without waking anyone; the leader assigns them via ``update_task``
+        (which starts the assignee on its own path) once a claimant is
+        chosen, and its stale-pending sweep reminds it of tasks still
+        sitting unclaimed.
 
-        Every unstarted member is started, not just the assignees — an
-        unassigned task goes to the shared claim pool, where any member may
-        turn out to be the claimant. Best-effort: the tasks are already
-        committed, so a spawn failure is logged and left to the leader's
-        round-idle reconcile rather than turned into a tool failure that
-        would invite the model to create the tasks a second time.
+        Per-member fault tolerant: the tasks are already committed, so a
+        spawn failure is logged and the remaining assignees still start —
+        a tool failure here would invite the model to create the tasks a
+        second time.
         """
-        try:
-            started = await self.agent_team.autostart_unstarted()
-        except Exception as e:
-            team_logger.error("create_task failed to auto-start members: {}", e, exc_info=True)
-            return
+        started: list[str] = []
+        for assignee in dict.fromkeys(a for a in assignees if a):
+            try:
+                if await self.agent_team.autostart_member(assignee):
+                    started.append(assignee)
+            except Exception as e:
+                team_logger.error(
+                    "create_task failed to auto-start assignee {}: {}", assignee, e, exc_info=True
+                )
         if started:
-            team_logger.info(f"Auto-started members: {started}")
+            team_logger.info(f"Auto-started assigned members: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:

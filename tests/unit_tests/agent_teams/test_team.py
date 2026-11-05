@@ -1539,9 +1539,8 @@ async def test_autostart_unstarted_without_callback_noop(db, message_bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_create_task_tool_autostarts_unstarted_members(db, message_bus):
-    """create_task 落板后自动拉起 UNSTARTED 成员：任务不能落在从未启动的
-    成员身上（leader 只建任务不喊话时 roster 全员 UNSTARTED 的死锁场景）。"""
+async def test_create_task_tool_autostarts_assignees(db, message_bus):
+    """create_task 落板后按委派拉起：指定 assignee 的成员被拉起开工。"""
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
 
@@ -1570,6 +1569,47 @@ async def test_create_task_tool_autostarts_unstarted_members(db, message_bus):
     on_started.assert_awaited_once_with("dev-1")
     member = await db.member.get_member("dev-1", team_id)
     assert member.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_tool_starts_only_assignees(db, message_bus):
+    """create_task 不再全量拉起：同批未指派任务与未被委派的成员都保持
+    UNSTARTED（未指派任务静候 update_task 指派，由指派路径拉起认领者）。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_assignee_only_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Assignee Only Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    for name in ("dev-1", "dev-2"):
+        await backend.spawn_member(
+            member_name=name, display_name=name,
+            agent_card=AgentCard(name=name, description="d", version="1.0.0"),
+        )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    result = await tool.invoke(
+        {"tasks": [
+            {"title": "t1", "content": "c1", "assignee": "dev-1"},
+            {"title": "t2", "content": "c2"},
+        ]}
+    )
+
+    assert result.success
+    on_started.assert_awaited_once_with("dev-1")
+    m1 = await db.member.get_member("dev-1", team_id)
+    m2 = await db.member.get_member("dev-2", team_id)
+    assert m1.status == MemberStatus.STARTING.value
+    assert m2.status == MemberStatus.UNSTARTED.value
 
 
 @pytest.mark.asyncio
@@ -1667,11 +1707,10 @@ async def test_update_task_assign_autostarts_assignee(db, message_bus):
         {"tasks": [{"title": "t1", "content": "c1", "task_id": "task-1"}]}
     )
     assert created.success
-    # create_task 的全员拉起已把 dev-1 置 STARTING；重置回 UNSTARTED 以隔离验证指派路径
-    on_started.reset_mock()
-    await db.member.try_transition_member_status(
-        "dev-1", team_id, MemberStatus.STARTING, MemberStatus.UNSTARTED,
-    )
+    # 未指派任务不再拉起任何成员：dev-1 保持 UNSTARTED，on_started 未被调用
+    on_started.assert_not_awaited()
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value
 
     update_tool = UpdateTaskTool(backend, t)
     result = await update_tool.invoke({"task_id": "task-1", "assignee": "dev-1"})
