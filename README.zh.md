@@ -1,6 +1,6 @@
 # openJiuwen Core
 
-[中文版](README.zh.md) | [English Version](README.md)
+[English Version](README.md)
 
 ## 简介
 
@@ -133,7 +133,7 @@ async def main():
 asyncio.run(main())
 ```
 
-预期输出
+**预期输出：**
 ```
 WorkflowAgent output result >>> 工作流输出文本: 冰箱罢工了，因为它觉得生活太冷了。
 ```
@@ -171,6 +171,36 @@ WorkflowAgent output result >>> 工作流输出文本: 冰箱罢工了，因为�
 - 改进文档
 - 提交代码
 - 分享使用经验
+
+### 如何参与贡献
+
+1. **Fork 仓库**到你在 AtomGit 上的账号。
+2. **克隆你 fork 的仓库**到本地，并基于改动创建新分支：
+   ```bash
+   git checkout -b <type>/<简短描述>
+   ```
+   常用 `<type>`：`feat`、`fix`、`docs`、`chore`、`refactor`。
+3. **完成改动**，并以规范的提交信息提交：
+   ```bash
+   git commit -m "<type>(<scope>): <subject>"
+   ```
+4. **推送分支**到你 fork 的仓库，并向本仓库的 `develop` 分支发起 Pull Request。
+5. **签署 CLA**。每条 commit 的作者邮箱都必须已被 CLA 覆盖。CLA 机器人会在你的 PR 下发布签署链接。签署完成（或修正邮箱后），在 PR 下评论 `/check-cla` 重新校验。
+6. **处理 review 意见**。维护者可能要求修改，请更新你的分支后再次推送。
+
+### 贡献规范
+
+- 单个 PR 保持小而聚焦 —— 一个 PR 只做一处逻辑改动为佳。
+- 欢迎纯文档类 PR（README、示例、docstring 等），通常 review 较快。
+- 涉及代码改动的，请同步添加或更新测试，并在提交前确认本地测试通过。
+- 遵循仓库已有的代码风格；如仓库提供了格式化工具，请先运行一遍。
+- 切勿提交密钥、凭证或任何个人敏感数据。
+
+### 社区
+
+- 官方网站：<https://www.openjiuwen.com>
+- 贡献指南：<https://www.openjiuwen.com/contribute>
+- 联系邮箱：<contact@openjiuwen.com>
 
 ## 开源许可证
 
