@@ -9,6 +9,11 @@ import re
 import pytest
 from pydantic import BaseModel
 
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    mark_cancellation_cause,
+    reset_cancellation_causes,
+)
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
@@ -44,6 +49,14 @@ def _compression_states(session: _FakeSession) -> list[ContextCompressionState]:
         else:
             states.append(ContextCompressionState(**payload))
     return states
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cancellation_causes():
+    """Every _FakeSession in this module shares the session id "session-1"."""
+    reset_cancellation_causes()
+    yield
+    reset_cancellation_causes()
 
 
 class _ReplacingCompressor(ContextProcessor):
@@ -313,6 +326,58 @@ async def test_get_context_window_streams_failed_state_when_cancelled():
     assert [state.status for state in states] == ["started", "failed"]
     assert states[1].error == "cancelled"
     assert states[1].phase == "get_context_window"
+
+
+@pytest.mark.asyncio
+async def test_active_compression_streams_paused_state_when_cause_is_pause():
+    session = _FakeSession()
+    mark_cancellation_cause(session.get_session_id(), CancellationCause.PAUSE)
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="will pause")],
+        processors=[_CancellingCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    with pytest.raises(asyncio.CancelledError):
+        await context.compress_context()
+
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "paused"]
+    assert states[1].reason == "user_pause"
+    assert states[1].error is None
+    assert states[1].phase == "active_compress"
+    assert "paused" in states[1].summary
+    assert "tokens" in states[1].summary
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_streams_cancelled_state_when_cause_is_cancel():
+    session = _FakeSession()
+    mark_cancellation_cause(session.get_session_id(), CancellationCause.CANCEL)
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="will cancel")],
+        processors=[_CancellingGetWindowProcessor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    with pytest.raises(asyncio.CancelledError):
+        await context.get_context_window()
+
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "cancelled"]
+    assert states[1].reason == "user_cancel"
+    assert states[1].error is None
+    assert states[1].phase == "get_context_window"
+    assert "cancelled" in states[1].summary
+    assert "tokens" in states[1].summary
 
 
 @pytest.mark.asyncio

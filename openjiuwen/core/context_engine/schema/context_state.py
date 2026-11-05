@@ -54,7 +54,15 @@ class ContextCompressionModifiedMessage(BaseModel):
 class ContextCompressionState(BaseModel):
     type: str = Field(default=CONTEXT_COMPRESSION_STATE_TYPE)
     operation_id: str
-    status: Literal["started", "completed", "noop", "skipped", "failed"]
+    status: Literal[
+        "started",
+        "completed",
+        "noop",
+        "skipped",
+        "failed",
+        "paused",
+        "cancelled",
+    ]
     phase: Literal["add_messages", "get_context_window", "active_compress"]
     processor: str = Field(default="")
     model: str = Field(default="")
@@ -70,3 +78,5 @@ class ContextCompressionState(BaseModel):
     summary: str = Field(default="")
     compact_summary: str = Field(default="")
     error: str | None = Field(default=None)
+    reason: str = Field(default="")
+    """Why this state was reached, e.g. ``user_pause`` / ``user_cancel``."""
