@@ -127,6 +127,7 @@ def _make_trace_wrap_handler(
     async def handler(call_next, /, *args, **kwargs):
         tracer = session.tracer()
         span = None
+        ended = False
         try:
             agent_span = session.span()
             span = tracer.tracer_agent_span_manager.create_agent_span(agent_span)
@@ -152,10 +153,25 @@ def _make_trace_wrap_handler(
                 end_outputs = {"outputs": result}
             await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_end",
                                  span=span, outputs=end_outputs)
+            ended = True
             return result
         except Exception as error:
             await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_error", span=span, error=error)
+            ended = True
             raise
+        finally:
+            # Cancellation (CancelledError is a BaseException) bypasses both
+            # branches above; without this compensation the span stays half
+            # open — its attached ambient context leaks and later spans
+            # mis-parent onto it. Finalization only awaits (never yields);
+            # if even this best-effort end fails we must not break the
+            # cancellation semantics, so it is swallowed.
+            if span is not None and not ended:
+                try:
+                    await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_end",
+                                         span=span, outputs={"outputs": None})
+                except Exception:  # noqa: BLE001 - telemetry must not break cancellation
+                    pass
 
     return handler
 
@@ -176,6 +192,9 @@ def _make_trace_stream_wrap_handler(
     async def handler(call_next, /, *args, **kwargs):
         tracer = session.tracer()
         span = None
+        results: list = []
+        final_usage = None
+        ended = False
         try:
             agent_span = session.span()
             span = tracer.tracer_agent_span_manager.create_agent_span(agent_span)
@@ -221,9 +240,29 @@ def _make_trace_stream_wrap_handler(
                 end_outputs = {"outputs": results}
             await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_end",
                                  span=span, outputs=end_outputs)
+            ended = True
         except Exception as error:
             await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_error", span=span, error=error)
+            ended = True
             raise
+        finally:
+            # Mid-stream abandonment (GeneratorExit) and cancellation
+            # (CancelledError) are BaseExceptions: they bypass both branches
+            # above and used to leave the span half open — its attached
+            # ambient context then leaks and later spans mis-parent onto it.
+            # Compensate with a best-effort end carrying whatever was seen.
+            # Finalization may await but must never yield; if even this fails
+            # we swallow it — telemetry must not break cancellation semantics.
+            if span is not None and not ended:
+                try:
+                    if invoke_type == InvokeType.LLM:
+                        end_outputs = _llm_end_payload(results, None, usage=final_usage)
+                    else:
+                        end_outputs = {"outputs": results}
+                    await tracer.trigger("tracer_agent", f"on_{invoke_type.value}_end",
+                                         span=span, outputs=end_outputs)
+                except Exception:  # noqa: BLE001 - telemetry must not break cancellation
+                    pass
 
     return handler
 

@@ -667,3 +667,91 @@ class TestDecator:
         usage = results[1][2]["outputs"]["usage_metadata"]
         # One chunk: first == last timestamp, no interval to average — absent.
         assert usage.get("inter_token_latency_ms") is None
+
+    async def test_decorate_model_stream_abandoned_fires_end(self):
+        """Mid-stream abandonment must not leave the llm span half open.
+
+        GeneratorExit is a BaseException: it bypasses the except-Exception
+        branch, and without the finally compensation the span's ambient
+        context leaks and later spans mis-parent onto it. Abandonment here =
+        caller aclose() after one chunk; the end event must still fire with
+        whatever was seen (partial chunks + their usage).
+
+        Drives the trace handler directly: through the full proxy chain the
+        inner generator's finalization is scheduled by asyncio's asyncgen
+        hooks (GC timing), which is best-effort-by-design in production but
+        non-deterministic in a test. The handler's own finally is the unit
+        under contract.
+        """
+        from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+        from openjiuwen.core.session.tracer.data import InvokeType
+        from openjiuwen.core.session.tracer.decorator import _make_trace_stream_wrap_handler
+
+        class _StreamModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def stream(self, messages, **kwargs):
+                yield AssistantMessage(
+                    content="partial-1",
+                    usage_metadata=UsageMetadata(input_tokens=10, output_tokens=5),
+                )
+                yield AssistantMessage(content="partial-2")
+                yield AssistantMessage(content="never-reaches-caller")
+
+            async def invoke(self, messages, **kwargs):
+                raise AssertionError("abandonment test must not hit invoke")
+
+        results = []
+        mock_session = self._tpot_mock_env(results)
+        handler = _make_trace_stream_wrap_handler(
+            mock_session._inner, InvokeType.LLM, {"class_name": "abandoned", "type": "llm"}
+        )
+        model = _StreamModel()
+
+        async def call_next(*args, **kwargs):
+            async for item in model.stream(*args, **kwargs):
+                yield item
+
+        agen = handler(call_next, [BaseMessage(role="user", content="hi")])
+        first = await agen.__anext__()
+        assert first.content == "partial-1"
+        await agen.aclose()
+
+        events = [r[1] for r in results]
+        # Compensation fires on_llm_end — not on_llm_error: abandonment is
+        # the caller's choice, not a model failure.
+        assert events == ["on_llm_start", "on_llm_end"]
+        end_payload = results[1][2]["outputs"]
+        assert [m.content for m in end_payload["outputs"]] == ["partial-1"]
+        # Usage seen before abandonment travels with the closing event.
+        assert end_payload["usage_metadata"]["input_tokens"] == 10
+
+    async def test_decorate_model_invoke_cancelled_fires_end(self):
+        """CancelledError bypasses except Exception; the finally compensation
+        must still close the span instead of leaving it half open, and the
+        cancellation itself must propagate unchanged."""
+        import asyncio
+
+        class _CancelledModel:
+            def __init__(self):
+                self.config = MagicMock()
+
+            async def invoke(self, messages, **kwargs):
+                raise asyncio.CancelledError()
+
+            async def stream(self, messages, **kwargs):
+                raise AssertionError("cancel test must not hit stream")
+
+        results = []
+        mocked_model = decorate_model_with_trace(
+            _CancelledModel(), self._tpot_mock_env(results)
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await mocked_model.invoke([BaseMessage(role="user", content="hi")])
+
+        events = [r[1] for r in results]
+        assert events == ["on_llm_start", "on_llm_end"]
+        # No partial result existed: the closing event says so honestly.
+        assert results[1][2]["outputs"] == {"outputs": None}
