@@ -1320,7 +1320,7 @@ class AnthropicModelClient(BaseModelClient):
 
         usage_metadata = self._usage_from_anthropic(
             getattr(response, "usage", None),
-            str(getattr(response, "model", "") or ""),
+            self._served_model_name(response),
         )
 
         parser_content = None
@@ -1444,7 +1444,7 @@ class AnthropicModelClient(BaseModelClient):
             msg = getattr(event, "message", None)
             usage = getattr(msg, "usage", None) if msg is not None else None
             usage_metadata = self._usage_from_anthropic(
-                usage, str(getattr(msg, "model", "") or "")
+                usage, self._served_model_name(msg)
             )
             return AssistantMessageChunk(
                 content="",

@@ -2815,10 +2815,7 @@ class OpenAIModelClient(BaseModelClient):
             input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
 
             usage_metadata = UsageMetadata(
-                # gen_ai.response.model semantics: the model that served the
-                # call. Prefer what the response body reports (gateways may
-                # route to a different backend than the request config).
-                model_name=str(getattr(response, "model", "") or "")
+                model_name=self._served_model_name(response)
                 or self.model_config.model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -2936,9 +2933,7 @@ class OpenAIModelClient(BaseModelClient):
         if hasattr(chunk, 'usage') and chunk.usage:
             input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
             usage_metadata = UsageMetadata(
-                # Same served-model-first rule as the batch path; chunk.model
-                # carries what the gateway actually served.
-                model_name=str(getattr(chunk, "model", "") or "")
+                model_name=self._served_model_name(chunk)
                 or self.model_config.model_name,
                 input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
