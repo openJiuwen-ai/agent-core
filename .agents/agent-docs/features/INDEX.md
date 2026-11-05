@@ -202,7 +202,9 @@ generated: true
 | [F_05_browser-task-integrity](harness/F_05_browser-task-integrity.md) | F | F_05 Browser Task Integrity | m056838700 | openjiuwen/harness | — | 待核实 |
 | [F_05_claude-turn-boundary-from-delivery-receipts](harness/F_05_claude-turn-boundary-from-delivery-receipts.md) | F | F_05 Claude Turn Boundaries from Delivery Receipts | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_06_browser-execution-and-completion](harness/F_06_browser-execution-and-completion.md) | F | Browser Execution and Completion Boundaries | m056838700 | openjiuwen/harness | — | 待核实 |
+| [F_06_opt-in-stream-task-lifecycle](harness/F_06_opt-in-stream-task-lifecycle.md) | F | 可选流式后台任务生命周期 | yan_zj | openjiuwen/harness | openjiuwen/harness/deep_agent.py | 待核实 |
 | [F_07_browser-jev-policy](harness/F_07_browser-jev-policy.md) | F | Browser Jev Policy with LLM Fallback | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_07_session-checkpointer-injection](harness/F_07_session-checkpointer-injection.md) | F | Session 级 checkpointer 注入 | Song Haoran | openjiuwen/harness | openjiuwen/core/session/agent.py | 待核实 |
 | [F_07_third-party-harness-provider-packages](harness/F_07_third-party-harness-provider-packages.md) | F | 第三方 Harness Provider 包：entry point 发现与生成 skill | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_08_browser-jev-handover](harness/F_08_browser-jev-handover.md) | F | Browser Jev Segmented Handover | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_08_provider-owned-model-config](harness/F_08_provider-owned-model-config.md) | F | Provider 自有的模型映射：`ModelChoice` + `model_config` | alan_cheng | openjiuwen/harness | — | 待核实 |

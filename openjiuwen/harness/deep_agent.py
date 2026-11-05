@@ -3265,6 +3265,25 @@ class DeepAgent(BaseAgent):
         effective_inputs["_steering_queue"] = steering_queue
         if host_iteration_limit is not None:
             effective_inputs["_host_max_iterations"] = host_iteration_limit
+
+        lifecycle = self._deep_config.stream_task_lifecycle
+        if lifecycle is not None:
+            # Opt-in ownership for Persistent. The default native/personal
+            # branch below retains its existing call and stream semantics.
+            try:
+                async with aclosing(self._react_agent.stream(
+                    effective_inputs, session, stream_modes,
+                    _background_task_lifecycle=lifecycle,
+                )) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
+            finally:
+                # The session decorator is another generator boundary; its
+                # close alone is not a producer-completion signal. Drain the
+                # explicitly registered tasks before this native call exits.
+                await lifecycle.cancel_and_wait()
+            return
+
         async with aclosing(self._react_agent.stream(
             effective_inputs, session, stream_modes,
         )) as chunks:
@@ -3731,6 +3750,8 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+        if self._deep_config is not None and self._deep_config.stream_task_lifecycle is not None:
+            await self._deep_config.stream_task_lifecycle.cancel_and_wait()
         await self._release_session_subagent_controls(
             session or self._loop_session,
             reason="aborted",

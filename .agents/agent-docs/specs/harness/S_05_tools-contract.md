@@ -549,7 +549,7 @@ Initial tabs and scoped reader content use existing task/cache state to avoid st
 and repeat reads caused only by unrelated control observations. Same-query ACK search
 submits are retired locally; LLM recovery, new bindings and changed scope remain possible.
 
-See [F_21](../features/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
+See [F_21](../../features/harness/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
 
 
 ### Browser receipt and current binding consistency (2026-10-09)

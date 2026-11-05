@@ -1,9 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
+from contextlib import contextmanager
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
+    Callable,
     TYPE_CHECKING,
     Union,
 )
@@ -18,7 +21,7 @@ from openjiuwen.core.kv_cache.kv_cache_metadata import (
     team_member_cache_identity,
 )
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.checkpointer import Checkpointer, CheckpointerFactory
 from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
 from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.stream.manager import StreamWriterManager
@@ -40,7 +43,8 @@ class Session:
                  close_stream_on_post_run: bool = True,
                  source_metadata: dict[str, Any] | None = None,
                  parent_session_id: str | None = None,
-                 kv_cache_runtime: KVCacheRuntimeProtocol | None = None):
+                 kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
+                 checkpointer: Checkpointer | None = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -50,10 +54,14 @@ class Session:
         self._inner = AgentSession(
             session_id=session_id,
             config=config,
+            checkpointer=checkpointer,
             card=card,
             stream_writer_manager=stream_writer_manager,
         )
+        # Only an explicit injection changes pre_run; the default keeps the global lookup at run time.
+        self._checkpointer_injected = checkpointer is not None
         self._card = card
+        self._output_observer: Callable[[OutputSchema], Awaitable[None]] | None = None
         self._pre_run_done = False
         self._post_run_done = False
         self._interaction = None
@@ -70,6 +78,10 @@ class Session:
 
     def get_session_id(self) -> str:
         return self._session_id
+
+    def checkpointer(self) -> Checkpointer:
+        """Return the checkpointer this Session saves through."""
+        return self._inner.checkpointer()
 
     def get_parent_session_id(self) -> str | None:
         """Return the optional product Session that owns this child Session."""
@@ -233,12 +245,24 @@ class Session:
     def dump_state(self) -> dict:
         return self._inner.state().dump()
 
+    @contextmanager
+    def observe_output(self, observer: Callable[[OutputSchema], Awaitable[None]]):
+        """Observe this session's output in the producing task before it can advance."""
+        previous = self._output_observer
+        self._output_observer = observer
+        try:
+            yield
+        finally:
+            self._output_observer = previous
+
     async def write_stream(self, data: Union[dict, OutputSchema]):
         stream_data = self._normalize_output_stream(self._tag_stream_payload(data))
         from openjiuwen.core.runner.callback import trigger
         await trigger(self._session_id + "write_stream", data=stream_data)
         await self._inner.stream_writer_manager().get_writer(BaseStreamMode.OUTPUT).write(
             stream_data)
+        if self._output_observer is not None:
+            await self._output_observer(stream_data)
 
     async def write_custom_stream(self, data: dict):
         stream_data = self._tag_stream_payload(data)
@@ -260,7 +284,11 @@ class Session:
                                     card=self._card,
                                     session=self)
         inputs = kwargs.get("inputs")
-        await CheckpointerFactory.get_checkpointer().pre_agent_execute(self._inner, inputs)
+        if self._checkpointer_injected:
+            checkpointer = self._inner.checkpointer()
+        else:
+            checkpointer = CheckpointerFactory.get_checkpointer()
+        await checkpointer.pre_agent_execute(self._inner, inputs)
         self._pre_run_done = True
         return self
 
@@ -334,6 +362,7 @@ def create_agent_session(session_id: str = None,
                          source_metadata: dict[str, Any] | None = None,
                          parent_session_id: str | None = None,
                          kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
+                         checkpointer: Checkpointer | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
@@ -345,5 +374,6 @@ def create_agent_session(session_id: str = None,
         source_metadata=source_metadata,
         parent_session_id=parent_session_id,
         kv_cache_runtime=kv_cache_runtime,
+        checkpointer=checkpointer,
     )
     return session

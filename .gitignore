@@ -1,3 +1,6 @@
+# Local Persistent Agent development visualization
+/persistent_agents_development_visualisation/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

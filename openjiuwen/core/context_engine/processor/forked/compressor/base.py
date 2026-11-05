@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +29,7 @@ from openjiuwen.core.context_engine.processor.forked.support.context_debug impor
     write_debug_record,
 )
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
+from openjiuwen.core.context_engine.usage.context_tokens import count_tools_tokens
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -39,12 +39,12 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.kv_cache.kv_cache_metadata import (
     context_compressor_cache_identity,
     resolve_session_lineage,
 )
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
-from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
 _TRANSIENT_COMPRESSION_ERROR_KINDS = {
@@ -804,8 +804,7 @@ class PrefixCompactProcessor(ContextProcessor):
         messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
         usage_tokens = count_usage_tokens_with_tail(messages)
         if usage_tokens is not None:
-            # The model-reported usage already includes the system prompt and
-            # tools that were present when this still-valid baseline was made.
+            # Model usage already includes the system prompt and tool definitions.
             return usage_tokens
         return self._count_messages_tokens(messages, context) + self._count_tools_tokens(
             list(context_window.tools or []),
@@ -813,13 +812,7 @@ class PrefixCompactProcessor(ContextProcessor):
         )
 
     def _count_tools_tokens(self, tools: list[ToolInfo], context: ModelContext) -> int:
-        token_counter = context.token_counter()
-        if token_counter is not None:
-            try:
-                return token_counter.count_tools(tools)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.warning("[%s] tool token counter failed: %s", self.processor_type(), exc)
-        return sum(self._estimate_text_tokens(_serialize_tool(tool)) for tool in tools)
+        return count_tools_tokens(tools, context.token_counter(), self.processor_type())
 
     def _count_messages_tokens(
         self,
@@ -847,10 +840,6 @@ class PrefixCompactProcessor(ContextProcessor):
     def resolve_context_max(context: ModelContext, kwargs: dict[str, Any]) -> int:
         """Resolve the configured context limit for diagnostics and extension points."""
         return PrefixCompactProcessor._resolve_context_max(context, kwargs)
-
-    @staticmethod
-    def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 3, 1) if text else 0
 
     def _context_debug_enabled(self) -> bool:
         return bool(getattr(self.config, "enable_compression_dump", False))
@@ -904,9 +893,3 @@ def _tool_result_ids(messages: list[BaseMessage]) -> set[str]:
         for message in messages
         if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
     }
-
-
-def _serialize_tool(tool: ToolInfo) -> str:
-    if hasattr(tool, "model_dump"):
-        return json.dumps(tool.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
-    return str(tool)

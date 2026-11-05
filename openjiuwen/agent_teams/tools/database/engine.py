@@ -980,12 +980,16 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
     return True
 
 
-async def drop_cur_session_tables(engine: AsyncEngine) -> None:
-    """Drop dynamic tables for current session.
+async def drop_cur_session_tables(sessions: DbSessions) -> None:
+    """Drop dynamic tables for current session under the process-wide write lock.
+
+    Runs inside ``DbSessions.write()`` so the drop serialises with
+    ``create_cur_session_tables`` and every DAO write of this instance; a bare
+    ``engine.begin()`` let a drop interleave with an in-flight bind or write.
 
     The session_id is obtained from context via get_session_id().
     """
-    if engine is None:
+    if sessions is None:
         return
 
     session_id = get_session_id()
@@ -999,27 +1003,31 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
 
-    async with engine.begin() as conn:
+    async with sessions.write() as session:
+        conn = await session.connection()
         for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
+        await session.commit()
 
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
 
 async def cleanup_all_runtime_state(
-    engine: AsyncEngine,
+    sessions: DbSessions,
 ) -> tuple[list[str], list[str]]:
     """Delete all dynamic team tables and clear static team tables.
 
     This cleanup is storage-level and does not depend on an active
-    agent instance or the current session context.
+    agent instance or the current session context. Runs under the
+    ``DbSessions`` write lock, same as ``drop_cur_session_tables``.
     """
-    if engine is None:
+    if sessions is None:
         return [], []
 
     deleted_tables: list[str] = []
     cleared_tables: list[str] = []
-    async with engine.begin() as conn:
+    async with sessions.write() as session:
+        conn = await session.connection()
         table_names = await conn.run_sync(_get_table_names)
 
         for table_name in table_names:
@@ -1033,6 +1041,7 @@ async def cleanup_all_runtime_state(
                 continue
             await conn.run_sync(_clear_table, table_name)
             cleared_tables.append(table_name)
+        await session.commit()
 
     team_logger.info(
         "Cleaned team runtime state: deleted dynamic tables={}, cleared static tables={}",
@@ -1042,32 +1051,35 @@ async def cleanup_all_runtime_state(
     return deleted_tables, cleared_tables
 
 
-async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> list[str]:
+async def drop_session_tables_by_id(sessions: DbSessions, session_id: str) -> list[str]:
     """Drop dynamic tables for a specific session_id without context.
 
     This is used by Runner.release(session_id) to clean up per-session
     tables when the session context is not active (e.g. after the agent
-    has finished executing).
+    has finished executing). Runs under the ``DbSessions`` write lock,
+    same as ``drop_cur_session_tables``.
 
     Args:
-        engine: Database engine.
+        sessions: Read/write session provider of the database.
         session_id: Session identifier to clean up.
 
     Returns:
         List of dropped table names.
     """
-    if engine is None or not session_id:
+    if sessions is None or not session_id:
         return []
 
     suffix = _sanitize_session_id_for_table(session_id)
     dropped: list[str] = []
-    async with engine.begin() as conn:
+    async with sessions.write() as session:
+        conn = await session.connection()
         table_names = await conn.run_sync(_get_table_names)
         for prefix in TEAM_DYNAMIC_TABLE_PREFIXES:
             expected_table = f"{prefix}{suffix}"
             if expected_table in table_names:
                 await conn.run_sync(_drop_table, expected_table)
                 dropped.append(expected_table)
+        await session.commit()
 
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)

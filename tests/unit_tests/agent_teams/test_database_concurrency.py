@@ -623,6 +623,38 @@ async def test_session_ddl_runs_under_write_lock(
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.parametrize(
+    "drop",
+    [
+        lambda db: db.drop_cur_session_tables(),
+        lambda db: db.drop_session_tables_by_id("pool_session"),
+        lambda db: db.cleanup_all_runtime_state(),
+        lambda db: db.force_delete_team_session("t1"),
+    ],
+    ids=["drop_cur", "drop_by_id", "cleanup_all", "force_delete"],
+)
+async def test_session_table_drops_wait_for_write_lock(file_db: TeamDatabase, drop) -> None:
+    """Session-table drops serialise with bind-time DDL and DAO writes.
+
+    Regression guard for "no such table: team_task_<hash>": drops used to run
+    on a bare ``engine.begin()`` outside the write lock, so a delete / release
+    could interleave with an in-flight bind or write of the same session.
+    """
+    async with file_db._sessions._write_lock:
+        task = asyncio.create_task(drop(file_db))
+        await asyncio.sleep(0.2)
+        assert not task.done()
+    await asyncio.wait_for(task, timeout=10)
+
+    async with file_db.read_session_local() as session:
+        rows = await session.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'team_task_%'")
+        )
+        assert rows.scalars().all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_new_session_bind_skips_migration_scan(file_db: TeamDatabase, monkeypatch) -> None:
     """A fresh bind creates the session tables on the current scheme, so the
     migration pass must treat them as "nothing to migrate" — the
