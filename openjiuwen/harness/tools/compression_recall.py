@@ -48,9 +48,9 @@ def _render_recall_content(result: Dict[str, Any], language: str) -> str:
     The full structured dict stays in ``ToolOutput.data`` for programmatic
     consumers; ``content`` is what the model actually reads, so it carries only
     the recalled text plus pointers to the archive for anything left out. The
-    recall root holds every compression archive of the session and directory
-    names are designed as ``{timestamp}_{query head}`` so the model can browse
-    other archives by time and topic on its own.
+    recall root holds every compression archive of the session. Each
+    subdirectory name is the memory_id, and the query topic is ``archive_query``
+    in that directory's manifest.json.
     """
     chunks = result.get("chunks") or []
     if not chunks:
@@ -68,7 +68,8 @@ def _render_recall_content(result: Dict[str, Any], language: str) -> str:
             f"本 session 共有 {archive_count} 个压缩归档；当前归档目录：{archive_path}"
             "（turns.jsonl 为轮次索引，chunks/ 为该次压缩的原文）\n"
             f"归档根目录：{recall_root} —— 本会话所有压缩落盘都在此目录下，"
-            f"子目录名格式为 {{时间戳}}_{{query前10字符}}，需要其他压缩内容时可按时间和主题自行浏览查找"
+            f"子目录名就是 memory_id，查询主题在各目录 manifest.json 的 archive_query 字段，"
+            f"需要其他压缩内容时可按 memory_id 和 archive_query 浏览"
         )
         chunk_tpl = "\n\n--- 片段 {i} | 归档 {memory_id} | {turn_id} | {chunk_id} | 相关度 {score:.2f} ---\n{body}"
     else:
@@ -80,8 +81,8 @@ def _render_recall_content(result: Dict[str, Any], language: str) -> str:
             f"This session has {archive_count} compression archive(s); current archive: {archive_path} "
             f"(turns.jsonl is the turn index, chunks/ holds this compression's source text)\n"
             f"Archive root: {recall_root} — all compressed archives of this session live here; "
-            f"subdirectory names are {{timestamp}}_{{first 10 chars of query}}, so you can browse "
-            f"other archives by time and topic yourself"
+            f"subdirectory names are the memory_id, and the query topic is the archive_query field "
+            f"in each directory's manifest.json, so you can browse other archives by memory_id and archive_query"
         )
         chunk_tpl = "\n\n--- chunk {i} | archive {memory_id} | {turn_id} | {chunk_id} | score {score:.2f} ---\n{body}"
     parts = [header]

@@ -126,11 +126,20 @@ class LLMRetryRail(DeepAgentRail):
             return 0.0
         return self.backoff_seconds[min(retry_index, len(self.backoff_seconds) - 1)]
 
-    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Reset retry counters at the start of each agent invocation."""
+    def _reset_retry_counters(self) -> None:
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
         self.transient_invoke_retry_count = 0
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Reset retry counters at the start of each agent invocation."""
+        self._reset_retry_counters()
+
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Budgets cover consecutive failures, so a completed model call clears them."""
+        await super().after_model_call(ctx)
+        if ctx.exception is None:
+            self._reset_retry_counters()
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Install a per-model-call stream chunk inspector."""

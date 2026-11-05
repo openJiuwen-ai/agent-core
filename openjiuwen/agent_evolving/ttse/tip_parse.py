@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import FrozenSet, Optional, Tuple
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 
 # When <condition>: use <capability> to <action>
 _TIP_RE = re.compile(

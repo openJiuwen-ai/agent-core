@@ -259,9 +259,12 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 
 
 def estimate_content_tokens(content: Any) -> int:
-    """Approximate token count when no token counter is available."""
-    text = sanitize_content_for_text(content)
-    return max(len(text) // 3, 1)
+    """Approximate token count when no token counter is available.
+
+    Delegates to :meth:`ContextUtils.estimate_tokens` so image blocks are priced
+    by their pixel dimensions instead of the sanitized base64 placeholder.
+    """
+    return ContextUtils.estimate_tokens(content)
 
 
 def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:

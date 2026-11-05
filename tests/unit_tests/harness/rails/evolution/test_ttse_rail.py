@@ -1847,6 +1847,30 @@ async def test_disk_catalog_trails_empty_listing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_catalog_omit_hides_team_category_from_member_attachment(tmp_path):
+    counts = {
+        "team-planning-and-acceptance": 4,
+        "software-engineering-devops": 2,
+    }
+
+    async def _body(omit: bool) -> str:
+        rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+        if omit:
+            rail._catalog_omit_categories = frozenset({"team-planning-and-acceptance"})
+        rail._ttse_store.catalog_counts = lambda: dict(counts)
+        content, live = rail._catalog_attachment()
+        assert ("team-planning-and-acceptance" in live) is (not omit)
+        assert live["software-engineering-devops"] == 2
+        return content
+
+    hidden = await _body(True)
+    shown = await _body(False)
+    assert "team-planning-and-acceptance" not in hidden
+    assert "software-engineering-devops" in hidden
+    assert "team-planning-and-acceptance" in shown
+
+
+@pytest.mark.asyncio
 async def test_disk_catalog_attachment_uses_context_session_id(tmp_path):
     rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
     manager = PromptAttachmentManager()

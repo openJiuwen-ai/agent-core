@@ -94,6 +94,8 @@ async def test_tool_requires_runtime_session_and_recalls_current_session(tmp_pat
     assert result.success is True
     assert result.data["matched_turn"]["query"] == "database timeout"
     assert result.data["chunks"]
+    assert "archive_query" in result.data["content"]
+    assert "query前10" not in result.data["content"]
 
 
 @pytest.mark.asyncio
