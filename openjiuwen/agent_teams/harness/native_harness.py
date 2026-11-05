@@ -52,6 +52,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -623,6 +628,14 @@ class NativeHarness(DeepAgent):
                 (False).
         """
         self._require_alive()
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.CANCEL)
+        elif self._st.phase is HarnessState.PAUSED:
+            # Aborting a paused harness discards the parked round without
+            # any cancellation; the PAUSE mark's purpose ends here — drop
+            # it so the next round inside the TTL window is not mislabeled
+            # as user_pause.
+            clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdAbort(immediate=immediate, ack=ack))
         await ack
@@ -641,6 +654,12 @@ class NativeHarness(DeepAgent):
         coroutine returns only once PAUSED has been reached.
         """
         self._require_alive()
+        # Guard on an active round, mirroring abort(): _on_pause is a no-op
+        # from IDLE / PAUSED / without an active round, and a stray mark
+        # would relabel a later internal failure as user pause within the
+        # registry TTL.
+        if self._st.active is not None:
+            mark_cancellation_cause(self.session_id, CancellationCause.PAUSE)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdPause(ack=ack))
         await ack
@@ -661,6 +680,7 @@ class NativeHarness(DeepAgent):
         No-op in any other state.
         """
         self._require_alive()
+        clear_cancellation_cause(self.session_id)
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdResume(ack=ack, query=query))
         await ack
@@ -896,6 +916,10 @@ class NativeHarness(DeepAgent):
                 # cannot overtake same-context messages queued before them.
                 self._st.pending_queue.append(msg)
         elif phase is HarnessState.PAUSED:
+            # Warm/interrupt resume via send bypasses resume(); the spent
+            # PAUSE mark must not survive into the resumed round, or a later
+            # internal failure would resolve to user_pause.
+            clear_cancellation_cause(self.session_id)
             if isinstance(msg.content, InteractiveInput):
                 # An interrupt-resume payload drives its own single round; it
                 # cannot be steered into a continuation.
