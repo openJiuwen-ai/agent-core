@@ -1,7 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import (
+    CompressionRecallConfig,
+    ContextEngineConfig,
+    PtlFallbackConfig,
+)
 from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 
@@ -71,6 +75,7 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
 _CORE_CLASSES = [
     "CompressionRecallConfig",
     "ContextEngineConfig",
+    "PtlFallbackConfig",
     "ContextWindow",
     "ContextWindowChange",
     "ModelContext",

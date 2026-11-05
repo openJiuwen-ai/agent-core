@@ -3,9 +3,15 @@
 
 from typing import Dict, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
+
+DEFAULT_OVERFLOW_TRUNCATE_MARKER = (
+    "[CONTEXT_TRUNCATED] To fit the model context window, {rounds} earlier "
+    "conversation segment(s) (about {tokens} tokens) were removed. If that "
+    "information is still required, ask the user to provide it again."
+)
 
 
 class CompressionRecallConfig(BaseModel):
@@ -19,6 +25,77 @@ class CompressionRecallConfig(BaseModel):
     def _validate_chunk_tokens(self) -> "CompressionRecallConfig":
         if self.chunk_overlap_tokens >= self.chunk_size_tokens:
             raise ValueError("chunk_overlap_tokens must be smaller than chunk_size_tokens")
+        return self
+
+
+class PtlFallbackConfig(BaseModel):
+    """Recovery policy for provider prompt-too-long (PTL) rejections.
+
+    The fallback runs in two phases. Phase A reuses the configured LLM
+    compressors; Phase B is a pure-code truncation that drops the oldest
+    complete dialogue turns without calling a model. Phase B is what makes
+    the fallback work when no compressor is configured or when compression is
+    too slow/ineffective.
+
+    Attributes
+    ----------
+    enabled : bool, default False
+        Master switch. When off, a PTL rejection keeps the historical
+        behaviour: one compression attempt, otherwise the original model
+        exception is raised unchanged.
+    phase_a_compress : bool, default True
+        Run the LLM compressors first. Phase B runs only when Phase A does
+        not change the context.
+    phase_a_timeout_s : float, default 0
+        Upper bound for one Phase A compression. ``0`` disables the timeout.
+        On timeout the in-flight compression is cancelled and the fallback
+        proceeds to Phase B; compression state may report that call as
+        interrupted.
+    enable_pure_code_truncate : bool, default True
+        Enable Phase B. Dropping is per complete dialogue turn, oldest
+        first; the newest ``keep_last_rounds`` turns are always preserved.
+        When even one turn does not fit, the oldest complete tool exchange
+        inside the retained turn is removed instead.
+    max_retries : int, default 3
+        Maximum recovery retries per agent round (1..10). Each retry repeats
+        the model call after the recovery hook changes the context.
+    truncate_target_ratio : float, default 0.8
+        Phase B aims at ``limit * ratio ** attempt`` so that repeated
+        failures keep making progress.
+    keep_last_rounds : int, default 1
+        Number of newest dialogue turns Phase B never drops.
+    archive_dropped_rounds : bool, default True
+        Best-effort archive of dropped messages before they are discarded.
+        Archiving never blocks the truncation.
+    marker_template : str
+        Text of the marker injected where the dropped history used to be.
+        Only ``{rounds}`` and ``{tokens}`` placeholders are supported.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False)
+    phase_a_compress: bool = Field(default=True)
+    phase_a_timeout_s: float = Field(default=0.0, ge=0)
+    enable_pure_code_truncate: bool = Field(default=True)
+    max_retries: int = Field(default=3, ge=1, le=10)
+    truncate_target_ratio: float = Field(default=0.8, gt=0, le=1)
+    keep_last_rounds: int = Field(default=1, ge=1)
+    archive_dropped_rounds: bool = Field(default=True)
+    marker_template: str = Field(default=DEFAULT_OVERFLOW_TRUNCATE_MARKER)
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "PtlFallbackConfig":
+        try:
+            self.marker_template.format(rounds=0, tokens=0)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(
+                "marker_template must only use the {rounds} and {tokens} placeholders"
+            ) from exc
+        if self.enabled and not self.phase_a_compress and not self.enable_pure_code_truncate:
+            raise ValueError(
+                "ptl_fallback_config requires phase_a_compress or enable_pure_code_truncate"
+            )
         return self
 
 
@@ -126,6 +203,10 @@ class ContextEngineConfig(BaseModel):
         Directory for context-debug records. When None, falls back to the
         ``OPENJIUWEN_CONTEXT_DEBUG_DIR`` env var, then to
         ``{workspace}/context/{session_id}_context/context_debug/``.
+
+    ptl_fallback_config : PtlFallbackConfig
+        Recovery policy for model prompt-too-long rejections. See
+        :class:`PtlFallbackConfig`.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -150,3 +231,4 @@ class ContextEngineConfig(BaseModel):
     )
     enable_context_debug: bool = Field(default=False)
     context_debug_dir: Optional[str] = Field(default=None)
+    ptl_fallback_config: PtlFallbackConfig = Field(default_factory=PtlFallbackConfig)

@@ -24,6 +24,52 @@ retrieve compressed content on demand.
 - `chunk_overlap_tokens`: Token overlap between adjacent chunks. Must be
   greater than `0` and smaller than `chunk_size_tokens`. Default: `300`.
 
+## `PtlFallbackConfig`
+
+```python
+class openjiuwen.core.context_engine.PtlFallbackConfig(
+    enabled: bool = False,
+    phase_a_compress: bool = True,
+    phase_a_timeout_s: float = 0.0,
+    enable_pure_code_truncate: bool = True,
+    max_retries: int = 3,
+    truncate_target_ratio: float = 0.8,
+    keep_last_rounds: int = 1,
+    archive_dropped_rounds: bool = True,
+    marker_template: str = "...",
+)
+```
+
+Recovery policy for provider prompt-too-long (PTL / context-overflow) errors.
+
+Recovery runs in two phases. Phase A reuses the configured LLM compressors.
+Phase B is a pure-code truncation that never calls a model: it drops complete
+dialogue turns (user message through the final assistant reply) from oldest to
+newest, always keeping the newest `keep_last_rounds` turns. When a single turn
+still does not fit, the oldest complete tool exchange inside it (an assistant
+`tool_calls` message plus its matching `tool` results) is removed instead, so
+tool-call pairing stays valid. A `[CONTEXT_TRUNCATED]` marker is inserted where
+the history was cut off.
+
+`enabled` defaults to `False`: when off, the historical behaviour is preserved
+(one compression attempt, otherwise the original model exception is raised).
+
+**Parameters:**
+
+- `enabled`: Master switch. Default: `False`.
+- `phase_a_compress`: Whether to try LLM compression first. Default: `True`.
+- `phase_a_timeout_s`: Timeout in seconds for one Phase A compression; `0`
+  disables it. On timeout the fallback proceeds to Phase B.
+- `enable_pure_code_truncate`: Enable Phase B. Default: `True`.
+- `max_retries`: Recovery retries per agent round, `1..10`. Default: `3`.
+- `truncate_target_ratio`: Phase B targets `limit * ratio ** attempt`, so
+  repeated failures keep making progress. Default: `0.8`, range `(0, 1]`.
+- `keep_last_rounds`: Number of newest dialogue turns never dropped. Default: `1`.
+- `archive_dropped_rounds`: Best-effort archive of dropped messages before they
+  are discarded; archiving never blocks truncation. Default: `True`.
+- `marker_template`: Marker text. Only `{rounds}` and `{tokens}` placeholders
+  are supported.
+
 ## `ContextEngineConfig`
 
 ```python
@@ -68,6 +114,8 @@ processors).
 - `context_debug_dir` (`str | None`): Directory for context-debug records. When
   `None`, falls back to the `OPENJIUWEN_CONTEXT_DEBUG_DIR` env var, then to
   `{workspace}/context/{session_id}_context/context_debug/`. Default: `None`.
+- `ptl_fallback_config` (`PtlFallbackConfig`): Recovery policy for provider
+  context-overflow errors. Defaults to a disabled `PtlFallbackConfig`.
 
 Explicit `context_window_tokens` and `model_context_window_tokens` values take
 precedence over remote OpenRouter metadata.

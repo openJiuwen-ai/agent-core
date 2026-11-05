@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
+import asyncio
 import functools
 
 from pydantic import BaseModel
@@ -10,11 +11,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import context_engine_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.overflow_truncate import truncate_overflowed_context
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
@@ -423,6 +426,16 @@ class ContextEngine:
                 await effective_session.commit()
         return result
 
+    @property
+    def config(self) -> ContextEngineConfig:
+        """Return the active engine configuration.
+
+        Read-only by contract: callers may inspect policy switches (for
+        example the PTL fallback retry budget) but must not mutate the engine
+        through this reference.
+        """
+        return self._config
+
     async def recover_from_model_exception(
             self,
             *,
@@ -432,18 +445,47 @@ class ContextEngine:
             exception: Exception = None,
             streaming: bool = False,
             stream_chunks_emitted: int = 0,
+            messages: Optional[List[BaseMessage]] = None,
+            tools: Optional[List[ToolInfo]] = None,
+            attempt: int = 1,
+            attempted_recoveries: Optional[List[str]] = None,
             **kwargs,
     ) -> bool:
-        """Recover from a model context-window rejection by compressing once.
+        """Recover from a model context-window (PTL) rejection.
 
         ReAct agents call this hook after model-call rail retries are
-        exhausted. A retry is requested when the provider error clearly
-        describes an input/context limit and ``compress_context`` returns
-        ``"compressed"``. A missing or ineffective processor preserves the
-        original model exception.
-        """
-        del context
+        exhausted. A retry is requested only when the provider error clearly
+        describes an input/context limit and a recovery phase actually changed
+        the context. Otherwise the original model exception is preserved.
 
+        Two phases are available, both controlled by
+        :class:`PtlFallbackConfig`:
+
+        * Phase A reuses the configured LLM compressors. This is the only
+          behaviour when ``enabled`` is false.
+        * Phase B is a pure-code truncation that drops the oldest complete
+          dialogue turns without calling a model. It runs when Phase A is
+          disabled, skipped after a previous attempt, or did not change the
+          context.
+
+        Args:
+            context_id: Context to shrink.
+            session: Session used by Phase A and to persist Phase B results.
+            context: Live context instance. When omitted it is resolved from
+                the engine pool by ``context_id``.
+            exception: Provider exception that triggered recovery.
+            streaming: Whether the failed call was streaming.
+            stream_chunks_emitted: Chunks already sent. Recovery is skipped
+                when non-zero because a retry would duplicate the prefix.
+            messages: Exact payload messages of the rejected request, when
+                available. Used to estimate fixed prompt/tool overhead.
+            tools: Exact payload tools of the rejected request.
+            attempt: 1-based recovery attempt for this agent round.
+            attempted_recoveries: Mutable trace shared by the caller across
+                attempts. Phase A is skipped once recorded here; the phase that
+                succeeded is appended.
+            **kwargs: Extra compressor arguments for Phase A.
+        """
         # A streaming response may already have been sent to the caller when
         # the provider reports an overflow. Retrying after compression would
         # emit the already-sent prefix again, so only recover before the first
@@ -459,15 +501,105 @@ class ContextEngine:
         if not self.is_context_overflow_error(exception):
             return False
 
+        ptl_config = self._config.ptl_fallback_config
+        if not ptl_config.enabled:
+            return await self._recover_with_compressors(
+                context_id=context_id,
+                session=session,
+                timeout_s=0.0,
+                swallow_errors=False,
+                kwargs=kwargs,
+            )
+
+        tried = attempted_recoveries if isinstance(attempted_recoveries, list) else None
+        phase_a_done = tried is not None and "phase_a_compress" in tried
+
+        if ptl_config.phase_a_compress and not phase_a_done:
+            if tried is not None:
+                tried.append("phase_a_compress")
+            compressed = await self._recover_with_compressors(
+                context_id=context_id,
+                session=session,
+                timeout_s=ptl_config.phase_a_timeout_s,
+                swallow_errors=True,
+                kwargs=kwargs,
+            )
+            if compressed:
+                return True
+
+        if not ptl_config.enable_pure_code_truncate:
+            return False
+
+        truncated = await self._recover_with_pure_code_truncation(
+            context_id=context_id,
+            session=session,
+            context=context,
+            exception=exception,
+            messages=messages,
+            tools=tools,
+            attempt=attempt,
+            config=ptl_config,
+        )
+        if truncated and tried is not None:
+            tried.append("phase_b_truncate")
+        return truncated
+
+    async def _recover_with_compressors(
+            self,
+            *,
+            context_id: str,
+            session: Session,
+            timeout_s: float,
+            swallow_errors: bool,
+            kwargs: Dict[str, Any],
+    ) -> bool:
+        """Phase A: let the configured compressors rewrite the context."""
         compression_kwargs = dict(kwargs)
         compression_kwargs.setdefault(
             "compression_trigger", "model_context_overflow"
         )
-        result = await self.compress_context(
-            context_id=context_id,
-            session=session,
-            **compression_kwargs,
-        )
+        try:
+            if timeout_s and timeout_s > 0:
+                async with asyncio.timeout(timeout_s):
+                    result = await self.compress_context(
+                        context_id=context_id,
+                        session=session,
+                        **compression_kwargs,
+                    )
+            else:
+                result = await self.compress_context(
+                    context_id=context_id,
+                    session=session,
+                    **compression_kwargs,
+                )
+        except TimeoutError:
+            if not swallow_errors:
+                # Legacy callers never installed a timeout; a TimeoutError here
+                # came from the compressor itself and must stay visible.
+                raise
+            if timeout_s and timeout_s > 0:
+                context_engine_logger.warning(
+                    "model context recovery compression timed out after %.1fs; "
+                    "falling back to pure-code truncation",
+                    timeout_s,
+                )
+            else:
+                context_engine_logger.warning(
+                    "model context recovery compression failed; "
+                    "falling back to pure-code truncation",
+                    exc_info=True,
+                )
+            return False
+        except Exception:  # noqa: BLE001 - Phase B is the fallback for a broken compressor
+            if not swallow_errors:
+                raise
+            context_engine_logger.warning(
+                "model context recovery compression failed; "
+                "falling back to pure-code truncation",
+                exc_info=True,
+            )
+            return False
+
         result_code = result.get("result") if isinstance(result, dict) else result
         if result_code != "compressed":
             context_engine_logger.info(
@@ -478,6 +610,108 @@ class ContextEngine:
 
         context_engine_logger.info("model context recovery compressed context")
         return True
+
+    async def _recover_with_pure_code_truncation(
+            self,
+            *,
+            context_id: str,
+            session: Session,
+            context: ModelContext,
+            exception: Exception,
+            messages: Optional[List[BaseMessage]],
+            tools: Optional[List[ToolInfo]],
+            attempt: int,
+            config,
+    ) -> bool:
+        """Phase B: drop the oldest complete dialogue turns without a model."""
+        target_context = context
+        if target_context is None:
+            resolved_session_id = session.get_session_id() if session else "default_session_id"
+            target_context = self.get_context(context_id=context_id, session_id=resolved_session_id)
+        if target_context is None:
+            context_engine_logger.warning(
+                "model context recovery cannot find context %s", context_id
+            )
+            return False
+
+        try:
+            result = truncate_overflowed_context(
+                target_context,
+                error_texts=list(self._iter_exception_texts(exception)),
+                attempt=attempt,
+                target_ratio=config.truncate_target_ratio,
+                keep_last_rounds=config.keep_last_rounds,
+                archive_dropped_rounds=config.archive_dropped_rounds,
+                marker_template=config.marker_template,
+                messages=messages,
+                tools=tools,
+            )
+        except Exception:  # noqa: BLE001 - keep the original model error visible
+            context_engine_logger.warning(
+                "model context recovery truncation failed", exc_info=True
+            )
+            return False
+
+        if not result.changed:
+            context_engine_logger.info(
+                "model context recovery found nothing to truncate, "
+                "limit=%s target=%s estimated=%s",
+                result.limit_tokens,
+                result.target_tokens,
+                result.tokens_before,
+            )
+            return False
+
+        effective_session = session or self._context_session_ref(target_context)
+        if effective_session is not None and self._is_context_pooled(effective_session, target_context):
+            # The model retry can proceed from the in-memory context even when
+            # persistence fails, so a storage problem must not undo the rescue.
+            try:
+                await self.save_contexts(
+                    effective_session,
+                    context_ids=[target_context.context_id()],
+                )
+                await effective_session.commit()
+            except Exception:  # noqa: BLE001 - in-memory rescue still valid
+                context_engine_logger.warning(
+                    "model context recovery truncated in memory but failed to persist",
+                    exc_info=True,
+                )
+        elif effective_session is not None:
+            # Saving an unpooled context would rewrite the session's context
+            # state with an empty payload, so persistence is skipped.
+            context_engine_logger.info(
+                "model context recovery truncated context %s in memory; "
+                "it is not owned by this engine, skipping persistence",
+                target_context.context_id(),
+            )
+
+        context_engine_logger.info(
+            "model context recovery truncated context: rounds=%s messages=%s "
+            "tool_exchanges=%s tokens=%s->%s limit=%s target=%s archive=%s",
+            result.dropped_rounds,
+            result.dropped_messages,
+            result.dropped_tool_exchanges,
+            result.tokens_before,
+            result.tokens_after,
+            result.limit_tokens,
+            result.target_tokens,
+            result.archive_memory_id,
+        )
+        return True
+
+    @staticmethod
+    def _context_session_ref(context: ModelContext):
+        getter = getattr(context, "get_session_ref", None)
+        return getter() if callable(getter) else None
+
+    def _is_context_pooled(self, session: Session, context: ModelContext) -> bool:
+        """Return whether ``context`` is the engine-owned instance for ``session``."""
+        try:
+            session_id = session.get_session_id()
+        except Exception:  # noqa: BLE001 - unknown session cannot own a pooled context
+            return False
+        return self.get_context(context_id=context.context_id(), session_id=session_id) is context
 
     @classmethod
     def is_context_overflow_error(cls, exception: Exception) -> bool:
