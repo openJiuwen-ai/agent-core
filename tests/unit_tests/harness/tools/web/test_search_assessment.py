@@ -4,9 +4,10 @@
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from html import escape
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
 import pytest
@@ -35,6 +36,22 @@ def candidate(index):
 
 def model_reply(results):
     return SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"results": results}))))
+
+
+@pytest.mark.asyncio
+async def test_reference_time_uses_aware_clock_and_preserves_local_offset(monkeypatch):
+    instant = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    clock = SimpleNamespace(now=Mock(return_value=instant))
+    monkeypatch.setattr("openjiuwen.harness.tools.web._assessment.datetime", clock)
+    model = model_reply([{"id": 0, "relevance": "relevant", "reason": "Useful"}])
+
+    result = await assess_candidates(model, "query", [(0, candidate(0))])
+
+    assert result.status == "ok"
+    clock.now.assert_called_once_with(timezone.utc)
+    payload = json.loads(model.invoke.call_args.kwargs["messages"][1]["content"])
+    assert payload["reference_time"] == instant.astimezone().isoformat(timespec="seconds")
+    assert datetime.fromisoformat(payload["reference_time"]) == instant
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ from openjiuwen.harness.tools.web import WebFetchWebpageTool, WebFreeSearchTool,
 from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._budget import WEB_RESEARCH_BUDGET_KEY, WebResearchBudget
 from openjiuwen.harness.tools.web._quality import WebContentError
-from openjiuwen.harness.tools.web.free_search import _select_search_candidates
+from openjiuwen.harness.tools.web.free_search import _is_search_navigation_url, _select_search_candidates
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +67,53 @@ def test_dates_and_keywords_without_a_model_are_not_proof_of_relevance():
             {"title": "Asia news 2009", "url": "https://source.invalid/article", "date": "2026-11-03"},
         ])
         assert selected[0]["relevance"] == "uncertain"
+
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://bing.com/", True),
+    ("https://www.bing.com/search?q=test", True),
+    ("https://cn.bing.com/search/", True),
+    ("https://html.duckduckgo.com/html/", True),
+    ("https://duckduckgo.com/link", True),
+    ("https://bing.com/article", False),
+    ("https://bing.com.example.invalid/search", False),
+    ("https://notduckduckgo.com/search", False),
+])
+def test_navigation_filter_keeps_domain_and_path_boundaries(url, expected):
+    assert _is_search_navigation_url(url) is expected
+
+
+@pytest.mark.parametrize(("label", "href", "target"), [
+    ("Source", "/reference", "https://source.invalid/reference"),
+    ("Source", "https://other.invalid/reference", "https://other.invalid/reference"),
+    ("Source", "//other.invalid/reference", "https://other.invalid/reference"),
+    ("Source", "", None),
+    ("Source", "#section", None),
+    ("Source", "mailto:user@example.invalid", None),
+    ("Source", "javascript:void(0)", None),
+    ("", "https://source.invalid/reference", None),
+])
+def test_fetch_link_extraction_keeps_anchor_conditions(label, href, target):
+    page = f'<article><p>Body</p><a href="{href}">{label}</a></article>'
+    _, content = WebFetchWebpageTool._extract_main_text_from_html(page, "https://source.invalid/page")
+    if target is None:
+        assert "[Source](" not in content and "[](" not in content
+        assert label in content
+    else:
+        assert f"[Source]({target})" in content
+
+
+def test_wrapped_metadata_preserves_model_visible_instructions():
+    search = WebFreeSearchTool(language="en")
+    assert search.card.input_params["properties"]["provider"]["description"] == (
+        "Only enabled engines may run. Set provider when the user names an engine; "
+        "only auto permits fallback among configured free sources."
+    )
+    fetch = WebFetchWebpageTool(language="en")
+    assert (
+        "Content status is distinct from HTTP status: challenges, authentication and empty shells are not evidence. "
+        in fetch.card.description
+    )
 
 
 @pytest.mark.asyncio

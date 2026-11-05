@@ -82,7 +82,8 @@ def test_reader_unheaded_links_keep_own_plain_summary_without_merging_results():
 
 
 @pytest.mark.asyncio
-async def test_reader_summary_reaches_tool_output_and_provenance(monkeypatch):
+@pytest.mark.parametrize("provider", ["duckduckgo", "ddg"])
+async def test_reader_summary_reaches_tool_output_and_provenance(monkeypatch, provider):
     calls = []
 
     async def request(session, method, url, **kwargs):
@@ -92,13 +93,13 @@ async def test_reader_summary_reaches_tool_output_and_provenance(monkeypatch):
 
     recorded = []
     monkeypatch.setattr(_http, "request", request)
-    tool = WebFreeSearchTool(enabled_engines=("duckduckgo",))
+    tool = WebFreeSearchTool(enabled_engines=("duckduckgo", "bing"))
     monkeypatch.setattr(tool, "_on_search_results", lambda rows: recorded.extend(rows))
-    result = await tool.invoke({"query": "AI Agent latest developments", "provider": "duckduckgo"})
+    result = await tool.invoke({"query": "AI Agent latest developments", "provider": provider})
     assert "Free search results (DuckDuckGo (via jina.ai))" in result
     assert "Snippet: AI agents gain new capabilities" in result
     assert "other.invalid" not in result
-    assert len(calls) == 2
+    assert len(calls) == 2 and all("bing.com" not in url for url in calls)
     assert recorded[0]["url"] == "https://example.org/guide"
 
 
