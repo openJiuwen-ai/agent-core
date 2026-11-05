@@ -16,6 +16,7 @@ from typing import Literal
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import HandlerId
 from openjiuwen.core.extension.errors import OperationError
+from openjiuwen.core.extension.install_report import PackageInstallState, PackageOperationToken
 from openjiuwen.core.extension.package_manager import OpenedSource
 from openjiuwen.core.extension.runtime import ActivationCandidate
 from openjiuwen.core.extension.schema.manifest import Manifest
@@ -115,6 +116,7 @@ class PlanRequest:
     operation: PlanOperation
     manifest: Manifest
     package_root: Path
+    operation_token: PackageOperationToken
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,7 @@ class ApplyRequest:
     bus: ExtensionEventBusProtocol
     plan: ExtensionPlan
     manifest: Manifest
+    operation_token: PackageOperationToken
     store_copy_created: bool = False
 
 
@@ -178,6 +181,7 @@ class QueryResult:
     installed: tuple[Path, ...] = ()
     inflight: dict[str, int] = field(default_factory=dict)
     published: dict[str, tuple[HandlerId, ...]] = field(default_factory=dict)
+    packages: tuple[PackageInstallState, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +190,7 @@ class InstallRequest:
 
     bus: ExtensionEventBusProtocol
     paths: tuple[Path, ...]
+    startup: bool = False
 
 
 @dataclass(frozen=True, slots=True)

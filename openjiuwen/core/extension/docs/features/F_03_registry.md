@@ -31,7 +31,7 @@
 
 - 依赖方向保持 `extension → events`。builtins 内只放登记与转发，业务编排延迟导入 extension，避免 `events` 包加载时反向依赖。
 - `init` 不读用户 manifest，不安装扩展。宿主回调返回后，`init` 触发一次 `ops.build`，调用方不再单独触发。
-- `open_install_dir` 在 `init` 之后记住安装目录和宿主版本，并列出已有包目录。它不安装。
+- `open_install_dir` 在 `init` 之后异步绑定安装根目录、报告路径、可选域和宿主版本，登记报告执行者；不安装，也不返回路径列表。
 - 九类事件的特性说明与验收放在本模块文档；Events 开发计划不单列这些工作项。
 
 ## 4. 方案概览
@@ -60,7 +60,7 @@ flowchart LR
 | `extension/management/` | 九类事件 Core Handler 编排 |
 | `events/builtins/event_types/package_events.py`、`extension_events.py` | `register(bus)` 登记九类事件并转发到 extension |
 
-主路径：`init` → `open_install_dir` → `install(列出的包目录)` → `trigger(package.install)`。
+主路径：`init` → `await open_install_dir(..., report_path=...)` → `await load_installed()`。在线来源继续用 install。域和报告见 [F_05](F_05_domain-install-report.md)。
 
 ## 6. 影响面
 

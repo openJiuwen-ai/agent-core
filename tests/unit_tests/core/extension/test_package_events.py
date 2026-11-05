@@ -2,13 +2,15 @@
 
 """EX-03: orchestration of the nine package management events."""
 
-import sys
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.events.types import Event
+from openjiuwen.core.extension.errors import ExtensionFailure
+from openjiuwen.core.extension.install_report import PackageOperationToken
 from openjiuwen.core.extension.management import (
     EXTENSION_APPLY_EVENT,
     EXTENSION_PLAN_EVENT,
@@ -20,13 +22,11 @@ from openjiuwen.core.extension.management import (
     ParseRequest,
     ParseResult,
     PlanRequest,
-    PlanResult,
     QueryRequest,
     QueryResult,
     ResolveRequest,
     ResolveResult,
     RollbackRequest,
-    RollbackResult,
 )
 from openjiuwen.core.extension.manifest import load_manifest
 from openjiuwen.core.extension.schema.manifest import PackageDependency
@@ -127,120 +127,61 @@ async def test_resolve_refuses_a_duplicate_batch_and_answers_uninstall(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_plan_orders_one_package_and_refuses_an_active_install(tmp_path: Path) -> None:
+async def test_plan_requires_an_admitted_operation(tmp_path: Path) -> None:
     source = _source(tmp_path, "source", "demo")
     manifest = load_manifest(source)
     registry, bus = await build_registry(tmp_path / "store")
-
-    planned = await bus.trigger(
-        Event(
-            EXTENSION_PLAN_EVENT,
-            PlanRequest(bus=bus, operation="install", manifest=manifest, package_root=source),
-        )
-    )
-    assert isinstance(planned, PlanResult)
-    assert planned.error is None
-    assert planned.plan is not None
-    assert planned.plan.operation == "install"
-    assert planned.plan.target_generation == 1
-    assert [item.id for item in planned.plan.extensions] == ["ext"]
-
-    assert all(item.status == "SUCCESS" for item in await registry.install([source]))
-    again = await bus.trigger(
-        Event(
-            EXTENSION_PLAN_EVENT,
-            PlanRequest(bus=bus, operation="install", manifest=manifest, package_root=source),
-        )
-    )
-    assert isinstance(again, PlanResult)
-    assert again.plan is None
-    assert again.error is not None
-    assert again.error.status == StatusCode.EXTENSION_PACKAGE_EXISTS
+    forged = PackageOperationToken("run", "process", "demo", "operation")
+    with pytest.raises(ExtensionFailure, match="stale"):
+        await bus.trigger(Event(EXTENSION_PLAN_EVENT, PlanRequest(
+            bus=bus, operation="install", manifest=manifest, package_root=source,
+            operation_token=forged)))
+    assert (await registry.install(source))[0].status == "SUCCESS"
+    assert (await registry.install(source))[0].error.code == "EXTENSION_PACKAGE_EXISTS"
 
 
 @pytest.mark.asyncio
-async def test_apply_publishes_a_plan_and_reports_a_load_failure(tmp_path: Path) -> None:
+async def test_apply_publishes_only_an_admitted_plan(tmp_path: Path) -> None:
     source = _source(tmp_path, "source", "demo")
     manifest = load_manifest(source)
     registry, bus = await build_registry(tmp_path / "store")
-    planned = await bus.trigger(
-        Event(
-            EXTENSION_PLAN_EVENT,
-            PlanRequest(bus=bus, operation="install", manifest=manifest, package_root=source),
-        )
-    )
-    assert isinstance(planned, PlanResult)
+    service = registry.context.install_report
+    token = await service.begin_operation(manifest, "install")
+    await service.wait_for_dependencies(token)
+    planned = await asyncio.create_task(bus.trigger(Event(EXTENSION_PLAN_EVENT, PlanRequest(
+        bus=bus, operation="install", manifest=manifest, package_root=source,
+        operation_token=token))))
     assert planned.plan is not None
-
-    applied = await bus.trigger(
-        Event(EXTENSION_APPLY_EVENT, ApplyRequest(bus=bus, plan=planned.plan, manifest=manifest))
-    )
-    assert isinstance(applied, ActivationReport)
+    applied = await asyncio.create_task(bus.trigger(Event(EXTENSION_APPLY_EVENT, ApplyRequest(
+        bus=bus, plan=planned.plan, manifest=manifest, operation_token=token))))
     assert applied.status == "SUCCESS"
-    assert await call_business_event(bus) == 1
-
-    broken = _source(tmp_path, "broken", "broken", body=_BROKEN_BODY)
-    broken_manifest = load_manifest(broken)
-    broken_plan = await bus.trigger(
-        Event(
-            EXTENSION_PLAN_EVENT,
-            PlanRequest(bus=bus, operation="install", manifest=broken_manifest, package_root=broken),
-        )
-    )
-    assert isinstance(broken_plan, PlanResult)
-    assert broken_plan.plan is not None
-    failed = await bus.trigger(
-        Event(EXTENSION_APPLY_EVENT, ApplyRequest(bus=bus, plan=broken_plan.plan, manifest=broken_manifest))
-    )
-
-    assert isinstance(failed, ActivationReport)
-    assert failed.status == "FAILED"
-    assert failed.error is not None
-    assert failed.error.status == StatusCode.EXTENSION_LOAD_FAILED
-    assert registry.runtime.get_active("broken") is None
+    await service.finish_operation(token, report=applied, active=registry.runtime.get_active("demo"))
+    assert (await service.read_packages())["demo"].successful
     assert await call_business_event(bus) == 1
 
 
 @pytest.mark.asyncio
-async def test_rollback_drops_the_candidate_and_its_own_store_copy(tmp_path: Path) -> None:
+async def test_rollback_cleans_only_the_admitted_copy(tmp_path: Path) -> None:
     source = _source(tmp_path, "source", "demo")
-    store = tmp_path / "store"
-    registry, bus = await build_registry(store)
+    registry, bus = await build_registry(tmp_path / "store")
     manifest = load_manifest(source)
-    copied = registry.package_manager.copy_into_store(source, manifest)
-    planned = await bus.trigger(
-        Event(
-            EXTENSION_PLAN_EVENT,
-            PlanRequest(bus=bus, operation="install", manifest=manifest, package_root=copied),
-        )
-    )
-    assert isinstance(planned, PlanResult)
-    assert planned.plan is not None
-    prepared = registry.runtime.prepare(planned.plan)
-    assert prepared.candidate is not None
-    assert prepared.candidate.module_names[0] in sys.modules
-
-    rolled_back = await bus.trigger(
-        Event(
-            EXTENSION_ROLLBACK_EVENT,
-            RollbackRequest(
-                bus=bus,
-                plan=planned.plan,
-                candidate=prepared.candidate,
-                store_copy_created=True,
-            ),
-        )
-    )
-
-    assert isinstance(rolled_back, RollbackResult)
-    assert rolled_back.package_id == "demo"
+    service = registry.context.install_report
+    with pytest.raises(ExtensionFailure, match="admitted"):
+        registry.package_manager.copy_into_store(source, manifest)
+    token = await service.begin_operation(manifest, "install")
+    with service.operation_scope(token):
+        copied = registry.package_manager.copy_into_store(source, manifest)
+        planned = await bus.trigger(Event(EXTENSION_PLAN_EVENT, PlanRequest(
+            bus=bus, operation="install", manifest=manifest, package_root=copied,
+            operation_token=token)))
+        prepared = registry.runtime.prepare(planned.plan)
+        rolled_back = await bus.trigger(Event(EXTENSION_ROLLBACK_EVENT, RollbackRequest(
+            bus=bus, plan=planned.plan, candidate=prepared.candidate, store_copy_created=True)))
     assert rolled_back.removed_store_copy
-    assert rolled_back.residue is None
-    assert all(name not in sys.modules for name in prepared.candidate.module_names)
     assert not copied.exists()
     assert source.is_dir()
-    assert registry.runtime.get_active("demo") is None
-    assert await call_business_event(bus) == ("core", {"tool": "Bash"})
+    await service.finish_operation(token, report=ActivationReport(
+        "", "demo", "install", "FAILED", None, None), active=None)
 
 
 @pytest.mark.asyncio

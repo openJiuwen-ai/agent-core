@@ -36,7 +36,7 @@ async def _registry(tmp_path: Path, *, callbacks=(), mcp_servers=None):
     bus.register_event_type(BUSINESS_EVENT, match_event_input, echo_core_handler)
     registry = Registry()
     await registry.init(bus, store=service, cleanup_callbacks=callbacks)
-    registry.open_install_dir(tmp_path / "installed")
+    await registry.open_install_dir(tmp_path / "installed", report_path=tmp_path / "report.yaml")
     source = tmp_path / "source"
     write_package(source, "demo", body=_BODY)
     if mcp_servers is not None:

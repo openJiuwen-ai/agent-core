@@ -9,7 +9,9 @@ are passed afterwards, through ``open_install_dir``, which does not install.
 The convenience methods then trigger the matching root event.
 """
 
-from collections.abc import Callable, Sequence
+import asyncio
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -17,6 +19,7 @@ from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event
 from openjiuwen.core.extension.data import JsonState, JsonStore, StateDependencies
 from openjiuwen.core.extension.errors import ExtensionFailure
+from openjiuwen.core.extension.install_report import PackageInstallReport
 from openjiuwen.core.extension.management import (
     PACKAGE_INSTALL_EVENT,
     PACKAGE_RELOAD_EVENT,
@@ -27,7 +30,6 @@ from openjiuwen.core.extension.management import (
     ReloadRequest,
     UninstallRequest,
     bind_context,
-    context_for,
     replace_context,
     unbind_context,
 )
@@ -42,6 +44,9 @@ class Registry:
 
     def __init__(self) -> None:
         self._context: ManagementContext | None = None
+        self._startup_lock = asyncio.Lock()
+        self._operations: set[asyncio.Task] = set()
+        self._closing = False
 
     @property
     def is_ready(self) -> bool:
@@ -134,8 +139,8 @@ class Registry:
         state_bound = False
         # Imported lazily: ops_impl.store imports extension.data, and this module
         # is loaded while openjiuwen.core.extension.__init__ is still running.
-        from openjiuwen.core.events.ops_impl.store import configure_store, unconfigure_store
         from openjiuwen.core.events.ops_impl.state import configure_state, unconfigure_state
+        from openjiuwen.core.events.ops_impl.store import configure_store, unconfigure_store
 
         try:
             if states is not None:
@@ -161,42 +166,88 @@ class Registry:
             raise
         self._context = context
 
-    def open_install_dir(
-        self,
-        install_dir: Path,
-        *,
-        host_version: str | None = None,
-    ) -> tuple[Path, ...]:
-        """Remember the install directory and list the packages already in it.
-
-        Call this after ``init``. It does not copy files or install packages.
-        ``host_version`` is the version compared with ``requires.host``.
-
-        Returns:
-            Package directories ``<install_dir>/<package.id>/<version>`` that
-            contain a manifest. The caller passes them to ``install``.
-
-        Raises:
-            ExtensionFailure: ``init`` has not run, or a directory is already set.
-        """
+    async def open_install_dir(
+        self, install_dir: Path, *, report_path: Path, host_version: str | None = None,
+        domain: str | None = None, allowed_domains: Collection[str] | None = None,
+        poll_interval: float = 0.5, dependency_timeout: float = 300.0, lock_timeout: float = 5.0,
+    ) -> None:
+        """Bind an installation root and a mandatory cross-process YAML report."""
         context = self._require_ready()
         if context.package_manager is not None:
-            raise ExtensionFailure(
-                StatusCode.EXTENSION_LOAD_FAILED,
-                reason="install directory is already set",
+            raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="install directory is already set")
+        if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="domain must be a nonempty string")
+        if allowed_domains is not None:
+            invalid_collection = isinstance(allowed_domains, str) or not allowed_domains
+            invalid_value = any(
+                not isinstance(value, str) or not value.strip()
+                for value in allowed_domains
             )
-        manager = PackageManager(Path(install_dir))
-        replace_context(
-            ManagementContext(
-                bus=context.bus,
-                package_manager=manager,
-                orchestrator=context.orchestrator,
-                runtime=context.runtime,
-                host_version=host_version,
-            )
-        )
-        self._context = context_for(context.bus)
-        return tuple(manager.list_installed())
+            missing_domain = domain is not None and domain not in allowed_domains
+            if invalid_collection or invalid_value or missing_domain:
+                raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="invalid allowed_domains")
+        manager = PackageManager(Path(install_dir), domain=domain, allowed_domains=allowed_domains)
+        report = PackageInstallReport(report_path, poll_interval=poll_interval,
+                                      dependency_timeout=dependency_timeout, lock_timeout=lock_timeout)
+        await report.open(manager.store, domain=domain)
+        manager.install_report = report
+        self._context = replace(context, package_manager=manager, install_report=report, host_version=host_version)
+        replace_context(self._context)
+
+    async def load_installed(self) -> tuple[ActivationReport, ...]:
+        task = asyncio.current_task()
+        self._operations.add(task)
+        try:
+            async with self._startup_lock:
+                return await self._load_installed()
+        finally:
+            self._operations.discard(task)
+
+    async def _load_installed(self) -> tuple[ActivationReport, ...]:
+        """Discover and order the complete root, then activate this scope's queue."""
+        context = self._require_store()
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        service = context.install_report
+        plan = await service.prepare_startup(context.package_manager)
+        reports = [ActivationReport("", item.package_id, "install", "FAILED", None, None, item.error)
+                   for item in plan.rejected]
+        try:
+            for manifest in plan.ordered:
+                if context.package_manager.domain is not None and manifest.domain != context.package_manager.domain:
+                    continue
+                if context.runtime.get_active(manifest.package_id) is not None:
+                    continue
+                root = context.package_manager.version_dir(manifest.package_id, manifest.version)
+                result = await self._trigger(
+                    PACKAGE_INSTALL_EVENT, InstallRequest(bus=context.bus, paths=(root,), startup=True),
+                )
+                reports.extend(result.reports)
+        finally:
+            if not self._closing:
+                await service.mark_started()
+        return tuple(reports)
+
+    async def begin_shutdown(self) -> None:
+        """Stop new admissions and let cancelled management operations finish their file work."""
+        self._closing = True
+        context = self._require_ready()
+        if context.install_report is not None:
+            await context.install_report.mark_stopping()
+        current = asyncio.current_task()
+        tasks = [task for task in self._operations if task is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def close(self) -> None:
+        """Release report ownership after local handlers and resources have stopped."""
+        context = self._require_ready()
+        if context.runtime.active_packages():
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="active handlers remain")
+        if context.install_report is not None:
+            await context.install_report.close()
 
     async def install(
         self,
@@ -230,7 +281,16 @@ class Registry:
 
     async def _trigger(self, event_type: str, request: object) -> PackageOperationResult:
         context = self._require_ready()
-        result = await context.bus.trigger(Event(event_type, request))
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        task = asyncio.current_task()
+        already_tracked = task in self._operations
+        self._operations.add(task)
+        try:
+            result = await context.bus.trigger(Event(event_type, request))
+        finally:
+            if not already_tracked:
+                self._operations.discard(task)
         if not isinstance(result, PackageOperationResult):
             raise ExtensionFailure(
                 StatusCode.EXTENSION_LOAD_FAILED,
@@ -248,7 +308,7 @@ class Registry:
 
     def _require_store(self) -> ManagementContext:
         context = self._require_ready()
-        if context.package_manager is None:
+        if context.package_manager is None or context.install_report is None:
             raise ExtensionFailure(
                 StatusCode.EXTENSION_LOAD_FAILED,
                 reason="install directory has not been provided",

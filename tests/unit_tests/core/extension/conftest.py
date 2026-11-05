@@ -140,7 +140,7 @@ async def build_registry(
         bus.register_event_type(event_type, match_event_input, echo_core_handler)
     registry = Registry()
     await registry.init(bus)
-    registry.open_install_dir(install_dir, host_version=host_version)
+    await registry.open_install_dir(install_dir, report_path=install_dir.parent / (install_dir.name + "-report.yaml"), host_version=host_version)
     return registry, bus
 
 

@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / package-loading` |
 | 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-11-06 |
 | 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
@@ -19,7 +19,7 @@
 
 - **本规约定义：** `manifest.yaml` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
 - **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主配置解析、远程仓库与多版本同时生效。
-- **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主在启动流程中于适当时机发起批量安装（经管理事件，见 S_02）。
+- **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主调用异步 `open_install_dir` 绑定安装根目录及必传的报告路径，再调用 `load_installed()`；发现、选版和排序由 Core 完成。
 - **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（见 S_02）。
 
 ### 1.2 术语
@@ -54,8 +54,10 @@
 5. `requires.host` 可选；若存在，为空白分隔的版本条件，表示宿主版本要求，不参与包拓扑排序。
 6. 通过检查的包落在安装副本路径；来源已是该路径时就地使用。
 7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。任何安装失败清理与卸载都不删除用户来源。
-8. 同一 `package.id` 在安装目录中只保留一个版本目录。启动列出若见同 id 多版本，按同批重复 id 处理，不自动挑选。
+8. 同一 ID 可以有多个磁盘版本，但只能属于一个 domain。启动选最高合法版本；仍存活进程中的包使用实际生效版本。选中版本失败不自动降级。显式安装批次中重复 ID 仍整批拒绝。
 9. 可选的 `mcp.json` 与 `manifest.yaml` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
+
+`package.domain` 为可选字符串；设置 `domain` 或 `allowed_domains` 后必须填写非空字符串。匹配保留大小写和首尾字符，不自动修正。`allowed_domains` 由宿主指定；SDK 不固定产品域名。显式安装归属不匹配报 `EXTENSION_DOMAIN_MISMATCH`，启动只过滤合法的其它域包。
 
 ### 2.2 打开与复制
 
@@ -90,6 +92,8 @@
 | `load_manifest` / `parse_manifest_mapping` | `manifest` | 读并校验声明 |
 | `PackageManager.open_source` | `package_manager` | 打开目录或 zip |
 | `PackageManager.copy_into_store` / `remove_installed` / `list_installed` | `package_manager` | 安装副本读写 |
+| `PackageManager.managed_versions` | `package_manager` | 逐版本校验并枚举可确认的受管副本；单个损坏目录不阻断其它版本 |
+| `build_startup_plan` | `selection` | 全目录选版、检查跨域依赖并稳定排序 |
 | `resolve_install_set` | `selection` | 一批安装的接受、拒绝与包序 |
 | `evaluate_reload` | `selection` | 重载版本是否仍被依赖方接受 |
 | `order_key` / `topological_order` | `ordering` | 稳定排序与拓扑 |
@@ -110,6 +114,7 @@
 6. 依赖缺失、版本不匹配、或依赖方已拒绝 → `EXTENSION_DEPENDENCY_NOT_MET`。
 7. 环上节点 → `EXTENSION_DEPENDENCY_CYCLE`；仅被环挡住的节点 → 依赖未满足。
 8. 重载时，若某依赖方的版本条件不接受新版本 → `EXTENSION_DEPENDENT_INCOMPATIBLE`，生效记录不变。
+9. 启动计划中，磁盘存在精确 `(package.id, version)` 时保留真实 manifest。报告只为尚未复制完成、但已登记的目标补临时节点；相同版本的 domain 或依赖与磁盘不一致时拒绝，不以报告覆盖磁盘事实。
 
 ### 3.2 版本条件
 
@@ -120,7 +125,7 @@
 
 ### 3.3 生效记录字段
 
-`ActivePackageRecord` 至少包含：`package_id`、`version`、`root`、`generation`、`requires_packages`。Package Manager 不持有生效记录。
+`ActivePackageRecord` 包含 `package_id`、`version`、`root`、`generation`、`requires_packages` 和 `domain`。Package Manager 不持有生效记录。
 
 ## 4. Plan、candidate 与生命周期判断
 
@@ -169,7 +174,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 
 ### 4.5 错误码
 
-错误码与消息模板定义在 `openjiuwen.core.common.exception.codes.StatusCode`，号段 `201000–201015`。`OperationError.code` 使用**枚举成员名**。
+错误码与消息模板定义在 `openjiuwen.core.common.exception.codes.StatusCode`，号段以代码枚举为准（本特性新增 `201021–201023`）。`OperationError.code` 使用**枚举成员名**。
 
 | StatusCode | 适用情况 |
 | --- | --- |
@@ -180,7 +185,10 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 | `EXTENSION_DEPENDENCY_CYCLE` | 包或包内扩展成环 |
 | `EXTENSION_DEPENDENT_INCOMPATIBLE` | 重载版本不被依赖方接受 |
 | `EXTENSION_PACKAGE_IN_USE` | 卸载时仍被依赖 |
-| `EXTENSION_PACKAGE_BUSY` | 卸载时有在途调用 |
+| `EXTENSION_PACKAGE_BUSY` | 有在途调用、管理占用、重复执行者或启动队列仍在执行 |
+| `EXTENSION_DOMAIN_MISMATCH` | 请求交给了其它域的实例 |
+| `EXTENSION_REPORT_FAILED` | 报告损坏、I/O/锁超时或操作身份失效 |
+| `EXTENSION_DEPENDENCY_TIMEOUT` | 等待跨进程依赖超过配置上限 |
 | `EXTENSION_PACKAGE_NOT_INSTALLED` | 未生效/未安装却要 reload、uninstall 或删除副本 |
 | `EXTENSION_MANIFEST_INVALID` | 声明非法 |
 | `EXTENSION_SOURCE_INVALID` | 来源非法 |
@@ -203,14 +211,17 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 
 ## 6. 适用限制与兼容性
 
-- 本规约适用于同一进程内的包加载控制面。
-- 不定义跨进程互斥、远程拉包、多版本同时生效或前端 Runtime。
+- 每个 Registry 只把自己的包发布到自己的 Bus。共享报告用于同主机、同一安装空间的依赖和管理保护。
+- 共享文件系统必须支持进程锁和原子替换；不提供远程拉包、同一 ID 多版本同时生效或前端 Runtime。
+- 报告格式、运行锁和重启判断见 [F_05](../features/F_05_domain-install-report.md)。
+- 受管版本按目录独立校验；合法的其它域版本可参与全局判断，无法验证身份的旧目录只跳过。损坏目录只有在报告或 Runtime 已知其版本时才允许进入清理流程。
 - 公共名称、错误码或不变量变更时，必须同步本规约与 `tests/unit_tests/core/extension/`。
 
 ## 7. 验证索引
 
 | 主题 | 测试文件 |
 | --- | --- |
+| 按域启动、共享报告、锁、重启和真实子进程 | `tests/unit_tests/core/extension/test_install_report.py` |
 | 声明、安装目录、zip 防护、依赖定序 | `tests/unit_tests/core/extension/test_package_source.py` |
 | Plan、prepare、生效记录、卸载判断 | `tests/unit_tests/core/extension/test_plan_runtime.py` |
 | `mcp.json` 解析与声明表 | `tests/unit_tests/core/extension/test_mcp_declarations.py` |

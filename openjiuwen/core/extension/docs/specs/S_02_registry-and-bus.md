@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_02 / registry-and-bus` |
 | 关联模块 | `openjiuwen/core/extension/`；九类事件登记模块在 `openjiuwen/core/events/builtins/` |
-| 最近一次修订日期 | 2026-11-02 |
+| 最近一次修订日期 | 2026-11-06 |
 | 关联 feature | [F_03](../features/F_03_registry.md)、[F_04](../features/F_04_bus-wiring.md) |
 | 设计依据 | [开发计划](../designs/extension-development-plan.md)、[架构](../designs/extension-architecture.md) |
 
@@ -54,7 +54,24 @@ Runtime 按 Ops 记录其原代，旧代退出后异步执行 reason=reload 的�
 回调失败保留后台任务并退避重试，不回滚已经发布的新代。宿主停止 Runtime 时调用
 `stop_retirements()`，随后按原 shutdown 顺序释放资源。清理回调必须按 generation 隔离旧代资源。
 
-`open_install_dir(install_dir, *, host_version=None)` 在 `init` 之后调用。它记住安装目录，用 `host_version` 和 `requires.host` 比较，并返回目录里已有的 `<package.id>/<version>/`。这一步不安装。调用方把返回的路径交给 `install`。
+`open_install_dir` 在 `init` 之后异步调用，返回 None：
+
+```python
+async def open_install_dir(
+    self, install_dir: Path, *, report_path: Path, host_version: str | None = None,
+    domain: str | None = None, allowed_domains: Collection[str] | None = None,
+    poll_interval: float = 0.5, dependency_timeout: float = 300.0, lock_timeout: float = 5.0,
+) -> None: ...
+
+async def load_installed(self) -> tuple[ActivationReport, ...]: ...
+async def begin_shutdown(self) -> None: ...
+async def close(self) -> None: ...
+```
+
+报告路径必传，时间单位均为秒。open 完成运行锁与进程登记，不安装包；load 从根目录完整发现、选版、稳定排序，再筛出当前域逐包激活。
+`domain=None` 保留全量加载；不能和按域实例混用同一报告。每个执行范围只允许一个存活执行者。
+宿主停机先 begin_shutdown 拒绝新操作并结束在途管理任务，撤销本地 Handler 和资源后 close 释放运行锁。
+报告读写、依赖占用及重启规则见 [F_05](../features/F_05_domain-install-report.md)。
 
 `open_install_dir` 不触发 `ops.build`。`init` 在宿主回调返回后触发一次。调用方不再单独触发。
 
@@ -72,9 +89,11 @@ Runtime 按 Ops 记录其原代，旧代退出后异步执行 reason=reload 的�
 | `package.install` | 汇总各包 Report | 子事件失败按依赖跳过规则 |
 | `package.uninstall` | 注册移除且安装副本删除 | `PACKAGE_BUSY` / `PACKAGE_IN_USE` |
 | `package.reload` | 该包 Handler 已热切换 | 依赖方不兼容、准备失败 |
-| `package.query` | 当前生效/进展事实 | 无目标时明确空结果 |
+| `package.query` | 本地 active/installed/inflight/published 与共享 packages | 报告不可读时明确失败 |
 
-编排步骤遵循架构第 4.1、5 节；内部步骤不另增事件。
+管理写操作先由报告登记 operation_id，并取得 `PackageOperationToken`。`PlanRequest.operation_token` 与 `ApplyRequest.operation_token` 必须显式携带该 token；Handler 按 token 校验包、操作、进程和 operation_id。token 随事件请求传递，因此计划和 apply 可以跨异步任务调度，不依赖发起任务的上下文变量，也不能单独绕过报告执行。apply 在校验后自行进入操作范围，文件写入仍由该范围授权。依赖等待不持报告锁；发布前再次校验。
+
+完成本地动作后提交报告失败时，不覆盖已经得到的 `ActivationReport`，也不中断同批其它包；共享行保留 pending/unknown 并记录异常。查询可以用已完成的本地 Runtime 发布补正报告，不重新执行扩展代码。其它编排步骤遵循架构第 4.1、5 节；内部步骤不另增事件。
 
 ## 4. Bus 发布
 
@@ -107,7 +126,7 @@ MCP 清理失败保留声明和 store，不继续执行宿主回调或数据删�
 
 重载不调用 uninstall，不删除 store。宿主可在旧代调用结束后，调用相同清理接口并传
 `reason="reload"`，停机传 `reason="shutdown"`；Core store 对这两种原因保留文件。
-当前未增加 WebUI、后台刷新任务、state 数据或通用停机入口。
+WebUI 仍由宿主清理回调负责；Registry.begin_shutdown/close 负责管理任务和报告运行锁，不代替宿主撤销资源。
 store 细节及本次验证见 [Events F_14](../../../events/docs/features/F_14_ops-store.md)。
 
 ## 5. 验证索引

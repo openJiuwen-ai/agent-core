@@ -8,7 +8,8 @@ import stat
 import tempfile
 import uuid
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -70,8 +71,28 @@ class OpenedSource:
 class PackageManager:
     """Owns the install directory. It does not record which packages are active."""
 
-    def __init__(self, store: Path) -> None:
+    def __init__(
+        self, store: Path, *, domain: str | None = None, allowed_domains: Collection[str] | None = None,
+    ) -> None:
         self.store = store.expanduser().resolve()
+        self.domain = domain
+        self.allowed_domains = None if allowed_domains is None else frozenset(allowed_domains)
+        self.require_domain = domain is not None or allowed_domains is not None
+        self.install_report = None
+
+    def validate_manifest(self, manifest: Manifest, *, match_domain: bool = True) -> None:
+        """Validate generic host restrictions without knowing product domain names."""
+        if self.require_domain and (not isinstance(manifest.domain, str) or not manifest.domain.strip()):
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="package.domain is required")
+        if self.allowed_domains is not None and manifest.domain not in self.allowed_domains:
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="package.domain is not allowed")
+        if match_domain and self.domain is not None and manifest.domain != self.domain:
+            raise ExtensionFailure(StatusCode.EXTENSION_DOMAIN_MISMATCH,
+                                   reason=f"{manifest.package_id} belongs to {manifest.domain!r}")
+
+    def _guard_mutation(self, package_id: str) -> None:
+        if self.install_report is not None:
+            self.install_report.require_file_operation(package_id)
 
     def list_installed(self) -> list[Path]:
         """Return each ``<package.id>/<version>`` directory that has a manifest.
@@ -107,7 +128,8 @@ class PackageManager:
             return self._open_zip(source)
         if source.is_dir():
             _assert_no_symlinks(source)
-            manifest = load_manifest(source)
+            manifest = load_manifest(source, require_domain=self.require_domain)
+            self.validate_manifest(manifest)
             return OpenedSource(manifest, source, source, None)
         raise ExtensionFailure(
             StatusCode.EXTENSION_SOURCE_INVALID,
@@ -124,6 +146,8 @@ class PackageManager:
         Raises:
             ExtensionFailure: The copy cannot be completed. The source is kept.
         """
+        self.validate_manifest(manifest)
+        self._guard_mutation(manifest.package_id)
         source_root = source_root.resolve()
         if not source_root.exists():
             raise ExtensionFailure(
@@ -161,7 +185,9 @@ class PackageManager:
                 cause=exc,
             ) from exc
         try:
-            staging.rename(target)
+            with (self.install_report.file_operation_scope(manifest.package_id)
+                  if self.install_report is not None else nullcontext()):
+                staging.rename(target)
         except OSError as exc:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
@@ -190,9 +216,16 @@ class PackageManager:
                 continue
             if not (root / "manifest.yaml").is_file():
                 continue
-            manifest = load_manifest(root)
-            if manifest.package_id != package_id or manifest.version != root.name:
-                raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed copy identity mismatch")
+            try:
+                manifest = load_manifest(root, require_domain=self.require_domain)
+                self.validate_manifest(manifest, match_domain=False)
+                if manifest.package_id != package_id or manifest.version != root.name:
+                    raise ExtensionFailure(
+                        StatusCode.EXTENSION_SOURCE_INVALID,
+                        reason="managed copy identity mismatch",
+                    )
+            except ExtensionFailure:
+                continue
             versions.append(root.name)
         return tuple(versions)
 
@@ -206,6 +239,7 @@ class PackageManager:
             ExtensionFailure: The path would leave the store, or the directory
                 is not an installed package.
         """
+        self._guard_mutation(package_id)
         target = self.version_dir(package_id, version)
         store = self.store.resolve()
         original = self.store / package_id / version
@@ -235,10 +269,12 @@ class PackageManager:
             )
         _assert_no_symlinks(target)
         try:
-            shutil.rmtree(target)
-            package_dir = target.parent
-            if package_dir.exists() and not any(package_dir.iterdir()):
-                package_dir.rmdir()
+            with (self.install_report.file_operation_scope(package_id)
+                  if self.install_report is not None else nullcontext()):
+                shutil.rmtree(target)
+                package_dir = target.parent
+                if package_dir.exists() and not any(package_dir.iterdir()):
+                    package_dir.rmdir()
         except OSError as exc:
             raise ExtensionFailure(
                 StatusCode.EXTENSION_INSTALL_COPY_FAILED,
@@ -250,13 +286,13 @@ class PackageManager:
         """Return the resolved install path; deletion validates its containment."""
         return (self.store / package_id / version).resolve()
 
-    @staticmethod
-    def _open_zip(source: Path) -> OpenedSource:
+    def _open_zip(self, source: Path) -> OpenedSource:
         temp = Path(tempfile.mkdtemp(prefix="openjiuwen-ext-"))
         try:
             _extract_zip(source, temp)
             _assert_no_symlinks(temp)
-            manifest = load_manifest(temp)
+            manifest = load_manifest(temp, require_domain=self.require_domain)
+            self.validate_manifest(manifest)
         except Exception as error:
             shutil.rmtree(temp, ignore_errors=True)
             raise error

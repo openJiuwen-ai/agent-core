@@ -50,7 +50,7 @@ async def test_init_triggers_ops_build_so_the_first_install_can_run(tmp_path: Pa
     bus.register_event_type(BUSINESS_EVENT, match_event_input, echo_core_handler)
     registry = Registry()
     await registry.init(bus)
-    registry.open_install_dir(tmp_path / "store")
+    await registry.open_install_dir(tmp_path / "store", report_path=tmp_path / "report.yaml")
 
     reports = await registry.install([source])
 

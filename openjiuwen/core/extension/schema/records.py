@@ -64,3 +64,4 @@ class ActivePackageRecord:
     root: Path
     generation: int
     requires_packages: tuple[PackageDependency, ...]
+    domain: str | None = None
