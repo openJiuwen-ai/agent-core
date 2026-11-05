@@ -1,50 +1,57 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""Read manifest.yaml and check that its entry files stay inside the package."""
+"""Read the package manifest and check that its entry files stay inside the package."""
 
+import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.extension.data.json_values import valid_package_id
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.schema.manifest import ExtensionDecl, Manifest, PackageDependency
 from openjiuwen.core.extension.versions import parse_version, specifier_matches
-from openjiuwen.core.extension.data.json_values import valid_package_id
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MANIFEST_NAME = "manifest.json"
+PACKAGE_TYPE = "extension"
+
+
+def has_manifest(package_root: Path) -> bool:
+    """Return True when the package carries a manifest.json."""
+
+    return (Path(package_root) / MANIFEST_NAME).is_file()
 
 
 def load_manifest(package_root: Path, *, require_domain: bool = False) -> Manifest:
-    """Read ``package_root / manifest.yaml``.
+    """Read ``package_root / manifest.json``.
 
     Raises:
         ExtensionFailure: The file is missing, unreadable, or the declaration
             does not meet the manifest rules.
     """
     root = package_root.expanduser().resolve()
-    path = root / "manifest.yaml"
+    path = root / MANIFEST_NAME
     if not path.is_file():
         raise ExtensionFailure(
             StatusCode.EXTENSION_MANIFEST_INVALID,
-            reason=f"manifest.yaml is missing under {root}",
+            reason=f"{MANIFEST_NAME} is missing under {root}",
         )
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ExtensionFailure(
             StatusCode.EXTENSION_MANIFEST_INVALID,
-            reason=f"cannot read manifest.yaml: {exc}",
+            reason=f"cannot read {path.name}: {exc}",
             cause=exc,
         ) from exc
     if not isinstance(raw, dict):
         raise ExtensionFailure(
             StatusCode.EXTENSION_MANIFEST_INVALID,
-            reason="manifest.yaml top level must be a mapping",
+            reason=f"{path.name} top level must be a mapping",
         )
     return parse_manifest_mapping(raw, root, require_domain=require_domain)
 
@@ -57,6 +64,12 @@ def parse_manifest_mapping(
     Raises:
         ExtensionFailure: A required field is missing or a value is illegal.
     """
+    package_type = raw.get("package_type")
+    if package_type != PACKAGE_TYPE:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason=f"package_type must be {PACKAGE_TYPE!r}, got {package_type!r}",
+        )
     schema_version = raw.get("schemaVersion")
     if schema_version != 1:
         raise ExtensionFailure(
@@ -77,8 +90,18 @@ def parse_manifest_mapping(
         domain = None
     package_id = _required_package_id(package.get("id"))
     version = _required_version(package.get("version"), "package.version")
-    display_name = _optional_text(package.get("displayName"), "package.displayName")
-    description = _optional_text(package.get("description"), "package.description")
+    display = raw.get("display")
+    display = display if isinstance(display, Mapping) else {}
+    display_name = _localized_text(display.get("name"))
+    if display_name is None:
+        display_name = _optional_text(package.get("displayName"), "package.displayName")
+    if display_name is None:
+        display_name = _localized_text(raw.get("display_name"))
+    description = _localized_text(display.get("description"))
+    if description is None:
+        description = _optional_text(package.get("description"), "package.description")
+    if description is None:
+        description = _localized_text(raw.get("display_description"))
 
     requires = raw.get("requires") or {}
     if not isinstance(requires, dict):
@@ -148,6 +171,19 @@ def _optional_text(value: object, field: str) -> str | None:
             reason=f"{field} must be a non-empty string",
         )
     return value.strip()
+
+
+def _localized_text(value: object) -> str | None:
+    """Read an asset manifest's ``{zh, en}`` text without validating its shape."""
+
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, Mapping):
+        for key in ("zh", "en"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    return None
 
 
 def _optional_specifier(value: object, field: str) -> str | None:

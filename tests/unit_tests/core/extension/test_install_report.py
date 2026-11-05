@@ -29,11 +29,11 @@ from openjiuwen.core.extension.selection import build_startup_plan
 
 def _write(root, package_id, domain, version="1.0.0", requires=()):
     write_package(root, package_id, version, requires=requires)
-    path = root / "manifest.yaml"
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    path = root / "manifest.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
     if domain is not None:
         raw["package"]["domain"] = domain
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
     return root
 
 
@@ -519,18 +519,18 @@ async def test_failed_reload_preserves_shared_effective_version_and_domain(tmp_p
         assert (await a.install(_write(tmp_path / "a-src", "a", "a")))[0].status == "SUCCESS"
         source = _write(tmp_path / "b-src", "b", "b", requires=(PackageDependency("a", "<2.0.0"),))
         assert (await b.install(source))[0].status == "SUCCESS"
-        path = root / "a" / "1.0.0" / "manifest.yaml"
-        raw = yaml.safe_load(path.read_text())
+        path = root / "a" / "1.0.0" / "manifest.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
         raw["package"]["version"] = "2.0.0"
-        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         assert (await a.reload("a")).error.code == "EXTENSION_DEPENDENT_INCOMPATIBLE"
         assert (await b.context.install_report.read_packages())["a"].active_version == "1.0.0"
         raw["package"]["version"] = "1.0.0"
         raw["package"]["domain"] = "b"
-        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         assert (await a.reload("a")).error.code == "EXTENSION_DOMAIN_MISMATCH"
         raw["package"]["domain"] = "a"
-        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         (root / "a" / "1.0.0" / raw["extensions"][0]["module"]).write_text("raise RuntimeError('broken update')")
         assert (await a.reload("a")).status == "FAILED"
         state = (await b.context.install_report.read_packages())["a"]
@@ -565,7 +565,7 @@ def test_real_process_simultaneous_global_id_claim(tmp_path):
         assert sum(item["active"] == ["shared"] for item in results) == 1
         row = yaml.safe_load((tmp_path / "report.yaml").read_text())["packages"]["shared"]
         assert row["active_version"] == "1.0.0" and row["status"] == "success"
-        manifest = yaml.safe_load((root / "shared" / "1.0.0" / "manifest.yaml").read_text())
+        manifest = json.loads((root / "shared" / "1.0.0" / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["package"]["domain"] == row["domain"]
     finally:
         for domain in ("a", "b"):

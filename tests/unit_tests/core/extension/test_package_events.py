@@ -2,6 +2,7 @@
 
 """EX-03: orchestration of the nine package management events."""
 
+import json
 import asyncio
 from pathlib import Path
 
@@ -231,13 +232,10 @@ async def test_install_skips_a_dependent_and_keeps_an_independent_package(tmp_pa
 @pytest.mark.asyncio
 async def test_install_refuses_a_package_the_host_version_does_not_satisfy(tmp_path: Path) -> None:
     source = _source(tmp_path, "source", "demo")
-    (source / "manifest.yaml").write_text(
-        (source / "manifest.yaml").read_text(encoding="utf-8").replace(
-            "extensions:",
-            "requires:\n  host: '>=9.0.0'\nextensions:",
-        ),
-        encoding="utf-8",
-    )
+    manifest_path = source / "manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["requires"] = {"host": ">=9.0.0"}
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
     registry, _ = await build_registry(tmp_path / "store", host_version="1.0.0")
 
     result = await registry.install([source])
@@ -326,11 +324,10 @@ async def test_reload_is_refused_when_a_dependent_rejects_the_new_version(tmp_pa
     registry, bus = await build_registry(store)
     assert all(item.status == "SUCCESS" for item in await registry.install([base, child]))
 
-    manifest_path = store / "base" / "1.0.0" / "manifest.yaml"
-    manifest_path.write_text(
-        manifest_path.read_text(encoding="utf-8").replace("version: 1.0.0", "version: 2.0.0"),
-        encoding="utf-8",
-    )
+    manifest_path = store / "base" / "1.0.0" / "manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["package"]["version"] = "2.0.0"
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
     refused = await registry.reload("base")
 
     assert refused.status == "FAILED"

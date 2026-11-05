@@ -15,8 +15,8 @@ from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.events import Event, EventHandlerOps, ExtensionEventBus
 from openjiuwen.core.events.ops_impl.mcp.runtime import set_resource_mgr_provider
 from openjiuwen.core.extension import ExtensionFailure, Registry
-from openjiuwen.core.extension.schema.mcp import declarations
 from openjiuwen.core.extension.data import JsonStore
+from openjiuwen.core.extension.schema.mcp import declarations
 from tests.unit_tests.core.extension.conftest import BUSINESS_EVENT, echo_core_handler, match_event_input, write_package
 
 _BODY = (
@@ -220,7 +220,7 @@ async def test_partial_install_copy_deletion_can_retry_without_manifest(
     def partial_remove(package_id, version, *, missing_ok=False):
         calls.append(version)
         if len(calls) == 1:
-            (registry.package_manager.version_dir(package_id, version) / "manifest.yaml").unlink()
+            (registry.package_manager.version_dir(package_id, version) / "manifest.json").unlink()
             raise ExtensionFailure(StatusCode.EXTENSION_INSTALL_COPY_FAILED, reason="partial deletion")
         original(package_id, version, missing_ok=missing_ok)
 
@@ -265,7 +265,7 @@ async def test_expired_ops_cannot_recreate_data_after_uninstall(tmp_path: Path) 
 async def test_active_package_with_damaged_manifest_can_still_be_uninstalled(tmp_path: Path) -> None:
     registry, bus, service, source = await _registry(tmp_path)
     assert await bus.trigger(Event(BUSINESS_EVENT, {"action": _set})) is True
-    (registry.package_manager.version_dir("demo", "1.0.0") / "manifest.yaml").write_text("invalid", encoding="utf-8")
+    (registry.package_manager.version_dir("demo", "1.0.0") / "manifest.json").write_text("invalid", encoding="utf-8")
     assert (await registry.uninstall("demo")).status == "SUCCESS"
     assert not (service.directory / "demo.json").exists()
     assert source.exists()
@@ -276,7 +276,7 @@ async def test_unverified_inactive_manifest_cannot_authorize_cleanup(tmp_path: P
     registry, bus, service, _ = await _registry(tmp_path)
     assert await bus.trigger(Event(BUSINESS_EVENT, {"action": _set})) is True
     registry.runtime.unpublish("demo", bus)
-    (registry.package_manager.version_dir("demo", "1.0.0") / "manifest.yaml").write_text("invalid", encoding="utf-8")
+    (registry.package_manager.version_dir("demo", "1.0.0") / "manifest.json").write_text("invalid", encoding="utf-8")
     assert (await registry.uninstall("demo")).status == "FAILED"
     assert await service.get("demo", "config") == {"enabled": True}
 

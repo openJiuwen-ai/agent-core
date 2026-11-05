@@ -48,7 +48,7 @@ from openjiuwen.core.extension.management.types import (
     RollbackResult,
     UninstallRequest,
 )
-from openjiuwen.core.extension.manifest import load_manifest
+from openjiuwen.core.extension.manifest import has_manifest, load_manifest
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.mcp import McpServerSpec, declarations
 from openjiuwen.core.extension.schema.records import ActivationReport, ActivePackageRecord, ExtensionPlan
@@ -301,7 +301,7 @@ async def _handle_package_reload(
             ),
         )
     root = context.package_manager.version_dir(package_id, record.version)
-    if not (root / "manifest.yaml").is_file():
+    if not has_manifest(root):
         root = record.root
     try:
         manifest = load_manifest(root)

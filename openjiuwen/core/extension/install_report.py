@@ -27,6 +27,7 @@ import yaml
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.extension.data.files import run_file_operation, sync_directory
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError
+from openjiuwen.core.extension.manifest import has_manifest, load_manifest
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.records import ActivationReport, ActivePackageRecord
 from openjiuwen.core.extension.versions import specifier_matches
@@ -349,7 +350,6 @@ class PackageInstallReport:
                 "status": "pending", "reason": None, "pending": cls._pending(manifest, "install")}
 
     async def prepare_startup(self, package_manager: PackageManager) -> StartupInstallPlan:
-        from openjiuwen.core.extension.manifest import load_manifest
         from openjiuwen.core.extension.selection import RejectedPackage, build_startup_plan
 
         def prepare(data: dict[str, Any]) -> Any:
@@ -488,9 +488,8 @@ class PackageInstallReport:
                     _fail(StatusCode.EXTENSION_DUPLICATE_PACKAGE_ID, package_id=manifest.package_id)
             # Direct ZIP operations must check every disk version, not only report rows.
             directory = self.install_dir / manifest.package_id
-            from openjiuwen.core.extension.manifest import load_manifest
             for root in directory.iterdir() if directory.is_dir() else ():
-                if root.is_dir() and not root.name.startswith(".") and (root / "manifest.yaml").is_file():
+                if root.is_dir() and not root.name.startswith(".") and has_manifest(root):
                     try:
                         existing = load_manifest(root, require_domain=self.domain is not None)
                     except ExtensionFailure:

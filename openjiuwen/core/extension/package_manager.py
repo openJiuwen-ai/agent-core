@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.extension.errors import ExtensionFailure
-from openjiuwen.core.extension.manifest import load_manifest
+from openjiuwen.core.extension.manifest import has_manifest, load_manifest
 from openjiuwen.core.extension.schema.manifest import Manifest
 
 # Bound package archives and reject symbolic links before loading code.
@@ -109,7 +109,7 @@ class PackageManager:
             for version_dir in sorted(package_dir.iterdir(), key=lambda path: path.name):
                 if not version_dir.is_dir() or version_dir.name.startswith("."):
                     continue
-                if (version_dir / "manifest.yaml").is_file():
+                if has_manifest(version_dir):
                     found.append(version_dir.resolve())
         return found
 
@@ -214,7 +214,7 @@ class PackageManager:
             if root.name in known_versions:
                 versions.append(root.name)
                 continue
-            if not (root / "manifest.yaml").is_file():
+            if not has_manifest(root):
                 continue
             try:
                 manifest = load_manifest(root, require_domain=self.require_domain)
@@ -261,7 +261,7 @@ class PackageManager:
             )
         if missing_ok and not target.exists():
             return
-        if not target.is_dir() or (not missing_ok and not (target / "manifest.yaml").is_file()):
+        if not target.is_dir() or (not missing_ok and not has_manifest(target)):
             raise ExtensionFailure(
                 StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
                 package_id=package_id,

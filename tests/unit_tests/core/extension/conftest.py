@@ -2,6 +2,7 @@
 
 """Shared helpers for extension unit tests."""
 
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -81,23 +82,17 @@ def write_package(
         ),
         encoding="utf-8",
     )
-    dependencies = "".join(
-        f"    - id: {item.package_id}\n      version: \"{item.version}\"\n" for item in requires
-    )
-    requires_block = f"requires:\n  packages:\n{dependencies}" if dependencies else ""
-    (root / "manifest.yaml").write_text(
-        "schemaVersion: 1\n"
-        "package:\n"
-        f"  id: {package_id}\n"
-        f"  version: {version}\n"
-        "  displayName: Demo\n"
-        f"{requires_block}"
-        "extensions:\n"
-        "  - id: ext\n"
-        "    runtime: backend\n"
-        f"    module: {module}\n",
-        encoding="utf-8",
-    )
+    manifest: dict[str, object] = {
+        "package_type": "extension",
+        "schemaVersion": 1,
+        "package": {"id": package_id, "version": version, "displayName": "Demo"},
+        "extensions": [{"id": "ext", "runtime": "backend", "module": module}],
+    }
+    if requires:
+        manifest["requires"] = {
+            "packages": [{"id": item.package_id, "version": item.version} for item in requires]
+        }
+    (root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def match_event_input(event_input: object, match_pattern: Mapping[str, object]) -> bool:

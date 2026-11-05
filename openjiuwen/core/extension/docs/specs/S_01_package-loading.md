@@ -17,7 +17,7 @@
 
 ### 1.1 责任范围
 
-- **本规约定义：** `manifest.yaml` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
+- **本规约定义：** `manifest.json` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
 - **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主配置解析、远程仓库与多版本同时生效。
 - **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主调用异步 `open_install_dir` 绑定安装根目录及必传的报告路径，再调用 `load_installed()`；发现、选版和排序由 Core 完成。
 - **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（见 S_02）。
@@ -26,7 +26,7 @@
 
 | 术语 | 含义 |
 | --- | --- |
-| 包根 | 含有 `manifest.yaml` 的目录 |
+| 包根 | 含有 `manifest.json` 的目录 |
 | 安装副本 | `<install_dir>/<package.id>/<version>/` |
 | 用户来源 | 调用方传入的原始目录或 zip |
 | 生效记录 | Runtime 中的 `ActivePackageRecord`，供后续依赖与卸载判断 |
@@ -47,7 +47,7 @@
 
 ### 2.1 manifest 不变量
 
-1. 一个包根只有一个 `manifest.yaml`，`schemaVersion` 必须为 `1`。
+1. 一个包根只有一个 `manifest.json`，`package_type` 必须为 `extension`，`schemaVersion` 必须为 `1`。
 2. `package.id` 匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`，且不含 `..`。`package.version` 为 `MAJOR.MINOR.PATCH`。
 3. `extensions[].module` 相对包根；解析后绝对路径必须落在包根内且文件存在。`runtime` 仅接受 `backend`。
 4. `extensions[].requires` 只指向同一包内其它扩展 id，不得自依赖，不得引用外包扩展。
@@ -55,7 +55,7 @@
 6. 通过检查的包落在安装副本路径；来源已是该路径时就地使用。
 7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。任何安装失败清理与卸载都不删除用户来源。
 8. 同一 ID 可以有多个磁盘版本，但只能属于一个 domain。启动选最高合法版本；仍存活进程中的包使用实际生效版本。选中版本失败不自动降级。显式安装批次中重复 ID 仍整批拒绝。
-9. 可选的 `mcp.json` 与 `manifest.yaml` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
+9. 可选的 `mcp.json` 与 `manifest.json` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
 
 `package.domain` 为可选字符串；设置 `domain` 或 `allowed_domains` 后必须填写非空字符串。匹配保留大小写和首尾字符，不自动修正。`allowed_domains` 由宿主指定；SDK 不固定产品域名。显式安装归属不匹配报 `EXTENSION_DOMAIN_MISMATCH`，启动只过滤合法的其它域包。
 
