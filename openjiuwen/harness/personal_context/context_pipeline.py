@@ -35,6 +35,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.harness.personal_context.agent_support import run_personal_context_agent
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
+from openjiuwen.harness.personal_context.context_usage import context_update_lock, publish_with_usage
 from openjiuwen.harness.personal_context.file_tools import _ReclusterApply, _ReclusterPlan
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.path_safety import (
@@ -7810,13 +7811,15 @@ class ContextPipelineService:
         elif tag == "finish":
             if payload is not None:
                 raise _pipeline_error("finish event payload must be None")
-            await self._finish_run_event(safe_service, safe_run)
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run)
         elif tag == "retain":
             if payload is not None:
                 raise _pipeline_error("retain event payload must be None")
             if (safe_service, safe_run) not in self._invalidated_run_keys:
                 self._cancelled_run_keys.discard((safe_service, safe_run))
-            await self._finish_run_event(safe_service, safe_run, retaining=True)
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run, retaining=True)
         elif tag == "abort":
             if payload is not None:
                 raise _pipeline_error("abort event payload must be None")
@@ -9655,7 +9658,7 @@ class ContextPipelineService:
 
             def commit() -> None:
                 nonlocal committed
-                _commit_context_tree(candidate_context, self._context_root)
+                publish_with_usage(self._home, candidate_context, relocations)
                 committed = True
 
             try:

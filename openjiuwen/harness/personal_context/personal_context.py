@@ -466,10 +466,17 @@ class PersonalContext:
         self._embedding_config = candidate
 
     async def set_configuration(self, config: PersonalContextConfig) -> None:
-        """Set or replace the complete configuration while PersonalContext is stopped."""
+        """Replace stopped configuration, or hot-update only the knowledge byte limit."""
         if not isinstance(config, PersonalContext.Config):
             raise _error(StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID, "config must be PersonalContext.Config")
         async with self._state_lock:
+            if self._config is not None and self._state in {"CONFIGURED", "RUNNING", "STOPPED"}:
+                capacity_update = self._config.model_copy(update={"max_context_size_mb": config.max_context_size_mb})
+                if capacity_update == config and self._config.max_context_size_mb != config.max_context_size_mb:
+                    self._config = config
+                    if self._pipeline_service is not None:
+                        self._pipeline_service.replace_configuration(config)
+                    return
             if self._state in {"STARTING", "RUNNING", "STOPPING", "FAILED"}:
                 raise _state_error("PersonalContext must be stopped before configuration changes")
             if self._config == config:
@@ -907,7 +914,7 @@ class PersonalContext:
         def report_pipeline_result(service_id: str, run_id: str, result: dict[str, object]) -> None:
             identity = self._fetch_run_identity.get(service_id)
             if identity is not None and identity.get("run_id") == run_id:
-                self._fetch_run_results[service_id] = dict(result)
+                self._fetch_run_results.setdefault(service_id, {}).update(result)
 
         try:
             # A stopped runtime never reuses its old queue.  The previous
@@ -1937,7 +1944,7 @@ class PersonalContext:
             if (
                 not isinstance(data, dict)
                 or set(data) != {"schema_version", "runs"}
-                or data["schema_version"] not in {1, 2, 3}
+                or data["schema_version"] not in {1, 2, 3, 4}
             ):
                 raise ValueError("invalid history schema")
             schema_version = data["schema_version"]
@@ -1954,7 +1961,7 @@ class PersonalContext:
                     record.setdefault("item_errors", [])
                     record.setdefault("omitted_item_errors", 0)
                 result_fields = {"created_node_count", "updated_node_count", "no_new_content"}
-                if not isinstance(record, dict) or set(record) not in (
+                if not isinstance(record, dict) or set(record) - {"capacity_maintenance"} not in (
                     required_fields,
                     required_fields | {"actual_profile"},
                     required_fields | result_fields,
@@ -1969,7 +1976,8 @@ class PersonalContext:
                 }:
                     raise ValueError("invalid history profile")
                 PersonalContextStatus.validate_fetch_run_progress(
-                    {service_id: {key: record[key] for key in progress_fields | (result_fields & record.keys())}}
+                    {service_id: {key: record[key] for key in progress_fields |
+                                  ((result_fields | {"capacity_maintenance"}) & record.keys())}}
                 )
                 if record["run_state"] not in {"succeeded", "partial_succeeded", "failed", "cancelled"}:
                     raise ValueError("history must be terminal")
@@ -1994,7 +2002,7 @@ class PersonalContext:
         temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps({"schema_version": 3, "runs": records}, ensure_ascii=False).encode("utf-8")
+            encoded = json.dumps({"schema_version": 4, "runs": records}, ensure_ascii=False).encode("utf-8")
             if len(encoded) > 128 * 1024:
                 raise ValueError("history exceeds size limit")
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
@@ -2210,6 +2218,23 @@ class PersonalContext:
             await provider.commit_run(run_id=run_id)
             ensure_run_active()
             self._write_cursor(service_id, committed_cursor)
+            # Maintenance follows the durable source checkpoint, including no-change
+            # and retained partial rounds. A maintenance failure never rolls it back.
+            try:
+                from openjiuwen.harness.personal_context.context_capacity import maintain_capacity
+                from openjiuwen.harness.personal_context.context_pipeline import _cancel_safe_to_thread
+                from openjiuwen.harness.personal_context.context_usage import context_update_lock
+
+                async with context_update_lock(self._home):
+                    maintenance = await _cancel_safe_to_thread(
+                        maintain_capacity, self._home, limit_bytes=self._config.max_context_size_mb * 1_000_000,
+                    )
+                self._fetch_run_results.setdefault(service_id, {}).update(capacity_maintenance=maintenance)
+            except Exception as exc:
+                logger.warning("PersonalContext post-commit maintenance failed (%s)", type(exc).__name__)
+                self._fetch_run_results.setdefault(service_id, {}).update(
+                    capacity_maintenance={"status": "failed", "reason": type(exc).__name__},
+                )
             return committed_cursor
 
         async def wait_for_commit_point(committed_cursor: dict[str, object]) -> tuple[bool, dict[str, object]]:
