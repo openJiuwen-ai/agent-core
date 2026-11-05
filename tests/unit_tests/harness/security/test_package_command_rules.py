@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from openjiuwen.harness.security.models import PermissionLevel
@@ -267,6 +271,27 @@ def test_package_powershell_root_delete_parameter_prefixes(recurse: str, force: 
     assert "shell_ps_recursive_or_forced_delete" in matched
 
 
+def test_package_registry_rule_does_not_stall_multiline_file_delete() -> None:
+    # An external deadline still fires if the synchronous regex stalls.
+    script = r"""
+import asyncio
+from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+from openjiuwen.harness.security.models import PermissionLevel
+
+engine = PermissionEngine({"enabled": True})
+command = "Remove-Item .\\cleanup.log -Force" + "\nWrite-Output ('remaining=' + $remaining)" * 8
+result = asyncio.run(engine.check_permission("powershell", {"command": command}))
+assert result.permission == PermissionLevel.ASK, result
+assert result.matched_rule == "default", result
+"""
+    subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        cwd=Path(__file__).resolve().parents[4],
+        check=True,
+        timeout=10,
+    )
+
+
 def test_package_windows_system_and_disk_cmdlets_are_deny() -> None:
     cfg = _package_cfg()
     cases = (
@@ -276,6 +301,7 @@ def test_package_windows_system_and_disk_cmdlets_are_deny() -> None:
         ("Clear-Disk -Number 1 -RemoveData", "shell_disk_partition_or_raw_device_write"),
         ("reg delete HKLM\\Software\\Foo /f", "shell_registry_delete"),
         ("Remove-Item HKCU:\\Software\\Foo -Recurse", "shell_registry_delete"),
+        ("Remove-Item -LiteralPath\n Registry::HKEY_CURRENT_USER\\Software\\Foo", "shell_registry_delete"),
     )
     for command, rule_id in cases:
         level, matched = evaluate_tiered_policy(
