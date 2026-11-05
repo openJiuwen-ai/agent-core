@@ -209,3 +209,67 @@ def test_signature_preserves_filesystem_errors(tmp_path, monkeypatch, operation)
     with pytest.raises(OSError) as caught:
         rail._build_skills_snapshot_signature()
     assert caught.value is failure
+
+
+def _make_skills(root: Path, names) -> None:
+    for name in names:
+        skill = root / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n# {name}\n", encoding="utf-8"
+        )
+
+
+def _record_is_dir(monkeypatch) -> list:
+    checked = []
+    original = Path.is_dir
+
+    def is_dir(path):
+        checked.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    return checked
+
+
+@pytest.mark.parametrize("filters", [{"enabled_skills": ["kept"]}, {"disabled_skills": ["retired", "other"]}])
+def test_signature_skips_disallowed_names_without_filesystem_calls(tmp_path, monkeypatch, filters):
+    _make_skills(tmp_path, ["kept", "retired", "other"])
+    rail = SkillUseRail(skills_dir=str(tmp_path), **filters)
+    checked = _record_is_dir(monkeypatch)
+    signature = rail._build_skills_snapshot_signature()
+    assert [Path(key).name for key, _ in signature] == ["kept"]
+    assert "retired" not in checked and "other" not in checked
+
+
+def test_signature_ignores_disallowed_skill_edits(tmp_path):
+    _make_skills(tmp_path, ["kept", "retired"])
+    rail = SkillUseRail(skills_dir=str(tmp_path), disabled_skills=["retired"])
+    before = rail._build_skills_snapshot_signature()
+    os.utime(tmp_path / "retired" / "SKILL.md", (1700000000, 1700000000))
+    assert rail._build_skills_snapshot_signature() == before
+    os.utime(tmp_path / "kept" / "SKILL.md", (1700000000, 1700000000))
+    assert rail._build_skills_snapshot_signature() != before
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_disallowed_names_without_filesystem_calls(tmp_path, monkeypatch):
+    _make_skills(tmp_path, ["kept", "retired"])
+    rail = SkillUseRail(skills_dir=str(tmp_path), enabled_skills=["kept"])
+    checked = _record_is_dir(monkeypatch)
+    await rail._prepare_skills()
+    assert [skill.name for skill in rail.skills] == ["kept"]
+    assert "retired" not in checked
+
+
+@pytest.mark.asyncio
+async def test_disabling_skill_at_runtime_refreshes_before_model_call(tmp_path):
+    _make_skills(tmp_path, ["kept", "retired"])
+    rail = SkillUseRail(skills_dir=str(tmp_path), skill_mode="all", include_tools=False)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=None)
+    await rail.before_invoke(ctx)
+    assert sorted(skill.name for skill in rail.skills) == ["kept", "retired"]
+    rail.disabled_skills = {"retired"}
+    await rail.before_model_call(ctx)
+    assert [skill.name for skill in rail.skills] == ["kept"]
