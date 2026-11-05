@@ -113,6 +113,13 @@ class SandboxGatewayConfig(BaseModel):
     timeout_seconds: int = Field(default=30, description="Unified timeout in seconds (request + readiness)")
     auth_headers: Dict[str, str] = Field(default_factory=dict, description="Authentication HTTP headers")
     auth_query_params: Dict[str, str] = Field(default_factory=dict, description="Authentication query parameters")
+    supports_conditional_write: bool = Field(
+        default=False,
+        description=(
+            "Provider capability declaration. Set True only when the selected sandbox filesystem "
+            "atomically enforces expected_content_sha256 and create_if_absent for writes."
+        ),
+    )
 
 
 class GatewayStoreConfig(BaseModel):

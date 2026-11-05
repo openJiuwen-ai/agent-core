@@ -370,6 +370,28 @@ class OrgTaskManager:
             await session.commit()
             return counts
 
+    async def release_membership(self) -> None:
+        """Drop leader registration and the owner identity.
+
+        Tasks, reviews, summary rows, and stored outputs stay in place. This is
+        the membership half of leaving an organization, not ``dissolve_organization``.
+        """
+
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            await session.execute(
+                delete(OrgLeaderRecord).where(col(OrgLeaderRecord.organization_id) == self.organization_id)
+            )
+            row = await session.get(OrgInfoRecord, self.organization_id)
+            if row is not None:
+                metadata = _json_loads(row.metadata_json, {})
+                metadata.pop("owner_team_id", None)
+                metadata.pop("owner_leader_id", None)
+                row.metadata_json = _json_dumps(metadata)
+                row.updated_at = now
+            await session.commit()
+
     async def register_leader(
         self,
         *,

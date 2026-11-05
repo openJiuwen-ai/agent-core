@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import hashlib
 import os
 import random
 import shutil
@@ -1316,6 +1317,88 @@ async def test_concurrent_write_file(sys_op, work_dir):
     assert result.code == StatusCode.SUCCESS.code
     assert len(result.data.content.strip().split("\n")) == write_count
     assert result.data.content == per_write_content * write_count
+
+
+@pytest.mark.asyncio
+async def test_conditional_write_rejects_stale_or_missing_content_without_modifying_file(sys_op, work_dir):
+    file_path = "conditional_update.txt"
+    original = b"observed bytes"
+    await sys_op.fs().write_file(file_path, original, mode="bytes", prepend_newline=False)
+    expected_hash = hashlib.sha256(original).hexdigest()
+
+    result = await sys_op.fs().write_file(
+        file_path,
+        b"new bytes",
+        mode="bytes",
+        prepend_newline=False,
+        options={"expected_content_sha256": "0" * 64},
+    )
+
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert result.code == conflict_code.code
+    assert (Path(work_dir) / file_path).read_bytes() == original
+
+    (Path(work_dir) / file_path).unlink()
+    deleted_target = await sys_op.fs().write_file(
+        file_path,
+        b"must not recreate",
+        mode="bytes",
+        prepend_newline=False,
+        options={"expected_content_sha256": expected_hash},
+    )
+    assert deleted_target.code == conflict_code.code
+    assert not (Path(work_dir) / file_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_create_if_absent_distinguishes_empty_file_from_missing_file(sys_op, work_dir):
+    file_path = "create_if_absent.txt"
+    create_options = {"create_if_absent": True}
+
+    created = await sys_op.fs().write_file(
+        file_path, b"winner", mode="bytes", prepend_newline=False, options=create_options
+    )
+    assert created.code == StatusCode.SUCCESS.code
+    assert (Path(work_dir) / file_path).read_bytes() == b"winner"
+
+    existing = await sys_op.fs().write_file(
+        file_path, b"loser", mode="bytes", prepend_newline=False, options=create_options
+    )
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert existing.code == conflict_code.code
+    assert (Path(work_dir) / file_path).read_bytes() == b"winner"
+
+    empty_path = "existing_empty_file.txt"
+    (Path(work_dir) / empty_path).write_bytes(b"")
+    empty_target = await sys_op.fs().write_file(
+        empty_path, b"not empty now", mode="bytes", prepend_newline=False, options=create_options
+    )
+    assert empty_target.code == conflict_code.code
+    assert (Path(work_dir) / empty_path).read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_competing_create_if_absent_writes_do_not_overwrite_winner(sys_op, work_dir):
+    file_path = "competing_create.txt"
+    options = {"create_if_absent": True}
+
+    first, second = await asyncio.gather(
+        sys_op.fs().write_file(file_path, b"first", mode="bytes", prepend_newline=False, options=options),
+        sys_op.fs().write_file(file_path, b"second", mode="bytes", prepend_newline=False, options=options),
+    )
+
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert sorted((first.code, second.code)) == sorted((StatusCode.SUCCESS.code, conflict_code.code))
+    winner = b"first" if first.code == StatusCode.SUCCESS.code else b"second"
+    assert (Path(work_dir) / file_path).read_bytes() == winner
+
+
+@pytest.mark.asyncio
+async def test_local_filesystem_advertises_conditional_write_support(sys_op):
+    assert sys_op.fs().supports_conditional_write is True
 
 
 @pytest.mark.asyncio

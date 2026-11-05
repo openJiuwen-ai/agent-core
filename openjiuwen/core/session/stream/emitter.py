@@ -56,6 +56,14 @@ class AsyncStreamQueue:
                     timeout=attempt_timeout,
                     attempt=attempt + 1,
                 )
+                # ``put`` on a non-full queue never suspends, so without an
+                # explicit yield the producer would run to completion and the
+                # consumer would only drain everything afterwards. That inverts
+                # the visible event order (model.completed before reply.delta)
+                # for stream pipelines that record events on the consumer side.
+                # ``wait_for`` used to provide this yield implicitly via its
+                # inner task; ``asyncio.timeout`` does not.
+                await asyncio.sleep(0)
                 return
             except asyncio.TimeoutError:
                 session_logger.error(

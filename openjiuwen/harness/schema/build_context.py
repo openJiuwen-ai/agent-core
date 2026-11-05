@@ -68,6 +68,8 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
+        tool_owner_id: Optional invocation owner for stateful tools; ``None``
+            preserves Card ownership.
         moa: Invocation policy for this root agent only; not inherited by
             capability providers or serialized as part of a spec.
     """
@@ -80,6 +82,8 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+    tool_owner_id: str | None = None
+    """Optional invocation owner for stateful tools; None preserves Card ownership."""
     moa: MoAConfig | None = None
 
     def derive(self, **overrides: Any) -> "BuildContext":

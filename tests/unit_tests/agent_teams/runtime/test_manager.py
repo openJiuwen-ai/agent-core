@@ -434,6 +434,10 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         calls.append("reset")
         return 1
 
+    async def create_tables() -> bool:
+        calls.append("tables")
+        return True
+
     async def add_to_pool(entry: ActiveTeam) -> None:
         assert entry.agent is agent
         calls.append("activate")
@@ -441,6 +445,7 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
     backend = SimpleNamespace(
         db=SimpleNamespace(
             initialize=initialize,
+            create_cur_session_tables=create_tables,
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
         )
     )
@@ -459,7 +464,8 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         inputs=None,
     )
 
-    assert calls == ["initialize", "reset", "activate"]
+    # Session tables are ensured (initialize is idempotent) before pooling.
+    assert calls == ["initialize", "reset", "initialize", "tables", "activate"]
 
 
 class TestRunOrganizationTurn:
@@ -509,6 +515,7 @@ class TestRunOrganizationTurn:
         entry.interact_gate.close_and_drain.assert_not_called()
         session.post_run.assert_not_called()
         agent.invoke.assert_not_called()
+        assert manager.activate.await_args.kwargs["preserve_conversation_mode"] is True
 
     @pytest.mark.asyncio
     async def test_idle_marker_ends_turn_and_runs_finalize(self):
@@ -545,14 +552,20 @@ class TestRunOrganizationTurn:
             )
         )
         manager.finalize = AsyncMock(side_effect=finalize)
+        activated = []
+
+        async def on_activated():
+            activated.append(chunks_consumed.copy())
 
         result = await manager.run_organization_turn(
             team_name="team-a",
             session_id="session-1",
             inputs={"query": "claim task"},
+            on_activated=on_activated,
         )
 
         assert result is True
+        assert activated == [[]]
         agent.stream.assert_called_once()
         agent.invoke.assert_not_awaited()
         assert chunks_consumed == ["content", "idle"]

@@ -275,6 +275,11 @@ _ORG_SUMMARY_TEAM_PROMPT = {
 }
 
 _LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
+# Only the wait until the review sentence reaches the leader. A delivered
+# review runs until the model finishes. One extra attempt, then stop.
+_REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS = 60.0
+_REVIEW_WAKE_ATTEMPT_LIMIT = 2
+_REVIEW_WAKE_RETRY_DELAY_SECONDS = 1.0
 _PARENT_RESUME_TERMINAL_STATUSES = frozenset(
     {
         OrgTaskStatus.COMPLETED,
@@ -286,6 +291,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
     from openjiuwen.agent_teams.tools.database import TeamDatabase
+
+
+class OrganizationWakeRejected(Exception):
+    """An organization wake cannot be delivered in this session mode."""
 
 
 class OrganizationRuntimeManager:
@@ -852,6 +861,106 @@ class OrganizationRuntimeManager:
                 deleted,
             )
             return result
+
+    async def release_membership(
+        self,
+        *,
+        organization_id: str,
+        owner_team_id: str,
+        session_id: str,
+    ) -> None:
+        """Unregister members without deleting tasks, outputs, or team sessions.
+
+        ``dissolve_organization`` erases organization rows and stops expert
+        teams. This path only detaches the live membership so a finished swarm
+        round is no longer an active organization.
+        """
+
+        async with self._membership_lock:
+            try:
+                _, owner_backend = await self._resolve_leader(owner_team_id, session_id)
+            except ValueError:
+                logger.info(
+                    "organization membership release skipped; owner runtime is gone org=%s team=%s",
+                    organization_id,
+                    owner_team_id,
+                )
+                return
+            manager = get_process_org_manager(
+                organization_id=organization_id,
+                db=owner_backend.db,
+                messager=owner_backend.messager,
+                session_id=session_id,
+            )
+            organization = await manager.get_organization()
+            summary_team = await manager.task_pool.get_summary_team()
+            service = self._unclaimed_services.pop((session_id, organization_id), None)
+            if service is not None:
+                await service.stop()
+
+            member_team_ids = {leader.team_id for leader in organization.leaders} if organization is not None else set()
+            member_team_ids.add(owner_team_id)
+            if summary_team is not None and summary_team.summary_team_id:
+                member_team_ids.add(summary_team.summary_team_id)
+            for team_id in member_team_ids:
+                key = (session_id, team_id)
+                worker = self._leader_turn_workers.pop(key, None)
+                if worker is not None and not worker.done() and worker is not asyncio.current_task():
+                    worker.cancel()
+                self._leader_turn_queues.pop(key, None)
+                self._scheduled_leader_messages = {
+                    message_key for message_key in self._scheduled_leader_messages if message_key[:2] != key
+                }
+                self._scheduled_parent_reviews = {
+                    review_key for review_key in self._scheduled_parent_reviews if review_key[:2] != key
+                }
+                self._scheduled_summary_executions = {
+                    summary_key for summary_key in self._scheduled_summary_executions if summary_key[:2] != key
+                }
+                await self._release_org_subscriber(organization_id, session_id, team_id)
+                entry = await self._team_runtime_manager.pool.get(team_id)
+                if entry is None or entry.current_session_id != session_id:
+                    continue
+                backend = getattr(entry.agent, "team_backend", None)
+                if backend is None:
+                    continue
+                backend.org_task_manager = None
+                backend.org_message_service = None
+                self._unbind_organization_workspace(entry.agent, backend)
+                spawn_manager = getattr(entry.agent, "spawn_manager", None)
+                for handle in getattr(spawn_manager, "spawned_handles", {}).values():
+                    teammate = getattr(handle, "agent_ref", None)
+                    teammate_backend = getattr(teammate, "team_backend", None)
+                    if teammate is not None and teammate_backend is not None:
+                        self._unbind_organization_workspace(teammate, teammate_backend)
+                self._set_owner_lifecycle_prompt(entry.agent, is_owner=False)
+                harness = getattr(entry.agent, "harness", None)
+                remove_tool = getattr(harness, "remove_tool", None)
+                if callable(remove_tool):
+                    from openjiuwen.agent_teams.organization.tools import ORG_LEADER_TOOL_NAMES
+
+                    for tool_name in ORG_LEADER_TOOL_NAMES:
+                        remove_tool(tool_name)
+                self._team_organizations.pop(key, None)
+
+            await manager.task_pool.release_membership()
+            self._summary_team_locks.pop((session_id, organization_id), None)
+            remove_process_org_manager(
+                organization_id=organization_id,
+                db=owner_backend.db,
+                session_id=session_id,
+            )
+            from openjiuwen.agent_teams.organization.workspace import (
+                remove_organization_workspace_manager,
+            )
+
+            remove_organization_workspace_manager(organization_id, session_id)
+            logger.info(
+                "organization membership released: org=%s owner=%s teams=%s",
+                organization_id,
+                owner_team_id,
+                sorted(member_team_ids),
+            )
 
     async def get_organization(self, *, organization_id: str, team_id: str, session_id: str) -> OrganizationSpec | None:
         """Read organization state through an active member's shared database."""
@@ -2374,9 +2483,12 @@ class OrganizationRuntimeManager:
 
         A ``PAUSED`` leader gets a dedicated organization turn. A ``RUNNING``
         leader that is already idle/settled (open stream, no in-flight round)
-        receives the prompt via ``interact`` so the existing stream handles it
-        — no finalize/re-activate reentrancy. Busy ``RUNNING`` leaders keep
-        polling until they pause or settle.
+        receives the prompt on that stream. Team sessions use ``interact``.
+        Group-chat sessions inject the prompt through the current leader
+        runtime so the session mode stays ``group_chat``. Busy ``RUNNING``
+        leaders keep polling until they pause or settle. A permanent mode
+        rejection ends that wake instead of parking it for a retry that
+        cannot succeed.
         """
 
         key = (session_id, team_id)
@@ -2404,8 +2516,10 @@ class OrganizationRuntimeManager:
                 review_task_id = None
                 ready_parent_task_id = None
                 queued_at = None
+                review_attempt = 1
                 turn_failed = False
                 summary_requeued = False
+                review_requeue = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
@@ -2415,6 +2529,7 @@ class OrganizationRuntimeManager:
                     review_task_id = inputs.pop("_org_review_task_id", None)
                     ready_parent_task_id = inputs.pop("_org_ready_parent_task_id", None)
                     queued_at = inputs.pop("_org_queued_at", None)
+                    review_attempt = self._review_attempt(inputs.pop("_org_review_attempt", None))
                 try:
                     task_manager = getattr(getattr(entry.agent, "team_backend", None), "org_task_manager", None)
                     if open_claim_task_id is not None and task_manager is not None:
@@ -2492,7 +2607,34 @@ class OrganizationRuntimeManager:
                             team_id,
                             started_at - queued_at if queued_at is not None else 0.0,
                         )
-                    if not await self._run_leader_turn(team_id, session_id, inputs):
+                    if review_key is not None and review_task_id is not None and entry.state is RuntimeState.PAUSED:
+                        outcome = await self._run_paused_review_turn(
+                            team_id,
+                            session_id,
+                            inputs,
+                            entry=entry,
+                            task_manager=task_manager,
+                            review_task_id=str(review_task_id),
+                            attempt=review_attempt,
+                        )
+                        if outcome == "requeue" and isinstance(original_inputs, dict):
+                            review_requeue = True
+                            nxt = dict(original_inputs)
+                            nxt["_org_review_attempt"] = review_attempt + 1
+                            # A lone retry waits. Turns queued during that wait go first.
+                            queue.append(nxt)
+                            if len(queue) == 1:
+                                await self._pause_lone_review_retry(key)
+                        elif outcome == "not_run":
+                            turn_failed = True
+                            queue.appendleft(original_inputs)
+                            logger.warning(
+                                "Organization leader turn was not run for team {} session {}",
+                                team_id,
+                                session_id,
+                            )
+                            return
+                    elif not await self._run_leader_turn(team_id, session_id, inputs):
                         turn_failed = True
                         queue.appendleft(original_inputs)
                         logger.warning(
@@ -2511,6 +2653,13 @@ class OrganizationRuntimeManager:
                         summary_requeued = await self._check_summary_closeout(
                             team_id, session_id, summary_key, queue, original_inputs
                         )
+                except OrganizationWakeRejected as exc:
+                    logger.warning(
+                        "Organization leader wake rejected for team {} session {}: {}",
+                        team_id,
+                        session_id,
+                        exc,
+                    )
                 except Exception:
                     turn_failed = True
                     queue.appendleft(original_inputs)
@@ -2521,7 +2670,7 @@ class OrganizationRuntimeManager:
                 finally:
                     if not turn_failed and message_key is not None:
                         self._scheduled_leader_messages.discard(message_key)
-                    if not turn_failed and review_key is not None:
+                    if not turn_failed and not review_requeue and review_key is not None:
                         self._scheduled_parent_reviews.discard(review_key)
                     if not turn_failed and not summary_requeued and summary_key is not None:
                         self._scheduled_summary_executions.discard(summary_key)
@@ -2733,24 +2882,206 @@ class OrganizationRuntimeManager:
         session_id: str,
         inputs: object,
     ) -> bool:
-        """Hand an org prompt to a RUNNING idle leader via the interact path."""
+        """Hand an org prompt to a RUNNING idle leader on its open stream."""
         query = inputs.get("query") if isinstance(inputs, dict) else None
         if not str(query or "").strip():
             return False
-        result = await self._team_runtime_manager.interact(
-            str(query),
-            team_name=team_id,
-            session_id=session_id,
-        )
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        backend = getattr(getattr(entry, "agent", None), "team_backend", None)
+        mode = getattr(backend, "conversation_mode", "team")
+        if mode == "group_chat":
+            result = await self._team_runtime_manager.deliver_organization_prompt(
+                str(query),
+                team_name=team_id,
+                session_id=session_id,
+            )
+        else:
+            result = await self._team_runtime_manager.interact(
+                str(query),
+                team_name=team_id,
+                session_id=session_id,
+            )
         if not result:
+            reason = getattr(result, "reason", None)
             team_logger.warning(
                 "Organization interact wake failed for team {} session {}: {}",
                 team_id,
                 session_id,
-                getattr(result, "reason", None),
+                reason,
             )
+            if reason == "conversation_mode_mismatch":
+                raise OrganizationWakeRejected(reason)
             return False
         return True
+
+    @staticmethod
+    def _review_attempt(raw: object) -> int:
+        try:
+            attempt = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 1
+        return attempt if attempt >= 1 else 1
+
+    @staticmethod
+    def _review_wake_again(
+        *,
+        attempt: int,
+        team_id: str,
+        session_id: str,
+        review_task_id: str,
+        reason: str,
+    ) -> str:
+        """One extra wake. After that the card stays waiting for review."""
+        if attempt < _REVIEW_WAKE_ATTEMPT_LIMIT:
+            logger.warning(
+                "Review wake will retry team={} session={} task={} attempt={} reason={}",
+                team_id,
+                session_id,
+                review_task_id,
+                attempt,
+                reason,
+            )
+            return "requeue"
+        logger.warning(
+            "Review wake stopped without a verdict team={} session={} task={} attempts={}",
+            team_id,
+            session_id,
+            review_task_id,
+            attempt,
+        )
+        return "done"
+
+    async def _pause_lone_review_retry(self, key: tuple) -> None:
+        """Wait out a review retry unless another leader turn arrives.
+
+        The retry sits at the front while this wait runs. A turn queued
+        during the wait is rotated ahead of it so the drain is not stuck.
+        """
+        deadline = time.monotonic() + _REVIEW_WAKE_RETRY_DELAY_SECONDS
+        while time.monotonic() < deadline:
+            pending = self._leader_turn_queues.get(key)
+            if pending is not None and len(pending) > 1:
+                pending.rotate(-1)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.01, remaining))
+
+    async def _stop_review_turn(self, task: asyncio.Task) -> None:
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception:
+            logger.warning("Review startup did not stop cleanly", exc_info=True)
+
+    async def _run_paused_review_turn(
+        self,
+        team_id: str,
+        session_id: str,
+        inputs: object,
+        *,
+        entry: Any,
+        task_manager: Any,
+        review_task_id: str,
+        attempt: int,
+    ) -> str:
+        """Run one paused review. Time out only until the sentence is delivered.
+
+        Returns ``done`` when the wake should be dropped, ``requeue`` when the
+        same review should run once more, and ``not_run`` when the turn itself
+        did not start.
+        """
+
+        agent = entry.agent
+        arm = getattr(agent, "arm_user_input_delivery", None)
+        delivered = arm() if callable(arm) else None
+        turn_task = asyncio.create_task(self._run_leader_turn(team_id, session_id, inputs))
+        try:
+            ran, undelivered = await self._await_review_delivery(turn_task, delivered)
+            return await self._review_turn_verdict(
+                ran=ran,
+                undelivered=undelivered,
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                task_manager=task_manager,
+            )
+        finally:
+            try:
+                if not turn_task.done():
+                    await self._stop_review_turn(turn_task)
+            finally:
+                clear = getattr(agent, "clear_user_input_delivery", None)
+                if callable(clear):
+                    clear()
+
+    async def _await_review_delivery(self, turn_task: asyncio.Task, delivered: Any) -> tuple[bool, bool]:
+        """Wait until the review sentence arrives, or the turn itself finishes.
+
+        Returns ``(ran, undelivered)``. Stopping the delivery wait lives in
+        this helper so a cancellation there still reaches the caller's cleanup.
+        """
+        if delivered is None:
+            return bool(await turn_task), False
+        delivery_wait = asyncio.create_task(delivered.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {turn_task, delivery_wait},
+                timeout=_REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                return False, True
+            if turn_task in done:
+                return bool(turn_task.result()), False
+            return bool(await turn_task), False
+        finally:
+            if not delivery_wait.done():
+                await self._stop_review_turn(delivery_wait)
+
+    async def _review_turn_verdict(
+        self,
+        *,
+        ran: bool,
+        undelivered: bool,
+        attempt: int,
+        team_id: str,
+        session_id: str,
+        review_task_id: str,
+        task_manager: Any,
+    ) -> str:
+        """Decide whether a paused review wake is finished, skipped, or retried."""
+        if undelivered:
+            return self._review_wake_again(
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                reason="review prompt was not delivered",
+            )
+        if not ran:
+            return "not_run"
+        if task_manager is None:
+            return "done"
+        review = await task_manager.get_task_review(review_task_id)
+        status = getattr(review, "review_status", None) if review is not None else None
+        if status in (None, "", OrgTaskReviewStatus.PENDING):
+            return self._review_wake_again(
+                attempt=attempt,
+                team_id=team_id,
+                session_id=session_id,
+                review_task_id=review_task_id,
+                reason="review still pending",
+            )
+        return "done"
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
         closeout = isinstance(inputs, dict) and inputs.get("_org_summary_closeout") is True

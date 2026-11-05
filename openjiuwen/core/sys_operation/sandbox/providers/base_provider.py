@@ -27,6 +27,9 @@ from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoin
 class BaseFSProvider(BaseFsProtocal, ABC):
     """Abstract interface for File System capabilities of a sandbox."""
 
+    # A provider must override this only after implementing both conditional write modes.
+    supports_conditional_write: bool = False
+
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         self.endpoint = endpoint
         self.config = config
