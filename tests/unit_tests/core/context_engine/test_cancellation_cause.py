@@ -40,6 +40,24 @@ def test_last_mark_wins():
     assert resolve_cancellation_cause("session-1") is CancellationCause.CANCEL
 
 
+def test_inheritance_prefers_most_specific_ancestor():
+    """Longest matching key wins, regardless of insertion order.
+
+    A team-level PAUSE marked before a member-level CANCEL must not shadow
+    it when a deeper sub-session resolves (and vice versa).
+    """
+    mark_cancellation_cause("session-1", CancellationCause.PAUSE)
+    mark_cancellation_cause("session-1:member-a", CancellationCause.CANCEL)
+    assert resolve_cancellation_cause("session-1:member-a_sub_x") is CancellationCause.CANCEL
+
+    # Reverse combination: parent CANCEL must not shadow a child PAUSE.
+    mark_cancellation_cause("session-2", CancellationCause.CANCEL)
+    mark_cancellation_cause("session-2:member-b", CancellationCause.PAUSE)
+    assert resolve_cancellation_cause("session-2:member-b_sub_y") is CancellationCause.PAUSE
+    # Sessions under the bare parent keep inheriting the parent's mark.
+    assert resolve_cancellation_cause("session-2:member-c") is CancellationCause.CANCEL
+
+
 def test_clear_drops_the_mark():
     mark_cancellation_cause("session-1", CancellationCause.PAUSE)
     clear_cancellation_cause("session-1")

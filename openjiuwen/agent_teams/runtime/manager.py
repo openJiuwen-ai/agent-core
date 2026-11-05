@@ -527,7 +527,9 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
-        mark_cancellation_cause(session_id, CancellationCause.PAUSE)
+        if entry.state is not RuntimeState.PAUSED:
+            # Idempotent no-op pause must not refresh the mark's TTL window.
+            mark_cancellation_cause(session_id, CancellationCause.PAUSE)
         await entry.agent.pause_coordination()
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)

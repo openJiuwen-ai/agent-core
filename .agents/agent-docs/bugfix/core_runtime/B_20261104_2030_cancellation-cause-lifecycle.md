@@ -67,7 +67,16 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    后续真实内部取消被误报为 `paused` / `user_pause`；
 9. `NativeHarness.abort()` 从 PAUSED 丢弃停放 round 后不清除 PAUSE 标记：
    丢弃不产生任何 CancelledError，标记失去用途成为纯残留，同 session 新 round
-   在 TTL 窗口内的内部失败被误报为用户暂停；相关测试曾以断言固化该残留行为。
+   在 TTL 窗口内的内部失败被误报为用户暂停；相关测试曾以断言固化该残留行为；
+10. `NativeHarness` 经 `send(PAUSED)` 暖恢复/中断恢复绕过 `resume()`：停放
+    round 被原地续跑但 PAUSE 标记不清理，恢复后 round 内的内部失败仍会解析为
+    `user_pause`；
+11. `TeamRuntimeManager.pause()` 在条目已 PAUSED 的幂等 no-op 分支仍刷新 PAUSE
+    标记，延长陈旧标记的 TTL 窗口；
+12. `resolve_cancellation_cause` 的继承扫描按 dict 插入顺序返回首个前缀匹配：
+    父级标记（如团队 `s1 → PAUSE`）会遮蔽后插入的更具体子级标记
+    （`s1:member-a → CANCEL`），深层子会话（`s1:member-a_sub_x`）取消原因
+    错标，且两个标记均为用户真实操作、日志难以定位遮蔽来源。
 
 ## 关联设计与当前契约
 
@@ -125,6 +134,14 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
    分支：abort 是 PAUSED 的另一出口（resume 之外），丢弃停放 round 时同步清除
    PAUSE 标记，与"标记者即清理者"对称原则闭环；对应测试断言从固化残留
    （`resolve is PAUSE`）改为防残留（`resolve is None`）。
+10. `_on_send` 的 PAUSED 分支（暖恢复与中断恢复两条路径）在启动 round 前调用
+    `clear_cancellation_cause(self.session_id)`：send 恢复与 resume、abort 一样
+    是 PAUSED 的出口，标记清理在 supervisor 侧完成、无竞态。
+11. `TeamRuntimeManager.pause()` 打标加 `entry.state is not RuntimeState.PAUSED`
+    守卫：幂等 no-op 暂停不再刷新标记 TTL；真实 RUNNING→PAUSED 转换照常打标。
+12. `resolve_cancellation_cause` 继承扫描改为最长匹配 key 优先：收集全部前缀
+    命中后取 key 最长者返回，成员级标记不再被团队级标记按插入顺序遮蔽；
+    精确命中路径与近失配（near-miss）行为不变。
 
 ## 回归证据与适用范围
 
@@ -151,8 +168,14 @@ c4e52b7c 引入按 session id 键控的 cancellation cause 注册表修复了上
   IDLE no-op abort 不打标、PAUSED abort 丢弃 round 后 CANCEL 与 PAUSE 标记
   均无残留，及 `test_idle_pause_does_not_mark_pause_cause`：IDLE no-op pause
   不打标）；
-- `tests/unit_tests/agent_teams/harness/test_pause.py`：9 passed，真实
-  pause / resume 路径（含打标）无回归；
+- `tests/unit_tests/agent_teams/harness/test_pause.py`：10 passed（含本轮新增
+  `test_send_during_paused_clears_pause_cause`：send 暖恢复后 PAUSE 标记清除）；
+- `tests/unit_tests/core/context_engine/test_cancellation_cause.py`：10 passed
+  （含本轮新增 `test_inheritance_prefers_most_specific_ancestor`：最长前缀
+  优先，正反两组父/子标记组合及裸父级继承）；
+- `tests/unit_tests/agent_teams/runtime/test_manager.py`：29 passed（含本轮新增
+  `TestIdempotentPauseDoesNotRefreshMark` 两用例：RUNNING→PAUSED 照常打标、
+  已 PAUSED 幂等 no-op 不再刷新标记）；
 - `tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py`：
   6 passed（含本轮新增 `test_abort_marks_target_session_not_bound_session`：
   异会话 `abort(session=...)` 标记落在目标会话、绑定会话无标记）；

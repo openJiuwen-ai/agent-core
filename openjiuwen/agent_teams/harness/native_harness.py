@@ -916,6 +916,10 @@ class NativeHarness(DeepAgent):
                 # cannot overtake same-context messages queued before them.
                 self._st.pending_queue.append(msg)
         elif phase is HarnessState.PAUSED:
+            # Warm/interrupt resume via send bypasses resume(); the spent
+            # PAUSE mark must not survive into the resumed round, or a later
+            # internal failure would resolve to user_pause.
+            clear_cancellation_cause(self.session_id)
             if isinstance(msg.content, InteractiveInput):
                 # An interrupt-resume payload drives its own single round; it
                 # cannot be steered into a continuation.

@@ -106,7 +106,9 @@ def resolve_cancellation_cause(session_id: object) -> Optional[CancellationCause
     """Return the unexpired cause for ``session_id``, if any.
 
     Sub-sessions inherit their parent's cause: ``<parent>:<agent>`` (team
-    protocol adapter) and ``<parent>_sub_<id>`` (subagent sessions).
+    protocol adapter) and ``<parent>_sub_<id>`` (subagent sessions). When
+    several ancestors carry marks, the most specific (longest matching key)
+    wins: a member-level mark is never shadowed by a team-level one.
 
     The mark is deliberately left in place: one user action can cancel
     several processors (including sub-session contexts) that all resolve the
@@ -122,12 +124,19 @@ def resolve_cancellation_cause(session_id: object) -> Optional[CancellationCause
         entry = _causes.get(sid)
         if entry is not None:
             return CancellationCause(entry[0])
+        best_key: str | None = None
+        best_value: str | None = None
         for key, (value, expires_at) in _causes.items():
             if expires_at <= now:
                 continue
-            if sid.startswith(f"{key}:") or sid.startswith(f"{key}_sub_"):
-                return CancellationCause(value)
-    return None
+            if not (sid.startswith(f"{key}:") or sid.startswith(f"{key}_sub_")):
+                continue
+            if best_key is None or len(key) > len(best_key):
+                best_key = key
+                best_value = value
+        if best_key is not None:
+            return CancellationCause(best_value)
+        return None
 
 
 def reset_cancellation_causes() -> None:

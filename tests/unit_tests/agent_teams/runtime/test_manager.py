@@ -813,3 +813,65 @@ class TestColdActivationClearsCancellationCause:
             assert resolve_cancellation_cause("session-1") is None
         finally:
             reset_cancellation_causes()
+
+
+class TestIdempotentPauseDoesNotRefreshMark:
+    """An already-PAUSED entry's pause is a no-op and must not re-mark.
+
+    Re-marking on the idempotent path would refresh the TTL window of a
+    stale PAUSE mark; only a real transition into PAUSED may mark.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_running_entry_pause_marks_pause_cause(self):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        try:
+            manager = TeamRuntimeManager()
+            agent = SimpleNamespace(pause_coordination=AsyncMock())
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.RUNNING,
+                )
+            )
+
+            assert await manager.pause(team_name="team-a", session_id="session-1")
+            agent.pause_coordination.assert_awaited_once()
+            assert resolve_cancellation_cause("session-1") is CancellationCause.PAUSE
+        finally:
+            reset_cancellation_causes()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_already_paused_entry_pause_does_not_remark(self):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        try:
+            manager = TeamRuntimeManager()
+            agent = SimpleNamespace(pause_coordination=AsyncMock())
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.PAUSED,
+                )
+            )
+
+            assert await manager.pause(team_name="team-a", session_id="session-1")
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()
