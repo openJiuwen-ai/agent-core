@@ -1,18 +1,19 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import json
+from abc import abstractmethod
+from typing import List, Dict, Any, Tuple, Optional
 import os
 import uuid
-from abc import abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+import json
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.context_engine import ContextWindow, ModelContext
+from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
+
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
 _OFFLOAD_MESSAGE_HANDLE: str = "\n[[OFFLOAD: handle={handle}, type={type}]]"
@@ -163,17 +164,6 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         meta-class).  Empty string if not registered.
         """
         return getattr(cls, _PROCESSOR_TYPE_ATTR, "")
-
-    def fork_compaction(self, instructions: str | None, failures: list):
-        """Use the native candidate fork for the installed forked processor rail."""
-        from openjiuwen.core.context_engine.processor.base import ContextProcessor as NativeProcessor
-        return NativeProcessor.fork_compaction(self, instructions, failures)
-
-    def configure_compaction(self, instructions: str | None, failures: list) -> None:
-        """Configure the isolated copy through the native processor contract."""
-        from openjiuwen.core.context_engine.processor.base import ContextProcessor as NativeProcessor
-
-        NativeProcessor.configure_compaction(self, instructions, failures)
 
     @property
     def config(self) -> BaseModel:

@@ -3,27 +3,16 @@
 
 """Team lifecycle tools: build_team and clean_team."""
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.extensions.events import build_team_policy_sections
-from openjiuwen.agent_teams.extensions.models import TeamPolicyBuildInput, TeamPolicyContext
-from openjiuwen.agent_teams.extensions.policy import (
-    render_policy_sections,
-    select_policy_disclosure_sections,
-)
 from openjiuwen.agent_teams.prompts import build_leader_policy_disclosure
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
-from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
-
-if TYPE_CHECKING:
-    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 # ========== Team Management ==========
 
@@ -70,7 +59,6 @@ class BuildTeamTool(TeamTool):
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
         loader: TemplateLoader = load_template,
-        extension_bus: "ExtensionEventBusProtocol | None" = None,
     ):
         verify_gate_enabled = dispatch_mode == "scheduled"
         super().__init__(
@@ -86,7 +74,6 @@ class BuildTeamTool(TeamTool):
         self.team = team
         self.db = team.db
         self.messager = team.messager
-        self._extension_bus = extension_bus
         self._language = language
         self._lifecycle = lifecycle
         self._teammate_mode = teammate_mode
@@ -186,36 +173,6 @@ class BuildTeamTool(TeamTool):
         # asked for, and that is precisely the value it has to plan against.
         if self._verify_gate_enabled:
             data[self._VERIFY_PARAM] = self.team.task_verification_enabled()
-        if self._extension_bus is not None:
-            # Host wiring: run the disclosure through the policy build chain
-            # now, inside the async invoke — the synchronous render only
-            # shows the pre-rendered text. The context snapshot carries the
-            # flags this very call settled, so the chain (CORE and handlers)
-            # builds from the team's actual configuration.
-            disclosure_output = await build_team_policy_sections(
-                TeamPolicyBuildInput(
-                    team_name=self.team.team_name,
-                    role=TeamRole.LEADER,
-                    member_name=self.team.member_name,
-                ),
-                TeamPolicyContext(
-                    language=self._language,
-                    lifecycle=self._lifecycle,
-                    team_mode=self._team_mode,
-                    dispatch_mode=self._dispatch_mode,
-                    teammate_mode=self._teammate_mode,
-                    hitt_enabled=bool(data.get("enable_hitt")),
-                ),
-                bus=self._extension_bus,
-                session_id=get_session_id() or None,
-                loader=self._loader,
-            )
-            disclosure = render_policy_sections(
-                select_policy_disclosure_sections(disclosure_output.sections),
-                language=self._language,
-            )
-            if disclosure:
-                data["policy_disclosure"] = disclosure
         return ToolOutput(success=True, data=data)
 
     def render_for_llm(self, output: ToolOutput) -> str:
@@ -250,20 +207,15 @@ class BuildTeamTool(TeamTool):
             )
         if self._VERIFY_PARAM in d:
             facts += f" task_verification={d[self._VERIFY_PARAM]}"
-        policy = d.get("policy_disclosure")
-        if policy is None:
-            # No extension wiring: render the default disclosure here, as
-            # before. With wiring the text was assembled inside ``invoke``
-            # (the build chain is async; this render is not).
-            policy = build_leader_policy_disclosure(
-                lifecycle=self._lifecycle,
-                teammate_mode=self._teammate_mode,
-                team_mode=self._team_mode,
-                dispatch_mode=self._dispatch_mode,
-                language=self._language,
-                hitt_enabled=bool(d.get("enable_hitt")),
-                loader=self._loader,
-            )
+        policy = build_leader_policy_disclosure(
+            lifecycle=self._lifecycle,
+            teammate_mode=self._teammate_mode,
+            team_mode=self._team_mode,
+            dispatch_mode=self._dispatch_mode,
+            language=self._language,
+            hitt_enabled=bool(d.get("enable_hitt")),
+            loader=self._loader,
+        )
         if not policy:
             return facts
         return f"{facts}\n\n{policy}"

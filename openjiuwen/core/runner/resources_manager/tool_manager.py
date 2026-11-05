@@ -102,10 +102,7 @@ class ToolMgr:
         return f"{server_id}.{server_name}.{tool_name}"
 
     async def add_tool_server(
-        self,
-        server_config: McpServerConfig,
-        expiry_time: Optional[float] = None,
-        timeout: Optional[float] = None,  # noqa: ASYNC109
+        self, server_config: McpServerConfig, expiry_time: Optional[float] = None
     ) -> List[McpToolCard]:
         # Serialize registrations for the same server_id so concurrent callers
         # (e.g. team members starting in parallel and sharing a DeepAgentSpec)
@@ -124,9 +121,8 @@ class ToolMgr:
                 return cards
             client = self._create_client(server_config)
             connected = False
-            budget = {} if timeout is None else {"timeout": timeout}
             try:
-                connected = await client.connect(**budget)
+                connected = await client.connect()
                 if not connected:
                     last_err = getattr(client, "_last_connect_error", None)
                     reason = f"{type(last_err).__name__}: {last_err}" if last_err else ""
@@ -134,9 +130,7 @@ class ToolMgr:
                         StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR,
                         server_config=server_config, reason=reason,
                     )
-                results = await self._inner_refresh_mcp_tools(
-                    client, server_config, expiry_time, timeout=timeout
-                )
+                results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
                 self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
                 return results
             except BaseException as e:
@@ -279,11 +273,8 @@ class ToolMgr:
         else:
             return []
 
-    async def _inner_refresh_mcp_tools(
-        self, client, server_config, expiry_time, timeout: Optional[float] = None  # noqa: ASYNC109
-    ):
-        list_kwargs = {} if timeout is None else {"timeout": timeout}
-        mcp_cards = await client.list_tools(**list_kwargs)
+    async def _inner_refresh_mcp_tools(self, client, server_config, expiry_time):
+        mcp_cards = await client.list_tools()
         mcp_cards = mcp_cards if mcp_cards else []
         for card in mcp_cards:
             card.id = self.generate_mcp_tool_id(server_config.server_id, server_config.server_name, card.name)

@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, AsyncIterator, Tuple
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.core.controller.modules.task_scheduler import (
     TaskExecutor,
     TaskExecutorDependencies,
@@ -21,7 +20,7 @@ from openjiuwen.core.controller.schema.dataframe import (
     TextDataFrame,
 )
 from openjiuwen.core.controller.schema.event import EventType
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
@@ -159,15 +158,11 @@ class SessionSpawnExecutor(TaskExecutor):
             )
             yield self._build_error_chunk(task_id, str(exc))
         finally:
-            try:
-                if subagent is not None:
-                    await cleanup_subagent_task_resources(subagent)
-                if child_session is not None:
-                    await kv_cache_subagent_lifecycle.evict_subagent(child_session)
-                    await child_session.post_run()
-            finally:
-                if subagent is not None:
-                    get_agent_runtime().unbind(cid, subagent)
+            if subagent is not None:
+                await cleanup_subagent_task_resources(subagent)
+            if child_session is not None:
+                await kv_cache_subagent_lifecycle.evict_subagent(child_session)
+                await child_session.post_run()
 
     def _build_error_chunk(
         self, task_id: str, error: str

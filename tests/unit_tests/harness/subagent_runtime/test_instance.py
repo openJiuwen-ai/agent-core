@@ -15,7 +15,6 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.ids import new_task_id
@@ -295,23 +294,17 @@ async def test_interrupt_then_new_input_completes() -> None:
 
 @pytest.mark.asyncio
 async def test_shutdown_closes_instance_and_stops_worker() -> None:
-    instance, agent, _ = _make_instance()
-    runtime = get_agent_runtime()
-    runtime.bind(instance.subagent_id, agent)
+    instance, _, _ = _make_instance()
     await instance.start_worker()
     await instance.enqueue(UserInputOp(query="done", task_id="t1"))
     await asyncio.sleep(0.05)
 
-    try:
-        await instance.shutdown("manual")
+    await instance.shutdown("manual")
 
-        assert instance.is_closed()
-        assert instance.agent_status() == SubagentStatus.closed("manual")
-        assert instance._worker_task is not None
-        assert instance._worker_task.done()
-        assert runtime.get(instance.subagent_id) is None
-    finally:
-        runtime.unbind(instance.subagent_id, agent)
+    assert instance.is_closed()
+    assert instance.agent_status() == SubagentStatus.closed("manual")
+    assert instance._worker_task is not None
+    assert instance._worker_task.done()
 
 
 @pytest.mark.asyncio

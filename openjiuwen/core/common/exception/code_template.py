@@ -25,9 +25,7 @@ ALLOWED_SCOPES = {
     "TOOLCHAIN",
     "MEMORY",
     "RETRIEVAL",
-    "SYS_OPERATION",
-    "EVENTS",
-    "EXTENSION",
+    "SYS_OPERATION"
 }
 
 ALLOWED_FAILURE_TYPES = {
@@ -85,8 +83,6 @@ def _code_range_by_scope(scope: str) -> str:
         "COMMON": "188000-188999",
         "SESSION": "190000–198999",
         "SYS_OPERATION": "199000–199999",
-        "EVENTS": "200000–200999",
-        "EXTENSION": "201000–201099",
     }.get(scope, "custom")
 
 

@@ -24,7 +24,6 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.foundation.tool.base import render_payload_text
 from openjiuwen.core.session.agent import Session, create_agent_session
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
@@ -1095,29 +1094,26 @@ class TaskTool(Tool):
                     reason=f"Subagent {normalized_type} execution failed: {exc}",
                 ) from exc
             finally:
+                if owner_root is not None:
+                    unregister_run_root_span(
+                        owner_root,
+                        session_id=sub_session_id,
+                    )
                 try:
-                    if owner_root is not None:
-                        unregister_run_root_span(
-                            owner_root,
-                            session_id=sub_session_id,
-                        )
-                    try:
-                        await cleanup_subagent_task_resources(subagent)
-                    finally:
-                        if browser_query is not None:
-                            self._active_browser_queries.discard(browser_query.key)
-                        try:
-                            if child_session is not None and affinity_enabled:
-                                await kv_cache_subagent_lifecycle.finish_subagent(
-                                    child_session,
-                                    subagent_type=normalized_type,
-                                    succeeded=succeeded,
-                                )
-                        finally:
-                            if child_session is not None:
-                                await child_session.post_run()
+                    await cleanup_subagent_task_resources(subagent)
                 finally:
-                    get_agent_runtime().unbind(sub_session_id, subagent)
+                    if browser_query is not None:
+                        self._active_browser_queries.discard(browser_query.key)
+                    try:
+                        if child_session is not None and affinity_enabled:
+                            await kv_cache_subagent_lifecycle.finish_subagent(
+                                child_session,
+                                subagent_type=normalized_type,
+                                succeeded=succeeded,
+                            )
+                    finally:
+                        if child_session is not None:
+                            await child_session.post_run()
 
     @staticmethod
     def _accepts_runtime_session(subagent: Any) -> bool:

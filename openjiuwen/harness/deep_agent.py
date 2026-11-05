@@ -49,7 +49,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import (
@@ -2002,11 +2001,6 @@ class DeepAgent(BaseAgent):
         await session.pre_run(inputs=self._to_effective_inputs(inputs))
         return session
 
-    def _bind_session_runtime(self, session: Session | None) -> None:
-        """Bind this agent to a concrete session when one is available."""
-        if session is not None:
-            get_agent_runtime().bind(session.get_session_id(), self)
-
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
         """Synchronously queue a rail for registration.
 
@@ -2300,25 +2294,6 @@ class DeepAgent(BaseAgent):
                 error_msg=str(exc),
                 cause=exc,
             ) from exc
-
-    async def load_subagent_config(self, config: "SubAgentConfig") -> LoadRecord:
-        """Bind one in-memory sub-agent config through the extension binder.
-
-        This is the production entry used by event-driven registration. It
-        records the same ``LoadRecord`` as file-backed extension loading and
-        delegates duplicate checks, ability binding, and rail preparation to
-        ``apply_extension_hot``.
-        """
-        from openjiuwen.harness.schema.config import SubAgentConfig
-
-        if not isinstance(config, SubAgentConfig):
-            raise TypeError("config must be SubAgentConfig")
-        if self.deep_config is None:
-            raise ValueError("DeepAgentConfig is required. Call configure() first.")
-        return await self._apply_extension_parts(
-            ExtensionParts(subagents=[config]),
-            source_uri=None,
-        )
 
     async def unload_extension(self, record: LoadRecord) -> list[str]:
         """Unload resources produced by a successful Plugin / AgentTemplate load.
@@ -2802,10 +2777,9 @@ class DeepAgent(BaseAgent):
 
         self._log_loop("forcing controller cleanup due to session switch")
 
-        loop_session = self._loop_session
-        if loop_session is not None:
+        if self._loop_session is not None:
             try:
-                await self._loop_controller.unbind_session(loop_session)
+                await self._loop_controller.unbind_session(self._loop_session)
             except Exception as e:
                 logger.warning(f"unbind_session failed during force cleanup: {e}")
 
@@ -2814,8 +2788,6 @@ class DeepAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"controller.stop() failed during force cleanup: {e}")
 
-        if loop_session is not None:
-            get_agent_runtime().unbind(loop_session.get_session_id(), self)
         self._loop_coordinator = None
         self._loop_controller = None
         self._loop_session = None
@@ -3314,7 +3286,6 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
-        self._bind_session_runtime(session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3400,7 +3371,6 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
-        self._bind_session_runtime(session)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3922,42 +3892,39 @@ class DeepAgent(BaseAgent):
 
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
-            self._bind_session_runtime(session)
-            try:
-                goal_language = self._goal_prompt_language()
-                if self._task_completion_rail is None:
-                    await self.register_rail(TaskCompletionRail(goal_language=goal_language))
-
-                from openjiuwen.harness.goal.store import SessionGoalStore
-
-                self.goal_manager = GoalManager(
-                    store=SessionGoalStore(session),
-                    event_manager=self._event_manager,
-                    control_lock=self._interaction_control_lock,
-                    has_output_stream=self.has_output_stream,
-                    cancel_active_round=self._cancel_active_round,
-                    emit_event=self._emit_interaction_event,
-                    notify_work=self._notify_work,
-                    language=goal_language,
-                )
-                self._interaction_started = True
-                self._interaction_forwarder_task = asyncio.create_task(
-                    self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+            goal_language = self._goal_prompt_language()
+            if self._task_completion_rail is None:
+                await self.register_rail(
+                    TaskCompletionRail(goal_language=goal_language)
                 )
 
-                rail = self._task_completion_rail
-                if isinstance(rail, TaskCompletionRail):
-                    self._bind_live_goal_manager(rail)
-                    try:
-                        init_rail(rail, self)
-                    except Exception:
-                        logger.exception("[DeepAgent] Failed to register goal tools")
+            from openjiuwen.harness.goal.store import SessionGoalStore
 
-                self._ensure_supervisor_running()
-                logger.info("[DeepAgent] Started for session %s", sid)
-            except BaseException:
-                get_agent_runtime().unbind(sid, self)
-                raise
+            self.goal_manager = GoalManager(
+                store=SessionGoalStore(session),
+                event_manager=self._event_manager,
+                control_lock=self._interaction_control_lock,
+                has_output_stream=self.has_output_stream,
+                cancel_active_round=self._cancel_active_round,
+                emit_event=self._emit_interaction_event,
+                notify_work=self._notify_work,
+                language=goal_language,
+            )
+            self._interaction_started = True
+            self._interaction_forwarder_task = asyncio.create_task(
+                self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+            )
+
+            rail = self._task_completion_rail
+            if isinstance(rail, TaskCompletionRail):
+                self._bind_live_goal_manager(rail)
+                try:
+                    init_rail(rail, self)
+                except Exception:
+                    logger.exception("[DeepAgent] Failed to register goal tools")
+
+            self._ensure_supervisor_running()
+            logger.info("[DeepAgent] Started for session %s", sid)
 
     async def stop(self) -> None:
         """Serialize teardown with start and terminate this interaction runtime."""
@@ -3972,47 +3939,42 @@ class DeepAgent(BaseAgent):
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
-        interaction_session = self._interaction_session
-        try:
-            self._event_manager.discard_all_work()
-            await self._interaction_output.shutdown()
-            await self._cancel_active_round(reason="stop")
+        self._event_manager.discard_all_work()
+        await self._interaction_output.shutdown()
+        await self._cancel_active_round(reason="stop")
 
-            for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        await task
-            self._interaction_supervisor_task = None
-            self._interaction_forwarder_task = None
-
-            emit_tasks = list(self._interaction_emit_tasks)
-            self._interaction_emit_tasks.clear()
-            for task in emit_tasks:
-                if not task.done():
-                    task.cancel()
-            for task in emit_tasks:
+        for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
+            if task is not None and not task.done():
+                task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await task
+        self._interaction_supervisor_task = None
+        self._interaction_forwarder_task = None
 
-            if interaction_session is not None:
-                with suppress(Exception):
-                    await interaction_session.close_stream()
-            controller = self.loop_controller
-            if controller is not None and interaction_session is not None:
-                with suppress(Exception):
-                    await controller.unbind_session(interaction_session)
-                with suppress(Exception):
-                    await controller.stop()
+        emit_tasks = list(self._interaction_emit_tasks)
+        self._interaction_emit_tasks.clear()
+        for task in emit_tasks:
+            if not task.done():
+                task.cancel()
+        for task in emit_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
-            self._interaction_started = False
-            self._event_manager.discard_all_work()
-            self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
-            self._active_interaction_round = None
-            self._interaction_round_task = None
-        finally:
-            if interaction_session is not None:
-                get_agent_runtime().unbind(interaction_session.get_session_id(), self)
+        if self._interaction_session is not None:
+            with suppress(Exception):
+                await self._interaction_session.close_stream()
+        controller = self.loop_controller
+        if controller is not None and self._interaction_session is not None:
+            with suppress(Exception):
+                await controller.unbind_session(self._interaction_session)
+            with suppress(Exception):
+                await controller.stop()
+
+        self._interaction_started = False
+        self._event_manager.discard_all_work()
+        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
+        self._active_interaction_round = None
+        self._interaction_round_task = None
 
     async def attach_output(self) -> Optional[InteractionOutputStream]:
         """Claim the sole output reader for this interaction.

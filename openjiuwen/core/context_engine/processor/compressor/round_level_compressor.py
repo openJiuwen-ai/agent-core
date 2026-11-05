@@ -1300,11 +1300,6 @@ class RoundLevelCompressor(ContextProcessor):
     def _get_model(self) -> Model:
         if self._model is None:
             self._model = Model(self._round_config.model_client, self._round_config.model)
-            if hasattr(self, "_compaction_failures"):
-                from openjiuwen.core.context_engine.compaction import _InstructionModel
-                self._model = _InstructionModel(
-                    self._model, self._compaction_instructions, self._compaction_failures,
-                )
         return self._model
 
     def load_state(self, state: Dict[str, Any]) -> None:

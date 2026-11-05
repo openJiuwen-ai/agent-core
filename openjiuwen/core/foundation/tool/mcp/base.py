@@ -215,15 +215,7 @@ class MCPTool(Tool):
                     tool_name=self.card.name, tool_id=self.card.id,
                     formatted_inputs=arguments)
 
-            timeout = kwargs.get("timeout")
-            if timeout is None:
-                result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
-            else:
-                result = await self._mcp_client.call_tool(
-                    tool_name=self._card.name,
-                    arguments=arguments,
-                    timeout=timeout,
-                )
+            result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
             if isinstance(result, McpToolResult):
                 return result
             return {"result": result}

@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.harness.task_loop.session_spawn_executor import SessionSpawnExecutor
 
 
@@ -40,20 +39,14 @@ async def test_executor_forwards_browser_capabilities_to_subagent_creation() -> 
         event_queue=MagicMock(),
     )
     executor = SessionSpawnExecutor(dependencies, deep_agent)
-    runtime = get_agent_runtime()
-    runtime.bind("browser-session", subagent)
 
-    try:
-        chunks = [chunk async for chunk in executor.execute_ability("task-1", MagicMock())]
+    chunks = [chunk async for chunk in executor.execute_ability("task-1", MagicMock())]
 
-        assert len(chunks) == 1
-        deep_agent.create_subagent.assert_called_once_with(
-            "browser_agent",
-            "browser-session",
-            browser_capabilities=["pdf"],
-        )
-        subagent.prepare_task_resources.assert_awaited_once()
-        subagent.cleanup_task_resources.assert_awaited_once()
-        assert runtime.get("browser-session") is None
-    finally:
-        runtime.unbind("browser-session", subagent)
+    assert len(chunks) == 1
+    deep_agent.create_subagent.assert_called_once_with(
+        "browser_agent",
+        "browser-session",
+        browser_capabilities=["pdf"],
+    )
+    subagent.prepare_task_resources.assert_awaited_once()
+    subagent.cleanup_task_resources.assert_awaited_once()
