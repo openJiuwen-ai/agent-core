@@ -3259,7 +3259,14 @@ class DeepAgent(BaseAgent):
         if host_iteration_limit is not None:
             effective_inputs["_host_max_iterations"] = host_iteration_limit
 
-        lifecycle = self._deep_config.stream_task_lifecycle
+        # ``_deep_config`` may be absent on a partially constructed agent
+        # (tests build one via ``__new__`` with only ``_react_agent``).
+        deep_config = getattr(self, "_deep_config", None)
+        lifecycle = (
+            deep_config.stream_task_lifecycle
+            if deep_config is not None
+            else None
+        )
         if lifecycle is not None:
             # Opt-in ownership for Persistent. The default native/personal
             # branch below retains its existing call and stream semantics.

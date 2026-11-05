@@ -2489,7 +2489,10 @@ class ReActAgent(BaseAgent):
         image_items = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
         for tool_result, _ in results:
             image_items.extend(self._iter_multimodal_image_items(tool_result))
-        turn_paused = bool(ctx.extra.get(TOOL_CALLS_STILL_PAUSED_KEY)) or any(
+        # The handler writes the literal boolean True; compare strictly so a
+        # context that is not a real AgentCallbackContext (extra is not a
+        # dict) cannot read as paused and leak the journal past the batch.
+        turn_paused = ctx.extra.get(TOOL_CALLS_STILL_PAUSED_KEY) is True or any(
             isinstance(tool_result, ToolInterruptException) or self._hitl_handler.is_sub_agent_interrupt(tool_result)
             for tool_result, _ in results
         )

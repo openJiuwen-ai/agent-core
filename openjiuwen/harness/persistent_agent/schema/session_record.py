@@ -370,6 +370,9 @@ class _EncodedAnswer(BaseModel):
     value: Any
     request: _EncodedRequest
     carried: StrictBool = False
+    # True when the resume input was plain text addressed to no interrupt;
+    # optional because records written before the field existed lack it.
+    unaddressed: StrictBool = False
 
 
 class _EncodedEntry(BaseModel):
@@ -448,7 +451,8 @@ def decode_interruption(data: dict) -> ToolInterruptionState:
                     ):
                         raise invalid_record("carried interrupt answer ownership does not match")
                     carried[inner_id][owner] = InterruptAnswer(
-                        owner=owner, kind=answer.kind, value=answer.value, request=request, carried=answer.carried,
+                        owner=owner, kind=answer.kind, value=answer.value, request=request,
+                        carried=answer.carried, unaddressed=answer.unaddressed,
                     )
             tools[call_id] = ToolInterruptEntry(
                 tool_call=ToolCall.model_validate(entry.tool_call),
