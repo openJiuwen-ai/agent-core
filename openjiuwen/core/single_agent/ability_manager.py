@@ -1522,7 +1522,6 @@ class AbilityManager:
                 tool_call=tool_call,
                 session=session,
                 tag=tag,
-                callback_context=ctx,
             )
 
         if isinstance(ctx.inputs, ToolCallInputs):
