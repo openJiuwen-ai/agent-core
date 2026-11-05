@@ -23,7 +23,7 @@ import asyncio
 import sys
 import types
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -133,6 +133,59 @@ async def _stop(client: SseClient) -> None:
         await client._owner_task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [8192, 8193, 9000])
+async def test_real_sse_sdk_url_size_boundary_reaches_http_transport(monkeypatch, size):
+    """Use the installed SSE SDK and HTTPX; replace only the network transport."""
+    import httpx
+    from mcp.client import sse as sdk
+    from openjiuwen.core.foundation.tool.mcp.client.sse_client import logger as sse_logger
+    from openjiuwen.harness.security import outbound
+    from openjiuwen.harness.security.outbound import policy
+
+    monkeypatch.setattr(policy, "_state", policy.get_host_exit_state())
+    policy.publish_host_exit_policy({"net_guard": {"enabled": True, "defaults": "allow", "urls": {}}})
+    prefix = "http://192.0.2.10:63656/sse?pad="
+    url = prefix + "a" * (size - len(prefix))
+    assert len(url) == size
+    checked, sent = [], []
+    original_check = outbound.check_mcp_server_url
+    original_sdk = sdk.sse_client
+
+    def check(value):
+        checked.append(value)
+        original_check(value)
+
+    def respond(request):
+        sent.append(str(request.url))
+        # A rig need not implement MCP to prove the URL reached transport.
+        return httpx.Response(400, text="synthetic rig response")
+
+    def http_factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(respond), follow_redirects=True, **kwargs)
+
+    def sse_client(value, **kwargs):
+        return original_sdk(value, httpx_client_factory=http_factory, **kwargs)
+
+    monkeypatch.setattr(outbound, "check_mcp_server_url", check)
+    monkeypatch.setattr(sdk, "sse_client", sse_client)
+    errors = Mock()
+    monkeypatch.setattr(sse_logger, "error", errors)
+    client = SseClient(McpServerConfig(server_name=f"size{size}-mcp", server_path=url))
+    try:
+        with patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)):
+            assert await client.connect(timeout=1) is False
+        assert checked == [url]
+        assert sent == ([url] if size == 8192 else [])
+        error_args = errors.call_args.args
+        assert error_args[1:3] == (f"size{size}-mcp", size)
+        assert ("host_exit:url_size" in repr(error_args[-1])) is (size > 8192)
+        if sent:
+            assert len(sent[0]) == 8192
+    finally:
+        await _stop(client)
 
 
 class TestSseDoLifecycleIntegration:

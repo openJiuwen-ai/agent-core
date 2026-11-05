@@ -106,6 +106,23 @@ def test_active_blocks_denied_and_bad_scheme():
     assert userinfo.value.matched_rule == "host_exit:userinfo"
 
 
+@pytest.mark.parametrize("check", [host_exit.check_outbound_url, host_exit.check_mcp_server_url])
+@pytest.mark.parametrize("size", [8191, 8192, 8193, 9000])
+def test_url_size_boundary_is_inclusive_and_reports_actual_length(check, size):
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    prefix = "http://192.0.2.10:63656/sse?pad="
+    url = prefix + "a" * (size - len(prefix))
+    assert len(url) == size
+    if size <= 8192:
+        check(url)
+    else:
+        with pytest.raises(OutboundBlockedError) as exc:
+            check(url)
+        assert exc.value.matched_rule == "host_exit:url_size"
+        assert f"url_length={size} limit=8192" in exc.value.reason
+        assert exc.value.url == url
+
+
 @pytest.mark.parametrize("check", [host_exit.check_reader_url, host_exit.check_outbound_url])
 @pytest.mark.parametrize("host", [
     "r.jina.ai", "R.JINA.AI.", "%72.jina.ai", "ｒ.ｊｉｎａ.ａｉ", "ｒ.ｊｉｎａ.ａｉ。",

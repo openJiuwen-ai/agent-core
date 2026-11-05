@@ -248,6 +248,25 @@ registry in `outbound/policy.py`. Review and add future opaque reader domains th
 registry is code-owned, not a user-configurable permission exemption. Paid search at
 `deepsearch.jina.ai` is a separate service and is not in this registry.
 
+### 6.3 Inclusive URL-length boundary and diagnostics
+
+`MAX_URL_CHARS = 8192` is inclusive: the host exit rejects only `len(url) > 8192`.
+The measurement is the complete Python string passed to the check, including scheme,
+path and query, not its UTF-8 byte count or a serialized HTTP request-line length.
+For enforced non-loopback MCP endpoints, configuration validation and SSE connection
+validation check the saved `server_path`; the existing loopback exemption is separate.
+
+A length rejection retains `host_exit:url_size` and includes `url_length=<actual>` and
+`limit=8192` in its reason. Configuration skip logs and SSE failure logs identify the
+server name and measured length. When testing several boundary legs in one process,
+correlate the server name, length and request interval; finding the rule name anywhere
+in a shared log window does not establish that the current leg was rejected.
+
+Regression tests cover 8191/8192/8193/9000 and run the installed SSE SDK with a mocked
+HTTP transport: 8192 reaches the transport unchanged, while 8193 and 9000 do not send.
+A transport receiving a request may still reject the SSE/MCP handshake; that is not a
+URL-size denial. These tests do not establish the cause of a separate full-suite log.
+
 ## 7. Source index
 
 | Path | Notes |

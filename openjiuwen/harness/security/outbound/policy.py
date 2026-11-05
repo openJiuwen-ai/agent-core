@@ -208,8 +208,12 @@ def check_outbound_url(url: str, *, is_redirect: bool = False) -> None:
         raise OutboundBlockedError(url, f"host exit policy unavailable: {state.error}", "host_exit:error")
     if state.mode != STATE_ACTIVE or state.checker is None:
         return
-    if len(url) > MAX_URL_CHARS:
-        raise OutboundBlockedError(url, "URL exceeds internal length limit", "host_exit:url_size")
+    url_length = len(url)
+    if url_length > MAX_URL_CHARS:
+        raise OutboundBlockedError(
+            url, f"URL exceeds internal length limit (url_length={url_length} limit={MAX_URL_CHARS})",
+            "host_exit:url_size",
+        )
     parsed = urlparse(url)
     scheme = (parsed.scheme or "").lower()
     if scheme not in _ALLOWED_SCHEMES:
