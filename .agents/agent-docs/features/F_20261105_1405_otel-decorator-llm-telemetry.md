@@ -39,7 +39,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 ## 决策归属与关系
 
 - merge 线（!3570/!3571 原内容：ambient shell、rail 合并、respect_existing 等 span 合并机制）整体撤回，本地备份于 `backup/2026-11-05-*` 四个 ref；decorator 模块 diff 与合并机制无关，整体取用。
-- 本文档为新决策记录：计数与身份全部落在装饰器新建的内层真实 llm span 上，外层 span（!2523/!2524 已合入的桥面数据）保持不动，后端负责去重。
+- 本文档为新决策记录：计数与身份全部落在装饰器新建的内层真实 llm span 上，外层 span 保持不动、后端负责去重。外层桥面数据中外加的用量/时延载荷（!2524，非 ReAct 模式手工发射）于 2026-11-05 经用户决策整体回退（见下），!2523（agent 身份）与既有基线载荷（MODEL_STAT/MODEL_USAGE/LATENCY）不动。
 
 ## 上下文与跨边界影响
 
@@ -63,6 +63,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 - **C7 嵌入桥 llm span 父级走显式 refs，显式 > 逻辑 > 环境三级**（2026-11-05 部署实证 ② 修复）：嵌入双写桥的 llm span 逻辑父不在 agent handler 的 span manager 表里，环境回退又被链路上下文污染破坏（部署实证：llm span 与 node span 并列、误挂工作流死根；`create_agent_session` 实证会把 current span 换成 recording=False 的死根）。studio 在 `AgentCoreModelLayer.invoke/stream` 同步入口（桥线程启动前、node executor 上下文内）捕获当前 span 的 `(trace_id, span_id, trace_flags)`，随 kwargs 走与 agent_id 同一条 `get_model(identity=)` 通道（C6）；core `on_llm_start` 据显式 refs 构造 `NonRecordingSpan` 父上下文，refs 缺失/非法（非 hex / 全零）时逐位回退既有解析，行为不变。flags 缺省按已采样：显式 refs 只来自活着的 recording span，宁可多采不丢数据。
 - **C8 会话重绑清空工作流映射（未修，独立 bugfix 线）**（2026-11-05 根因钉死）：裸会话 lazy `session.tracer()` → `Tracer.init()` 对全局注册表 handler 扇出 `set_session_id`；WF handler 见到与缓存不同的会话 id 即 `_cleanup_stale_spans` 清空 `_layer_root_spans/_component_spans` 并强关活 span。嵌入侧每次模型调用都建裸会话（会话 id 常与外层会话不同），于是工作流执行中途映射被清、后续组件解析落环境回退（部署实证 ③ 的结构性成因：end 节点误挂；伴随 token 异 Context ValueError 与双端 end 噪声，同族）。修复需要区分「真会话切换」与「嵌入裸会话瞬态翻转」（候选：handler 按 Tracer 实例化而非全局共享 / cleanup 按存活语义收敛），涉及跨会话隔离设计，不并入本线。
 - **C8 修复：会话重绑守卫（2026-11-05 当日从撤回合并线捞回）**：`_has_live_spans()`——工作流仍有 tracked span 在录制时 `set_trace_id/set_session_id` 直接返回（缓存、映射、绑定全不动），跑完后的下一次重绑按原语义清理。语义与撤回合并线 17e7c3112（ignore foreign tracer init while workflow run is live，当时部署验证过 end 层级正常）逐字一致，属纯遥测记账时机变化，零业务触达；真会话切换在无在途 run 时照常清理（TestWorkflowIsolation / TestMultiRoundConversationTraceContinuity 护栏全绿）。
+- **外层 !2524 载荷回退（2026-11-05，studio 侧执行）**：非 ReAct 模式（规划链 task_plan / task_understanding / intention_detect、PlanExecute 步骤链）桥 span 的用量/时延载荷系手工发射的同值第二份拷贝——这些路径的模型在默认配置（`USE_AGENT_CORE_MODEL=true`）下经 `AgentCoreModelLayer → ModelWrapper → get_model`，本线在 get_model 出口无条件装饰，每次调用已有带 usage/TTFT/TPOT 的内层 llm span，故整体回退（studio !2582 d944410f9 / !2583 997b78874）。既有基线载荷与 !2523 身份不动。已知过渡期代价：旧 core 实例（无装饰能力）与 `USE_AGENT_CORE_MODEL=false` 部署上规划链 usage 无来源，待 core 铺齐后消除；后端去重的"桥 span 带 usage"分支随之消失。
 
 ## 与设计的偏差
 
