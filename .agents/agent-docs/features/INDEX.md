@@ -17,13 +17,14 @@ generated: true
 |---|
 | [agent_evolving/ttse](#module-1) |
 | [agent_teams](#module-2) |
-| [core.session.tracer](#module-3) |
-| [core/foundation/llm](#module-4) |
-| [extensions.tracer_otel](#module-5) |
-| [extensions/observability](#module-6) |
-| [harness](#module-7) |
-| [harness/subagents](#module-8) |
-| [harness/tools/browser_move](#module-9) |
+| [core.runner.resources_manager](#module-3) |
+| [core.session.tracer](#module-4) |
+| [core/foundation/llm](#module-5) |
+| [extensions.tracer_otel](#module-6) |
+| [extensions/observability](#module-7) |
+| [harness](#module-8) |
+| [harness/subagents](#module-9) |
+| [harness/tools/browser_move](#module-10) |
 
 <a id="module-1"></a>
 
@@ -193,13 +194,21 @@ generated: true
 
 <a id="module-3"></a>
 
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-4"></a>
+
 ## core.session.tracer
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
-<a id="module-4"></a>
+<a id="module-5"></a>
 
 ## core/foundation/llm
 
@@ -207,15 +216,15 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## extensions.tracer_otel
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## extensions/observability
 

@@ -11,6 +11,7 @@ modules:
 files:
   - openjiuwen/core/session/tracer/decorator.py
   - openjiuwen/core/runner/resources_manager/model_manager.py
+  - openjiuwen/core/runner/resources_manager/resource_manager.py
   - openjiuwen/extensions/tracer_otel/handler.py
   - tests/unit_tests/core/session/tracer/test_decorator.py
   - tests/unit_tests/core/runner/resources_manager/test_model_manager.py
@@ -33,6 +34,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
   - C4 类级能力常量 `OtelAgentHandler.LLM_SPAN_DECORATOR_CAPABILITY = 1`，供 agent-studio `trace_compat.py` 门禁从失效的 `LLM_SPAN_MERGE_CAPABILITY`（merge 线已撤回）重指向。
   - C5 装饰器双 handler 半开兜底（2026-11-05 增补，用户部署实证缺陷 ②）：invoke/stream 两 handler 增加 `ended` 标记 + `finally` 补偿——`CancelledError`/`GeneratorExit` 是 BaseException、绕过 `except Exception`，此前 span 停在半开、挂载的 ambient 上下文泄漏、后续 span 认错父；补偿以 best-effort 触发 `on_*_end`（流式带已见部分结果与 usage，非流式 `outputs=None`），失败吞掉不破坏取消语义。
   - C6 `ModelMgr.get_model` 增补 `identity: dict | None = None` 透传给 `decorate_model_with_trace`（2026-11-05 增补，用户部署实证缺陷 ①）：嵌入侧（studio runtime 双写桥）拿到的是裸会话、无 agent card，控制器层 agent 身份只能经显式参数带给 llm span；缺省 `None` 保持全部存量调用方的原 wire 形态。
+  - C6 补透公共入口三环（2026-11-05 复审修正，用户发现）：嵌入侧拿模型的真实入口是 `Runner.resource_mgr.get_model`（`ResourceMgr`），原 C6 只改了叶子 `ModelMgr.get_model`——入口 keyword-only 固定签名不收 identity，嵌入侧传参直接 TypeError（模型创建失败，比遥测丢失严重）。`ResourceMgr.get_model` / `_inner_get_resources_by_provider` / `_dispatch_get` 三处 keyword-only 增补 `identity=None`；`_dispatch_get` 仅 `resource_type == "model"` 且显式非 None 时转发，其余资源类型的 get 不收到该参数，共享分发契约不被单类型参数污染。
 
 ## 决策归属与关系
 
@@ -57,6 +59,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 - **C5 兜底走 `on_*_end` 而非 `on_*_error`**（2026-11-05）：弃流/取消是调用方选择而非模型故障，语义上按「带部分结果的收尾」关闭；补偿内只 await 不 yield，若仍失败（真实取消链路可能再抛）吞掉——遥测不得改变取消语义。
 - **C5 弃流补偿的时序是 best-effort**（2026-11-05 实测）：经完整 proxy 链 `aclose()` 时内层 handler 的 finally 由 asyncio asyncgen finalizer 钩子调度（GC 时机），生产可用但测试不可依赖；单测直接驱动 handler（`_make_trace_stream_wrap_handler`），代理链的同步关闭不属于本契约。
 - **C6 `identity` 是显式参数而非复用 session**：裸会话无 agent card，rail `_build_common_info` 路径无从取身份；显式传递不改动 session 结构，且 `None` 缺省使存量调用方 wire 完全不变。
+- **跨层透传的验收必须打到公共入口**（2026-11-05 修正的教训）：studio 探针 `_decorator_accepts_identity` 查 `decorate_model_with_trace` 签名——双子带上该参数后门开，但 ResourceMgr 入口断链，"新 core + 新 studio"组合反而 TypeError。签名探测只证明叶子改了、不证明链路通；参数透传类改动的用例必须从嵌入侧真实入口（`Runner.resource_mgr.get_model`）打到叶子，本次 ResourceMgr 用例即按此补。
 
 ## 与设计的偏差
 
@@ -68,6 +71,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 | --- | --- | --- | --- | --- |
 | 2026-11-05 tracer_otel + decorator 单测 | feature/otel-decorator-llm-telemetry（C1–C4）本地；.testenv（openjiuwen 可编辑安装指向本工作区，Python 3.12） | `/Users/lily/ai-app/jiuwen/.testenv/bin/python -m pytest tests/unit_tests/extensions/tracer_otel/ tests/unit_tests/core/session/tracer/test_decorator.py -q` | 通过：172 passed（含新增 5 项 sibling/workflow 身份/首写优先/能力常量单测，3.68s） | 端到端 collector 链路（跨仓联调范围） |
 | 2026-11-05 C5/C6 增补单测 | 同上（C1–C6） | 同命令 + `tests/unit_tests/core/runner/resources_manager/`，`PYTHONPATH` 指向本工作区 | 通过：179 passed（新增 3 项：弃流补偿 fires end with partial、取消补偿 fires end with outputs=None、get_model identity 透传）；stash 源码修复后 3 项必红、恢复后全绿 | 端到端 collector 链路（跨仓联调范围） |
+| 2026-11-05 C6 补透 ResourceMgr 入口 | feature/otel-decorator-llm-telemetry（wt-twin-dev 工作区） | `PYTHONPATH=wt-twin-dev .testenv pytest tests/unit_tests/core/runner/resources_manager/ tests/unit_tests/core/session/tracer/ tests/unit_tests/extensions/tracer_otel/ -q` | 通过：225 passed；ResourceMgr 两用例修复前必红（TypeError 与生产缺陷同型：入口/dispatch 拒收 identity），修复后全绿 | 端到端 collector 链路（跨仓联调范围） |
 
 ### 可见行为、副作用与证据有效范围
 

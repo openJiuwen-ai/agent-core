@@ -19,21 +19,22 @@ generated: true
 | [agent_evolving/ttse](#module-2) |
 | [agent_teams](#module-3) |
 | [agent_teams/workflow](#module-4) |
-| [core.session.tracer](#module-5) |
-| [core/context_engine](#module-6) |
-| [core/controller](#module-7) |
-| [core/foundation/llm](#module-8) |
-| [core/runner/drunner/dmessage_queue](#module-9) |
-| [core/session](#module-10) |
-| [extensions.tracer_otel](#module-11) |
-| [extensions/a2a](#module-12) |
-| [extensions/observability](#module-13) |
-| [harness](#module-14) |
-| [harness/subagents](#module-15) |
-| [harness/tools/browser_move](#module-16) |
-| [harness/tools/browser_move/decision](#module-17) |
-| [harness/tools/subagent](#module-18) |
-| [未分类](#module-19) |
+| [core.runner.resources_manager](#module-5) |
+| [core.session.tracer](#module-6) |
+| [core/context_engine](#module-7) |
+| [core/controller](#module-8) |
+| [core/foundation/llm](#module-9) |
+| [core/runner/drunner/dmessage_queue](#module-10) |
+| [core/session](#module-11) |
+| [extensions.tracer_otel](#module-12) |
+| [extensions/a2a](#module-13) |
+| [extensions/observability](#module-14) |
+| [harness](#module-15) |
+| [harness/subagents](#module-16) |
+| [harness/tools/browser_move](#module-17) |
+| [harness/tools/browser_move/decision](#module-18) |
+| [harness/tools/subagent](#module-19) |
+| [未分类](#module-20) |
 
 <a id="module-1"></a>
 
@@ -291,13 +292,21 @@ generated: true
 
 <a id="module-5"></a>
 
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-6"></a>
+
 ## core.session.tracer
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## core/context_engine
 
@@ -341,15 +350,15 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
 
-<a id="module-11"></a>
+<a id="module-12"></a>
 
 ## extensions.tracer_otel
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | core.session.tracer, core.runner.resources_manager, extensions.tracer_otel | openjiuwen/core/session/tracer/decorator.py, openjiuwen/core/runner/resources_manager/model_manager.py, openjiuwen/core/runner/resources_manager/resource_manager.py, openjiuwen/extensions/tracer_otel/handler.py, tests/unit_tests/core/session/tracer/test_decorator.py, tests/unit_tests/core/runner/resources_manager/test_model_manager.py, tests/unit_tests/extensions/tracer_otel/test_handler.py | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
-<a id="module-12"></a>
+<a id="module-13"></a>
 
 ## extensions/a2a
 
