@@ -282,8 +282,10 @@ def test_sync_redirect_into_opaque_reader_stops_before_connection():
     host_exit.publish_host_exit_policy({"net_guard": _section()})
     first = _Resp(302, "https://r.jina.ai/https://start.example/redirect")
     session = _Session([first])
-    with pytest.raises(OutboundBlockedError, match="host_exit:opaque_reader"):
+    with pytest.raises(OutboundBlockedError) as exc:
         sync_client.get("https://start.example/", session=session)
+    assert exc.value.matched_rule == "host_exit:opaque_reader"
+    assert exc.value.url == "https://r.jina.ai/https://start.example/redirect"
     assert len(session.calls) == 1
     assert first.closed
 
@@ -427,8 +429,10 @@ async def test_async_redirect_into_opaque_reader_stops_before_connection():
     host_exit.publish_host_exit_policy({"net_guard": _section()})
     first = _AsyncResp(302, "https://r.jina.ai/https://start.example/redirect")
     session = _AsyncSession([first])
-    with pytest.raises(OutboundBlockedError, match="host_exit:opaque_reader"):
+    with pytest.raises(OutboundBlockedError) as exc:
         await async_client.request(session, "GET", "https://start.example/")
+    assert exc.value.matched_rule == "host_exit:opaque_reader"
+    assert exc.value.url == "https://r.jina.ai/https://start.example/redirect"
     assert len(session.calls) == 1
     assert first.released
 

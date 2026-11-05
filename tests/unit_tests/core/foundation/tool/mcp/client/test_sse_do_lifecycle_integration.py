@@ -139,8 +139,8 @@ async def _stop(client: SseClient) -> None:
 @pytest.mark.parametrize("size", [8192, 8193, 9000])
 async def test_real_sse_sdk_url_size_boundary_reaches_http_transport(monkeypatch, size):
     """Use the installed SSE SDK and HTTPX; replace only the network transport."""
-    import httpx
-    from mcp.client import sse as sdk
+    httpx = pytest.importorskip("httpx")
+    sdk = pytest.importorskip("mcp.client.sse")
     from openjiuwen.core.foundation.tool.mcp.client.sse_client import logger as sse_logger
     from openjiuwen.harness.security import outbound
     from openjiuwen.harness.security.outbound import policy
