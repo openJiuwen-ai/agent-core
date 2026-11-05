@@ -2470,10 +2470,17 @@ class ReActAgent(BaseAgent):
                     observation["name"] = observation.get("name") or tool_names.get(tool_message.tool_call_id)
                     ctx.extra.setdefault("_iteration_observations", []).append(observation)
 
-        await self._add_tool_result_images(ctx, results, context)
+        await self._add_tool_result_images(ctx, results, context, journal_key=journal_key)
         return results
 
-    async def _add_tool_result_images(self, ctx: AgentCallbackContext, results: list, context: ModelContext) -> None:
+    async def _add_tool_result_images(
+        self,
+        ctx: AgentCallbackContext,
+        results: list,
+        context: ModelContext,
+        *,
+        journal_key: Optional[str] = None,
+    ) -> None:
         """Give the model the images of tool results in one user message after the tool messages.
 
         While a call of this assistant turn is still paused, hold them back: a
@@ -2489,6 +2496,7 @@ class ReActAgent(BaseAgent):
         if turn_paused:
             if image_items:
                 ctx.extra[DEFERRED_TOOL_IMAGES_KEY] = image_items
+            # 仍在暂停期：批量结果尚未全部落上下文，abort 仍需 journal 兜底，不 pop。
             return
         multimodal_message = self._build_multimodal_message_from_items(image_items)
         if multimodal_message is not None:
@@ -2497,7 +2505,7 @@ class ReActAgent(BaseAgent):
         # Only now are the batch's results in the context; until then an abort uses the journal.
         if journal_key is not None:
             self._tool_fact_journals.pop(journal_key, None)
-        return results
+        return
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
