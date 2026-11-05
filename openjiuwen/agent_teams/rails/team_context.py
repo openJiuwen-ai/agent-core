@@ -56,6 +56,7 @@ class TeamHandleKey:
     WORKTREE_MANAGER = "team.worktree_manager"
     SWARMFLOW_EXTERNAL_CLI_AGENTS = "team.swarmflow_external_cli_agents"
     SWARMFLOW_EXPERT_SPECS = "team.swarmflow_expert_specs"
+    EXTENSION_BUS = "team.extension_bus"
 
 
 def inject_team_handles(
@@ -212,6 +213,17 @@ def get_worktree_manager(context: Any) -> Optional["WorktreeManager"]:
     return _get(context, TeamHandleKey.WORKTREE_MANAGER)
 
 
+def get_extension_bus(context: Any) -> Optional[Any]:
+    """Return the host-initialized extension bus handle, or None.
+
+    Seeded by ``TeamRuntimeManager`` into the spec's build-context extras
+    before the leader build paths run; per-member derive copies carry it
+    into the rail factories. None means no extension wiring: the policy
+    rail then builds its sections locally at construction time.
+    """
+    return _get(context, TeamHandleKey.EXTENSION_BUS)
+
+
 __all__ = [
     "TeamHandleKey",
     "inject_team_handles",
@@ -220,6 +232,7 @@ __all__ = [
     "get_model_allocator",
     "get_messager",
     "get_permissions_override",
+    "get_extension_bus",
     "get_swarmflow_model_resolver",
     "get_swarmflow_worker_base_spec",
     "get_swarmflow_human_base_spec",

@@ -886,6 +886,29 @@ async def create_cur_session_tables(sessions: DbSessions) -> bool:
     return False
 
 
+def _has_table(sync_conn, table_name: str) -> bool:
+    """Return whether one table exists (a single has_table call, no PRAGMAs)."""
+    return inspect(sync_conn).has_table(table_name)
+
+
+async def cur_session_table_exists(sessions: DbSessions, table_kind: str) -> bool:
+    """Read-only existence check for the bound session's dynamic tables.
+
+    ``table_kind`` is ``"task"`` or ``"message"``: each kind's tables are
+    created together per session, so one representative table per kind is
+    enough. Read paths use this to answer empty for sessions that never
+    ran a team — reads never run DDL.
+    """
+    session_id = get_session_id()
+    if not session_id:
+        return False
+    model_factory = {"task": _get_task_model, "message": _get_message_model}[table_kind]
+    table_name = model_factory().__table__.name
+    async with sessions.read() as session:
+        conn = await session.connection()
+        return await conn.run_sync(_has_table, table_name)
+
+
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:
     """Drop dynamic tables for current session.
 

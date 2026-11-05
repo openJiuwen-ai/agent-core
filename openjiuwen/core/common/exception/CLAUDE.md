@@ -111,6 +111,8 @@ raise ToolError(StatusCode.TOOL_EXECUTION_ERROR, card=tool_card, reason=str(e))
 | COMMON | 188000–188999 |
 | SESSION | 190000–198999 |
 | SYS_OPERATION | 199000–199999 |
+| EVENTS | 200000–200999 |
+| EXTENSION | 201000–201099 |
 
 **新增 code 前先确认区间**——不要跨段塞。区间和 `status_mapping.RANGE_RULES` 必须保持一致，改一处就得同步另一处。
 
