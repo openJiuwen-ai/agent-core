@@ -17,7 +17,7 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.status import MemberMode
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -218,3 +218,113 @@ async def test_description_states_the_limit_in_both_languages(db, lang):
     send = _leader_send(db, lang=lang)
 
     assert str(MAX_CONTENT_CHARS) in send.card.description
+
+
+DEV_3 = "dev-3"
+DEV_4 = "dev-4"
+
+
+async def _spawn_unstarted(db, name: str) -> None:
+    await db.member.create_member(
+        member_name=name,
+        team_name=TEAM_NAME,
+        display_name=name,
+        agent_card=AgentCard().model_dump_json(),
+        status=MemberStatus.UNSTARTED.value,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+
+def _leader_send_with_spawn(db, on_started):
+    backend = TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        on_member_started=on_started,
+    )
+    return _send_tool(
+        create_team_tools(role="leader", agent_team=backend, on_teammate_created=on_started)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_unicast_starts_only_the_recipient(db):
+    """A direct message launches the addressed member and nobody else —
+    the whole roster must not come up for one targeted note."""
+    await _spawn_unstarted(db, DEV_3)
+    await _spawn_unstarted(db, DEV_4)
+    on_started = AsyncMock()
+    send = _leader_send_with_spawn(db, on_started)
+
+    result = await send.invoke({"to": DEV_3, "content": "hello"})
+
+    assert result.success
+    on_started.assert_awaited_once_with(DEV_3)
+    m3 = await db.member.get_member(DEV_3, TEAM_NAME)
+    m4 = await db.member.get_member(DEV_4, TEAM_NAME)
+    assert m3.status == MemberStatus.STARTING.value
+    assert m4.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_multicast_starts_only_valid_recipients(db):
+    """Multicast starts the validated recipients only; a typo'd name is
+    reported failed and never launches a process."""
+    await _spawn_unstarted(db, DEV_3)
+    await _spawn_unstarted(db, DEV_4)
+    on_started = AsyncMock()
+    send = _leader_send_with_spawn(db, on_started)
+
+    result = await send.invoke({"to": [DEV_3, "ghost"], "content": "hello"})
+
+    assert not result.success  # strict multicast: partial failure is a failure
+    on_started.assert_awaited_once_with(DEV_3)
+    m4 = await db.member.get_member(DEV_4, TEAM_NAME)
+    assert m4.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_still_starts_everyone(db):
+    """Broadcast semantics address the whole roster, so the full-roster
+    startup is retained there and only there."""
+    await _spawn_unstarted(db, DEV_3)
+    await _spawn_unstarted(db, DEV_4)
+    on_started = AsyncMock()
+    send = _leader_send_with_spawn(db, on_started)
+
+    result = await send.invoke({"to": "*", "content": "global announcement"})
+
+    assert result.success
+    assert {call.args[0] for call in on_started.await_args_list} == {DEV_3, DEV_4}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_send_never_starts_anyone(db):
+    """The auto-start funnel is leader-only; a teammate's send is a no-op
+    for spawning even when it has a callback wired."""
+    await _spawn_unstarted(db, DEV_3)
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=DEV_1,
+        is_leader=False,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        on_member_started=on_started,
+    )
+    send = _send_tool(
+        create_team_tools(role="member", agent_team=backend, on_teammate_created=on_started)
+    )
+
+    result = await send.invoke({"to": DEV_3, "content": "hello"})
+
+    assert result.success
+    on_started.assert_not_awaited()
+    m3 = await db.member.get_member(DEV_3, TEAM_NAME)
+    assert m3.status == MemberStatus.UNSTARTED.value
