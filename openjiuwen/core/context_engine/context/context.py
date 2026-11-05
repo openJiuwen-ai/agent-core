@@ -1011,6 +1011,10 @@ class SessionModelContext(ModelContext):
         self,
         state_input: ContextProcessorStateInput,
     ) -> None:
+        # Window-management processors (suppress_state_events) stay fully
+        # silent: no stream push, no callback, no history record.
+        if getattr(state_input.processor, "suppress_state_events", False):
+            return
         state = self._processor_state_recorder.build_state(state_input)
         await self._processor_state_recorder.emit(self, state)
 

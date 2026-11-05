@@ -891,6 +891,8 @@ class ReadFileTool(Tool):
         _, ext = os.path.splitext(file_path.lower())
         image_type = ext.lstrip(".") or "png"
         dimensions: str | None = None
+        width: int | None = None
+        height: int | None = None
         resized = raw
 
         try:
@@ -904,7 +906,8 @@ class ReadFileTool(Tool):
                 with Image.open(io.BytesIO(raw)) as img:
                     detected_format = (img.format or "PNG").lower()
                     image_type = detected_format  # prefer format detected from buffer
-                    dimensions = f"{img.width}x{img.height}"
+                    width, height = img.width, img.height
+                    dimensions = f"{width}x{height}"
 
                     # Tier 1: standard resize, same format as the source (thumbnail to 1536×1536).
                     tier1 = img.copy()
@@ -941,6 +944,17 @@ class ReadFileTool(Tool):
         if dimensions:
             parts.append(f"dimensions: {dimensions}")
 
+        logger.info(
+            "[read_file_image] path=%s raw_bytes=%d transmitted_bytes=%d "
+            "dimensions=%s mime_type=%s attached=%s",
+            file_path,
+            len(raw),
+            len(resized),
+            dimensions or "",
+            mime_type,
+            self.enable_image_multimodal,
+        )
+
         if not self.enable_image_multimodal:
             parts.append(
                 "Image bytes are not attached because read_file native image multimodal input is disabled."
@@ -956,17 +970,19 @@ class ReadFileTool(Tool):
         encoded = base64.b64encode(resized).decode("ascii")
         data_url = f"data:{mime_type};base64,{encoded}"
         parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
+        image_item: Dict[str, Any] = {
+            "type": "image",
+            "source": "read_file",
+            "source_path": file_path,
+            "mime_type": mime_type,
+            "data_url": data_url,
+        }
+        if width and height:
+            image_item["width"] = width
+            image_item["height"] = height
         return {
             "content": "\n".join(parts),
-            "multimodal": [
-                {
-                    "type": "image",
-                    "source": "read_file",
-                    "source_path": file_path,
-                    "mime_type": mime_type,
-                    "data_url": data_url,
-                }
-            ],
+            "multimodal": [image_item],
         }
 
     # ------------------------------------------------------------------

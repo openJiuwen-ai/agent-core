@@ -9,6 +9,10 @@ from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
 
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.context_engine.processor.offloader.image_window_offloader import (
+    ImageWindowOffloader,
+    ImageWindowOffloaderConfig,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloader,
     MessageOffloaderConfig
@@ -75,6 +79,9 @@ _PROCESSORS_CLASSES = [
     "ContextProcessor",
     "ToolResultBudgetProcessor",
     "ToolResultBudgetProcessorConfig",
+    # read_file image window
+    "ImageWindowOffloader",
+    "ImageWindowOffloaderConfig",
     # tool result window
     "ToolResultWindowProcessor",
     "ToolResultWindowProcessorConfig",
