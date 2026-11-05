@@ -26,8 +26,13 @@ class ModelMgr(AbstractManager["Model"]):
         layer's agent_id) that embedding applications want stamped on every
         llm span as gen_ai.agent.* — the session they pass here is a bare
         conversation session without an agent card, so the rail's common-info
-        path cannot supply them. ``None`` (all pre-existing callers) keeps the
-        exact pre-identity wire format.
+        path cannot supply them. ``None`` / empty (all pre-existing callers)
+        skips decoration entirely and returns the bare model: core-internal
+        callers never pass identity, and decorating them would mint anonymous
+        llm spans that carry no attribution and double-count against existing
+        bridge/shell payloads.
         """
         model = await self._get_resource(model_id)
+        if not identity:
+            return model
         return decorate_model_with_trace(model, session, identity=identity)
