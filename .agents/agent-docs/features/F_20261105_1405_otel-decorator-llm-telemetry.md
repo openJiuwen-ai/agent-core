@@ -6,11 +6,14 @@ author: yidaaichixia
 author_email: 1046386000@qq.com
 modules:
   - core.session.tracer
+  - core.runner.resources_manager
   - extensions.tracer_otel
 files:
   - openjiuwen/core/session/tracer/decorator.py
+  - openjiuwen/core/runner/resources_manager/model_manager.py
   - openjiuwen/extensions/tracer_otel/handler.py
   - tests/unit_tests/core/session/tracer/test_decorator.py
+  - tests/unit_tests/core/runner/resources_manager/test_model_manager.py
   - tests/unit_tests/extensions/tracer_otel/test_handler.py
 designs: []
 design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。
@@ -28,6 +31,8 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
   - C2 `extensions/tracer_otel/handler.py`：`_set_llm_response_attrs` 容器级 `usage_metadata` sibling 提取（修 unwrap 钻入 chunk 列表后 usage 丢失 + 非 dict 早退缺口）；`_set_agent_identity_attrs` 消费 `workflow_id`/`workflow_name`（写缺才写）、metadata 首写优先、`component_*` 刻意不映射。
   - C3 `OtelAgentHandler.drop_agent_span`：best-effort 关闭仍开着的 span（agent-studio !2583 RAG 检索降级路径依赖此钩子）。
   - C4 类级能力常量 `OtelAgentHandler.LLM_SPAN_DECORATOR_CAPABILITY = 1`，供 agent-studio `trace_compat.py` 门禁从失效的 `LLM_SPAN_MERGE_CAPABILITY`（merge 线已撤回）重指向。
+  - C5 装饰器双 handler 半开兜底（2026-11-05 增补，用户部署实证缺陷 ②）：invoke/stream 两 handler 增加 `ended` 标记 + `finally` 补偿——`CancelledError`/`GeneratorExit` 是 BaseException、绕过 `except Exception`，此前 span 停在半开、挂载的 ambient 上下文泄漏、后续 span 认错父；补偿以 best-effort 触发 `on_*_end`（流式带已见部分结果与 usage，非流式 `outputs=None`），失败吞掉不破坏取消语义。
+  - C6 `ModelMgr.get_model` 增补 `identity: dict | None = None` 透传给 `decorate_model_with_trace`（2026-11-05 增补，用户部署实证缺陷 ①）：嵌入侧（studio runtime 双写桥）拿到的是裸会话、无 agent card，控制器层 agent 身份只能经显式参数带给 llm span；缺省 `None` 保持全部存量调用方的原 wire 形态。
 
 ## 决策归属与关系
 
@@ -49,6 +54,9 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 - **身份键写缺才写 + metadata 首写优先**：起止两次转发同键冲突时保留起点值；基线 rail 路径不携带这些键，写缺才写在既有路径上惰性，无行为变化。
 - **`component_*` 刻意不映射**：`openjiuwen.workflow.component_id` 是后端的 shell 判别键，内层 llm span 不得认领，否则去重规则失效。
 - **develop 基线已含 `ttft_seconds` 优先读取**（#1833 引擎链路落地），C2 因此比计划少一块；0.1.17_hotfix 基线无该块，hotfix 复刻时 C2 需按该基线行文适配。
+- **C5 兜底走 `on_*_end` 而非 `on_*_error`**（2026-11-05）：弃流/取消是调用方选择而非模型故障，语义上按「带部分结果的收尾」关闭；补偿内只 await 不 yield，若仍失败（真实取消链路可能再抛）吞掉——遥测不得改变取消语义。
+- **C5 弃流补偿的时序是 best-effort**（2026-11-05 实测）：经完整 proxy 链 `aclose()` 时内层 handler 的 finally 由 asyncio asyncgen finalizer 钩子调度（GC 时机），生产可用但测试不可依赖；单测直接驱动 handler（`_make_trace_stream_wrap_handler`），代理链的同步关闭不属于本契约。
+- **C6 `identity` 是显式参数而非复用 session**：裸会话无 agent card，rail `_build_common_info` 路径无从取身份；显式传递不改动 session 结构，且 `None` 缺省使存量调用方 wire 完全不变。
 
 ## 与设计的偏差
 
@@ -59,6 +67,7 @@ design_note: 方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!357
 | 执行日期 / 验证范围 | 实现版本与环境 | 命令 / 复现步骤 / 记录链接 | 实际结果 | 未覆盖项 / 失败原因 |
 | --- | --- | --- | --- | --- |
 | 2026-11-05 tracer_otel + decorator 单测 | feature/otel-decorator-llm-telemetry（C1–C4）本地；.testenv（openjiuwen 可编辑安装指向本工作区，Python 3.12） | `/Users/lily/ai-app/jiuwen/.testenv/bin/python -m pytest tests/unit_tests/extensions/tracer_otel/ tests/unit_tests/core/session/tracer/test_decorator.py -q` | 通过：172 passed（含新增 5 项 sibling/workflow 身份/首写优先/能力常量单测，3.68s） | 端到端 collector 链路（跨仓联调范围） |
+| 2026-11-05 C5/C6 增补单测 | 同上（C1–C6） | 同命令 + `tests/unit_tests/core/runner/resources_manager/`，`PYTHONPATH` 指向本工作区 | 通过：179 passed（新增 3 项：弃流补偿 fires end with partial、取消补偿 fires end with outputs=None、get_model identity 透传）；stash 源码修复后 3 项必红、恢复后全绿 | 端到端 collector 链路（跨仓联调范围） |
 
 ### 可见行为、副作用与证据有效范围
 
