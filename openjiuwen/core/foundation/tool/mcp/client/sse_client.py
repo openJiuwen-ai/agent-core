@@ -158,8 +158,10 @@ class SseClient(McpClient):
             return True
 
         except Exception as e:
-            logger.error("[SseClient] SSE connection failed to %s: %s: %r", self._server_path,
-                         type(e).__name__, e)
+            logger.error(
+                "[SseClient] SSE connection failed server=%s url_length=%s to %s: %s: %r",
+                self._name, len(self._server_path), self._server_path, type(e).__name__, e,
+            )
             # Clean up whatever partial state we have, but don't let cleanup
             # exceptions mask the original connection error.
             try:

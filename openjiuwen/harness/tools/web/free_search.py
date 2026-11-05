@@ -29,6 +29,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.security.outbound.policy import reader_fallback_allowed
 from openjiuwen.harness.tools.web._common import (
     _FREE_SEARCH_BING_ENABLED_ENV,
     _FREE_SEARCH_DDG_ENABLED_ENV,
@@ -720,12 +721,11 @@ class WebFreeSearchTool(Tool):
 
         engines: list[tuple[str, Any]] = []
         if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False):
-            engines.extend(
-                [
-                    ("duckduckgo", WebFreeSearchTool._search_duckduckgo),
-                    ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina),
-                ]
-            )
+            engines.append(("duckduckgo", WebFreeSearchTool._search_duckduckgo))
+            if reader_fallback_allowed():
+                engines.append(("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina))
+            else:
+                tool_logger.debug("[FreeSearch] skipping duckduckgo-jina: host egress policy disallows opaque readers")
         if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False):
             engines.append(("bing", WebFreeSearchTool._search_bing))
 

@@ -106,6 +106,61 @@ def test_active_blocks_denied_and_bad_scheme():
     assert userinfo.value.matched_rule == "host_exit:userinfo"
 
 
+@pytest.mark.parametrize("check", [host_exit.check_outbound_url, host_exit.check_mcp_server_url])
+@pytest.mark.parametrize("size", [8191, 8192, 8193, 9000])
+def test_url_size_boundary_is_inclusive_and_reports_actual_length(check, size):
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    prefix = "http://192.0.2.10:63656/sse?pad="
+    url = prefix + "a" * (size - len(prefix))
+    assert len(url) == size
+    if size <= 8192:
+        check(url)
+    else:
+        with pytest.raises(OutboundBlockedError) as exc:
+            check(url)
+        assert exc.value.matched_rule == "host_exit:url_size"
+        assert f"url_length={size} limit=8192" in exc.value.reason
+        assert exc.value.url == url
+
+
+@pytest.mark.parametrize("check", [host_exit.check_reader_url, host_exit.check_outbound_url])
+@pytest.mark.parametrize("host", [
+    "r.jina.ai", "R.JINA.AI.", "%72.jina.ai", "ｒ.ｊｉｎａ.ａｉ", "ｒ.ｊｉｎａ.ａｉ。",
+])
+def test_opaque_reader_uses_shared_normalization_even_with_allow_rule(check, host):
+    host_exit.publish_host_exit_policy({"net_guard": _section(urls={"r.jina.ai": "allow"})})
+    with pytest.raises(OutboundBlockedError) as exc:
+        check(f"https://{host}/https://start.example/redirect")
+    assert exc.value.matched_rule == "host_exit:opaque_reader"
+
+
+@pytest.mark.parametrize("mode,allowed", [
+    ("unset", True), ("disabled", True), ("not_enforced", True), ("active", False), ("error", False),
+])
+def test_opaque_reader_shared_mode_contract(mode, allowed):
+    if mode != "unset":
+        section = _section(enabled=mode != "disabled", enforce_host_exit=mode != "not_enforced")
+        if mode == "error":
+            section["max_request_mb"] = 0
+        host_exit.publish_host_exit_policy({"net_guard": section})
+    assert host_exit.get_host_exit_state().mode == mode
+    assert host_exit.reader_fallback_allowed() is allowed
+    if allowed:
+        host_exit.check_reader_url("https://r.jina.ai/https://start.example/")
+    else:
+        with pytest.raises(OutboundBlockedError) as exc:
+            host_exit.check_reader_url("https://r.jina.ai/https://start.example/")
+        assert exc.value.matched_rule == ("host_exit:error" if mode == "error" else "host_exit:opaque_reader")
+
+
+@pytest.mark.parametrize("url", [
+    "https://deepsearch.jina.ai/", "https://r.jina.ai.other.example/", "https://example.org/r.jina.ai/",
+])
+def test_reader_registry_does_not_block_other_services(url):
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    host_exit.check_outbound_url(url)
+
+
 def test_not_enforced_passes_through():
     host_exit.publish_host_exit_policy(
         {"net_guard": _section(urls={"*": "deny"}, enforce_host_exit=False)}
@@ -221,6 +276,18 @@ def test_sync_redirect_to_denied_host_is_blocked():
         sync_client.get("https://start.example/", session=session)
     assert len(session.calls) == 1
     assert session.calls[0][2]["allow_redirects"] is False
+
+
+def test_sync_redirect_into_opaque_reader_stops_before_connection():
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    first = _Resp(302, "https://r.jina.ai/https://start.example/redirect")
+    session = _Session([first])
+    with pytest.raises(OutboundBlockedError) as exc:
+        sync_client.get("https://start.example/", session=session)
+    assert exc.value.matched_rule == "host_exit:opaque_reader"
+    assert exc.value.url == "https://r.jina.ai/https://start.example/redirect"
+    assert len(session.calls) == 1
+    assert first.closed
 
 
 def test_sync_redirect_rewrites_method_and_strips_auth():
@@ -353,6 +420,21 @@ async def test_async_redirect_to_denied_host_is_blocked():
         await async_client.request(session, "GET", "https://start.example/")
     assert first.released is True
     assert session.calls[0][2]["allow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_async_redirect_into_opaque_reader_stops_before_connection():
+    from openjiuwen.harness.security.outbound import async_client
+
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    first = _AsyncResp(302, "https://r.jina.ai/https://start.example/redirect")
+    session = _AsyncSession([first])
+    with pytest.raises(OutboundBlockedError) as exc:
+        await async_client.request(session, "GET", "https://start.example/")
+    assert exc.value.matched_rule == "host_exit:opaque_reader"
+    assert exc.value.url == "https://r.jina.ai/https://start.example/redirect"
+    assert len(session.calls) == 1
+    assert first.released
 
 
 @pytest.mark.asyncio

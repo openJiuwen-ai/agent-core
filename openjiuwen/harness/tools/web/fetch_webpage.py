@@ -13,13 +13,19 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 import aiohttp
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.security.outbound.policy import (
+    OutboundBlockedError,
+    reader_fallback_allowed,
+)
 from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._common import (
     _FETCH_WEBPAGE_DEFAULT_MAX_BYTES,
@@ -185,7 +191,7 @@ class WebFetchWebpageTool(Tool):
         timeout_seconds: int,
         byte_cap: int,
     ) -> dict[str, Any]:
-        """Fetch webpage content, falling back to the jina.ai reader on 401/403/429."""
+        """Fetch directly; allow the opaque reader only without host egress enforcement."""
         status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
@@ -194,7 +200,11 @@ class WebFetchWebpageTool(Tool):
             timeout_seconds=timeout_seconds,
             max_bytes=byte_cap,
         )
-        if status in {401, 403, 429}:
+        if status in {401, 403, 429} and reader_fallback_allowed():
+            tool_logger.warning(
+                "web_fetch.reader_fallback source_host=%s reader_host=r.jina.ai status=%s",
+                urlparse(url).hostname, status,
+            )
             return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
         _raise_fetch_http_error(url, status, body)
 
@@ -259,6 +269,8 @@ class WebFetchWebpageTool(Tool):
         try:
             async with _http.new_session() as session:
                 data = await WebFetchWebpageTool._fetch_webpage(session, url, timeout_seconds, byte_cap)
+        except OutboundBlockedError as exc:
+            return f"[PERMISSION_DENIED]: {exc}"
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: failed to fetch webpage: {exc}"
 

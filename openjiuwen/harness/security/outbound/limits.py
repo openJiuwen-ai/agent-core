@@ -17,7 +17,7 @@ MAX_REQUEST_MB = 1024
 MAX_TIMEOUT_SECONDS = 3600
 _MB = 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
-MAX_URL_CHARS = 8192
+MAX_URL_CHARS = 8192  # Inclusive Python-string character count at the policy check.
 
 
 class OutboundLimitError(ValueError):

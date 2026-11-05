@@ -224,6 +224,49 @@ This is neither a global Shell allow nor a remembered
 approval, and it never rewrites a final ASK to ALLOW. Disabling the workspace or
 its source removes this contribution on refresh. V1 has no such exception.
 
+### 6.2 Host outbound redirects and opaque readers
+
+Host applications publish `permissions.net_guard` through the outbound policy registry.
+While host enforcement is active, built-in HTTP clients check every redirect target before
+connecting. Web fetch reports an `OutboundBlockedError` as `[PERMISSION_DENIED]`, retaining
+the `outbound blocked` reason and matched rule instead of treating it as a transport failure.
+
+The async fetch tool does not retry HTTP 401/403/429 through `r.jina.ai` while host enforcement
+is active. The shared exit also rejects direct or redirected reader wrappers, including
+canonical hostname variants, even if the outer reader domain has an allow rule. Remote
+reader redirects cannot be checked locally; validating only the embedded URL cannot secure
+the subsequent chain. Ordinary allowed redirects retain their existing behavior.
+
+Reader fallback remains available in `unset`, `disabled` and `not_enforced` modes. Its WARNING
+records source/reader hostnames and status, without full query URLs. A policy-build error
+remains fail-closed. This is host-process HTTP enforcement, not an OS-level sandbox guarantee.
+
+Hosts can import `check_reader_url` and `reader_fallback_allowed` from
+`openjiuwen.harness.security.outbound`; delegate to these helpers rather than copying hostname
+normalization or policy-state checks. Core maintains the immutable `OPAQUE_READER_HOSTS`
+registry in `outbound/policy.py`. Review and add future opaque reader domains there; the
+registry is code-owned, not a user-configurable permission exemption. Paid search at
+`deepsearch.jina.ai` is a separate service and is not in this registry.
+
+### 6.3 Inclusive URL-length boundary and diagnostics
+
+`MAX_URL_CHARS = 8192` is inclusive: the host exit rejects only `len(url) > 8192`.
+The measurement is the complete Python string passed to the check, including scheme,
+path and query, not its UTF-8 byte count or a serialized HTTP request-line length.
+For enforced non-loopback MCP endpoints, configuration validation and SSE connection
+validation check the saved `server_path`; the existing loopback exemption is separate.
+
+A length rejection retains `host_exit:url_size` and includes `url_length=<actual>` and
+`limit=8192` in its reason. Configuration skip logs and SSE failure logs identify the
+server name and measured length. When testing several boundary legs in one process,
+correlate the server name, length and request interval; finding the rule name anywhere
+in a shared log window does not establish that the current leg was rejected.
+
+Regression tests cover 8191/8192/8193/9000 and run the installed SSE SDK with a mocked
+HTTP transport: 8192 reaches the transport unchanged, while 8193 and 9000 do not send.
+A transport receiving a request may still reject the SSE/MCP handshake; that is not a
+URL-size denial. These tests do not establish the cause of a separate full-suite log.
+
 ## 7. Source index
 
 | Path | Notes |
