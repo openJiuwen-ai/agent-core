@@ -219,3 +219,41 @@ async def test_add_tool_server_coerces_exception_group_into_base_error() -> None
     assert "demo" in str(err.cause)  # server_name
     # connect() returned True, so disconnect cleanup must run on the failure path.
     assert fake_client.disconnect.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_forwards_timeout_to_client() -> None:
+    """A connect budget must reach both ``connect`` and ``list_tools``."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="timeout-srv")
+
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(return_value=True)
+    fake_client.list_tools = AsyncMock(
+        return_value=[_make_tool_card("alpha", cfg.server_id, cfg.server_name)]
+    )
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        await mgr.add_tool_server(cfg, timeout=1.5)
+
+    fake_client.connect.assert_awaited_once_with(timeout=1.5)
+    fake_client.list_tools.assert_awaited_once_with(timeout=1.5)
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_omits_timeout_when_unset() -> None:
+    """Without a budget the client keeps its own default behaviour."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="no-timeout-srv")
+
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(return_value=True)
+    fake_client.list_tools = AsyncMock(return_value=[])
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        await mgr.add_tool_server(cfg)
+
+    fake_client.connect.assert_awaited_once_with()
+    fake_client.list_tools.assert_awaited_once_with()

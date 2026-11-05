@@ -15,6 +15,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -89,25 +90,30 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         tool = TaskTool(card=card, parent_agent=parent_agent)
 
         session = Session(session_id="parent_session")
-        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
-            result = await tool.invoke(
-                {"subagent_type": "code", "task_description": "run task"},
-                session=session,
-            )
+        sub_session_id = "parent_session_sub_code_runtime"
+        subagent = FakeSubAgent()
+        runtime = get_agent_runtime()
+        runtime.bind(sub_session_id, subagent)
+        try:
+            with (
+                patch.object(parent_agent, "create_subagent", return_value=subagent),
+                patch.object(tool, "_build_sub_session_id", return_value=sub_session_id),
+            ):
+                result = await tool.invoke(
+                    {"subagent_type": "code", "task_description": "run task"},
+                    session=session,
+                )
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.data, {"output": "done", "agent_id": "test_id"})
-        self.assertIsNone(result.error)
-        self.assertEqual(called_inputs["query"], "run task")
-        self.assertEqual(prepare_calls, 1)
-        self.assertEqual(cleanup_calls, 1)
-        # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
-        self.assertIsNotNone(
-            re.fullmatch(
-                r"parent_session_sub_code_[0-9a-f]{8}",
-                called_inputs["conversation_id"],
-            ),
-        )
+            self.assertTrue(result.success)
+            self.assertEqual(result.data, {"output": "done", "agent_id": "test_id"})
+            self.assertIsNone(result.error)
+            self.assertEqual(called_inputs["query"], "run task")
+            self.assertEqual(called_inputs["conversation_id"], sub_session_id)
+            self.assertEqual(prepare_calls, 1)
+            self.assertEqual(cleanup_calls, 1)
+            self.assertIsNone(runtime.get(sub_session_id))
+        finally:
+            runtime.unbind(sub_session_id, subagent)
 
     async def test_task_tool_prefers_stream_and_returns_only_terminal_answer(self) -> None:
         calls: list[tuple[str, dict[str, str]]] = []
