@@ -64,6 +64,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
+    get_declared_image_support,
     schedule_image_support_probe,
 )
 from openjiuwen.harness.rails import DeepAgentRail
@@ -918,6 +919,14 @@ class DeepAgent(BaseAgent):
             return bool(cfg.enable_read_image_multimodal)
         if cfg.model is None:
             return None
+        declared = get_declared_image_support(cfg.model)
+        if declared is not None:
+            # A declared capability is authoritative: no probe round-trip and
+            # no "unknown" window where user uploads would look unsupported.
+            # Deliberately not written back into the config: reading the
+            # declaration is cheap, and latching it would turn the auto (None)
+            # state into an explicit verdict that outlives the declaration.
+            return declared
         cached = get_cached_image_support(cfg.model)
         if cached is None:
             return None
@@ -1071,6 +1080,18 @@ class DeepAgent(BaseAgent):
                 "[DeepAgent] no model configured; disabling read_file image multimodal",
             )
             config.enable_read_image_multimodal = False
+            return
+
+        declared = get_declared_image_support(config.model)
+        if declared is not None:
+            # Not written back into the config: read paths resolve the
+            # declaration on demand, and latching it here would freeze auto
+            # (None) into an explicit verdict the host never asked for.
+            logger.info(
+                "[DeepAgent] read_file image multimodal from model declaration "
+                "(supports_vision): %s",
+                declared,
+            )
             return
 
         cached = get_cached_image_support(config.model)

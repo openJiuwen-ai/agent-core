@@ -69,6 +69,17 @@ _OFFICE_DOC_EXTENSIONS: frozenset = frozenset({
     ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
 })
 
+# Inline-image budget for read_file native multimodal: raw bytes and longest
+# side. The byte budget is derived from the provider-side per-image cap instead
+# of the token budget: the blob is base64-encoded into the data URI, so 3.6 MB
+# of raw bytes becomes ~4.8 MB of base64, below the 5 MB per-image limit
+# enforced by providers such as Anthropic and still leaving room for the
+# "data:...;base64," prefix. The longest side stays at 2048px so reference
+# images (e.g. a 1900x1600 PPT slide) are not downscaled before the model sees
+# them; the shrink pipeline only fires when either limit is exceeded.
+READ_IMAGE_MAX_BYTES = 3_600_000
+READ_IMAGE_MAX_DIMENSION = 2048
+
 
 def _is_office_doc_path(file_path: str) -> bool:
     _, ext = os.path.splitext(file_path.lower())
@@ -846,6 +857,9 @@ class ReadFileTool(Tool):
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
     MAX_OFFICE_DOC_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB - ZIP containers with media
+    # Overridable per subclass / instance: inline-image budget for native multimodal.
+    READ_IMAGE_MAX_BYTES: int = READ_IMAGE_MAX_BYTES
+    READ_IMAGE_MAX_DIMENSION: int = READ_IMAGE_MAX_DIMENSION
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
     def __init__(
@@ -1396,15 +1410,6 @@ class ReadFileTool(Tool):
 
         return await asyncio.to_thread(_extract_sync)
 
-    def _image_byte_budget(self) -> int:
-        """Raw-byte budget whose base64 form stays within ``MAX_TOKENS``.
-
-        ``base64_len * 0.125`` approximates the token cost of the encoded
-        payload, so the raw budget is ``MAX_TOKENS / 0.125 * 3 / 4``.
-        """
-
-        return max(1, int(self.MAX_TOKENS * 6))
-
     @staticmethod
     def _image_text_only_result(
         file_path: str,
@@ -1483,8 +1488,8 @@ class ReadFileTool(Tool):
         fitted = shrink_image_bytes(
             raw,
             mime_type,
-            max_bytes=self._image_byte_budget(),
-            max_dimension=1536,
+            max_bytes=self.READ_IMAGE_MAX_BYTES,
+            max_dimension=self.READ_IMAGE_MAX_DIMENSION,
         )
         if fitted is None:
             # 预算内无法编码时绝不能退回原始字节：那会把未受预算约束的

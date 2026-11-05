@@ -214,6 +214,9 @@ def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir
 @pytest.mark.asyncio
 async def test_read_file_image_compresses_large_image_within_budget(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
+    # The budget is a class attribute so deployments can tighten it per model.
+    read_tool.READ_IMAGE_MAX_BYTES = 64 * 1024
+    read_tool.READ_IMAGE_MAX_DIMENSION = 1024
     file_path = os.path.join(temp_dir, "large_noise.png")
 
     # Random noise compresses poorly, guaranteeing the payload busts the
@@ -237,9 +240,9 @@ async def test_read_file_image_compresses_large_image_within_budget(sys_op, temp
     encoded_payload = data_url.split(",", 1)[1]
     decoded = base64.b64decode(encoded_payload)
     assert len(decoded) < raw_size
-    assert len(decoded) <= read_tool._image_byte_budget()
+    assert len(decoded) <= read_tool.READ_IMAGE_MAX_BYTES
     with Image.open(io.BytesIO(decoded)) as shrunk:
-        assert max(shrunk.size) <= 1536
+        assert max(shrunk.size) <= read_tool.READ_IMAGE_MAX_DIMENSION
 
 
 @pytest.mark.asyncio
