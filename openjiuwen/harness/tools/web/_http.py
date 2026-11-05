@@ -12,6 +12,7 @@ trust_env=False retry that mirrors the original ProxyError fallback.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -26,6 +27,7 @@ from openjiuwen.harness.tools.web._common import _free_search_ssl_verify, _resol
 _READ_CHUNK_SIZE = 64 * 1024
 # Connect-phase timeout cap (seconds); read phase uses the caller's full budget.
 _CONNECT_TIMEOUT_CAP = 10
+_MAX_RESPONSE_HEADER_FIELD_SIZE = 64 * 1024
 
 
 def _make_connector() -> aiohttp.TCPConnector:
@@ -115,6 +117,7 @@ async def _do_request(
         proxy=proxy,
         proxy_auth=proxy_auth,
         timeout=timeout,
+        max_field_size=_MAX_RESPONSE_HEADER_FIELD_SIZE,
     ) as resp:
         body, truncated = await _read_capped(resp, max_bytes)
         return resp.status, dict(resp.headers), body, str(resp.url), truncated
@@ -149,6 +152,7 @@ async def request(
         A tuple of (status, headers, body bytes, final URL, truncated flag).
     """
     method_up = method.upper()
+    started_at = time.monotonic()
     proxy = _resolve_proxy(url, proxy_url)
     explicit_proxy = proxy is not None
     proxy_auth: aiohttp.BasicAuth | None = None
@@ -176,6 +180,14 @@ async def request(
     except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError):
         if explicit_proxy:
             raise
+        remaining = timeout_seconds - (time.monotonic() - started_at)
+        if remaining <= 0:
+            raise TimeoutError("HTTP request budget exhausted before proxy fallback") from None
+        timeout = aiohttp.ClientTimeout(
+            total=remaining,
+            sock_connect=min(remaining, _CONNECT_TIMEOUT_CAP),
+            sock_read=remaining,
+        )
         async with aiohttp.ClientSession(trust_env=False, connector=_make_connector()) as fallback:
             return await _do_request(
                 fallback,
