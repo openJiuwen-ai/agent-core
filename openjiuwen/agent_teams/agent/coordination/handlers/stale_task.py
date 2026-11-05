@@ -28,6 +28,14 @@ Two sweeps, both throttled per task:
   spawnable capacity since assignment launches them), plus assigned tasks
   whose assignee never started (spawn failed and rolled back — only the
   leader can retry the launch or reassign).
+- **stale in-progress (leader-only)**: an IN_PROGRESS task that goes too
+  long without new output (silence) — or runs too long at all (age) —
+  self-prompts the leader to review it and, if warranted, send the
+  assignee a convergence order. This covers the shape the idle-clock
+  sweeps structurally cannot see: a member mid-round is "busy", and busy
+  is unrepresentable as a stall. Durations accumulate per poll
+  tick, never from wall-clock spans, so a paused team (polls frozen)
+  cannot fabricate a stall either.
 
 Scheduled dispatch keeps the legacy ``updated_at`` claim sweep — see
 ``ScheduledStaleTaskHandler``.
@@ -82,18 +90,26 @@ class StaleTaskHandler(BaseCoordinationHandler):
         MemberStatus.UNSTARTED.value,
         MemberStatus.STARTING.value,
     })
+    # Cap on the silence-tolerance backoff: a witness refresh re-arms the
+    # silence ladder, and every re-arm after a FIRED ladder doubles the
+    # silence threshold, up to this multiple of the configured timeout —
+    # recurring quiet episodes are still reported, but at an ever-thinning
+    # cadence (alarm fatigue is worse than no alarm).
+    _SILENCE_SCALE_CAP: ClassVar[int] = 8
 
     def __init__(
-        self,
-        host: "DispatcherHost",
-        blueprint: TeamAgentBlueprint,
-        infra: TeamInfra,
-        poll_ctrl: "PollController",
+            self,
+            host: "DispatcherHost",
+            blueprint: TeamAgentBlueprint,
+            infra: TeamInfra,
+            poll_ctrl: "PollController",
     ) -> None:
         super().__init__(host, blueprint, infra, poll_ctrl)
         spec = blueprint.spec
         self._idle_claim_seconds = float(spec.stale_claim_idle_timeout)
         self._idle_pending_seconds = float(spec.stale_pending_idle_timeout)
+        self._inprogress_silence_seconds = float(spec.stale_inprogress_silence_timeout)
+        self._inprogress_age_seconds = float(spec.stale_inprogress_age_timeout)
         # task_id -> wall-clock seconds when we last fired a stale-claim
         # nudge. Throttles follow-up nudges only; whether a task *is* stale
         # is decided by the member's idle clock (``idle_seconds()``), which
@@ -108,6 +124,15 @@ class StaleTaskHandler(BaseCoordinationHandler):
         # when the task leaves the set.
         self._stale_claim_streak: dict[str, int] = {}
         self._escalated_claims: set[str] = set()
+        # Stale-IN_PROGRESS watch, task_id -> {last_witness, silent_accum,
+        # tenure_accum, silence_tier, age_tier, silence_scale}. Durations
+        # accumulate the
+        # wall-clock delta between consecutive poll ticks (capped), never a
+        # bare ``now - since`` span: polls freeze while the team is paused,
+        # so a pause window adds nothing — the F_65 pause defect cannot
+        # reappear through this path. GC'd when the task leaves IN_PROGRESS.
+        self._inprogress_watch: dict[str, dict[str, float]] = {}
+        self._last_inprogress_tick_at: float | None = None
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Periodic task-board sweep: flag stale CLAIMED + leader stale PENDING."""
@@ -117,6 +142,7 @@ class StaleTaskHandler(BaseCoordinationHandler):
             try:
                 await self._check_stale_claimed_tasks()
                 await self._check_stale_pending_tasks()
+                await self._check_stale_inprogress_tasks()
             except Exception as exc:
                 # 团队存储已被删除（session.delete 删表）→ 自我停轮，不再刷屏
                 if await self._retire_polls_if_storage_gone(exc):
@@ -149,8 +175,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
         own_name = self._blueprint.member_name
         active: list[Any] = []
         for status in (
-            TaskStatus.PLANNING.value,
-            TaskStatus.IN_PROGRESS.value,
+                TaskStatus.PLANNING.value,
+                TaskStatus.IN_PROGRESS.value,
         ):
             active.extend(await task_manager.list_tasks(status=status))
         owned_active = [tk for tk in active if tk.assignee and tk.assignee == own_name]
@@ -399,6 +425,204 @@ class StaleTaskHandler(BaseCoordinationHandler):
             int(idle),
         )
 
+    async def _check_stale_inprogress_tasks(self) -> None:
+        """Leader-only: review prompt for IN_PROGRESS tasks that stall or outrun their welcome.
+
+        Two ladders per task, both tick-accumulated:
+
+        - **Silence** — no new witness (assignee mailbox message or task
+          ``updated_at`` bump) for ``stale_inprogress_silence_timeout``.
+          A witness refresh resets the silence clock and re-arms the ladder
+          (tier back to 0): each fresh quiet episode climbs from tier 0
+          again, but every re-arm after a fired ladder doubles the
+          tolerance (``silence_scale``, capped at ``_SILENCE_SCALE_CAP`` x),
+          so a member who reports just often enough is re-reported per
+          episode at an ever-thinning cadence instead of every window.
+          A failed witness query freezes the silence clock for that tick —
+          "no witness data" is never treated as "no output".
+        - **Age** — the task has sat in IN_PROGRESS for
+          ``stale_inprogress_age_timeout`` total, *regardless of output*.
+          Catches "active but never converging", which silence cannot see;
+          the framework hands the leader facts (age, output count) and the
+          leader judges whether the output is progress or spinning.
+
+        Tier 1 is a review prompt (send a customized convergence order);
+        tier 2 appends the ready-made final notice. Within one quiet
+        episode the ladder stops after tier 2 — the leader was told twice,
+        and choosing to wait is a legitimate verdict, so no further nagging
+        (alarm fatigue is worse than no alarm). The leader's own nudges
+        never count as witness — only assignee output resets the silence
+        clock.
+        """
+        if self._blueprint.role != TeamRole.LEADER:
+            return
+        task_manager = self._infra.task_manager
+        if task_manager is None:
+            return
+
+        in_progress = [
+            tk
+            for tk in await task_manager.list_tasks(status=TaskStatus.IN_PROGRESS.value)
+            # Defensive guard
+            if tk.assignee and tk.assignee != self._blueprint.member_name
+        ]
+
+        # GC watch entries for tasks that left IN_PROGRESS — completed,
+        # sent to review, cancelled, or reassigned. Both ladders reset.
+        current_ids = {tk.task_id for tk in in_progress}
+        for tid in [k for k in self._inprogress_watch if k not in current_ids]:
+            self._inprogress_watch.pop(tid, None)
+        if not in_progress:
+            # Next task starts its accumulation from its own first tick, not
+            # from a span covering a taskless gap.
+            self._last_inprogress_tick_at = None
+            return
+
+        now = time.time()
+        if self._last_inprogress_tick_at is None:
+            tick_delta = 0.0
+        else:
+            # Cap a single tick's contribution so event-loop congestion
+            # cannot inject a huge fabricated span into one tick.
+            tick_delta = min(now - self._last_inprogress_tick_at, 300.0)
+        self._last_inprogress_tick_at = now
+
+        # Witness source: per-sender mailbox high-water marks. A query
+        # failure FREEZES the silence clock for this tick (tenure still
+        # accrues): "no witness data" must never masquerade as "no output" —
+        # a transient read failure (database locked under write contention;
+        # the message table has no sender/timestamp index by design) would
+        # otherwise fabricate a stall out of thin air and escalate into a
+        # convergence order against a healthy, reporting member. The lower
+        # bound keeps the GROUP BY scan proportional to "messages posted
+        # after the oldest watched task started" — the bound is what keeps
+        # the query cheap on long-lived sessions.
+        latest_by_sender: dict[str, tuple[int, int]] = {}
+        witness_ok = True
+        message_manager = self._infra.message_manager
+        if message_manager is not None:
+            now_ms = get_current_time()
+            since_ms = min((tk.updated_at or now_ms) for tk in in_progress)
+            try:
+                latest_by_sender = await message_manager.latest_timestamps_by_sender(
+                    since_timestamp=since_ms
+                )
+            except Exception as e:
+                witness_ok = False
+                team_logger.warning(
+                    "stale-inprogress: sender witness query failed, "
+                    "freezing the silence clock this tick: %s",
+                    e,
+                )
+
+        review_lines: list[str] = []
+        final_lines: list[str] = []
+        for task in in_progress:
+            sender_latest, sender_msgs = latest_by_sender.get(task.assignee, (0, 0))
+            witness_s = max(task.updated_at or 0, sender_latest) / 1000.0
+            watch = self._inprogress_watch.setdefault(
+                task.task_id,
+                {
+                    "last_witness": 0.0,
+                    "silent_accum": 0.0,
+                    "tenure_accum": 0.0,
+                    "silence_tier": 0,
+                    "age_tier": 0,
+                    "silence_scale": 1,
+                },
+            )
+            watch["tenure_accum"] += tick_delta
+            if witness_ok:
+                if witness_s > watch["last_witness"]:
+                    if watch["last_witness"]:
+                        team_logger.debug("stale-inprogress witness refresh: task=%s", task.task_id)
+                    watch["last_witness"] = witness_s
+                    watch["silent_accum"] = 0.0
+                    # The refresh re-arms the silence ladder (tier back to
+                    # 0), but re-arming after a FIRED ladder doubles the
+                    # tolerance (capped): a member who reports just often
+                    # enough still gets a fresh review per quiet episode,
+                    # yet the prompts thin out instead of nagging every
+                    # window. An unfired ladder keeps the base tolerance —
+                    # the backoff answers nagging, not mere output.
+                    if watch["silence_tier"] > 0:
+                        watch["silence_scale"] = min(
+                            watch["silence_scale"] * 2,
+                            self._SILENCE_SCALE_CAP,
+                        )
+                        team_logger.debug(
+                            "stale-inprogress silence re-armed with backoff: task=%s scale=%d",
+                            task.task_id,
+                            watch["silence_scale"],
+                        )
+                    watch["silence_tier"] = 0
+                else:
+                    watch["silent_accum"] += tick_delta
+            # witness_ok=False: the silence clock freezes this tick — neither
+            # refreshed nor accumulated (see the witness-query comment above).
+
+            silent_min = int(watch["silent_accum"] // 60)
+            age_min = int(watch["tenure_accum"] // 60)
+            silence_budget = self._inprogress_silence_seconds * watch["silence_scale"]
+            review_due = (
+                    (watch["silence_tier"] == 0 and watch["silent_accum"] >= silence_budget)
+                    or (watch["age_tier"] == 0 and watch["tenure_accum"] >= self._inprogress_age_seconds)
+            )
+            final_due = (
+                    (watch["silence_tier"] == 1 and watch["silent_accum"] >= 2 * silence_budget)
+                    or (watch["age_tier"] == 1 and watch["tenure_accum"] >= 2 * self._inprogress_age_seconds)
+            )
+            if review_due:
+                if watch["silence_tier"] == 0 and watch["silent_accum"] >= silence_budget:
+                    watch["silence_tier"] = 1
+                if watch["age_tier"] == 0 and watch["tenure_accum"] >= self._inprogress_age_seconds:
+                    watch["age_tier"] = 1
+                review_lines.append(
+                    f"- [{task.task_id}] {task.title} (assignee={task.assignee}, "
+                    + t(
+                        "dispatcher.stale_inprogress_task_stats",
+                        silent_min=silent_min,
+                        age_min=age_min,
+                        msg_count=sender_msgs,
+                    )
+                    + ")"
+                )
+                team_logger.info(
+                    "[leader] stale-inprogress review: task=%s assignee=%s silent_min=%d age_min=%d witness_msgs=%d",
+                    task.task_id,
+                    task.assignee,
+                    silent_min,
+                    age_min,
+                    sender_msgs,
+                )
+            elif final_due:
+                if watch["silence_tier"] == 1 and watch["silent_accum"] >= 2 * silence_budget:
+                    watch["silence_tier"] = 2
+                if watch["age_tier"] == 1 and watch["tenure_accum"] >= 2 * self._inprogress_age_seconds:
+                    watch["age_tier"] = 2
+                final_lines.append(f"- [{task.task_id}] {task.title} (assignee={task.assignee})")
+                team_logger.warning(
+                    "[leader] stale-inprogress final-notice: task=%s assignee=%s silent_min=%d",
+                    task.task_id,
+                    task.assignee,
+                    silent_min,
+                )
+
+        sections: list[str] = []
+        if review_lines:
+            sections.append(t("dispatcher.stale_inprogress_review_header"))
+            sections.extend(review_lines)
+        if final_lines:
+            sections.append(t("dispatcher.stale_inprogress_final_header"))
+            sections.extend(final_lines)
+            sections.append(t("dispatcher.stale_inprogress_final_template"))
+        if not sections:
+            return
+        await self._round.deliver_input(
+            render_event(kind="stale-inprogress", body="\n".join(sections)),
+            use_steer=False,
+        )
+
 
 class ScheduledStaleTaskHandler(StaleTaskHandler):
     """Stale-task sweep of a scheduled-dispatch team instance (F_62).
@@ -450,9 +674,9 @@ class ScheduledStaleTaskHandler(StaleTaskHandler):
         own_name = self._blueprint.member_name
         active: list[Any] = []
         for status in (
-            TaskStatus.PLANNING.value,
-            TaskStatus.IN_PROGRESS.value,
-            TaskStatus.IN_REVIEW.value,
+                TaskStatus.PLANNING.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.IN_REVIEW.value,
         ):
             active.extend(await task_manager.list_tasks(status=status))
         relevant = [tk for tk in active if tk.assignee and tk.assignee == own_name]

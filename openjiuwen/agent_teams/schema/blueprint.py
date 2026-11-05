@@ -379,6 +379,27 @@ class TeamAgentSpec(BaseModel):
     the leader's process-local idle clock, never DB ``updated_at``.
     Ignored under scheduled dispatch. See F_65.
     """
+    stale_inprogress_silence_timeout: int = 600
+    """Autonomous dispatch: seconds an IN_PROGRESS task may go without output.
+
+    The witness clock of a task is the later of its ``updated_at`` and its
+    assignee's latest mailbox message; when no new witness appears for this
+    long the leader self-prompts to review the task and, if warranted, send
+    a convergence order to the assignee. Accumulated per POLL_TASK tick so a
+    paused team cannot inflate it (polls freeze while paused). Covers the
+    "running but silent" blind spot that the idle-clock sweeps structurally
+    cannot see (F_65: busy is unrepresentable as a stall).
+    """
+    stale_inprogress_age_timeout: int = 1800
+    """Autonomous dispatch: seconds an IN_PROGRESS task may run at all.
+
+    Fires the leader review prompt even when the assignee keeps producing
+    output — the "active but never converging" shape that the silence
+    timeout cannot catch. Output quality is not judged by the framework;
+    the prompt hands the leader the facts (age + output count) and the
+    leader decides. Same tick-accumulated, pause-safe measurement as the
+    silence timeout.
+    """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
 
@@ -642,6 +663,16 @@ class TeamAgentSpec(BaseModel):
         if self.stale_pending_idle_timeout <= 0:
             raise ValueError(
                 f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        if self.stale_inprogress_silence_timeout <= 0:
+            raise ValueError(
+                f"stale_inprogress_silence_timeout must be > 0 seconds, got "
+                f"{self.stale_inprogress_silence_timeout}",
+            )
+        if self.stale_inprogress_age_timeout <= 0:
+            raise ValueError(
+                f"stale_inprogress_age_timeout must be > 0 seconds, got "
+                f"{self.stale_inprogress_age_timeout}",
             )
         return self
 

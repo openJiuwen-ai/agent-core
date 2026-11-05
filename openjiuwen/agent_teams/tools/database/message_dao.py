@@ -6,7 +6,7 @@
 import json
 from typing import List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -242,6 +242,44 @@ class MessageDao:
             result = await session.execute(query)
             rows = result.scalars().all()
             return rows
+
+    async def get_latest_timestamps_by_sender(
+        self, team_name: str, *, since_timestamp: int = 0
+    ) -> dict[str, tuple[int, int]]:
+        """Per-sender (latest timestamp, message count) since ``since_timestamp``.
+
+        Backs the stale-inprogress sweep's witness clock: a task's assignee
+        "produced output" when it sent any mailbox message, so the sweep only
+        needs the per-sender high-water mark, not the messages themselves.
+
+        The lower bound keeps the scan proportional to "messages posted after
+        the oldest watched task started" instead of the whole session table;
+        the message table deliberately has no (from_member_name, timestamp)
+        index (write-amplification budget, models.py A1/A2), so the bound is
+        what keeps this GROUP BY cheap on long-lived sessions. Correctness:
+        a sender whose last message predates the bound simply drops out of
+        the map, and the caller's witness then falls back to the task's own
+        updated_at — which is >= the bound by construction.
+        """
+        message_model = _get_message_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(
+                    message_model.from_member_name,
+                    func.max(message_model.timestamp),
+                    func.count(),
+                )
+                .where(
+                    message_model.team_name == team_name,
+                    message_model.timestamp >= since_timestamp,
+                )
+                .group_by(message_model.from_member_name)
+            )
+            return {
+                sender: (latest, count)
+                for sender, latest, count in result.all()
+                if sender and latest is not None
+            }
 
     async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.

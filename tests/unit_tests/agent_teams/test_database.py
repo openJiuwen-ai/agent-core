@@ -10,7 +10,7 @@ import warnings
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, update
 from sqlalchemy.exc import SAWarning
 
 from openjiuwen.agent_teams.context import (
@@ -1788,6 +1788,60 @@ class TestMessageOperations:
         message_ids = [m.message_id for m in messages]
         assert "msg3" in message_ids
         assert "msg4" in message_ids
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_get_latest_timestamps_by_sender_respects_since_bound(self, db):
+        """The since_timestamp bound drops messages posted before it.
+
+        Backs the stale-inprogress sweep's witness clock on long-lived
+        sessions: senders whose only messages predate the bound drop out of
+        the aggregate (the caller's witness then falls back to the task's
+        own updated_at), while newer senders stay.
+        """
+        set_session_id("session_id")
+        await db.team.create_team(
+            team_name="team22",
+            display_name="Team 22",
+            leader_member_name="leader22"
+        )
+        await db.message.create_message(
+            message_id="old-msg",
+            team_name="team22",
+            from_member_name="member-old",
+            to_member_name="leader22",
+            content="posted long ago",
+        )
+        await db.message.create_message(
+            message_id="new-msg",
+            team_name="team22",
+            from_member_name="member-new",
+            to_member_name="leader22",
+            content="posted after the bound",
+        )
+        # Age the older message below the bound; create_message always
+        # stamps get_current_time(), so adjust the row directly.
+        message_model = _get_message_model()
+        async with db.session_local() as session:
+            await session.execute(
+                update(message_model)
+                .where(message_model.message_id == "old-msg")
+                .values(timestamp=1000)
+            )
+            await session.commit()
+
+        bounded = await db.message.get_latest_timestamps_by_sender(
+            "team22", since_timestamp=2000
+        )
+        assert "member-old" not in bounded
+        assert "member-new" in bounded
+        assert bounded["member-new"][0] >= 2000
+        assert bounded["member-new"][1] == 1
+
+        # Default (no bound) sees both senders.
+        unbounded = await db.message.get_latest_timestamps_by_sender("team22")
+        assert unbounded["member-old"] == (1000, 1)
+        assert "member-new" in unbounded
 
     @pytest.mark.asyncio
     @pytest.mark.level1

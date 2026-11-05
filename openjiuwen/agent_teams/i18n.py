@@ -201,6 +201,28 @@ STRINGS: dict[str, dict[str, str]] = {
             "[催促建议] 以下任务已指派但承担成员从未启动（可能拉起失败被回滚）。"
             "请用 send_message 点名该成员重试拉起，或用 update_task(assignee=...) 改派其他成员："
         ),
+        # agent/coordination/handlers/stale_task.py — stale-inprogress leader self-prompt
+        "dispatcher.stale_inprogress_review_header": (
+            "[复核建议] 以下任务长时间处于进行中（也可能成员正在专注执行，请先复核再决定是否介入）。"
+            "若判断成员收尾困难或方向偏离，用 send_message 向承担成员发收敛令——"
+            "催收消息必须自包含：明确告知停止扩张、只要增量结论、给出格式与时间盒。"
+            "若属正常长任务可忽略本提示（同一段沉默最多提醒两次；成员有新产出后重新计时，"
+            "且容忍间隔逐次加倍，不会持续轰炸）："
+        ),
+        "dispatcher.stale_inprogress_task_stats": (
+            "无新产出 {silent_min} 分钟 / 已进行 {age_min} 分钟 / 成员近期来信 {msg_count} 条"
+        ),
+        "dispatcher.stale_inprogress_final_header": (
+            "[最终催收建议] 以下任务经首次提醒后仍未收敛（成员可能已挂死或陷入无效循环，"
+            "若消息无响应可考虑 shutdown_member(force=true) 兜底）。"
+            "建议直接向承担成员发送以下最终通知（可照发，可改写）："
+        ),
+        "dispatcher.stale_inprogress_final_template": (
+            "最终通知：请立即停止扩张检索与新的工具探索，回传你手上已有的结论。"
+            "如果你还在等某个检索，直接放弃它，用手上材料收尾——哪怕只有几百字的增量结论，"
+            "也远好于什么都不发。请把结论正文直接通过 send_message 发给我（不要先写文件）。"
+            "发送后即可结束本任务。"
+        ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "人类成员",
         "hitt.human_agent_default_desc": (
@@ -472,6 +494,35 @@ STRINGS: dict[str, dict[str, str]] = {
             "(the spawn may have failed and rolled back). "
             "Retry the launch with send_message to the assignee, or reassign via "
             "update_task(assignee=...):"
+        ),
+        # agent/coordination/handlers/stale_task.py — stale-inprogress leader self-prompt
+        "dispatcher.stale_inprogress_review_header": (
+            "[Review suggestion] The following tasks have been in progress for a long time "
+            "(the member may simply be focused — review before intervening). "
+            "If a member is struggling to converge or drifting off course, send it a convergence "
+            "order with send_message — the order must be self-contained: state what to stop "
+            "expanding, ask only for the incremental findings, and give a format and a time box. "
+            "Ignore this prompt for legitimately long tasks (each silent episode is reported "
+            "at most twice; fresh output restarts the clock with a doubled tolerance, "
+            "so prompts will not keep coming):"
+        ),
+        "dispatcher.stale_inprogress_task_stats": (
+            "no new output for {silent_min} min / running for {age_min} min / "
+            "{msg_count} recent message(s) from the member"
+        ),
+        "dispatcher.stale_inprogress_final_header": (
+            "[Final notice suggestion] The following tasks still have not converged after the first "
+            "reminder (the member may be hung or stuck in a fruitless loop — if messages go "
+            "unanswered, consider shutdown_member(force=true) as a fallback). "
+            "Send the member the following final notice directly (send as-is or adapt):"
+        ),
+        "dispatcher.stale_inprogress_final_template": (
+            "Final notice: stop expanding your search and stop launching new tool explorations "
+            "now, and send back whatever conclusions you already have. If you are still waiting "
+            "on a lookup, abandon it and wrap up with the material in hand — even a few hundred "
+            "words of incremental findings beats sending nothing. Send the conclusion text "
+            "directly to me via send_message (do not write it to a file first). "
+            "You may end the task once sent."
         ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "Human Member",
