@@ -566,6 +566,118 @@ class TestOtelAgentHandler:
 # ---------------------------------------------------------------------------
 
 
+class TestExplicitParentContext:
+    """嵌入侧显式父 refs（parent_span_id/parent_trace_id）优先于逻辑父与环境回退。
+
+    嵌入侧（studio 双写桥）llm span 的逻辑父不在本 handler 的 span manager
+    表里，环境回退又被链路中的上下文污染破坏（部署实证：llm span 与 node
+    span 并列、误挂死根）。修复：identity 通道显式携带 node span 的
+    (trace_id, span_id[, trace_flags])，on_llm_start 据此构造 NonRecordingSpan
+    父上下文——显式 > 逻辑 > 环境三级顺序，refs 缺失/非法时逐位回退既有
+    解析，行为不变。
+    """
+
+    @staticmethod
+    def _hex_ids(otel_span):
+        ctx = otel_span.get_span_context()
+        return f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}"
+
+    async def test_llm_span_parents_onto_explicit_refs(self):
+        """refs 齐全 → llm span 落到给定 (trace_id, span_id) 下、同 trace。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        node_span = _OTEL_TRACER.start_span(name="component.node-llm")
+        try:
+            trace_hex, span_hex = self._hex_ids(node_span)
+            span_manager = SpanManager("test-trace-id")
+            agent_span = span_manager.create_agent_span()
+            await handler.on_llm_start(
+                span=agent_span,
+                inputs={"prompt": "hi"},
+                instance_info={
+                    "class_name": "TestModel",
+                    "parent_trace_id": trace_hex,
+                    "parent_span_id": span_hex,
+                },
+            )
+        finally:
+            node_span.end()
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is not None
+        assert f"{llm.parent.span_id:016x}" == span_hex
+        # 同 trace 才是真嵌套（并列两个 root 不算）
+        assert f"{llm.context.trace_id:032x}" == trace_hex
+
+    async def test_llm_span_without_refs_keeps_existing_resolution(self):
+        """无 refs（存量调用方）→ 父级解析与修复前逐位一致（无逻辑父→无父）。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "TestModel"}
+        )
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is None or llm.parent.span_id == 0
+
+    async def test_llm_span_ignores_garbage_refs(self):
+        """非法 refs（非 hex / 全零）→ 视同缺失，不打断、不误挂。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "parent_trace_id": "zz-not-hex",
+                "parent_span_id": "0000000000000000",
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        assert llm.parent is None or llm.parent.span_id == 0
+
+    async def test_explicit_refs_beat_logical_parent(self):
+        """refs 与逻辑父并存 → 显式优先（嵌入桥的 node span 不在本表，但顺序必须钉死）。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        node_span = _OTEL_TRACER.start_span(name="component.node-llm")
+        try:
+            trace_hex, span_hex = self._hex_ids(node_span)
+            span_manager = SpanManager("test-trace-id")
+            logical_parent = span_manager.create_agent_span()
+            await handler.on_chain_start(
+                span=logical_parent, inputs=None, instance_info={"class_name": "LogicalParent"},
+            )
+            agent_span = span_manager.create_agent_span(logical_parent)
+            await handler.on_llm_start(
+                span=agent_span,
+                inputs=None,
+                instance_info={
+                    "class_name": "TestModel",
+                    "parent_trace_id": trace_hex,
+                    "parent_span_id": span_hex,
+                },
+            )
+        finally:
+            node_span.end()
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+        await handler.on_chain_end(span=logical_parent, outputs="done")
+
+        llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chat TestModel")
+        logical = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chain.LogicalParent")
+        assert llm.parent is not None
+        assert llm.parent.span_id == int(span_hex, 16)
+        assert llm.parent.span_id != logical.context.span_id
+
+
 class TestOtelWorkflowHandler:
     async def test_workflow_call_start_creates_span(self):
         config = OtelTracerConfig(redaction_enabled=False)
