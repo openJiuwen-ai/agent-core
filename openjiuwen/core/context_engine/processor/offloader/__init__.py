@@ -1,3 +1,7 @@
+from openjiuwen.core.context_engine.processor.offloader.image_window_offloader import (
+    ImageWindowOffloader,
+    ImageWindowOffloaderConfig,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloader,
     MessageOffloaderConfig,
@@ -16,6 +20,8 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_window_proce
 )
 
 __all__ = [
+    "ImageWindowOffloader",
+    "ImageWindowOffloaderConfig",
     "MessageOffloader",
     "MessageOffloaderConfig",
     "MessageSummaryOffloader",

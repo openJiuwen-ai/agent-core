@@ -274,11 +274,19 @@ class BaseModelClient(ABC):
         # loaded additively on top of the default store for self-signed endpoints.
 
     @staticmethod
-    def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
+    def _convert_messages_to_dict(
+        messages: Union[str, List[BaseMessage], List[dict]],
+        include_reasoning_content: bool = False,
+    ) -> List[dict]:
         """Convert messages to specific API format
 
         Args:
             messages: String or list of BaseMessage
+            include_reasoning_content: When True, echo a non-empty
+                ``reasoning_content`` from prior assistant turns (that also carry
+                ``tool_calls``) into the request payload. Default False: providers
+                such as DeepSeek-reasoner reject (HTTP 400) requests that include
+                chain-of-thought, so the field is stripped by default.
 
         Returns:
             List[dict]: Converted message list
@@ -321,7 +329,7 @@ class BaseModelClient(ABC):
                     })
                 msg_dict["tool_calls"] = tool_calls_list
 
-                if msg.reasoning_content:
+                if include_reasoning_content and msg.reasoning_content:
                     msg_dict["reasoning_content"] = msg.reasoning_content
 
             # Handle tool_call_id for ToolMessage
@@ -396,7 +404,10 @@ class BaseModelClient(ABC):
             )
 
         # Convert message format
-        messages_dict = self._convert_messages_to_dict(messages)
+        messages_dict = self._convert_messages_to_dict(
+            messages,
+            include_reasoning_content=self.model_client_config.reasoning_content_in_request,
+        )
 
         # Build basic parameters
         params: Dict[str, Any] = {
