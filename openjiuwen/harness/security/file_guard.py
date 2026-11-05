@@ -768,12 +768,7 @@ class ReadDenyOnlyFileGuard:
         tool_name: str,
         tool_args: Mapping[str, Any],
     ) -> list[tuple[str, str]]:
-        return [
-            (path, action)
-            for path, action in self._engine.collect_file_guard_ask_accesses(
-                tool_name, tool_args,
-            )
-        ]
+        return list(self._engine.collect_file_guard_ask_accesses(tool_name, tool_args))
 
 
 def build_file_guard_checker(

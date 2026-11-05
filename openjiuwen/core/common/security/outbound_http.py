@@ -43,23 +43,25 @@ async def check_connection(url: str) -> ConnectionTarget:
     if key is None:
         raise OutboundPermissionError("Outbound permission context is required")
     try:
-        if (
-            len(url) > 8192
-            or any(ord(char) <= 32 or ord(char) == 127 for char in url)
-            or "\\" in url
-            or re.search(r"%(?![0-9a-f]{2})|%(?:0[0-9a-f]|1[0-9a-f]|7f)", url, re.I)
-        ):
+        ambiguous_url = (
+            len(url) > 8192,
+            any(ord(char) <= 32 or ord(char) == 127 for char in url),
+            "\\" in url,
+            bool(re.search(r"%(?![0-9a-f]{2})|%(?:0[0-9a-f]|1[0-9a-f]|7f)", url, re.I)),
+        )
+        if any(ambiguous_url):
             raise ValueError("ambiguous URL text")
         parts = urlsplit(url)
-        host = parts.hostname
-        if (
-            len(url) > 8192
-            or parts.scheme not in {"http", "https"}
-            or not host
-            or parts.username is not None
-            or parts.password is not None
-            or "%" in host
-        ):
+        host = parts.hostname or ""
+        invalid_target = (
+            len(url) > 8192,
+            parts.scheme not in {"http", "https"},
+            not host,
+            parts.username is not None,
+            parts.password is not None,
+            "%" in host,
+        )
+        if any(invalid_target):
             raise ValueError("invalid target")
         if re.search(r"%(?:2f|5c|25)", parts.path, re.I) or any(
             segment in {".", ".."} for segment in unquote(parts.path).split("/")
@@ -73,7 +75,7 @@ async def check_connection(url: str) -> ConnectionTarget:
         if parts.port is not None and parts.port == 0:
             raise ValueError("invalid port")
         port = parts.port or (443 if parts.scheme == "https" else 80)
-    except (ValueError, UnicodeError) as exc:
+    except ValueError as exc:
         raise OutboundPermissionError("Invalid outbound HTTP URL") from exc
     try:
         addresses = [str(ipaddress.ip_address(host))]
@@ -230,14 +232,18 @@ def requests_request(method: str, url: str, **kwargs):
         )
 
         class PinnedAdapter(HTTPAdapter):
+            def __init__(self, pool, *args, **kwargs):
+                self._pool = pool
+                super().__init__(*args, **kwargs)
+
             def get_connection(self, url, proxies=None):
-                return pool
+                return self._pool
 
             def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
-                return pool
+                return self._pool
 
             def close(self):
-                pool.close()
+                self._pool.close()
                 super().close()
 
         host_header = f"[{target.host}]" if ":" in target.host else target.host
@@ -246,7 +252,7 @@ def requests_request(method: str, url: str, **kwargs):
         headers["Host"] = host_header
         with requests.Session() as session:
             session.trust_env = False
-            session.mount("https://" if secure else "http://", PinnedAdapter(max_retries=0))
+            session.mount("https://" if secure else "http://", PinnedAdapter(pool, max_retries=0))
             response = session.request(method, url, headers=headers, allow_redirects=False, **kwargs)
         if not follow or response.status_code not in _REDIRECTS or not response.headers.get("Location"):
             return response

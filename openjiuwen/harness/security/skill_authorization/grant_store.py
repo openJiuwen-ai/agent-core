@@ -8,6 +8,7 @@ import copy
 import hashlib
 import logging
 import threading
+import weakref
 from typing import Any
 
 from .models import (
@@ -95,6 +96,7 @@ class SkillGrantStore:
         self._invalidated_scopes: set[_ScopeKey] = set()
         # 固定内存墓碑：Bloom filter 可能误拒绝，但不会漏掉已删除 session（fail-closed）。
         self._retired_sessions = _RetiredSessionFilter()
+        self._permission_listeners: weakref.WeakSet = weakref.WeakSet()
 
     @property
     def authorization_generation(self) -> int:
@@ -111,17 +113,12 @@ class SkillGrantStore:
 
     def add_permission_listener(self, listener) -> None:
         """Weakly register a host configuration publisher (not a decision hook)."""
-        import weakref
-
         with _permission_listener_lock:
-            listeners = getattr(self, "_permission_listeners", None)
-            if listeners is None:
-                self._permission_listeners = listeners = weakref.WeakSet()
-            listeners.add(listener)
+            self._permission_listeners.add(listener)
 
     def notify_permission_listeners(self, session_id, agent_scope_id=None, operation="refresh") -> None:
         with _permission_listener_lock:
-            listeners = list(getattr(self, "_permission_listeners", ()))
+            listeners = list(self._permission_listeners)
         for listener in listeners:
             listener.skill_permissions_changed(session_id, agent_scope_id, operation)
 
@@ -321,9 +318,15 @@ class SkillGrantStore:
     def active_scopes(self, session_id: str) -> list[str]:
         """List scopes for configuration publication, never for per-tool composition."""
         with self._lock:
-            return [scope for (sid, scope), grants in self._grants.items()
-                    if sid == session_id and (sid, scope) not in self._invalidated_scopes
-                    and any(grant.status == GrantStatus.ACTIVE for grant in grants.values())]
+            active: list[str] = []
+            for (sid, scope), grants in self._grants.items():
+                if sid != session_id:
+                    continue
+                if (sid, scope) in self._invalidated_scopes:
+                    continue
+                if any(grant.status == GrantStatus.ACTIVE for grant in grants.values()):
+                    active.append(scope)
+            return active
 
     def list_grants(
         self,
