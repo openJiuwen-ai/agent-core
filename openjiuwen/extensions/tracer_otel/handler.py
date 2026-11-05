@@ -22,7 +22,7 @@ _CACHED_TZLOCAL = tzlocal()
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
+from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
 from openjiuwen.core.common.exception.errors import BaseError
@@ -128,6 +128,35 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     if state is None:
         return None
     return trace.set_span_in_context(state.span)
+
+
+def _explicit_parent_context(instance_info: dict | None) -> otel_context.Context | None:
+    """Build a parent context from explicit embedded-side span refs, or None.
+
+    嵌入侧（studio 双写桥）llm span 的逻辑父不在本 handler 的 span manager
+    表中，环境回退又会被链路中的上下文污染破坏（部署实证：llm span 与
+    node span 并列、误挂死根）。identity 通道显式携带 node span 的
+    (parent_trace_id, parent_span_id[, parent_trace_flags])，此处构造
+    NonRecordingSpan 父上下文。refs 缺失或非法（非 hex / 全零）返回 None，
+    调用方走既有 逻辑父→环境 解析，行为不变。flags 缺省按已采样处理：
+    显式 refs 只来自活着的 recording span，宁可多采不丢数据。
+    """
+    info = instance_info or {}
+    trace_hex = str(info.get("parent_trace_id") or "")
+    span_hex = str(info.get("parent_span_id") or "")
+    try:
+        trace_id = int(trace_hex, 16)
+        span_id = int(span_hex, 16)
+    except ValueError:
+        return None
+    if not (0 < span_id < 2**64 and 0 < trace_id < 2**128):
+        return None
+    try:
+        flags = TraceFlags(int(str(info.get("parent_trace_flags") or "1"), 16) & TraceFlags.SAMPLED)
+    except ValueError:
+        flags = TraceFlags(TraceFlags.SAMPLED)
+    ctx = SpanContext(trace_id=trace_id, span_id=span_id, is_remote=True, trace_flags=flags)
+    return trace.set_span_in_context(NonRecordingSpan(ctx))
 
 
 
@@ -559,7 +588,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            parent_ctx = self._resolve_parent_context(span)
+            # 显式父 refs（嵌入桥经 identity 通道带来）> 逻辑父 > 环境回退
+            parent_ctx = _explicit_parent_context(instance_info)
+            if parent_ctx is None:
+                parent_ctx = self._resolve_parent_context(span)
             state = self._start_and_push(
                 name=f"chat {instance_info.get('class_name', 'unknown')}",
                 kind=SpanKind.CLIENT,
