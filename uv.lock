@@ -74,7 +74,7 @@ wheels = [
 [[package]]
 name = "agent-shield"
 version = "0.1.0"
-source = { git = "https://gitcode.com/openJiuwen/agent-security.git?subdirectory=agent_shield&rev=develop#63b308d190dcda347ed437cec9b312282bb5d13e" }
+source = { git = "https://gitcode.com/openJiuwen/agent-security.git?subdirectory=agent_shield&rev=develop#86e8d62e33e24ddd327639bdd32017dda0a1c1cb" }
 
 [[package]]
 name = "agentarts-sdk"

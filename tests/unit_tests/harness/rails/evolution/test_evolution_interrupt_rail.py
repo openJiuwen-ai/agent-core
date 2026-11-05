@@ -523,6 +523,10 @@ def _permission_rail_deciding(monkeypatch, level: PermissionLevel) -> Permission
         "openjiuwen.harness.rails.security.tool_security_rail.get_permission_manager",
         lambda: manager,
     )
+    monkeypatch.setattr(
+        "openjiuwen.harness.security.permission_checks.get_permission_manager",
+        lambda: manager,
+    )
     return PermissionInterruptRail()
 
 
