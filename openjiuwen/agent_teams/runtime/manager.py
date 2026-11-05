@@ -73,6 +73,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
 )
@@ -522,6 +527,9 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        if entry.state is not RuntimeState.PAUSED:
+            # Idempotent no-op pause must not refresh the mark's TTL window.
+            mark_cancellation_cause(session_id, CancellationCause.PAUSE)
         await entry.agent.pause_coordination()
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
@@ -930,6 +938,7 @@ class TeamRuntimeManager:
             return False
         # A failed shutdown is still a live, owned runtime. Preserve the entry
         # and propagate the failure so callers can retry instead of orphaning it.
+        mark_cancellation_cause(session_id, CancellationCause.CANCEL)
         token = set_session_id(session_id)
         try:
             if self._organization_runtime_manager is not None:
@@ -1332,6 +1341,10 @@ class TeamRuntimeManager:
         if kind is RunActionKind.RESUME_FROM_PAUSE:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
+            # The pause mark set by ``pause()`` is not consumed when resolved
+            # and only expires via TTL. Drop it here so a post-resume internal
+            # cancellation inside the TTL window is not misreported as user_pause.
+            clear_cancellation_cause(team_session.get_session_id())
             await self._pre_run_with_inputs(team_session, inputs)
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
@@ -1339,6 +1352,10 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
+        # A fresh runtime must not inherit a stale stop/pause mark left on
+        # this session by the previous team: within the registry TTL it
+        # would relabel the new team's internal failures as user actions.
+        clear_cancellation_cause(session_id)
         if kind is RunActionKind.COLD_RECOVER:
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.

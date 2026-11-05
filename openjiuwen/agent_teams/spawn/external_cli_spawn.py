@@ -465,28 +465,15 @@ def _bind_trajectory_recorder(
     """
     if not session_id:
         return
-    try:
-        from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
-    except ImportError:
-        return
-    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
-
     subject = teammate.observability_execution_subject(session_id)
-    try:
-        recorder = HarnessTrajectoryRecorder.create(
-            subject=subject,
-            agent_name=subject.display_name,
-            agent_mode="team",
-            attributes={
-                AT_TEAM_NAME: team_name,
-                AT_MEMBER_NAME: teammate.member_name or subject.display_name,
-                "agentteam.backend": runtime.provider_name,
-            },
-        )
-    except ValueError:
-        team_logger.warning("[external-cli] trajectory disabled for member {}: incomplete subject", subject.subject_id)
-        return
-    runtime.bind_trajectory_recorder(recorder)
+    from openjiuwen.agent_teams.external.member_runtime import _bind_harness_trajectory_recorder
+
+    _bind_harness_trajectory_recorder(
+        runtime,
+        subject=subject,
+        team_name=team_name,
+        member_name=teammate.member_name or subject.display_name,
+    )
 
 
 async def external_cli_spawn(

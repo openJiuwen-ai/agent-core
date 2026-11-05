@@ -892,6 +892,77 @@ def test_external_session_rebinds_activity_sink_per_turn(monkeypatch):
     assert turns[0].activity_binds[-1][3] == "corr2"
 
 
+def test_external_session_binds_trajectory_once_before_start(monkeypatch):
+    from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+
+    recorder = object()
+    create_calls: list[dict] = []
+    events: list[tuple[str, Any]] = []
+
+    def _create(cls, **kwargs):
+        create_calls.append(kwargs)
+        return recorder
+
+    monkeypatch.setattr(HarnessTrajectoryRecorder, "create", classmethod(_create))
+
+    class _Runtime:
+        provider_name = "codex"
+
+        def __init__(self):
+            self.recorder = None
+
+        def bind_trajectory_recorder(self, value):
+            self.recorder = value
+            events.append(("bind", value))
+
+    runtime = _Runtime()
+
+    class _Turns(_FakeTurns):
+        def __init__(self, member_runtime, *, member_name, auth_hint_models=None):
+            super().__init__(resume=False, require=False)
+            self.runtime = member_runtime
+
+        async def start(self, team_session):
+            events.append(("start", self.runtime.recorder))
+            assert self.runtime.recorder is recorder
+            self.started += 1
+
+    async def _build(**kwargs):
+        return runtime
+
+    monkeypatch.setattr(asb_mod, "ExternalMemberTurns", _Turns)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.spawn.build_cli_workflow_runtime",
+        _build,
+    )
+    entry = ExternalCliAgentSpec(cli_agent="codex")
+    mgr = AvatarSessionManager(
+        team_name="t",
+        session_id="product-session",
+        run_id="r1",
+        external_cli_agents=(entry,),
+        gate_agent_type=lambda name: entry,
+        external_cwd=lambda member, configured_entry: None,
+    )
+
+    async def _scenario():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "Coder", "agent_type": "codex"})
+        first = await mgr.send_turn(sid, "one", {"label": "Coder", "agent_type": "codex"}, None, history=())
+        second = await mgr.send_turn(sid, "two", {"label": "Coder", "agent_type": "codex"}, None, history=())
+        await mgr.aclose()
+        return sid, first, second
+
+    sid, first, second = asyncio.run(_scenario())
+
+    assert first.text == "ext:one" and second.text == "ext:two"
+    assert [kind for kind, _ in events] == ["bind", "start"]
+    assert events[0][1] is recorder
+    subject = create_calls[0]["subject"]
+    assert subject.subject_id == f"team-member:product-session:t:{sid}"
+    assert subject.display_name == "Coder"
+    assert len(create_calls) == 1
+
+
 def test_external_session_first_turn_resolves_model_plan_before_builder(monkeypatch):
     """The session path plans the model where the builder is invoked: a builtin
     pick reaches build_cli_workflow_runtime as the endpointless config."""

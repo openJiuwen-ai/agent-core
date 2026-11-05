@@ -43,6 +43,7 @@ from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.harness.execution_subject import ExecutionSubject
 from openjiuwen.harness_protocol import (
     AUTH_FALLBACK_EVENT_TYPE,
     AUTH_FALLBACK_REQUEST_TYPE,
@@ -194,6 +195,43 @@ def read_member_checkpoint(member_session: Any, *, backend: str) -> HarnessCheck
     if not isinstance(state, dict) or state.get(_EXTERNAL_BACKEND_KEY) != backend:
         return None
     return checkpoint_from_dict(state.get(_EXTERNAL_CHECKPOINT_KEY))
+
+
+def _bind_harness_trajectory_recorder(
+    runtime: Any,
+    *,
+    subject: ExecutionSubject,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Bind the protocol event recorder under the host-assigned member identity."""
+    if not subject.session_id:
+        return
+    try:
+        from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+    except ImportError:
+        return
+
+    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
+
+    try:
+        recorder = HarnessTrajectoryRecorder.create(
+            subject=subject,
+            agent_name=subject.display_name,
+            agent_mode="team",
+            attributes={
+                AT_TEAM_NAME: team_name,
+                AT_MEMBER_NAME: member_name,
+                "agentteam.backend": runtime.provider_name,
+            },
+        )
+    except ValueError:
+        team_logger.warning(
+            "External trajectory disabled for member {}: incomplete subject",
+            member_name,
+        )
+        return
+    runtime.bind_trajectory_recorder(recorder)
 
 
 class ExternalHarnessMemberRuntime:

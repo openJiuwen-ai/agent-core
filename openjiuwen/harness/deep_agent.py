@@ -34,6 +34,10 @@ from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
@@ -102,7 +106,10 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
-from openjiuwen.harness.tools.subagent._control_registry import release_subagent_control
+from openjiuwen.harness.tools.subagent._control_registry import (
+    _CONTROL_ATTR,
+    release_subagent_control,
+)
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -3705,6 +3712,10 @@ class DeepAgent(BaseAgent):
                 Falls back to the bound loop session when omitted.
         """
         proposal_session = session or self._loop_session
+        if self._has_in_flight_abort_target(proposal_session):
+            self._mark_cancellation_cause(
+                CancellationCause.CANCEL, session=proposal_session
+            )
         if self._moa_scope_owner is not None:
             if proposal_session is None:
                 self._moa_scope_owner.close_all("aborted")
@@ -4281,8 +4292,52 @@ class DeepAgent(BaseAgent):
         active = self._active_interaction_round
         if active is None:
             return False
+        self._mark_cancellation_cause(CancellationCause.CANCEL)
         await self._cancel_active_round(reason=reason)
         return True
+
+    def _mark_cancellation_cause(
+        self,
+        cause: CancellationCause,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Tag the target session so compression reports cancel instead of failed.
+
+        ``session`` overrides the bound context session: ``abort(session=...)``
+        may target a session other than the bound one, and the mark must land
+        on the same session the guard checked. Falls back to the bound
+        resolution when omitted.
+        """
+        try:
+            if session is not None:
+                session_id = session.get_session_id()
+            else:
+                session_id = self._resolve_context_session_id()
+        except Exception:
+            logger.debug("[DeepAgent] cancel cause not bound to a session", exc_info=True)
+            return
+        mark_cancellation_cause(session_id, cause)
+
+    def _has_in_flight_abort_target(self, session: Optional[Session]) -> bool:
+        """Whether ``abort()`` has anything it can actually cancel right now.
+
+        The cancellation-cause mark must only be set when a real cancellation
+        is about to happen: a no-op abort would otherwise leave a stale mark
+        that relabels a later internal failure as ``user_cancel`` within the
+        registry TTL. Mirrors the three targets ``abort()`` cancels: the
+        active interaction round, the streaming task-loop background task,
+        and persistent subagent controls held for ``session``.
+        """
+        if self._active_interaction_round is not None:
+            return True
+        stream_task = self._stream_process_task
+        if stream_task is not None and not stream_task.done():
+            return True
+        if session is not None:
+            controls = getattr(self, _CONTROL_ATTR, None) or {}
+            if session.get_session_id() in controls:
+                return True
+        return False
 
     async def _cancel_active_round(
         self,
