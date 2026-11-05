@@ -26,7 +26,10 @@ def _schema_free_search(lang: str) -> Dict[str, Any]:
                 "type": "string", "enum": ["auto", "bing", "duckduckgo"], "default": "auto",
                 "description": {
                     "cn": "只使用已启用的引擎。用户指定 Bing 等引擎时必须指定 provider；auto 才允许在已配置免费源之间回退。",
-                    "en": "Only enabled engines may run. Set provider when the user names an engine; only auto permits fallback among configured free sources.",
+                    "en": (
+                        "Only enabled engines may run. Set provider when the user names an engine; "
+                        "only auto permits fallback among configured free sources."
+                    ),
                 }[lang],
             },
             "max_results": {"type": "integer", "description": max_desc, "default": 8},
@@ -166,7 +169,8 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
                 "Set max_chars=0 to disable clipping and "
                 "use a larger timeout_seconds for slow pages. "
                 "Best fit: documentation, blog posts, news, API references, and similar general web content. "
-                "Content status is distinct from HTTP status: challenges, authentication and empty shells are not evidence. "
+                "Content status is distinct from HTTP status: challenges, authentication "
+                "and empty shells are not evidence. "
                 "Preserve source links and field associations; never fill missing fields with adjacent numbers "
                 "or present stale observations as live data. "
                 "Git repository URLs (GitHub/GitLab/Gitee/Gitcode/Bitbucket, etc.) are usually a poor fit - "

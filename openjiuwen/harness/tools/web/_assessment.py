@@ -8,7 +8,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urlunsplit
 
@@ -130,7 +130,7 @@ async def assess_candidates(
     if len(candidates) > 30:
         return SearchAssessment(status="unavailable", reason="candidate_limit_exceeded")
     payload = {
-        "reference_time": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "reference_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "original_task": original_task[:3000],
         "search_query": query[:1500],
         "candidates": [_candidate_payload(index, row) for index, row in candidates],

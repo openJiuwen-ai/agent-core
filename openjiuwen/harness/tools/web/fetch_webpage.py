@@ -79,7 +79,11 @@ def _content_issue(title: str, content: str, raw: str = "") -> str | None:
     stripped = content.strip()
     if not stripped or stripped == title.strip():
         return "dynamic_shell" if "<script" in raw.casefold() else "empty"
-    loading = re.search(r"enable javascript|javascript is required|please wait|正在加载|数据加载中|请开启.*javascript", stripped, re.IGNORECASE)
+    loading = re.search(
+        r"enable javascript|javascript is required|please wait|正在加载|数据加载中|请开启.*javascript",
+        stripped,
+        re.IGNORECASE,
+    )
     placeholders = re.findall(r"(?m)^\s*(?:-|--|[\u2014\u2013]|\[missing\])\s*$", stripped)
     if loading and (len(stripped) < 200 or len(placeholders) >= 4):
         return "dynamic_shell"
@@ -168,18 +172,25 @@ class WebFetchWebpageTool(Tool):
         content = _decode_response_text(body, content_type=content_type).strip()
         blocked = challenge_reason(content, status=status)
         if blocked:
-            raise WebContentError("blocked", blocked + " Use another authorized source or ask the user; do not bypass verification.")
+            raise WebContentError(
+                "blocked",
+                blocked + " Use another authorized source or ask the user; do not bypass verification.",
+            )
         _raise_fetch_http_error(url, status, body)
         source_error = re.search(r"(?im)^Warning:.*returned error\s+([45]\d{2})", content)
         if source_error:
-            raise WebContentError("source_error", f"The reader reported HTTP {source_error.group(1)} at the original source.")
+            raise WebContentError(
+                "source_error",
+                f"The reader reported HTTP {source_error.group(1)} at the original source.",
+            )
         title_match = re.search(r"(?m)^Title:\s*(.*)$", content)
         title = title_match.group(1).strip() if title_match else ""
         if "Markdown Content:" in content:
             content = content.split("Markdown Content:", 1)[1].strip()
         blocked = challenge_reason(content, title=title)
         if blocked or status == 202:
-            raise WebContentError("blocked", (blocked or "The reader returned a pending/verification response.") + " Do not bypass verification.")
+            reason = blocked or "The reader returned a pending/verification response."
+            raise WebContentError("blocked", reason + " Do not bypass verification.")
         _require_text_response(content.encode("utf-8"), "text/plain")
         issue = _content_issue(title, content)
         if issue:
@@ -207,7 +218,9 @@ class WebFetchWebpageTool(Tool):
             label = anchor.get_text(" ", strip=True)
             href = str(anchor.get("href") or "").strip()
             target = urljoin(base_url, href)
-            if label and href and not href.startswith("#") and urlsplit(target).scheme in {"https", "http"}:
+            if not label or not href or href.startswith("#"):
+                continue
+            if urlsplit(target).scheme in {"https", "http"}:
                 anchor.replace_with(f"[{label}]({target})")
         for table in reversed(soup.select("table, [role='table']")):
             lines: list[str] = []
@@ -220,7 +233,9 @@ class WebFetchWebpageTool(Tool):
         for term in soup.select("dt"):
             value = term.find_next_sibling()
             if value is not None and value.name == "dd":
-                term.replace_with(term.get_text(" ", strip=True) + ": " + (value.get_text(" ", strip=True) or "[missing]") + "\n")
+                label = term.get_text(" ", strip=True)
+                content = value.get_text(" ", strip=True) or "[missing]"
+                term.replace_with(f"{label}: {content}\n")
                 value.decompose()
 
         for selector in (
@@ -314,7 +329,11 @@ class WebFetchWebpageTool(Tool):
 
         blocked = challenge_reason(raw, title=title, status=status) or challenge_reason(text, title=title)
         if blocked or status == 202:
-            raise WebContentError("blocked", (blocked or "The source returned a pending/verification response (202).") + " Do not bypass access controls; use another authorized source or ask the user.")
+            reason = blocked or "The source returned a pending/verification response (202)."
+            raise WebContentError(
+                "blocked",
+                reason + " Do not bypass access controls; use another authorized source or ask the user.",
+            )
         _raise_fetch_http_error(request.url, status, body)
         issue = _content_issue(title, text, raw)
         if issue == "dynamic_shell" and not request.allowed_domains:
@@ -327,7 +346,11 @@ class WebFetchWebpageTool(Tool):
                 request.session, request.url, remaining, request.byte_cap, proxy_url=request.proxy_url,
             )
         if issue:
-            raise WebContentError(issue, "No usable source text was extracted. Missing fields are unknown, not zero; do not infer values from adjacent labels.")
+            raise WebContentError(
+                issue,
+                "No usable source text was extracted. Missing fields are unknown, not zero; "
+                "do not infer values from adjacent labels.",
+            )
 
         return {
             "url": final_url,
@@ -403,7 +426,11 @@ class WebFetchWebpageTool(Tool):
         lines = [
             f"URL: {data.get('url', url)}",
             f"Status: {data.get('status_code', '')}",
-            "Content status: ok. Extracted source text is not independently verified. Check the requested entity and observation/publication time; never fill missing fields with adjacent values.",
+            (
+                "Content status: ok. Extracted source text is not independently verified. "
+                "Check the requested entity and observation/publication time; "
+                "never fill missing fields with adjacent values."
+            ),
         ]
         if data.get("title"):
             lines.append(f"Title: {data['title']}")

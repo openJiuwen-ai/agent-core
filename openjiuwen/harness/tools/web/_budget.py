@@ -46,23 +46,38 @@ class WebResearchBudget:
             self.started_at = time.monotonic()
         remaining = self.timeout_seconds - (time.monotonic() - self.started_at)
         if remaining <= 0:
-            raise WebContentError("budget_exhausted", "Retrieval deadline reached. Report supported facts and missing evidence; do not retry.")
+            raise WebContentError(
+                "budget_exhausted",
+                "Retrieval deadline reached. Report supported facts and missing evidence; do not retry.",
+            )
         return min(timeout, remaining)
 
     def reserve_search(self, engine: str) -> None:
         self.remaining(self.timeout_seconds)
         provider = "duckduckgo" if engine == "duckduckgo-jina" else engine
         if provider not in self.searches and len(self.searches) >= self.max_engines:
-            raise WebContentError("budget_exhausted", "Search source limit reached. Do not switch to another source or paid search without user approval.")
+            raise WebContentError(
+                "budget_exhausted",
+                "Search source limit reached. "
+                "Do not switch to another source or paid search without user approval.",
+            )
         attempts = self.searches.get(provider, 0)
         if attempts >= self.searches_per_engine:
-            raise WebContentError("budget_exhausted", f"Search attempt limit reached for {provider}. Reuse evidence or report the missing information; do not repeat this search.")
+            raise WebContentError(
+                "budget_exhausted",
+                f"Search attempt limit reached for {provider}. "
+                "Reuse evidence or report the missing information; do not repeat this search.",
+            )
         self.searches[provider] = attempts + 1
 
     def reserve_fetch(self) -> None:
         self.remaining(self.timeout_seconds)
         if self.fetches >= self.max_fetches:
-            raise WebContentError("budget_exhausted", "Page fetch limit reached. Answer only from verified evidence, identify missing fields, and stop retrieval.")
+            raise WebContentError(
+                "budget_exhausted",
+                "Page fetch limit reached. Answer only from verified evidence, "
+                "identify missing fields, and stop retrieval.",
+            )
         self.fetches += 1
 
 
