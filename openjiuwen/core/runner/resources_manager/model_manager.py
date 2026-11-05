@@ -19,6 +19,15 @@ class ModelMgr(AbstractManager["Model"]):
     def remove_model(self, model_id: str) -> Optional[ModelProvider]:
         return self._unregister_resource_provider(model_id)
 
-    async def get_model(self, model_id: str, session=None) -> Optional[Model]:
+    async def get_model(self, model_id: str, session=None, identity: dict | None = None) -> Optional[Model]:
+        """Resolve a model and hand the caller a traced copy.
+
+        ``identity`` carries caller-side attribution keys (e.g. the controller
+        layer's agent_id) that embedding applications want stamped on every
+        llm span as gen_ai.agent.* — the session they pass here is a bare
+        conversation session without an agent card, so the rail's common-info
+        path cannot supply them. ``None`` (all pre-existing callers) keeps the
+        exact pre-identity wire format.
+        """
         model = await self._get_resource(model_id)
-        return decorate_model_with_trace(model, session)
+        return decorate_model_with_trace(model, session, identity=identity)
