@@ -35,6 +35,7 @@ from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.fork import ForkContext
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.interaction.payload import GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
@@ -181,6 +183,10 @@ class TeamAgent(BaseAgent):
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
         self._named_checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
+        # Local startup diagnostics, not persisted task/member state: members
+        # whose current startup failure the leader has already been told about.
+        # One notice per failure episode, cleared when the member starts.
+        self._member_startup_failures: set[str] = set()
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -206,6 +212,8 @@ class TeamAgent(BaseAgent):
             request_completion_poll_callback=self._request_completion_poll,
             member_startup_reconciler=self._reconcile_member_startup,
             task_board_probe=self.is_task_board_settled,
+            model_group_label_getter=self._model_group_label,
+            served_model_recorder=self._record_served_model,
         )
         self._coordination = CoordinationKernel(self)
         self._user_input_delivered: asyncio.Event | None = None
@@ -544,6 +552,19 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
+    async def announce_task_revisions(self) -> None:
+        """Have the member runtime deliver its pending task edit notice now (F_129).
+
+        The member's task notice tracker is the only source of the notice; a
+        ``TASK_UPDATED`` event only asks the runtime to speak early. A runtime
+        without the capability gets no early notice — the next input carries it.
+        """
+        from openjiuwen.agent_teams.agent.member_runtime import TaskNoticeAwareRuntime
+
+        harness = self.harness
+        if isinstance(harness, TaskNoticeAwareRuntime):
+            await harness.announce_task_revisions()
+
     async def deliver_input(
         self,
         content: Any,
@@ -565,6 +586,19 @@ class TeamAgent(BaseAgent):
             immediate=use_steer,
             run_context=run_context,
         )
+
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller` — the spawn path
+        reads it off the leader to attach the SAME session-level controller to
+        an in-process teammate after its configure, so every member's
+        swarmflow runs register in one registry. None before any attach (or
+        when no runtime is built yet).
+        """
+        harness = self.harness
+        return harness.background_task_controller if harness is not None else None
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
@@ -702,7 +736,7 @@ class TeamAgent(BaseAgent):
         self._configurator.setup_infra(
             spec,
             ctx,
-            on_teammate_created=self._on_teammate_created,
+            on_teammate_created=self._start_teammate_runtime,
             on_teammate_restarted=self._restart_teammate_runtime,
             on_teammate_stopped=self._stop_teammate_runtime,
             on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
@@ -728,7 +762,7 @@ class TeamAgent(BaseAgent):
         *,
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> None:
-        # The leader-only async ``swarmflow`` tool is wired entirely inside the
+        # The async ``swarmflow`` tool is wired entirely inside the
         # NativeHarness async-tool framework (configurator builds the worker-model
         # resolver and gates the tool on it); TeamAgent no longer participates.
         self._configurator.setup_agent(
@@ -791,10 +825,13 @@ class TeamAgent(BaseAgent):
 
         Leader self-monitoring routes the leader's own anomalies straight to
         the ReliabilityHandler instead of publishing an event the leader's
-        messager self-filter would drop. Runs after the dispatcher is built,
-        mirroring ``_register_team_completion_callbacks``. No-op when the
-        harness, dispatcher, or reliability handler is absent (reliability
-        disabled, or a non-leader member whose rail has no local reporter).
+        messager self-filter would drop. The handler's pending route notices
+        (the leader's own model-group switches) are bound the same way: the
+        rail folds them into the leader's next admitted input. Runs after the
+        dispatcher is built, mirroring ``_register_team_completion_callbacks``.
+        No-op when the harness, dispatcher, or reliability handler is absent
+        (reliability disabled, or a non-leader member whose rail has no local
+        reporter).
         """
         harness = self._configurator.harness
         dispatcher = self._coordination.dispatcher
@@ -807,6 +844,7 @@ class TeamAgent(BaseAgent):
 
         for rail in harness.find_rails(ReliabilityRail):
             rail.bind_local_sink(handler.handle_local_anomaly)
+            rail.bind_route_notice_source(handler.take_pending_route_notices)
 
     def _resolve_agent_spec(
         self,
@@ -1055,6 +1093,27 @@ class TeamAgent(BaseAgent):
         """
         member_name = self._member_name() or "?"
         team_logger.info("[{}] shutdown_self requested (force={})", member_name, force)
+        # Stop this member's swarmflow runs BEFORE the stream unwind. The
+        # unwind path (finalize_round -> harness.stop -> native.stop) bare-
+        # cancels in-flight async tools: the run task dies with no terminal
+        # event and no journal record, and its finally deregisters the
+        # ticket — so the dispose-time stop_by_owner arrives to an empty
+        # registry and the workflow card stays "running" forever. Stopping
+        # through the session-level controller first unwinds each owned run
+        # properly (abort event + terminal progress + journal record) while
+        # the tickets are still live. The controller is the team-level
+        # registry (run -> handle, handle.owner_member), so this does not
+        # depend on the member's own harness at all.
+        controller = self.background_task_controller
+        if controller is not None and member_name != "?":
+            try:
+                await controller.stop_by_owner(member_name, include_paused=True)
+            except Exception:
+                team_logger.warning(
+                    "[{}] pre-unwind stop of owned swarmflow runs failed; continuing",
+                    member_name,
+                    exc_info=True,
+                )
         await self._stream_controller.cooperative_cancel()
         target = await self.resolve_retire_target(force=force)
         self._state.retired_status = target
@@ -1199,6 +1258,19 @@ class TeamAgent(BaseAgent):
         # above was a no-op: before ``build_team`` the leader has no row, but
         # it is still a member of its own team as far as idleness goes.
         await self.observe_member_status(self._member_name() or "", status)
+
+    def _model_group_label(self) -> Optional[str]:
+        """Name of the team's model group; ``None`` outside a model-group pool."""
+        backend = self.team_backend
+        return backend.model_group_label() if backend is not None else None
+
+    async def _record_served_model(self, model_name: str) -> bool:
+        """Persist the model the model group just routed this member to."""
+        backend = self.team_backend
+        member_name = self._member_name()
+        if backend is None or not member_name:
+            return False
+        return await backend.db.member.update_member_served_model(member_name, backend.team_name, model_name)
 
     async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
         """Record a member's status and drive the debounced team-idle marker.
@@ -1478,8 +1550,6 @@ class TeamAgent(BaseAgent):
                                 # creator's context. Falling back to full keeps the
                                 # behaviour consistent with the leader notification.
                                 ckpt_idx = None
-                                from openjiuwen.agent_teams.i18n import t
-
                                 await self._notify_fork_name_not_found(
                                     teammate_id,
                                     fork_value,
@@ -1622,8 +1692,6 @@ class TeamAgent(BaseAgent):
         exist, so a naming mismatch (missing name, or a name whose creator
         does not match ``fork_source``) is no longer silent.
         """
-        from openjiuwen.agent_teams.i18n import t
-
         available = ", ".join(sorted(self._named_checkpoints)) or "（无）"
         try:
             await self.message_manager.send_message(
@@ -1670,6 +1738,31 @@ class TeamAgent(BaseAgent):
         reference instead of building its own.
         """
         self._configurator.workspace_manager = manager
+
+    def share_swarmflow_with(self, other: "TeamAgent") -> None:
+        """Share the team-level swarmflow infrastructure with an in-process teammate.
+
+        The leader constructs the shared swarmflow objects (governor /
+        budget ledger / model resolver / base specs / expert table) once at
+        its setup; in-process teammates reuse the same instance by reference
+        — mirroring ``share_workspace_cache_with`` — so concurrent runs from
+        any member draw down one budget pool under one L1/L3 authority.
+        Must run **before** ``teammate.configure(...)``: afterwards the
+        teammate's setup has already run without it.
+        """
+        own = self._configurator.swarmflow
+        if own is not None:
+            other.attach_swarmflow(own)
+
+    def attach_swarmflow(self, infra: SwarmflowInfra | None) -> None:
+        """Adopt the shared team-level swarmflow infrastructure (in-process member share).
+
+        Called by the leader's ``share_swarmflow_with`` — the
+        teammate's ``setup_agent`` reads the injected instance instead of
+        constructing its own (construction is leader-only; a member without
+        injection keeps every field empty).
+        """
+        self._configurator.swarmflow = infra
 
     def invalidate_workspace_cache(self) -> None:
         """Drop resident evolvable-workspace values so the next run re-reads.
@@ -1801,6 +1894,44 @@ class TeamAgent(BaseAgent):
             fork_from=fork_from,
         )
 
+    async def _report_member_startup_failure(self, member_name: str, error: Exception) -> None:
+        """Notify the leader once per failure episode of ``member_name``, without raising.
+
+        The episode, not the error text, is the dedup key: the notice wakes the
+        leader, and its round-idle reconcile retries the start. Keying on text
+        would let any error carrying a timestamp, path or duration re-notify on
+        every retry and keep the leader looping.
+        """
+        if member_name in self._member_startup_failures:
+            return
+        if self.harness is None:
+            # deliver_input would drop the notice silently; leave the episode
+            # open so the next failure is reported once the runtime exists.
+            team_logger.warning("Leader runtime unavailable; startup failure of {} not notified", member_name)
+            return
+        reason = f"{type(error).__name__}: {error}"[:1200]
+        self._member_startup_failures.add(member_name)
+        try:
+            await self.deliver_input(t("team.member_startup_failed", member_name=member_name, reason=reason))
+        except Exception:
+            self._member_startup_failures.discard(member_name)
+            team_logger.error("Failed to notify leader of member startup failure: {}", member_name, exc_info=True)
+
+    async def _start_teammate_runtime(self, member_name: str) -> None:
+        """Spawn a teammate for the startup funnel, reporting a failed spawn to the leader.
+
+        Every startup path (send_message, create_task, interact, scheduler,
+        peer wake-up, round-idle reconcile) spawns through this callback, so
+        the notice names the member that actually failed. The error is
+        re-raised so ``startup_member`` rolls the CAS back.
+        """
+        try:
+            await self._on_teammate_created(member_name)
+        except Exception as exc:
+            await self._report_member_startup_failure(member_name, exc)
+            raise
+        self._member_startup_failures.discard(member_name)
+
     async def auto_start_member(self, member_name: str) -> bool:
         """Start an UNSTARTED member or recover an ERROR member.
 
@@ -1811,7 +1942,7 @@ class TeamAgent(BaseAgent):
         if backend is None or not backend.is_leader:
             return False
         try:
-            started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
+            started = await backend.startup_member(member_name, on_created=self._start_teammate_runtime)
             if not started:
                 started = await backend.recover_member(member_name)
         except Exception as exc:
@@ -1822,8 +1953,19 @@ class TeamAgent(BaseAgent):
         return started
 
     async def _restart_teammate_runtime(self, member_name: str) -> bool:
-        """Replace a failed teammate runtime without replaying its first prompt."""
-        return await self._spawn_manager.restart_teammate(member_name)
+        """Replace a failed teammate runtime without replaying its first prompt.
+
+        A restart that exhausts its retries is reported to the leader like a
+        failed first start; ``restart_teammate`` itself swallows the error.
+        """
+
+        async def report(error: Exception) -> None:
+            await self._report_member_startup_failure(member_name, error)
+
+        restarted = await self._spawn_manager.restart_teammate(member_name, on_failed=report)
+        if restarted:
+            self._member_startup_failures.discard(member_name)
+        return restarted
 
     async def _stop_teammate_runtime(self, member_name: str) -> None:
         """Remove a failed teammate's stale runtime handle."""
@@ -1850,6 +1992,10 @@ class TeamAgent(BaseAgent):
     async def auto_start_all(self) -> list[str]:
         """Start all UNSTARTED members via TeamBackend.startup.
 
+        Only the interact broadcast (``@all`` / untargeted operator message)
+        calls this, so task-scoped members with no open task are started too:
+        the broadcast is addressed to them as well.
+
         Best-effort: failure is logged but does not raise.
         Returns list of member names that were started.
         """
@@ -1857,7 +2003,7 @@ class TeamAgent(BaseAgent):
         if backend is None or not backend.is_leader:
             return []
         try:
-            started = await backend.startup(on_created=self._on_teammate_created)
+            started = await backend.startup(on_created=self._start_teammate_runtime, include_idle_task_scoped=True)
             if started:
                 team_logger.info("Auto-started members via interact broadcast: {}", started)
             return started

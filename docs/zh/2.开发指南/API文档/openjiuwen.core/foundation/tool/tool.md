@@ -30,6 +30,7 @@ class ToolCard(BaseCard)
 * **name**(str, 可选)：工具名称。
 * **description**(str, 可选)：工具描述。
 * **input_params**(Dict[str, Any] | Type[BaseModel], 可选)：工具的输入参数模式（Schema）。可以是 JSON Schema 字典或 Pydantic 模型类。默认为空字典，表示没有输入参数模式，接受任何输入。
+* **execution**(ToolExecution, 可选)：谁执行该工具的调用。`"server"`：Agent 调用 `invoke`；`"client"`：由连接的客户端执行，见[客户端执行的工具](#客户端执行的工具)。仅供框架判断谁来执行，不会出现在发给模型的工具定义里。默认值：`"server"`。
 
 ### tool_info
 ```python
@@ -129,6 +130,40 @@ def render_for_llm(output: Any) -> str
 **返回**：
 
 **str**，面向模型的工具结果文本。
+
+## 客户端执行的工具
+
+模型像调用普通工具一样调用客户端工具，但由连接的客户端（如打开文档的编辑器前端）执行。所有 `before_tool_call` Rail 放行后，Agent 不调用 `invoke`，而是以 `interrupt_kind="client_tool"` 的中断暂停该调用，请求为 `ClientToolRequest`（`tool_name`、最终参数 `arguments`、`client_request`）。宿主让客户端执行后用 `InteractiveInput.answer(interrupt_id, result)` 回答，结果成为该调用的正常工具输出。
+
+### class ClientTool
+
+```python
+class ClientTool(Tool)
+```
+
+客户端工具基类。构造时使用标记为 `execution="client"` 的卡片（必要时为副本，不修改传入的卡片）。`invoke` 不会被调用。
+
+* **build_request**(arguments: dict, context: ClientToolContext) -> dict：返回客户端执行所需的信息（作为 `client_request` 发给宿主）。抛出 `ClientToolUnavailable(message)` 时调用直接以工具错误结束，不联系客户端（例如没有打开的文档、输入不合法）。可为 `async`。
+* **complete**(arguments: dict, result: ClientToolResult, context: ClientToolContext) -> ToolOutput：把客户端结果变成工具输出；`arguments` 为发给客户端的参数。返回非 `ToolOutput` 时作为结果文本，图片与状态保留。可为 `async`。默认使用 `default_client_output`。
+
+### class ClientToolContext
+
+调用上下文：**tool_call**（含最终参数的调用）、**session**（Agent 会话，可读写会话状态）、**agent**、**callback_context**，以及 **session_id** 属性。
+
+### class ClientToolResult
+
+宿主的答复。
+
+* **status**(ClientToolStatus)：`completed`、`error`、`timeout`、`client_gone`、`cancelled`。除 `completed` 外均为失败；`timeout` / `client_gone` / `cancelled` 为可重试错误（`data["retryable"]=True`）。默认值：`"completed"`。
+* **content**(str | List[dict])：结果文本或内容块：`{"type": "text", "text": ...}`、`{"type": "image", "data_url": "data:image/png;base64,..."}` 或 `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ...}}`。图片经多模态路径交给模型。
+* **is_error**(bool)：客户端执行了但失败。
+* **data**(Any)：结构化结果，供 Rail 与宿主使用，不展示给模型。
+
+`ClientToolResult.coerce(value)` 接受本类、字符串、内容块列表或 dict。dict 的键全部属于 `status` / `content` / `is_error` / `data` 且取值合法时按本结构解析；其余 dict 作为整体结果：以 JSON 展示给模型，`data` 保留原 dict，只有 `is_error` 为真或 `status` 为 `completed` 以外的状态时才算失败（如 `{"status": "ok", "sections": 3}` 为成功，`{"status": "error", "message": "..."}` 为失败且保留 `message`）。
+
+### class ClientToolUnavailable
+
+由 `build_request` 抛出，以 `message` 作为该调用的工具错误结束调用，不联系客户端。
 
 ## Auth
 

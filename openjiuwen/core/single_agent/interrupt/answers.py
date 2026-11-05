@@ -13,6 +13,7 @@ undeclared (``""``)      for this session)
 skill_evolution_approval ``{"action": "allow_once" | "allow_always" | "reject",
                          "feedback": str}``
 ask_user                 ``{"answers": {question: answer}}`` or the answer text
+client_tool              a ``ClientToolResult`` (or its dict form) or the result text
 ======================== ==========================================================
 
 An undeclared kind may be answered in the ``approved`` shape, which every

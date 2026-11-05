@@ -1,9 +1,9 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, OrderedDict, Tuple
+from typing import Literal, Optional, Dict, OrderedDict, Tuple
 
 import pulsar
 
@@ -22,7 +22,16 @@ from openjiuwen.core.runner.runner_config import PulsarConfig
 
 
 class PulsarSubscription(SubscriptionBase):
-    def __init__(self, topic: str, consumer: pulsar.Consumer, executor: ThreadPoolExecutor):
+    def __init__(
+        self,
+        topic: str,
+        consumer: pulsar.Consumer,
+        executor: ThreadPoolExecutor,
+        *,
+        legacy_key_encoding: Literal["literal", "escaped"] = "literal",
+    ) -> None:
+        """Configure a consumer with an explicit legacy key decoding mode."""
+        self._legacy_key_encoding = legacy_key_encoding
         self._topic = topic
         self._consumer = consumer
         self._executor = executor
@@ -85,7 +94,7 @@ class PulsarSubscription(SubscriptionBase):
                 )
 
                 data = msg.data()
-                payload = deserialize_message(data)
+                payload = deserialize_message(data, legacy_key_encoding=self._legacy_key_encoding)
                 logger.info(
                     f"[PulsarSubscription] Received message, topic={self._topic}, message_id={payload.message_id}, "
                     f"type:{payload.type}")
@@ -110,7 +119,16 @@ class MessageQueuePulsar(MessageQueueBase):
     DEFAULT_MAX_RETRIES = 3
     DEFAULT_RETRY_DELAY = 1.0
 
-    def __init__(self, pulsar_config: PulsarConfig):
+    def __init__(
+        self,
+        pulsar_config: PulsarConfig,
+        *,
+        wire_version: Literal[1, 2] = 1,
+        legacy_key_encoding: Literal["literal", "escaped"] = "literal",
+    ) -> None:
+        """Configure Pulsar with explicit writer and legacy reader formats."""
+        self._wire_version = wire_version
+        self._legacy_key_encoding = legacy_key_encoding
         self._url = pulsar_config.url
         self._max_workers = pulsar_config.max_workers or 8
         self._client: Optional[pulsar.Client] = None
@@ -128,11 +146,14 @@ class MessageQueuePulsar(MessageQueueBase):
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
         fallback_to_fake: bool = True,
+        wire_version: Literal[1, 2] = 1,
+        legacy_key_encoding: Literal["literal", "escaped"] = "literal",
     ) -> Tuple["MessageQueueBase", bool]:
+        """Start Pulsar with retries, preserving wire settings on local fallback."""
         last_error: Optional[Exception] = None
         for attempt in range(1, max_retries + 1):
             try:
-                mq = cls(pulsar_config)
+                mq = cls(pulsar_config, wire_version=wire_version, legacy_key_encoding=legacy_key_encoding)
                 mq.start()
                 logger.info(
                     f"[MessageQueuePulsar] initialized (attempt {attempt})"
@@ -154,7 +175,7 @@ class MessageQueuePulsar(MessageQueueBase):
             f"falling back to FakeMQ. Last error: {last_error}"
         )
 
-        fake_mq = FakeMQ()
+        fake_mq = FakeMQ(wire_version=wire_version, legacy_key_encoding=legacy_key_encoding)
         fake_mq.start()
 
         fallback_msg = QueueMessage(
@@ -208,7 +229,9 @@ class MessageQueuePulsar(MessageQueueBase):
             consumer = self._client.subscribe(topic, subscription_name=self.DEFAULT_SUBSCRIPTION_NAME,
                                               consumer_type=pulsar.ConsumerType.KeyShared)
             # All Pulsar operations reuse the same thread pool
-            sub = PulsarSubscription(topic, consumer, self._executor)
+            sub = PulsarSubscription(
+                topic, consumer, self._executor, legacy_key_encoding=self._legacy_key_encoding,
+            )
             self._subs[topic] = sub
             logger.info(f"[MessageQueuePulsar] Create new subscription, topic={topic}")
             return sub
@@ -234,7 +257,9 @@ class MessageQueuePulsar(MessageQueueBase):
             # Get or create producer
             producer = await self._get_or_create_producer(topic)
             # Serialize and send
-            content = serialize_message(message)
+            content = serialize_message(
+                message, wire_version=self._wire_version, legacy_key_encoding=self._legacy_key_encoding,
+            )
 
             loop = asyncio.get_running_loop()
 

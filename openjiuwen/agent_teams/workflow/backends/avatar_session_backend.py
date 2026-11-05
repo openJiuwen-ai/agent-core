@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
@@ -100,6 +100,12 @@ _SCHEMA_TURN_NUDGE = (
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
+
+# Wire marker for an explicit skip: the person pressed "skip" instead of
+# answering, so the turn is skipped immediately rather than keeping the
+# question pending until the human timeout. Transports send this verbatim
+# (the host maps its own skip flag onto it); a real reply never equals it.
+HUMAN_REPLY_SKIP = "__swarmflow_skip__"
 
 # One-shot intent classification (see ``_classify_intent``): is the person's raw
 # reply a request to edit the script/flow and rerun, or a plain continue? Kept
@@ -216,7 +222,7 @@ class AvatarSessionManager:
         skill_visibility_fn: Callable[[Any, str], Any] | None = None,
         external_cli_agents: Sequence[Any] = (),
         gate_agent_type: Callable[[str], Any] | None = None,
-        gate_agent_template: Callable[[dict], Any] | None = None,
+        gate_agent_template: Callable[[dict], Awaitable[Any]] | None = None,
         external_cwd: Callable[[str, Any], str | None] | None = None,
         team_backend: Any = None,
         progress_sink: Any = None,
@@ -242,6 +248,11 @@ class AvatarSessionManager:
         # usual path would drop them) are parked here and consumed by
         # ``_await_human_reply`` before it registers a new future.
         self._pending_reply_buffer: dict[str, str] = {}
+        # Raw replies already handed to a human turn, kept so a retry of a
+        # failed classify/format attempt reuses them instead of re-asking the
+        # person. Peeked (not popped): every retry of the same correlation
+        # reads the same reply; a newer buffered/waited reply overwrites it.
+        self._human_reply_reuse: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -321,7 +332,7 @@ class AvatarSessionManager:
         gate = self._gate_agent_template
         if kind != "human" and opts.get("agent_template") and gate is None:
             raise BackendError("this backend has no expert gate; agent_template is unavailable")
-        expert = gate(opts) if (kind != "human" and gate is not None) else None
+        expert = await gate(opts) if (kind != "human" and gate is not None) else None
         if kind == "human":
             base = self._human_base_spec
         elif expert is not None:
@@ -774,6 +785,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -811,6 +823,7 @@ class AvatarSessionManager:
                 fut.cancel()
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         live = [state for state in list(self._sessions.values()) if state.harness is not None]
 
         external = [state for state in list(self._sessions.values()) if state.external is not None]
@@ -951,8 +964,22 @@ class AvatarSessionManager:
                 member_name=state.member_name,
                 display_name=opts.get("label") or state.member_name,
             )
-            with execution_subject_scope(avatar_subject):
-                await harness.start(team_session=team_session)
+            from openjiuwen.extensions.observability.span_context import (
+                bind_root_span_context,
+                get_root_span,
+            )
+
+            team_root = (
+                get_root_span(session_id=self._session_id)
+                if self._session_id
+                else None
+            )
+            # The avatar callback looks up by its child session id. Bind the
+            # owning Team root only in the context copied by its supervisor;
+            # child ids are not globally unique across concurrent Team runs.
+            with bind_root_span_context(team_root, session_id=state.session_id):
+                with execution_subject_scope(avatar_subject):
+                    await harness.start(team_session=team_session)
             if fork_data is not None and fork_data.get("messages"):
                 await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(
@@ -1338,7 +1365,7 @@ class AvatarSessionManager:
         yields ``skipped`` so the engine returns ``None`` for the turn.
         """
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
-        if raw is None:  # timed out / no answer
+        if raw is None or raw == HUMAN_REPLY_SKIP:  # timed out / explicit skip
             return AgentResult(skipped=True)
         # NEW: classify intent before formatting (best-effort; any failure
         # degrades to the existing formatting path rather than failing the turn).
@@ -1427,12 +1454,17 @@ class AvatarSessionManager:
         # Consume a buffered reply first (don't re-push the prompt).
         buffered = self._pending_reply_buffer.pop(corr, None)
         if buffered is not None:
+            self._human_reply_reuse[corr] = buffered
             if self._on_human_replied is not None:
                 try:
                     self._on_human_replied(state.member_name, corr, buffered)
                 except Exception:
                     team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
             return buffered
+        # A retry of a failed classify/format attempt reuses the raw reply it
+        # already obtained instead of asking the person again.
+        if self._human_reply_reuse.get(corr) is not None:
+            return self._human_reply_reuse[corr]
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut
@@ -1458,6 +1490,7 @@ class AvatarSessionManager:
                 self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+        self._human_reply_reuse[corr] = raw
         return raw
 
     # ------------------------------------------------------------------

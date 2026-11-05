@@ -341,6 +341,21 @@ async def test_session_paused_before_the_upgrade_resumes():
 
 
 @pytest.mark.asyncio
+async def test_a_paused_call_without_a_request_runs_on_resume():
+    """A host may record a paused call without an interrupt request (the rest of
+    a batch it stopped). No client waits on it, so resuming runs it."""
+    call = _call("call_rest")
+    state = ToolInterruptionState(
+        ai_message=AssistantMessage(content="", tool_calls=[call]),
+        iteration=0,
+        interrupted_tools={"call_rest": ToolInterruptEntry(tool_call=call)},
+    )
+    rounds = Rounds()
+    assert await rounds.resume(state, "go on") == {}
+    assert rounds.ran == ["call_rest"]
+
+
+@pytest.mark.asyncio
 async def test_pending_interrupts_and_matched_answers():
     rounds = Rounds(ConfirmInterruptRail(tool_names=["demo_tool"]))
     state, payloads = await rounds.start(_call("call_a"), _call("call_b"), _call("call_c"))

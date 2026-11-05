@@ -254,3 +254,40 @@ async def test_scheduled_probe_skips_cached_endpoint() -> None:
 
     assert not image_modality_probe._probe_tasks
     invoke.assert_not_awaited()
+
+
+def test_probe_on_a_model_group_runs_on_its_own_router() -> None:
+    """A group model is probed through a scoped copy; the original config stays untouched."""
+    from openjiuwen.core.foundation.llm.schema.config import (
+        IntelliRouterConfig,
+        ModelClientConfig,
+        ModelRequestConfig,
+    )
+    from openjiuwen.harness.image_modality_probe import _isolated_probe_model
+
+    router = IntelliRouterConfig(model_group_id="mgp_1")
+    client_config = ModelClientConfig(
+        client_provider="intelli_router",
+        intelli_router=router,
+    )
+    llm = _make_llm()
+    llm.model_client_config = client_config
+    llm.model_config = ModelRequestConfig(model="*")
+
+    probe_llm = _isolated_probe_model(llm)
+
+    assert probe_llm is not llm
+    probe_router = probe_llm.model_client_config.intelli_router
+    assert probe_router.router_scope == "image_modality_probe"
+    assert probe_router.model_group_id == "mgp_1"
+    assert client_config.intelli_router.router_scope is None, "the original config is not mutated"
+    assert llm.model_client_config is client_config
+
+
+def test_probe_on_a_plain_model_uses_it_as_is() -> None:
+    """A non-group model has no shared router state, so it is probed directly."""
+    from openjiuwen.harness.image_modality_probe import _isolated_probe_model
+
+    llm = _make_llm()
+
+    assert _isolated_probe_model(llm) is llm

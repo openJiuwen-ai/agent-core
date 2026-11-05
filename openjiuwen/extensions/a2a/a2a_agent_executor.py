@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from uuid import uuid4
 
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
@@ -100,10 +101,12 @@ class A2AAgentExecutor(AgentExecutor):
         updater: TaskUpdater,
         request_payload: dict[str, object],
     ) -> None:
+        open_artifact_ids: set[str] = set()
         async for chunk in self._stream_handler(request_payload):
-            stop = await self._publish_result(updater, chunk, final=False)
+            stop = await self._publish_result(updater, chunk, final=False, open_artifact_ids=open_artifact_ids)
             if stop:
                 return
+        await self._finish_artifacts(updater, open_artifact_ids)
         await updater.complete()
 
     async def _execute_invoke(
@@ -120,25 +123,33 @@ class A2AAgentExecutor(AgentExecutor):
         result: AgentResult,
         *,
         final: bool,
+        open_artifact_ids: set[str] | None = None,
     ) -> bool:
+        """Publish chunks and close every open artifact before a terminal status."""
         artifacts = result.artifacts
-        last_index = len(artifacts) - 1
-        for index, artifact in enumerate(artifacts):
-            await updater.add_artifact(
-                parts=[A2ATransformer.to_a2a_part(part) for part in artifact.parts],
-                artifact_id=artifact.artifactId,
-                name=artifact.name,
-                metadata=artifact.metadata or None,
-                last_chunk=final and index == last_index,
-            )
-
+        if open_artifact_ids is None:
+            open_artifact_ids = set()
         status = result.status or (TaskStatus.COMPLETED if final else TaskStatus.WORKING)
         is_terminal = final or status in self._HALT_STATUSES
+        for artifact in artifacts:
+            artifact_id = artifact.artifactId or uuid4().hex
+            await updater.add_artifact(
+                parts=[A2ATransformer.to_a2a_part(part) for part in artifact.parts],
+                artifact_id=artifact_id,
+                name=artifact.name,
+                metadata=artifact.metadata or None,
+                last_chunk=is_terminal,
+            )
+            if is_terminal:
+                open_artifact_ids.discard(artifact_id)
+            else:
+                open_artifact_ids.add(artifact_id)
 
         if not is_terminal:
             await updater.start_work()
             return False
 
+        await self._finish_artifacts(updater, open_artifact_ids)
         if status == TaskStatus.FAILED:
             await updater.failed()
         elif status == TaskStatus.CANCELED:
@@ -148,6 +159,13 @@ class A2AAgentExecutor(AgentExecutor):
         else:
             await updater.complete()
         return True
+
+    @staticmethod
+    async def _finish_artifacts(updater: TaskUpdater, open_artifact_ids: set[str]) -> None:
+        """Close prior chunks without replacing their accumulated contents."""
+        for artifact_id in sorted(open_artifact_ids):
+            await updater.add_artifact(parts=[], artifact_id=artifact_id, append=True, last_chunk=True)
+        open_artifact_ids.clear()
 
     @staticmethod
     async def _cancel_quietly(updater: TaskUpdater) -> None:

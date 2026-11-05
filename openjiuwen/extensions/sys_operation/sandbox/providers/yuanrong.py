@@ -73,9 +73,6 @@ from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegist
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DOCKER_IMAGE = "yr-docker-runtime:v0"
-DEFAULT_DOCKER_WORKDIR = "/tmp/test"
-DEFAULT_DOCKER_MOUNTS = [{"source": "/tmp", "target": "/tmp/test", "readonly": True}]
 DEFAULT_DOCKER_CPU = 1000
 DEFAULT_DOCKER_MEMORY = 1024
 YUANRONG_IDLE_TIMEOUT = -1
@@ -310,7 +307,7 @@ class _YuanrongProviderMixin:
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
         executor = str(extra.get("executor") or "default").strip().lower()
-        if executor not in {"default", "docker"}:
+        if executor not in {"default", "docker", "conch"}:
             executor = "default"
         self._executor = executor
 
@@ -354,7 +351,7 @@ class _YuanrongProviderMixin:
         return yr
 
     @staticmethod
-    def _normalize_docker_rootfs(extra: dict[str, Any]) -> str:
+    def _normalize_rootfs(extra: dict[str, Any]) -> str:
         """Build the JSON rootfs string expected by ``Sandbox(rootfs=...)``.
 
         Accepts a dict (with ``image`` aliased to ``imageurl``), a pre-serialized
@@ -368,9 +365,9 @@ class _YuanrongProviderMixin:
             if "imageurl" not in payload and "image" in payload:
                 payload["imageurl"] = payload.pop("image")
             return json.dumps(payload)
-        image = extra.get("image") or DEFAULT_DOCKER_IMAGE
-        workdir = extra.get("workdir") or DEFAULT_DOCKER_WORKDIR
-        mounts = extra.get("mounts") if isinstance(extra.get("mounts"), list) else DEFAULT_DOCKER_MOUNTS
+        image = extra.get("image")
+        workdir = extra.get("workdir")
+        mounts = extra.get("mounts")
         return json.dumps(
             {
                 "type": "image",
@@ -390,10 +387,13 @@ class _YuanrongProviderMixin:
         user = extra.get("user")
         if isinstance(user, str) and user.strip():
             kwargs["user"] = user.strip()
-        if self._executor != "docker":
-            return kwargs
-        kwargs["sandbox_type"] = "docker"
-        kwargs["rootfs"] = self._normalize_docker_rootfs(extra)
+        if self._executor == "docker":
+            kwargs["sandbox_type"] = "docker"
+        elif self._executor == "conch":
+            kwargs["sandbox_type"] = "conch"
+        else:
+            raise ValueError(f"invalid executor: {self._executor}")
+        kwargs["rootfs"] = self._normalize_rootfs(extra)
         kwargs["cpu"] = int(extra.get("cpu", DEFAULT_DOCKER_CPU))
         kwargs["memory"] = int(extra.get("memory", DEFAULT_DOCKER_MEMORY))
         return kwargs

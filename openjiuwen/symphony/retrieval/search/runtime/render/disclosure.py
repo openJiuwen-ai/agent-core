@@ -49,7 +49,9 @@ def _build_system_prompt(
 ) -> str:
     resolved_top_k = max(1, int(top_k))
     if not compact_codes_enabled and flat_list_mode and resolved_top_k != 2:
-        return LEGACY_FLAT_NON_COMPACT_SYSTEM_PROMPT
+        return "\n\n".join(
+            part for part in (LEGACY_FLAT_NON_COMPACT_SYSTEM_PROMPT, candidate_block.rstrip()) if part
+        )
     bank = _load_progressive_prompt_bank()
     candidate_region = "<CANDIDATE_LIST>" if flat_list_mode else "<CANDIDATE_TREE>"
     if compact_codes_enabled and flat_list_mode:

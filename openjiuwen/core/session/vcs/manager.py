@@ -156,7 +156,16 @@ class VersioningManager:
     async def _resolve_event_id(self, at: str) -> int:
         suffix = at[len(const.EVENT_REF_PREFIX):]
         if at.startswith(const.EVENT_REF_PREFIX) and suffix.isdigit():
-            return int(suffix)
+            event_id = int(suffix)
+            # An event ref beyond the current head is not in this session's
+            # history. Accepting it lets rewind() advance HEAD past a gap that
+            # has no WAL entries, so later appends/replay start from a hole.
+            if not 0 <= event_id <= self._head.event_id:
+                raise build_error(
+                    StatusCode.CONTEXT_EXECUTION_ERROR,
+                    error_msg=f"unknown vcs ref: {at}",
+                )
+            return event_id
         commit = await self._backend.get_commit(at)
         if commit is not None:
             return commit.event_id_high

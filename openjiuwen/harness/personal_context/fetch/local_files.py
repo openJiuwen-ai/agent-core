@@ -7,6 +7,7 @@ import errno
 import hashlib
 import os
 import stat as stat_module
+import zipfile
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from functools import partial
@@ -26,12 +27,14 @@ from openjiuwen.harness.personal_context.fetch.retry import classify_file_error,
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
-_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf"}
+_SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".pdf", ".docx"}
 _SKIPPED_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__", ".personal_context"}
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
 _TEXT_MAX_SIZE = 1 * 1024 * 1024
 _PDF_MAX_SIZE = 20 * 1024 * 1024
+_DOCX_MAX_SIZE = 20 * 1024 * 1024
+_DOCX_MAX_XML_SIZE = 64 * 1024 * 1024
 _RAW_SNAPSHOT_MAX_SIZE = 2 * 1024 * 1024
 _MAX_CONTENT_CHARS = 2_000_000
 _READ_CHUNK_SIZE = 64 * 1024
@@ -254,6 +257,8 @@ def _scan_files(root: Path) -> list[dict[str, Any]]:
 
             for filename in sorted(filenames, key=lambda value: (value.casefold(), value)):
                 path = current / filename
+                if filename.startswith("~$"):
+                    continue
                 if path.is_symlink() or path.suffix.casefold() not in _SUPPORTED_EXTENSIONS:
                     continue
                 resolved = path.resolve()
@@ -285,7 +290,12 @@ def _scan_files(root: Path) -> list[dict[str, Any]]:
 
 
 def _max_size(extension: str) -> int:
-    return _PDF_MAX_SIZE if extension.casefold() == ".pdf" else _TEXT_MAX_SIZE
+    normalized = extension.casefold()
+    if normalized == ".pdf":
+        return _PDF_MAX_SIZE
+    if normalized == ".docx":
+        return _DOCX_MAX_SIZE
+    return _TEXT_MAX_SIZE
 
 
 def _read_checked(path: Path, *, extension: str) -> bytes:
@@ -329,6 +339,8 @@ def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
         content_revision_id = _revision_id(raw_bytes)
         if extension == ".pdf":
             content, content_truncated = _read_pdf(path)
+        elif extension == ".docx":
+            content, content_truncated = _read_docx(path)
         else:
             content = raw_bytes.decode("utf-8")
             content_truncated = len(content) > _MAX_CONTENT_CHARS
@@ -378,6 +390,64 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
         raise
     except Exception as exc:
         raise _file_error("local PDF extraction failed", exc) from None
+
+
+def _read_docx(path: Path) -> tuple[str, bool]:
+    """Extract text from an OOXML .docx file (paragraphs and tables in document order)."""
+    try:
+        import docx as python_docx
+        from docx.table import Table as _DocxTable
+        from docx.text.paragraph import Paragraph as _DocxParagraph
+    except ImportError as exc:
+        raise _file_error("python-docx is required for .docx extraction", exc) from None
+    try:
+        with zipfile.ZipFile(str(path)) as archive:
+            xml_size = sum(
+                info.file_size
+                for info in archive.infolist()
+                if info.filename.startswith("word/") and info.filename.endswith(".xml")
+            )
+        if xml_size > _DOCX_MAX_XML_SIZE:
+            raise _file_error(
+                f"docx decompressed XML size {xml_size} exceeds limit {_DOCX_MAX_XML_SIZE}"
+            )
+        document = python_docx.Document(str(path))
+        parts: list[str] = []
+        total = 0
+
+        def _append(text: str) -> bool:
+            nonlocal total
+            if not text:
+                return False
+            if parts:
+                text = "\n" + text
+            remaining = _MAX_CONTENT_CHARS - total
+            if len(text) > remaining:
+                parts.append(text[:remaining])
+                total = _MAX_CONTENT_CHARS
+                return True
+            parts.append(text)
+            total += len(text)
+            return total >= _MAX_CONTENT_CHARS
+
+        for child in document.element.body.iterchildren():
+            tag = child.tag
+            if tag.endswith("}p"):
+                if _append(_DocxParagraph(child, document).text):
+                    return "".join(parts), True
+            elif tag.endswith("}tbl"):
+                table = _DocxTable(child, document)
+                for row in table.rows:
+                    cells = [cell.text.replace("\n", " ").strip() for cell in row.cells]
+                    if _append(" | ".join(cells)):
+                        return "".join(parts), True
+        return "".join(parts), False
+    except asyncio.CancelledError:
+        raise
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise _file_error("local DOCX extraction failed", exc) from None
 
 
 def _revision_id(content: bytes) -> str:

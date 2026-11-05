@@ -487,6 +487,7 @@ class NativeHarness(DeepAgent):
         from openjiuwen.core.runner import Runner
 
         config = self.deep_config
+        await self._close_memory_managers(config)
         sys_op = config.sys_operation if config is not None else None
         if sys_op is None:
             return
@@ -494,6 +495,25 @@ class NativeHarness(DeepAgent):
         # (or a dispose after Runner.stop already cleared everything) is a no-op.
         if Runner.resource_mgr.get_sys_operation(sys_op.id) is not None:
             Runner.resource_mgr.remove_sys_operation(sys_op.id)
+
+    async def _close_memory_managers(self, config: Any) -> None:
+        """Release the memory index managers this member's rails opened.
+
+        They live in the process-global ``INDEX_CACHE`` keyed by card id and
+        workspace, each with its own watchdog threads and SQLite connection.
+        """
+        workspace = getattr(config, "workspace", None) if config is not None else None
+        if workspace is None or self.card is None:
+            return
+        from openjiuwen.core.memory.lite.manager import aclose_memory_managers_for
+
+        try:
+            closed = await aclose_memory_managers_for(self.card.id, workspace)
+        except Exception:
+            logger.exception("[NativeHarness] closing memory managers failed")
+            return
+        if closed:
+            logger.info("[NativeHarness] closed %d memory manager(s) for %s", closed, self.card.id)
 
     def outputs(self) -> AsyncIterator[Any]:
         """Return an AsyncIterator over output chunks.

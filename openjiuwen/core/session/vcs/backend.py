@@ -16,7 +16,11 @@ from openjiuwen.core.session.vcs.models import Commit, Head, LogEntry, Snapshot
 
 def compute_crc(entry: LogEntry) -> int:
     """Compute crc32 over the entry's canonical JSON excluding the crc field."""
-    payload = entry.model_dump(exclude={"crc"})
+    # Use JSON mode so values such as datetime are normalized exactly as the
+    # on-disk model_dump_json() form; python-mode dumps can contain datetime
+    # objects and make json.dumps raise (or produce a CRC that no decoder can
+    # reproduce from the serialized entry).
+    payload = entry.model_dump(mode="json", exclude={"crc"})
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return zlib.crc32(canonical.encode("utf-8"))
 

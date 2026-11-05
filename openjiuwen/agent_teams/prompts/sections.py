@@ -60,6 +60,8 @@ class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
     BOOTSTRAP = "team_bootstrap"
+    PREBUILT = "team_prebuilt"
+    BOUND_GROUP = "team_bound_group"
     ROLE = "team_role"
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
@@ -77,6 +79,7 @@ class TeamSectionName:
 # A-class md frontmatter, so there is no on-disk copy to drift from.
 SECTION_PRIORITY: dict[str, int] = {
     TeamSectionName.ROLE: 11,
+    TeamSectionName.BOUND_GROUP: 12,
     TeamSectionName.HITT: 12,
     TeamSectionName.BRIDGE: 12,
     TeamSectionName.WORKFLOW: 13,
@@ -179,6 +182,70 @@ def build_leader_bootstrap_section(
     body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
     return PromptSection(
         name=TeamSectionName.BOOTSTRAP,
+        content={language: f"{body}\n"},
+        priority=11,
+    )
+
+
+def build_leader_bound_group_section(
+    *,
+    group: str,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> PromptSection:
+    """Build the leader section naming the AgentGroup the team is bound to.
+
+    Added only under scheduled dispatch with a bound group and the expert
+    tools wired — the same signal that scopes ``view_experts`` to the group —
+    so the prompt that says "look inside this group first" and the tool that
+    does it appear together. It names the group only: the members are found
+    with ``view_experts`` and spawned on demand, so nothing here reads the
+    package and the prefix stays byte-stable.
+
+    Args:
+        group: The bound AgentGroup's name.
+        language: Prompt language ('cn' or 'en').
+        loader: Template loader (the per-team workspace loader, or the
+            framework default).
+
+    Returns:
+        PromptSection naming the bound group.
+    """
+    body = loader("leader_bound_group", language).format({"group": group}).content.strip()
+    return PromptSection(
+        name=TeamSectionName.BOUND_GROUP,
+        content={language: f"{body}\n"},
+        priority=SECTION_PRIORITY[TeamSectionName.BOUND_GROUP],
+    )
+
+
+def build_leader_prebuilt_section(
+    *,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> PromptSection:
+    """Build the leader's opening section for a framework-built team (F_122).
+
+    The ``team_bootstrap`` counterpart for ``bootstrap_mode="framework"``:
+    the team already exists when the leader starts and there is no
+    ``build_team`` to call, so the section says only who the leader is, that
+    the team is a generic one with no members yet, and that the policy,
+    team info and roster arrive with the first input as ``<team-policy>`` /
+    ``<team-context>`` blocks. It carries no collaboration-mechanism slot:
+    the "build_team versus swarmflow" routing guide names a path that does
+    not exist here.
+
+    Args:
+        language: Prompt language ('cn' or 'en').
+        loader: Template loader (the per-team workspace loader, or the
+            framework default).
+
+    Returns:
+        PromptSection carrying the prebuilt opening body.
+    """
+    body = loader("leader_prebuilt", language).content.strip()
+    return PromptSection(
+        name=TeamSectionName.PREBUILT,
         content={language: f"{body}\n"},
         priority=11,
     )
@@ -311,6 +378,8 @@ def build_team_dispatch_section(
     *,
     role: TeamRole,
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
+    member_subtasks: bool = False,
     language: str = "cn",
     loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
@@ -325,6 +394,15 @@ def build_team_dispatch_section(
         role: Team role; roles outside ``_DISPATCH_ROLE_SLUGS`` get None.
         dispatch_mode: ``"autonomous"`` (members claim from the board) or
             ``"scheduled"`` (leader assigns, the scheduler starts members).
+        member_messaging: Whether scheduled members may message each other
+            (``TeamAgentSpec.enable_member_messaging``, F_126). Fills the
+            scheduled templates' ``{{member_messaging}}`` capability slot —
+            the same signal that picks the member ``send_message`` variant.
+            Ignored under autonomous dispatch.
+        member_subtasks: Whether scheduled members may split their task into
+            subtasks (``TeamAgentSpec.max_subtask_depth > 0``, F_128). Fills the
+            scheduled templates' ``{{member_subtasks}}`` capability slot — the
+            same signal that grants members ``create_task``; empty when off.
         language: Prompt language.
 
     Returns:
@@ -337,13 +415,27 @@ def build_team_dispatch_section(
     mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
     labels = _labels_for(language)
     template = loader(f"dispatch_{mode}_{slug}", language)
-    if mode == "scheduled" and slug == "leader":
-        # Inline task members (F_118) sit behind a hard switch; when it is off
-        # the passage that teaches `member` / `lifetime` / dormancy goes with it.
-        inline_member = ""
-        if constants.INLINE_TASK_MEMBER_ENABLED:
-            inline_member = loader("dispatch_scheduled_leader_inline_member", language).content.strip() + "\n\n"
-        template = template.format({"inline_member": inline_member})
+    if mode == "scheduled":
+        template = template.format(
+            {
+                "member_messaging": _scheduled_member_messaging(slug, member_messaging, language, loader),
+                # The slot ends a list line in both templates, so the rule
+                # joins the list as its own item and an empty slot leaves no
+                # blank line behind.
+                "member_subtasks": (
+                    "\n" + loader(f"dispatch_scheduled_{slug}_subtasks", language).content.strip()
+                    if member_subtasks
+                    else ""
+                ),
+            }
+        )
+        if slug == "leader":
+            # Inline task members (F_118) sit behind a hard switch; when it is off
+            # the passage that teaches `member` / `lifetime` / dormancy goes with it.
+            inline_member = ""
+            if constants.INLINE_TASK_MEMBER_ENABLED:
+                inline_member = loader("dispatch_scheduled_leader_inline_member", language).content.strip() + "\n\n"
+            template = template.format({"inline_member": inline_member})
     dispatch_text = template.content.strip()
     body = f"{labels['dispatch_heading']}\n\n{dispatch_text}\n"
     return PromptSection(
@@ -351,6 +443,21 @@ def build_team_dispatch_section(
         content={language: body},
         priority=SECTION_PRIORITY[TeamSectionName.DISPATCH],
     )
+
+
+def _scheduled_member_messaging(slug: str, enabled: bool, language: str, loader: TemplateLoader) -> str:
+    """Render the ``{{member_messaging}}`` slot of a scheduled dispatch template.
+
+    The leader always gets a rule (who members can reach decides how it routes
+    information). The teammate's closed rule already lives in its
+    ``send_message`` description, so its slot collapses to empty there and the
+    template keeps the slot on its last line for ``strip()`` to absorb.
+    """
+    if enabled:
+        return loader(f"dispatch_scheduled_{slug}_messaging_open", language).content.strip()
+    if slug == "leader":
+        return loader("dispatch_scheduled_leader_messaging_closed", language).content.strip()
+    return ""
 
 
 def build_team_task_state_section(
@@ -620,6 +727,8 @@ def build_team_static_sections(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
+    member_subtasks: bool = False,
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -647,6 +756,10 @@ def build_team_static_sections(
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
         dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        member_messaging: Whether scheduled members may message each other
+            (F_126); forwarded to the dispatch section.
+        member_subtasks: Whether scheduled members may split their task into
+            subtasks (F_128); forwarded to the dispatch section.
         base_prompt: Optional user-supplied prompt appended as the extra section.
         language: Prompt language ("cn" / "en").
         hitt_enabled: Whether HITT is enabled for the team; gates the static
@@ -690,6 +803,8 @@ def build_team_static_sections(
         build_team_dispatch_section(
             role=role,
             dispatch_mode=dispatch_mode,
+            member_messaging=member_messaging,
+            member_subtasks=member_subtasks,
             language=language,
             loader=loader,
         ),
@@ -725,6 +840,8 @@ def build_leader_policy_disclosure(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
+    member_subtasks: bool = False,
     language: str = "cn",
     hitt_enabled: bool = False,
     loader: TemplateLoader = load_template,
@@ -754,6 +871,10 @@ def build_leader_policy_disclosure(
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
         dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        member_messaging: Whether scheduled members may message each other
+            (F_126); decides which messaging rule the leader reads.
+        member_subtasks: Whether scheduled members may split their task into
+            subtasks (F_128); adds the leader's subtask rule.
         language: Prompt language ("cn" / "en").
         hitt_enabled: The team's effective HITT flag, as resolved by this
             ``build_team`` call — not the spec ceiling.
@@ -768,6 +889,8 @@ def build_leader_policy_disclosure(
         teammate_mode=teammate_mode,
         team_mode=team_mode,
         dispatch_mode=dispatch_mode,
+        member_messaging=member_messaging,
+        member_subtasks=member_subtasks,
         base_prompt=None,
         language=language,
         hitt_enabled=hitt_enabled,
@@ -787,6 +910,8 @@ def build_team_member_system_prompt(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
+    member_subtasks: bool = False,
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -837,6 +962,8 @@ def build_team_member_system_prompt(
         teammate_mode=teammate_mode,
         team_mode=team_mode,
         dispatch_mode=dispatch_mode,
+        member_messaging=member_messaging,
+        member_subtasks=member_subtasks,
         base_prompt=base_prompt,
         language=language,
         hitt_enabled=hitt_enabled,
@@ -857,7 +984,9 @@ def build_team_member_system_prompt(
 __all__ = [
     "TeamSectionName",
     "build_leader_bootstrap_section",
+    "build_leader_bound_group_section",
     "build_leader_policy_disclosure",
+    "build_leader_prebuilt_section",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",

@@ -100,6 +100,10 @@ class IntelliRouterConfig(BaseModel):
     health_check_interval: float = Field(default=300.0, description="Health check interval in seconds")
     enable_observability: bool = Field(default=False, description="Enable router observability hooks")
     web_dashboard_port: int = Field(default=0, description="Metrics web dashboard port")
+    router_scope: Optional[str] = Field(
+        default=None,
+        description="Router cache scope; clients with different scopes never share router state (e.g. cooldowns)",
+    )
 
     model_config = {"extra": "forbid"}
 

@@ -340,7 +340,7 @@ def _compact_batch_step(item: Any) -> dict[str, Any] | None:
         "status": "completed" if ok else "failed",
         "elapsed_ms": int(item.get("elapsed_ms") or 0),
     }
-    for key in ("phase", "error", "executed", "state_changed"):
+    for key in ("phase", "error", "executed", "state_changed", "execution_stage", "keyboard", "focus_before"):
         if item.get(key) not in (None, ""):
             compact[key] = item.get(key)
     return compact
@@ -1047,8 +1047,10 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "  // Playwright owns actionability retry. Never replay an uncertain invocation here.\n"
         "  const invokeAction = async (action) => {\n"
         "    if (currentItem.executed !== true) currentItem.executed = null;\n"
+        "    currentItem.execution_stage = 'action_attempt';\n"
         "    const value = await action();\n"
         "    currentItem.executed = true;\n"
+        "    currentItem.execution_stage = 'action_ack';\n"
         "    return value;\n"
         "  };\n"
         "  const clickChecked = async (step, timeout, option = false, initialChecked = null) => {\n"
@@ -1085,6 +1087,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "  if (typeof page.on === 'function') page.on('framenavigated', onNavigation);\n"
         "  watchPopups(page);\n"
         "  const getCheckedTarget = async (index, kind, locator, timeout, requireEnabled = true) => {\n"
+        "    currentItem.execution_stage = 'target_preflight';\n"
         "    const started = Date.now();\n"
         "    preflightTargetCount += 1;\n"
         "    try {\n"
@@ -1108,8 +1111,8 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    const timeout = Math.max(250, Number(step.timeout_ms || fallbackTimeout));\n"
         "    const stepStartedAt = Date.now();\n"
         "    const item = { index: i, op, ok: false, elapsed_ms: 0, generation_id: generationId };\n"
-        "    item.executed = !(preflightPrimaryOps.has(op) || op === 'select_visible_text' ||\n"
-        "      (op === 'press' && hasTarget(step)));\n"
+        "    item.executed = !(preflightPrimaryOps.has(op) || op === 'select_visible_text' || op === 'press');\n"
+        "    item.execution_stage = 'operation_attempt';\n"
         "    currentItem = item;\n"
         "    try {\n"
         "      if (step._target_error) { item.executed = false; throw new Error(step._target_error); }\n"
@@ -1175,11 +1178,19 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        await clickChecked(step, timeout, true, checkedOption);\n"
         "      } else if (op === 'press') {\n"
         "        const key = String(step.key || 'Enter');\n"
+        "        item.keyboard = {key, binding: hasTarget(step) ? 'explicit_target' : 'active_element'};\n"
         "        if (hasTarget(step)) {\n"
         "          const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
         "          item.target_validation = checkedTarget.metadata;\n"
         "          await invokeAction(() => checkedTarget.locator.press(key, { timeout }));\n"
         "        } else {\n"
+        "          try {\n"
+        "            item.focus_before = await Promise.race([page.evaluate(() => {\n"
+        "              const el = document.activeElement;\n"
+        "              return el ? {tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || '',\n"
+        "                type: el.getAttribute('type') || '', editable: el.isContentEditable} : null;\n"
+        "            }), sleep(Math.min(timeout, 250)).then(() => null)]);\n"
+        "          } catch (_err) { item.focus_before = null; }\n"
         "          await invokeAction(() => page.keyboard.press(key));\n"
         "        }\n"
         "      } else if (op === 'select_option') {\n"
@@ -1416,6 +1427,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "      }\n"
         "      item.executed = true;\n"
         "      item.ok = true;\n"
+        "      if (item.execution_stage !== 'action_ack') item.execution_stage = 'step_ack';\n"
         "      if (step.wait_after_ms !== undefined) {\n"
         "        await sleep(Math.max(0, Number(step.wait_after_ms || 0)));\n"
         "      } else if (defaultAfter > 0) {\n"
@@ -2174,6 +2186,8 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "state_changed": True,
                 "execution_state": "dispatched_unknown",
                 "error": error,
+                "failure_stage": "outer_rpc_timeout",
+                "step_receipts_available": False,
                 "session_id": session_id,
                 "request_id": request_id,
                 "steps_requested": len(safe_steps),

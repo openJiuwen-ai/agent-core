@@ -26,7 +26,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool, render_tool_output
-from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.sys_operation import SysOperation, OperationMode
 from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -68,6 +68,86 @@ _BINARY_EXTENSIONS: frozenset = frozenset({
     ".pyc", ".pyo", ".class", ".wasm",
     ".db", ".sqlite", ".sqlite3",
 })
+
+# Office documents are ZIP-based binary containers and need dedicated parsers.
+_OFFICE_READ_EXTENSIONS: frozenset = frozenset({".docx", ".xlsx"})
+
+_DECODE_ERROR_MARKERS = (
+    "can't decode",
+    "invalid start byte",
+    "invalid continuation byte",
+    "undecodable",
+)
+
+
+def _is_decode_error(message: str) -> bool:
+    """Return whether a read failure came from strict text decoding."""
+    lowered = str(message).lower()
+    return any(marker in lowered for marker in _DECODE_ERROR_MARKERS)
+
+
+def _read_docx_text(file_path: str) -> str:
+    """Extract paragraphs and tables from a .docx file as Markdown-like text."""
+    from docx import Document
+
+    document = Document(file_path)
+    parts: List[str] = []
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style_name = paragraph.style.name if paragraph.style else ""
+        if style_name == "Title":
+            parts.append(f"# {text}")
+        elif style_name.startswith("Heading"):
+            try:
+                level = int(style_name.split()[-1])
+            except (ValueError, IndexError):
+                level = 1
+            parts.append(f"{'#' * (level + 1)} {text}")
+        else:
+            parts.append(text)
+
+    for table in document.tables:
+        if not table.rows:
+            continue
+        table_lines: List[str] = []
+        header_cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
+        table_lines.append("| " + " | ".join(header_cells) + " |")
+        table_lines.append("| " + " | ".join("---" for _ in header_cells) + " |")
+        for row in table.rows[1:]:
+            cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+            table_lines.append("| " + " | ".join(cells) + " |")
+        parts.append("\n".join(table_lines))
+
+    return "\n\n".join(parts)
+
+
+def _read_xlsx_text(file_path: str) -> str:
+    """Extract worksheet names, cells and rows from an .xlsx file as text."""
+    from openpyxl import load_workbook
+
+    parts: List[str] = []
+    workbook = load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        for worksheet in workbook.worksheets:
+            table_lines: List[str] = [f"## {worksheet.title}"]
+            first_row = True
+            for row in worksheet.iter_rows(values_only=True):
+                cells = [str(cell) if cell is not None else "" for cell in row]
+                if not any(cells):
+                    continue
+                escaped = [cell.replace("|", "\\|") for cell in cells]
+                table_lines.append("| " + " | ".join(escaped) + " |")
+                if first_row:
+                    table_lines.append("| " + " | ".join("---" for _ in cells) + " |")
+                    first_row = False
+            parts.append("\n".join(table_lines))
+    finally:
+        workbook.close()
+
+    return "\n\n".join(parts)
 
 
 @dataclass
@@ -523,6 +603,7 @@ def _is_unc_path(path_value: str) -> bool:
 class ReadFileTool(Tool):
     MAX_LINES_TO_READ: int = 2000
     MAX_SIZE_BYTES: int = 256 * 1024   # 256 KB
+    MAX_OFFICE_DOC_SIZE_BYTES: int = 10 * 1024 * 1024   # 10 MB
     MAX_TOKENS: int = 25_000
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
@@ -578,6 +659,11 @@ class ReadFileTool(Tool):
     def _is_notebook(file_path: str) -> bool:
         return file_path.lower().endswith(".ipynb")
 
+    @staticmethod
+    def _is_office_document(file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path.lower())
+        return ext in _OFFICE_READ_EXTENSIONS
+
     @classmethod
     def _is_image(cls, file_path: str) -> bool:
         _, ext = os.path.splitext(file_path.lower())
@@ -586,7 +672,12 @@ class ReadFileTool(Tool):
     @classmethod
     def _is_binary_check_exempt(cls, file_path: str) -> bool:
         """File types handled by dedicated readers, exempt from the binary-file guard."""
-        return cls._is_pdf(file_path) or cls._is_notebook(file_path) or cls._is_image(file_path)
+        return (
+            cls._is_pdf(file_path)
+            or cls._is_notebook(file_path)
+            or cls._is_image(file_path)
+            or cls._is_office_document(file_path)
+        )
 
     @staticmethod
     def _is_pdf_supported(model_name: str) -> bool:
@@ -688,6 +779,7 @@ class ReadFileTool(Tool):
         return (
             not self._is_image(file_path)
             and not self._is_pdf(file_path)
+            and not self._is_office_document(file_path)
             and not file_path.lower().endswith(".ipynb")
         )
 
@@ -793,6 +885,17 @@ class ReadFileTool(Tool):
         start = max(0, offset) + 1    # convert 0-based skip to 1-indexed start line
         end = start + max(0, limit) - 1
         res = await self.operation.fs().read_file(file_path, line_range=(start, end))
+        # Keep the UTF-8 fast path untouched; only retry when strict decoding
+        # failed. Local backends can inspect the bytes and fall back to
+        # GB18030/Big5, while sandbox providers receive the encoding verbatim.
+        if (
+            res.code != StatusCode.SUCCESS.code
+            and getattr(self.operation, "mode", None) == OperationMode.LOCAL
+            and _is_decode_error(res.message)
+        ):
+            res = await self.operation.fs().read_file(
+                file_path, line_range=(start, end), encoding="auto"
+            )
         if res.code != StatusCode.SUCCESS.code:
             raise RuntimeError(res.message)
         content = res.data.content or ""
@@ -883,6 +986,62 @@ class ReadFileTool(Tool):
             blocks.append(cell_text)
             extracted_count += 1
         return "\n".join(blocks).strip()
+
+    async def _read_office_doc(self, file_path: str, offset: int, limit: int) -> str:
+        """Parse a .docx/.xlsx document and return its selected lines as text."""
+        try:
+            byte_len = os.stat(file_path).st_size
+        except OSError:
+            byte_len = 0
+        if byte_len > self.MAX_OFFICE_DOC_SIZE_BYTES:
+            raise RuntimeError(
+                f"Office document '{os.path.basename(file_path)}' "
+                f"({byte_len // 1024 // 1024} MB) exceeds the maximum allowed size "
+                f"({self.MAX_OFFICE_DOC_SIZE_BYTES // 1024 // 1024} MB). "
+                "Office documents are parsed in their entirety and cannot be read in portions. "
+                "Consider splitting the document or converting to a smaller format."
+            )
+
+        ext = os.path.splitext(file_path.lower())[1]
+        try:
+            if ext == ".docx":
+                content = await asyncio.to_thread(_read_docx_text, file_path)
+            elif ext == ".xlsx":
+                content = await asyncio.to_thread(_read_xlsx_text, file_path)
+            else:
+                raise RuntimeError(f"Unsupported Office document format: {ext}")
+        except ImportError as exc:
+            package = "python-docx" if ext == ".docx" else "openpyxl"
+            raise RuntimeError(
+                f"Reading '{ext}' files requires the '{package}' package. "
+                f"Install with: pip install {package}"
+            ) from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read Office document '{os.path.basename(file_path)}': "
+                f"the file is not a valid {ext} document or is corrupt. Details: {exc}"
+            ) from exc
+
+        lines = content.splitlines(True)
+        start = max(0, offset)
+        end = start + max(0, limit)
+        selected = "".join(lines[start:end])
+
+        if not selected.strip():
+            if offset == 0:
+                return "Warning: the document exists but the contents are empty."
+            return (
+                f"Error: The document exists but no content was returned at offset {offset}. "
+                "Use a smaller offset or read from the beginning."
+            )
+
+        tokens = self._estimate_tokens(selected)
+        if tokens > self.MAX_TOKENS:
+            raise MaxFileReadTokenExceededError(tokens, self.MAX_TOKENS)
+
+        return self._cat_n(selected)
 
     async def _read_pdf(self, file_path: str, pages: Optional[str]) -> str:
         res = await self.operation.fs().read_file(file_path, mode="bytes")
@@ -1147,6 +1306,8 @@ class ReadFileTool(Tool):
                 rendered = await self._read_pdf(file_path, pages)
             elif self._is_notebook(file_path):
                 rendered = await self._read_notebook(file_path)
+            elif self._is_office_document(file_path):
+                rendered = await self._read_office_doc(file_path, offset, limit)
             elif self._is_image(file_path):
                 rendered = await self._read_image(file_path, model_name)
             else:

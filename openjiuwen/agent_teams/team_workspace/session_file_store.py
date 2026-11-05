@@ -33,6 +33,9 @@ CONTENT_IN_FILE = "#file#"
 KIND_DIRECT = "direct"
 KIND_BROADCAST = "broadcast"
 KIND_TASK = "task"
+# A snapshot of a task body at one revision (F_129 / D9): the version the
+# assignee last saw, kept so a revision push can show what changed.
+KIND_TASK_REVISION = "task_revision"
 
 
 @dataclass(frozen=True)
@@ -41,9 +44,10 @@ class FileAddress:
 
     team_name: str
     session_id: str
-    kind: str  # KIND_DIRECT | KIND_BROADCAST | KIND_TASK
+    kind: str  # KIND_DIRECT | KIND_BROADCAST | KIND_TASK | KIND_TASK_REVISION
     object_id: str
     to_member: str | None = None
+    revision: int | None = None  # KIND_TASK_REVISION only
 
 
 class SessionFileStore:
@@ -94,6 +98,17 @@ class SessionFileStore:
 
     # ── cleanup ────────────────────────────────────────────────────────────
 
+    def remove_task_revisions(self, *, team_name: str, session_id: str, task_id: str, below: int) -> None:
+        """Delete a task's revision snapshots older than ``below`` (F_129 / D9)."""
+        tasks_dir = self._session_root(team_name, session_id) / "tasks"
+        if not tasks_dir.is_dir():
+            return
+        for path in tasks_dir.glob(f"{task_id}.r*.md"):
+            start = len(task_id) + 2
+            suffix = path.name[start:-len(".md")]
+            if suffix.isdigit() and int(suffix) < below:
+                path.unlink(missing_ok=True)
+
     def remove_session(self, *, team_name: str, session_id: str) -> None:
         """Delete the session's ``messages/`` and ``tasks/`` directories."""
         root = self._session_root(team_name, session_id)
@@ -133,6 +148,10 @@ class SessionFileStore:
             return f"messages/broadcast/{address.object_id}.md"
         if address.kind == KIND_TASK:
             return f"tasks/{address.object_id}.md"
+        if address.kind == KIND_TASK_REVISION:
+            if address.revision is None:
+                raise ValueError("task revision snapshot requires revision")
+            return f"tasks/{address.object_id}.r{address.revision}.md"
         raise ValueError(f"unknown kind: {address.kind}")
 
 
@@ -140,4 +159,12 @@ def _rmtree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-__all__ = ["CONTENT_IN_FILE", "KIND_BROADCAST", "KIND_DIRECT", "KIND_TASK", "FileAddress", "SessionFileStore"]
+__all__ = [
+    "CONTENT_IN_FILE",
+    "KIND_BROADCAST",
+    "KIND_DIRECT",
+    "KIND_TASK",
+    "KIND_TASK_REVISION",
+    "FileAddress",
+    "SessionFileStore",
+]
