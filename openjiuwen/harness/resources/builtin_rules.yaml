@@ -36,7 +36,7 @@ rules:
     description: "删除 Windows 注册表键（reg delete 或 Remove-Item 注册表驱动器）"
     tools: [shell]
     match_type: command
-    pattern: 're:(?i)(?:^|[\s;&|()])(?:(?:reg\s+delete\b)|(?:(?:Remove-Item|Remove-ItemProperty|\bri\b)\b(?:\s[^\n\r;|&]*?)+?(?:HK(?:LM|CU|CR|U|CC):|Registry::)))'
+    pattern: 're:(?i)(?:^|[\s;&|()])(?:(?:reg\s+delete\b)|(?:(?:Remove-Item|Remove-ItemProperty|\bri\b)\b\s[^;|&]*?(?:HK(?:LM|CU|CR|U|CC):|Registry::)))'
     severity: CRITICAL
     action: deny
 
