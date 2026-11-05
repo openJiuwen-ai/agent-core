@@ -1015,6 +1015,10 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": {
+            "status": "succeeded", "limit_bytes": 50_000_000, "before_bytes": 0,
+            "after_bytes": 0, "removed_count": 0, "oversized_count": 0,
+        },
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -1187,6 +1191,10 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
 
     await personal_context._run_fetch_once("notes", EmptyProvider(service_config, home=tmp_path))
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": {
+            "status": "succeeded", "limit_bytes": 50_000_000, "before_bytes": 0,
+            "after_bytes": 0, "removed_count": 0, "oversized_count": 0,
+        },
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -2684,10 +2692,15 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         for _attempt in range(500):
             status = await personal_context.snapshot()
             cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
+            runs = [
+                await personal_context.get_fetch_run_status(item["service_id"], run_id=item["run_id"])
+                for item in accepted["runs"]
+            ]
             if (
                 status.context_ready
                 and len(cursor_files) == 2
                 and status.fetch_service_states == {"notes-a": "RUNNING", "notes-b": "RUNNING"}
+                and all(run["run_state"] == "succeeded" for run in runs)
             ):
                 break
             assert status.fetch_service_errors == {}
@@ -2747,6 +2760,7 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         persistent_files = {path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()}
         assert all(
             path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/"))
+            or path in {"state/context_usage.json", "state/context_usage.lock", "state/context_update.lock"}
             for path in persistent_files
         )
         assert not list((home / "workspace" / "sandboxes").rglob("*"))
