@@ -31,7 +31,6 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTopic,
 )
 from openjiuwen.agent_teams.organization.expert_adapters import (
-    ExpertGroupCatalog,
     ExpertTeamLauncher,
 )
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
@@ -319,7 +318,6 @@ class OrganizationRuntimeManager:
         self._summary_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
-        self._expert_group_catalog: ExpertGroupCatalog | None = None
         self._expert_team_launcher: ExpertTeamLauncher | None = None
         self._expert_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
         self._summary_team_launcher: SummaryTeamLauncher | None = None
@@ -346,11 +344,6 @@ class OrganizationRuntimeManager:
 
         self._team_activator = activator
 
-    def set_expert_group_catalog(self, catalog: ExpertGroupCatalog) -> None:
-        """Set the host adapter that lists validated AgentGroup packages."""
-
-        self._expert_group_catalog = catalog
-
     def set_expert_team_launcher(self, launcher: ExpertTeamLauncher) -> None:
         """Set the host adapter that launches expert Teams for organization invite."""
 
@@ -360,8 +353,8 @@ class OrganizationRuntimeManager:
         """Register a host callback that injects Catalog/Launcher on first use.
 
         The installer should be idempotent and must not run package scans itself;
-        it only constructs and ``set_*`` the adapters. Listing/launch still happen
-        when tools call ``list_expert_groups`` / ``create_and_invite_expert_team``.
+        it only installs the launcher. Launch happens when tools call
+        ``create_and_invite_expert_team``; discovery uses ExpertCatalog directly.
         """
 
         self._expert_adapter_installer = installer
@@ -397,9 +390,9 @@ class OrganizationRuntimeManager:
         self._summary_adapter_installer(self)
 
     def _ensure_expert_adapters(self) -> None:
-        """Lazily run the host installer once Catalog or Launcher is still missing."""
+        """Lazily install the host launcher independently of expert discovery."""
 
-        if self._expert_group_catalog is not None and self._expert_team_launcher is not None:
+        if self._expert_team_launcher is not None:
             return
         installer = self._expert_adapter_installer
         if installer is None:
@@ -1006,14 +999,6 @@ class OrganizationRuntimeManager:
             return []
         return await self._configured_team_provider(session_id)
 
-    async def list_expert_groups(self, *, capabilities: set[str] | None = None) -> list[dict[str, Any]]:
-        """List host-validated AgentGroup templates; does not create Teams."""
-
-        self._ensure_expert_adapters()
-        if self._expert_group_catalog is None:
-            return []
-        return [descriptor.to_dict() for descriptor in self._expert_group_catalog.list(capabilities=capabilities)]
-
     async def create_and_invite_expert_team(
         self,
         *,
@@ -1466,6 +1451,11 @@ class OrganizationRuntimeManager:
 
         await self._resume_claimed_tasks(manager=manager, team_id=team_id, session_id=session_id)
         await self._resume_summary_executions(manager=manager, team_id=team_id, session_id=session_id)
+        for notice in await manager.task_pool.ensure_root_completion_notices(team_id=team_id):
+            self._schedule_root_completion_delivery_turn(
+                team_id=team_id, session_id=session_id, organization_id=manager.organization_id,
+                task_id=notice["root_task_id"], message_id=notice["message_id"],
+            )
         for message in await manager.message_service.list_leader_messages(
             team_id=team_id,
             unread_only=True,
@@ -1474,6 +1464,9 @@ class OrganizationRuntimeManager:
                 # The deadline scanner replays these with phase-aware prompts.
                 continue
             metadata = message.get("metadata") or {}
+            if metadata.get("kind") == "root_completed":
+                # All pending root notices, including those beyond this inbox page, are scheduled above.
+                continue
             if metadata.get("kind") == "summary_completed":
                 self._schedule_summary_completion_delivery_turn(
                     team_id=team_id,
@@ -1774,7 +1767,18 @@ class OrganizationRuntimeManager:
                     completed_task_id=event.task_id,
                 )
                 task = await manager.task_pool.get_task(event.task_id)
-                if task is None or not task.parent_task_id:
+                if task is None:
+                    return
+                if not task.parent_task_id:
+                    notices = await manager.task_pool.ensure_root_completion_notices(
+                        team_id=backend.team_name, task_id=task.task_id,
+                    )
+                    for notice in notices:
+                        self._schedule_root_completion_delivery_turn(
+                            team_id=backend.team_name, session_id=session_id,
+                            task_id=task.task_id, organization_id=manager.organization_id,
+                            message_id=notice["message_id"],
+                        )
                     return
                 if task.created_by.team_id != backend.team_name:
                     return
@@ -1897,6 +1901,13 @@ class OrganizationRuntimeManager:
                 if persisted is None or persisted["handled_at"] is not None:
                     return
                 metadata = persisted.get("metadata") or {}
+                if metadata.get("kind") == "root_completed":
+                    self._schedule_root_completion_delivery_turn(
+                        team_id=backend.team_name, session_id=session_id,
+                        task_id=metadata["root_task_id"], organization_id=manager.organization_id,
+                        message_id=message_id,
+                    )
+                    return
                 if metadata.get("kind") == "summary_submission_blocked":
                     message_key = (session_id, backend.team_name, message_id)
                     self._scheduled_leader_messages.add(message_key)
@@ -2161,6 +2172,38 @@ class OrganizationRuntimeManager:
             prompt=prompt,
             message_key=message_key,
             relay_source="org_root_background",
+        )
+
+    def _schedule_root_completion_delivery_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        task_id: str,
+        organization_id: str,
+        message_id: str,
+    ) -> None:
+        """Return a directly delegated root's saved result to its creating Team."""
+        message_key = (session_id, team_id, message_id)
+        if message_key in self._scheduled_leader_messages:
+            self._ensure_leader_turn_worker(team_id, session_id)
+            return
+        self._scheduled_leader_messages.add(message_key)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            message_key=message_key,
+            relay_source="org_root_delivery",
+            prompt=(
+                f"Delegated root task {task_id} completed in organization {organization_id}. "
+                f"Read completion notice {message_id} with org_get_leader_message. "
+                "Read its latest status and saved output_abstract/output_context with "
+                "org_view_tasks(action='get'). Verify the actual result and deliver it to the user "
+                "with the task's current status in this turn. After handling the saved result, "
+                "acknowledge this notice with org_ack_leader_message. Do not create, delegate, review, or "
+                "complete another task and do not repeat the finished work. Do not say you are "
+                "waiting for a result that has already been submitted."
+            ),
         )
 
     def _schedule_summary_completion_delivery_turn(

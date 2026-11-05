@@ -4,7 +4,6 @@
 """Organization-level coordination primitives for multiple in-process teams."""
 
 from openjiuwen.agent_teams.organization.expert_adapters import (
-    ExpertGroupDescriptor,
     LaunchedExpertTeam,
 )
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
@@ -48,7 +47,6 @@ __all__ = [
     "OrgUnclaimedPhase",
     "OrgUnclaimedTaskPolicy",
     "OrgUnclaimedTaskState",
-    "ExpertGroupDescriptor",
     "LaunchedExpertTeam",
     "LaunchedSummaryTeam",
     "NegotiationRequest",
