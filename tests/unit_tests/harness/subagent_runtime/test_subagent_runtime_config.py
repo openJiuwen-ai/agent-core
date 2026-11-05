@@ -28,8 +28,8 @@ def test_wait_timeout_constants() -> None:
 
 def test_subagent_runtime_config_defaults() -> None:
     config = SubagentRuntimeConfig()
-    assert config.max_subagents == 10
-    assert config.max_concurrent_running == 10
+    assert config.max_subagents == 20
+    assert config.max_concurrent_running == 20
     assert config.max_spawn_depth == 2
     assert config.turn_timeout_s == TURN_TIMEOUT_S_DEFAULT
     assert config.turn_timeout_s * 1000 == WAIT_TIMEOUT_MS_DEFAULT
