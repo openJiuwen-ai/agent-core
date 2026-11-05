@@ -169,7 +169,7 @@ def convert_messages(messages: Union[str, list[BaseMessage], list[dict]]) -> tup
         inputs.append(
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": content_text}],
+                "content": _user_content_parts(message.get("content"), content_text),
             }
         )
 
@@ -474,6 +474,55 @@ def _content_part_text(part: Any) -> str:
         if value is not None:
             return str(value)
     return ""
+
+
+def _user_content_parts(content: Any, content_text: str) -> list[dict[str, Any]]:
+    """Map user content to Responses ``input_text`` and ``input_image`` parts in their original order.
+    Adjacent text parts are merged into one ``input_text``.
+    Parts that are neither text nor images are dropped.
+    """
+    if not isinstance(content, list):
+        return [{"type": "input_text", "text": content_text}]
+
+    parts: list[dict[str, Any]] = []
+    pending_text: list[str] = []
+
+    def flush_text() -> None:
+        if pending_text:
+            parts.append({"type": "input_text", "text": "".join(pending_text)})
+            pending_text.clear()
+
+    for part in content:
+        image = _input_image_part(part)
+        if image is not None:
+            flush_text()
+            parts.append(image)
+            continue
+        text = _content_part_text(part)
+        if text:
+            pending_text.append(text)
+    flush_text()
+
+    return parts or [{"type": "input_text", "text": ""}]
+
+
+def _input_image_part(part: Any) -> Optional[dict[str, Any]]:
+    """Convert a chat-style ``image_url`` part to a Responses ``input_image`` part."""
+    if not isinstance(part, dict) or part.get("type") != "image_url":
+        return None
+
+    image_url = part.get("image_url")
+    detail = None
+    if isinstance(image_url, dict):
+        detail = image_url.get("detail")
+        image_url = image_url.get("url")
+    if not isinstance(image_url, str) or not image_url:
+        return None
+
+    image: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+    if detail:
+        image["detail"] = detail
+    return image
 
 
 def _tool_result_item(message: dict[str, Any], output: str) -> Optional[dict[str, Any]]:
