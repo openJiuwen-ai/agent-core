@@ -21,6 +21,7 @@ import aiohttp
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.harness.tools.web._common import _free_search_ssl_verify, _resolve_proxy
+from openjiuwen.harness.tools.web._reachability import host_from, mark_alive, mark_dead
 
 # Chunk size for the streaming reader.
 _READ_CHUNK_SIZE = 64 * 1024
@@ -161,8 +162,9 @@ async def request(
         sock_connect=min(timeout_seconds, _CONNECT_TIMEOUT_CAP),
         sock_read=timeout_seconds,
     )
+    host = host_from(url)
     try:
-        return await _do_request(
+        resp = await _do_request(
             session,
             method_up,
             url,
@@ -174,10 +176,12 @@ async def request(
             max_bytes=max_bytes,
         )
     except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError):
+        # The *proxy* is unreachable, not the target host, so the target is not
+        # marked dead. When no explicit proxy was requested, retry directly.
         if explicit_proxy:
             raise
         async with aiohttp.ClientSession(trust_env=False, connector=_make_connector()) as fallback:
-            return await _do_request(
+            resp = await _do_request(
                 fallback,
                 method_up,
                 url,
@@ -188,6 +192,13 @@ async def request(
                 timeout=timeout,
                 max_bytes=max_bytes,
             )
+    except aiohttp.ConnectionTimeoutError:
+        # The connect phase timed out: the host is unreachable at the network
+        # layer. Remember it so later calls skip it without paying the timeout.
+        mark_dead(host)
+        raise
+    mark_alive(host)
+    return resp
 
 
 def format_http_error_reason(status: int, body: bytes) -> str:
