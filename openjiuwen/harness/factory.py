@@ -43,6 +43,7 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.subagent_runtime.binding import runtime_rail_required
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
@@ -208,6 +209,7 @@ def _inject_general_purpose_subagent(
         workspace=workspace,
         sys_operation=sys_operation,
         restrict_to_work_dir=False,
+        can_delegate=True,
     ))
     return effective_subagents
 
@@ -473,7 +475,7 @@ def resolve_deep_agent_parts(
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SubagentRail, bool(effective_subagents),
+        (SubagentRail, runtime_rail_required(enable_subagent_runtime, bool(effective_subagents)),
          lambda: SubagentRail(
              enable_async_subagent=enable_async_subagent,
              enable_subagent_runtime=enable_subagent_runtime,

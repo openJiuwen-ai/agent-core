@@ -27,6 +27,15 @@ def raise_subagent_capacity_invalid(*, used: int, limit: int) -> NoReturn:
     )
 
 
+FORK_CANNOT_SPAWN = "Fork subagents cannot spawn subagents"
+DEPTH_LIMIT_REACHED = "Subagent spawn depth limit reached"
+# Spawn rejects before it takes an alive slot. This is not the alive-cap
+# error, and send_input does not use this sentence: it still queues.
+CONCURRENT_LIMIT_REACHED = (
+    "Concurrent subagent limit reached. Do not retry until a subagent finishes."
+)
+
+
 def build_subagent_runtime_error(
     reason: str,
     *,
