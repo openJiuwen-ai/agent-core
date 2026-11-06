@@ -6,12 +6,14 @@ Covers:
 - _streaming=True  -> llm.stream() called, llm_output chunks written
 - _streaming=False -> fallback to llm.invoke(), no stream writes
 """
+import asyncio
 import os
 import unittest
 from unittest.mock import patch
 
 import pytest
 
+from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -46,6 +48,22 @@ class _StreamingFinishReasonRail(AgentRail):
 
     async def after_model_call(self, ctx):
         self.finish_reasons.append(ctx.inputs.response.finish_reason)
+
+
+class _StreamingLatencyRail(AgentRail):
+    """Snapshot usage_metadata as seen by after_model_call hooks (tracer path).
+
+    A model_dump() copy freezes the values at hook time — the response object
+    itself is mutated by the backfill, so storing the live reference could
+    never observe a pre-backfill state.
+    """
+
+    def __init__(self):
+        self.captured_usages = []
+
+    async def after_model_call(self, ctx):
+        usage = ctx.inputs.response.usage_metadata
+        self.captured_usages.append(usage.model_dump() if usage else None)
 
 
 class _FakeContext:
@@ -150,6 +168,67 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.content, "partial done")
         self.assertEqual(result.finish_reason, "length")
         self.assertEqual(rail.finish_reasons, ["length"])
+
+    @pytest.mark.asyncio
+    async def test_streaming_backfills_latency_into_usage_metadata(self):
+        """TTFT / inter-token latency must land on usage_metadata (#1833).
+
+        tracer_otel reads first_token_time / inter_token_latency_ms from the
+        response at AFTER_MODEL_CALL time, so the streaming path must backfill
+        them before the response reaches after_model_call hooks; perf_metrics
+        alone only feeds the UI stream channel.
+        """
+        agent = _make_agent("agent_stream_latency")
+        rail = _StreamingLatencyRail()
+        await agent.register_rail(rail)
+
+        async def streaming_chunks(*args, **kwargs):
+            yield AssistantMessageChunk(content="partial ", finish_reason="null")
+            await asyncio.sleep(0.001)
+            yield AssistantMessageChunk(
+                content="done",
+                finish_reason="stop",
+                usage_metadata=UsageMetadata(
+                    model_name="test-model", input_tokens=10, output_tokens=5
+                ),
+            )
+
+        ctx = AgentCallbackContext(
+            agent=agent,
+            session=_FakeSession(),
+            context=_FakeContext(),
+            inputs=ModelCallInputs(messages=[], tools=[]),
+            extra={"_streaming": True},
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model.Model.stream",
+            side_effect=streaming_chunks,
+        ):
+            result = await agent._railed_model_call(ctx)
+
+        usage = result.usage_metadata
+        self.assertIsNotNone(usage)
+        # first_token_time is seconds (gen_ai.response.time_to_first_chunk
+        # semconv); the fake stream answers in milliseconds, so a seconds
+        # value must stay well under 1.0 — a raw ms write (e.g. "2.5" for
+        # 2.5ms) fails this magnitude lock.
+        self.assertGreaterEqual(float(usage.first_token_time), 0.0)
+        self.assertLess(float(usage.first_token_time), 1.0)
+        self.assertIsNotNone(usage.inter_token_latency_ms)
+        self.assertGreaterEqual(usage.inter_token_latency_ms, 0.0)
+        self.assertLess(usage.inter_token_latency_ms, 1000.0)
+        # after_model_call hooks (OtelRail -> on_llm_end) already observed
+        # the backfilled values — the rail snapshots a copy at hook time, so
+        # equality proves the backfill happened before after_model_call.
+        self.assertEqual(len(rail.captured_usages), 1)
+        self.assertEqual(
+            rail.captured_usages[0]["first_token_time"], usage.first_token_time
+        )
+        self.assertEqual(
+            rail.captured_usages[0]["inter_token_latency_ms"],
+            usage.inter_token_latency_ms,
+        )
 
     @pytest.mark.asyncio
     async def test_no_session_falls_back_to_invoke(self):
