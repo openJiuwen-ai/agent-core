@@ -5,11 +5,9 @@
 
 嵌入侧（如 studio runtime 的双写桥）拿到的会话是裸会话、无 agent card，
 控制器层的 agent 身份只能经 ``identity=`` 显式带给 llm span。本文件钉死：
-identity 原样透传给 decorate_model_with_trace；**缺省 / 空 identity 返回裸
-模型**（门控收紧）——core 存量调用方（llm_controller、workflow 组件等）
-从不传 identity，若照旧装饰会给每次调用造一个无归因的匿名 llm span，
-既无可读身份又与既有桥 / 壳载荷双计；真身 span 只应产生在嵌入侧显式
-带身份的取模型出口。
+identity 原样透传给 decorate_model_with_trace；**identity 不是开关**——
+缺省 / 空一律照常装饰（与基线一致，匿名 span），带 identity 只是多写
+署名属性。core 内部存量调用方改由各自调用点自带模块身份（无名变有名）。
 
 嵌入侧拿模型的公共入口是 ``Runner.resource_mgr.get_model``（ResourceMgr），
 不是 ModelMgr——入口签名不收 identity 时调用直接 TypeError（比遥测丢失
@@ -57,9 +55,9 @@ class TestModelMgr:
         assert captured["session"] is session
         assert captured["identity"] == {"agent_id": "agent-9"}
 
-    async def test_default_call_returns_bare_model(self, monkeypatch):
-        """缺省调用（core 全部存量调用方）不装饰：返回裸模型，
-        decorate_model_with_trace 一次都不被调——杜绝匿名 llm span。"""
+    async def test_default_call_still_decorates(self, monkeypatch):
+        """缺省调用（core 全部存量调用方）照常装饰：与基线一致返回
+        包装模型，identity 以 None 透传（wire 形态不变，匿名 span）。"""
         mgr = ModelMgr()
         bare = MagicMock(name="bare-model")
 
@@ -80,12 +78,12 @@ class TestModelMgr:
         )
 
         out = await mgr.get_model("m-1", MagicMock())
-        assert out is bare
-        assert calls == []
+        assert out == "decorated"
+        assert calls == [None]
 
-    async def test_empty_identity_returns_bare_model(self, monkeypatch):
-        """空 identity 视同缺省：不装饰（嵌入侧探测失败 / 归因信息缺失时
-        只会传空，同样不该产匿名 span）。"""
+    async def test_empty_identity_still_decorates(self, monkeypatch):
+        """空 identity 视同缺省：照常装饰（嵌入侧探测失败 / 归因信息缺失时
+        只会传空，行为退回匿名 span 而非不产 span）。"""
         mgr = ModelMgr()
         bare = MagicMock(name="bare-model")
 
@@ -106,8 +104,8 @@ class TestModelMgr:
         )
 
         out = await mgr.get_model("m-1", MagicMock(), identity={})
-        assert out is bare
-        assert calls == []
+        assert out == "decorated"
+        assert calls == [{}]
 
 
 class TestResourceMgrIdentity:
