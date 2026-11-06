@@ -23,7 +23,7 @@ _CACHED_TZLOCAL = tzlocal()
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
+from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
 from openjiuwen.core.common.exception.errors import BaseError
@@ -128,6 +128,35 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     if state is None:
         return None
     return trace.set_span_in_context(state.span)
+
+
+def _explicit_parent_context(instance_info: dict | None) -> otel_context.Context | None:
+    """Build a parent context from explicit embedded-side span refs, or None.
+
+    嵌入侧（studio 双写桥）llm span 的逻辑父不在本 handler 的 span manager
+    表中，环境回退又会被链路中的上下文污染破坏（部署实证：llm span 与
+    node span 并列、误挂死根）。identity 通道显式携带 node span 的
+    (parent_trace_id, parent_span_id[, parent_trace_flags])，此处构造
+    NonRecordingSpan 父上下文。refs 缺失或非法（非 hex / 全零）返回 None，
+    调用方走既有 逻辑父→环境 解析，行为不变。flags 缺省按已采样处理：
+    显式 refs 只来自活着的 recording span，宁可多采不丢数据。
+    """
+    info = instance_info or {}
+    trace_hex = str(info.get("parent_trace_id") or "")
+    span_hex = str(info.get("parent_span_id") or "")
+    try:
+        trace_id = int(trace_hex, 16)
+        span_id = int(span_hex, 16)
+    except ValueError:
+        return None
+    if not (0 < span_id < 2**64 and 0 < trace_id < 2**128):
+        return None
+    try:
+        flags = TraceFlags(int(str(info.get("parent_trace_flags") or "1"), 16) & TraceFlags.SAMPLED)
+    except ValueError:
+        flags = TraceFlags(TraceFlags.SAMPLED)
+    ctx = SpanContext(trace_id=trace_id, span_id=span_id, is_remote=True, trace_flags=flags)
+    return trace.set_span_in_context(NonRecordingSpan(ctx))
 
 
 
@@ -238,18 +267,27 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
     read tokens, reasoning tokens, response model, per-kind costs,
     first-token timing) off an ``AssistantMessage`` payload, normalized via
-    ``model_dump`` semantics. Present values are set unconditionally — a
-    recorded 0 is a fact, not an absence.
+    ``model_dump`` semantics; decorator-measured streams instead carry usage
+    as a container-level ``usage_metadata`` sibling of ``outputs`` (see the
+    note at the unwrap call below). Present values are set unconditionally —
+    a recorded 0 is a fact, not an absence.
     """
     obj = _unwrap_llm_payload(outputs)
-    if not isinstance(obj, dict):
-        return
-    finish_reason = obj.get("finish_reason")
-    # "null" is the schema default for AssistantMessage.finish_reason, i.e.
-    # "provider did not report one" — not a zero value, so it stays filtered.
-    if finish_reason and str(finish_reason) != "null":
-        otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
-    usage = obj.get("usage_metadata")
+    # Decorator-measured streams attach usage as a container-level sibling of
+    # "outputs": unwrap drills into the chunk list, which cannot carry usage
+    # itself, so the sibling is read before the unwrapped-object fallback
+    # (rail payloads embed usage on the message and keep that path). A chunk
+    # list also skips the finish_reason block instead of aborting the read.
+    sibling = outputs.get("usage_metadata") if isinstance(outputs, dict) else None
+    usage = sibling if isinstance(sibling, dict) else None
+    if usage is None:
+        usage = obj.get("usage_metadata") if isinstance(obj, dict) else None
+    if isinstance(obj, dict):
+        finish_reason = obj.get("finish_reason")
+        # "null" is the schema default for AssistantMessage.finish_reason, i.e.
+        # "provider did not report one" — not a zero value, so it stays filtered.
+        if finish_reason and str(finish_reason) != "null":
+            otel_span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
     if not isinstance(usage, dict):
         return
     otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
@@ -262,17 +300,22 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
     otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
     otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
-    # Streaming / reasoning latency. first_token_time is declared on
-    # UsageMetadata (no producer yet — parsed whenever it carries a number);
-    # the *_ms keys are schema-transparent: raw-dict callers and future
-    # UsageMetadata fields flow through unchanged. All parses are guarded —
-    # a malformed value skips its attribute; it must never raise and abort
-    # the span finalization that follows in on_llm_end.
-    first_token_time = str(usage.get("first_token_time") or "")
-    if first_token_time:
+    # Streaming / reasoning latency. TTFT comes from the semantically explicit
+    # `ttft_seconds` field (decorator-measured streams stamp it on the usage
+    # snapshot); `first_token_time` is kept as a **legacy fallback** only — by
+    # contract it is a "first token instant" (timestamp string), so a
+    # non-numeric value simply skips the attribute. The *_ms keys are
+    # schema-transparent: raw-dict callers and future UsageMetadata fields
+    # flow through unchanged. All parses are guarded — a malformed value skips
+    # its attribute; it must never raise and abort the span finalization that
+    # follows in on_llm_end.
+    ttft_seconds = usage.get("ttft_seconds")
+    if ttft_seconds is None:
+        ttft_seconds = usage.get("first_token_time") or ""
+    if ttft_seconds != "":
         try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(first_token_time))
-        except ValueError:
+            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
+        except (TypeError, ValueError):
             pass
     inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
@@ -300,6 +343,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
     LLM spans use ``SpanKind.CLIENT`` and ``gen_ai.*`` semantic conventions;
     all other types use ``SpanKind.INTERNAL`` and ``openjiuwen.agent.*``.
     """
+
+    # Capability probe for embedding applications (e.g. agent-studio's
+    # trace-compat gate): this build consumes decorator-measured llm spans —
+    # a container-level "usage_metadata" sibling on the end payload and
+    # workflow_id/workflow_name identity keys — as pure additions, without
+    # any span-merge logic. Bump when the consumed shape changes.
+    LLM_SPAN_DECORATOR_CAPABILITY = 1
 
     def __init__(self, otel_tracer: trace.Tracer, config: OtelTracerConfig, trace_id: str | None = None):
         super().__init__()
@@ -417,7 +467,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         ``agent_id`` / ``agent_name`` / ``agent_description`` /
         ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
         without them (other rails, direct handler callers) simply skip the
-        attributes.
+        attributes. Decorator-measured llm spans forward the same info plus
+        ``workflow_id`` / ``workflow_name``; ``component_*`` keys are
+        deliberately not mapped — ``openjiuwen.workflow.component_id`` is the
+        backend's shell discriminator and inner llm spans must not claim it.
         """
         info = instance_info or {}
         agent_id = info.get("agent_id")
@@ -434,8 +487,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
         if info.get("user_id"):
             otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
-        if info.get("metadata"):
+        # First writer wins for metadata: decorator identity stamps it at span
+        # start, and a later rail-forwarded info must not clobber it.
+        if info.get("metadata") and OJ_GEN_AI_METADATA not in (otel_span.attributes or {}):
             otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+        # Workflow context from decorator-forwarded identity: written only when
+        # absent so the start-time value survives a second identity forward.
+        existing = otel_span.attributes or {}
+        if info.get("workflow_id") and OJ_WORKFLOW_ID not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_ID, str(info["workflow_id"]))
+        if info.get("workflow_name") and OJ_WORKFLOW_NAME not in existing:
+            otel_span.set_attribute(OJ_WORKFLOW_NAME, str(info["workflow_name"]))
 
     # --- helper: set common agent attributes (non-LLM) ---
 
@@ -463,7 +525,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            parent_ctx = self._resolve_parent_context(span)
+            # 显式父 refs（嵌入桥经 identity 通道带来）> 逻辑父 > 环境回退
+            parent_ctx = _explicit_parent_context(instance_info)
+            if parent_ctx is None:
+                parent_ctx = self._resolve_parent_context(span)
             state = self._start_and_push(
                 name=f"llm.{instance_info.get('class_name', 'unknown')}",
                 kind=SpanKind.CLIENT,
@@ -755,6 +820,27 @@ class OtelAgentHandler(TraceExtAgentHandler):
         except Exception as exc:
             session_logger.warning("otel agent handler: on_retriever_error failed: %s", exc)
 
+    def drop_agent_span(self, invoke_id: str) -> None:
+        """Best-effort close of an agent span whose end/error event never arrived.
+
+        Degradation-tolerant emitters (e.g. studio's retrieval tool) fire
+        on_retriever_end / on_retriever_error through ``Tracer.trigger``; when
+        the trigger itself raises, the emitter can only drop the span on its
+        side. Without this hook the OTel span opened by on_*_start stays
+        half-open in this manager forever. The span is closed with OK status
+        (the business call may well have succeeded — only telemetry delivery
+        failed) plus a drop marker event. Never raises.
+        """
+        try:
+            state = self._span_manager.get(invoke_id)
+            if state is not None and state.recorded:
+                state.span.add_event(
+                    "oj.span.dropped", attributes={"reason": "end event undelivered by emitter"}
+                )
+            self._end_and_pop(invoke_id)
+        except Exception as exc:
+            session_logger.warning("otel agent handler: drop_agent_span failed: %s", exc)
+
     # ================================================================
     # Embedding events — INTERNAL span, embeddings operation (issue #1833).
     # Core emitter: APIEmbedding._get_embeddings fires these under a traced
@@ -922,8 +1008,26 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
     # --- helper: resolve parent context for a new span ---
 
+    def _has_live_spans(self) -> bool:
+        """Whether any tracked workflow span is still recording.
+
+        Tracer.init() broadcasts set_trace_id/set_session_id to every
+        registered handler singleton, including handlers currently tracing a
+        live run for another session (e.g. a fresh lightweight agent session
+        created inside a running workflow component). Resetting caches or
+        force-cleaning spans at that moment would detach the live run's
+        ambient context mid-node and force-end in-flight spans, so resets
+        must be deferred while any tracked span is still recording.
+        """
+        tracked = list(self._layer_root_spans.values()) + list(self._component_spans.values())
+        return any(state.span.is_recording() for state in tracked)
+
     def set_session_id(self, session_id: str | None) -> None:
         """Override to clear cached trace context when session changes."""
+        if self._has_live_spans():
+            # Per-event session binding keeps serving the live run; rebind
+            # once the run finishes.
+            return
         if session_id and session_id != self._cached_session_id:
             self._cached_root_ctx = None
             self._cached_trace_id = None
@@ -939,6 +1043,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         (the workflow_runner reuses the first execution's trace_id for QA
         resume, so the cache is preserved in that case).
         """
+        if self._has_live_spans():
+            # A live run is being traced for another session; a foreign
+            # tracer's init must not clear caches or force-clean its spans.
+            return
         session_logger.debug(
             "otel: set_trace_id called: old=%s, new=%s, cached_trace_id=%s, cached_ctx=%s",
             self._trace_id, trace_id, self._cached_trace_id, self._cached_root_ctx is not None
