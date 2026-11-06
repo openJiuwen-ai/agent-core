@@ -531,14 +531,14 @@ class SkillUseRail(DeepAgentRail):
                 continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
+                # Name filter first: a disallowed entry costs no filesystem call.
+                if not self._is_skill_name_allowed(item.name):
+                    skipped_by_filter += 1
+                    continue
                 if not item.is_dir():
                     continue
 
                 scanned_dirs += 1
-                if not self._is_skill_name_allowed(item.name):
-                    skipped_by_filter += 1
-                    continue
-
                 skill_md_path = item / "SKILL.md"
                 if not skill_md_path.exists():
                     continue
@@ -709,6 +709,10 @@ class SkillUseRail(DeepAgentRail):
                         language=lang,
                         agent_id=agent_id,
                         enable_image_multimodal=enable_read_image_multimodal,
+                        # 运行时按当前模型能力重判，init 值仅作回退。
+                        image_multimodal_resolver=(
+                            lambda: should_enable_read_image_multimodal(agent)
+                        ),
                     ),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
@@ -910,6 +914,9 @@ class SkillUseRail(DeepAgentRail):
                 continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
+                # Same filter as the refresh: a disallowed SKILL.md never reaches self.skills.
+                if not self._is_skill_name_allowed(item.name):
+                    continue
                 if not item.is_dir():
                     continue
 

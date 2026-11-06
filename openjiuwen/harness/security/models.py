@@ -12,40 +12,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, NotRequired, TypedDict
 
+from agent_shield.tool_permission import PermissionLevel, PermissionResult
 
-class PermissionLevel(str, Enum):
-    """权限级别.
-
-    - ALLOW: 直接执行，无需确认
-    - ASK:   弹出确认框，用户决定
-    - DENY:  拒绝执行，返回错误
-    """
-    ALLOW = "allow"
-    ASK = "ask"
-    DENY = "deny"
-
-
-@dataclass
-class PermissionResult:
-    permission: PermissionLevel
-    matched_rule: str | None = None
-    reason: str | None = None
-    external_paths: list[str] | None = None
-
-    @property
-    def is_allowed(self) -> bool:
-        return self.permission == PermissionLevel.ALLOW
-
-    @property
-    def is_denied(self) -> bool:
-        return self.permission == PermissionLevel.DENY
-
-    @property
-    def needs_approval(self) -> bool:
-        return self.permission == PermissionLevel.ASK
+# 判定结果类型由 agent_shield 定义；这里转出，保持原有导入路径可用。
 
 
 @dataclass(frozen=True)
@@ -108,6 +79,14 @@ class FileGuardSection(TypedDict, total=False):
     paths: NotRequired[list[FileGuardPathEntry]]
 
 
+class SoftDeleteSection(TypedDict, total=False):
+    """Windows 软删除与批量删除审批。只有布尔 ``enabled: true`` 才开启。"""
+
+    enabled: bool
+    archive_dir: NotRequired[str]
+    batch_delete_threshold: NotRequired[int]
+
+
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
@@ -148,6 +127,7 @@ class PermissionsSection(TypedDict, total=False):
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
     file_guard: NotRequired[FileGuardSection]
+    soft_delete: NotRequired[SoftDeleteSection]
     external_directory: NotRequired[dict[str, str]]  # deprecated → file_guard
 
 
@@ -156,6 +136,7 @@ __all__ = [
     "FileGuardDefaults",
     "FileGuardPathEntry",
     "FileGuardSection",
+    "SoftDeleteSection",
     "PermissionConfirmResponse",
     "PermissionLevel",
     "PermissionResult",

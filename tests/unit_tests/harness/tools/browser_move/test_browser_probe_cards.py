@@ -61,7 +61,31 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
     assert "source" in js
     assert "summary" in js
     assert "primary_link" in js
+    assert "href: primaryLink.href" in js
+    assert "recommended_action" in js
     assert "buttons" in js
+    assert "clickable" in js
+    assert "match_count" in js
+    assert "visible" in js
+    assert "enabled" in js
+    assert "generation_id" in js
+
+
+def test_build_card_probe_js_embeds_generation_and_validates_clickability() -> None:
+    js = build_card_probe_js(generation_id="g11")
+
+    assert '"generation_id": "g11"' in js
+    assert "selectorMeta.match_count === 1" in js
+    assert "cardSelectorMeta.match_count === 1" in js
+    assert "selector_hint_validated: cardSelectorValidated" in js
+    assert "primary_link_selector_hint_validated: primaryLinkSelectorValidated" in js
+    assert "selector_hint: clickable ? selectorHint : ''" in js
+    assert "cardClickable ? 'use_validated_selector'" in js
+    assert "selectorDescriptor" in js
+    assert "selector_metadata" in js
+    assert "title: selectorDescriptor(title.selector_hint)" in js
+    assert "price: selectorDescriptor(price.selector_hint)" in js
+    assert "generation_id: generationId" in js
 
 
 def test_build_card_probe_js_clamps_max_cards() -> None:
@@ -210,8 +234,17 @@ def test_build_card_probe_js_prefers_better_nested_card_candidate() -> None:
 def test_build_card_probe_js_does_not_return_repeated_simple_selector_early() -> None:
     js = build_card_probe_js(max_cards=10, viewport_only=True)
 
-    assert "document.querySelectorAll(simple).length === 1" in js
+    assert "validateSelectorHint(el, simple)" in js
     assert "sameSimple.length === 1" not in js
+
+
+def test_build_card_probe_js_validates_selector_hints_before_returning_them() -> None:
+    js = build_card_probe_js(max_cards=10, viewport_only=True)
+
+    assert "matches.length === 1 && matches[0] === el" in js
+    assert "selector_hint_validated" in js
+    assert "primary_link_selector_hint_validated" in js
+    assert "'navigate_primary_link'" in js
 
 
 def test_build_card_probe_js_button_extraction_ignores_viewport_for_card_children() -> None:
@@ -220,6 +253,7 @@ def test_build_card_probe_js_button_extraction_ignores_viewport_for_card_childre
     assert "rect.width < 2 || rect.height < 2" in js
     assert "style.visibility === 'hidden'" in js
     assert "Number(style.opacity) === 0" in js
+
 
 def test_build_card_probe_js_accepts_site_profiles_and_selector_cache_records() -> None:
     js = build_card_probe_js(
@@ -256,6 +290,7 @@ def test_build_card_probe_js_accepts_site_profiles_and_selector_cache_records() 
     assert "profile_ids" in js
     assert "cache_records_used" in js
 
+
 def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, monkeypatch) -> None:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
         BrowserSelectorCache,
@@ -267,7 +302,7 @@ def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, mo
     runtime._code_executor = AsyncMock(
         return_value={
             "result": (
-                '### Result\n'
+                "### Result\n"
                 '{"ok": true, '
                 '"url": "https://books.toscrape.com/", '
                 '"profile_ids": ["books_to_scrape"], '
@@ -287,7 +322,7 @@ def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, mo
                 '"rating_selector_hint": "article.product_pod:nth-of-type(1) > p.star-rating:nth-of-type(1)", '
                 '"primary_link_selector_hint": "article.product_pod:nth-of-type(1) > h3:nth-of-type(1) > a:nth-of-type(1)", '
                 '"buttons": [{"selector_hint": "article.product_pod:nth-of-type(1) > div.product_price:nth-of-type(2) > form:nth-of-type(1) > button.btn.btn-primary:nth-of-type(1)"}]'
-                '},'
+                "},"
                 '{"id": "card_2", '
                 '"title": "Tipping the Velvet", '
                 '"price": "53.74", '
@@ -302,7 +337,7 @@ def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, mo
                 '"rating_selector_hint": "article.product_pod:nth-of-type(1) > p.star-rating:nth-of-type(1)", '
                 '"primary_link_selector_hint": "article.product_pod:nth-of-type(1) > h3:nth-of-type(1) > a:nth-of-type(1)", '
                 '"buttons": [{"selector_hint": "article.product_pod:nth-of-type(1) > div.product_price:nth-of-type(2) > form:nth-of-type(1) > button.btn.btn-primary:nth-of-type(1)"}]'
-                '}]}'
+                "}]}"
             )
         }
     )
@@ -321,14 +356,14 @@ def test_runtime_probe_cards_unwraps_result_field_and_records_cache(tmp_path, mo
     assert exported[0]["success_count"] == 1
     assert exported[0]["quality_score"] > 0
 
+
 def test_runtime_unwrap_mcp_result_field() -> None:
     runtime = _make_runtime()
 
-    raw = {
-        "result": '### Result\n{"ok": true, "cards": []}'
-    }
+    raw = {"result": '### Result\n{"ok": true, "cards": []}'}
 
     assert runtime._unwrap_mcp_text_result(raw) == '### Result\n{"ok": true, "cards": []}'
+
 
 def test_build_card_probe_js_has_cache_first_diagnostics() -> None:
     js = build_card_probe_js(
@@ -382,14 +417,14 @@ def test_build_card_probe_js_includes_table_and_list_row_selectors() -> None:
     js = build_card_probe_js(max_cards=10, viewport_only=True)
 
     assert "tbody > tr" in js
-    assert "[role=\"article\"]" in js
-    assert "[role=\"row\"]" in js
-    assert "[class*=\"article\" i]" in js
-    assert "[class*=\"post\" i]" in js
-    assert "[class*=\"result\" i]" in js
-    assert "[class*=\"search-result\" i]" in js
-    assert "[class*=\"list\" i]" in js
-    assert "[class*=\"row\" i]" in js
+    assert '[role="article"]' in js
+    assert '[role="row"]' in js
+    assert '[class*="article" i]' in js
+    assert '[class*="post" i]' in js
+    assert '[class*="result" i]' in js
+    assert '[class*="search-result" i]' in js
+    assert '[class*="list" i]' in js
+    assert '[class*="row" i]' in js
 
 
 def test_build_card_probe_js_extracts_article_metadata_fields() -> None:
@@ -401,9 +436,9 @@ def test_build_card_probe_js_extracts_article_metadata_fields() -> None:
     assert "author_selector_hint" in js
     assert "source_selector_hint" in js
     assert "summary_selector_hint" in js
-    assert "[class*=\"author\" i]" in js
-    assert "[class*=\"summary\" i]" in js
-    assert "[class*=\"snippet\" i]" in js
+    assert '[class*="author" i]' in js
+    assert '[class*="summary" i]' in js
+    assert '[class*="snippet" i]' in js
 
 
 def test_runtime_probe_cards_records_rejected_cache_attempt(tmp_path, monkeypatch) -> None:

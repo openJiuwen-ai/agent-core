@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from agent_shield.tool_permission import PermissionLevel, get_permission_manager
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import set_workspace
@@ -135,19 +137,31 @@ async def test_destructive_warning_present(sys_op) -> None:
 
 # ── injection blocked ────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_injection_backtick_blocked(sys_op) -> None:
-    tool = BashTool(sys_op)
-    res = await tool.invoke({"command": "echo `whoami`"})
-    assert res.success is False
-    assert "injection" in res.error.lower()
+_PERMISSION_CONFIG = {
+    "enabled": True,
+    "tools": {"bash": "allow"},
+    "package_builtin_rules": True,
+    "permission_mode": "strict",
+    "shell_allowlist": None,
+}
 
 
 @pytest.mark.asyncio
-async def test_injection_dollar_paren_blocked(sys_op) -> None:
-    tool = BashTool(sys_op)
-    res = await tool.invoke({"command": "echo $(id)"})
-    assert res.success is False
+async def test_injection_backtick_blocked() -> None:
+    result = await get_permission_manager().check_permission(
+        "bash", {"command": "echo `whoami`"}, config=_PERMISSION_CONFIG
+    )
+    assert result.permission == PermissionLevel.DENY
+    assert "injection" in (result.reason or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_injection_dollar_paren_blocked() -> None:
+    result = await get_permission_manager().check_permission(
+        "bash", {"command": "echo $(id)"}, config=_PERMISSION_CONFIG
+    )
+    assert result.permission == PermissionLevel.DENY
+    assert "injection" in (result.reason or "").lower()
 
 
 # ── workspace sandbox ─────────────────────────────────────────
@@ -277,9 +291,14 @@ async def test_small_output_not_persisted(sys_op) -> None:
 @pytest.mark.asyncio
 async def test_timeout_returns_collected_output(sys_op) -> None:
     tool = BashTool(sys_op)
-    # echo runs first, then sleep blows the 1s timeout: the kill must not drop
-    # the output already collected before it.
-    res = await tool.invoke({"command": "echo partial; sleep 5", "timeout": 1})
+    # print first, then block so the 1s timeout kills the process: the kill must
+    # not drop the output already collected before it. Using the interpreter
+    # avoids shell-dialect differences between cmd, bash, and Git Bash.
+    command = (
+        f'"{sys.executable}" -c '
+        f'"import time; print(\'partial\', flush=True); time.sleep(5)"'
+    )
+    res = await tool.invoke({"command": command, "timeout": 1})
     assert res.success is False
     assert "partial" in res.data["content"]
 

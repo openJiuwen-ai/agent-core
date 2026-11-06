@@ -39,7 +39,7 @@ from openjiuwen.agent_evolving.trajectory.messages import (
     trajectory_to_messages,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.ttse.subject_log import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -156,10 +156,16 @@ class TTSERail(EvolutionRail):
         ttse_config: Optional[TTSEConfig] = None,
         embedding: Optional[EmbeddingProvider] = None,
         success_detector: Optional[SuccessDetector] = None,
+        catalog_omit_categories: Optional[Collection[str]] = None,
         **kwargs: Any,
     ) -> None:
         self._ttse_llm = llm
         self._ttse_model = model
+        self._catalog_omit_categories = frozenset(
+            item.strip()
+            for item in (catalog_omit_categories or ())
+            if isinstance(item, str) and item.strip()
+        )
         # Shallow-copy so resolving embedding does not mutate the caller's config.
         self._ttse_config = TTSEConfig() if ttse_config is None else copy(ttse_config)
         resolved = embedding if embedding is not None else self._ttse_config.embedding
@@ -184,6 +190,8 @@ class TTSERail(EvolutionRail):
         self._last_capabilities: Optional[str] = None
         self._agent: Any = None
         self._consult_tools: list = []
+        self._consult_tool_description: str | None = None
+        self._consult_category_description: str | None = None
         self._attachment_manager: Any = None
         # Auto-dream: count non-follow-up task iterations between silent runs.
         self._dream_non_followup_count: int = 0
@@ -256,6 +264,8 @@ class TTSERail(EvolutionRail):
                 max_rules=int(getattr(self._ttse_config, "consult_max_rules", 40) or 40),
                 default_top_k=int(getattr(self._ttse_config, "consult_top_k", 8) or 8),
                 rrf_k=int(getattr(self._ttse_config, "consult_rrf_k", 60) or 60),
+                description=self._consult_tool_description,
+                category_description=self._consult_category_description,
             )
             self._register_runtime_tools(agent, tools)
             self._consult_tools = tools
@@ -289,6 +299,14 @@ class TTSERail(EvolutionRail):
         if trajectory is None:
             return []
         return trajectory_to_messages(trajectory, fields=fields, invoke_local=True)
+
+    def messages_from_trajectory(self, trajectory: Optional[Trajectory]) -> List[dict]:
+        """Project a trajectory for callers outside this class."""
+        return self._trajectory_to_messages(trajectory)
+
+    def ttse_store_path(self) -> str:
+        """Filesystem path of this rail's FACT/TIP bank."""
+        return str(getattr(self._ttse_config, "store_path", "") or "")
 
     def _allow_evolution_trigger(self, trigger_point, ctx: AgentCallbackContext) -> bool:
         """Trigger every invoke: TTSE induces from EVERY task.
@@ -400,13 +418,23 @@ class TTSERail(EvolutionRail):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[TTSERail] induction failed: %s", exc)
 
+    async def run_induction(
+        self,
+        trajectory,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        snapshot: Optional[dict] = None,
+    ) -> str:
+        """Run detect and induction. Public entry for team acceptance."""
+        return await self._run_ttse_induction(trajectory, ctx, snapshot=snapshot)
+
     async def _run_ttse_induction(
         self,
         trajectory,
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict] = None,
-    ) -> None:
+    ) -> str:
         snapshot = snapshot or {}
         messages = snapshot.get("messages")
         if messages is None:
@@ -433,7 +461,7 @@ class TTSERail(EvolutionRail):
         )
         if evidence.is_empty:
             logger.debug("[TTSERail] induction skipped: empty conversation/tool evidence")
-            return
+            return "empty"
         logger.info(
             "[TTSERail] starting induction query=%s batch_size=%s has_capabilities=%s",
             (task_query or "")[:80],
@@ -459,7 +487,7 @@ class TTSERail(EvolutionRail):
 
         if outcome == "skip":
             logger.info("[TTSERail] induction skipped: detect outcome=skip (%s)", result.reason)
-            return
+            return "skip"
 
         evidence_text = evidence.evidence_text
         async with self._evolution_lock:
@@ -487,6 +515,7 @@ class TTSERail(EvolutionRail):
                     existing_tips=self._ttse_store.tips_texts(),
                     outcome=outcome,
                     grader_note=evidence.grader_note,
+                    role_note=str(snapshot.get("ttse_role_note") or ""),
                 )
                 logger.info(
                     "[TTSERail] induce() done outcome=%s facts=%s tips=%s",
@@ -503,7 +532,7 @@ class TTSERail(EvolutionRail):
                         self._ttse_store.stats(),
                     )
                 await self._maybe_project_catalog()
-                return
+                return f"induced added={added} facts={len(facts)} tips={len(tips)}"
 
             # Batch mode (reference ``learn_batch``): buffer this task. blame/retire
             # still run per failed task (concentrated here); synthesize + induce
@@ -527,6 +556,8 @@ class TTSERail(EvolutionRail):
                 await self._blame_and_retire(task_query, buffered_evidence, messages)
             if len(self._batch_buffer) >= self._ttse_config.batch_size:
                 await self._flush_batch(capabilities)
+                return "flushed"
+            return "buffered"
 
     async def _blame_and_retire(
         self,
@@ -753,6 +784,10 @@ class TTSERail(EvolutionRail):
     # Auto-dream (silent bank hygiene)
     # ------------------------------------------------------------------
 
+    async def note_task_iteration(self, ctx: AgentCallbackContext, trajectory: Any) -> None:
+        """Advance this rail's dream counter. Public entry for the leader rail."""
+        await self._on_after_task_iteration(ctx, trajectory)
+
     async def _on_after_task_iteration(
         self,
         ctx: AgentCallbackContext,
@@ -765,7 +800,9 @@ class TTSERail(EvolutionRail):
         if self._dream_iteration_blocked(ctx):
             return
         interval = max(1, int(self._ttse_config.dream_interval))
-        count, reached = bump_dream_session_count(
+        # load/save of dream-state.json must not stall the event loop.
+        count, reached = await asyncio.to_thread(
+            bump_dream_session_count,
             self._ttse_config.resolved_dream_state_path(),
             interval,
         )
@@ -903,8 +940,7 @@ class TTSERail(EvolutionRail):
         if not session_id:
             logger.warning("[TTSERail] skip catalog attachment: no session_id")
             return
-        counts = self._ttse_store.catalog_counts() if hasattr(self._ttse_store, "catalog_counts") else {}
-        content = render_catalog_markdown(counts)
+        content, live = self._catalog_attachment()
         try:
             await manager.add_section(
                 session_id=session_id,
@@ -918,8 +954,16 @@ class TTSERail(EvolutionRail):
         except ValueError as exc:
             logger.warning("[TTSERail] skip catalog attachment: %s", exc)
             return
-        live = {k: int(v) for k, v in (counts or {}).items() if int(v or 0) > 0}
         logger.info("[TTSERail] trailed catalog attachment session_id=%s counts=%s", session_id, live)
+
+    def _catalog_attachment(self) -> tuple[str, dict]:
+        """Markdown trailed on the prompt, plus the counts written to the log."""
+        counts = self._ttse_store.catalog_counts() if hasattr(self._ttse_store, "catalog_counts") else {}
+        omitted = self._catalog_omit_categories
+        if omitted:
+            counts = {k: v for k, v in (counts or {}).items() if k not in omitted}
+        live = {k: int(v) for k, v in (counts or {}).items() if int(v or 0) > 0}
+        return render_catalog_markdown(counts), live
 
     @staticmethod
     def _catalog_session_id(ctx: AgentCallbackContext) -> str | None:

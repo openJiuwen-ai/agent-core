@@ -285,6 +285,26 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["output"], "listed")
         self.assertNotEqual(result["output"], EMPTY_RESPONSE_MSG)
 
+    async def test_exhausted_iterations_report_finish_reason(self):
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=1)
+
+        async def _fake_execute(ctx, tool_calls, session, context):
+            return [{"tool_name": "view_task", "tool_result": "ok"}] * len(tool_calls)
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([_tool_call_answer()])
+        session = _mock_session()
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm), \
+                patch.object(agent, "_execute_tool_call", side_effect=_fake_execute), \
+                patch.object(agent, "_after_execute_tool_call_for_hitl",
+                             return_value=(None, None)), \
+                patch.object(agent, "_after_execute_tool_call", return_value=None):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "error")
+        self.assertEqual(result["finish_reason"], "max_iterations")
+
     async def test_length_turn_uses_truncation_retry_not_empty_error(self):
         """finish_reason=length 必须走截断续跑，不被空回复判定吞掉。"""
         agent, _, _ = self._make_agent_with_mocks(max_iterations=3)

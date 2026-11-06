@@ -1230,7 +1230,7 @@ class RoundLevelCompressor(ContextProcessor):
 
     @staticmethod
     def _estimate_content_tokens(content: Any) -> int:
-        return max(len(sanitize_content_for_text(content)) // 3, 1)
+        return ContextUtils.estimate_tokens(content)
 
     @staticmethod
     def _to_text(content: Any) -> str:

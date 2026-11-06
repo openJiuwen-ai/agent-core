@@ -6,7 +6,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.sys_operation import OperationMode
+from openjiuwen.core.sys_operation.result import ReadFileData, ReadFileResult
 from openjiuwen.harness.schema.config import VisionModelConfig
 from openjiuwen.harness.tools import (
     ImageOCRTool,
@@ -81,6 +84,7 @@ def test_visual_question_answering_tool_uses_ocr_context(monkeypatch):
         image_path_or_url: str,
         prompt: str,
         configured_model: VisionModelConfig | None,
+        operation=None,
     ):
         _ = image_path_or_url
         prompts.append(prompt)
@@ -131,6 +135,7 @@ def test_visual_question_answering_tool_can_skip_ocr(monkeypatch):
         image_path_or_url: str,
         prompt: str,
         configured_model: VisionModelConfig | None,
+        operation=None,
     ):
         _ = image_path_or_url
         prompts.append(prompt)
@@ -250,3 +255,136 @@ def test_normalize_headers_only_rewrites_auth_header():
     assert normalized["OpenAI-Organization"] == "org-vision"
     assert normalized["OpenAI-Project"] == "proj-vision"
     assert normalized["x-custom-header"] == "kept-verbatim"
+
+
+class _FakeSysOperation:
+    """Minimal SysOperation stand-in covering mode + fs().read_file()."""
+
+    def __init__(self, content: bytes, *, mode: OperationMode):
+        self.mode = mode
+        self.read_calls: list[str] = []
+        self._content = content
+
+    def fs(self):
+        return self
+
+    async def read_file(self, path, *, mode="text", **kwargs):
+        self.read_calls.append(path)
+        data = ReadFileData(path=path, content=self._content, mode="bytes")
+        return ReadFileResult(
+            code=StatusCode.SUCCESS.code,
+            message="success",
+            data=data,
+        )
+
+
+def test_image_ocr_tool_reads_image_via_sandbox_operation(monkeypatch, tmp_path):
+    # Sandbox paths contain the SANDBOX_PATH_MARKER that the local branch
+    # rejects; the sandbox branch must read them through fs().read_file.
+    image_path = tmp_path / "sample.png"
+    _write_test_png(image_path)
+    fake_operation = _FakeSysOperation(image_path.read_bytes(), mode=OperationMode.SANDBOX)
+    vision_model_config = VisionModelConfig(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="mock-model",
+    )
+
+    calls = []
+
+    def fake_invoke_chat_completion(config, prompt, image_content):
+        calls.append(image_content)
+        return "sandbox text"
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.multimodal.vision._invoke_chat_completion",
+        fake_invoke_chat_completion,
+    )
+
+    sandbox_path = "/home/user/uploads/pic.png"
+
+    async def _run():
+        await Runner.start()
+        try:
+            tool = ImageOCRTool(vision_model_config=vision_model_config, operation=fake_operation)
+            return await tool.invoke({"image_path_or_url": sandbox_path})
+        finally:
+            await Runner.stop()
+
+    result = asyncio.run(_run())
+
+    assert result.success is True
+    assert result.data["text"] == "sandbox text"
+    assert fake_operation.read_calls == [sandbox_path]
+    assert calls[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_ocr_tool_local_operation_still_reads_local_file(tmp_path, monkeypatch):
+    image_path = tmp_path / "sample.png"
+    _write_test_png(image_path)
+    fake_operation = _FakeSysOperation(b"must-not-be-used", mode=OperationMode.LOCAL)
+    vision_model_config = VisionModelConfig(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="mock-model",
+    )
+
+    calls = []
+
+    def fake_invoke_chat_completion(config, prompt, image_content):
+        calls.append(image_content)
+        return "local text"
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.multimodal.vision._invoke_chat_completion",
+        fake_invoke_chat_completion,
+    )
+
+    async def _run():
+        await Runner.start()
+        try:
+            tool = ImageOCRTool(vision_model_config=vision_model_config, operation=fake_operation)
+            return await tool.invoke({"image_path_or_url": str(image_path)})
+        finally:
+            await Runner.stop()
+
+    result = asyncio.run(_run())
+
+    # LOCAL mode keeps the original local-file branch: fs() is never called.
+    assert result.success is True
+    assert fake_operation.read_calls == []
+    assert calls[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_ocr_tool_passes_data_uri_through(monkeypatch):
+    vision_model_config = VisionModelConfig(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="mock-model",
+    )
+
+    calls = []
+
+    def fake_invoke_chat_completion(config, prompt, image_content):
+        calls.append(image_content)
+        return "data uri text"
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.multimodal.vision._invoke_chat_completion",
+        fake_invoke_chat_completion,
+    )
+
+    data_uri = "data:image/png;base64,QUJD"
+
+    async def _run():
+        await Runner.start()
+        try:
+            tool = ImageOCRTool(vision_model_config=vision_model_config)
+            return await tool.invoke({"image_path_or_url": data_uri})
+        finally:
+            await Runner.stop()
+
+    result = asyncio.run(_run())
+
+    assert result.success is True
+    assert calls[0]["image_url"]["url"] == data_uri

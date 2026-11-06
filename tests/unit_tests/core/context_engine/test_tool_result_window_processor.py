@@ -17,6 +17,7 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_proce
 )
 from openjiuwen.core.context_engine.processor.offloader.tool_result_window_processor import (
     ToolResultWindowProcessorConfig,
+    WINDOWED_OUTPUT_TAG,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import (
@@ -196,6 +197,69 @@ class TestToolResultWindowProcessor:
         assert mock_fs.write_file.call_count == 2  # only r1 written this round
 
     @pytest.mark.asyncio
+    async def test_small_old_result_is_compacted_without_filesystem_offload(self, tmp_path):
+        config = ToolResultWindowProcessorConfig(
+            tool_names=["browser_snapshot"],
+            keep_last_k=1,
+            min_offload_chars=4096,
+            small_result_trim_size=80,
+        )
+        context, mock_fs = await build_context(str(tmp_path), config)
+
+        msgs: List = [UserMessage(content="browse")]
+        msgs += tool_round("s0", "browser_snapshot", "old-" + "x" * 500)
+        msgs += tool_round("s1", "browser_snapshot", "new-" + "y" * 500)
+        await context.add_messages(msgs)
+
+        results = [m for m in context.get_messages() if isinstance(m, ToolMessage)]
+        assert not isinstance(results[0], OffloadToolMessage)
+        assert results[0].content.startswith(WINDOWED_OUTPUT_TAG)
+        assert results[0].metadata["tool_result_window_managed"] is True
+        assert results[1].content.startswith("new-")
+        mock_fs.write_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tiny_old_result_is_kept_and_marked_without_reprocessing(self, tmp_path):
+        config = ToolResultWindowProcessorConfig(
+            tool_names=["browser_snapshot"],
+            keep_last_k=1,
+            min_offload_chars=4096,
+            small_result_trim_size=80,
+        )
+        context, mock_fs = await build_context(str(tmp_path), config)
+
+        await context.add_messages([UserMessage(content="browse")])
+        await context.add_messages(tool_round("s0", "browser_snapshot", "tiny result"))
+        await context.add_messages(tool_round("s1", "browser_snapshot", "new result"))
+        first = [m for m in context.get_messages() if isinstance(m, ToolMessage)][0]
+        assert first.content == "tiny result"
+        assert first.metadata["tool_result_window_managed"] is True
+
+        await context.add_messages(tool_round("s2", "browser_snapshot", "latest result"))
+        assert mock_fs.write_file.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_large_old_result_still_persists_with_threshold(self, tmp_path):
+        config = ToolResultWindowProcessorConfig(
+            tool_names=["browser_snapshot"],
+            keep_last_k=1,
+            trim_size=100,
+            min_offload_chars=4096,
+            small_result_trim_size=80,
+        )
+        context, mock_fs = await build_context(str(tmp_path), config)
+
+        msgs: List = [UserMessage(content="browse")]
+        msgs += tool_round("s0", "browser_snapshot", "old-" + "x" * 5000)
+        msgs += tool_round("s1", "browser_snapshot", "new-" + "y" * 5000)
+        await context.add_messages(msgs)
+
+        results = [m for m in context.get_messages() if isinstance(m, ToolMessage)]
+        assert isinstance(results[0], OffloadToolMessage)
+        assert results[0].content.startswith(PERSISTED_OUTPUT_TAG)
+        mock_fs.write_file.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_empty_tool_names_is_noop(self, tmp_path):
         config = ToolResultWindowProcessorConfig(tool_names=[], keep_last_k=1)
         context, mock_fs = await build_context(str(tmp_path), config)
@@ -248,6 +312,8 @@ class TestToolResultWindowProcessorConfig:
         assert config.tool_names == []
         assert config.keep_last_k == 3
         assert config.trim_size == 3000
+        assert config.min_offload_chars == 0
+        assert config.small_result_trim_size == 800
         assert config.offload_file_prefix == "ToolResultWindowProcessor"
 
     def test_non_positive_window_and_trim_are_rejected(self):

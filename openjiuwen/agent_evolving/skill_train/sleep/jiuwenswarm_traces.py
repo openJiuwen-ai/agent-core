@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -32,6 +33,8 @@ _META_USER_MARKERS = (
 )
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>[\s\S]*?</system-reminder>", re.IGNORECASE)
 _INDEXED_ATTR_RE = re.compile(r"^(?P<base>.+)\.(?P<index>\d+)\.(?P<field>[^.]+)$")
+
+logger = logging.getLogger(__name__)
 
 
 def has_jiuwenswarm_traces(path: Path) -> bool:
@@ -79,6 +82,63 @@ def _indexed_messages(attrs: Mapping[str, Any], base: str) -> list[dict[str, Any
         if row is not None:
             ordered.append(row)
     return ordered
+
+
+_TEXT_LIKE_PART_TYPES = frozenset({"text", "reasoning", "thinking"})
+
+
+def _is_text_part(part: Any) -> bool:
+    return isinstance(part, Mapping) and str(part.get("type") or "text") == "text"
+
+
+def _is_text_like_part(part: Any) -> bool:
+    return isinstance(part, Mapping) and str(part.get("type") or "text") in _TEXT_LIKE_PART_TYPES
+
+
+def _flatten_message_content(message: Mapping[str, Any]) -> str:
+    """Flatten new-format ``parts`` payloads into plain ``content`` text.
+
+    Newer telemetry stores message bodies as ``{role, parts: [{type, content}]}``.
+    Text parts win. When a message has no text part, text-like parts (reasoning
+    / thinking) are joined as a fallback; unknown part types (tool_call, image,
+    tool_result, ...) are skipped so non-prose payloads never leak into
+    ``user_prompts`` / ``assistant_finals``.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    texts = [str(part.get("content") or "") for part in parts if _is_text_part(part)]
+    if not texts:
+        texts = [str(part.get("content") or "") for part in parts if _is_text_like_part(part)]
+    return "\n".join(text for text in texts if text)
+
+
+def _packed_messages(attrs: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+    """Decode single-attribute message lists (``gen_ai.input.messages`` style).
+
+    Newer telemetry packs the whole message array as one JSON attribute instead
+    of the legacy ``<base>.<index>.<field>`` indexed attributes handled by
+    :func:`_indexed_messages`. Returns ``[]`` when the attribute is absent or
+    does not decode into a list of message mappings.
+    """
+    raw = attrs.get(key)
+    if isinstance(raw, str):
+        raw = _decode_jsonish(raw)
+    if not isinstance(raw, list):
+        return []
+    messages: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        role = str(item.get("role") or "")
+        content = _flatten_message_content(item)
+        if not role and not content:
+            continue
+        messages.append({"role": role, "content": content})
+    return messages
 
 
 def _span_attrs(span: Mapping[str, Any]) -> dict[str, Any]:
@@ -168,6 +228,8 @@ def _prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
     messages = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
     if not messages:
         messages = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
+    if not messages:
+        messages = _packed_messages(attrs, semconv.GEN_AI_INPUT_MESSAGES)
     return messages
 
 
@@ -175,6 +237,8 @@ def _completion_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
     messages = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_COMPLETION)
     if not messages:
         messages = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
+    if not messages:
+        messages = _packed_messages(attrs, semconv.GEN_AI_OUTPUT_MESSAGES)
     if messages:
         return messages
     output = attrs.get(semconv.LANGFUSE_OBSERVATION_OUTPUT)
@@ -509,14 +573,33 @@ def _digest_from_trace(
     spans: list[dict[str, Any]],
     *,
     project: str,
+    drop_reasons: dict[str, int] | None = None,
 ) -> SessionDigest | None:
-    """Build one SessionDigest from spans that share an OTLP ``traceId``."""
-    if not trace_id or _spans_look_like_noise(spans):
+    """Build one SessionDigest from spans that share an OTLP ``traceId``.
+
+    ``drop_reasons`` (optional) accumulates per-reason drop counters so the
+    loader can emit one compact ``logger.info`` summary instead of one line
+    per dropped trace; the per-trace detail stays at ``logger.debug``.
+    """
+
+    def _drop(reason: str) -> None:
+        logger.debug("skip trace %s: %s", trace_id, reason)
+        if drop_reasons is not None:
+            drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+
+    if not trace_id:
+        return None
+    if _spans_look_like_noise(spans):
+        _drop("prewarm/heartbeat noise")
         return None
 
     spans = sorted(spans, key=_start_time)
     main = _select_main_llm_span(spans)
     if main is None:
+        _drop(
+            "no llm.call with a usable prompt "
+            "(neither langfuse/gen_ai.prompt.* indexed attrs nor gen_ai.input.messages)"
+        )
         return None
 
     attrs = _span_attrs(main)
@@ -553,6 +636,7 @@ def _digest_from_trace(
                 ordered.append({"role": "assistant", "content": text, "skills": []})
 
     if not user_prompts:
+        _drop("no user prompts after unwrap")
         return None
 
     tools_used, skills_used = _collect_tools_and_skills(spans)
@@ -617,6 +701,7 @@ def load_jiuwenswarm_session_digests(
                     by_trace[tid].append(span)
 
     digests: list[SessionDigest] = []
+    drop_reasons: dict[str, int] = {}
     # Prefer recently active traces when max_sessions truncates.
     ordered_traces = sorted(
         by_trace.items(),
@@ -624,11 +709,23 @@ def load_jiuwenswarm_session_digests(
         reverse=True,
     )
     for tid, spans in ordered_traces:
-        digest = _digest_from_trace(tid, spans, project=project)
+        digest = _digest_from_trace(tid, spans, project=project, drop_reasons=drop_reasons)
         if digest is not None:
             digests.append(digest)
         if max_sessions > 0 and len(digests) >= max_sessions:
             break
+    if drop_reasons:
+        # One compact info line instead of one log per dropped trace; the
+        # per-trace detail remains available at debug level.
+        detail = ", ".join(
+            f"{reason} x{count}" for reason, count in sorted(drop_reasons.items())
+        )
+        logger.info(
+            "harvest: kept %d digest(s), dropped %d trace(s) [%s]",
+            len(digests),
+            sum(drop_reasons.values()),
+            detail,
+        )
     return digests
 
 

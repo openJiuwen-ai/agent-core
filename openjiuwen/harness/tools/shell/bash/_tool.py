@@ -17,9 +17,15 @@ from typing import (
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.session import get_current_session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.filesystem import (
+    _detect_and_record_deletions,
+    _parse_rm_targets,
+    _record_rm_targets_before_deletion,
+)
 from openjiuwen.harness.tools.shell.bash._output import (
     CommandOutput,
     persist_large_output,
@@ -28,21 +34,14 @@ from openjiuwen.harness.tools.shell.bash._output import (
     truncate_output,
 )
 from openjiuwen.harness.tools.shell.bash._permission import (
-    check_permission,
     PermissionConfig,
     PermissionMode,
+    check_permission,
 )
 from openjiuwen.harness.tools.shell.bash._security import (
-    check_injection,
     get_destructive_warning,
 )
 from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
-from openjiuwen.core.session import get_current_session
-from openjiuwen.harness.tools.filesystem import (
-    _detect_and_record_deletions,
-    _parse_rm_targets,
-    _record_rm_targets_before_deletion,
-)
 
 # Matches sudo not already followed by -n / -En / --non-interactive
 _SUDO_NEEDS_N_RE = re.compile(
@@ -89,6 +88,8 @@ class BashTool(Tool):
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
+        # Tool-local guard for call-site policy (team worktree deny patterns etc.).
+        # Agent-level adjudication still lives in PermissionInterruptRail.
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
             deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
@@ -194,10 +195,9 @@ class BashTool(Tool):
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                return guard
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            return ToolOutput(success=False, error=perm.reason)
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
@@ -325,14 +325,13 @@ class BashTool(Tool):
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            yield ToolOutput(success=False, error=perm.reason)
+            return
+
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
-
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                yield guard
-                return
 
         warning = get_destructive_warning(p.command)
 
@@ -408,15 +407,3 @@ class BashTool(Tool):
             data={"content": content},
             error=content if is_error else None,
         )
-
-    def _guard(self, p: _BashInputs):
-        # tool-layer injection check (supplements sys_operation safety)
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
-
-        # permission pipeline (deny/allow patterns + mode enforcement)
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
-        return None

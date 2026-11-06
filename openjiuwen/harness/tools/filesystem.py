@@ -19,7 +19,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
+from typing import Callable, Dict, Any, AsyncIterator, List, Optional, Tuple
 
 import pdfplumber
 
@@ -68,6 +68,17 @@ _BINARY_EXTENSIONS: frozenset = frozenset({
 _OFFICE_DOC_EXTENSIONS: frozenset = frozenset({
     ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
 })
+
+# Inline-image budget for read_file native multimodal: raw bytes and longest
+# side. The byte budget is derived from the provider-side per-image cap instead
+# of the token budget: the blob is base64-encoded into the data URI, so 3.6 MB
+# of raw bytes becomes ~4.8 MB of base64, below the 5 MB per-image limit
+# enforced by providers such as Anthropic and still leaving room for the
+# "data:...;base64," prefix. The longest side stays at 2048px so reference
+# images (e.g. a 1900x1600 PPT slide) are not downscaled before the model sees
+# them; the shrink pipeline only fires when either limit is exceeded.
+READ_IMAGE_MAX_BYTES = 3_600_000
+READ_IMAGE_MAX_DIMENSION = 2048
 
 
 def _is_office_doc_path(file_path: str) -> bool:
@@ -846,6 +857,9 @@ class ReadFileTool(Tool):
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
     MAX_OFFICE_DOC_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB - ZIP containers with media
+    # Overridable per subclass / instance: inline-image budget for native multimodal.
+    READ_IMAGE_MAX_BYTES: int = READ_IMAGE_MAX_BYTES
+    READ_IMAGE_MAX_DIMENSION: int = READ_IMAGE_MAX_DIMENSION
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
     def __init__(
@@ -854,6 +868,7 @@ class ReadFileTool(Tool):
         language: str = "cn",
         agent_id: Optional[str] = None,
         enable_image_multimodal: bool = True,
+        image_multimodal_resolver: Optional[Callable[[], bool]] = None,
     ):
         super().__init__(
             build_tool_card(
@@ -866,6 +881,23 @@ class ReadFileTool(Tool):
         )
         self.operation = operation
         self.enable_image_multimodal = enable_image_multimodal
+        # 运行时动态判定（如按当前主模型能力）：切模型后 read_file 行为跟随，
+        # init 时的 enable_image_multimodal 只作为 resolver 缺失/失败时的回退值。
+        self._image_multimodal_resolver = image_multimodal_resolver
+
+    def _image_multimodal_enabled(self) -> bool:
+        """Resolve native inline at call time so model switches are honored."""
+
+        resolver = self._image_multimodal_resolver
+        if resolver is None:
+            return self.enable_image_multimodal
+        try:
+            return bool(resolver())
+        except Exception as exc:
+            logger.debug(
+                "image multimodal resolver failed, falling back to init flag: %s", exc
+            )
+            return self.enable_image_multimodal
 
     # ------------------------------------------------------------------
     # File-type predicates
@@ -1379,33 +1411,31 @@ class ReadFileTool(Tool):
         return await asyncio.to_thread(_extract_sync)
 
     @staticmethod
-    def _estimate_base64_tokens(byte_length: int) -> int:
-        """Token estimate for base64-encoding `byte_length` bytes, without encoding.
+    def _image_text_only_result(
+        file_path: str,
+        mime_type: str,
+        raw: bytes,
+        dimensions: Optional[str],
+        *,
+        note: str,
+    ) -> Dict[str, Any]:
+        """Describe an image without attaching pixels (metadata-only read)."""
 
-        Computes the exact base64.b64encode() output length (3 raw bytes -> 4
-        encoded chars, rounded up to a multiple of 4) from the byte count
-        alone, so budget checks don't need to pay for a real encode just to
-        measure size.
-        """
-        encoded_length = ((byte_length + 2) // 3) * 4
-        return max(1, int(encoded_length * 0.125))
-
-    @staticmethod
-    def _compress_image(img: Any, size: Tuple[int, int], quality: int) -> Optional[bytes]:
-        """Render an isolated, downsized JPEG copy of an already-decoded PIL image.
-
-        `img.convert("RGB")` returns a new image object, so `img` itself is
-        never mutated and stays reusable by other compression tiers.
-        """
-        try:
-            out = io.BytesIO()
-            tier = img.convert("RGB")
-            tier.thumbnail(size)
-            tier.save(out, format="JPEG", quality=quality)
-            return out.getvalue()
-        except (OSError, ValueError) as exc:
-            logger.debug("Failed to compress image bytes: %s", exc)
-            return None
+        parts = [
+            f"Image file read: {file_path}",
+            f"format: {mime_type.partition('/')[2] or 'png'}",
+            f"size_bytes: {len(raw)}",
+        ]
+        if dimensions:
+            parts.append(f"dimensions: {dimensions}")
+        parts.append(note)
+        parts.append(
+            "If a vision tool is configured, call image_ocr or visual_question_answering with this file path."
+        )
+        return {
+            "content": "\n".join(parts),
+            "multimodal": [],
+        }
 
     async def _read_image(self, file_path: str, model_name: str) -> Dict[str, Any]:
 
@@ -1418,10 +1448,16 @@ class ReadFileTool(Tool):
         if not raw:
             raise RuntimeError(f"Image file is empty: {file_path}")
 
+        from openjiuwen.harness.tools.multimodal.image_shrink import (
+            detect_mime_type,
+            shrink_image_bytes,
+        )
+
         _, ext = os.path.splitext(file_path.lower())
-        image_type = ext.lstrip(".") or "png"
+        # The payload wins over the suffix: a `.png`-named BMP must not be sent
+        # as image/png, or the provider rejects the request as malformed.
+        mime_type = detect_mime_type(raw, ext)
         dimensions: str | None = None
-        resized = raw
 
         try:
             from PIL import Image
@@ -1429,39 +1465,49 @@ class ReadFileTool(Tool):
             logger.debug("Pillow is unavailable for image metadata extraction (%s): %s", file_path, exc)
         else:
             try:
-                # Decode once; every compression tier below works off this same
-                # image object (via .copy()/.convert(), which never mutate it).
                 with Image.open(io.BytesIO(raw)) as img:
-                    detected_format = (img.format or "PNG").lower()
-                    image_type = detected_format  # prefer format detected from buffer
                     dimensions = f"{img.width}x{img.height}"
-
-                    # Tier 1: standard resize, same format as the source (thumbnail to 1536×1536).
-                    tier1 = img.copy()
-                    tier1.thumbnail((1536, 1536))
-                    out = io.BytesIO()
-                    tier1.save(out, format=detected_format.upper())
-                    candidate = out.getvalue()
-                    if candidate and len(candidate) < len(raw):
-                        resized = candidate
-
-                    # Tier 2/3: only pay for further compression if tier 1 still busts the budget.
-                    # Token budget check uses a byte-length estimate, not a real base64 encode.
-                    if self._estimate_base64_tokens(len(resized)) > self.MAX_TOKENS:
-                        compressed = self._compress_image(img, size=(800, 800), quality=40)
-                        if compressed and self._estimate_base64_tokens(len(compressed)) <= self.MAX_TOKENS:
-                            resized = compressed
-                            image_type = "jpeg"
-                        else:
-                            # Final fallback: 400×400 JPEG q=20 (mirrors TS Sharp fallback).
-                            fallback = self._compress_image(img, size=(400, 400), quality=20)
-                            if fallback:
-                                resized = fallback
-                                image_type = "jpeg"
             except (OSError, ValueError) as exc:
                 logger.debug("Failed to parse image metadata (%s): %s", file_path, exc)
 
-        mime_type = f"image/{image_type}"
+        # 先判定本次调用是否需要像素，再决定是否走缩小：模型不支持原生看图时
+        # 装像素没有意义，白缩一次会浪费 CPU / 内存（缩放在下面单独执行）。
+        if not self._image_multimodal_enabled():
+            return self._image_text_only_result(
+                file_path,
+                mime_type,
+                raw,
+                dimensions,
+                note=(
+                    "Image bytes are not attached because read_file native image "
+                    "multimodal input is disabled."
+                ),
+            )
+
+        # 与用户上传共用同一条缩小链路：够小原样送出，超限才按质量从高到低逐档压缩。
+        fitted = shrink_image_bytes(
+            raw,
+            mime_type,
+            max_bytes=self.READ_IMAGE_MAX_BYTES,
+            max_dimension=self.READ_IMAGE_MAX_DIMENSION,
+        )
+        if fitted is None:
+            # 预算内无法编码时绝不能退回原始字节：那会把未受预算约束的
+            # payload base64 后塞进上下文（正是 review 指出的问题）。
+            logger.debug("Image payload cannot be fitted within the read_file budget: %s", file_path)
+            return self._image_text_only_result(
+                file_path,
+                mime_type,
+                raw,
+                dimensions,
+                note=(
+                    "Image bytes are not attached because the image could not be "
+                    "decoded and encoded within the read_file image budget."
+                ),
+            )
+        resized, mime_type = fitted
+        image_type = mime_type.partition("/")[2] or "png"
+
         parts = [
             f"Image file read: {file_path}",
             f"format: {image_type}",
@@ -1470,18 +1516,6 @@ class ReadFileTool(Tool):
         ]
         if dimensions:
             parts.append(f"dimensions: {dimensions}")
-
-        if not self.enable_image_multimodal:
-            parts.append(
-                "Image bytes are not attached because read_file native image multimodal input is disabled."
-            )
-            parts.append(
-                "If a vision tool is configured, call image_ocr or visual_question_answering with this file path."
-            )
-            return {
-                "content": "\n".join(parts),
-                "multimodal": [],
-            }
 
         encoded = base64.b64encode(resized).decode("ascii")
         data_url = f"data:{mime_type};base64,{encoded}"

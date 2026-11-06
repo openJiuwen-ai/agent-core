@@ -2,10 +2,16 @@
 
 """Literal arguments must not authorize extra commands or evade path restrictions."""
 
+import os
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="literal shell parsing is disabled on Windows",
+)
 
 from openjiuwen.harness.security import literal_shell
 from openjiuwen.harness.security.core import PermissionEngine
@@ -43,7 +49,7 @@ async def test_literal_heredoc_after_leading_cd_is_allowed(delimiter):
         f'<<{delimiter}\n{{"txBody":{{"descInfo":"交易成功"}}}}\nEOF'
     )
     result = await PermissionEngine(config()).check_permission("bash", {"command": command})
-    assert result.is_allowed
+    assert result.permission == PermissionLevel.ALLOW
     assert "rules[cd]" in result.matched_rule
     assert "rules[python]" in result.matched_rule
 
@@ -70,18 +76,18 @@ async def test_cd_heredoc_preserves_denies_and_requires_both_command_rules(tmp_p
     for denied in ("cd", "python"):
         policy = config()
         next(rule for rule in policy["rules"] if rule["id"] == denied)["action"] = "deny"
-        assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_denied
+        assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).permission == PermissionLevel.DENY
     for allowed in ("cd", "python"):
         policy = config()
         policy["rules"] = [rule for rule in policy["rules"] if rule["id"] == allowed]
-        assert not (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_allowed
+        assert not (await PermissionEngine(policy).check_permission("bash", {"command": command})).permission == PermissionLevel.ALLOW
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     policy = config()
     policy["file_guard"] = {"enabled": True, "defaults": {"exec": "deny"}, "workspace": {"exec": "allow"}}
     assert (await PermissionEngine(policy, workspace_root=workspace).check_permission(
         "bash", {"command": command, "workdir": str(workspace)},
-    )).is_denied
+    )).permission == PermissionLevel.DENY
 
 
 @pytest.mark.asyncio
@@ -90,7 +96,7 @@ async def test_literal_numeric_arguments_are_allowed(value):
     result = await PermissionEngine(config()).check_permission("bash", {
         "command": f"python3 probe.py --value {value}",
     })
-    assert result.is_allowed
+    assert result.permission == PermissionLevel.ALLOW
 
 
 @pytest.mark.asyncio
@@ -115,7 +121,7 @@ async def test_customer_meeting_command_with_unquoted_integers():
     result = await PermissionEngine(compose_skill_permissions(base, overlay)).check_permission(
         "bash", {"command": command},
     )
-    assert result.is_allowed
+    assert result.permission == PermissionLevel.ALLOW
     for rule_id in ("allow_cd", "rule_cd", "allow_python3", "rule_python3"):
         assert f"rules[{rule_id}]" in result.matched_rule
 
@@ -158,10 +164,10 @@ async def test_tool_deny_and_parameter_deny_remain_effective():
     command = '''python3 probe.py --json '{"id":1}' '''
     policy = config()
     policy["tools"]["bash"] = "deny"
-    assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_denied
+    assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).permission == PermissionLevel.DENY
     policy["tools"]["bash"] = "allow"
     policy["rules"] = [{"id": "deny_python", "tools": ["bash"], "pattern": "python3 *", "action": "deny"}]
-    assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_denied
+    assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).permission == PermissionLevel.DENY
 
 
 @pytest.mark.asyncio
@@ -171,7 +177,7 @@ async def test_baseline_allow_is_not_evidence_for_a_chain():
     policy["rules"] = []
     assert (await PermissionEngine(policy).check_permission("bash", {
         "command": "cd ./ && python3 probe.py",
-    })).needs_approval
+    })).permission == PermissionLevel.ASK
 
 
 @pytest.mark.asyncio
@@ -180,7 +186,7 @@ async def test_unanchored_regex_cannot_authorize_a_chain_by_argument_text():
     policy["rules"] = [{"id": "argument_hit", "tools": ["bash"], "pattern": "re:python3", "action": "allow"}]
     assert (await PermissionEngine(policy).check_permission("bash", {
         "command": "echo python3 && echo python3",
-    })).needs_approval
+    })).permission == PermissionLevel.ASK
 
 
 @pytest.mark.asyncio
@@ -202,14 +208,14 @@ async def test_native_and_legacy_guard_check_scripts_after_cd(tmp_path: Path):
         result = await engine.check_permission("bash", {
             "command": "cd ./ && python3 ../outside.py", "workdir": str(workspace),
         })
-        assert result.is_denied, result
+        assert result.permission == PermissionLevel.DENY, result
 
 
 @pytest.mark.asyncio
 async def test_parser_unavailable_keeps_conservative_behavior(monkeypatch):
     monkeypatch.setattr(literal_shell, "_get_tree_sitter_bash_parser", lambda: None)
     result = await PermissionEngine(config()).check_permission("bash", {"command": "cd ./ && python3 probe.py"})
-    assert result.needs_approval
+    assert result.permission == PermissionLevel.ASK
 
 
 @pytest.mark.asyncio
@@ -218,7 +224,7 @@ async def test_other_shell_dialects_do_not_receive_bash_allow_evidence(shell_typ
     result = await PermissionEngine(config()).check_permission("bash", {
         "command": "cd ./ && python3 probe.py", "shell_type": shell_type,
     })
-    assert result.needs_approval
+    assert result.permission == PermissionLevel.ASK
 
 
 @pytest.mark.asyncio
@@ -226,7 +232,7 @@ async def test_each_remembered_subcommand_is_checked_without_rule_label_parsing(
     policy = deepcopy(config())
     policy["approval_overrides"] = policy.pop("rules")
     result = await PermissionEngine(policy).check_permission("bash", {"command": "cd ./ && python3 probe.py"})
-    assert result.is_allowed
+    assert result.permission == PermissionLevel.ALLOW
 
 
 @pytest.mark.asyncio
@@ -237,7 +243,7 @@ async def test_full_text_ask_cannot_hide_a_subcommand_deny():
         {"tools": ["bash"], "pattern": "python3 *", "action": "deny"},
     ]
     result = await PermissionEngine(policy).check_permission("bash", {"command": "cd ./ && python3 probe.py"})
-    assert result.is_denied
+    assert result.permission == PermissionLevel.DENY
 
 
 @pytest.mark.asyncio
@@ -246,7 +252,7 @@ async def test_invalid_optional_policy_sections_remain_conservative(value):
     policy = config()
     policy.update({"rules": value, "approval_overrides": value, "defaults": value})
     result = await PermissionEngine(policy).check_permission("bash", {"command": "cd ./ && python3 probe.py"})
-    assert result.needs_approval
+    assert result.permission == PermissionLevel.ASK
 
 
 @pytest.mark.parametrize("command", [
@@ -268,7 +274,7 @@ async def test_symlinked_script_after_cd_still_obeys_exec_guard(tmp_path):
     result = await PermissionEngine(policy, workspace_root=workspace).check_permission("bash", {
         "command": "cd ./ && python3 probe.py", "workdir": str(workspace),
     })
-    assert result.is_denied
+    assert result.permission == PermissionLevel.DENY
 
 
 @pytest.mark.asyncio
@@ -279,4 +285,4 @@ async def test_legacy_path_checks_are_supplemented_not_replaced(tmp_path):
     result = await PermissionEngine(policy, workspace_root=tmp_path / "workspace").check_permission("bash", {
         "command": f"cd ./ && python3 probe.py --out {tmp_path / 'outside.json'}",
     })
-    assert result.is_denied
+    assert result.permission == PermissionLevel.DENY

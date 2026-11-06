@@ -16,6 +16,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -63,6 +64,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
+    get_declared_image_support,
     schedule_image_support_probe,
 )
 from openjiuwen.harness.rails import DeepAgentRail
@@ -253,11 +255,36 @@ class DeepAgent(BaseAgent):
         self._interaction_started = False
         self._agent_ras_setting: Any = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
+        self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
+        self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def register_task_resource_cleanup(
+        self,
+        cleanup: Callable[[], Awaitable[None]],
+        *,
+        prepare: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
+        """Register task-scoped browser resource acquisition and cleanup."""
+        if prepare is not None and prepare not in self._task_resource_prepares:
+            self._task_resource_prepares.append(prepare)
+        if cleanup not in self._task_resource_cleanups:
+            self._task_resource_cleanups.append(cleanup)
+
+    async def prepare_task_resources(self) -> None:
+        for prepare in self._task_resource_prepares:
+            await prepare()
+
+    async def cleanup_task_resources(self) -> None:
+        for cleanup in reversed(self._task_resource_cleanups):
+            try:
+                await cleanup()
+            except Exception:
+                logger.exception("[DeepAgent] task resource cleanup failed")
 
     def set_agent_ras_setting(self, value: Any) -> None:
         """Set the raw ``agent_ras`` value for sub-agent passthrough.
@@ -877,6 +904,37 @@ class DeepAgent(BaseAgent):
             self._loop_controller.event_handler,
         )
 
+    def _resolve_image_input_supported(self) -> Optional[bool]:
+        """Resolve the main model's image capability at call time.
+
+        ``None`` means the verdict is still unknown (probe pending): the send
+        path then keeps image blocks untouched instead of stripping the user's
+        uploads. A probe that finishes in the background is picked up on the
+        next call from the module cache, so no rebuild is needed.
+        """
+        cfg = self._deep_config
+        if cfg is None:
+            return None
+        if cfg.enable_read_image_multimodal is not None:
+            return bool(cfg.enable_read_image_multimodal)
+        if cfg.model is None:
+            return None
+        declared = get_declared_image_support(cfg.model)
+        if declared is not None:
+            # A declared capability is authoritative: no probe round-trip and
+            # no "unknown" window where user uploads would look unsupported.
+            # Deliberately not written back into the config: reading the
+            # declaration is cheap, and latching it would turn the auto (None)
+            # state into an explicit verdict that outlives the declaration.
+            return declared
+        cached = get_cached_image_support(cfg.model)
+        if cached is None:
+            return None
+        # Keep read_file's resolver (it reads the config flag) in sync with
+        # the background probe verdict.
+        cfg.enable_read_image_multimodal = cached
+        return cached
+
     def _create_react_agent(self) -> ReActAgent:
         """Build the internal ReActAgent from current DeepAgentConfig."""
         cfg = self._deep_config
@@ -905,6 +963,17 @@ class DeepAgent(BaseAgent):
             react_config.sys_operation_id = cfg.sys_operation.id
 
         react_config.parallel_tool_calls = cfg.parallel_tool_calls
+
+        # Native image input policy: resolve the main model's image capability
+        # at call time so model switches are honored, and carry the per-request
+        # image budget down to the send path (stripping + oldest-image eviction).
+        react_config.image_input_supported_resolver = self._resolve_image_input_supported
+        react_config.max_image_bytes_per_request = getattr(
+            cfg, "max_image_bytes_per_request", None
+        )
+        react_config.max_images_per_request = getattr(
+            cfg, "max_images_per_request", None
+        )
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)
@@ -1011,6 +1080,18 @@ class DeepAgent(BaseAgent):
                 "[DeepAgent] no model configured; disabling read_file image multimodal",
             )
             config.enable_read_image_multimodal = False
+            return
+
+        declared = get_declared_image_support(config.model)
+        if declared is not None:
+            # Not written back into the config: read paths resolve the
+            # declaration on demand, and latching it here would freeze auto
+            # (None) into an explicit verdict the host never asked for.
+            logger.info(
+                "[DeepAgent] read_file image multimodal from model declaration "
+                "(supports_vision): %s",
+                declared,
+            )
             return
 
         cached = get_cached_image_support(config.model)
@@ -1286,6 +1367,18 @@ class DeepAgent(BaseAgent):
             "enable_plan_mode": spec.enable_plan_mode,
             "parallel_tool_calls": spec.parallel_tool_calls,
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
+            # Budgets are not model-specific: the child inherits the parent's
+            # values unless its spec sets its own.
+            "max_image_bytes_per_request": (
+                spec.max_image_bytes_per_request
+                if spec.max_image_bytes_per_request is not None
+                else self._deep_config.max_image_bytes_per_request
+            ),
+            "max_images_per_request": (
+                spec.max_images_per_request
+                if spec.max_images_per_request is not None
+                else self._deep_config.max_images_per_request
+            ),
             "agent_ras": getattr(self, "_agent_ras_setting", None),
             # 子代理需要充足时间完成多轮工具调用（如 PPT 生成、深度搜索等），
             # 默认 600s 偏短，提升至 1800s（30 分钟）。
@@ -1319,8 +1412,7 @@ class DeepAgent(BaseAgent):
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(
                     create_browser_agent(
-                        **create_kwargs,
-                        **factory_kwargs,
+                        **{**create_kwargs, **factory_kwargs},
                     )
                 )
             if normalized_factory == "code_agent":

@@ -123,20 +123,24 @@ class openjiuwen.core.security.guardrail.GuardrailResult(
     is_safe: bool,
     risk_level: RiskLevel,
     risk_type: Optional[str] = None,
+    confidence: float = 0.0,
     details: Optional[Dict[str, Any]] = None,
-    modified_data: Optional[Dict[str, Any]] = None
+    modified_data: Optional[Dict[str, Any]] = None,
+    event: Optional[str] = None
 )
 ```
 
-Guardrail detection result dataclass.
+Guardrail detection result. Defined in the detection library and re-exported here as the same class.
 
 **Parameters**:
 
-* **is_safe**(bool): Whether the detection passed.
+* **is_safe**(bool): `False` means risk was detected. It does not mean the call was blocked.
 * **risk_level**(RiskLevel): Detected risk level.
 * **risk_type**(str, optional): Risk type identifier. Default: `None`.
+* **confidence**(float): Same value as the backend `RiskAssessment.confidence`. Default: `0.0`.
 * **details**(Dict[str, Any], optional): Detection details. Default: `None`.
-* **modified_data**(Dict[str, Any], optional): Sanitized data. Default: `None`.
+* **modified_data**(Dict[str, Any], optional): Sanitized data. Default: `None`. Not written or consumed in this change.
+* **event**(str, optional): Name of the event that triggered detection. The converter leaves it empty; the callback writes it. Default: `None`.
 
 ### pass_
 
@@ -165,7 +169,7 @@ class method block(
 ) -> GuardrailResult
 ```
 
-Creates a block result.
+Creates an `is_safe=False` result. This is a result object and does not block execution.
 
 **Parameters**:
 
@@ -222,13 +226,13 @@ Risk level enumeration.
 
 | Risk Level | Action |
 |---------|---------|
-| SAFE | Pass through |
-| LOW | Raise `GuardrailError` |
-| MEDIUM | Raise `GuardrailError` |
-| HIGH | Raise `GuardrailError` |
-| CRITICAL | Raise `AbortError`, block execution |
+| SAFE | The callback returns `is_safe=True`; the call continues |
+| LOW | The callback returns `is_safe=False`; the call continues |
+| MEDIUM | The callback returns `is_safe=False`; the call continues |
+| HIGH | The callback returns `is_safe=False`; the call continues |
+| CRITICAL | The callback returns `is_safe=False`; the call continues. It does not raise `AbortError` |
 
-> **Note**: `CRITICAL` level raises `AbortError` to terminate callback execution, other risk levels raise `GuardrailError`.
+> **Note**: The callback no longer raises `GuardrailError` or `AbortError`. A direct `detect()` call still raises `ValueError` when no backend is set, and a backend `RuntimeError` still propagates. Only the callback path turns those exceptions into `pass_(details={"error": ...})`.
 
 ---
 
@@ -238,16 +242,12 @@ Risk level enumeration.
 class openjiuwen.core.security.guardrail.GuardrailError
 ```
 
-Exception raised when guardrail detects a risk. Inherits from framework exception hierarchy.
+The exception class remains. The content-detection callback no longer raises it. A direct `detect()` call does not use it as the risk exit either; the risk is on the returned `GuardrailResult`.
 
 **Example**:
 
 ```python
-from openjiuwen.core.security.guardrail import GuardrailError
-
-try:
-    # Trigger guardrail detection
-    result = await guardrail.detect("user_input", text=malicious_input)
-except GuardrailError as e:
-    print(f"Risk detected: {e.details}")
+result = await guardrail.detect("user_input", text=malicious_input)
+if not result.is_safe:
+    print(result.risk_type, result.risk_level, result.confidence)
 ```

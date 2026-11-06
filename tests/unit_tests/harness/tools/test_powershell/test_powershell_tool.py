@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_shield.tool_permission import PermissionLevel, get_permission_manager
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import PowerShellTool
@@ -60,14 +61,20 @@ async def test_read_only_blocks_write_commands() -> None:
 
 @pytest.mark.asyncio
 async def test_injection_pattern_blocked() -> None:
-    sys_op = MagicMock()
-    sys_op.work_dir = None
+    result = await get_permission_manager().check_permission(
+        "powershell",
+        {"command": "Invoke-Expression \"Get-ChildItem\"", "shell_type": "powershell"},
+        config={
+            "enabled": True,
+            "tools": {"powershell": "allow"},
+            "package_builtin_rules": True,
+            "permission_mode": "strict",
+            "shell_allowlist": None,
+        },
+    )
 
-    tool = PowerShellTool(sys_op)
-    res = await tool.invoke({"command": "Invoke-Expression \"Get-ChildItem\""})
-
-    assert res.success is False
-    assert "injection" in res.error.lower()
+    assert result.permission == PermissionLevel.DENY
+    assert "injection" in (result.reason or "").lower()
 
 
 # ── history path construction ─────────────────────────────────

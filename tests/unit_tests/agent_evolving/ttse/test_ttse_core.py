@@ -289,6 +289,55 @@ async def test_signal_detector_explicit_score_and_gates():
     assert judged.reason.startswith("judge:")
 
 
+def test_default_induce_llm_policy_is_10min_two_attempts():
+    policy = TTSEConfig().induce_llm_policy
+    assert policy.attempt_timeout_secs == 600.0
+    assert policy.max_attempts == 2
+    assert policy.total_budget_secs == 600.0
+
+
+def test_default_detect_llm_policy_is_60s_two_attempts():
+    policy = TTSEConfig().detect_llm_policy
+    assert policy.attempt_timeout_secs == 60.0
+    assert policy.max_attempts == 2
+    # two full attempts plus one backoff must fit the total budget
+    assert policy.total_budget_secs >= 2 * policy.attempt_timeout_secs + policy.backoff_base_secs
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_judge_retries_after_timeout():
+    attempts = {"count": 0}
+
+    def handler(_prompt):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError("request timed out")
+        return '{"outcome": "success", "reason": "ok after retry"}'
+
+    cfg = TTSEConfig(
+        detect_min_tool_calls=1,
+        detect_llm_policy=LLMInvokePolicy(
+            attempt_timeout_secs=5,
+            total_budget_secs=10,
+            max_attempts=2,
+            backoff_base_secs=0,
+        ),
+    )
+    detector = SignalBasedSuccessDetector(
+        llm=ScriptedLLM(handler),
+        model="m",
+        config=cfg,
+        signal_detector=QuietSignals(),
+    )
+    out = await detector.detect(
+        [],
+        [_tool_msg("bash", {"cmd": "ls"}), {"role": "assistant", "content": "ok"}],
+    )
+    assert attempts["count"] == 2
+    assert out.outcome == "success"
+    assert out.reason.startswith("judge:")
+
+
 @pytest.mark.asyncio
 async def test_signal_detector_bad_judge_json_skips():
     cfg = TTSEConfig(detect_min_tool_calls=1, detect_llm_policy=_POLICY)
@@ -330,6 +379,7 @@ async def test_render_and_list_capabilities_live_and_fallback():
     assert "`custom_tool`" in rendered
     live = await list_capability_names(agent)
     assert live == {"office", "custom_tool"}
+    assert await render_capabilities(None, fallback=False) == ""
 
 
 def test_parse_capability_names_from_text():

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.harness.image_modality_probe import get_declared_image_support
 from openjiuwen.harness.schema.config import is_vision_model_config_complete
 
 
@@ -50,21 +51,28 @@ def should_enable_read_image_multimodal(
 ) -> bool:
     """Resolve whether read_file should attach image bytes natively.
 
-    Vision tools are preferred when present. If no vision tool/config is
-    available, read_file keeps the native multimodal fallback.
+    Priority (matches "the main model looks at images directly whenever it
+    can, vision tools only cover models that cannot"):
+
+    1. an explicit caller-provided value wins outright;
+    2. a deep_config verdict that is already resolved decides on its own:
+       ``True`` (main model confirmed image-capable) keeps native inline even
+       when vision tools are configured, ``False`` (not supported) disables it;
+    3. while the verdict is unresolved, a per-model ``supports_vision``
+       declaration is authoritative and needs no probe;
+    4. otherwise a deep agent stays metadata-only until the probe lands, and
+       agents without a deep_config keep the conservative legacy rule: a
+       complete vision tool/config takes over and read_file stays metadata-only.
     """
     if explicit_value is not None:
         return explicit_value
 
     deep_config = getattr(agent, "deep_config", None)
-    configured_value = bool(
-        getattr(deep_config, "enable_read_image_multimodal", True)
-    )
-    if not configured_value:
-        return False
+    if deep_config is not None:
+        configured_value = getattr(deep_config, "enable_read_image_multimodal", None)
+        if configured_value is not None:
+            return bool(configured_value)
+        declared = get_declared_image_support(getattr(deep_config, "model", None))
+        return declared is True
 
-    vision_config = getattr(deep_config, "vision_model_config", None)
-    return not (
-        is_vision_model_config_complete(vision_config)
-        or has_complete_registered_vision_tool(agent)
-    )
+    return not has_complete_registered_vision_tool(agent)

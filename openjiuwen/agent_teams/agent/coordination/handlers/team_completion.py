@@ -74,6 +74,11 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         # — e.g. TeamSkillRail.notify_team_completed. Empty on members that
         # have no such rail, which is what gates the fan-out to the leader.
         self._completion_callbacks: list[Callable[[], Awaitable[None]]] = []
+        # Fired once on the TEAM_COMPLETED rising edge, after the event is
+        # published and before a persistent team pauses. Team TTSE uses this
+        # so induction sees the finished round. Empty unless a leader rail
+        # registered itself.
+        self._team_completed_callbacks: list[Callable[[], Awaitable[None]]] = []
 
     def register_completion_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register a coroutine fired whenever the task board drains.
@@ -82,6 +87,23 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         runs on every ``TASK_LIST_DRAINED`` this handler receives.
         """
         self._completion_callbacks.append(callback)
+
+    def register_team_completed_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a coroutine fired once when the team is accepted.
+
+        Distinct from ``register_completion_callback``, which runs on every
+        task-board drain. Acceptance is the rising edge of team completion.
+        """
+        self._team_completed_callbacks.append(callback)
+
+    async def _emit_team_accepted_callbacks(self) -> None:
+        """Run acceptance callbacks. One failure does not skip pause."""
+
+        for callback in self._team_completed_callbacks:
+            try:
+                await callback()
+            except Exception as e:
+                team_logger.error("team accepted callback failed: {}", e, exc_info=True)
 
     def rearm(self) -> None:
         """Reset the rising-edge guard so the next completion re-emits.
@@ -150,6 +172,7 @@ class TeamCompletionHandler(BaseCoordinationHandler):
                 await self._finalize_non_contributing_worktrees("session budget exhausted")
                 await self._publish_team_completed(team_backend.team_name, snapshot)
                 self._team_completed_emitted = True
+                await self._emit_team_accepted_callbacks()
                 # Persistent teams auto-pause on completion, budget-forced or
                 # not — the Runner drives finalize -> pause from here either way.
                 if self._blueprint.lifecycle == "persistent":
@@ -184,6 +207,7 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         await self._finalize_non_contributing_worktrees("team completion")
         await self._publish_team_completed(team_backend.team_name, snapshot)
         self._team_completed_emitted = True
+        await self._emit_team_accepted_callbacks()
 
         # Persistent teams auto-pause on completion: close the leader stream
         # so the Runner finally drives finalize -> pause. Temporary teams are

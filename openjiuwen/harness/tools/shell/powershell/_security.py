@@ -1,36 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Tool-layer security for PowerShell commands."""
+"""Tool-layer destructive-command warnings for PowerShell (informational only).
+
+Injection / permission adjudication lives in PermissionInterruptRail /
+``agent_shield``; this module only surfaces warnings in tool output.
+"""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class SecurityCheck:
-    """Result of a tool-layer security check."""
-
-    blocked: bool
-    reason: str | None = None
-    warning: str | None = None
-
-
-_INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)\b(?:invoke-expression|iex)\b"), "Invoke-Expression"),
-    (re.compile(r"(?i)\b(?:powershell|powershell\.exe|pwsh|pwsh\.exe)\b[^\n]*-encodedcommand\b"),
-     "nested encoded command"),
-    (re.compile(r"(^|[\s;(])&\s*(?:\(|\$)"), "dynamic call operator"),
-    (re.compile(r"(?i)\[scriptblock\]::create\s*\("), "dynamic ScriptBlock creation"),
-]
-
-
-def check_injection(command: str) -> SecurityCheck:
-    """Detect PowerShell patterns that make static review harder."""
-    for pattern, label in _INJECTION_PATTERNS:
-        if pattern.search(command):
-            return SecurityCheck(blocked=True, reason=f"PowerShell injection detected: {label}")
-    return SecurityCheck(blocked=False)
 
 
 _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
