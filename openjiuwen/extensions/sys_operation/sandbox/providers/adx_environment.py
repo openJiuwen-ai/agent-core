@@ -5,6 +5,12 @@ Environment identity is scoped by endpoint and isolation key. Workspace mounts
 are independent of that identity and may be shared by multiple Agents.
 Commands are submitted once with recoverable IDs; an unknown outcome is never
 handled by recreating an environment or replaying user work.
+
+A launcher may configure ``endpoint_file`` as a read-only node context JSON
+with ``ingress_url`` and optional ``node_id``. It is read before every environment
+lookup; malformed or missing configured context is an error. Node changes select
+a fresh SDK connection scope even when bridge URLs are identical. Serialized
+traffic and DNS policies are rehydrated through the public SDK types.
 """
 
 from __future__ import annotations
@@ -16,8 +22,9 @@ import os
 import shlex
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from openjiuwen.core.sys_operation.config import SandboxGatewayConfig
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
@@ -33,7 +40,7 @@ _PROCESS_IDENTITY = uuid.uuid4().hex
 
 def _network_policy(configuration: dict[str, Any]) -> Any:
     """Rehydrate public SDK network types from serializable deployment config."""
-    from adx_environment import NetworkPolicy, NetworkRule, PortRange, TrafficPolicy
+    from adx_environment import DNSPolicy, DNSRule, NetworkPolicy, NetworkRule, PortRange, TrafficPolicy
 
     network = dict(configuration)
     if isinstance(network.get("traffic"), dict):
@@ -49,6 +56,10 @@ def _network_policy(configuration: dict[str, Any]) -> Any:
             rules.append(rule)
         traffic["rules"] = rules
         network["traffic"] = TrafficPolicy(**traffic)
+    if isinstance(network.get("dns"), dict):
+        dns = dict(network["dns"])
+        dns["rules"] = [DNSRule(**rule) if isinstance(rule, dict) else rule for rule in dns.get("rules", [])]
+        network["dns"] = DNSPolicy(**dns)
     return NetworkPolicy(**network)
 
 
@@ -65,6 +76,7 @@ class _AdxEnvironmentBackend:
     endpoint: SandboxEndpoint
     _extra: dict[str, Any]
     _scope: str
+    _scope_suffix: str
 
     _lock: ClassVar[threading.RLock] = threading.RLock()
     # Shared by shell, code and fs; credentials remain in the SDK connection.
@@ -74,6 +86,7 @@ class _AdxEnvironmentBackend:
     def _initialize_backend(self, endpoint: SandboxEndpoint, config: SandboxGatewayConfig | None) -> None:
         launcher = getattr(config, "launcher_config", None)
         self._extra = dict(getattr(launcher, "extra_params", None) or {})
+        self._scope_suffix = ""
         self._scope = build_adx_shared_scope_key(endpoint.base_url, endpoint.isolation_key)
         if (self._extra.get("user") is None) != (self._extra.get("group") is None):
             raise ValueError("ADX tool user and group must both be configured")
@@ -84,12 +97,37 @@ class _AdxEnvironmentBackend:
                     raise ValueError(f"ADX tool {key} must be a nonempty name or numeric ID")
                 self._extra[key] = str(value).strip()
             identity = json.dumps([self._extra["user"], self._extra["group"]], separators=(",", ":"))
-            self._scope += "|identity=" + hashlib.sha256(identity.encode()).hexdigest()
+            self._scope_suffix = "|identity=" + hashlib.sha256(identity.encode()).hexdigest()
+            self._scope += self._scope_suffix
+
+    def _resolve_endpoint(self) -> tuple[SplitResult, str]:
+        base_url = self.endpoint.base_url
+        node_scope = ""
+        endpoint_file = self._extra.get("endpoint_file")
+        if endpoint_file:
+            node = json.loads(Path(endpoint_file).read_text(encoding="utf-8"))
+            if not isinstance(node, dict):
+                raise ValueError("ADX endpoint_file must contain a JSON object")
+            base_url = node.get("ingress_url")
+            if node.get("node_id"):
+                if not isinstance(node["node_id"], str):
+                    raise ValueError("ADX endpoint_file node_id must be a string")
+                node_scope = "|node=" + hashlib.sha256(node["node_id"].encode()).hexdigest()
+            if not isinstance(base_url, str) or not base_url:
+                raise ValueError("ADX endpoint_file requires an ingress_url")
+        url = urlsplit(base_url)
+        if url.scheme not in {"https", "http"} or not url.netloc or url.path not in {"", "/"}:
+            raise ValueError("ADX base_url must be an HTTP(S) origin")
+        if url.username is not None or url.password is not None or url.query or url.fragment:
+            raise ValueError("ADX base_url must be an HTTP(S) origin")
+        scope = build_adx_shared_scope_key(base_url, self.endpoint.isolation_key) + self._scope_suffix + node_scope
+        return url, scope
 
     def _get_environment(self) -> Any:
         from adx_environment import ConnectionConfig, Environment, EnvironmentNotFound, Mount  # pylint: disable=no-name-in-module
 
         with self._lock:
+            url, self._scope = self._resolve_endpoint()
             cached = self._instances.get(self._scope)
             if cached is not None:
                 try:
@@ -101,10 +139,13 @@ class _AdxEnvironmentBackend:
                 cached[0].close()
                 del self._instances[self._scope]
                 self._incarnations[self._scope] = uuid.uuid4().hex
-            url = urlsplit(self.endpoint.base_url)
-            if url.scheme not in {"https", "http"} or not url.netloc or url.path not in {"", "/"}:
-                raise ValueError("ADX base_url must be an HTTP(S) origin")
             connection_args = dict(self._extra.get("connection") or {})
+            if self._extra.get("endpoint_file"):
+                for key in ("gateway_address", "gateway_use_tls"):
+                    connection_args.pop(key, None)
+                connection_args.update(
+                    server_address=url.netloc, use_tls=url.scheme == "https", verify_tls=url.scheme == "https"
+                )
             connection_args.setdefault("server_address", url.netloc)
             connection_args.setdefault("use_tls", url.scheme == "https")
             connection_args.setdefault("token", os.environ.get("ADX_TOKEN", ""))
@@ -147,7 +188,7 @@ class _AdxEnvironmentBackend:
         if key == shared_key:
             return True
         if shared_key:
-            return key.startswith(shared_key + "|identity=")
+            return key.startswith((shared_key + "|identity=", shared_key + "|node="))
         if base_url:
             return key.startswith(base_url.rstrip("/") + "|")
         return False

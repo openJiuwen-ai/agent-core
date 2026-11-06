@@ -366,3 +366,46 @@ async def test_local_file_streams_preserve_bytes_and_report_size(monkeypatch, tm
     assert target.read_bytes() == payload
     assert len(downloads) == 1 and downloads[0].data.is_last_chunk
     assert downloads[0].data.chunk_size == len(payload)
+
+
+def test_restored_provider_refreshes_node_endpoint_before_using_cached_environment(tmp_path, monkeypatch):
+    import json
+
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentFSProvider
+
+    context = tmp_path / "node.json"
+    context.write_text(json.dumps({"ingress_url": "http://10.88.4.1:8080"}))
+    config = provider_config()
+    config.launcher_config.extra_params["endpoint_file"] = str(context)
+    config.launcher_config.extra_params["connection"]["server_address"] = "stale:8443"
+    first, second, third = MagicMock(), MagicMock(), MagicMock()
+    factory = MagicMock(side_effect=[first, second, third])
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    backend = AdxEnvironmentFSProvider(
+        SandboxEndpoint(base_url="https://stale:8443", isolation_key="restore-node"), config
+    )
+    assert backend._get_environment() is first
+    context.write_text(json.dumps({"ingress_url": "http://10.89.4.1:8080"}))
+    assert backend._get_environment() is second
+    assert [c.kwargs["connection"].server_address for c in factory.call_args_list] == [
+        "10.88.4.1:8080",
+        "10.89.4.1:8080",
+    ]
+    assert factory.call_args.kwargs["connection"].use_tls is False
+    context.write_text(json.dumps({"ingress_url": "http://10.89.4.1:8080", "node_id": "another-node"}))
+    assert backend._get_environment() is third
+    assert factory.call_args_list[-1].kwargs["connection"] is not factory.call_args_list[-2].kwargs["connection"]
+    context.write_text("{}")
+    with pytest.raises(ValueError):
+        backend._get_environment()
+
+
+def test_serialized_dns_policy_reaches_public_sdk():
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import _network_policy
+
+    policy = _network_policy(
+        {"dns": {"default_action": "deny", "rules": [{"action": "allow", "pattern": "api.example"}]}}
+    )
+    assert policy.dns.to_dict()["rules"] == [{"action": "allow", "pattern": "api.example"}]
