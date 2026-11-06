@@ -227,6 +227,41 @@ async def test_write_file_tool_updates_existing_file_after_read(sys_op, temp_dir
 
 
 @pytest.mark.asyncio
+async def test_write_file_tool_overwrites_existing_empty_file_after_read(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "empty.txt")
+    with open(file_path, "wb") as fh:
+        fh.write(b"")
+
+    await read_tool.invoke({"file_path": file_path})
+    res = await write_tool.invoke({"file_path": file_path, "content": "hello"})
+
+    assert res.success is True, res.error
+    assert res.data["type"] == "update"
+    with open(file_path, "r", encoding="utf-8") as fh:
+        assert fh.read() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_rejects_empty_file_that_gained_content_after_read(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "was_empty.txt")
+    with open(file_path, "wb") as fh:
+        fh.write(b"")
+
+    await read_tool.invoke({"file_path": file_path})
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("written by someone else\n")
+    res = await write_tool.invoke({"file_path": file_path, "content": "hello"})
+
+    assert res.success is False
+    with open(file_path, "r", encoding="utf-8") as fh:
+        assert fh.read() == "written by someone else\n"
+
+
+@pytest.mark.asyncio
 async def test_write_file_tool_reads_existing_content_via_sys_operation_fs(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)

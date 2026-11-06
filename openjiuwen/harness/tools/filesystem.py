@@ -1534,7 +1534,15 @@ class WriteFileTool(Tool):
                     # partial windows) while still refusing to overwrite a file
                     # that was only partially read.
                     ranges = read_state.read_ranges if read_state else None
-                    is_logically_complete = (
+                    # A file that was empty when read has no lines to cover, so
+                    # that read already saw all of it. The mtime/size check below
+                    # still rejects the write if the file changed since.
+                    read_empty_file = (
+                        read_state is not None
+                        and read_state.total_lines == 0
+                        and read_state.size_bytes == 0
+                    )
+                    is_logically_complete = read_empty_file or (
                         read_state is not None
                         and read_state.total_lines > 0
                         and ranges is not None
