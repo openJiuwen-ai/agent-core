@@ -40,6 +40,7 @@ from openjiuwen.harness.tools.web._common import (
     _FREE_SEARCH_DDG_ENABLED_ENV,
     _FREE_SEARCH_DEBUG_DIR_ENV,
     _FREE_SEARCH_DEBUG_ENV,
+    _JINA_READER_HEADERS,
     _decode_ddg_redirect,
     _decode_bing_redirect,
     _duckduckgo_search_url,
@@ -662,6 +663,21 @@ class WebFreeSearchTool(Tool):
         return any(marker in text for marker in markers)
 
     @staticmethod
+    def _is_bing_challenge_page(status_code: int, html: str) -> bool:
+        """Check if the response is a Bing CAPTCHA page, which is served with HTTP 200."""
+        if status_code in {202, 418, 429, 503}:
+            return True
+        text = (html or "").lower()
+        # Markup from the interstitial, not the bare words: a genuine result page contains those
+        # whenever the query is about them.
+        markers = [
+            'class="captcha"',
+            "captcha_header",
+            "/challenge/verify",
+        ]
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     async def _search_duckduckgo(
         session: aiohttp.ClientSession,
         query: str,
@@ -710,11 +726,18 @@ class WebFreeSearchTool(Tool):
     ) -> list[dict[str, str]]:
         """Search DuckDuckGo via the jina.ai proxy and parse markdown results."""
         url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
+        # Neutral User-Agent for the reader itself (see _JINA_READER_HEADERS), but keep the
+        # query-aligned Accept-Language: the reader fetches DuckDuckGo server-side, and the
+        # language hint belongs to that fetch rather than to the User-Agent check in front of it.
+        reader_headers = {
+            **_JINA_READER_HEADERS,
+            "Accept-Language": _search_request_headers(query)["Accept-Language"],
+        }
         status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
             url,
-            headers=_search_request_headers(query),
+            headers=reader_headers,
             timeout_seconds=timeout_seconds,
             proxy_url=proxy_url,
             max_bytes=2_000_000,
@@ -768,6 +791,9 @@ class WebFreeSearchTool(Tool):
         if blocked:
             raise WebContentError("blocked", blocked)
         _http.raise_for_status_with_body(status, body, engine="bing")
+        # Bing serves its CAPTCHA interstitial with HTTP 200; without this it reads as a query with no hits.
+        if WebFreeSearchTool._is_bing_challenge_page(status, html):
+            raise WebContentError("blocked", "Bing returned its anti-bot challenge page.")
         if truncated:
             raise WebContentError("truncated", "Bing response exceeded the search response size limit.")
         results_area = _extract_bing_results_area(soup)
