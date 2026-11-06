@@ -90,6 +90,7 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
+    _move_response_format_to_text(body)
     return clean_unicode(body)
 
 
@@ -110,6 +111,44 @@ def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, 
         expanded.update(nested)
     expanded.update(pending)
     return expanded
+
+
+def _move_response_format_to_text(body: dict[str, Any]) -> None:
+    """Translate a chat-style ``response_format`` into the Responses ``text.format`` field.
+
+    Other ``text`` settings are kept. A ``text.format`` the caller already set takes precedence.
+    """
+    if "response_format" not in body:
+        return
+    response_format = body.pop("response_format")
+    if response_format is None:
+        return
+
+    text_format = _text_format_from_response_format(response_format)
+    if text_format is None:
+        body["response_format"] = response_format
+        return
+
+    text = dict(body["text"]) if isinstance(body.get("text"), dict) else {}
+    if "format" in text:
+        logger.warning("Responses request sets both response_format and text.format; keeping text.format")
+    else:
+        text["format"] = text_format
+    body["text"] = text
+
+
+def _text_format_from_response_format(response_format: Any) -> Optional[dict[str, Any]]:
+    """Map a chat-style ``response_format`` dict to a Responses ``text.format`` dict.
+
+    ``json_schema`` formats are flattened: ``name``, ``schema``, ``strict`` and ``description``
+    move up next to ``type``. Other formats (``json_object``, ``text``) are used as they are.
+    """
+    if not isinstance(response_format, dict) or not response_format.get("type"):
+        return None
+    json_schema = response_format.get("json_schema")
+    if response_format["type"] == "json_schema" and isinstance(json_schema, dict):
+        return {"type": "json_schema", **json_schema}
+    return dict(response_format)
 
 
 def build_headers(
