@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-11-03 |
+| 最近一次修订日期 | 2026-11-05 |
 | 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
@@ -232,7 +232,7 @@ Bus 按以下顺序处理普通调用：
 4. 若事件定义配置了 `input_validator`，校验初始 `event_input`；返回 `False` 时以 `EVENTS_PAYLOAD_INVALID` 拒绝，matcher 和 Handler 均不执行。
 5. 用 MatchPatternFunc 筛选 USER / BUILTIN；CORE 不参与筛选。
 6. 按 USER → BUILTIN → CORE 执行，链内不重新匹配。USER / BUILTIN Adapter 在 Handler 调用 `EventNext` 传入新 Event 前校验 `event_input`；Handler 正常返回后校验 Handler 输出；CORE 正常返回后校验 CORE 输出。未配置对应 Validator 时跳过该项业务校验。
-7. 每次进入 Handler 前构建独立 Ops。`Builder.build(package_metadata, session_context)` 的 package_metadata 取自该 Handler 注册记录，CORE 传 `None`。
+7. 每次进入 Handler 前构建独立 Ops。扩展 Handler 调用 `Builder.build(package_metadata, session_context)`，package_metadata 取自该 Handler 注册记录。CORE 调用 `Builder.build_core(session_context, trigger_context)`，不绑定包信息。
 8. 将最外层合法结果交给调用方；CORE 或入口校验失败时 `trigger()` 失败。
 
 Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。
@@ -274,6 +274,12 @@ class EventHandlerOpsBuilder:
         session_context: SessionContext | None = None,
     ) -> "EventHandlerOps": ...
 
+    def build_core(
+        self,
+        session_context: SessionContext | None,
+        trigger_context: object | None,
+    ) -> "EventHandlerOps": ...
+
 
 class EventHandlerOps:
     @property
@@ -289,7 +295,8 @@ class EventHandlerOps:
 - `add_namespace()` 不得重复；`add_method()` 要求 namespace 已存在，并拒绝同 namespace 重名 method。
 - OpsMethod 是异步函数；实现调用时把当前 EventHandlerOps 作为第一个参数。
 - Builder 只保存能力函数定义。每次 `build(...)` 返回新的 Ops，不修改共享能力目录，也不保存可变的“当前包”或“当前会话”。
-- `package_metadata` 入参必须保留。EventBus 调用时传入当前 Handler 注册记录中的值。
+- `package_metadata` 入参必须保留。EventBus 调用 `build()` 时传入当前 Handler 注册记录中的值。
+- `build_core()` 只服务于 CORE Handler：包信息固定为空，并把本次 `trigger_context` 暴露为 `ops.trigger_context`。扩展 Handler 不使用该接口。
 - Builder 没有冻结状态：`ops.build` 成功返回即代表能力目录构建完成，此后不再修改；add 与 build 不设先后状态检查。
 - 宿主若短路 `ops.build` 并返回自己的 Builder，应自行保留所需能力；Bus 不自动补齐被跳过的能力。
 - Handler 通过 `ops.<namespace>.<method>(...)` 访问能力。未知 namespace 或未知 method 必须拒绝。

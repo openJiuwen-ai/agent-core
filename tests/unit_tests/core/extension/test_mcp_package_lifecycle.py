@@ -12,7 +12,7 @@ from openjiuwen.core.events.ops_impl.mcp.runtime import set_resource_mgr_provide
 from openjiuwen.core.events.types import Event, SessionContext
 from openjiuwen.core.extension.schema.mcp import declarations
 from openjiuwen.core.runner.resources_manager.base import Ok
-from tests.unit_tests.core.extension.conftest import build_registry, write_package
+from tests.unit_tests.core.extension.conftest import BUSINESS_EVENT, build_registry, write_package
 
 
 class _RemovingResourceMgr:
@@ -125,7 +125,7 @@ async def test_reload_replaces_changed_connection(tmp_path: Path) -> None:
     assert spec is not None and spec.params["command"] == "audit-mcp@2"
 
 
-_PLUGIN_BODY = """
+_PLUGIN_BODY = f"""
 from openjiuwen.core.events.ops_impl.mcp.models import McpConnectInput
 
 
@@ -138,7 +138,7 @@ class Extension:
         async def handler(event, ops, next_handler):
             return await ops.mcp.connect(McpConnectInput(server_name="audit"))
 
-        registrar.register_event_handler("tool.call", handler, {"tool": "Bash"}, "user")
+        registrar.register_event_handler("{BUSINESS_EVENT}", handler, {{"tool": "Bash"}}, "user")
 """
 
 
@@ -171,7 +171,10 @@ async def test_plugin_connect_opens_its_own_declaration(tmp_path: Path) -> None:
     manager = _OpeningResourceMgr()
     set_resource_mgr_provider(lambda: manager)
 
-    result = await bus.trigger(Event("tool.call", {"tool": "Bash"}), SessionContext("session-demo"))
+    result = await bus.trigger(
+        Event(BUSINESS_EVENT, {"tool": "Bash"}),
+        SessionContext("session-demo"),
+    )
 
     assert isinstance(result, McpConnectOutput)
     assert result.status is McpStatus.OK

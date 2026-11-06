@@ -9,6 +9,7 @@ import inspect
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, TypeAlias, cast
@@ -42,6 +43,16 @@ if TYPE_CHECKING:
 
 _EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 _PATTERN_SCALAR_TYPES = (bool, int, float, str)
+
+# Handlers currently running on this asyncio task, outermost to innermost.
+# A nested ``trigger()`` issued from inside a handler (typically through an
+# Ops verb) excludes every active handler from its match result, so a handler
+# never re-enters itself, directly or through another handler. The set is
+# task-local and is inherited by tasks the handler spawns.
+_ACTIVE_HANDLER_IDS: ContextVar[frozenset[HandlerId]] = ContextVar(
+    "openjiuwen_events_active_handler_ids",
+    default=frozenset(),
+)
 
 
 EventDispatcher: TypeAlias = Callable[..., Awaitable[EventOutput | None]]
@@ -322,7 +333,8 @@ class ExtensionEventBus:
     #   matched_handler_ids - handler ids selected by the matcher for this trigger
     #   target_level        - layer requested by EventNext.to(); None means "next"
     #   session_context     - normalized once at trigger(); read-only afterwards
-    # Only ``target_level`` changes between hops; the other two travel unchanged.
+    #   trigger_context     - private invocation data exposed only through CORE Ops
+    # Only ``target_level`` changes between hops; the other three travel unchanged.
 
     def _create_core_terminal(
         self,
@@ -337,10 +349,11 @@ class ExtensionEventBus:
             matched_handler_ids: frozenset[HandlerId],
             target_level: HandlerLevel | None,
             session_context: SessionContext | None,
+            trigger_context: object | None = None,
         ) -> EventOutput | None:
             del matched_handler_ids, target_level  # the chain ends here; nothing left to skip
             # CORE has no package identity; it still gets its own Ops bound to this session.
-            ops = None if self._builder is None else self._builder.build(None, session_context)
+            ops = None if self._builder is None else self._builder.build_core(session_context, trigger_context)
             # ``forward=None``: EventNext at the tail returns None instead of advancing.
             with EventNext(event.event_type, HandlerLevel.CORE, None) as event_next:
                 result = core_handler(event, ops, event_next)
@@ -378,6 +391,7 @@ class ExtensionEventBus:
             matched_handler_ids: frozenset[HandlerId],
             target_level: HandlerLevel | None,
             session_context: SessionContext | None,
+            trigger_context: object | None = None,
         ) -> EventOutput | None:
             async def continue_chain(next_event: Event, next_target: HandlerLevel | None) -> EventOutput | None:
                 return await call_next(
@@ -385,6 +399,7 @@ class ExtensionEventBus:
                     matched_handler_ids=matched_handler_ids,
                     target_level=next_target,
                     session_context=session_context,
+                    trigger_context=trigger_context,
                 )
 
             # Fast path: a skipped handler must not build Ops or create invocation state.
@@ -440,28 +455,34 @@ class ExtensionEventBus:
 
             # Framework faults from Ops construction remain outside the handler fault boundary.
             ops = None if self._builder is None else self._builder.build(package_metadata, session_context)
-            output: EventOutput | None = None
+            # Active for the whole invocation, including downstream replay in
+            # ``skip_handler``; nested triggers from here on cannot re-enter it.
+            active_token = _ACTIVE_HANDLER_IDS.set(_ACTIVE_HANDLER_IDS.get() | {handler_id})
             try:
-                with EventNext(event.event_type, handler_level, forward) as event_next:
-                    output = await _await_handler_result(handler(event, ops, event_next))
-            except Exception as handler_failure:
-                if validator_failure is None:
-                    return await skip_handler(handler_failure)
+                output: EventOutput | None = None
+                try:
+                    with EventNext(event.event_type, handler_level, forward) as event_next:
+                        output = await _await_handler_result(handler(event, ops, event_next))
+                except Exception as handler_failure:
+                    if validator_failure is None:
+                        return await skip_handler(handler_failure)
 
-            # A handler cannot swallow an event-definition failure or an invalid forwarded input.
-            if validator_failure is not None:
-                raise validator_failure
-            if invalid_input_failure is not None:
-                return await skip_handler(invalid_input_failure)
+                # A handler cannot swallow an event-definition failure or an invalid forwarded input.
+                if validator_failure is not None:
+                    raise validator_failure
+                if invalid_input_failure is not None:
+                    return await skip_handler(invalid_input_failure)
 
-            if not _run_validator(output_validator, output, "output"):
-                return await skip_handler(
-                    build_error(
-                        StatusCode.EVENTS_PAYLOAD_INVALID,
-                        reason="handler output is invalid",
+                if not _run_validator(output_validator, output, "output"):
+                    return await skip_handler(
+                        build_error(
+                            StatusCode.EVENTS_PAYLOAD_INVALID,
+                            reason="handler output is invalid",
+                        )
                     )
-                )
-            return output
+                return output
+            finally:
+                _ACTIVE_HANDLER_IDS.reset(active_token)
 
         return adapter
 
@@ -499,12 +520,15 @@ class ExtensionEventBus:
         self,
         event: Event,
         session: Session | SessionContext | None = None,
+        *,
+        trigger_context: object | None = None,
     ) -> EventOutput | None:
         """Run handlers matched by the event type's matcher.
 
         Args:
             event: Registered business event and its input.
             session: Trusted session facts bound to each entered handler.
+            trigger_context: Private invocation data available only to the CORE handler.
 
         Returns:
             The event-chain result.
@@ -527,13 +551,16 @@ class ExtensionEventBus:
             raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build has not succeeded")
         # Session and match results are fixed here, before the first await, and
         # then handed to the framework chain; the chain never re-matches.
+        # Handlers already running on this task are excluded so a nested
+        # trigger cannot re-enter them; the rest of the chain and CORE still run.
         session_context = _normalize_session(session)
-        matched_handler_ids = self._match_handlers(event, registration)
+        matched_handler_ids = self._match_handlers(event, registration) - _ACTIVE_HANDLER_IDS.get()
         return await registration.dispatch(
             event,
             matched_handler_ids=matched_handler_ids,
             target_level=None,
             session_context=session_context,
+            trigger_context=trigger_context,
         )
 
     async def _build(self, event: Event, registration: _EventRegistration) -> EventHandlerOpsBuilder:
@@ -545,6 +572,7 @@ class ExtensionEventBus:
             matched_handler_ids=matched_handler_ids,
             target_level=None,
             session_context=None,
+            trigger_context=None,
         )
         if isinstance(result, EventHandlerOpsBuilder):
             self._builder = result

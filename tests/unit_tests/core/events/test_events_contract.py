@@ -174,12 +174,20 @@ def test_events_protocol_bus_signature():
     assert unregister_handler_return == "None"
 
     trigger, trigger_return = _method_signature(ExtensionEventBusProtocol.trigger)
-    assert [parameter.name for parameter in trigger] == ["event", "session"]
+    assert [parameter.name for parameter in trigger] == ["event", "session", "trigger_context"]
     assert trigger[0].annotation == "Event"
     assert trigger[1].annotation == "Session | SessionContext | None"
     assert trigger[1].default is None
+    assert trigger[2].annotation == "object | None"
+    assert trigger[2].kind is inspect.Parameter.KEYWORD_ONLY
+    assert trigger[2].default is None
     assert trigger_return == "EventOutput | None"
-    assert list(inspect.signature(ExtensionEventBus.trigger).parameters) == ["self", "event", "session"]
+    assert list(inspect.signature(ExtensionEventBus.trigger).parameters) == [
+        "self",
+        "event",
+        "session",
+        "trigger_context",
+    ]
     assert (
         EventHandler
         == Callable[
@@ -192,7 +200,7 @@ def test_events_protocol_bus_signature():
 def test_events_builder_ops_and_event_next_signatures():
     assert not getattr(EventHandlerOpsBuilder, "_is_protocol", False)
     assert not getattr(EventHandlerOps, "_is_protocol", False)
-    assert _contract_functions(EventHandlerOpsBuilder) == {"add_namespace", "add_method", "build"}
+    assert _contract_functions(EventHandlerOpsBuilder) == {"add_namespace", "add_method", "build", "build_core"}
 
     add_namespace, add_namespace_return = _method_signature(EventHandlerOpsBuilder.add_namespace)
     assert [parameter.name for parameter in add_namespace] == ["namespace"]
@@ -209,6 +217,12 @@ def test_events_builder_ops_and_event_next_signatures():
     assert [parameter.annotation for parameter in build] == ["PackageMetadata | None", "SessionContext | None"]
     assert all(parameter.default is None for parameter in build)
     assert build_return == "EventHandlerOps"
+
+    build_core, build_core_return = _method_signature(EventHandlerOpsBuilder.build_core)
+    assert [parameter.name for parameter in build_core] == ["session_context", "trigger_context"]
+    assert [parameter.annotation for parameter in build_core] == ["SessionContext | None", "object | None"]
+    assert all(parameter.default is inspect.Parameter.empty for parameter in build_core)
+    assert build_core_return == "EventHandlerOps"
 
     assert not getattr(EventNext, "_is_protocol", False)
     assert _contract_functions(EventNext) == {"__call__", "to"}

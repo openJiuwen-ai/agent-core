@@ -15,6 +15,7 @@ from openjiuwen.core.extension.runtime import ActivationCandidate, Runtime
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.records import ExtensionPlan
 from tests.unit_tests.core.extension.conftest import (
+    BUSINESS_EVENT,
     build_bus,
     call_business_event,
     write_package,
@@ -28,7 +29,7 @@ _METADATA_BODY = (
     "        def handler(event, ops, next_handler):\n"
     "            package = ops.package_metadata\n"
     "            return (package.package_id, package.package_version, str(package.root))\n"
-    "        registrar.register_event_handler('tool.call', handler, {}, 'user')\n"
+    f"        registrar.register_event_handler('{BUSINESS_EVENT}', handler, {{}}, 'user')\n"
 )
 
 _HALF_SET_BODY = (
@@ -38,7 +39,7 @@ _HALF_SET_BODY = (
     "    def register(self, registrar):\n"
     "        def handler(event, ops, next_handler):\n"
     "            return 'published'\n"
-    "        registrar.register_event_handler('tool.call', handler, {}, 'user')\n"
+    f"        registrar.register_event_handler('{BUSINESS_EVENT}', handler, {{}}, 'user')\n"
     "        registrar.register_event_handler('tool.unknown', handler, {}, 'user')\n"
 )
 
@@ -49,7 +50,7 @@ _ASYNC_BODY = (
     "    def register(self, registrar):\n"
     "        async def handler(event, ops, next_handler):\n"
     "            return 'async-handler'\n"
-    "        registrar.register_event_handler('tool.call', handler, {}, 'user')\n"
+    f"        registrar.register_event_handler('{BUSINESS_EVENT}', handler, {{}}, 'user')\n"
 )
 
 

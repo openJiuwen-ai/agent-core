@@ -112,7 +112,7 @@ async def test_conflicting_build_handler_is_skipped_and_build_commits() -> None:
     bus.register_event_type("demo.echo", _matches, _core)
     bus.register_event_handler("demo.echo", _echo_user, {}, package_metadata=_PACKAGE)
 
-    # The outer handler hits a duplicate namespace after the inner one ran; it is skipped
+    # The outer handler hits a duplicate method after the inner one ran; it is skipped
     # and the inner handler's Builder is committed without rebuilding.
     assert isinstance(await bus.trigger(_BUILD), EventHandlerOpsBuilder)
     assert build_calls == [OPS_BUILD_EVENT_TYPE, OPS_BUILD_EVENT_TYPE]

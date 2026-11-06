@@ -11,7 +11,7 @@ import inspect
 import json
 from copy import deepcopy
 
-from typing import Any, Iterable, Optional, cast
+from typing import TYPE_CHECKING, Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
@@ -43,6 +43,9 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_categories imp
     is_shell_tool,
     shell_tools_from_config,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.core.events.builtins.event_types.tool_check import ToolCheckOutput
 
 
 TOOL_NAME_ALIASES = {
@@ -450,11 +453,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     return self.reject(tool_result=msg)
 
         if user_input is None:
-            logger.info(
-                "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
-                tool_name, normalized_name
-            )
-            result = await self._check_with_fresh_config(tool_name, normalized_name, tool_args, session_id)
+            from openjiuwen.core.runner import Runner
+
+            bus = Runner.get_extension_bus()
+            if bus is None:
+                result = await self._first_permission_check(
+                    tool_name, normalized_name, tool_args, session_id
+                )
+            else:
+                result = await self._first_permission_check_event(
+                    bus, ctx, tool_call, tool_name, normalized_name, tool_args, session_id
+                )
 
             if result.permission == PermissionLevel.ALLOW:
                 logger.info(
@@ -587,7 +596,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         if payload.approved:
             # A deny rule added while the call waited for this approval wins.
-            current = await self._check_with_fresh_config(tool_name, normalized_name, tool_args, session_id)
+            current = await self._first_permission_check(tool_name, normalized_name, tool_args, session_id)
             if current.permission == PermissionLevel.DENY:
                 logger.warning(
                     "[PermissionEngine] permission.rail.result tool=%s decision=deny_after_approval matched_rule=%s",
@@ -661,13 +670,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         )
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
 
-    async def _check_with_fresh_config(
+    async def _first_permission_check(
         self,
         tool_name: str,
         normalized_name: str,
         tool_args: dict,
         session_id: str | None,
     ) -> PermissionResult:
+        """Run the original config refresh and PermissionEngine check."""
+        logger.info(
+            "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
+            tool_name, normalized_name
+        )
         # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
         # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
         fresh: dict | None = None
@@ -699,6 +713,84 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 normalized_name,
             )
             raise
+
+    async def execute_tool_check(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> tuple[PermissionResult, ToolCheckOutput]:
+        """Execute the side-effect-free first check for an event CORE handler."""
+        from openjiuwen.core.events.builtins.event_types.tool_check import ToolCheckOutput
+
+        tool_call = ctx.inputs.tool_call
+        tool_name = ctx.inputs.tool_name
+        result = await self._first_permission_check(
+            tool_name,
+            self._normalize_tool_name(tool_name),
+            self.parse_tool_args(tool_call),
+            self._resolve_session_id(ctx),
+        )
+        return result, ToolCheckOutput(
+            decision=PermissionLevel(result.permission).value,
+            reason=result.reason,
+        )
+
+    @staticmethod
+    def apply_tool_check_output(
+        result: PermissionResult | None,
+        output: ToolCheckOutput,
+    ) -> PermissionResult:
+        """Apply public fields locally while preserving the host's private result fields."""
+        permission = PermissionLevel(output.decision)
+        if result is not None and result.permission == permission and result.reason == output.reason:
+            return result
+        return PermissionResult(
+            permission=permission,
+            matched_rule=None if result is None else result.matched_rule,
+            reason=output.reason,
+            external_paths=None if result is None else result.external_paths,
+        )
+
+    async def _first_permission_check_event(
+        self,
+        bus: Any,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        tool_name: str,
+        normalized_name: str,
+        tool_args: dict,
+        session_id: str | None,
+    ) -> PermissionResult:
+        """Run the first check through ``tool.check``; failures propagate without a direct retry."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.events.builtins.event_types.tool_check import (
+            TOOL_CHECK,
+            ToolCheckInput,
+            ToolCheckOutput,
+            ToolCheckTriggerContext,
+        )
+
+        event_input = ToolCheckInput(tool_call_id=getattr(tool_call, "id", None), tool_name=tool_name)
+
+        async def invoke_original(_ctx: AgentCallbackContext) -> tuple[PermissionResult, ToolCheckOutput]:
+            result = await self._first_permission_check(
+                tool_name, normalized_name, tool_args, session_id
+            )
+            return result, ToolCheckOutput(
+                decision=PermissionLevel(result.permission).value,
+                reason=result.reason,
+            )
+
+        trigger_context = ToolCheckTriggerContext(
+            callback_ctx=ctx,
+            invoke_original=invoke_original,
+        )
+        output = await bus.trigger(
+            Event(TOOL_CHECK, event_input),
+            ctx.session,
+            trigger_context=trigger_context,
+        )
+        result = trigger_context.raw_result
+        return self.apply_tool_check_output(result, output)
 
     @staticmethod
     def parse_tool_args(tool_call: Optional[ToolCall]) -> dict:

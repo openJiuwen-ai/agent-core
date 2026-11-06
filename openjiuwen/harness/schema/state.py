@@ -13,6 +13,37 @@ _SESSION_STATE_KEY = "deepagent"
 _SESSION_RUNTIME_ATTR = "_deepagent_runtime_state"
 
 
+@dataclass(slots=True)
+class TurnState:
+    """Session-scoped state for one logical DeepAgent turn."""
+
+    turn_id: str
+    step_index: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-friendly dict."""
+        return {
+            "turn_id": self.turn_id,
+            "step_index": self.step_index,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> Optional["TurnState"]:
+        """Restore a turn from persisted session state."""
+        if not isinstance(data, dict):
+            return None
+        turn_id = data.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        step_index = data.get("step_index", 0)
+        if isinstance(step_index, bool) or not isinstance(step_index, int) or step_index < 0:
+            return None
+        return cls(
+            turn_id=turn_id,
+            step_index=step_index,
+        )
+
+
 @dataclass
 class PlanModeState:
     """Plan mode session-scoped state.
@@ -82,6 +113,7 @@ class DeepAgentState:
         default_factory=list
     )
     plan_mode: PlanModeState = field(default_factory=PlanModeState)
+    turn_state: Optional[TurnState] = None
 
     def to_session_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-friendly dict."""
@@ -97,6 +129,11 @@ class DeepAgentState:
                 self.pending_follow_ups
             ),
             "plan_mode": self.plan_mode.to_dict(),
+            "turn_state": (
+                self.turn_state.to_dict()
+                if self.turn_state is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -126,5 +163,8 @@ class DeepAgentState:
             ),
             plan_mode=PlanModeState.from_dict(
                 data.get("plan_mode")
+            ),
+            turn_state=TurnState.from_dict(
+                data.get("turn_state")
             ),
         )

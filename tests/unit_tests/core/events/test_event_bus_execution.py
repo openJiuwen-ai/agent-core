@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +15,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.events.bus import ExtensionEventBus
 from openjiuwen.core.events.event_next import EventNext
+from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event, HandlerLevel, SessionContext
 
 
@@ -61,6 +63,35 @@ async def test_trigger_dispatches_registered_core_without_handlers() -> None:
     with pytest.raises(ValidationError) as unsupported_session:
         await bus.trigger(Event("demo.core_only", {"value": 1}), session=object())
     assert unsupported_session.value.status is StatusCode.EVENTS_PAYLOAD_INVALID
+
+
+@pytest.mark.asyncio
+async def test_trigger_context_is_available_only_to_core_handler() -> None:
+    bus = await _built_bus()
+    trigger_context = object()
+    handler_ops: list[object] = []
+
+    async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del event, event_next
+        assert ops is not None
+        assert cast(Any, ops).trigger_context is trigger_context
+        return "core"
+
+    async def handler(event: Event, ops: object | None, event_next: EventNext) -> object:
+        assert ops is not None
+        handler_ops.append(ops)
+        return await event_next(event)
+
+    bus.register_event_type("demo.trigger_context", _matches, core)
+    bus.register_event_handler("demo.trigger_context", handler, {}, HandlerLevel.USER)
+    bus.register_event_handler("demo.trigger_context", handler, {}, HandlerLevel.BUILTIN)
+
+    result = await bus.trigger(Event("demo.trigger_context", {}), trigger_context=trigger_context)
+
+    assert result == "core"
+    assert len(handler_ops) == 2
+    assert all(type(ops) is EventHandlerOps for ops in handler_ops)
+    assert all("trigger_context" not in vars(ops) for ops in handler_ops)
 
 
 @pytest.mark.asyncio
@@ -410,6 +441,125 @@ async def test_inflight_call_keeps_old_handlers_while_new_call_sees_updates() ->
     assert await old_call == "core"
     assert await bus.trigger(Event("demo.snapshot", {"call": "new"})) == "core"
     assert trace == ["old:u1", "old:u2", "old:core", "new:u1", "new:u3", "new:core"]
+
+
+@pytest.mark.asyncio
+async def test_nested_trigger_skips_active_handler_but_runs_others_and_core() -> None:
+    """An Ops verb re-triggering the same event must not re-enter the calling handler."""
+    bus = await _built_bus()
+    trace: list[str] = []
+
+    async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops, event_next
+        trace.append(f"core:{event.event_input['depth']}")
+        return event.event_input["depth"]
+
+    async def reentrant(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops
+        depth = event.event_input["depth"]
+        trace.append(f"reentrant:{depth}")
+        # Stands in for an Ops verb whose implementation calls ``bus.trigger()``.
+        nested = await bus.trigger(Event(event.event_type, {"depth": depth + 1}))
+        trace.append(f"reentrant:{depth}:nested={nested}")
+        return await event_next(event)
+
+    async def observer(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops
+        trace.append(f"observer:{event.event_input['depth']}")
+        return await event_next(event)
+
+    bus.register_event_type("demo.reentrant", _matches, core)
+    bus.register_event_handler("demo.reentrant", reentrant, {}, HandlerLevel.USER)
+    bus.register_event_handler("demo.reentrant", observer, {}, HandlerLevel.BUILTIN)
+
+    assert await bus.trigger(Event("demo.reentrant", {"depth": 0})) == 0
+    assert trace == [
+        "reentrant:0",
+        "observer:1",
+        "core:1",
+        "reentrant:0:nested=1",
+        "observer:0",
+        "core:0",
+    ]
+
+    # The active set is restored once the chain settles: a fresh trigger enters the handler again.
+    trace.clear()
+    assert await bus.trigger(Event("demo.reentrant", {"depth": 0})) == 0
+    assert trace[0] == "reentrant:0"
+
+
+@pytest.mark.asyncio
+async def test_nested_trigger_excludes_every_handler_on_the_call_stack() -> None:
+    """A -> B -> trigger must skip both A and B, not only the innermost one."""
+    bus = await _built_bus()
+    trace: list[str] = []
+
+    async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del event, ops, event_next
+        trace.append("core")
+        return "core"
+
+    def mutual(name: str) -> Callable[[Event, object | None, EventNext], object]:
+        async def run(event: Event, ops: object | None, event_next: EventNext) -> object:
+            del ops
+            trace.append(f"{name}:enter")
+            # Both handlers re-trigger; without full-stack exclusion A and B would
+            # alternately readmit each other and never terminate.
+            await bus.trigger(Event(event.event_type, {}))
+            trace.append(f"{name}:exit")
+            return await event_next(event)
+
+        return run
+
+    bus.register_event_type("demo.mutual", _matches, core)
+    bus.register_event_handler("demo.mutual", mutual("a"), {}, HandlerLevel.USER)
+    bus.register_event_handler("demo.mutual", mutual("b"), {}, HandlerLevel.BUILTIN)
+
+    assert await bus.trigger(Event("demo.mutual", {})) == "core"
+    assert trace == [
+        "a:enter",
+        "b:enter",  # nested from a: a excluded, b admitted
+        "core",  # nested from b: a and b both excluded
+        "b:exit",
+        "core",  # b continues a's nested chain into CORE
+        "a:exit",
+        "b:enter",  # a's own chain continues into b
+        "core",  # nested from b: a (still active) and b excluded
+        "b:exit",
+        "core",  # top-level chain reaches CORE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_handler_exclusion_is_task_local() -> None:
+    bus = await _built_bus()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    trace: list[str] = []
+
+    async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops, event_next
+        trace.append(f"core:{event.event_input['call']}")
+        return "core"
+
+    async def blocking(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops
+        trace.append(f"handler:{event.event_input['call']}")
+        if event.event_input["call"] == "first":
+            entered.set()
+            await release.wait()
+        return await event_next(event)
+
+    bus.register_event_type("demo.task_local", _matches, core)
+    bus.register_event_handler("demo.task_local", blocking, {}, HandlerLevel.USER)
+
+    first = asyncio.create_task(bus.trigger(Event("demo.task_local", {"call": "first"})))
+    await entered.wait()
+    # An unrelated trigger on another task is not affected by the in-flight handler.
+    assert await bus.trigger(Event("demo.task_local", {"call": "second"})) == "core"
+    release.set()
+    assert await first == "core"
+    assert trace == ["handler:first", "handler:second", "core:second", "core:first"]
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,7 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
     SystemMessage,
+    ToolCall,
     ToolMessage,
     UserMessage,
 )
@@ -1005,7 +1006,7 @@ class ReActAgent(BaseAgent):
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
         return preview_messages
 
-    async def _call_model(
+    async def _execute_model_step(
         self,
         ctx: AgentCallbackContext,
         context: ModelContext,
@@ -1074,6 +1075,92 @@ class ReActAgent(BaseAgent):
         log_llm_response(logger, ai_message)
 
         return ai_message
+
+    @staticmethod
+    def _next_turn_step(ctx: AgentCallbackContext) -> tuple[str, int] | None:
+        turn_state = ctx.extra.get("_turn_state")
+        if turn_state is None:
+            return None
+        turn_id = getattr(turn_state, "turn_id", None)
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        step_index = getattr(turn_state, "step_index", None)
+        if not isinstance(step_index, int) or isinstance(step_index, bool):
+            return None
+        if step_index < 0:
+            return None
+        turn_state.step_index = step_index + 1
+        return turn_id, step_index
+
+    async def _call_model(
+        self,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
+        tools: Optional[List[ToolInfo]],
+    ) -> object:
+        """Run one model step directly or through the active turn event bus."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.events.builtins.event_types.turn import (
+            TURN_STEP,
+            TurnStepInput,
+            TurnStepTriggerContext,
+            apply_turn_step_output,
+            build_turn_step_message,
+            turn_step_core_executed,
+            validate_turn_step_identity,
+        )
+        from openjiuwen.core.runner import Runner
+
+        step = self._next_turn_step(ctx)
+        bus = Runner.get_extension_bus()
+        if step is None or bus is None:
+            return await self._execute_model_step(ctx, context, tools)
+
+        turn_id, index = step
+        step_input = TurnStepInput(
+            turn_id=turn_id,
+            index=index,
+            model=str(self._config.model_name or ""),
+            agent_id=getattr(self.card, "id", None),
+        )
+
+        async def execute_step(final_input: TurnStepInput) -> object:
+            if final_input != step_input:
+                raise_error(
+                    StatusCode.EVENTS_PAYLOAD_INVALID,
+                    reason="turn.step input cannot be modified",
+                )
+            return await self._execute_model_step(ctx, context, tools)
+
+        trigger_context = TurnStepTriggerContext(execute_step=execute_step)
+        output = await bus.trigger(
+            Event(TURN_STEP, step_input),
+            ctx.session,
+            trigger_context=trigger_context,
+        )
+        step_output = validate_turn_step_identity(output, turn_id, index)
+
+        if not turn_step_core_executed(trigger_context):
+            message = build_turn_step_message(
+                step_output,
+                turn_id=turn_id,
+                index=index,
+            )
+            ctx.inputs.response = message
+            return message
+
+        original = trigger_context.original_result
+        if not isinstance(original, AssistantMessage):
+            return original
+
+        message = apply_turn_step_output(
+            original,
+            step_output,
+            turn_id=turn_id,
+            index=index,
+        )
+        ctx.inputs.response = message
+        return message
 
     async def _recover_from_model_exception(
         self,
@@ -2347,12 +2434,18 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
-        results = await self.ability_manager.execute(
-            ctx=ctx,
-            tool_call=tool_calls,
-            session=session,
-            parallel_tool_calls=self._config.parallel_tool_calls,
-        )
+        from openjiuwen.core.runner import Runner
+
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            results = await self.ability_manager.execute(
+                ctx=ctx,
+                tool_call=tool_calls,
+                session=session,
+                parallel_tool_calls=self._config.parallel_tool_calls,
+            )
+        else:
+            results = await self._execute_tool_call_event(bus, ctx, tool_calls, session)
 
         tool_names = {call.id: call.name for call in tool_calls}
         for tool_result, tool_message in results:
@@ -2368,6 +2461,41 @@ class ReActAgent(BaseAgent):
             await context.add_messages(multimodal_message)
 
         return results
+
+    @staticmethod
+    async def _execute_tool_call_event(
+        bus: Any,
+        ctx: AgentCallbackContext,
+        tool_calls: List,
+        session: Optional[Session],
+    ) -> list:
+        """Run one tool batch through ``tool.call``; failures propagate and never replay the direct call."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.events.builtins.event_types.tool_call import (
+            TOOL_CALL,
+            ToolCallEventInput,
+            ToolCallTriggerContext,
+            apply_tool_call_outputs,
+        )
+
+        async def invoke_original(final_tool_calls: list[ToolCall]) -> list:
+            return await ctx.agent.ability_manager.execute(
+                ctx=ctx,
+                tool_call=final_tool_calls,
+                session=session,
+                parallel_tool_calls=ctx.agent.config.parallel_tool_calls,
+            )
+
+        trigger_context = ToolCallTriggerContext(
+            tool_calls=tuple(tool_calls),
+            invoke_original=invoke_original,
+        )
+        event_input = tuple(
+            ToolCallEventInput(tool_call_id=call.id, tool_name=call.name, arguments=call.arguments)
+            for call in tool_calls
+        )
+        outputs = await bus.trigger(Event(TOOL_CALL, event_input), session, trigger_context=trigger_context)
+        return apply_tool_call_outputs(trigger_context, outputs)
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -2893,6 +3021,9 @@ class ReActAgent(BaseAgent):
         attribution_token = bind_usage_attribution(ctx.context_usage_attribution)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
+            turn_state = inputs.get("_turn_state")
+            if turn_state is not None:
+                ctx.extra["_turn_state"] = turn_state
             if invoke_inputs.turn_number is not None:
                 ctx.extra["_turn_number"] = invoke_inputs.turn_number
             ctx.extra["user_id"] = inputs.get("user_id", "")

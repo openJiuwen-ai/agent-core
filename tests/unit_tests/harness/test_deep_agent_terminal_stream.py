@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
+from openjiuwen.core.events.builtins.event_types.turn import TURN_START, TurnStartOutput
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
@@ -153,7 +154,7 @@ async def test_text_only_stream_gets_one_finalized_answer():
 
 
 @pytest.mark.asyncio
-async def test_interrupt_does_not_turn_provisional_text_into_an_answer():
+async def test_interrupt_does_not_turn_provisional_text_into_an_answer(monkeypatch):
     class InterruptInner(AnswerInner):
         async def stream(self, inputs, session=None, stream_modes=None):
             yield OutputSchema(type="llm_output", index=0, payload={"content": "Need approval"})
@@ -162,8 +163,24 @@ async def test_interrupt_does_not_turn_provisional_text_into_an_answer():
     agent = make_agent(InterruptInner())
     rail = FinalizingRail()
     agent.add_rail(rail)
-    chunks = [chunk async for chunk in agent.stream("read")]
+    session = Session(session_id="interrupt-turn")
+    event_types = []
+
+    async def trigger(event, event_session):
+        assert event_session is session
+        event_types.append(event.event_type)
+        assert event.event_type == TURN_START
+        return TurnStartOutput(turn_id=event.event_input.turn_id)
+
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: SimpleNamespace(trigger=trigger)),
+    )
+
+    chunks = [chunk async for chunk in agent.stream("read", session=session)]
     assert [chunk.type for chunk in chunks] == ["llm_output", INTERACTION]
+    assert event_types == [TURN_START]
     assert rail.finished
 
 

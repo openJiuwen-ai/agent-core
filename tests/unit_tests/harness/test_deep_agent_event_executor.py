@@ -253,6 +253,36 @@ async def test_execute_ability_yields_completion() \
 
 
 @pytest.mark.asyncio
+async def test_execute_ability_passes_session_turn_to_react() -> None:
+    """Task-loop execution projects the session TurnState into ReAct inputs."""
+    agent = _make_agent()
+    deps, task_manager = _make_deps()
+    session = FakeSession()
+    turn_state = agent._start_turn(session)
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="turn-task",
+        task_type=DEEP_TASK_TYPE,
+        description="turn work",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await task_manager.add_task(core_task)
+    executor = TaskLoopEventExecutor(deps, agent)
+
+    _ = [
+        chunk
+        async for chunk in executor.execute_ability(
+            "turn-task",
+            session,
+        )
+    ]
+
+    react_agent = agent.react_agent
+    assert react_agent is not None
+    assert react_agent.invoke_calls[0]["_turn_state"] is turn_state
+
+
+@pytest.mark.asyncio
 async def test_execute_ability_yields_failure() \
         -> None:
     """Exception in invoke yields a TASK_FAILED chunk."""

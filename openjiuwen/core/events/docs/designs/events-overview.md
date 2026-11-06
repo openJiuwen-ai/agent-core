@@ -122,7 +122,7 @@ Ops 按 `namespace.method` 动态组织平台能力，例如 `session.cwd`。运
 
 发起新事件的 OpsMethod 需要显式传递当前会话资料；新链重新匹配，各 Handler 使用自己的包信息和独立 Ops。原操作的授权边界应继续保留，不能因执行者切换到平台 CORE 而扩大权限。新链结束后，原 Handler 再决定继续或短路。
 
-例如在 `tool.call` Handler 中，调用 `next_handler(event)` 继续当前工具处理；调用实现了 `bus.trigger()` 的 `ops.tool.call(...)` 会发起新的工具事件，可能递归进入自身。当前 EventNext 在所属 Handler 激活且由同一 asyncio Task 调用时可多次推进；每次都会从相同后续位置重新执行，不会重新匹配，也不会改变当前事件类型。
+例如在 `tool.call` Handler 中，调用 `next_handler(event)` 继续当前工具处理；调用实现了 `bus.trigger()` 的 `ops.tool.call(...)` 会发起新的工具事件。Bus 按 asyncio Task 记录调用栈上所有正在运行的 Handler，嵌套 `trigger()` 在匹配时排除它们：新链不会再次进入当前 Handler，也不会进入其外层任何仍在运行的 Handler；其余匹配 Handler 与 CORE 照常执行。当前 EventNext 在所属 Handler 激活且由同一 asyncio Task 调用时可多次推进；每次都会从相同后续位置重新执行，不会重新匹配，也不会改变当前事件类型。
 
 ## 3. 关键流程与完成语义
 
@@ -269,7 +269,7 @@ USER Handler 可以跳过 BUILTIN 或短路，因此 BUILTIN 层级本身不能�
 
 本机制在进程内调用 Handler，不提供恶意代码隔离。受控注册、只读上下文和 Ops 约定不能替代沙箱；执行不可信代码所需的进程或沙箱隔离须另行设计。
 
-单链顺序不保证不同 `trigger()` 的执行或完成顺序。当前没有跨线程安全承诺、Build 并发锁、嵌套深度、调用次数、超时或容量上限。EventNext 多次调用和 OpsMethod 递归触发新事件都可能放大副作用；宿主与业务能力必须按实际风险增加限流、幂等、超时和重入保护。
+单链顺序不保证不同 `trigger()` 的执行或完成顺序。当前没有跨线程安全承诺、Build 并发锁、嵌套深度、调用次数、超时或容量上限。Bus 只提供一项重入保护：同一 asyncio Task 上正在运行的 Handler 不会被嵌套 `trigger()` 再次进入（含经由其他 Handler 的间接重入），因此 Handler 自环与互递归在首次嵌套即被切断；该集合随 `asyncio.create_task` 复制到 Handler 派生的任务。EventNext 多次调用和 OpsMethod 触发新事件仍可能放大副作用；宿主与业务能力必须按实际风险增加限流、幂等和超时保护。
 
 ## 5. 现有基础与落地边界
 
