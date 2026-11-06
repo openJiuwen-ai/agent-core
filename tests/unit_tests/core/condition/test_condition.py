@@ -202,6 +202,15 @@ class TestNumberCondition(TestConditionBase):
 
 class TestExpressionCondition(TestConditionBase):
 
+    def test_expression_condition_preserves_not_in_substring_in_variable_path(self):
+        expression = "${a.is_not_in_use} == true"
+        self.mock_state.get_global.return_value = True
+
+        result = ExpressionCondition(expression).invoke({}, self.mock_session)
+
+        assert result is True
+        self.mock_state.get_global.assert_called_once_with("a.is_not_in_use")
+
     def test_expression_condition_preserves_boolean_substrings_in_variable_paths(self):
         expression = "${node_llm.userFields.structured_output.is_false_alarm} == true"
         self.mock_state.get_global.return_value = True

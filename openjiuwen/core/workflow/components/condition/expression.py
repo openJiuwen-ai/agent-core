@@ -18,7 +18,7 @@ RULES = [
     (re.compile(r"\btrue\b"), "True"),
     (re.compile(r"\bfalse\b"), "False"),
     (re.compile(r"length\("), "len("),
-    (re.compile(r"not_in"), "not in"),
+    (re.compile(r"\bnot_in\b"), "not in"),
     (re.compile(r"is_empty\("), "_safe_is_empty("),
     (re.compile(r"is_not_empty\("), "_safe_is_not_empty("),
 ]
