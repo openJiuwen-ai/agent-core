@@ -1388,7 +1388,11 @@ class IntentDetector:
         try:
             from openjiuwen.core.runner import Runner
             model = await Runner.resource_mgr.get_model(
-                model_id=self.agent_config.intent_llm_id, session=self.session
+                model_id=self.agent_config.intent_llm_id, session=self.session,
+                identity={
+                    "agent_id": "core.workflow_event_handler",
+                    "agent_name": "core.workflow_event_handler",
+                },
             )
             llm_output = await model.invoke(llm_inputs)
             return llm_output.content.strip()
@@ -1482,7 +1486,8 @@ class IntentDetector:
             model_config.model_provider,
         )
         model = await Runner.resource_mgr.get_model(
-            model_id=model_id, session=session
+            model_id=model_id, session=session,
+            identity={"agent_id": "core.workflow_event_handler", "agent_name": "core.workflow_event_handler"},
         )
         if model is None:
             client_cfg = ModelClientConfig(
@@ -1516,6 +1521,10 @@ class IntentDetector:
                 model_id=model_id, model=create_model
             )
             model = await Runner.resource_mgr.get_model(
-                model_id=model_id, session=session
+                model_id=model_id, session=session,
+                identity={
+                    "agent_id": "core.workflow_event_handler",
+                    "agent_name": "core.workflow_event_handler",
+                },
             )
         return model

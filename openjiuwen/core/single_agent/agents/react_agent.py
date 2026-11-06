@@ -1137,6 +1137,18 @@ class ReActAgent(BaseAgent):
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
+            # 回填延迟到 usage_metadata：tracer 消费方（OtelRail after_model_call ->
+            # on_llm_end）从响应对象读 ttft / inter-token 盖 span 属性（develop 基线
+            # 50e97707b 同款契约）；perf_metrics 只进下方 UI 流通道，遥测侧拿不到。
+            # ttft_seconds 承载相对延迟（秒），first_token_time 保持「首 token 时刻」
+            # 契约不复用为延迟载体；total_latency（秒）一并回填，只回填 TTFT 会让
+            # span 出现「TTFT 有、total latency 为 0」的半缺失。
+            if "ttft_ms" in perf_metrics:
+                ai_message.usage_metadata.ttft_seconds = round(perf_metrics["ttft_ms"] / 1000, 6)
+            ai_message.usage_metadata.total_latency = round(call_latency / 1000, 6)
+            if "tpot_ms" in perf_metrics:
+                ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
+
             await session.write_stream(OutputSchema(
                 type="llm_usage",
                 index=0,

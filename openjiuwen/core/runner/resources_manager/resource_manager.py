@@ -94,12 +94,17 @@ class ResourceMgr:
         method_name = f"remove_{_REGISTRY_ACCESSORS[resource_type]}"
         return getattr(mgr, method_name)(resource_id)
 
-    def _dispatch_get(self, resource_type: str, resource_id: str, session=None) -> Any:
+    def _dispatch_get(self, resource_type: str, resource_id: str, session=None,
+                      identity: dict | None = None) -> Any:
         mgr = self._get_mgr(resource_type)
         method_name = f"get_{_REGISTRY_ACCESSORS[resource_type]}"
         kwargs: dict[str, Any] = {}
         if resource_type in _SESSION_GET_TYPES:
             kwargs["session"] = session
+        # identity（llm span 业务归因，嵌入侧经 get_model 显式传入）仅 model
+        # 的 get 接受；其余资源类型显式不转发，共享分发契约不被单类型参数污染。
+        if identity is not None and resource_type == "model":
+            kwargs["identity"] = identity
         return getattr(mgr, method_name)(resource_id, **kwargs)
 
     async def add_agent_team(self,
@@ -621,7 +626,8 @@ class ResourceMgr:
                         *,
                         tag: Optional[Tag | list[Tag]] = None,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                        session: Optional["Session"] = None) \
+                        session: Optional["Session"] = None,
+                        identity: Optional[dict] = None) \
             -> Optional[BaseModel] | list[Optional[BaseModel]]:
         """
         Get model instance(s) by ID or tag.
@@ -631,13 +637,17 @@ class ResourceMgr:
             tag: Single tag or list of tags; returns all models with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             session: Optional session context for the models.
+            identity: Optional business identity (e.g. agent_id) forwarded to
+                the traced-model decorator for llm span attribution. Embedders
+                on cores without this parameter must not pass it (capability
+                probing lives on the embedder side).
 
         Returns:
             Model or list[Model]: Model instance(s) if found, None otherwise.
         """
         return await self._inner_get_resources_by_provider(resource_id=model_id, tag=tag,
                                                            tag_match_strategy=tag_match_strategy, session=session,
-                                                           resource_type="model")
+                                                           resource_type="model", identity=identity)
 
     def add_prompt(self,
                    prompt_id: str,
@@ -1588,7 +1598,7 @@ class ResourceMgr:
     async def _inner_get_resources_by_provider(self, *, resource_id: Optional[str | list[str]], resource_type: str,
                                                tag: Tag | list[Tag],
                                                tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                                               session=None):
+                                               session=None, identity: dict | None = None):
         """
         Internal method to get resources by provider.
 
@@ -1598,6 +1608,8 @@ class ResourceMgr:
             tag: Tag(s) to filter.
             tag_match_strategy: Strategy for matching tags.
             session: Optional session context.
+            identity: Optional business identity for model gets (llm span
+                attribution); ignored for other resource types.
 
         Returns:
             Resource instance(s) or None.
@@ -1612,7 +1624,7 @@ class ResourceMgr:
             exc = None
             try:
                 if self._tag_mgr.has_resource(get_id):
-                    resource = await self._dispatch_get(resource_type, get_id, session=session)
+                    resource = await self._dispatch_get(resource_type, get_id, session=session, identity=identity)
             except Exception as e:
                 logger.error("get resource failed",
                              event_type=LogEventType.RESOURCE_MGR_GET_RESOURCE,
