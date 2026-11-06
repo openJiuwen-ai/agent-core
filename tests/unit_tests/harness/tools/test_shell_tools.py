@@ -8,6 +8,7 @@ import tempfile
 import pytest
 import pytest_asyncio
 
+from agent_shield.tool_permission import PermissionLevel, get_permission_manager
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import init_cwd
@@ -124,23 +125,35 @@ async def test_bash_tool_allowlist(sys_op):
 # Dangerous command interception
 # ────────────────────────────────────────────────────────────
 
+_PERMISSION_CONFIG = {
+    "enabled": True,
+    "tools": {"bash": "allow", "powershell": "allow"},
+    "package_builtin_rules": True,
+    "permission_mode": "strict",
+    "shell_allowlist": None,
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command,label", [
-    ("rm -rf /tmp/foo", "rm -rf"),
-    ("shutdown -h now", "shutdown"),
-    ("reboot", "reboot"),
-    ("diskpart", "diskpart"),
-    ("mkfs.ext4 /dev/sda", "mkfs"),
-    ("reg delete HKLM\\Software\\Test", "reg delete"),
-    ("Remove-Item C:\\foo -Recurse -Force", "Remove-Item -Recurse -Force"),
-])
-async def test_dangerous_command_blocked(sys_op, command, label):
-    bash_tool = BashTool(sys_op)
-    res = await bash_tool.invoke({"command": command})
-    assert res.success is False
-    assert res.data is None
-    assert "safety" in res.error
-    assert label in res.error
+@pytest.mark.parametrize("tool_name,tool_input,expected", [
+    ("bash", {"command": "rm -rf /tmp/foo"}, PermissionLevel.ASK),
+    ("bash", {"command": "shutdown -h now"}, PermissionLevel.DENY),
+    ("bash", {"command": "reboot"}, PermissionLevel.DENY),
+    ("bash", {"command": "diskpart"}, PermissionLevel.DENY),
+    ("bash", {"command": "mkfs.ext4 /dev/sda"}, PermissionLevel.DENY),
+    ("bash", {"command": "reg delete HKLM\\Software\\Test"}, PermissionLevel.DENY),
+    (
+        "powershell",
+        {"command": "Remove-Item C:\\foo -Recurse -Force", "shell_type": "powershell"},
+        PermissionLevel.ASK,
+    ),
+], ids=["rm -rf", "shutdown", "reboot", "diskpart", "mkfs", "reg delete", "Remove-Item -Recurse -Force"])
+async def test_dangerous_command_blocked(tool_name, tool_input, expected):
+    """Dangerous commands are judged by the unified permission manager (agent-security)."""
+    result = await get_permission_manager().check_permission(
+        tool_name, tool_input, config=_PERMISSION_CONFIG
+    )
+    assert result.permission == expected, result.matched_rule or result.reason
 
 
 # ────────────────────────────────────────────────────────────

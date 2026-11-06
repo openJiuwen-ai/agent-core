@@ -146,6 +146,26 @@ async def request(
     """
     method_up = method.upper()
     proxy = _resolve_proxy(url)
+    from openjiuwen.core.common.security.outbound import outbound_permission_key
+
+    if outbound_permission_key() is not None:
+        from aiohttp.helpers import get_env_proxy_for_url
+        from yarl import URL
+        from openjiuwen.core.common.security.outbound_http import aiohttp_request
+
+        def scoped_proxy(target_url):
+            explicit = _resolve_proxy(target_url)
+            if explicit is not None:
+                return explicit
+            try:
+                resolved, _ = get_env_proxy_for_url(URL(target_url))
+                return resolved
+            except LookupError:
+                return None
+        return await aiohttp_request(
+            method_up, url, headers=headers, json_body=json_body,
+            timeout_seconds=timeout_seconds, max_bytes=max_bytes, proxy_resolver=scoped_proxy,
+        )
     explicit_proxy = proxy is not None
     proxy_auth: aiohttp.BasicAuth | None = None
     if proxy is not None:

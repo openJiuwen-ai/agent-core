@@ -8,6 +8,7 @@ import copy
 import hashlib
 import logging
 import threading
+import weakref
 from typing import Any
 
 from .models import (
@@ -20,6 +21,7 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 _ScopeKey = tuple[str, str]
+_permission_listener_lock = threading.RLock()
 
 _RETIRED_SESSION_FILTER_BYTES = 1024 * 1024
 _RETIRED_SESSION_HASH_COUNT = 7
@@ -64,6 +66,21 @@ def _normalize_scope(session_id: str, agent_scope_id: str) -> _ScopeKey:
     return sid, scope
 
 
+def _permission_change(method):
+    """Notify host publishers after a mutation has released the store lock."""
+    from functools import wraps
+
+    @wraps(method)
+    def changed(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            session_id = args[0] if args else kwargs.get("session_id")
+            scope = args[1] if len(args) > 1 else kwargs.get("agent_scope_id")
+            self.notify_permission_listeners(session_id, scope, method.__name__)
+    return changed
+
+
 class SkillGrantStore:
     """进程内 Grant 存储（线程安全；进程重启后全部失效）。"""
 
@@ -79,6 +96,7 @@ class SkillGrantStore:
         self._invalidated_scopes: set[_ScopeKey] = set()
         # 固定内存墓碑：Bloom filter 可能误拒绝，但不会漏掉已删除 session（fail-closed）。
         self._retired_sessions = _RetiredSessionFilter()
+        self._permission_listeners: weakref.WeakSet = weakref.WeakSet()
 
     @property
     def authorization_generation(self) -> int:
@@ -92,6 +110,17 @@ class SkillGrantStore:
         return self._retired_sessions.memory_bytes
 
     # ---------- 写入 ----------
+
+    def add_permission_listener(self, listener) -> None:
+        """Weakly register a host configuration publisher (not a decision hook)."""
+        with _permission_listener_lock:
+            self._permission_listeners.add(listener)
+
+    def notify_permission_listeners(self, session_id, agent_scope_id=None, operation="refresh") -> None:
+        with _permission_listener_lock:
+            listeners = list(self._permission_listeners)
+        for listener in listeners:
+            listener.skill_permissions_changed(session_id, agent_scope_id, operation)
 
     def enter_skill_execution(
         self,
@@ -191,6 +220,7 @@ class SkillGrantStore:
         )
         return copy.deepcopy(grant)
 
+    @_permission_change
     def activate_pending(
         self,
         session_id: str,
@@ -285,6 +315,19 @@ class SkillGrantStore:
                     return copy.deepcopy(grant)
             return None
 
+    def active_scopes(self, session_id: str) -> list[str]:
+        """List scopes for configuration publication, never for per-tool composition."""
+        with self._lock:
+            active: list[str] = []
+            for (sid, scope), grants in self._grants.items():
+                if sid != session_id:
+                    continue
+                if (sid, scope) in self._invalidated_scopes:
+                    continue
+                if any(grant.status == GrantStatus.ACTIVE for grant in grants.values()):
+                    active.append(scope)
+            return active
+
     def list_grants(
         self,
         session_id: str,
@@ -306,6 +349,7 @@ class SkillGrantStore:
 
     # ---------- 回收 ----------
 
+    @_permission_change
     def invalidate_scope(
         self,
         session_id: str,
@@ -356,6 +400,7 @@ class SkillGrantStore:
         )
         return True
 
+    @_permission_change
     def revoke_grants(
         self,
         session_id: str,
@@ -396,6 +441,7 @@ class SkillGrantStore:
                     )
             self._drop_empty_scope(key)
 
+    @_permission_change
     def clear_session(self, session_id: str) -> None:
         """永久删除会话：清 Grant 并写墓碑，阻止在途调用为同 id 重建授权。"""
         sid = (session_id or "").strip()
@@ -417,6 +463,7 @@ class SkillGrantStore:
                 key for key in self._invalidated_scopes if key[0] != sid
             }
 
+    @_permission_change
     def clear_scope(self, session_id: str, agent_scope_id: str) -> None:
         """子 Agent 销毁：删除该 ``(session_id, agent_scope_id)`` 作用域下全部 Grant。"""
         key = _normalize_scope(session_id, agent_scope_id)
@@ -430,6 +477,7 @@ class SkillGrantStore:
                 key[0], key[1], len(grants),
             )
 
+    @_permission_change
     def clear_all(self) -> None:
         """功能开关运行中关闭等场景：清空全部 Grant。"""
         with self._lock:
