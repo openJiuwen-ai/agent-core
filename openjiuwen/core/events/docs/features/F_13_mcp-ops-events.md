@@ -102,7 +102,7 @@ async def call_audit_tool(ops: EventHandlerOps, path: str) -> object | None:
 
 ### 3.5 包声明
 
-包根目录的 `mcp.json` 与 `manifest.yaml` 同级声明服务：
+包根目录的 `mcp.json` 与 `manifest.json` 同级声明服务：
 
 ```json
 {"mcpServers": {"weather": {"client_type": "stdio", "params": {"command": "npx", "args": ["-y", "weather-mcp"]}}}}

@@ -197,8 +197,8 @@ def test_reload_rejects_inactive_or_wrong_package_id() -> None:
 
 def test_manifest_rejects_entry_outside_the_package(tmp_path: Path) -> None:
     write_package(tmp_path, "demo")
-    text = (tmp_path / "manifest.yaml").read_text(encoding="utf-8")
-    (tmp_path / "manifest.yaml").write_text(
+    text = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
         text.replace("extensions/ext/extension.py", "../outside.py"),
         encoding="utf-8",
     )
@@ -215,6 +215,7 @@ def test_manifest_rejects_package_ids_unsafe_for_store(tmp_path: Path, package_i
     with pytest.raises(ExtensionFailure) as caught:
         parse_manifest_mapping(
             {
+                "package_type": "extension",
                 "schemaVersion": 1,
                 "package": {"id": package_id, "version": "1.0.0"},
                 "extensions": [],
@@ -229,6 +230,7 @@ def test_manifest_rejects_bad_schema_and_runtime(tmp_path: Path) -> None:
     with pytest.raises(ExtensionFailure) as caught:
         parse_manifest_mapping(
             {
+                "package_type": "extension",
                 "schemaVersion": 2,
                 "package": {"id": "demo", "version": "1.0.0"},
                 "extensions": [],
@@ -241,6 +243,7 @@ def test_manifest_rejects_bad_schema_and_runtime(tmp_path: Path) -> None:
     with pytest.raises(ExtensionFailure) as caught_runtime:
         parse_manifest_mapping(
             {
+                "package_type": "extension",
                 "schemaVersion": 1,
                 "package": {"id": "demo", "version": "1.0.0"},
                 "extensions": [
@@ -257,11 +260,33 @@ def test_manifest_rejects_bad_schema_and_runtime(tmp_path: Path) -> None:
     assert extension.is_file()
 
 
+def test_manifest_reads_display_block(tmp_path: Path) -> None:
+    write_package(tmp_path, "demo")
+    manifest = parse_manifest_mapping(
+        {
+            "package_type": "extension",
+            "schemaVersion": 1,
+            "package": {"id": "demo", "version": "1.0.0"},
+            "display": {
+                "name": {"zh": "演示包", "en": "Demo Package"},
+                "description": {"zh": "演示描述", "en": "Demo description"},
+            },
+            "extensions": [
+                {"id": "ext", "runtime": "backend", "module": "extensions/ext/extension.py"}
+            ],
+        },
+        tmp_path,
+    )
+
+    assert manifest.display_name == "演示包"
+    assert manifest.description == "演示描述"
+
 def test_manifest_rejects_unknown_extension_dependency(tmp_path: Path) -> None:
     write_package(tmp_path, "demo")
     with pytest.raises(ExtensionFailure) as caught:
         parse_manifest_mapping(
             {
+                "package_type": "extension",
                 "schemaVersion": 1,
                 "package": {"id": "demo", "version": "1.0.0"},
                 "extensions": [
@@ -283,6 +308,7 @@ def test_manifest_rejects_invalid_package_id(tmp_path: Path) -> None:
     with pytest.raises(ExtensionFailure) as caught:
         parse_manifest_mapping(
             {
+                "package_type": "extension",
                 "schemaVersion": 1,
                 "package": {"id": "../bad", "version": "1.0.0"},
                 "extensions": [],
@@ -309,7 +335,7 @@ def test_zip_copy_never_deletes_the_callers_files(tmp_path: Path) -> None:
 
     assert archive_path.is_file()
     assert marker.read_text(encoding="utf-8") == "keep"
-    assert (installed / "manifest.yaml").is_file()
+    assert (installed / "manifest.json").is_file()
     assert manager.list_installed() == [installed]
 
     with manager.open_source(source) as opened_dir:
@@ -326,7 +352,7 @@ def test_copy_into_store_is_idempotent_for_install_copy(tmp_path: Path) -> None:
     second = manager.copy_into_store(first, manifest)
 
     assert first == second
-    assert (source / "manifest.yaml").is_file()
+    assert (source / "manifest.json").is_file()
 
 
 def test_copy_into_store_refuses_to_overwrite_existing_version(tmp_path: Path) -> None:
@@ -435,7 +461,7 @@ def test_remove_installed_only_deletes_the_store_copy(tmp_path: Path) -> None:
     manager.remove_installed("demo", "1.0.0")
 
     assert not installed.exists()
-    assert (source / "manifest.yaml").is_file()
+    assert (source / "manifest.json").is_file()
 
 
 def test_remove_installed_missing_version_fails(tmp_path: Path) -> None:
@@ -482,13 +508,14 @@ def test_list_installed_skips_hidden_and_missing_manifest(tmp_path: Path) -> Non
     store = tmp_path / "store"
     good = store / "demo" / "1.0.0"
     good.mkdir(parents=True)
-    (good / "manifest.yaml").write_text(
-        "schemaVersion: 1\npackage:\n  id: demo\n  version: 1.0.0\nextensions: []\n",
+    (good / "manifest.json").write_text(
+        '{"package_type": "extension", "schemaVersion": 1,'
+        ' "package": {"id": "demo", "version": "1.0.0"}, "extensions": []}',
         encoding="utf-8",
     )
     hidden = store / ".cache" / "1.0.0"
     hidden.mkdir(parents=True)
-    (hidden / "manifest.yaml").write_text("x", encoding="utf-8")
+    (hidden / "manifest.json").write_text("x", encoding="utf-8")
     bare = store / "other" / "1.0.0"
     bare.mkdir(parents=True)
 

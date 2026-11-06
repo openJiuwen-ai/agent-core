@@ -302,37 +302,42 @@ Package Manager 接受调用方传入的本地目录或 zip。zip 解压到新�
 
 #### 4.2.2 manifest 的职责和最小示例
 
-每个包根只有一个 `manifest.yaml`，声明包身份、版本、包依赖和扩展入口。具体 Handler 由扩展代码注册，不列在 manifest 中。下例仅说明对象关系，不是完整 Schema；版本范围的解析语法仍需规约化。
+每个包根只有一个 `manifest.json`，声明包身份、版本、包依赖和扩展入口。具体 Handler 由扩展代码注册，不列在 manifest 中。下例仅说明对象关系，不是完整 Schema；版本范围的解析语法仍需规约化。
 
-```yaml
-schemaVersion: 1
-package:
-  id: org.example.enterprise-report
-  version: 1.0.0
-  displayName: Enterprise Report
-  description: 企业报告扩展
-requires:
-  packages:
-    - id: org.example.report-common
-      version: ">=1.0.0 <2.0.0"
-extensions:
-  - id: report-base
-    runtime: backend
-    module: extensions/report-base/extension.py
-  - id: enterprise-report
-    runtime: backend
-    module: extensions/enterprise-report/extension.py
-    requires:
-      - id: report-base
+```json
+{
+  "package_type": "extension",
+  "schemaVersion": 1,
+  "package": {
+    "id": "org.example.enterprise-report",
+    "version": "1.0.0"
+  },
+  "display": {
+    "name": "Enterprise Report",
+    "description": "企业报告扩展"
+  },
+  "requires": {
+    "packages": [{"id": "org.example.report-common", "version": ">=1.0.0 <2.0.0"}]
+  },
+  "extensions": [
+    {"id": "report-base", "runtime": "backend", "module": "extensions/report-base/extension.py"},
+    {
+      "id": "enterprise-report",
+      "runtime": "backend",
+      "module": "extensions/enterprise-report/extension.py",
+      "requires": [{"id": "report-base"}]
+    }
+  ]
+}
 ```
 
-核心字段包括 `schemaVersion`、`package.id`、`package.version`，以及每个扩展单元的 id、runtime 和 module。展示名与描述只用于说明包的用途。
+核心字段包括 `package_type`（固定为 `extension`）、`schemaVersion`、`package.id`、`package.version`，以及每个扩展单元的 id、runtime 和 module。展示名与描述放在可选的 `display` 中，只用于说明包的用途。
 
 两类依赖分别处理：`requires.packages` 表示包之间的依赖，由 `package.resolve` 分析；`extensions[].requires` 只表示当前包内扩展之间的依赖，由 `extension.plan` 分析。包内扩展 ID 不能用于引用另一包的扩展单元。
 
 #### 4.2.3 mcp.json 的职责
 
-包根还可以有可选的 `mcp.json`，与 `manifest.yaml` 同级，只声明 MCP 服务：
+包根还可以有可选的 `mcp.json`，与 `manifest.json` 同级，只声明 MCP 服务：
 
 ```json
 {"mcpServers": {"weather": {"client_type": "stdio", "params": {"command": "npx", "args": ["-y", "weather-mcp"]}}}}
@@ -629,7 +634,7 @@ Handler 签名、平台能力访问和通用事件接口遵循 [Events 接入约
 **Core Handler 的处理逻辑：**
 
 1. 核对来源访问权限，使用 Package Manager 将输入目录解析为实际包根，处理路径规范化、符号链接和目录联接。
-2. 使用 Package Manager 读取 `manifest.yaml`，检查版本格式、必填字段、扩展 ID、运行域和入口声明；核对实际入口未越出包根。这里只检查声明的格式与边界，不判断整批包之间的版本兼容性。
+2. 使用 Package Manager 读取 `manifest.json`，检查版本格式、必填字段、扩展 ID、运行域和入口声明；核对实际入口未越出包根。这里只检查声明的格式与边界，不判断整批包之间的版本兼容性。
 3. 将包根与本次解析出的声明一起返回。任何必要检查失败，都返回对应失败原因；不导入代码、不创建实例、不注册 Handler，也不自动触发依赖解析。
 
 ```mermaid

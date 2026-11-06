@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""Parsed manifest.yaml. Field names follow the package file, not Python style."""
+"""Parsed package manifest (manifest.json). Field names follow the package file, not Python style."""
 
 from dataclasses import dataclass
 

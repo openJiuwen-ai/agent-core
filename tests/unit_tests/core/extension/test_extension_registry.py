@@ -142,7 +142,7 @@ async def test_install_uninstall_and_reload_report_each_package(tmp_path: Path) 
     assert report.status == "SUCCESS"
     assert report.current_generation == 1
     assert await call_business_event(bus) == 1
-    assert (store / "demo" / "1.0.0" / "manifest.yaml").is_file()
+    assert (store / "demo" / "1.0.0" / "manifest.json").is_file()
 
     entry = store / "demo" / "1.0.0" / "extensions" / "ext" / "extension.py"
     entry.write_text(entry.read_text(encoding="utf-8").replace("VALUE = 1", "VALUE = 5"), encoding="utf-8")

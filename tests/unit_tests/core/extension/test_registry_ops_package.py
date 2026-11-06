@@ -47,7 +47,7 @@ async def test_installed_package_reads_its_runtime_metadata(level: HandlerLevel,
         assert await bus.trigger(event, session) == ("actual.package", expected_root, "2.1.0")
         assert expected_root.is_absolute()
         assert expected_root != source.resolve()
-        assert (expected_root / "manifest.yaml").is_file()
+        assert (expected_root / "manifest.json").is_file()
 
         removed = await registry.uninstall("actual.package")
         assert removed.status == "SUCCESS"

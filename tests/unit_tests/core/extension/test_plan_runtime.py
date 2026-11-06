@@ -2,6 +2,7 @@
 
 """EX-02: plan, prepare, active records, and lifecycle decisions."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -208,15 +209,15 @@ def test_package_relative_imports_reach_sibling_parent_and_child(tmp_path: Path)
         "        registrar.register_event_handler('tool.call', on_call, {}, 'builtin')\n",
         encoding="utf-8",
     )
-    (tmp_path / "manifest.yaml").write_text(
-        "schemaVersion: 1\n"
-        "package:\n"
-        "  id: demo\n"
-        "  version: 1.0.0\n"
-        "extensions:\n"
-        "  - id: ext\n"
-        "    runtime: backend\n"
-        "    module: extensions/ext/extension.py\n",
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_type": "extension",
+                "schemaVersion": 1,
+                "package": {"id": "demo", "version": "1.0.0"},
+                "extensions": [{"id": "ext", "runtime": "backend", "module": "extensions/ext/extension.py"}],
+            }
+        ),
         encoding="utf-8",
     )
     manifest = load_manifest(tmp_path)
@@ -237,22 +238,24 @@ def test_plan_orders_extensions_and_advances_generation(tmp_path: Path) -> None:
             "    return type('E', (), {'register': lambda self, registrar: None})()\n",
             encoding="utf-8",
         )
-    (tmp_path / "manifest.yaml").write_text(
-        "schemaVersion: 1\n"
-        "package:\n"
-        "  id: demo\n"
-        "  version: 1.0.0\n"
-        "requires:\n"
-        "  host: '>=0.2.5'\n"
-        "extensions:\n"
-        "  - id: child\n"
-        "    runtime: backend\n"
-        "    module: extensions/child/extension.py\n"
-        "    requires:\n"
-        "      - id: base\n"
-        "  - id: base\n"
-        "    runtime: backend\n"
-        "    module: extensions/base/extension.py\n",
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_type": "extension",
+                "schemaVersion": 1,
+                "package": {"id": "demo", "version": "1.0.0"},
+                "requires": {"host": ">=0.2.5"},
+                "extensions": [
+                    {
+                        "id": "child",
+                        "runtime": "backend",
+                        "module": "extensions/child/extension.py",
+                        "requires": [{"id": "base"}],
+                    },
+                    {"id": "base", "runtime": "backend", "module": "extensions/base/extension.py"},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     manifest = load_manifest(tmp_path)
@@ -286,22 +289,28 @@ def test_plan_rejects_extension_cycle(tmp_path: Path) -> None:
             "    return type('E', (), {'register': lambda self, registrar: None})()\n",
             encoding="utf-8",
         )
-    (tmp_path / "manifest.yaml").write_text(
-        "schemaVersion: 1\n"
-        "package:\n"
-        "  id: demo\n"
-        "  version: 1.0.0\n"
-        "extensions:\n"
-        "  - id: a\n"
-        "    runtime: backend\n"
-        "    module: extensions/a/extension.py\n"
-        "    requires:\n"
-        "      - id: b\n"
-        "  - id: b\n"
-        "    runtime: backend\n"
-        "    module: extensions/b/extension.py\n"
-        "    requires:\n"
-        "      - id: a\n",
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_type": "extension",
+                "schemaVersion": 1,
+                "package": {"id": "demo", "version": "1.0.0"},
+                "extensions": [
+                    {
+                        "id": "a",
+                        "runtime": "backend",
+                        "module": "extensions/a/extension.py",
+                        "requires": [{"id": "b"}],
+                    },
+                    {
+                        "id": "b",
+                        "runtime": "backend",
+                        "module": "extensions/b/extension.py",
+                        "requires": [{"id": "a"}],
+                    },
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(ExtensionFailure) as caught:
