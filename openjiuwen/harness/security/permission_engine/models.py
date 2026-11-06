@@ -143,6 +143,7 @@ class ShellGuardSection(TypedDict, total=False):
     builtin_rules_enabled: bool
     unknown_structure: bool
     interpreter_sink: bool
+    cross_tool_restrictions: bool  # Host opt-in: command DENY/ASK covers every shell entry; ALLOW stays scoped.
 
 
 class SoftDeleteSection(TypedDict, total=False):

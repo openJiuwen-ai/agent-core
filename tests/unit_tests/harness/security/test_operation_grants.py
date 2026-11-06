@@ -1,6 +1,7 @@
 """ASK approvals must be bounded by objects, actions, lifetime and guard DENY."""
 
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,12 +12,57 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, Int
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
+    GRANT_MATCH_TYPE,
     build_operation_grant,
     has_operation_grant,
+    matches_operation_grant,
+    matches_subject,
     operation_subject,
     scope_options,
+    merge_operation_grants,
 )
 from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+
+
+def test_grant_upsert_preserves_positions_and_does_not_alias_inputs():
+    before = [{"id": "old-rm", "action": "allow"}, {"id": "echo", "action": "allow"},
+              {"id": "ls", "action": "allow"}]
+    batch = [{"id": "new-rm", "action": "allow"}, {"id": "echo", "action": "deny"},
+             {"id": "ls", "action": "allow"}]
+    merged = merge_operation_grants(before, batch)
+    assert [grant["id"] for grant in merged] == ["old-rm", "echo", "ls", "new-rm"]
+    assert merged[1]["action"] == "deny"
+    assert merge_operation_grants(merged, batch) == merged
+    merged[0]["action"] = "deny"
+    merged[1]["action"] = "ask"
+    assert before[0]["action"] == "allow" and batch[1]["action"] == "deny"
+
+
+@pytest.mark.parametrize("subject", [
+    {"kind": "file", "accesses": [["/workspace/a.txt", "read"]]},
+    {"kind": "command", "command": "echo ok", "shell_type": "bash", "cwd": "/workspace"},
+    {"kind": "program", "exe": "/runtime/python.exe", "argv": ["script.py"], "cwd": "/workspace"},
+    {"kind": "url", "url": "https://example.test/a"},
+    {"kind": "domain", "hostname": "example.test"},
+    {"kind": "endpoint", "address": "127.0.0.1", "port": 8080, "protocol": "tcp"},
+])
+def test_subject_matching_is_separate_from_invoking_tool(subject):
+    grant = {"tools": ["source"], "action": "allow", "match_type": GRANT_MATCH_TYPE,
+             "pattern": json.dumps({"scope": "exact", "subject": subject})}
+    assert matches_subject(grant, subject)
+    assert matches_operation_grant(grant, "source", subject)
+    assert not matches_operation_grant(grant, "other-tool", subject)
+    assert not matches_subject(grant, {**subject, "kind": "different-kind"})
+
+
+@pytest.mark.parametrize("changed", [{"match_type": "command"}, {"action": "deny"},
+                                     {"pattern": "invalid JSON"}, {"pattern": "{}"}])
+def test_subject_matching_rejects_invalid_or_non_allow_grants(changed):
+    subject = {"kind": "domain", "hostname": "example.test"}
+    grant = {"tools": ["source"], "action": "allow", "match_type": GRANT_MATCH_TYPE,
+             "pattern": json.dumps({"scope": "exact", "subject": subject}), **changed}
+    assert not matches_subject(grant, subject)
+    assert not matches_operation_grant(grant, "source", subject)
 
 
 def config():

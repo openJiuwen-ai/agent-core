@@ -32,6 +32,7 @@ from openjiuwen.harness.security.permission_engine.delguard.deletion_guard impor
     build_deletion_guard,
 )
 from openjiuwen.harness.security.permission_engine.fileguard.file_guard import (
+    FileGuardAction,
     FileGuardChecker,
     build_file_guard_checker,
 )
@@ -307,6 +308,11 @@ class PermissionEngine:
         """Return whether the host enables ordinary tool checks in this context."""
         return self._permission_checks_active is None or bool(self._permission_checks_active())
 
+    @property
+    def permission_checks_enabled(self) -> bool:
+        """Whether ordinary resource checks are active in the current host context."""
+        return bool(self._enabled and self.permission_checks_active())
+
     def check_tool_permission_directly(
         self,
         tool_name: str,
@@ -406,16 +412,54 @@ class PermissionEngine:
 
     # ---------- 权限检查 ----------
 
+    def check_file_accesses(self, accesses: list[tuple[Path, FileGuardAction]]) -> PermissionResult:
+        """Check authenticated runtime resources, without tool-level approvals.
+
+        The host resolves paths and authenticates the execution before calling.
+        Resource approvals remain the host's responsibility. Concrete accesses
+        use the same control-plane and FileGuard rules as tool calls.
+        """
+        for _path, action in accesses:
+            if action not in {"read", "write", "exec"}:
+                raise ValueError(f"Unsupported runtime file action: {action}")
+        protected = (self._immutable_control_guard.evaluate_accesses(accesses)
+                     if self._enabled and self._immutable_control_active() else None)
+        if protected is not None and protected.is_denied:
+            return protected
+        if self.permission_checks_enabled and self._file_guard is not None:
+            result = self._file_guard.evaluate_accesses(accesses)
+            if result is not None and (result.is_denied or protected is None):
+                return result
+        return protected or PermissionResult(permission=PermissionLevel.ALLOW)
+
+    def check_network_access(self, resource: str) -> PermissionResult:
+        """Evaluate a concrete URL, DNS name or endpoint with the existing NetGuard."""
+        result = self._net_guard.check_url(resource) if self.permission_checks_enabled and self._net_guard else None
+        return result or PermissionResult(permission=PermissionLevel.ALLOW)
+
     async def check_permission(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
-        *, workspace_delete_execution: LocalDeleteExecution | None = None,
+        *,
+        workspace_delete_execution: LocalDeleteExecution | None = None,
+        file_accesses: list[tuple[Path, FileGuardAction]] | None = None,
     ) -> PermissionResult:
-        """Return a policy decision, including explicit denial on analysis limits."""
+        """Return a complete policy decision, including denial on analysis limits.
+
+        A host runtime may supply authenticated actions for control-plane checks
+        and supplement FileGuard's existing path inference. Other rules,
+        approvals and deletion checks are unchanged.
+        This is a host argument, never a field accepted from tool arguments.
+        """
         try:
+            if file_accesses is None:
+                return await self._check_permission(
+                    tool_name, tool_args, workspace_delete_execution=workspace_delete_execution,
+                )
             return await self._check_permission(
                 tool_name, tool_args, workspace_delete_execution=workspace_delete_execution,
+                file_accesses=file_accesses,
             )
         except BaseError as exc:
             if not isinstance(exc.details, dict) or exc.details.get("rule_id") != "file_guard:analysis_limit":
@@ -428,7 +472,9 @@ class PermissionEngine:
         self,
         tool_name: str,
         tool_args: dict[str, Any],
-        *, workspace_delete_execution: LocalDeleteExecution | None = None,
+        *,
+        workspace_delete_execution: LocalDeleteExecution | None = None,
+        file_accesses: list[tuple[Path, FileGuardAction]] | None = None,
     ) -> PermissionResult:
         """检查工具调用权限.
 
@@ -451,6 +497,16 @@ class PermissionEngine:
         if self._immutable_control_active():
             immutable_args = tool_args if isinstance(tool_args, dict) else {}
             immutable_result = self._immutable_control_guard.evaluate(tool_name, immutable_args)
+            if file_accesses is not None:
+                observed = self._immutable_control_guard.evaluate_accesses(file_accesses)
+                if observed is not None and (
+                    immutable_result is None
+                    or tiered_policy_strictest(
+                        immutable_result.permission,
+                        observed.permission,
+                    ) == observed.permission
+                ):
+                    immutable_result = observed
             if immutable_result is not None:
                 logger.warning(
                     "[PermissionEngine] permission.immutable_control_plane.denied "
@@ -500,6 +556,18 @@ class PermissionEngine:
         )
 
         # 2. Pipeline B：file_guard（可独立关闭；含 ExternalDirectory Legacy 投影）
+        from openjiuwen.harness.security.permission_engine.approve.operation_grants import operation_subject
+
+        subject = operation_subject(tool_name, tool_args, self.config, self._workspace_root)
+        identity_control_result = None
+        if subject.get("command_identity"):
+            accesses = [(Path(path), "write" if action == "delete" else action)
+                        for path, action in subject["command_identity"]["accesses"]]
+            if self._immutable_control_active():
+                identity_control_result = self._immutable_control_guard.evaluate_accesses(accesses)
+                if identity_control_result is not None and identity_control_result.is_denied:
+                    return identity_control_result
+            file_accesses = [*(file_accesses or []), *accesses]
         exact_paths = {}
         if self._file_guard is not None:
             if workspace_delete_execution is not None:
@@ -507,6 +575,11 @@ class PermissionEngine:
                 if targets:
                     exact_paths["literal_delete_targets"] = targets
             path_result = self._file_guard.evaluate(tool_name, tool_args, **exact_paths)
+            if file_accesses is not None:
+                observed = self._file_guard.evaluate_accesses(file_accesses)
+                if observed is not None and (path_result is None or
+                        tiered_policy_strictest(path_result.permission, observed.permission) != path_result.permission):
+                    path_result = observed
             if path_result is not None:
                 path_rule = path_result.matched_rule or "file_guard"
                 logger.info(
@@ -562,6 +635,7 @@ class PermissionEngine:
 
         # 4. Pipeline D：删除数量防护（软删除开启 + 删除数量达阈值 → ASK）
         del_reason: str | None = None
+        del_result = None
         if self._deletion_guard is not None:
             delete_args = tool_args
             if exact_paths.get("literal_delete_targets") and workspace_delete_execution is not None:
@@ -590,9 +664,28 @@ class PermissionEngine:
         ):
             from openjiuwen.harness.security.permission_engine.approve.operation_grants import has_operation_grant
 
-            if has_operation_grant(self.config, tool_name, tool_args, self._workspace_root):
+            if has_operation_grant(self.config, tool_name, tool_args, self._workspace_root,
+                                   allow_semantic=del_result is None):
                 permission = PermissionLevel.ALLOW
                 matched_rule = "operation_grant"
+            elif del_result is None:
+                from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
+                    has_shared_file_operation,
+                )
+
+                if has_shared_file_operation(self.config, tool_name, tool_args, self._workspace_root):
+                    permission = PermissionLevel.ALLOW
+                    matched_rule = "file_resource_grant"
+
+        # Control-plane ASK is one-time consent, independent of remembered grants.
+        if identity_control_result is not None and (
+            tiered_policy_strictest(
+                permission, identity_control_result.permission,
+            ) == identity_control_result.permission
+        ):
+            permission = identity_control_result.permission
+            matched_rule = identity_control_result.matched_rule
+            external_paths = identity_control_result.external_paths or external_paths
 
         reason = self._get_reason(permission, tool_name, matched_rule)
         # 批量删除的 N/T 文案只在最终仍需确认时展示；更严格的 DENY 保留拒绝原因。

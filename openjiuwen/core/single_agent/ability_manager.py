@@ -18,6 +18,7 @@ from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.tool.execution_context import invoke_with_context
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
@@ -1217,10 +1218,9 @@ class AbilityManager:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(
-                        tool_args,
-                        session=session,
-                        tool_call_id=tool_call.id,
+                    result = await invoke_with_context(
+                        tool, tool_args, session=session,
+                        tool_call_id=tool_call.id, tool_name=tool_name,
                     )
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
@@ -1328,10 +1328,9 @@ class AbilityManager:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(
-                        tool_args,
-                        session=session,
-                        tool_call_id=tool_call.id,
+                    result = await invoke_with_context(
+                        tool, tool_args, session=session,
+                        tool_call_id=tool_call.id, tool_name=tool_name,
                     )
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"

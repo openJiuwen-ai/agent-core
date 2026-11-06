@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, AsyncIterator, Callable, List, Literal, 
 import pathlib
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
+from openjiuwen.core.sys_operation.local.process_launcher import create_process
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
@@ -44,6 +45,7 @@ _POWERSHELL_EXECUTABLE_PATTERN = re.compile(r"^\s*(?:powershell(?:\.exe)?|pwsh(?
 _POWERSHELL_COMMAND_ARG_PATTERN = re.compile(r"(?is)(?:^|\s)-(?:command|c)\s+(?P<script>.+)\s*$")
 _POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
 _POSIX_COMMANDS = frozenset({
+    "bash", "sh",
     "ls", "grep", "egrep", "fgrep", "cat", "head", "tail", "find", "rm",
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
     "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir",
@@ -379,7 +381,8 @@ class ShellOperation(BaseShellOperation):
 
         if use_shell:
             cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
-            return await asyncio.create_subprocess_shell(
+            return await create_process(
+                asyncio.create_subprocess_shell,
                 cmd,
                 cwd=str(cwd),
                 env=env,
@@ -388,7 +391,8 @@ class ShellOperation(BaseShellOperation):
                 stderr=stderr,
                 **subprocess_kw,
             )
-        return await asyncio.create_subprocess_exec(
+        return await create_process(
+            asyncio.create_subprocess_exec,
             *args,
             cwd=str(cwd),
             env=env,

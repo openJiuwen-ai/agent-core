@@ -94,13 +94,14 @@ def test_windows_explicit_powershell_unwraps_nested_command(monkeypatch):
     assert args[-1] == "Write-Output ok"
 
 
-def test_windows_auto_routes_posix_ls_to_git_bash(monkeypatch):
+@pytest.mark.parametrize("command", ['ls -la ".team/jiuwen_team_sess_abc/artifacts/"',
+                                      "bash -c 'cd sub && rm file.txt'",
+                                      "sh -c 'cd sub && rm file.txt'"])
+def test_windows_auto_routes_posix_ls_to_git_bash(monkeypatch, command):
     """Common POSIX ls checks should run through Git Bash in Windows auto mode."""
     import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
 
     exe = r"C:\Program Files\Git\bin\bash.exe"
-    command = 'ls -la ".team/jiuwen_team_sess_abc/artifacts/"'
-
     monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
     monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
 

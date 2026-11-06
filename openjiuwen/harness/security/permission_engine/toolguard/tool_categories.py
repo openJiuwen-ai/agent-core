@@ -15,6 +15,7 @@ from typing import Any
 _DEFAULT_SHELL_TOOLS = frozenset({
     "bash",
     "powershell",
+    "pwsh",
     "core.powershell",
     "mcp_exec_command",
     "create_terminal",
