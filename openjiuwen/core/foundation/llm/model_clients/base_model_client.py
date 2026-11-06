@@ -80,6 +80,17 @@ class BaseModelClient(ABC):
         self._validate_config()
 
     @staticmethod
+    def _served_model_name(payload: Any) -> str:
+        """Read the served-model name from a provider response/chunk body.
+
+        gen_ai.response.model semantics: the model that actually served the
+        call. Gateways may route to a different backend than the request
+        config, so the response body wins when it carries a name. Returns ""
+        when absent, letting callers fall back to the request config.
+        """
+        return str(getattr(payload, "model", "") or "")
+
+    @staticmethod
     def _extract_cache_tokens(obj: Any) -> int:
         """Extract prompt cache hit tokens from provider usage metadata.
 

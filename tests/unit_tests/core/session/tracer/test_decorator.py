@@ -420,6 +420,46 @@ class TestDecator:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
 
+    async def test_decorate_foundation_model(self):
+        # Foundation Model carries ModelRequestConfig at the top level (no
+        # `.config` wrapper): the probe must fall through to it instead of the
+        # class-name fallback, so shell spans get the real model name.
+        class FoundationModelStub:
+            def __init__(self):
+                self.model_config = ModelRequestConfig(model="qwen3-max")
+
+            async def invoke(self, **kwargs):
+                return {}
+
+            async def stream(self, **kwargs):
+                if False:
+                    yield {}
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        def mock_sync_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.sync_trigger = mock_sync_trigger
+
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+
+        mocked_model = decorate_model_with_trace(FoundationModelStub(), mock_session)
+
+        await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
+
+        assert results[0][1] == "on_llm_start"
+        assert results[0][2].get("instance_info", {}).get("class_name", "") == "qwen3-max"
+
+
     async def test_decorate_model_identity_passthrough(self):
         """identity= merges definition-scoped keys flat into instance_info.
 

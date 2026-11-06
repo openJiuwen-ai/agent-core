@@ -66,18 +66,17 @@ ERROR_TYPE = "error.type"
 # project extensions (项目扩展，非上游标准) and use the openjiuwen.* namespace
 # — aligned with the observability extension — never gen_ai.* (issue #1833).
 OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
-OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
-OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
-OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 # Conversation facts carried by the Session: source-metadata user id and the
 # raw source metadata dict.
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
 OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
-# Latency facts the GenAI standard does not model: trace display name,
-# inter-token latency, and reasoning duration (毫秒). first-token latency IS
-# standard-modeled (gen_ai.response.time_to_first_chunk, above).
+# Latency facts the GenAI standard does not model: trace display name, TPOT
+# (mean time per output token), and reasoning duration (毫秒). first-token
+# latency IS standard-modeled (gen_ai.response.time_to_first_chunk, above).
+# tpot_ms deliberately reuses the observability extension's published key for
+# the same fact — one fact, one key, no reader fallback chain.
 OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
-OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS = "openjiuwen.gen_ai.response.inter_token_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 

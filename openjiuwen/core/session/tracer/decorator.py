@@ -300,7 +300,11 @@ def decorate_model_with_trace(model, agent_session, identity: dict | None = None
     try:
         model_name = model.config.model_config.model_name
     except Exception:
-        model_name = type(model).__name__
+        try:
+            # foundation Model keeps its ModelRequestConfig at the top level.
+            model_name = model.model_config.model_name
+        except Exception:
+            model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
     if identity:
         instance_info.update({k: v for k, v in identity.items() if v})
