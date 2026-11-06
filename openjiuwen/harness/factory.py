@@ -143,6 +143,7 @@ def _inject_general_purpose_subagent(
         return effective_subagents
 
     desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
+    # Hosts such as Swarm mount independent authorization rails on child agents.
     gp_rails = [
         r for r in (rails or [])
         if not isinstance(r, SubagentRail) and getattr(r, "inherit_to_subagents", True)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -38,7 +38,20 @@ _INTERPRETERS = frozenset({
 _INDIRECT_COMMANDS = frozenset({"eval", "exec", "source", ".", "env", "command", "builtin"})
 
 
+def literal_shell_enabled(
+    permission_config: Mapping[str, Any] | None, tool_name: str, tool_args: Mapping[str, Any],
+) -> bool:
+    """Use POSIX evidence only when enabled and the invocation can run as POSIX."""
+    feature = (permission_config or {}).get("skill_authorization")
+    if not isinstance(feature, dict) or feature.get("enabled") is not True:
+        return False
+    shell_type = str(tool_args.get("shell_type") or "auto").lower()
+    return shell_type in {"auto", "bash", "sh"} and tool_name not in {"powershell", "core.powershell"}
+
+
 def is_script_interpreter(executable: str) -> bool:
+    # Treat interpreter aliases conservatively even on a POSIX host.
+    executable = executable.lower().removesuffix(".exe")
     return executable in _INTERPRETERS or re.fullmatch(r"python\d+(?:\.\d+)*", executable) is not None
 
 
@@ -104,6 +117,8 @@ def parse_literal_shell(command: str) -> LiteralShell | None:
         if not argv or PurePosixPath(argv[0]).name in _INDIRECT_COMMANDS:
             return None
         executable = PurePosixPath(argv[0]).name
+        if executable.lower() in {"cmd", "cmd.exe"}:
+            return None
         # The new automatic path does not authorize interpreter inline/stdin code.
         if is_script_interpreter(executable) and (len(argv) < 2 or argv[1].startswith("-")):
             return None

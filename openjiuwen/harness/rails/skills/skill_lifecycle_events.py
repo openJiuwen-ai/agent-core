@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Skill 加载/结束事件提取，供 SkillAuthorizationRail 与 SkillComplianceRail 共享。
+"""提取 Skill 加载和结束事件，供 Core 门禁及 Swarm 状态 Rail 使用。
 
 dev-stable 适配说明（相对 0708）：
 
@@ -181,8 +181,7 @@ def is_skill_authorization_gate_call(
 ) -> bool:
     """功能开关开启时，根 ``SKILL.md`` 加载与 ``skill_complete`` 归 Skill 门禁专属路由。
 
-    供 ``SkillAuthorizationRail.before_tool_call`` 与 ``PermissionInterruptRail``
-    短路分支共用同一份判定，确保两处路由边界永远一致。
+    供 Swarm 的子 Agent 工具权限 Rail 识别应由 Skill 门禁处理的调用。
     """
     if not is_skill_authorization_enabled(permissions_config):
         return False

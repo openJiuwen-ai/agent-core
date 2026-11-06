@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.literal_shell import (
-    LiteralCommand, match_literal_pattern, parse_literal_shell, pattern_binds_command,
+    LiteralCommand, literal_shell_enabled, match_literal_pattern, parse_literal_shell, pattern_binds_command,
 )
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
@@ -778,11 +778,9 @@ def _aggregate_subcommand_results(
 
 def _literal_policy_result(permission_config, tool_name, tool_args):
     """Reuse dev-stable literal-command evidence without replacing current guards."""
-    feature = permission_config.get("skill_authorization")
-    if not isinstance(feature, dict) or feature.get("enabled") is not True:
+    if _tool_category(tool_name, permission_config) != "shell":
         return None
-    shell_type = str(tool_args.get("shell_type") or "auto").lower()
-    if _tool_category(tool_name, permission_config) != "shell" or shell_type not in {"auto", "bash", "sh"}:
+    if not literal_shell_enabled(permission_config, tool_name, tool_args):
         return None
     plan = parse_literal_shell(_command_text(tool_args))
     if plan is None:
@@ -803,14 +801,19 @@ def _literal_policy_result(permission_config, tool_name, tool_args):
         defaults_cfg=defaults if isinstance(defaults, dict) else {},
         permission_config=permission_config, literal_arguments=True,
     )
-    decisions = []
-    # Full-text restrictions, including heredoc body checks, cannot disappear.
+    explicit = True
+    # Full-command restrictions include the heredoc body. A DENY already
+    # decides the invocation; an ASK prevents the literal ALLOW fast path.
     for rows, namespace in ((ctx.builtin_rules, "builtin"), (ctx.rules, "rules")):
         hits = _collect_param_rule_hits(rows, tool_name, tool_args, namespace, permission_config)
         restrictive = [(level, label) for level, label in hits if level != PermissionLevel.ALLOW]
         if restrictive:
-            decisions.append((_command_text(tool_args), *_finalize_hits(restrictive, namespace)))
-    explicit = not decisions
+            level, matched = _finalize_hits(restrictive, namespace)
+            if level == PermissionLevel.DENY:
+                return level, f"{_MR}:full_command:{matched}"
+            explicit = False
+
+    decisions = []
     for call in plan.commands:
         args = _with_shell_command(tool_args, call.text)
         permission, matched = _evaluate_single_invocation(tool_name, args, ctx)

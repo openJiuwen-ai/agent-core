@@ -332,14 +332,13 @@ def is_skill_authorization_enabled(permissions_config: Any) -> bool:
     return False
 
 
-#: Skill 审批卡的用户响应 schema(user -> backend;三动作协议,前后端同版本冻结)。
-#: 无法识别的 action 由后端默认拒绝(fail-closed)。
+#: Skill 审批响应。宿主还可明确拒绝加载，审批卡的选项由 card.actions 单独定义。
 SKILL_APPROVAL_PAYLOAD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["approve_once", "approve_session", "continue_without_overlay"],
+            "enum": ["approve_once", "approve_session", "continue_without_overlay", "reject"],
         },
     },
     "required": ["action"],

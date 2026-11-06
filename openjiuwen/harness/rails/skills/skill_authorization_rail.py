@@ -4,8 +4,7 @@
 
 dev-stable 适配说明（相对 0708 ``jiuwenclaw...deep_agent/rails/skill_authorization_rail.py``）：
 
-- 基类为 agent-core ``openjiuwen.harness.rails.interrupt.interrupt_base.BaseInterruptRail``；
-  ``InterruptRequest`` 无 ``allow_auto_confirm`` 字段，审批请求不再携带该参数；
+- 使用 ``BaseInterruptRail`` 的中断路由和 Skill 专属审批类型。
 - ``PermissionEngine`` 经构造注入（不再回落 0708 的进程级 ``get_permission_engine``）；
   未注入时策略评估按失败处理（fail-closed，主 Agent 交还原权限 Rail，子 Agent 拒载）；
 - DENY 预判改用 agent-core ``PermissionEngine.evaluate_global_policy_directly``
@@ -27,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.security.models import PermissionLevel
@@ -304,6 +303,8 @@ class SkillAuthorizationRail(BaseInterruptRail):
     """
 
     priority: int = 95
+    interrupt_kind = InterruptKind.SKILL_AUTHORIZATION
+    inherit_to_subagents = False
 
     #: 门禁日志前缀；子 Agent 委托版覆盖为 ``subagent.skill``。
     _gate_log_tag = "gate"
@@ -382,18 +383,18 @@ class SkillAuthorizationRail(BaseInterruptRail):
 
     @staticmethod
     def _mark_gate_handled(ctx: AgentCallbackContext) -> None:
-        """标记本次调用已由动态授权门禁裁决，避免原权限 Rail 重复处理。
+        """标记由 Skill 门禁接管的调用，供 Swarm 权限适配器消费。
 
-        写入 ``tool_call.id`` 而非布尔值：Agent 循环复用同一 ``ctx.extra`` 字典，
-        只有标记值与当前调用 id 一致时 ``PermissionInterruptRail`` 才短路，使残留
-        标记不会误伤同一次调用后续的其它工具（包括第二次 skill_tool 加载）。
+        正常调用写入 tool_call.id，因为 Agent 循环复用 ctx.extra。
+        宿主适配器据此区分不同调用，Core 的通用权限 Rail 独立裁决。
         """
         extra = getattr(ctx, "extra", None)
         if not isinstance(extra, dict):
             return
         tool_call = getattr(getattr(ctx, "inputs", None), "tool_call", None)
         call_id = str(getattr(tool_call, "id", "") or "")
-        extra[SKILL_AUTHORIZATION_GATE_HANDLED_KEY] = call_id or True
+        if call_id:
+            extra[SKILL_AUTHORIZATION_GATE_HANDLED_KEY] = call_id
 
     @staticmethod
     def _clear_gate_handled(ctx: AgentCallbackContext) -> None:
@@ -975,7 +976,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     # ---------- 门禁模板钩子（子 Agent 委托版覆盖） ----------
 
     def _proceed_tool_call(self, ctx: AgentCallbackContext, tool_call: Any, tool_name: str) -> None:
-        """主 Agent：门禁已标记 handled，原权限 Rail 跳过后调用自然继续。"""
+        """主 Agent 允许调用继续，宿主权限适配器可识别本次门禁标记。"""
 
     def _on_policy_evaluation_failed(self, ctx: AgentCallbackContext, tool_call: Any, tool_name: str) -> None:
         """主 Agent：不写 handled 标记，让原 PermissionInterruptRail 接管。"""
@@ -1063,7 +1064,6 @@ class SkillAuthorizationRail(BaseInterruptRail):
                 manifest.skill_name, session_id, manifest.permissions_hash,
                 False, manifest.risk_status, manifest.risk_level,
             )
-            # dev-stable InterruptRequest 无 allow_auto_confirm 字段。
             self._apply_decision(ctx, tool_call, tool_name, self.interrupt(InterruptRequest(
                 message=self._render_approval_message(card),
                 payload_schema={
@@ -1187,6 +1187,9 @@ class SkillAuthorizationRail(BaseInterruptRail):
                 manifest.skill_name,
             )
             return self.reject(tool_result="[PERMISSION_REJECTED] Skill 审批上下文与当前加载不匹配。")
+
+        if isinstance(user_input, dict) and user_input.get("action") == "reject":
+            return self.reject(tool_result="[PERMISSION_REJECTED] 用户拒绝加载 Skill。")
 
         action = _parse_answer_to_action(user_input)
         if action is None:
