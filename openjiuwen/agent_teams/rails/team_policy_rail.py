@@ -106,11 +106,13 @@ class TeamPolicyRail(DeepAgentRail):
         team_workspace_path: str | None = None,
         team_backend: "TeamBackend | None" = None,
         expose_human_agents_to_teammates: bool = False,
+        prompt_overrides: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._language = language
         self._member_name = member_name
         self._role = role
+        self._prompt_overrides = prompt_overrides
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
         self.system_prompt_builder = None
 
@@ -291,6 +293,7 @@ class TeamPolicyRail(DeepAgentRail):
             language=self._language,
             hitt_enabled=hitt_enabled,
             expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+            prompt_overrides=self._prompt_overrides,
         )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",

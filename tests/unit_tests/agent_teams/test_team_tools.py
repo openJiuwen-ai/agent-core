@@ -425,6 +425,7 @@ class TestSpawnToolCapabilityGate:
         names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=agent_team)}
         assert "spawn_teammate" in names
         assert "spawn_human_agent" not in names
+        assert "spawn_passive_human" not in names
         assert "spawn_bridge_agent" not in names
         assert "spawn_external_cli" not in names
 
@@ -444,7 +445,13 @@ class TestSpawnToolCapabilityGate:
             external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
         )
         names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=team)}
-        assert {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"} <= names
+        assert {
+            "spawn_teammate",
+            "spawn_human_agent",
+            "spawn_passive_human",
+            "spawn_bridge_agent",
+            "spawn_external_cli",
+        } <= names
 
     @pytest.mark.level1
     def test_hitt_only_wires_human_agent(self, db, message_bus):
@@ -462,6 +469,7 @@ class TestSpawnToolCapabilityGate:
         names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=team)}
         assert "spawn_teammate" in names
         assert "spawn_human_agent" in names
+        assert "spawn_passive_human" in names
         assert "spawn_bridge_agent" not in names
         assert "spawn_external_cli" not in names
 
