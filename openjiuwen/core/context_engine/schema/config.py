@@ -31,34 +31,36 @@ class CompressionRecallConfig(BaseModel):
 class PtlFallbackConfig(BaseModel):
     """Recovery policy for provider prompt-too-long (PTL) rejections.
 
-    The fallback runs in two phases. Phase A reuses the configured LLM
-    compressors; Phase B is a pure-code truncation that drops the oldest
-    complete dialogue turns without calling a model. Phase B is what makes
-    the fallback work when no compressor is configured or when compression is
-    too slow/ineffective.
+    Phase A (LLM compression) is the historical recovery path and always runs
+    first. Phase B is a pure-code truncation that drops the oldest complete
+    dialogue turns without calling a model. Phase B is the only new stage and
+    the only switch in this policy: when ``enable_pure_code_truncate`` is
+    false, a Phase A failure leaves the original model exception untouched,
+    exactly as before the capability existed.
 
     Attributes
     ----------
-    enabled : bool, default False
-        Master switch. When off, a PTL rejection keeps the historical
-        behaviour: one compression attempt, otherwise the original model
-        exception is raised unchanged.
-    phase_a_compress : bool, default True
-        Run the LLM compressors first. Phase B runs only when Phase A does
-        not change the context.
+    enable_pure_code_truncate : bool, default False
+        Run Phase B after Phase A did not change the context. Dropping is per
+        complete dialogue turn, oldest first; the newest ``keep_last_rounds``
+        turns are always preserved. When even one turn does not fit, the
+        oldest complete tool exchange inside the retained turn is removed
+        instead.
     phase_a_timeout_s : float, default 0
-        Upper bound for one Phase A compression. ``0`` disables the timeout.
-        On timeout the in-flight compression is cancelled and the fallback
-        proceeds to Phase B; compression state may report that call as
-        interrupted.
-    enable_pure_code_truncate : bool, default True
-        Enable Phase B. Dropping is per complete dialogue turn, oldest
-        first; the newest ``keep_last_rounds`` turns are always preserved.
-        When even one turn does not fit, the oldest complete tool exchange
-        inside the retained turn is removed instead.
+        Upper bound for one Phase A compression. Only effective when Phase B
+        is enabled; ``0`` disables the Phase A-specific timeout and is not an
+        infinite wait, because the model client timeout, streaming timeouts,
+        and user cancellation still apply. On timeout the in-flight
+        compression is cancelled and Phase B runs; compression state may
+        report that call as interrupted.
     max_retries : int, default 3
-        Maximum recovery retries per agent round (1..10). Each retry repeats
-        the model call after the recovery hook changes the context.
+        Maximum recovery retries per agent round (1..10) when Phase B is
+        enabled. Each retry repeats the model call after the recovery hook
+        changes the context. Without Phase B the budget stays at the
+        historical one attempt. Cross-phase recovery (Phase A succeeded but
+        the retry still overflows) needs at least two retries; with
+        ``max_retries=1`` only a same-attempt Phase A failure can reach
+        Phase B.
     truncate_target_ratio : float, default 0.8
         Phase B aims at ``limit * ratio ** attempt`` so that repeated
         failures keep making progress.
@@ -76,29 +78,28 @@ class PtlFallbackConfig(BaseModel):
     ``ContextEngineConfig.ptl_fallback_config`` has two "off" states:
 
     * ``None``: the capability is absent (for example, the removable
-      ``recovery`` package was deleted). The legacy path is used without
-      importing it.
-    * a present config with ``enabled=False``: the capability is installed but
-      explicitly disabled. Behaviour is identical to ``None``.
+      ``recovery`` package was deleted). Phase A runs without importing it.
+    * a present config with ``enable_pure_code_truncate=False``: the
+      capability is installed but Phase B is disabled. Behaviour is identical
+      to ``None``.
 
-    Use :meth:`is_active` when a boolean "should this run" answer is needed.
+    Use :meth:`is_phase_b_enabled` when a boolean "should Phase B run" answer
+    is needed.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(default=False)
-    phase_a_compress: bool = Field(default=True)
+    enable_pure_code_truncate: bool = Field(default=False)
     phase_a_timeout_s: float = Field(default=0.0, ge=0)
-    enable_pure_code_truncate: bool = Field(default=True)
     max_retries: int = Field(default=3, ge=1, le=10)
     truncate_target_ratio: float = Field(default=0.8, gt=0, le=1)
     keep_last_rounds: int = Field(default=1, ge=1)
     archive_dropped_rounds: bool = Field(default=True)
     marker_template: str = Field(default=DEFAULT_OVERFLOW_TRUNCATE_MARKER)
 
-    def is_active(self) -> bool:
-        """Return whether the fallback should run (installed and enabled)."""
-        return bool(self.enabled)
+    def is_phase_b_enabled(self) -> bool:
+        """Return whether Phase B truncation should run."""
+        return bool(self.enable_pure_code_truncate)
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "PtlFallbackConfig":
@@ -106,8 +107,8 @@ class PtlFallbackConfig(BaseModel):
             self.marker_template.format(rounds=0, tokens=0)
         except (KeyError, IndexError, ValueError) as exc:
             raise ValueError("marker_template must only use the {rounds} and {tokens} placeholders") from exc
-        if self.enabled and not self.phase_a_compress and not self.enable_pure_code_truncate:
-            raise ValueError("ptl_fallback_config requires phase_a_compress or enable_pure_code_truncate")
+        if self.phase_a_timeout_s > 0 and not self.enable_pure_code_truncate:
+            raise ValueError("phase_a_timeout_s requires enable_pure_code_truncate")
         return self
 
 

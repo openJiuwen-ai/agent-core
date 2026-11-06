@@ -438,20 +438,20 @@ class ContextEngine:
         return self._config
 
     def ptl_fallback_state(self) -> str:
-        """Return ``absent``, ``disabled`` or ``enabled`` for the PTL fallback.
+        """Return ``absent``, ``disabled`` or ``enabled`` for Phase B.
 
-        ``absent`` and ``disabled`` both take the legacy recovery path; this
-        helper exists so callers and logs can distinguish the two "off" states.
+        ``absent`` and ``disabled`` both run only Phase A; this helper exists
+        so callers and logs can distinguish the two "off" states.
         """
         ptl = getattr(self._config, "ptl_fallback_config", None)
         if ptl is None:
             return "absent"
-        return "enabled" if getattr(ptl, "enabled", False) else "disabled"
+        return "enabled" if getattr(ptl, "enable_pure_code_truncate", False) else "disabled"
 
     def model_recovery_max_attempts(self) -> int:
         """Return how many recovery retries one agent round may use."""
         ptl = getattr(self._config, "ptl_fallback_config", None)
-        if ptl is None or not getattr(ptl, "enabled", False):
+        if ptl is None or not getattr(ptl, "enable_pure_code_truncate", False):
             return 1
         retries = getattr(ptl, "max_retries", 1)
         if isinstance(retries, bool) or not isinstance(retries, int):
@@ -463,18 +463,16 @@ class ContextEngine:
         if state == "enabled":
             ptl = self._config.ptl_fallback_config
             context_engine_logger.info(
-                "PTL fallback enabled: phase_a_compress=%s phase_a_timeout_s=%s "
-                "pure_code_truncate=%s max_retries=%s truncate_target_ratio=%s",
-                getattr(ptl, "phase_a_compress", True),
+                "PTL fallback enabled: phase=phase_b phase_a_timeout_s=%s "
+                "max_retries=%s truncate_target_ratio=%s",
                 getattr(ptl, "phase_a_timeout_s", 0.0),
-                getattr(ptl, "enable_pure_code_truncate", True),
                 getattr(ptl, "max_retries", 1),
                 getattr(ptl, "truncate_target_ratio", 0.8),
             )
         elif state == "disabled":
-            context_engine_logger.debug("PTL fallback configured but disabled; using legacy recovery")
+            context_engine_logger.debug("PTL fallback configured but Phase B disabled; using Phase A only")
         else:
-            context_engine_logger.debug("PTL fallback not configured; using legacy recovery")
+            context_engine_logger.debug("PTL fallback not configured; using Phase A only")
 
     async def recover_from_model_exception(
             self,
@@ -498,15 +496,17 @@ class ContextEngine:
         describes an input/context limit and a recovery phase actually changed
         the context. Otherwise the original model exception is preserved.
 
-        Two phases are available, both controlled by
-        :class:`PtlFallbackConfig`:
+        Recovery always starts with Phase A, which reuses the configured LLM
+        compressors and is the historical behaviour. Phase B is a pure-code
+        truncation that drops the oldest complete dialogue turns without
+        calling a model; it is opt-in through
+        :attr:`PtlFallbackConfig.enable_pure_code_truncate`.
 
-        * Phase A reuses the configured LLM compressors. This is the only
-          behaviour when ``enabled`` is false.
-        * Phase B is a pure-code truncation that drops the oldest complete
-          dialogue turns without calling a model. It runs when Phase A is
-          disabled, skipped after a previous attempt, or did not change the
-          context.
+        With Phase B disabled, a PTL rejection is handled exactly as before:
+        one compression attempt, then the original exception is raised. With
+        Phase B enabled, a Phase A no-op, failure, or timeout falls through to
+        truncation; Phase A is attempted at most once per agent round, so a
+        later retry that still overflows goes straight to Phase B.
 
         Args:
             context_id: Context to shrink.
@@ -522,8 +522,8 @@ class ContextEngine:
             tools: Exact payload tools of the rejected request.
             attempt: 1-based recovery attempt for this agent round.
             attempted_recoveries: Trace shared by the caller across attempts.
-                Phase A is skipped once recorded here; this hook appends the
-                phases attempted by the recovery outcome.
+                When Phase B is enabled, Phase A is recorded and skipped once
+                attempted; the phases attempted by this hook are appended.
             **kwargs: Extra compressor arguments for Phase A.
         """
         # A streaming response may already have been sent to the caller when
@@ -542,39 +542,44 @@ class ContextEngine:
             return False
 
         ptl_config = getattr(self._config, "ptl_fallback_config", None)
-        if ptl_config is None or not ptl_config.enabled:
-            return await self._recover_with_compressors(
+        phase_b_enabled = bool(ptl_config is not None and getattr(ptl_config, "enable_pure_code_truncate", False))
+        attempted = attempted_recoveries if isinstance(attempted_recoveries, list) else None
+        phase_a_done = phase_b_enabled and attempted is not None and "phase_a_compress" in attempted
+
+        if not phase_a_done:
+            if phase_b_enabled and attempted is not None:
+                attempted.append("phase_a_compress")
+            compressed = await self._recover_with_compressors(
                 context_id=context_id,
                 session=session,
-                timeout_s=0.0,
-                swallow_errors=False,
+                timeout_s=getattr(ptl_config, "phase_a_timeout_s", 0.0) if phase_b_enabled else 0.0,
+                swallow_errors=phase_b_enabled,
                 kwargs=kwargs,
             )
+            if compressed:
+                return True
+
+        if not phase_b_enabled:
+            return False
 
         # Imported lazily: the recovery package is the removable part of this
-        # capability. Removing it leaves the legacy path above untouched.
-        from openjiuwen.core.context_engine.recovery import recover as recover_ptl
+        # capability. Removing it leaves Phase A above untouched.
+        from openjiuwen.core.context_engine.recovery import recover_phase_b
 
-        outcome = await recover_ptl(
+        truncated = await recover_phase_b(
             self,
-            compress=self._recover_with_compressors,
-            ptl_config=ptl_config,
             context_id=context_id,
             session=session,
             context=context,
-            exception=exception,
             error_texts=list(self._iter_exception_texts(exception)),
             messages=messages,
             tools=tools,
             attempt=attempt,
-            attempted_recoveries=attempted_recoveries,
-            compression_kwargs=kwargs,
+            config=ptl_config,
         )
-        # ``recover`` is pure with respect to the caller's list; merging the
-        # returned trace is this hook's documented responsibility.
-        if isinstance(attempted_recoveries, list):
-            attempted_recoveries.extend(outcome.trace)
-        return outcome.recovered
+        if truncated and attempted is not None and "phase_b_truncate" not in attempted:
+            attempted.append("phase_b_truncate")
+        return truncated
 
     async def _recover_with_compressors(
             self,
@@ -585,7 +590,13 @@ class ContextEngine:
             swallow_errors: bool,
             kwargs: Dict[str, Any],
     ) -> bool:
-        """Phase A: let the configured compressors rewrite the context."""
+        """Phase A: let the configured compressors rewrite the context.
+
+        Always called first on a PTL rejection. ``swallow_errors`` is true
+        only when Phase B is enabled: a compression failure or timeout then
+        falls through to truncation. With Phase B disabled the historical
+        behaviour is preserved and compression errors propagate.
+        """
         compression_kwargs = dict(kwargs)
         compression_kwargs.setdefault(
             "compression_trigger", "model_context_overflow"

@@ -59,8 +59,7 @@ def _content_text(message) -> str:
 async def test_ptl_fallback_recovers_the_turn_and_keeps_the_current_question():
     agent = _agent(
         PtlFallbackConfig(
-            enabled=True,
-            phase_a_compress=False,
+            enable_pure_code_truncate=True,
             archive_dropped_rounds=False,
             max_retries=3,
         )
@@ -91,8 +90,7 @@ async def test_ptl_fallback_recovers_the_turn_and_keeps_the_current_question():
 async def test_ptl_fallback_gives_up_when_nothing_left_to_truncate():
     agent = _agent(
         PtlFallbackConfig(
-            enabled=True,
-            phase_a_compress=False,
+            enable_pure_code_truncate=True,
             archive_dropped_rounds=False,
             max_retries=3,
         )
@@ -118,7 +116,6 @@ async def test_ptl_fallback_gives_up_when_nothing_left_to_truncate():
 async def test_disabled_fallback_does_not_retry_the_turn():
     agent = _agent(
         PtlFallbackConfig(
-            enabled=False,
             archive_dropped_rounds=False,
         )
     )

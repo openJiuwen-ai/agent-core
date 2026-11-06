@@ -17,7 +17,7 @@ from openjiuwen.core.context_engine import (
 from openjiuwen.core.context_engine.recovery import (
     TRUNCATE_MARKER_METADATA_KEY,
     parse_context_limit,
-    recover,
+    recover_phase_b,
     truncate_overflowed_context,
 )
 from openjiuwen.core.foundation.llm import (
@@ -384,7 +384,7 @@ class TestOverflowTruncate:
 
 class TestRecoverFromModelExceptionFallback:
     @pytest.mark.asyncio
-    async def test_disabled_keeps_legacy_behaviour(self, engine, session):
+    async def test_absent_fallback_keeps_legacy_behaviour(self, engine, session):
         context = await engine.create_context(context_id="ctx", session=session, history_messages=_plain_round(1))
         before = [message.content for message in context.get_messages()]
 
@@ -399,18 +399,95 @@ class TestRecoverFromModelExceptionFallback:
         assert [message.content for message in context.get_messages()] == before
 
     @pytest.mark.asyncio
-    async def test_pure_code_truncation_when_phase_a_disabled(self, session):
+    async def test_phase_b_disabled_keeps_legacy_behaviour(self, session):
+        engine = ContextEngine(ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig()))
+        messages = _plain_round(1) + _plain_round(2)
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+        engine.compress_context = AsyncMock(return_value="noop")
+        trace = []
+
+        recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
+            exception=RuntimeError("maximum context length is 6000 tokens"),
+            attempted_recoveries=trace,
+        )
+
+        assert recovered is False
+        assert [message.content for message in context.get_messages()] == [m.content for m in messages]
+        assert trace == []
+
+    @pytest.mark.asyncio
+    async def test_phase_b_disabled_still_uses_phase_a(self, session):
+        engine = ContextEngine(ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig()))
+        context = await engine.create_context(
+            context_id="ctx", session=session, history_messages=_plain_round(1) + _plain_round(2)
+        )
+        engine.compress_context = AsyncMock(return_value="compressed")
+
+        recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
+            exception=RuntimeError("maximum context length is 6000 tokens"),
+        )
+
+        assert recovered is True
+        engine.compress_context.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_phase_b_disabled_keeps_compressor_exception(self, session):
+        engine = ContextEngine(ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig()))
+        context = await engine.create_context(
+            context_id="ctx", session=session, history_messages=_plain_round(1) + _plain_round(2)
+        )
+        engine.compress_context = AsyncMock(side_effect=RuntimeError("compressor exploded"))
+
+        with pytest.raises(RuntimeError, match="compressor exploded"):
+            await engine.recover_from_model_exception(
+                context_id="ctx",
+                session=session,
+                context=context,
+                exception=RuntimeError("maximum context length is 6000 tokens"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_phase_b_enabled_does_not_swallow_cancellation(self, session):
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=False,
+                    enable_pure_code_truncate=True,
+                    archive_dropped_rounds=False,
+                )
+            )
+        )
+        context = await engine.create_context(
+            context_id="ctx", session=session, history_messages=_plain_round(1) + _plain_round(2)
+        )
+        engine.compress_context = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await engine.recover_from_model_exception(
+                context_id="ctx",
+                session=session,
+                context=context,
+                exception=RuntimeError("maximum context length is 6000 tokens"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_truncation_after_phase_a_changes_nothing(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                ptl_fallback_config=PtlFallbackConfig(
+                    enable_pure_code_truncate=True,
                     archive_dropped_rounds=False,
                 )
             )
         )
         messages = _plain_round(1) + _plain_round(2) + _plain_round(3)
         context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+        engine.compress_context = AsyncMock(return_value="noop")
         session.commit = AsyncMock()
 
         recovered = await engine.recover_from_model_exception(
@@ -427,7 +504,12 @@ class TestRecoverFromModelExceptionFallback:
     @pytest.mark.asyncio
     async def test_phase_a_is_skipped_once_attempted(self, session):
         engine = ContextEngine(
-            ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enabled=True, archive_dropped_rounds=False))
+            ContextEngineConfig(
+                ptl_fallback_config=PtlFallbackConfig(
+                    enable_pure_code_truncate=True,
+                    archive_dropped_rounds=False,
+                )
+            )
         )
         context = await engine.create_context(
             context_id="ctx", session=session, history_messages=_plain_round(1) + _plain_round(2)
@@ -449,7 +531,12 @@ class TestRecoverFromModelExceptionFallback:
     @pytest.mark.asyncio
     async def test_phase_a_failure_falls_back_to_truncation(self, session):
         engine = ContextEngine(
-            ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enabled=True, archive_dropped_rounds=False))
+            ContextEngineConfig(
+                ptl_fallback_config=PtlFallbackConfig(
+                    enable_pure_code_truncate=True,
+                    archive_dropped_rounds=False,
+                )
+            )
         )
         context = await engine.create_context(
             context_id="ctx", session=session, history_messages=_plain_round(1) + _plain_round(2)
@@ -475,14 +562,14 @@ class TestRecoverFromModelExceptionFallback:
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=False,
+                    enable_pure_code_truncate=True,
                     archive_dropped_rounds=False,
                 )
             )
         )
         messages = _plain_round(1) + _plain_round(2)
         context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+        engine.compress_context = AsyncMock(return_value="noop")
         session.commit = AsyncMock(side_effect=RuntimeError("disk full"))
 
         recovered = await engine.recover_from_model_exception(
@@ -498,7 +585,12 @@ class TestRecoverFromModelExceptionFallback:
     @pytest.mark.asyncio
     async def test_streaming_chunks_disable_ptl_recovery(self, session):
         engine = ContextEngine(
-            ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enabled=True, archive_dropped_rounds=False))
+            ContextEngineConfig(
+                ptl_fallback_config=PtlFallbackConfig(
+                    enable_pure_code_truncate=True,
+                    archive_dropped_rounds=False,
+                )
+            )
         )
         messages = _plain_round(1) + _plain_round(2)
         context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
@@ -520,14 +612,14 @@ class TestRecoverFromModelExceptionFallback:
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=False,
+                    enable_pure_code_truncate=True,
                     archive_dropped_rounds=False,
                 )
             )
         )
         messages = _plain_round(1) + _plain_round(2)
         context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+        engine.compress_context = AsyncMock(return_value="noop")
         session.commit = AsyncMock()
 
         recovered = await engine.recover_from_model_exception(
@@ -547,8 +639,7 @@ class TestRecoverFromModelExceptionFallback:
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=True,
+                    enable_pure_code_truncate=True,
                     phase_a_timeout_s=0.01,
                     archive_dropped_rounds=False,
                 )
@@ -579,8 +670,7 @@ class TestRecoverFromModelExceptionFallback:
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=True,
+                    enable_pure_code_truncate=True,
                     archive_dropped_rounds=False,
                 )
             )
@@ -605,8 +695,6 @@ class TestRecoverFromModelExceptionFallback:
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=True,
                     enable_pure_code_truncate=True,
                     max_retries=3,
                     archive_dropped_rounds=False,
@@ -645,12 +733,11 @@ class TestRecoverFromModelExceptionFallback:
         assert trace == ["phase_a_compress", "phase_b_truncate"]
 
     @pytest.mark.asyncio
-    async def test_recover_does_not_mutate_caller_trace(self, session):
+    async def test_phase_b_entry_point_truncates_context(self, session):
         engine = ContextEngine(
             ContextEngineConfig(
                 ptl_fallback_config=PtlFallbackConfig(
-                    enabled=True,
-                    phase_a_compress=False,
+                    enable_pure_code_truncate=True,
                     archive_dropped_rounds=False,
                 )
             )
@@ -658,40 +745,34 @@ class TestRecoverFromModelExceptionFallback:
         messages = _plain_round(1) + _plain_round(2)
         context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
         session.commit = AsyncMock()
-        trace = []
 
-        outcome = await recover(
+        recovered = await recover_phase_b(
             engine,
-            compress=AsyncMock(return_value=False),
-            ptl_config=engine.config.ptl_fallback_config,
             context_id="ctx",
             session=session,
             context=context,
-            exception=RuntimeError("maximum context length is 6000 tokens"),
             error_texts=["maximum context length is 6000 tokens"],
             messages=None,
             tools=None,
             attempt=1,
-            attempted_recoveries=trace,
-            compression_kwargs={},
+            config=engine.config.ptl_fallback_config,
         )
 
-        assert trace == []
-        assert outcome.recovered is True
-        assert outcome.trace == ("phase_b_truncate",)
+        assert recovered is True
+        assert len(context.get_messages()) < len(messages)
 
     def test_ptl_fallback_state_and_budget(self):
         absent = ContextEngine(ContextEngineConfig())
         assert absent.ptl_fallback_state() == "absent"
         assert absent.model_recovery_max_attempts() == 1
 
-        disabled = ContextEngine(
-            ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enabled=False, max_retries=5))
-        )
+        disabled = ContextEngine(ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(max_retries=5)))
         assert disabled.ptl_fallback_state() == "disabled"
         assert disabled.model_recovery_max_attempts() == 1
 
-        enabled = ContextEngine(ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enabled=True, max_retries=4)))
+        enabled = ContextEngine(
+            ContextEngineConfig(ptl_fallback_config=PtlFallbackConfig(enable_pure_code_truncate=True, max_retries=4))
+        )
         assert enabled.ptl_fallback_state() == "enabled"
         assert enabled.model_recovery_max_attempts() == 4
 
@@ -708,10 +789,11 @@ class TestRecoverFromModelExceptionFallback:
         # and the engine keeps its legacy single-compression path.
         assert ContextEngineConfig().ptl_fallback_config is None
 
-    def test_config_rejects_all_phases_disabled(self):
+    def test_config_defaults_to_phase_b_disabled(self):
+        config = PtlFallbackConfig()
+        assert config.is_phase_b_enabled() is False
+        assert config.phase_a_timeout_s == 0.0
+
+    def test_config_rejects_timeout_without_phase_b(self):
         with pytest.raises(ValidationError):
-            PtlFallbackConfig(
-                enabled=True,
-                phase_a_compress=False,
-                enable_pure_code_truncate=False,
-            )
+            PtlFallbackConfig(phase_a_timeout_s=1.0)

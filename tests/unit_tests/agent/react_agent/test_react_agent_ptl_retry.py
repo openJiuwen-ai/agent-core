@@ -18,9 +18,8 @@ def _agent_with_budget(max_retries: int, enabled: bool = True) -> ReActAgent:
     agent.context_engine = ContextEngine(
         ContextEngineConfig(
             ptl_fallback_config=PtlFallbackConfig(
-                enabled=enabled,
+                enable_pure_code_truncate=enabled,
                 max_retries=max_retries,
-                phase_a_compress=False,
                 archive_dropped_rounds=False,
             )
         )

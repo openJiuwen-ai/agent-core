@@ -25,10 +25,8 @@ class openjiuwen.core.context_engine.CompressionRecallConfig(
 
 ```python
 class openjiuwen.core.context_engine.PtlFallbackConfig(
-    enabled: bool = False,
-    phase_a_compress: bool = True,
+    enable_pure_code_truncate: bool = False,
     phase_a_timeout_s: float = 0.0,
-    enable_pure_code_truncate: bool = True,
     max_retries: int = 3,
     truncate_target_ratio: float = 0.8,
     keep_last_rounds: int = 1,
@@ -39,25 +37,32 @@ class openjiuwen.core.context_engine.PtlFallbackConfig(
 
 模型返回 prompt-too-long（PTL，上下文超限）错误时的兜底策略。
 
-兜底分两阶段：阶段 A 复用已配置的 LLM 压缩器；阶段 B 为纯代码截断，不调用模型，
-按“用户消息 → 最终 assistant 回复”的完整对话轮从旧到新整轮丢弃，最新
+阶段 A 是既有的恢复路径，复用已配置的 LLM 压缩器，始终先执行。阶段 B 为纯代码截断，
+不调用模型，按“用户消息 → 最终 assistant 回复”的完整对话轮从旧到新整轮丢弃，最新
 `keep_last_rounds` 轮永不丢弃。仅有单轮且仍然超限时，改为丢弃该轮内最旧的完整
 工具调用对（assistant `tool_calls` + 对应 `tool` 结果），保证工具调用配对完整。
 截断处会插入一条 `[CONTEXT_TRUNCATED]` 标记，提示模型该段历史已被移除。
 
-`enabled` 默认为 `False`：关闭时保持原有行为（只尝试一次压缩，失败则原样抛出模型异常）。
+`enable_pure_code_truncate` 默认为 `False`，即阶段 B 默认关闭。关闭时，PTL 错误按原流程
+处理：只尝试一次阶段 A 压缩，若仍未恢复则原样抛出模型异常。开启后，阶段 A 返回 noop、
+失败或超时会转入阶段 B；阶段 A 在每个 agent 轮次内最多尝试一次。
 
-> `ptl_fallback_config: null`（未配置）与 `enabled: false` 都走旧路径：前者表示能力不存在或已卸载，后者表示能力存在但显式关闭。可通过 `ContextEngine.ptl_fallback_state()` 区分 `absent` / `disabled` / `enabled`。
+> `ptl_fallback_config: null`（未配置）与 `enable_pure_code_truncate: false` 都只执行
+> 阶段 A：前者表示能力不存在或已卸载，后者表示能力存在但阶段 B 显式关闭。可通过
+> `ContextEngine.ptl_fallback_state()` 区分 `absent` / `disabled` / `enabled`
+>（`enabled` 表示阶段 B 已开启）。
 
 当 provider 报错中的上限不大于固定 system/工具开销时，阶段 B 会拒绝截断并保留原错误，避免无意义地丢弃历史。
 
 **参数：**
 
-- `enabled`：总开关。默认 `False`。
-- `phase_a_compress`：是否先尝试 LLM 压缩。默认 `True`。
-- `phase_a_timeout_s`：单次阶段 A 压缩的超时秒数，`0` 表示不限制。超时后转入阶段 B。
-- `enable_pure_code_truncate`：是否启用阶段 B 纯代码截断。默认 `True`。
-- `max_retries`：每个 agent 轮次允许的恢复重试次数，范围 `1..10`。默认 `3`。
+- `enable_pure_code_truncate`：阶段 A 未改变上下文后是否执行阶段 B 截断。默认 `False`。
+- `phase_a_timeout_s`：单次阶段 A 压缩的超时秒数。仅在阶段 B 开启时生效；`0` 表示不设
+  阶段 A 专用超时，阶段 B 关闭时只允许为 `0`。`0` 不是无限等待：阶段 A 仍受模型客户端
+  超时、流式首包/空闲超时和用户取消约束。超时后转入阶段 B。
+- `max_retries`：阶段 B 开启时每个 agent 轮次允许的恢复重试次数，范围 `1..10`。默认 `3`。
+  阶段 B 关闭时重试预算保持原有的一次。跨阶段恢复（阶段 A 成功但重试仍超限）至少需要
+  两次重试预算；设为 `1` 时只有同一次恢复内的阶段 A 失败才能进入阶段 B。
 - `truncate_target_ratio`：阶段 B 的目标水位为 `上限 × ratio ** attempt`，重复失败时
   逐次收紧以保证每次都有进展。默认 `0.8`，取值范围 `(0, 1]`。
 - `keep_last_rounds`：永不丢弃的最新完整对话轮数。默认 `1`。

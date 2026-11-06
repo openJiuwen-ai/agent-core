@@ -1,11 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Self-contained PTL (prompt-too-long) fallback capability.
+"""Self-contained PTL (prompt-too-long) fallback truncation.
 
 This module owns provider-limit parsing, dialogue-round truncation, archiving,
-and the Phase A/B orchestration. :class:`PtlFallbackConfig` lives in
-``schema/config.py`` so configuration stays in the schema layer.
+and the Phase B entry point. Phase A (LLM compression) stays in
+:class:`ContextEngine`; it always runs first and is never orchestrated here.
+:class:`PtlFallbackConfig` lives in ``schema/config.py`` so configuration
+stays in the schema layer.
 
 It is intentionally *uninstallable*: remove this ``recovery`` package only.
 ``PtlFallbackConfig`` remains in ``schema/config.py`` with a ``None`` default,
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.context.dialogue_rounds import find_all_dialogue_round
@@ -64,19 +66,6 @@ class OverflowTruncationResult:
     archive_memory_id: str = ""
     limit_source: str = ""
     resolved_window_tokens: int = 0
-
-
-@dataclass(frozen=True)
-class RecoveryOutcome:
-    """Result of one two-phase recovery call.
-
-    ``trace`` contains only the phases attempted by *this* call; the caller
-    merges it into its own attempt trace. ``recover`` never mutates the
-    caller's ``attempted_recoveries`` list.
-    """
-
-    recovered: bool
-    trace: Tuple[str, ...] = ()
 
 
 # Ordered from most to least specific. Every pattern captures the provider's
@@ -349,69 +338,7 @@ def truncate_overflowed_context(
     )
 
 
-async def recover(
-    engine: "ContextEngine",
-    *,
-    compress: Callable[..., Awaitable[bool]],
-    ptl_config: PtlFallbackConfig,
-    context_id: str,
-    session: Optional["Session"],
-    context: Optional["ModelContext"],
-    exception: Exception,
-    error_texts: Sequence[str],
-    messages: Optional[Sequence[BaseMessage]],
-    tools: Optional[Sequence[Any]],
-    attempt: int,
-    attempted_recoveries: Optional[List[str]],
-    compression_kwargs: Dict[str, Any],
-) -> RecoveryOutcome:
-    """Run the two-phase PTL recovery for one failed model call.
-
-    ``engine`` supplies persistence and pool lookup; ``compress`` is the
-    engine's Phase A entry point, injected by the caller so this module does
-    not reach into private engine methods. Keeping the module free of a hard
-    import of the engine is what makes it removable.
-
-    The returned :class:`RecoveryOutcome` carries only the phases attempted
-    by this call. The input ``attempted_recoveries`` list is read, never
-    mutated; the caller decides how to merge the trace.
-    """
-    tried = tuple(attempted_recoveries) if attempted_recoveries is not None else ()
-    new_trace: List[str] = []
-    phase_a_done = "phase_a_compress" in tried
-
-    if ptl_config.phase_a_compress and not phase_a_done:
-        new_trace.append("phase_a_compress")
-        compressed = await compress(
-            context_id=context_id,
-            session=session,
-            timeout_s=ptl_config.phase_a_timeout_s,
-            swallow_errors=True,
-            kwargs=compression_kwargs,
-        )
-        if compressed:
-            return RecoveryOutcome(True, tuple(new_trace))
-
-    if not ptl_config.enable_pure_code_truncate:
-        return RecoveryOutcome(False, tuple(new_trace))
-
-    truncated = await _recover_with_pure_code_truncation(
-        engine,
-        context_id=context_id,
-        session=session,
-        context=context,
-        error_texts=error_texts,
-        messages=messages,
-        tools=tools,
-        attempt=attempt,
-        config=ptl_config,
-    )
-    if truncated:
-        new_trace.append("phase_b_truncate")
-    return RecoveryOutcome(truncated, tuple(new_trace))
-
-
-async def _recover_with_pure_code_truncation(
+async def recover_phase_b(
     engine: "ContextEngine",
     *,
     context_id: str,
@@ -423,7 +350,16 @@ async def _recover_with_pure_code_truncation(
     attempt: int,
     config: PtlFallbackConfig,
 ) -> bool:
-    """Phase B: drop the oldest complete dialogue turns without a model."""
+    """Phase B: drop the oldest complete dialogue turns without a model.
+
+    ``engine`` supplies persistence and pool lookup. The caller runs Phase A
+    first and only calls this function when Phase B is enabled and Phase A did
+    not recover the request.
+
+    Returns ``True`` only when the context was actually changed, so the caller
+    can retry the model call. Every failure path returns ``False`` and leaves
+    the original model exception untouched.
+    """
     target_context = context
     if target_context is None:
         resolved_session_id = session.get_session_id() if session else "default_session_id"
@@ -738,9 +674,8 @@ __all__ = [
     "DEFAULT_OVERFLOW_TRUNCATE_MARKER",
     "OverflowTruncationResult",
     "PtlFallbackConfig",
-    "RecoveryOutcome",
     "TRUNCATE_MARKER_METADATA_KEY",
     "parse_context_limit",
-    "recover",
+    "recover_phase_b",
     "truncate_overflowed_context",
 ]
