@@ -1158,8 +1158,31 @@ class SkillAuthorizationRail(BaseInterruptRail):
         """当前加载未形成 ACTIVE Grant 时退出旧 overlay。
 
         正文加载失败、用户选择不授权、Manifest 漂移或激活失败时，
-        都不得继续沿用上一个 Skill 的权限。
+        都不得继续沿用上一个 Skill 的权限。无可退内容（scope 无
+        ACTIVE Grant 且本因为无授权加载）时跳过，避免空熔断。
         """
+        if reason == "skill_load_without_grant":
+            # 空回收防护：会话内不存在 ACTIVE Grant 时挂熔断没有可退内容，
+            # 其唯一可观测效果是持久化实现在 invalidated scope 上丢弃同轮
+            # 稍后的 active_skill 写入，使无 overlay 技能在会话首次加载时
+            # 活跃技能不落盘。查询失败时按原行为回收（fail-closed）。
+            try:
+                if self.store.get_active(session_id, agent_scope_id) is None:
+                    logger.info(
+                        "[skill_authorization] retire.skipped session=%s scope=%s "
+                        "reason=no_active_grant_to_retire",
+                        session_id,
+                        agent_scope_id,
+                    )
+                    return
+            except Exception:  # noqa: BLE001 — 查询失败按原行为回收（fail-closed）
+                logger.warning(
+                    "[skill_authorization] grant active query failed "
+                    "session=%s scope=%s",
+                    session_id,
+                    agent_scope_id,
+                    exc_info=True,
+                )
         try:
             self.store.invalidate_scope(session_id, agent_scope_id, reason=reason)
             self.store.revoke_grants(
