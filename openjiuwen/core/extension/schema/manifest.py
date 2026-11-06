@@ -36,3 +36,4 @@ class Manifest:
     requires_host: str | None
     requires_packages: tuple[PackageDependency, ...]
     extensions: tuple[ExtensionDecl, ...]
+    domain: str | None = None

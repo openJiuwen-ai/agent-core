@@ -17,9 +17,12 @@ from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import Event
+from openjiuwen.core.extension.data.files import run_file_operation
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
+from openjiuwen.core.extension.install_report import PackageInstallReport, PackageOperationToken
 from openjiuwen.core.extension.management.context import ManagementContext, context_for
 from openjiuwen.core.extension.management.types import (
     EXTENSION_APPLY_EVENT,
@@ -52,9 +55,16 @@ from openjiuwen.core.extension.schema.records import ActivationReport, ActivePac
 from openjiuwen.core.extension.selection import resolve_install_set
 
 
+def _management_context(bus: ExtensionEventBusProtocol) -> ManagementContext:
+    context = context_for(bus)
+    if context.package_manager is None or context.install_report is None:
+        raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="install directory has not been provided")
+    return context
+
+
 async def handle_package_parse(request: ParseRequest) -> ParseResult:
     """Read one local source: package root, manifest, and entry boundaries."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     source = Path(request.source)
     try:
         opened = context.package_manager.open_source(source)
@@ -73,12 +83,13 @@ async def handle_package_parse(request: ParseRequest) -> ParseResult:
 
 async def handle_package_resolve(request: ResolveRequest) -> ResolveResult:
     """Decide the install order, or whether one package may be uninstalled."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     if request.operation == "install":
         resolved = resolve_install_set(
             request.candidates,
             context.runtime.active_packages(),
             context.host_version,
+            external_packages=tuple((await context.install_report.read_packages()).values()),
         )
         return ResolveResult(
             operation="install",
@@ -111,16 +122,40 @@ async def handle_package_resolve(request: ResolveRequest) -> ResolveResult:
 
 async def handle_package_query(request: QueryRequest) -> QueryResult:
     """Report the facts the Runtime and the install store can confirm now."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     runtime = context.runtime
+    await context.install_report.reconcile_packages(
+        runtime.active_packages(), cleanup_packages=frozenset(
+            record.package_id for record in runtime.active_packages()
+            if runtime.uninstall_versions(record.package_id)),
+    )
+    states = await context.install_report.read_packages(request.package_id)
+    if request.package_id is not None and states:
+        domain = context.package_manager.domain
+        if domain is not None and states[request.package_id].domain != domain:
+            raise ExtensionFailure(StatusCode.EXTENSION_DOMAIN_MISMATCH, reason="query belongs to another domain")
     active = runtime.active_packages()
-    installed = tuple(context.package_manager.list_installed())
+    domain = context.package_manager.domain
+    roots = []
+    for root in context.package_manager.list_installed():
+        try:
+            manifest = load_manifest(root, require_domain=context.package_manager.require_domain)
+        except ExtensionFailure:
+            continue
+        if (request.package_id == manifest.package_id and domain is not None
+                and manifest.domain != domain):
+            raise ExtensionFailure(StatusCode.EXTENSION_DOMAIN_MISMATCH,
+                                   reason="query belongs to another domain")
+        if domain is None or manifest.domain == domain:
+            roots.append(root)
+    installed = tuple(roots)
     if request.package_id is not None:
         active = tuple(item for item in active if item.package_id == request.package_id)
         installed = tuple(item for item in installed if item.parent.name == request.package_id)
     return QueryResult(
         active=active,
         installed=installed,
+        packages=tuple(states.values()),
         inflight={item.package_id: runtime.inflight_count(item.package_id) for item in active},
         published={item.package_id: runtime.published_handlers(item.package_id) for item in active},
     )
@@ -128,7 +163,13 @@ async def handle_package_query(request: QueryRequest) -> QueryResult:
 
 async def handle_extension_plan(request: PlanRequest) -> PlanResult:
     """Order the extensions of one package for this operation."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
+    context.package_manager.validate_manifest(request.manifest)
+    await context.install_report.validate_operation(
+        request.operation_token,
+        request.manifest,
+        request.operation,
+    )
     previous = context.runtime.get_active(request.manifest.package_id)
     try:
         plan = context.orchestrator.build_plan(
@@ -144,15 +185,21 @@ async def handle_extension_plan(request: PlanRequest) -> PlanResult:
 
 async def handle_extension_apply(request: ApplyRequest) -> ActivationReport:
     """Run one plan and report what actually happened."""
-    context = context_for(request.bus)
-    if request.plan.operation == "uninstall":
-        return await _apply_uninstall(context, request)
-    return await _apply_load(context, request)
+    context = _management_context(request.bus)
+    token = request.operation_token
+    await context.install_report.validate_operation(token, request.manifest, request.plan.operation)
+    if (request.plan.package.package_id != request.manifest.package_id
+            or request.plan.package.package_version != request.manifest.version):
+        raise ExtensionFailure(StatusCode.EXTENSION_REPORT_FAILED, reason="plan package identity changed")
+    with context.install_report.operation_scope(token):
+        if request.plan.operation == "uninstall":
+            return await _apply_uninstall(context, request)
+        return await _apply_load(context, request)
 
 
 async def handle_extension_rollback(request: RollbackRequest) -> RollbackResult:
     """Drop a candidate that never reached the Bus, and its own store copy."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     plan = request.plan
     released: tuple[str, ...] = ()
     if request.candidate is not None:
@@ -164,7 +211,7 @@ async def handle_extension_rollback(request: RollbackRequest) -> RollbackResult:
         package_id = plan.package.package_id
         version = plan.package.package_version or ""
         try:
-            context.package_manager.remove_installed(package_id, version)
+            await run_file_operation(lambda: context.package_manager.remove_installed(package_id, version))
             removed = True
         except ExtensionFailure as exc:
             residue = exc.as_error()
@@ -180,7 +227,7 @@ async def handle_extension_rollback(request: RollbackRequest) -> RollbackResult:
 
 async def handle_package_install(request: InstallRequest) -> PackageOperationResult:
     """Install every source: parse, resolve the batch, then plan and apply."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     bus = request.bus
     reports: list[ActivationReport] = []
     parsed: list[ParsedPackage] = []
@@ -195,7 +242,7 @@ async def handle_package_install(request: InstallRequest) -> PackageOperationRes
                 continue
             parsed.append(result.package)
         if parsed:
-            reports.extend(await _install_batch(context, bus, parsed))
+            reports.extend(await _install_batch(context, request.bus, parsed, startup=request.startup))
     finally:
         for item in parsed:
             if item.opened is not None:
@@ -203,9 +250,12 @@ async def handle_package_install(request: InstallRequest) -> PackageOperationRes
     return PackageOperationResult(operation="install", reports=tuple(reports))
 
 
-async def handle_package_uninstall(request: UninstallRequest) -> PackageOperationResult:
+async def _handle_package_uninstall(
+    request: UninstallRequest,
+    token: PackageOperationToken,
+) -> PackageOperationResult:
     """Remove one package from the Bus and delete its install copy."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     bus = request.bus
     package_id = request.package_id
     resolved = await bus.trigger(
@@ -220,13 +270,23 @@ async def handle_package_uninstall(request: UninstallRequest) -> PackageOperatio
         return _single("uninstall", package_id, resolved.error)
     record = context.runtime.get_active(package_id)
     if record is None:
-        return await _uninstall_inactive(context, package_id)
-    return await _plan_and_apply(bus, "uninstall", _manifest_for_record(record), record.root)
+        with context.install_report.operation_scope(token):
+            return await _uninstall_inactive(context, package_id)
+    return await _plan_and_apply(
+        bus,
+        "uninstall",
+        _manifest_for_record(record),
+        record.root,
+        token,
+    )
 
 
-async def handle_package_reload(request: ReloadRequest) -> PackageOperationResult:
+async def _handle_package_reload(
+    request: ReloadRequest,
+    token: PackageOperationToken,
+) -> PackageOperationResult:
     """Hot-switch one package from the files currently in the install store."""
-    context = context_for(request.bus)
+    context = _management_context(request.bus)
     bus = request.bus
     package_id = request.package_id
     record = context.runtime.get_active(package_id)
@@ -247,10 +307,12 @@ async def handle_package_reload(request: ReloadRequest) -> PackageOperationResul
         manifest = load_manifest(root)
     except ExtensionFailure as exc:
         return _single("reload", package_id, exc.as_error())
-    error = context.runtime.check_reload(package_id, manifest)
+    error = context.runtime.check_reload(
+        package_id, manifest, external_packages=tuple((await context.install_report.read_packages()).values()),
+    )
     if error is not None:
         return _single("reload", package_id, error)
-    return await _plan_and_apply(bus, "reload", manifest, root)
+    return await _plan_and_apply(bus, "reload", manifest, root, token)
 
 
 async def _plan_and_apply(
@@ -258,6 +320,7 @@ async def _plan_and_apply(
     operation: PlanOperation,
     manifest: Manifest,
     package_root: Path,
+    operation_token: PackageOperationToken,
     *,
     store_copy_created: bool = False,
 ) -> PackageOperationResult:
@@ -267,6 +330,7 @@ async def _plan_and_apply(
         operation,
         manifest,
         package_root,
+        operation_token,
         store_copy_created=store_copy_created,
     )
     return PackageOperationResult(operation=operation, reports=(report,))
@@ -277,6 +341,7 @@ async def _plan_and_apply_report(
     operation: PlanOperation,
     manifest: Manifest,
     package_root: Path,
+    operation_token: PackageOperationToken,
     *,
     store_copy_created: bool = False,
 ) -> ActivationReport:
@@ -288,6 +353,7 @@ async def _plan_and_apply_report(
                 operation=operation,
                 manifest=manifest,
                 package_root=package_root,
+                operation_token=operation_token,
             ),
         )
     )
@@ -301,6 +367,7 @@ async def _plan_and_apply_report(
                 bus=bus,
                 plan=planned.plan,
                 manifest=manifest,
+                operation_token=operation_token,
                 store_copy_created=store_copy_created,
             ),
         )
@@ -314,6 +381,7 @@ async def _install_batch(
     context: ManagementContext,
     bus: ExtensionEventBusProtocol,
     parsed: Sequence[ParsedPackage],
+    *, startup: bool = False,
 ) -> list[ActivationReport]:
     """Resolve the parsed batch, then install the packages it allows."""
     resolved = await bus.trigger(
@@ -330,12 +398,15 @@ async def _install_batch(
         error = _invalid_result(PACKAGE_RESOLVE_EVENT)
         return [_report(item.manifest.package_id, "install", error) for item in parsed]
     if resolved.fatal is not None:
+        for item in parsed:
+            await context.install_report.reject_package(item.manifest, resolved.fatal)
         return [_report(item.manifest.package_id, "install", resolved.fatal) for item in parsed]
 
     sources = {item.manifest.package_id: item for item in parsed}
     reports: list[ActivationReport] = []
     failed: set[str] = set()
     for rejection in resolved.rejected:
+        await context.install_report.reject_package(sources[rejection.package_id].manifest, rejection.error)
         failed.add(rejection.package_id)
         reports.append(_report(rejection.package_id, "install", rejection.error))
     for manifest in resolved.ordered:
@@ -344,19 +415,14 @@ async def _install_batch(
         )
         if blocked:
             failed.add(manifest.package_id)
-            reports.append(
-                _report(
-                    manifest.package_id,
-                    "install",
-                    operation_error(
-                        StatusCode.EXTENSION_DEPENDENCY_NOT_MET,
-                        package_id=manifest.package_id,
-                        reason=f"dependency {', '.join(blocked)} failed in this batch",
-                    ),
-                )
+            error = operation_error(
+                StatusCode.EXTENSION_DEPENDENCY_NOT_MET, package_id=manifest.package_id,
+                reason=f"dependency {', '.join(blocked)} failed in this batch",
             )
+            await context.install_report.reject_package(manifest, error)
+            reports.append(_report(manifest.package_id, "install", error))
             continue
-        report = await _install_one(context, bus, sources[manifest.package_id])
+        report = await _install_one(context, bus, sources[manifest.package_id], startup=startup)
         if report.status == "FAILED":
             failed.add(manifest.package_id)
         reports.append(report)
@@ -367,20 +433,158 @@ async def _install_one(
     context: ManagementContext,
     bus: ExtensionEventBusProtocol,
     package: ParsedPackage,
+    *, startup: bool = False,
 ) -> ActivationReport:
-    """Copy one package into the install store, then plan and apply it."""
+    """Reserve dependencies, copy only this source, and publish the local package."""
     manifest = package.manifest
+    service = context.install_report
+    token = None
+    report = None
+    created = False
+    cleanup_pending = False
     try:
-        root = context.package_manager.copy_into_store(package.root, manifest)
+        context.package_manager.validate_manifest(manifest)
+        token = await service.begin_operation(manifest, "install", startup=startup)
+        await service.wait_for_dependencies(token)
+        await service.validate_operation(token, manifest, "install")
+        with service.operation_scope(token):
+            root = await run_file_operation(lambda: context.package_manager.copy_into_store(package.root, manifest))
+        created = root != package.root.resolve()
+        report = await _plan_and_apply_report(
+            bus,
+            "install",
+            manifest,
+            root,
+            token,
+            store_copy_created=created,
+        )
+        inactive = context.runtime.get_active(manifest.package_id) is None
+        if report.status == "FAILED" and created and inactive:
+            with service.operation_scope(token):
+                try:
+                    await run_file_operation(
+                        lambda: context.package_manager.remove_installed(
+                            manifest.package_id,
+                            manifest.version,
+                            missing_ok=True,
+                        )
+                    )
+                except ExtensionFailure:
+                    cleanup_pending = True
     except ExtensionFailure as exc:
-        return _report(manifest.package_id, "install", exc.as_error())
-    return await _plan_and_apply_report(
-        bus,
-        "install",
-        manifest,
-        root,
-        store_copy_created=root != package.root.resolve(),
+        report = _report(manifest.package_id, "install", exc.as_error())
+    finally:
+        if token is not None:
+            await _finish_operation(
+                service,
+                token,
+                report=report,
+                active=context.runtime.get_active(manifest.package_id),
+                cleanup_pending=cleanup_pending,
+            )
+    return report
+
+
+async def _managed_existing(
+    request: UninstallRequest | ReloadRequest,
+    operation: PlanOperation,
+) -> PackageOperationResult:
+    context = _management_context(request.bus)
+    manager = context.package_manager
+    service = context.install_report
+    record = context.runtime.get_active(request.package_id)
+    token = None
+    result = None
+    cleanup_pending = False
+    try:
+        if record is not None:
+            manifest = _manifest_for_record(record) if operation == "uninstall" else load_manifest(
+                record.root, require_domain=manager.require_domain,
+            )
+        else:
+            roots = [root for root in manager.list_installed() if root.parent.name == request.package_id]
+            if not roots:
+                states = await service.read_packages(request.package_id)
+                state = states.get(request.package_id)
+                if state is not None and operation == "uninstall":
+                    manifest = Manifest(1, request.package_id, state.active_version or "0.0.0", None, None,
+                                        None, (), (), domain=state.domain)
+                else:
+                    return _single(operation, request.package_id, operation_error(
+                        StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED, package_id=request.package_id,
+                        reason="no package is installed"))
+            else:
+                manifest = load_manifest(roots[-1], require_domain=manager.require_domain)
+        manager.validate_manifest(manifest)
+        token = await service.begin_operation(manifest, operation)
+        if operation == "reload":
+            await service.wait_for_dependencies(token)
+        await service.validate_operation(token, manifest, operation)
+        if operation == "reload":
+            result = await _handle_package_reload(request, token)
+        else:
+            result = await _handle_package_uninstall(request, token)
+        if operation == "uninstall" and _reports_not_installed(result):
+            # Failed-only records have no installed resources; explicit uninstall releases the id.
+            states = await service.read_packages(request.package_id)
+            state = states.get(request.package_id)
+            if state is not None and state.active_version is None:
+                result = PackageOperationResult(
+                    operation,
+                    (ActivationReport("", request.package_id, operation, "SUCCESS", None, None),),
+                )
+        cleanup_pending = (result is None or not result.succeeded) and bool(
+            context.runtime.uninstall_versions(request.package_id))
+    except ExtensionFailure as exc:
+        result = _single(operation, request.package_id, exc.as_error())
+    finally:
+        if token is not None:
+            report = result.reports[0] if result is not None and result.reports else None
+            await _finish_operation(
+                service,
+                token,
+                report=report,
+                active=context.runtime.get_active(request.package_id),
+                cleanup_pending=cleanup_pending,
+            )
+    return result
+
+
+async def _finish_operation(
+    service: PackageInstallReport,
+    token: PackageOperationToken,
+    *,
+    report: ActivationReport | None,
+    active: ActivePackageRecord | None,
+    cleanup_pending: bool,
+) -> None:
+    """Commit a completed package result without hiding that local result."""
+    try:
+        await service.finish_operation(
+            token,
+            report=report,
+            active=active,
+            cleanup_pending=cleanup_pending,
+        )
+    except ExtensionFailure:
+        logger.exception("could not commit package operation result")
+
+
+def _reports_not_installed(result: PackageOperationResult) -> bool:
+    report = result.reports[0] if result.reports else None
+    return (
+        report is not None
+        and report.error is not None
+        and report.error.code == "EXTENSION_PACKAGE_NOT_INSTALLED"
     )
+
+
+async def handle_package_uninstall(request: UninstallRequest) -> PackageOperationResult:
+    return await _managed_existing(request, "uninstall")
+
+
+async def handle_package_reload(request: ReloadRequest) -> PackageOperationResult:
+    return await _managed_existing(request, "reload")
 
 
 async def _apply_load(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
@@ -591,7 +795,7 @@ async def _remove_package_resources(context: ManagementContext, package_id: str,
         raise ExtensionFailure(stripped.status, **stripped.params)
     await context.runtime.cleanup_package_resources(package_id, generation, reason="uninstall")
     for version in context.runtime.uninstall_versions(package_id):
-        context.package_manager.remove_installed(package_id, version, missing_ok=True)
+        await run_file_operation(lambda: context.package_manager.remove_installed(package_id, version, missing_ok=True))
     declarations.withdraw(package_id)
 
 
@@ -677,6 +881,7 @@ def _manifest_for_record(record: ActivePackageRecord) -> Manifest:
         requires_host=None,
         requires_packages=record.requires_packages,
         extensions=(),
+        domain=record.domain,
     )
 
 

@@ -1078,6 +1078,9 @@ class StatusCode(Enum):
     EXTENSION_DATA_COMMIT_UNKNOWN = (201018, "extension data commit is uncertain, reason='{reason}'")
     EXTENSION_DATA_WRITE_FAILED = (201019, "extension data write failed, reason='{reason}'")
     EXTENSION_DATA_PATH_INVALID = (201020, "extension data path is invalid, reason='{reason}'")
+    EXTENSION_DOMAIN_MISMATCH = (201021, "package domain does not match, reason='{reason}'")
+    EXTENSION_REPORT_FAILED = (201022, "package install report failed, reason='{reason}'")
+    EXTENSION_DEPENDENCY_TIMEOUT = (201023, "package '{package_id}' timed out waiting for dependencies")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

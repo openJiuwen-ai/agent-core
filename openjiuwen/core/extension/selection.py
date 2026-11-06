@@ -4,14 +4,15 @@
 """Choose which packages can be installed, and in what order."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.extension.errors import OperationError, operation_error
+from openjiuwen.core.extension.install_report import PackageInstallState
 from openjiuwen.core.extension.ordering import topological_order
-from openjiuwen.core.extension.schema.manifest import Manifest
+from openjiuwen.core.extension.schema.manifest import Manifest, PackageDependency
 from openjiuwen.core.extension.schema.records import ActivePackageRecord
-from openjiuwen.core.extension.versions import specifier_matches
+from openjiuwen.core.extension.versions import parse_version, specifier_matches
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,8 @@ def resolve_install_set(
     candidates: Sequence[Manifest],
     active: Sequence[ActivePackageRecord],
     host_version: str | None,
+    *,
+    external_packages: Sequence[PackageInstallState] = (),
 ) -> ResolveInstallResult:
     """Decide install order from manifests and the packages already active.
 
@@ -65,7 +68,12 @@ def resolve_install_set(
         else:
             rejected[manifest.package_id] = error
 
-    _reject_unsatisfied_dependencies(pool, rejected, active_by_id)
+    dependency_facts = dict(active_by_id)
+    for item in external_packages:
+        version = item.dependency_version
+        if version is not None and item.package_id not in dependency_facts:
+            dependency_facts[item.package_id] = _DependencyVersion(version)
+    _reject_unsatisfied_dependencies(pool, rejected, dependency_facts)
     ordered, remaining = topological_order(
         tuple(pool.values()),
         identifier=lambda manifest: manifest.package_id,
@@ -96,6 +104,8 @@ def evaluate_reload(
     active: Sequence[ActivePackageRecord],
     package_id: str,
     new_manifest: Manifest,
+    *,
+    external_packages: Sequence[PackageInstallState] = (),
 ) -> OperationError | None:
     """Return an error when the new manifest cannot replace the active package.
 
@@ -117,7 +127,11 @@ def evaluate_reload(
                 f"manifest has {new_manifest.package_id}"
             ),
         )
-    dependency_error = _dependency_error(new_manifest, active_by_id, ignore_id=package_id)
+    dependencies = dict(active_by_id)
+    for item in external_packages:
+        if item.dependency_version is not None and item.package_id not in dependencies:
+            dependencies[item.package_id] = _DependencyVersion(item.dependency_version)
+    dependency_error = _dependency_error(new_manifest, dependencies, ignore_id=package_id)
     if dependency_error is not None:
         return dependency_error
     for record in active:
@@ -292,3 +306,91 @@ def _dependency_error(
                 ),
             )
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class _DependencyVersion:
+    version: str
+
+
+@dataclass(frozen=True, slots=True)
+class StartupInstallPlan:
+    """Complete deterministic graph, before the host's domain is selected."""
+
+    ordered: tuple[Manifest, ...]
+    rejected: tuple[RejectedPackage, ...]
+
+
+def _manifest_from_report(
+    state: PackageInstallState,
+    exact: Mapping[tuple[str, str], Manifest],
+) -> tuple[Manifest | None, OperationError | None]:
+    version = state.dependency_version
+    if version is None:
+        return None, None
+    if state.successful:
+        requirements = state.requires
+    elif state.pending is not None:
+        requirements = state.pending["requires"]
+    else:
+        return None, None
+    disk_manifest = exact.get((state.package_id, version))
+    if disk_manifest is not None:
+        disk_requirements = {
+            item.package_id: item.version
+            for item in disk_manifest.requires_packages
+        }
+        if disk_manifest.domain != state.domain or disk_requirements != requirements:
+            return None, operation_error(
+                StatusCode.EXTENSION_REPORT_FAILED,
+                reason=f"report conflicts with manifest for {state.package_id} {version}",
+            )
+        return disk_manifest, None
+    return Manifest(
+        schema_version=1,
+        package_id=state.package_id,
+        version=version,
+        display_name=None,
+        description=None,
+        requires_host=None,
+        requires_packages=tuple(
+            PackageDependency(key, value)
+            for key, value in requirements.items()
+        ),
+        extensions=(),
+        domain=state.domain,
+    ), None
+
+
+def build_startup_plan(
+    manifests: Sequence[Manifest], active_packages: Sequence[PackageInstallState],
+) -> StartupInstallPlan:
+    """Choose one version per global id and detect cycles across all domains."""
+    selected: dict[str, Manifest] = {}
+    rejected: dict[str, OperationError] = {}
+    domains: dict[str, set[str | None]] = {}
+    exact = {(manifest.package_id, manifest.version): manifest for manifest in manifests}
+    for manifest in manifests:
+        domains.setdefault(manifest.package_id, set()).add(manifest.domain)
+        previous = selected.get(manifest.package_id)
+        if previous is None or parse_version(manifest.version) > parse_version(previous.version):
+            selected[manifest.package_id] = manifest
+    for package_id, values in domains.items():
+        if len(values) > 1:
+            rejected[package_id] = operation_error(StatusCode.EXTENSION_DUPLICATE_PACKAGE_ID, package_id=package_id)
+            selected.pop(package_id, None)
+    for state in active_packages:
+        if state.package_id in rejected:
+            continue
+        manifest, error = _manifest_from_report(state, exact)
+        if error is not None:
+            rejected[state.package_id] = error
+            selected.pop(state.package_id, None)
+        elif manifest is not None:
+            selected[state.package_id] = manifest
+    # Host version is checked by the actual owning process, not by the process scanning first.
+    structural = tuple(replace(item, requires_host=None) for item in selected.values())
+    result = resolve_install_set(structural, (), None)
+    rejected.update((item.package_id, item.error) for item in result.rejected)
+    return StartupInstallPlan(tuple(selected[item.package_id] for item in result.ordered),
+                              tuple(RejectedPackage(key, value) for key, value in sorted(rejected.items())))

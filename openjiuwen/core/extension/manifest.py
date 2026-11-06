@@ -19,7 +19,7 @@ from openjiuwen.core.extension.data.json_values import valid_package_id
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def load_manifest(package_root: Path) -> Manifest:
+def load_manifest(package_root: Path, *, require_domain: bool = False) -> Manifest:
     """Read ``package_root / manifest.yaml``.
 
     Raises:
@@ -46,10 +46,12 @@ def load_manifest(package_root: Path) -> Manifest:
             StatusCode.EXTENSION_MANIFEST_INVALID,
             reason="manifest.yaml top level must be a mapping",
         )
-    return parse_manifest_mapping(raw, root)
+    return parse_manifest_mapping(raw, root, require_domain=require_domain)
 
 
-def parse_manifest_mapping(raw: Mapping[str, Any], package_root: Path) -> Manifest:
+def parse_manifest_mapping(
+    raw: Mapping[str, Any], package_root: Path, *, require_domain: bool = False,
+) -> Manifest:
     """Build a Manifest from an already loaded mapping.
 
     Raises:
@@ -67,6 +69,12 @@ def parse_manifest_mapping(raw: Mapping[str, Any], package_root: Path) -> Manife
             StatusCode.EXTENSION_MANIFEST_INVALID,
             reason="package must be a mapping",
         )
+    domain = package.get("domain")
+    if not isinstance(domain, str) or not domain.strip():
+        if require_domain:
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID,
+                                   reason="package.domain must be a nonempty string")
+        domain = None
     package_id = _required_package_id(package.get("id"))
     version = _required_version(package.get("version"), "package.version")
     display_name = _optional_text(package.get("displayName"), "package.displayName")
@@ -91,6 +99,7 @@ def parse_manifest_mapping(raw: Mapping[str, Any], package_root: Path) -> Manife
         requires_host=requires_host,
         requires_packages=requires_packages,
         extensions=extensions,
+        domain=domain,
     )
 
 

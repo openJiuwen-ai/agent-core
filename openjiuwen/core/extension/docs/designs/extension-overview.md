@@ -41,7 +41,7 @@ Extension 负责把本地扩展包中的处理逻辑注册到 Events 已有的�
 
 EventBus 提供通用事件注册和调用服务，交回处理结果或异常。事件执行、平台能力和会话等公共约定以 Events 文档为准，本模块聚焦包管理事件及其 Core Handler 与模块能力的协作。
 
-调用方提供包来源和安装目录。包来源可以是本地包目录或 zip；安装目录通过 `open_install_dir(install_dir: Path, ...)` 传入。安装目录的选择、配置解析和默认值由调用方负责，Extension 只使用传入的路径。前端和 Gateway 的转发协议也由调用方适配。
+调用方提供包来源、安装根目录和必传报告路径。包来源可以是本地包目录或 zip；安装目录通过 `open_install_dir(install_dir: Path, ...)` 传入。安装目录的选择、配置解析和默认值由调用方负责，Extension 只使用传入的路径。前端和 Gateway 的转发协议也由调用方适配。
 
 ### 1.3 当前范围与后续扩展
 
@@ -257,3 +257,7 @@ store 数据的宿主注入、在途计数及卸载失败重试已纳入 Core �
 | [Core 公共规范](../../../AGENTS.md) | 模块依赖、文档分工，以及后续规约和验证要求 |
 
 包加载控制面的契约与方案见 [S_01](../specs/S_01_package-loading.md)、[F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)。9 类管理事件的登记与 Core Handler 在 Events 目录开发；Registry 与 Bus 发布见 [开发计划](extension-development-plan.md) EX-03、EX-04。概览保留整体设计说明。
+
+## 按域启动与共享报告
+
+[按域加载与共享安装报告](../features/F_05_domain-install-report.md)实现与验证见开发计划 EX-05。宿主传根目录与必传报告路径，Core 完整排序后筛域。

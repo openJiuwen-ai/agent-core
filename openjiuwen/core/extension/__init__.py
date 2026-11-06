@@ -10,6 +10,7 @@ nine package management events on an EventBus, then triggers install, reload,
 and uninstall. ``Runtime`` writes a loaded package to the Bus in one pass.
 """
 
+from openjiuwen.core.extension.install_report import PackageInstallReport, PackageInstallState
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
 from openjiuwen.core.extension.management import (
     ManagementContext,
@@ -52,6 +53,8 @@ __all__ = [
     "McpServerSpec",
     "OperationError",
     "Orchestrator",
+    "PackageInstallReport",
+    "PackageInstallState",
     "PackageManager",
     "PackageOperationResult",
     "PackageResourceCleanup",

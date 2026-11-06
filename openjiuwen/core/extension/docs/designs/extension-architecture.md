@@ -224,7 +224,7 @@ Core 业务模块需要提供所属业务事件的默认行为和能力处理器
 
 `init` 是 jiuwenswarm 显式调用的方法。EventBus 初始化时已经登记 core 内置事件，包括 9 类管理事件及其 Core Handler。`init` 只接收这份 EventBus，并执行 jiuwenswarm 的事件和处理器登记回调。进程启动时只调用一次。它不读取用户 manifest，不加载扩展代码，不执行包安装。宿主回调返回后，它触发一次 `ops.build`，调用方不再单独触发。
 
-`init` 返回后，jiuwenswarm 把安装目录路径交给 `open_install_dir`。Extension 列出该目录中的包目录，作为一批路径触发 `package.install`。`host_version` 在同一次调用里传入，用来和 `requires.host` 比较。这一步不安装。这样进程重启后会重新装上安装目录里的包。
+`init` 返回后，宿主异步调用 `open_install_dir`，传安装根目录、报告路径、可选域和宿主版本。随后调用 `load_installed`，由 Core 完整发现、检查和排序，再按域激活。报告记录另一进程的安装进度，但不把对方 Handler 注册到本地 Bus。详细规则见 [F_05](../features/F_05_domain-install-report.md)。
 
 必需事件或平台处理器登记失败时，Registry 不能标为就绪。目前建议拒绝重复 `init`，失败实例清理后由调用方重建。事件基础设施的准备方式遵循 Events 公共约定，Extension 不重复定义。
 
@@ -1084,3 +1084,7 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | [Core 公共规范](../../../AGENTS.md) | 查阅模板使用、规约与特性方案分工，以及交付检查要求 |
 
 Extension 的规约在 `docs/specs/`，特性说明在 `docs/features/`。Registry 与 EventBus 的对接还没有实现，见特性文档里的实现范围。
+
+## 按域启动与共享报告
+
+[按域加载与共享安装报告](../features/F_05_domain-install-report.md)实现与验证见开发计划 EX-05。宿主传根目录与必传报告路径，Core 完整排序后筛域。

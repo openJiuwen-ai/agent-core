@@ -29,6 +29,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.events.types import HandlerId, HandlerLevel
+from openjiuwen.core.extension.install_report import PackageInstallState
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.records import ActivePackageRecord, ExtensionPlan
@@ -355,7 +356,9 @@ class Runtime:
             del self._active[package_id]
             self._finish_uninstall(package_id)
 
-    def check_reload(self, package_id: str, new_manifest: Manifest) -> OperationError | None:
+    def check_reload(
+        self, package_id: str, new_manifest: Manifest, *, external_packages: Sequence[PackageInstallState] = (),
+    ) -> OperationError | None:
         """Check dependency compatibility before preparing a replacement."""
         if self.uninstall_versions(package_id):
             return operation_error(
@@ -363,7 +366,7 @@ class Runtime:
                 package_id=package_id,
                 reason="an unfinished uninstall must be retried first",
             )
-        return evaluate_reload(self.active_packages(), package_id, new_manifest)
+        return evaluate_reload(self.active_packages(), package_id, new_manifest, external_packages=external_packages)
 
     def prepare(self, plan: ExtensionPlan) -> PrepareResult:
         """Load the plan's extensions and collect handler declarations.
@@ -652,6 +655,7 @@ class Runtime:
             root=root.resolve(),
             generation=candidate.generation,
             requires_packages=manifest.requires_packages,
+            domain=manifest.domain,
         )
 
 

@@ -19,6 +19,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.orchestrator import Orchestrator
+from openjiuwen.core.extension.install_report import PackageInstallReport
 from openjiuwen.core.extension.package_manager import PackageManager
 from openjiuwen.core.extension.runtime import Runtime
 
@@ -32,6 +33,7 @@ class ManagementContext:
     orchestrator: Orchestrator
     runtime: Runtime
     host_version: str | None = None
+    install_report: PackageInstallReport | None = None
 
 
 _LOCK = threading.Lock()
