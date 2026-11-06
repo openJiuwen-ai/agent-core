@@ -21,6 +21,8 @@ classifiers = [
 dependencies = [
     # Content detection. The package is agent-security/agent_shield.
     "agent-shield @ git+https://gitcode.com/openJiuwen/agent-security.git@develop#subdirectory=agent_shield",
+    # RSI engine dependency
+    "agentdescent>=0.4.6",
     # HTTP clients
     "aiohttp>=3.11.12",
     "requests>=2.32.3",
