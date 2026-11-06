@@ -35,6 +35,7 @@ class TodoSnapshot:
     content_sha256: str | None = None
     versioned: bool = True
     backend_id: str | None = None
+    read_only_backend: bool = False
 
     def document(self):
         return {"plan_id": self.plan_id, "revision": self.revision, "todos": copy.deepcopy(self.todos)}
@@ -69,11 +70,14 @@ class TodoResult(dict):
     def __init__(self, result, snapshot):
         super().__init__(result)
         self.todo_snapshot = snapshot.document()
+        self.todo_snapshot_versioned = snapshot.versioned
 
 
 def snapshot_from_result(result):
     if isinstance(result, TodoResult):
-        return decode_snapshot(result.todo_snapshot)
+        snapshot = decode_snapshot(result.todo_snapshot)
+        snapshot.versioned = result.todo_snapshot_versioned
+        return snapshot
     return None
 
 
@@ -156,12 +160,16 @@ def current_transaction(tool, session_id):
     return current if current is not None and current.key == key else None
 
 
-async def read_snapshot(fs, path):
+async def read_snapshot(fs, path, *, allow_read_only=False):
     result = await fs.read_file(path, mode="text", options={"snapshot": True, "missing_ok": True})
     if result.code != 0 or result.data is None:
         raise RuntimeError(f"Todo snapshot read failed: {result.message}")
     supports_snapshot = isinstance(result.data.exists, bool) and isinstance(result.data.content_sha256, str)
     if not supports_snapshot:
+        if allow_read_only:
+            snapshot = decode_snapshot(result.data.content)
+            snapshot.read_only_backend = True
+            return snapshot
         raise RuntimeError(
             f"Todo backend does not support snapshot reads ({type(fs).__name__}): "
             "read_file must return exists and content_sha256; "
@@ -226,7 +234,9 @@ async def transact(
         for _ in range(3):
             if check_active is not None:
                 check_active()
-            snapshot = await read_snapshot(tool.fs, path)
+            allow_read_only = (getattr(tool, "_allow_legacy_reads", False)
+                               and getattr(tool, "snapshot_guard", None) is None)
+            snapshot = await read_snapshot(tool.fs, path, allow_read_only=allow_read_only)
             await check_snapshot_lifecycle(tool, session_id, snapshot)
             if reference.value is _UNRESOLVED:
                 reference.value = snapshot.plan_id
@@ -241,6 +251,8 @@ async def transact(
             if tx.pending is None or (tx.new_plan is None and tx.pending == snapshot.todos):
                 committed = snapshot
             else:
+                if snapshot.read_only_backend:
+                    raise RuntimeError("Todo backend does not support conditional writes")
                 if snapshot.revision >= MAX_REVISION:
                     raise ValueError("Todo revision exceeds safe integer range")
                 ids = [row.get("id") for row in tx.pending]
@@ -278,7 +290,7 @@ async def transact(
                 tool.mark_created_in_invoke(session_id)
             if binding is not None:
                 binding[1][key] = committed.plan_id
-            if isinstance(result, dict) and committed.exists:
+            if isinstance(result, dict) and committed.exists and not snapshot.read_only_backend:
                 result = TodoResult(result, committed)
             return result
     raise RuntimeError("Todo update conflicted in all three attempts; read the current plan and retry")

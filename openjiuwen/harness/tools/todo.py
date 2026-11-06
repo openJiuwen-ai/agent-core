@@ -147,7 +147,10 @@ class TodoTool(Tool):
                 return TodoItems(replace(tx.snapshot, todos=tx.pending))
             return tx.items
         try:
-            snapshot = await read_snapshot(self.fs, os.path.abspath(self._get_file_path(session_id)))
+            snapshot = await read_snapshot(
+                self.fs, os.path.abspath(self._get_file_path(session_id)),
+                allow_read_only=self.snapshot_guard is None,
+            )
             from openjiuwen.harness.tools.todo_store import check_snapshot_lifecycle
             await check_snapshot_lifecycle(self, session_id, snapshot)
         except Exception as exc:
@@ -267,6 +270,8 @@ class TodoCreateTool(TodoTool):
             workspace,
             lock_manager,
         )
+        # A host may require explicit intent before replacing an active plan.
+        self.require_explicit_plan_action = False
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
@@ -382,8 +387,9 @@ class TodoCreateTool(TodoTool):
         if plan_action not in (None, "new", "rebuild"):
             raise ValueError("plan_action must be new or rebuild")
         await self._reject_recreate_within_invoke(session_id)
-        if plan_action is None and any(t.get("status", "pending") not in ("completed", "cancelled")
-                                       for t in tx.snapshot.todos):
+        if (self.require_explicit_plan_action and plan_action is None
+                and any(t.get("status", "pending") not in ("completed", "cancelled")
+                        for t in tx.snapshot.todos)):
             raise ValueError("An active plan exists; use todo_modify or explicitly choose plan_action=new/rebuild")
         new_todos = []
         seen_ids: set = set()
@@ -443,6 +449,7 @@ class TodoListTool(TodoTool):
             workspace,
             lock_manager,
         )
+        self._allow_legacy_reads = True
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
@@ -524,6 +531,7 @@ class TodoGetTool(TodoTool):
             workspace,
             lock_manager,
         )
+        self._allow_legacy_reads = True
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
