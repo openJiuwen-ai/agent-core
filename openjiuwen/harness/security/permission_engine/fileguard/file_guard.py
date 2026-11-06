@@ -620,7 +620,7 @@ def _match_glob(pattern: str, path_posix: str) -> bool:
             out.append(re.escape(pattern[i]))
             i += 1
     try:
-        return bool(re.fullmatch("".join(out), path_posix))
+        return bool(re.fullmatch("".join(out), path_posix, flags=re.IGNORECASE if os.name == "nt" else 0))
     except re.error:
         return False
 
@@ -707,6 +707,29 @@ class FileGuardChecker:
             accesses = [(p, action) for p in paths]
 
         accesses.extend((target, "write") for target in literal_delete_targets)
+        return self._evaluate_accesses(accesses)
+
+    def evaluate_accesses(
+        self, accesses: list[tuple[Path, FileGuardAction]],
+    ) -> PermissionResult | None:
+        """Evaluate concrete absolute resources reported by a trusted host.
+
+        The caller owns process authentication and path canonicalization. This
+        checks file policy only; control-plane protection must be checked first.
+        """
+        for path, action in accesses:
+            if not isinstance(path, Path) or not path.is_absolute():
+                raise ValueError("Runtime file access requires an absolute Path")
+            if action not in {"read", "write", "exec"}:
+                raise ValueError(f"Unsupported runtime file action: {action}")
+        if not self._effective.enabled:
+            return None
+        return self._evaluate_accesses(accesses)
+
+    def _evaluate_accesses(
+        self, accesses: list[tuple[Path, FileGuardAction]],
+    ) -> PermissionResult | None:
+        """Shared aggregation for extracted and directly reported accesses."""
         if not accesses:
             return None
 
@@ -828,7 +851,7 @@ class FileGuardChecker:
     ) -> tuple[PermissionLevel, str | None]:
         if self._effective.composed:
             return self._resolve_composed(path, action)
-        path_posix = path.as_posix()
+        path_posix = os.path.normcase(path.as_posix()).replace("\\", "/")
         best_prefix: tuple[int, FileGuardPathRule] | None = None
         glob_hits: list[PermissionLevel] = []
 
@@ -838,7 +861,7 @@ class FileGuardChecker:
                     glob_hits.append(_level_for_action(rule, action))
                 continue
             # prefix
-            prefix = rule.path.rstrip("/")
+            prefix = os.path.normcase(rule.path).replace("\\", "/").rstrip("/")
             if path_posix == prefix or path_posix.startswith(prefix + "/"):
                 # also accept contains_path for Windows drive quirks
                 if contains_path(prefix, path) or path_posix == prefix or path_posix.startswith(prefix + "/"):
@@ -871,7 +894,7 @@ class FileGuardChecker:
     def _resolve_composed(
         self, path: Path, action: FileGuardAction,
     ) -> tuple[PermissionLevel, str | None]:
-        path_posix = path.as_posix()
+        path_posix = os.path.normcase(path.as_posix()).replace("\\", "/")
         hits: dict[str, list[tuple[int, PermissionLevel, FileGuardPathRule]]] = {
             source: [] for source in self._effective.source_order
         }
@@ -882,7 +905,7 @@ class FileGuardChecker:
                 if _match_glob(rule.path.replace("\\", "/"), path_posix):
                     hits[rule.source].append((0, _level_for_action(rule, action), rule))
                 continue
-            prefix = rule.path.rstrip("/")
+            prefix = os.path.normcase(rule.path).replace("\\", "/").rstrip("/")
             if path_posix == prefix or path_posix.startswith(prefix + "/"):
                 hits[rule.source].append((len(prefix), _level_for_action(rule, action), rule))
 

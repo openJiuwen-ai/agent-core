@@ -18,6 +18,12 @@ DeepAgent 工具权限与安全提示示例（仅依赖 openjiuwen）。
 风险等级为静态提示，不改变权限判定；读取/写入/执行同一路径会分别列出。
 中断 metadata 保留 ``ask_title`` / ``ask_summary``，并提供 ``ask_risk_level`` 与
 ``file_operations``，宿主可复用这些数据，避免再次分析时丢失原工作目录。
+交接到运行时检查时，``delete`` 对应 FileGuard 的 ``write`` 轴；展示兜底 ``access`` 统一转为 ``read``。
+移动源文件会同时列出 ``read/delete``，复制源文件只列出 ``read``。HTTP(S) 精确 URL 授权仅统一
+省略的根路径与 ``/``，其他 URL 字段及显式 DENY 仍按原规则检查。
+原生 PowerShell 子程序的本地 AST 判定文本与宿主调用文本分别编码，实际进程参数保持不变。
+启用包内规则时，localhost/127.0.0.1 默认允许且可显式收紧；PEM 按名称/凭据目录保护，
+其他 PEM 仍遵循普通 FileGuard 配置，不按文件内容识别私钥。
 
 宿主注入：:class:`openjiuwen.harness.security.permission_engine.host.ToolPermissionHost`
 （``get_permissions_snapshot``、``request_permission_confirmation``、``persist_allow_rule``、

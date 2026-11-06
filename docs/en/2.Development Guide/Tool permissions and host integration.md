@@ -63,6 +63,24 @@ permissions = {
 
 The engine no longer supports a separate legacy “pattern-only” path; express policy with `tools`, `defaults`, `rules`, and `approval_overrides`.
 
+Command DENY/ASK rules also inspect literal argv views: full executable path,
+basename, and (on Windows) the name without `.exe`. Windows executable casing is
+normalized without changing argument casing. Shell quote decoding is limited to
+one statically verifiable invocation; dynamic commands remain subject to runtime
+checks. Hosts can bind authenticated native words with `bind_native_command`, so
+native arguments are never parsed again as shell syntax. Values are independently
+quoted, and flags, empty values, boundaries and order are retained. An exact rule
+`git version` does not match `git --version` or `git version extra`; use an explicit
+regex/wildcard rule when those variants should also be restricted.
+
+A host may set `permissions.shell_guard.cross_tool_restrictions: true` in its
+effective runtime policy. DENY/ASK rules targeting only shell tools then apply to
+every shell tool in `permissions.categories.shell` (or the SDK defaults). This is
+appropriate for a product-wide command-security editor whose older saved rules
+list only Bash and legacy command tools. Ordinary hosts retain explicit per-tool
+scope by default. Tool baselines, ALLOW rules and remembered approvals keep their
+existing scope and matching behavior; these restriction views never grant access.
+
 Package command rules ask before recursive, forced root deletion with `rm`
 (including `/`, quoted roots, Windows drive roots and bare drive letters),
 PowerShell `Remove-Item` and its deletion aliases, and CMD `rd`/`rmdir`/`del`/`erase /s`.
@@ -268,6 +286,21 @@ A transport receiving a request may still reject the SSE/MCP handshake; that is 
 URL-size denial. These tests do not establish the cause of a separate full-suite log.
 
 ## 7. Source index
+
+The prototype retains package allow entries for `localhost` and `127.0.0.1` when NetGuard and package rules
+are enabled. Explicit host/URL ASK or DENY rules can tighten them; no additional IPv6 or loopback-range
+allow is added. The metadata hosts `169.254.169.254` and `metadata.google.internal` remain denied.
+PEM protection uses the `**/*key*.pem` / `**/*private*.pem` name patterns and existing credential directories.
+Other PEM files follow ordinary FileGuard policy, including explicit DENY. These are path rules, not PEM
+content inspection; a private key with an unrelated filename is not automatically identified.
+
+Runtime hosts normalize approval-card `access` to `read` and `delete` to `write`, without overriding DENY.
+SDK and host persistence share `operation_grants.merge_operation_grants`: update existing IDs in place,
+append new IDs in batch order, and keep repeated saves stable. After a successful save, the SDK refreshes
+the host snapshot before recording the runtime approval; later policy changes still invalidate it.
+For native children of PowerShell calls, local Bash-AST command checks omit PowerShell's leading `&`;
+host/cloud requests retain the literal PowerShell invocation. Actual process argv and original shell scripts
+are unchanged. Quoting tests alone are insufficient: test the resulting ALLOW/ASK/DENY decisions as well.
 
 | Path | Notes |
 |------|--------|

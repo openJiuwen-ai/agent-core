@@ -79,7 +79,7 @@ class ShellAstParseResult:
     backend: str = "fallback"
 
 
-def parse_shell_for_permission(command: str) -> ShellAstParseResult:
+def parse_shell_for_permission(command: str, *, preserve_redirects: bool = False) -> ShellAstParseResult:
     """Parse shell command for permission checks.
 
     Returns:
@@ -100,7 +100,7 @@ def parse_shell_for_permission(command: str) -> ShellAstParseResult:
     parser = _get_tree_sitter_bash_parser()
     if parser is not None:
         try:
-            return _parse_with_tree_sitter(text, parser)
+            return _parse_with_tree_sitter(text, parser, preserve_redirects=preserve_redirects)
         except Exception:  # pragma: no cover - defensive logging path
             logger.warning("[PermissionEngine] permission.shell_ast.parse_failed fallback=true", exc_info=True)
 
@@ -117,10 +117,8 @@ def split_shell_for_grants(command: str) -> tuple[str, ...]:
     # Unwrapping a launcher would lose its interpreter and execution semantics.
     if not text or canonicalize_shell_command_for_permission(text) != text:
         return ()
-    parsed = parse_shell_for_permission(text)
+    parsed = parse_shell_for_permission(text, preserve_redirects=True)
     if parsed.kind != "simple" or not parsed.subcommands:
-        return ()
-    if parsed.flags.has_input_redirection or parsed.flags.has_output_redirection:
         return ()
     source, cursor = text.encode("utf-8"), 0
     commands = []
@@ -151,8 +149,8 @@ def _get_tree_sitter_bash_parser() -> Any | None:
     if _TREE_SITTER_PARSER is not None:
         return _TREE_SITTER_PARSER
     try:
-        from tree_sitter import Language, Parser
         import tree_sitter_bash
+        from tree_sitter import Language, Parser
 
         language = Language(tree_sitter_bash.language())
         try:
@@ -232,7 +230,7 @@ def _collect_operator_markers(command: str) -> tuple[str, ...]:
     return tuple(markers)
 
 
-def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
+def _parse_with_tree_sitter(command: str, parser: Any, *, preserve_redirects=False) -> ShellAstParseResult:
     source = command.encode("utf-8")
     tree = parser.parse(source)
     root = getattr(tree, "root_node", None)
@@ -265,7 +263,7 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
             backend="tree-sitter",
         )
 
-    command_nodes = _collect_command_nodes(root)
+    command_nodes = _collect_command_nodes(root, preserve_redirects=preserve_redirects)
     if not command_nodes:
         return ShellAstParseResult(
             kind="too_complex",
@@ -403,17 +401,25 @@ def _collect_tree_sitter_flags(root: Any) -> ShellStructureFlags:
     return ShellStructureFlags(operators=tuple(operators), **flags)
 
 
-def _collect_command_nodes(root: Any) -> list[Any]:
+def _collect_command_nodes(root: Any, *, preserve_redirects=False) -> list[Any]:
+    from types import SimpleNamespace
+
+    if preserve_redirects and str(getattr(root, "type", "")) == "redirected_statement":
+        body = root.child_by_field_name("body")
+        if body is not None and body.type in {"list", "pipeline"}:
+            nodes = _collect_command_nodes(body, preserve_redirects=True)
+            redirects = [child for child in root.named_children if child != body]
+            if nodes and all(child.start_byte >= body.end_byte for child in redirects):
+                last = nodes[-1]
+                nodes[-1] = SimpleNamespace(start_byte=last.start_byte, end_byte=root.end_byte,
+                                           children=[*last.children, *redirects])
+                return nodes
+        return [root]
+    if str(getattr(root, "type", "")) == "command":
+        return [root]
     command_nodes: list[Any] = []
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if str(getattr(node, "type", "")) == "command":
-            command_nodes.append(node)
-            continue
-        for child in reversed(list(getattr(node, "children", []) or [])):
-            if child is not None:
-                stack.append(child)
+    for child in getattr(root, "named_children", []):
+        command_nodes.extend(_collect_command_nodes(child, preserve_redirects=preserve_redirects))
     return command_nodes
 
 

@@ -29,6 +29,7 @@ from openjiuwen.harness.security.patterns import (
 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
     build_operation_grant,
     build_operation_grants,
+    merge_operation_grants,
     operation_subject,
     scope_options,
 )
@@ -44,13 +45,13 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionResult,
     PermissionsSection,
 )
-from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import (
-    LocalDeleteExecution,
-    local_delete_execution,
-)
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
     is_shell_tool,
     shell_tools_from_config,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.workspace_delete import (
+    LocalDeleteExecution,
+    local_delete_execution,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
@@ -103,8 +104,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         soft_delete_enabled: Any = None,
     ) -> None:
         super().__init__(tool_names=tool_names)
-        self._static_config = cast(dict[str, Any], config or {})
+        self._static_config = cast(
+            dict[str, Any], config if config is not None else (engine.config if engine is not None else {}),
+        )
         self._host = host or ToolPermissionHost()
+        self._runtime_approvals: dict[tuple[str, str], dict] = {}
         if engine is not None:
             self._engine = engine
         else:
@@ -297,6 +301,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     ) -> None:
         """Hot-update static permission config；可选 ``tool_names`` 仅更新基类标签集合。"""
         cfg_dict = cast(dict[str, Any], config)
+        self._runtime_snapshot = None
         self._static_config = cfg_dict
         self._engine.update_config(cfg_dict, soft_delete_enabled=soft_delete_enabled)
         if (cfg_dict.get("composition") or {}).get("schema_version") == 2 and self._host.resolve_workspace_dir:
@@ -314,6 +319,69 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             "[PermissionEngine] permission.rail.config_updated intercept=all_tools optional_tool_tags=%s",
             sorted(self._tool_names),
         )
+
+    def runtime_engine(self, session_id: str):
+        """Return the same live engine used by this rail for a host runtime guard.
+
+        Refresh through the existing session-aware snapshot hook; callers must
+        not substitute model-supplied configuration or infer ALLOW from ASK.
+        """
+        if self._host.get_permissions_snapshot is not None:
+            snapshot = self._invoke_permissions_hook(
+                self._host.get_permissions_snapshot, session_id=session_id,
+            )
+            # Poll the live source for revocation, but only recompile/log when
+            # the snapshot changes. File hooks call this for every access.
+            if snapshot != getattr(self, "_runtime_snapshot", None):
+                self.update_config(snapshot)
+                self._runtime_snapshot = deepcopy(snapshot)
+        return self._engine
+
+    async def evaluate_runtime_permission(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], result: PermissionResult,
+    ) -> PermissionResult:
+        """Resolve a host runtime decision through the ordinary evaluation hook."""
+        return await self._apply_host_evaluation(ctx, tool_call, result)
+
+    async def _record_runtime_approval(self, session_id, tool_call, result=None, *, confirmation=None):
+        """Freeze the confirmed operation and the file operations shown on its card."""
+        if not session_id or tool_call is None or not tool_call.id:
+            return
+        if result is None:
+            result = await self._engine.check_permission(
+                self._normalize_tool_name(tool_call.name), self.parse_tool_args(tool_call))
+        operations = self._build_interrupt_metadata(tool_call, result)["file_operations"]
+        grants = build_operation_grants(
+            self._normalize_tool_name(tool_call.name), self.parse_tool_args(tool_call),
+            self._engine.config, self._approval_workspace(),
+            mode=confirmation.authorization_mode if confirmation else "allow",
+            scope=confirmation.authorization_scope if confirmation else "exact",
+        )
+        # Bounded transient state; an interrupted/cancelled call may never execute.
+        if len(self._runtime_approvals) >= 128:
+            self._runtime_approvals.pop(next(iter(self._runtime_approvals)))
+        self._runtime_approvals[(session_id, tool_call.id)] = {
+            "tool": self._normalize_tool_name(tool_call.name), "args": self.parse_tool_args(tool_call),
+            "config": deepcopy(self._engine.config), "trusted": list(self._engine.trusted_dirs),
+            "accesses": [(item["path"], item["action"]) for item in operations],
+            "operation": operation_subject(self._normalize_tool_name(tool_call.name), self.parse_tool_args(tool_call),
+                                           self._engine.config, self._approval_workspace()),
+            "grants": grants,
+        }
+
+    def take_runtime_approval(self, session_id, tool_call_id, tool_name, inputs, *, include_operation=False):
+        """Consume once at the actual invocation boundary; stale policy grants expire."""
+        record = self._runtime_approvals.pop((session_id, tool_call_id), None)
+        engine = self.runtime_engine(session_id)
+        if record is None:
+            return {} if include_operation else []
+        if record["tool"] != self._normalize_tool_name(tool_name) or record["args"] != inputs:
+            return {} if include_operation else []
+        if record["config"] != engine.config or record["trusted"] != list(engine.trusted_dirs):
+            return {} if include_operation else []
+        if include_operation:
+            return deepcopy({key: record[key] for key in ("accesses", "operation", "grants")})
+        return record["accesses"]
 
     def _collect_file_guard_persist_accesses(
         self,
@@ -430,7 +498,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                                         self._approval_workspace(), mode=authorization_mode,
                                         scope=authorization_scope)
         if (
-            authorization_scope == "subcommands" and len(grants) == 1
+            authorization_scope == "subcommands"
+            and sum(grant.get("match_type") == "shell_subcommand" for grant in grants) == 1
             and len(parse_shell_for_permission(tool_args.get("command") or "").subcommands) == 1
         ):
             # Keep combination reuse, while remembering the single complete
@@ -439,11 +508,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 normalized_name, tool_args, base_cfg, self._approval_workspace(),
             ))
         cfg = deepcopy(base_cfg)
-        overrides = list(cfg.get("approval_overrides") or [])
-        grant_ids = {grant["id"] for grant in grants}
-        cfg["approval_overrides"] = [
-            g for g in overrides if isinstance(g, dict) and g.get("id") not in grant_ids
-        ] + grants
+        cfg["approval_overrides"] = merge_operation_grants(cfg.get("approval_overrides"), grants)
 
         prev_cfg = deepcopy(self._engine.config)
         self.update_config(cfg)
@@ -462,6 +527,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 persisted = False
             if not persisted:
                 self.update_config(prev_cfg)
+            elif self._host.get_permissions_snapshot is not None:
+                # The host may upsert grants in a different order or publish a
+                # new composition revision. Freeze the committed snapshot before
+                # recording the approval that the runtime will consume.
+                self.runtime_engine(session_id)
             return persisted
 
         if not write_yaml_fallback:
@@ -490,23 +560,28 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         except Exception:
             return True
 
+    @staticmethod
+    def normalize_confirmation_scope(payload, subject):
+        """Share the existing scope defaults with authenticated runtime resources."""
+        scope = payload.authorization_scope
+        if scope is None:
+            scope = "exact" if payload.authorization_mode == "allow" else next(
+                (option["value"] for option in scope_options(subject) if option["value"] != "exact"), "exact",
+            )
+        mode = payload.authorization_mode
+        if mode is None:
+            mode = "allow" if scope == "exact" else "allow_with_scope"
+        return replace(payload, authorization_mode=mode, authorization_scope=scope)
+
     async def _validate_confirmation(self, payload, tool_name, tool_args, session_id):
         if not payload.approved:
-            return payload, None
+            return payload, None, None
         try:
             if self._host.get_permissions_snapshot:
                 self.update_config(self._invoke_permissions_hook(
                     self._host.get_permissions_snapshot, session_id=session_id))
-            scope = payload.authorization_scope
-            if scope is None:
-                subject = operation_subject(tool_name, tool_args, self._engine.config, self._approval_workspace())
-                scope = "exact" if payload.authorization_mode == "allow" else next(
-                    (option["value"] for option in scope_options(subject) if option["value"] != "exact"), "exact",
-                )
-            mode = payload.authorization_mode
-            if mode is None:
-                mode = "allow" if scope == "exact" else "allow_with_scope"
-            payload = replace(payload, authorization_mode=mode, authorization_scope=scope)
+            subject = operation_subject(tool_name, tool_args, self._engine.config, self._approval_workspace())
+            payload = self.normalize_confirmation_scope(payload, subject)
             build_operation_grants(tool_name, tool_args, self._engine.config,
                                    self._approval_workspace(), mode=payload.authorization_mode,
                                    scope=payload.authorization_scope)
@@ -514,12 +589,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if result.is_denied:
                 return payload, "[PERMISSION_DENIED] " + (
                     result.reason or "Policy changed while awaiting approval"
-                )
+                ), result
             if self._requires_one_time_approval(result) and payload.auto_confirm:
                 payload = replace(payload, auto_confirm=False, persist_allow=None)
         except (TypeError, ValueError) as exc:
-            return payload, "[PERMISSION_DENIED] " + str(exc)
-        return payload, None
+            return payload, "[PERMISSION_DENIED] " + str(exc), None
+        return payload, None, result
 
     async def _apply_host_evaluation(
         self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], result: PermissionResult,
@@ -755,6 +830,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             result = await self._apply_host_evaluation(ctx, tool_call, result)
 
             if result.permission == PermissionLevel.ALLOW:
+                # A remembered user decision must reach the actual invocation,
+                # just like a confirmation received during this call. Ordinary
+                # policy/cloud ALLOW must not grant arbitrary child commands.
+                matched = result.matched_rule or ""
+                if (matched in {"operation_grant", "file_resource_grant", "session_auto_confirm"}
+                        or "shell_subcommand_grant" in matched):
+                    await self._record_runtime_approval(session_id, tool_call, result)
                 logger.info(
                     "[PermissionEngine] permission.rail.result tool=%s decision=allow matched_rule=%s",
                     tool_name,
@@ -779,6 +861,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     tool_name,
                     auto_confirm_key,
                 )
+                await self._record_runtime_approval(session_id, tool_call, result)
                 return self.approve()
 
             if self._host.request_permission_confirmation is not None:
@@ -810,7 +893,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                             ),
                         )
                     confirm_payload = ext_out
-                    confirm_payload, invalid = await self._validate_confirmation(
+                    confirm_payload, invalid, _validated_result = await self._validate_confirmation(
                         confirm_payload, normalized_name, tool_args, session_id,
                     )
                     if invalid:
@@ -837,6 +920,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     ):
                         self._store_auto_confirm(ctx, auto_confirm_key)
                     if confirm_payload.approved:
+                        await self._record_runtime_approval(session_id, tool_call, result, confirmation=confirm_payload)
                         decision = (
                             "allow_always_persist" if confirm_payload.wants_permanent_persist()
                             else "allow_always_session" if confirm_payload.auto_confirm
@@ -887,7 +971,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 metadata=self._build_interrupt_metadata(tool_call, invalid),
             ))
 
-        payload, invalid = await self._validate_confirmation(
+        payload, invalid, confirmed_result = await self._validate_confirmation(
             payload, normalized_name, tool_args, session_id,
         )
         if invalid:
@@ -925,6 +1009,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             self._store_auto_confirm(ctx, auto_confirm_key)
 
         if payload.approved:
+            await self._record_runtime_approval(session_id, tool_call, confirmed_result, confirmation=payload)
             decision = (
                 "allow_always_persist" if payload.wants_permanent_persist()
                 else "allow_always_session" if payload.auto_confirm

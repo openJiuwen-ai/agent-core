@@ -194,8 +194,15 @@ sensitive_paths:
     match: glob
     severity: CRITICAL
     action: deny
-  - id: any_pem
-    path: "**/*.pem"
+  # PEM is also the standard container for public CA certificates (certifi).
+  # Protect private-key names and existing credential directories, not all PEM.
+  - id: any_key_pem
+    path: "**/*key*.pem"
+    match: glob
+    severity: CRITICAL
+    action: deny
+  - id: any_private_pem
+    path: "**/*private*.pem"
     match: glob
     severity: CRITICAL
     action: deny
@@ -246,9 +253,9 @@ sensitive_paths:
     action: ask
 
 # 抓取内置底线（net_guard）：compose / ingest 在 net_guard.enabled 时注入。
-# YAML overlay 不得把 builtin URL 放宽为 allow。仅 allow|deny。
+# 内置 deny 不得被 overlay 放宽；内置 allow 可被显式 ask/deny 收紧。
 net_urls:
   "169.254.169.254": deny
   "metadata.google.internal": deny
-  "localhost": deny
-  "127.0.0.1": deny
+  "localhost": allow
+  "127.0.0.1": allow

@@ -44,6 +44,25 @@ def remember(cfg, args):
     )
 
 
+@pytest.mark.asyncio
+async def test_different_canonical_children_cannot_consume_redirected_child_grants(tmp_path, monkeypatch):
+    from openjiuwen.harness.security.permission_engine.toolguard import tool_policy
+
+    cfg = config()
+    cfg["rules"] = [{"tools": ["bash"], "pattern": "echo approved", "action": "allow"}]
+    remember(cfg, arguments(tmp_path, "echo approved > out.txt"))
+    # A redirect-preserving parse and the canonical parse must identify the
+    # same child before the former can lend its approval to the latter.
+    original = "echo approved > out.txt && git dangerous"
+    canonicalize = tool_policy.canonicalize_shell_command_for_permission
+    monkeypatch.setattr(tool_policy, "canonicalize_shell_command_for_permission", lambda text:
+                        "git dangerous && echo approved" if text == original else canonicalize(text))
+    result = await PermissionEngine(cfg).check_permission("bash", arguments(tmp_path, original))
+    assert result.needs_approval
+    valid = "echo approved > out.txt && echo approved"
+    assert (await PermissionEngine(cfg).check_permission("bash", arguments(tmp_path, valid))).is_allowed
+
+
 def test_children_share_initial_cwd_and_are_deduplicated(tmp_path):
     cfg, args = config(), arguments(tmp_path, "cd repo && git status && git status")
     remember(cfg, args)
@@ -156,7 +175,7 @@ async def test_split_grants_preserve_other_guard_asks_and_sink_check(tmp_path):
 
 
 @pytest.mark.parametrize("command", [
-    "echo hi > out.txt", "echo $(git status)", "for x in a; do git status; done",
+    "echo $(git status)", "for x in a; do git status; done",
     "cmd /c \"git status && git diff\"", "git status &", "git status # comment",
 ])
 def test_unsupported_structures_offer_exact_only(tmp_path, command):
@@ -188,7 +207,7 @@ def test_invalid_or_non_utf8_spans_disable_split_grants(monkeypatch, span):
     parsed = shell_ast.ShellAstParseResult(
         kind="simple", subcommands=(shell_ast.ShellSubcommand(text="中", source_span=span),),
     )
-    monkeypatch.setattr(shell_ast, "parse_shell_for_permission", lambda command: parsed)
+    monkeypatch.setattr(shell_ast, "parse_shell_for_permission", lambda command, **kwargs: parsed)
     assert shell_ast.split_shell_for_grants("中") == ()
 
 
@@ -212,7 +231,8 @@ def test_persistence_sends_one_complete_batch_without_promoting_snapshot_grants(
     assert len(calls) == 1
     saved = calls[0]
     expected = ["cd repo", "git status"] if "&&" in command else [command, command]
-    assert [json.loads(grant["pattern"])["subject"]["command"] for grant in saved] == expected
+    assert [json.loads(grant["pattern"])["subject"]["command"] for grant in saved
+            if json.loads(grant["pattern"])["subject"]["kind"] == "command"] == expected
     assert all(grant["id"] != initial["approval_overrides"][0]["id"] for grant in saved)
     if success:
         assert rail._engine.config["approval_overrides"] == [*initial["approval_overrides"], *saved]
@@ -267,7 +287,7 @@ async def test_single_default_scope_remembers_exact_without_widening_other_calls
         assert not writes and not cfg.get("approval_overrides")
         return
     assert len(writes) == 1
-    assert [grant["match_type"] for grant in writes[0]] == ["shell_subcommand", "exact_operation"]
+    assert [grant["match_type"] for grant in writes[0] if grant["tools"] != ["file_resource"]] == ["shell_subcommand", "exact_operation"]
     assert (await rail._engine.check_permission("bash", {**args, "workdir": str(tmp_path / "elsewhere")})).needs_approval
     combined = {**args, "command": command + " && git status"}
     assert (await rail._engine.check_permission("bash", combined)).needs_approval

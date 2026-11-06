@@ -145,10 +145,16 @@ def _rule_targets_tool(
         tool_name: str,
         r_tools: list[Any],
         permission_config: Mapping[str, Any] | None,
+        *, restrictive: bool = False,
 ) -> bool:
     r_tools_s = [str(x).strip() for x in r_tools if isinstance(x, str) and str(x).strip()]
     if tool_name in r_tools_s:
         return True
+    guard = (permission_config or {}).get("shell_guard")
+    if restrictive and isinstance(guard, Mapping) and guard.get("cross_tool_restrictions") is True:
+        if (_tool_category(tool_name, permission_config) == "shell"
+                and r_tools_s and all(_tool_category(name, permission_config) == "shell" for name in r_tools_s)):
+            return True
     return _CATEGORY_SHELL in r_tools_s and is_shell_tool(
         tool_name, shell_tools_from_config(permission_config),
     )
@@ -242,14 +248,16 @@ def _collect_param_rule_hits(
 ) -> list[tuple[PermissionLevel, str]]:
     """参数级规则命中列表 (level, label)；``label_ns`` 为 ``builtin`` 或 ``rules``。"""
     hits: list[tuple[PermissionLevel, str]] = []
+    restriction_views: tuple[str, ...] | None = None
     for rule in rules:
         if not isinstance(rule, dict):
             continue
+        restrictive = str(rule.get("action") or "").strip().lower() in {"deny", "ask"}
         r_tools = rule.get("tools") or []
         if isinstance(r_tools, str):
             r_tools = [r_tools]
         if not isinstance(r_tools, list) or not _rule_targets_tool(
-                tool_name, r_tools, permission_config,
+                tool_name, r_tools, permission_config, restrictive=restrictive,
         ):
             continue
         r_tools_s = [str(x).strip() for x in r_tools if isinstance(x, str) and str(x).strip()]
@@ -275,7 +283,14 @@ def _collect_param_rule_hits(
         if not tiered_policy_rule_matches(
                 tool_name, pattern, tool_args, r_tools_s, permission_config,
         ):
-            continue
+            if not restrictive or _tool_category(tool_name, permission_config) != "shell":
+                continue
+            from openjiuwen.harness.security.permission_engine.approve.command_identity import restriction_command_views
+
+            if restriction_views is None:
+                restriction_views = restriction_command_views(tool_name, tool_args)
+            if not any(_shell_pattern_matches(pattern, view) for view in restriction_views):
+                continue
         action = rule.get("action")
         if not (isinstance(action, str) and action.strip()):
             logger.debug(
@@ -285,9 +300,7 @@ def _collect_param_rule_hits(
             )
             continue
         dec = _parse_level(action)
-        rid = rule.get("id", "")
-        label = f"{label_ns}[{rid}]" if rid else f"{label_ns}[?]"
-        hits.append((dec, label))
+        hits.append((dec, f"{label_ns}[{rule.get('id') or '?'}]"))
     return hits
 
 
@@ -849,9 +862,13 @@ def evaluate_tiered_policy(
 
         reusable_commands = split_shell_for_grants(original_cmd) if (
             not priority_blocks_override
-            and any(isinstance(g, dict) and g.get("match_type") == "shell_subcommand" for g in approval_overrides)
+            and any(isinstance(g, dict) and (g.get("match_type") == "shell_subcommand"
+                    or g.get("tools") == ["dll_runtime_program"]) for g in approval_overrides)
         ) else ()
-        for subcommand in shell_parse.subcommands:
+        reusable_children = parse_shell_for_permission(original_cmd, preserve_redirects=True).subcommands \
+            if reusable_commands else ()
+        original_children = parse_shell_for_permission(original_cmd).subcommands if reusable_commands else ()
+        for index, subcommand in enumerate(shell_parse.subcommands):
             if not subcommand.text:
                 continue
             sub_args = _with_shell_command(tool_args, subcommand.text)
@@ -860,10 +877,15 @@ def evaluate_tiered_policy(
                 sub_args,
                 command_ctx,
             )
+            grant_command = original_cmd if reusable_commands else None
+            if len(reusable_children) == len(original_children) == len(shell_parse.subcommands):
+                if original_children[index].text == subcommand.text:
+                    grant_command = reusable_children[index].text
             if (
                 sub_permission != PermissionLevel.DENY
-                and subcommand.text in reusable_commands
-                and has_shell_subcommand_grant(permission_config, tool_name, sub_args)
+                and grant_command is not None
+                and has_shell_subcommand_grant(permission_config, tool_name,
+                                              _with_shell_command(tool_args, grant_command))
             ):
                 sub_permission, sub_rule = PermissionLevel.ALLOW, "shell_subcommand_grant"
                 shell_grant_used = True

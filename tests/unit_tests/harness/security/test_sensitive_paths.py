@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths import (
     load_package_sensitive_paths,
     merge_package_sensitive_paths,
@@ -79,3 +81,43 @@ def test_overlay_cannot_widen_package_sensitive_path() -> None:
     assert ssh["read"] == "deny"
     assert ssh["write"] == "deny"
     assert ssh["exec"] == "deny"
+
+
+@pytest.mark.parametrize("name,denied", [("certifi/cacert.pem", False), ("ca-bundle.pem", False),
+                                       ("server-key.pem", True), ("privkey.pem", True),
+                                       ("private.pem", True), (".ssh/certificate.pem", True)])
+def test_public_ca_and_private_key_paths(tmp_path: Path, name: str, denied: bool) -> None:
+    from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+
+    engine = PermissionEngine({"enabled": True, "file_guard": {"enabled": True,
+        "defaults": {"read": "allow", "write": "allow", "exec": "allow"}}}, workspace_root=tmp_path)
+    assert engine.check_file_accesses([(tmp_path / name, "read")]).is_denied is denied
+
+
+def test_public_ca_explicit_deny_is_retained(tmp_path: Path) -> None:
+    from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+
+    ca = tmp_path / "certifi/cacert.pem"
+    engine = PermissionEngine({"enabled": True, "file_guard": {"enabled": True,
+        "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+        "paths": [{"path": str(ca), "read": "deny"}]}}, workspace_root=tmp_path)
+    assert engine.check_file_accesses([(ca, "read")]).is_denied
+
+
+@pytest.mark.parametrize("action", ["read", "write", "exec"])
+@pytest.mark.parametrize("name", ["server-key.pem", "private.pem", ".ssh/certificate.pem"])
+def test_protected_pem_paths_deny_every_axis(tmp_path: Path, name: str, action: str) -> None:
+    from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+
+    engine = PermissionEngine({"enabled": True, "file_guard": {"enabled": True,
+        "defaults": {"read": "allow", "write": "allow", "exec": "allow"}}}, workspace_root=tmp_path)
+    assert engine.check_file_accesses([(tmp_path / name, action)]).is_denied
+
+
+@pytest.mark.parametrize("decision", ["allow", "ask", "deny"])
+def test_other_pem_files_follow_configured_policy(tmp_path: Path, decision: str) -> None:
+    from openjiuwen.harness.security.permission_engine.core import PermissionEngine
+
+    engine = PermissionEngine({"enabled": True, "file_guard": {"enabled": True,
+        "defaults": {"read": decision, "write": "allow", "exec": "allow"}}}, workspace_root=tmp_path)
+    assert engine.check_file_accesses([(tmp_path / "bundle.pem", "read")]).permission.value == decision

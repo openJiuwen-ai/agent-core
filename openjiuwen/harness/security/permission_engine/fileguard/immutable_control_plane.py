@@ -102,7 +102,26 @@ class ImmutableControlPlaneGuard:
             workspace,
             self._permission_config,
         )
-        for path, action, _source in accesses:
+        return self._evaluate_accesses([(path, action) for path, action, _source in accesses])
+
+    def evaluate_accesses(self, accesses: Sequence[tuple[Path, str]]) -> PermissionResult | None:
+        """Check concrete resources without parsing a synthetic tool call."""
+        for path, action in accesses:
+            if not isinstance(path, Path) or not path.is_absolute():
+                raise ValueError("Runtime control-plane access requires an absolute Path")
+            if action not in {"read", "write", "exec", "delete"}:
+                raise ValueError(f"Unsupported runtime control-plane action: {action}")
+        pending = None
+        for access in accesses:
+            result = self._evaluate_accesses([access])
+            if result is not None:
+                if result.is_denied:
+                    return result
+                pending = pending or result
+        return pending
+
+    def _evaluate_accesses(self, accesses: Sequence[tuple[Path, str]]) -> PermissionResult | None:
+        for path, action in accesses:
             if action not in {"write", "exec", "delete"}:
                 continue
             canonical = _canonical(path)

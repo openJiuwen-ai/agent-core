@@ -407,9 +407,12 @@ def _path_aware_one_segment(
     new_cwd: Path | None = None
 
     if cmd0 in _TRANSFER_CMDS and len(path_tokens) >= 2:
-        results.append((path_tokens[0][0], "read"))
-        for p, _ in path_tokens[1:]:
-            results.append((p, "write"))
+        for p, _ in path_tokens[:-1]:
+            results.append((p, "read"))
+            if cmd0 in {"mv", "move"}:
+                # Moving removes each source; policy checks delete on the write axis.
+                results.append((p, "delete"))
+        results.append((path_tokens[-1][0], "write"))
     elif cmd0 in _DELETE_CMDS:
         for p, _ in path_tokens:
             results.append((p, "delete"))

@@ -38,8 +38,8 @@ async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, host
                               {"command": "cat ./other.txt", "workdir": str(tmp_path)}, "subcommands"),
         "single_url_shell": ("bash", {"command": "curl https://api.example.co.uk/a", "workdir": str(tmp_path)},
                              {"command": "curl https://api.example.co.uk/b", "workdir": str(tmp_path)}, "subcommands"),
-        "unsupported": ("bash", {"command": "echo A > a.txt", "workdir": str(tmp_path)},
-                        {"command": "echo B > a.txt", "workdir": str(tmp_path)}, "exact"),
+        "unsupported": ("bash", {"command": "echo $(printf A) > a.txt", "workdir": str(tmp_path)},
+                        {"command": "echo $(printf B) > a.txt", "workdir": str(tmp_path)}, "exact"),
     }[kind]
     fields = {
         "omitted": {}, "exact": {"authorization_scope": "exact"}, "allow": {"authorization_mode": "allow"},
@@ -75,6 +75,9 @@ async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, host
     assert len(writes) == 1
     expected = "exact" if reply in {"exact", "allow"} else default
     grants = cfg["approval_overrides"]
+    resources = [grant for grant in grants if grant["tools"] == ["file_resource"]]
+    assert len(resources) == int(kind in {"file", "single_file_shell"})
+    grants = [grant for grant in grants if grant["tools"] != ["file_resource"]]
     assert len(grants) == (2 if expected == "subcommands" else 1)
     assert all(json.loads(grant["pattern"])["scope"] == (
         "exact" if expected == "subcommands" else expected
