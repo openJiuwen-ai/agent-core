@@ -26,6 +26,14 @@ from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import Evolutio
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.rails.skills.skill_authorization_rail import SkillAuthorizationRail
+from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.skill_authorization import (
+    SkillGrantStore,
+    compose_skill_permissions,
+    get_skill_authorization_context,
+)
 from openjiuwen.harness_protocol import (
     DynamicToolCallRequest,
     DynamicToolCallResponse,
@@ -99,9 +107,9 @@ async def runner():
 
 
 async def _turn(tmp_path, host: Host, capabilities, *, tools=(), rails=(), permissions=None, first_call=None,
-                workflows=()):
+                workflows=(), followups=()):
     llm = MockLLMModel()
-    llm.set_responses([first_call, create_text_response("done")])
+    llm.set_responses([first_call, *followups, create_text_response("done")])
 
     def factory(_ctx):
         agent = make_deep_agent(tmp_path, tools=list(tools), rails=list(rails), permissions=permissions)
@@ -147,6 +155,59 @@ async def test_d_permission_ask_reaches_the_host_as_a_tool_approval(tmp_path, ru
     assert request.request_id == request.provider_data["interrupt_id"] != "call_D"
     assert request.provider_data["kind"] == InterruptKind.PERMISSION
     assert tool.invoke_count == 1 and result.final_output == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_skill_authorization_host_approval_lifecycle(tmp_path, runner, approved):
+    skill = tmp_path / "probe"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: probe\ndescription: probe\n---\nUnique skill body")
+    (skill / "skill_permissions.json").write_text(
+        '{"permissions":{"rules":[{"pattern":"cat ./probe.txt","action":"allow"}]}}'
+    )
+    policy = ask_permissions("bash")
+    policy["skill_authorization"] = {"enabled": True}
+    store = SkillGrantStore()
+    observed = []
+
+    class PermissionProbe(CountingTool):
+        async def invoke(self, inputs, **kwargs):
+            scope = get_skill_authorization_context()
+            grant = store.get_active(scope.session_id, scope.agent_scope_id)
+            config = compose_skill_permissions(policy, grant.overlay_snapshot) if grant else policy
+            result = await PermissionEngine(config).check_permission("bash", {"command": "cat ./probe.txt"})
+            observed.append((grant is not None, result.is_allowed))
+            return await super().invoke(inputs, **kwargs)
+
+    def decide(request):
+        decision = ToolApprovalDecision.ALLOW if approved else ToolApprovalDecision.DENY
+        return ToolApprovalResponse(request_id=request.request_id, decision=decision)
+
+    host = Host(decide)
+    result, llm = await _turn(
+        tmp_path, host, ALL_CAPS,
+        tools=[CountingTool("skill_complete"), PermissionProbe("permission_probe")],
+        rails=[SkillUseRail(str(tmp_path)), SkillAuthorizationRail(
+            engine=PermissionEngine(policy), grant_store=store, config_provider=lambda: policy,
+            skill_resolver=lambda _: (skill, "test", "1"),
+        )],
+        first_call=create_tool_call_response("skill_tool", '{"skill_name":"probe"}', tool_call_id="load"),
+        followups=[
+            create_tool_call_response("permission_probe", "{}", tool_call_id="active"),
+            create_tool_call_response("skill_complete", "{}", tool_call_id="complete"),
+            create_tool_call_response("permission_probe", "{}", tool_call_id="inactive"),
+        ],
+    )
+    [request] = host.requests
+    assert isinstance(request, ToolApprovalRequest)
+    assert request.provider_data["kind"] == InterruptKind.SKILL_AUTHORIZATION
+    schema = request.provider_data["value"]["payload_schema"]
+    assert "reject" in schema["properties"]["action"]["enum"]
+    expected = "Unique skill body" if approved else "拒绝加载 Skill"
+    assert expected in str(tool_results_seen(llm))
+    assert observed == [(approved, approved), (False, False)]
+    assert result.final_output == "done"
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,8 @@ import pytest
 from openjiuwen.harness.security import literal_shell
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.models import PermissionLevel
+from openjiuwen.harness.security.permission_engine.fileguard.file_guard import extract_paths_legacy
+from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
 from openjiuwen.harness.security.skill_authorization import compose_skill_permissions
 from openjiuwen.harness.security.permission_engine.toolguard import tool_policy
 
@@ -303,3 +305,55 @@ async def test_legacy_path_checks_are_supplemented_not_replaced(tmp_path):
         "command": f"cd ./ && python3 probe.py --out {tmp_path / 'outside.json'}",
     })
     assert result.is_denied
+
+
+@pytest.mark.parametrize(("tool", "shell"), [
+    ("bash", {"shell_type": "cmd"}),
+    ("bash", {"shell_type": "powershell"}),
+    ("powershell", {}),
+    ("core.powershell", {"shell_type": "auto"}),
+])
+def test_non_posix_shells_keep_legacy_and_native_evidence(tmp_path, tool, shell):
+    args = {"command": "cd ./sub && python3 probe.py", **shell}
+    policy = config()
+    policy["tools"][tool] = "ask"
+    for rule in policy["rules"]:
+        rule["tools"] = [tool]
+    assert tool_policy._literal_policy_result(policy, tool, args) is None
+    disabled = {**policy, "skill_authorization": {"enabled": False}}
+    for extract in (extract_paths_legacy, extract_accesses_native):
+        assert extract(tool, args, tmp_path, policy) == extract(tool, args, tmp_path, disabled)
+
+
+@pytest.mark.parametrize("command", ["PYTHON", "Python3", "python.exe", "PYTHON -c 'print(1)'"])
+def test_incomplete_interpreter_calls_do_not_add_literal_path_evidence(tmp_path, command):
+    assert literal_shell.parse_literal_shell(command) is None
+    args = {"command": command}
+    assert extract_paths_legacy("bash", args, tmp_path, config()) == []
+    assert extract_accesses_native("bash", args, tmp_path, config()) == []
+
+
+@pytest.mark.parametrize("launcher", ["pwsh -Command", "cmd.exe /c"])
+def test_non_posix_launchers_keep_existing_path_evidence(tmp_path, launcher):
+    args = {"command": f"{launcher} 'cd ./sub && python3 probe.py'"}
+    policy = config()
+    assert literal_shell.parse_literal_shell(args["command"]) is None
+    disabled = {**policy, "skill_authorization": {"enabled": False}}
+    for extract in (extract_paths_legacy, extract_accesses_native):
+        assert extract("bash", args, tmp_path, policy) == extract("bash", args, tmp_path, disabled)
+
+
+def test_legacy_literal_paths_are_added_once_without_discarding_existing_checks(tmp_path):
+    args = {"command": "cd ./sub && cat ./input.txt"}
+    assert extract_paths_legacy("bash", args, tmp_path, config()) == [
+        tmp_path / "sub", tmp_path / "input.txt", tmp_path / "sub" / "input.txt",
+    ]
+
+
+def test_full_command_deny_reports_its_own_rule_without_the_command_body():
+    policy = config()
+    policy["rules"].append({"id": "body", "tools": ["bash"], "pattern": "re:blocked_body", "action": "deny"})
+    command = "python3 probe.py <<'EOF'\nblocked_body\nEOF"
+    level, matched = tool_policy._literal_policy_result(policy, "bash", {"command": command})
+    assert level == PermissionLevel.DENY
+    assert ":full_command:" in matched and "rules[body]" in matched and "blocked_body" not in matched
