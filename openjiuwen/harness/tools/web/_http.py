@@ -32,7 +32,7 @@ def _make_connector() -> aiohttp.TCPConnector:
     """Build a TCP connector honoring the SSL-verify configuration.
 
     ``ssl=True`` uses aiohttp's default verification (equivalent to requests
-    ``verify=True``); ``ssl=False`` disables it (default, for intranet usage).
+    ``verify=True``); ``ssl=False`` disables it when explicitly configured.
     """
     if _free_search_ssl_verify():
         return aiohttp.TCPConnector(ssl=True)
@@ -129,6 +129,7 @@ async def request(
     json_body: dict[str, Any] | None = None,
     timeout_seconds: float,
     max_bytes: int | None = None,
+    proxy_url: str | None = None,
 ) -> tuple[int, dict[str, str], bytes, str, bool]:
     """Perform an HTTP request, retrying without env proxies on a proxy error.
 
@@ -140,12 +141,15 @@ async def request(
         json_body: Optional JSON request body (POST).
         timeout_seconds: Total timeout budget; also used for the read phase.
         max_bytes: Optional byte ceiling for the response body.
+        proxy_url: Optional task-scoped proxy.  When omitted, the existing
+            WEB_PROXY_URL/FREE_SEARCH_PROXY_URL environment configuration is
+            used.
 
     Returns:
         A tuple of (status, headers, body bytes, final URL, truncated flag).
     """
     method_up = method.upper()
-    proxy = _resolve_proxy(url)
+    proxy = _resolve_proxy(url, proxy_url)
     from openjiuwen.core.common.security.outbound import outbound_permission_key
 
     if outbound_permission_key() is not None:
@@ -154,7 +158,7 @@ async def request(
         from openjiuwen.core.common.security.outbound_http import aiohttp_request
 
         def scoped_proxy(target_url):
-            explicit = _resolve_proxy(target_url)
+            explicit = _resolve_proxy(target_url, proxy_url)
             if explicit is not None:
                 return explicit
             try:
