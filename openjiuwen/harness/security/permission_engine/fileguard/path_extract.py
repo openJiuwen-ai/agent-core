@@ -460,20 +460,30 @@ def _shell_segment_accesses(
     part, new_cwd = _path_aware_one_segment(
         segment, cwd, include_cd_reads=include_cd_reads, shell_type=shell_type,
     )
+    tokens, redirects = _segment_tokens(segment, shell_type)
     if shell_extras:
-        tokens, redirects = _segment_tokens(segment, shell_type)
         for tok, action in [(tok, "exec") for tok in _interpreter_operands(tokens)] + redirects:
             path = _resolve_shell_operand(tok, cwd, shell_type, bare=True)
             if path is not None:
                 part.append((path, action))
-        inline = _literal_shell_inline(tokens)
-        if inline is not None:
-            if depth >= _MAX_INLINE_DEPTH:
-                _raise_analysis_limit("inline shell depth limit")
-            part.extend(_extract_segment_accesses(
-                inline, cwd, include_cd_reads=include_cd_reads, shell_type="sh", shell_extras=True,
-                depth=depth + 1, budget=budget,
-            ))
+    inline, child_shell = _literal_shell_inline(tokens), "sh"
+    if inline is None and tokens:
+        launcher = _basename_lower(tokens[0].strip('"').strip("'"))
+        if launcher in {"cmd", "powershell", "pwsh"}:
+            peeled = canonicalize_shell_command_for_permission(segment)
+            if peeled != segment:
+                inline = peeled
+                child_shell = "cmd" if launcher == "cmd" else "powershell"
+    if inline is not None:
+        if depth >= _MAX_INLINE_DEPTH:
+            _raise_analysis_limit("inline shell depth limit")
+        part.extend(_extract_segment_accesses(
+            inline, cwd, include_cd_reads=include_cd_reads,
+            shell_type=child_shell, shell_extras=shell_extras,
+            depth=depth + 1, budget=budget,
+        ))
+        # Each interpreter owns its cwd; only its resource effects reach the parent.
+        new_cwd = None
     return part, new_cwd
 
 
@@ -567,7 +577,6 @@ def extract_path_aware_command_accesses(
     if not command or not isinstance(command, str):
         return []
     shell_type = _shell_profiles(command, shell_type)[0]
-    command = canonicalize_shell_command_for_permission(command)
     return _extract_segment_accesses(
         command, workdir, include_cd_reads=include_cd_reads, shell_type=shell_type, shell_extras=False,
     )
@@ -590,7 +599,6 @@ def extract_shell_path_accesses(
         last_quote = command.rfind('"')
         if command.startswith('"') and last_quote > 0:
             command = command[1:last_quote] + command[last_quote + 1:]
-    command = canonicalize_shell_command_for_permission(command)
     return _extract_segment_accesses(
         command, workdir, include_cd_reads=include_cd_reads, shell_type=shell_type, shell_extras=True,
     )

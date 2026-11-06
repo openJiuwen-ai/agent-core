@@ -35,7 +35,11 @@ the executor's shell selection predicates, so cmd switches `/b`, `/s` and `/d` a
 Bash/Sh expands unquoted `~`; unresolved variables are not literal directories. Only a single valid `cd` operand
 advances cwd. Conditional branches and pipelines retain possible directories and can be more conservative than
 execution. Extraction is bounded to 128 cwd candidates and 1024 segment/cwd checks, shared across literal Bash/Sh
-`-c` recursion (maximum depth 4); a child shell does not change its parent's cwd. Limits raise a tagged framework
+`-c` recursion (maximum depth 4); a child shell does not change its parent's cwd. Literal CMD `/c` and
+PowerShell `-Command` wrappers are also analyzed recursively with the child's dialect and a separate cwd.
+For example, `cmd /c "cd child && type inside.txt" && cat ./outside.txt` checks `outside.txt` relative to
+the parent directory. Both basic path extraction and extraction of scripts/redirections preserve this boundary.
+Limits raise a tagged framework
 error that `check_permission()` converts to DENY with rule `file_guard:analysis_limit`. Operands following unknown
 options are conservatively checked as possible scripts. Dynamic inline code, module resolution and file access
 inside scripts still require appropriate runtime protection.
