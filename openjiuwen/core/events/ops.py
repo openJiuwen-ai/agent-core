@@ -23,13 +23,11 @@ class EventHandlerOpsBuilder:
         self._catalog: dict[str, dict[str, OpsMethod]] = {}
 
     def add_namespace(self, namespace: str) -> None:
-        """Add an empty capability namespace."""
+        """Register a capability namespace, keeping methods already contributed to it."""
         self._validate_name(namespace, "namespace")
         if hasattr(EventHandlerOps, namespace):
             raise_error(StatusCode.EVENTS_OPS_INVALID, reason=f"namespace conflicts with ops attribute: {namespace}")
-        if namespace in self._catalog:
-            raise_error(StatusCode.EVENTS_OPS_INVALID, reason=f"duplicate namespace: {namespace}")
-        self._catalog[namespace] = {}
+        self._catalog.setdefault(namespace, {})
 
     def add_method(
         self,
@@ -61,6 +59,16 @@ class EventHandlerOpsBuilder:
         if session_context is not None and not isinstance(session_context, SessionContext):
             raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="session_context must be SessionContext or None")
         return EventHandlerOps(self._catalog, package_metadata, session_context)
+
+    def build_core(
+        self,
+        session_context: SessionContext | None,
+        trigger_context: object | None,
+    ) -> EventHandlerOps:
+        """Build the CORE view, exposing trigger context and no package identity."""
+        if session_context is not None and not isinstance(session_context, SessionContext):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="session_context must be SessionContext or None")
+        return _CoreEventHandlerOps(self._catalog, session_context, trigger_context)
 
     @staticmethod
     def _validate_name(name: str, kind: str) -> None:
@@ -101,6 +109,17 @@ class EventHandlerOps:
         if namespace not in self._catalog:
             raise_error(StatusCode.EVENTS_OPS_INVALID, reason=f"unknown namespace: {namespace}")
         return _OpsNamespace(self, self._catalog[namespace])
+
+
+class _CoreEventHandlerOps(EventHandlerOps):
+    def __init__(
+        self,
+        catalog: Mapping[str, Mapping[str, OpsMethod]],
+        session_context: SessionContext | None,
+        trigger_context: object | None,
+    ) -> None:
+        super().__init__(catalog, None, session_context)
+        self.trigger_context = trigger_context
 
 
 class _OpsNamespace:

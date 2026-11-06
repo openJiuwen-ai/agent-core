@@ -9,7 +9,23 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ValidationError
+from openjiuwen.core.events import (
+    OPS_BUILD_EVENT_TYPE,
+    Event,
+    EventHandlerOps,
+    EventHandlerOpsBuilder,
+    EventNext,
+    ExtensionEventBus,
+)
+from openjiuwen.core.events.builtins.event_types.agent_spawn import (
+    AGENT_SPAWN,
+    AgentSpawnInput,
+    AgentSpawnOutput,
+)
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
@@ -112,6 +128,122 @@ async def test_subagent_spawn_delegates_to_control() -> None:
     assert result.data["sub_session_id"] == "parent_sub_explore"
     assert result.data["status"] == SubagentStatusKind.PENDING_INIT.value
     assert "output" not in result.data
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_uses_event_rewrite_and_preserves_private_task_id() -> None:
+    tool = SubagentSpawnTool(
+        ToolCard(id="subagent_spawn", name="subagent_spawn", description="spawn"),
+        _parent(),
+        allowed_subagent_types={"explore_agent"},
+    )
+    control = _control_mock(
+        spawn=AsyncMock(
+            return_value=SpawnResult(
+                subagent_id="parent_sub_explore",
+                task_id="task-private",
+                status=SubagentStatus.pending_init(),
+            ),
+        ),
+    )
+    session = Session(session_id="parent_sess")
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    assert isinstance(builder, EventHandlerOpsBuilder)
+
+    async def rewrite(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> object:
+        del ops
+        request = event.event_input
+        assert isinstance(request, AgentSpawnInput)
+        return await event_next(
+            Event(
+                AGENT_SPAWN,
+                AgentSpawnInput(
+                    subagent_type=request.subagent_type,
+                    task_description="rewritten task",
+                    display_name="Rewritten Explorer",
+                    role="reviewer",
+                ),
+            )
+        )
+
+    bus.register_event_handler(AGENT_SPAWN, rewrite, {})
+    Runner.set_extension_bus(bus)
+    try:
+        with patch(
+            "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control",
+            return_value=control,
+        ):
+            output = await tool.invoke(
+                {
+                    "subagent_type": "explore_agent",
+                    "task_description": "original task",
+                    "display_name": "Explorer",
+                    "role": "researcher",
+                },
+                session=session,
+            )
+    finally:
+        Runner.set_extension_bus(None)
+
+    control.spawn.assert_awaited_once_with(
+        "explore_agent",
+        "rewritten task",
+        display_name="Rewritten Explorer",
+        role="reviewer",
+        browser_capabilities=None,
+    )
+    assert output.data == {
+        "subagent_id": "parent_sub_explore",
+        "sub_session_id": "parent_sub_explore",
+        "task_id": "task-private",
+        "status": SubagentStatusKind.PENDING_INIT.value,
+    }
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_rejects_short_circuit_without_replaying_spawn() -> None:
+    tool = _spawn_tool()
+    control = _control_mock()
+    session = Session(session_id="parent_sess")
+    bus = ExtensionEventBus()
+    builder = await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, None))
+    assert isinstance(builder, EventHandlerOpsBuilder)
+
+    async def short_circuit(
+        event: Event,
+        ops: EventHandlerOps | None,
+        event_next: EventNext,
+    ) -> AgentSpawnOutput:
+        del event, ops, event_next
+        return AgentSpawnOutput(subagent_id="forged", status="pending_init")
+
+    bus.register_event_handler(AGENT_SPAWN, short_circuit, {})
+    Runner.set_extension_bus(bus)
+    try:
+        with patch(
+            "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control",
+            return_value=control,
+        ):
+            with pytest.raises(ValidationError) as invalid:
+                await tool.invoke(
+                    {
+                        "subagent_type": "explore_agent",
+                        "task_description": "task",
+                        "display_name": "Explorer",
+                        "role": "researcher",
+                    },
+                    session=session,
+                )
+    finally:
+        Runner.set_extension_bus(None)
+
+    assert invalid.value.status is StatusCode.EVENTS_STATE_INVALID
+    control.spawn.assert_not_awaited()
 
 
 @pytest.mark.asyncio

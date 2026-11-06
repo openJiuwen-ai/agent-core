@@ -729,7 +729,7 @@ sequenceDiagram
 
 本例只说明 prompt.submit 处理中可以调用工具，不要求所有 prompt.submit 都执行工具。原 Handler 会等待工具事件返回，因此这是嵌套调用。工具新链失败时，错误返回给发起方，按能力与 Handler 的约定处理。
 
-如果 tool.call Handler 再次调用 tool.call 动词，会新建同类事件链，可能递归进入自己；它不会替代当前 next。Core 当前不限制这种重入，宿主和能力实现按第 6.2 节增加保护。
+如果 tool.call Handler 再次调用 tool.call 动词，会新建同类事件链；它不会替代当前 next。新链匹配时会排除调用栈上正在运行的 Handler（见第 6.2 节），因此该 Handler 自身不会被再次进入，其余匹配 Handler 和 CORE 照常执行。
 
 ### 5.5 平台与个人扩展的接入方式
 
@@ -967,7 +967,9 @@ EventBus 在 trigger 的 await 调用链中直接等待 Handler，不把它另�
 
 动词方法发起新的事件调用，原 Handler 等待它结束。同类事件反复触发、或多个事件互相触发，都可能使嵌套调用无限循环。
 
-当前没有父子调用跟踪、嵌套深度或重入限制。宿主与具体 OpsMethod 应根据真实业务增加超时、深度、配额或幂等保护，不能依赖 Python 递归上限保护系统。彼此独立的同类型调用可以并发。
+Bus 以 asyncio Task 为单位记录调用栈上所有正在运行的 Handler；嵌套 `trigger()` 在入口匹配时将它们从匹配结果中排除，之后按既有 pass-through 路径跳过，不构建 Ops、不记日志。排除覆盖整条栈而非仅栈顶：A → B → 再次触发匹配 A 的事件时 A 与 B 均被跳过，避免两者交替放行形成乒乓递归。Handler 自环与互递归因此在首次嵌套即到达 CORE。该集合随 `asyncio.create_task` 复制，Handler 派生的任务同样不会再次进入它。
+
+Bus 不提供嵌套深度、调用配额或超时上限。宿主与具体 OpsMethod 应根据真实业务增加超时、配额或幂等保护，不能依赖 Python 递归上限保护系统。彼此独立的同类型调用可以并发，互不影响对方的活跃 Handler 集合。
 
 ### 6.3 完成与结果交接
 

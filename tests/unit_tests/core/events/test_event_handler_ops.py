@@ -33,11 +33,6 @@ def _sync_method(ops: EventHandlerOps) -> None:
     del ops
 
 
-def _add_duplicate_namespace(builder: EventHandlerOpsBuilder) -> None:
-    builder.add_namespace("tool")
-    builder.add_namespace("tool")
-
-
 class _BusinessFailure(Exception):
     """Representative extension business failure."""
 
@@ -83,7 +78,6 @@ async def test_ops_happy_path_and_context_isolation() -> None:
         ("method", "not-valid"),
         ("method", "class"),
         ("method", "_private"),
-        ("duplicate_namespace", "tool"),
         ("duplicate_method", "call"),
         ("missing_namespace", "call"),
         ("sync_method", "call"),
@@ -91,7 +85,7 @@ async def test_ops_happy_path_and_context_isolation() -> None:
 )
 def test_builder_rejects_invalid_registration(operation: str, name: object) -> None:
     builder = EventHandlerOpsBuilder()
-    if operation not in {"namespace", "duplicate_namespace"}:
+    if operation != "namespace":
         builder.add_namespace("tool")
     if operation == "duplicate_method":
         builder.add_method("tool", "call", _noop)
@@ -99,7 +93,6 @@ def test_builder_rejects_invalid_registration(operation: str, name: object) -> N
     actions: dict[str, Callable[[], None]] = {
         "namespace": lambda: builder.add_namespace(name),  # type: ignore[arg-type]
         "method": lambda: builder.add_method("tool", name, _noop),  # type: ignore[arg-type]
-        "duplicate_namespace": lambda: _add_duplicate_namespace(builder),
         "duplicate_method": lambda: builder.add_method("tool", "call", _noop),
         "missing_namespace": lambda: builder.add_method("missing", "call", _noop),
         "sync_method": lambda: builder.add_method("tool", "call", _sync_method),  # type: ignore[arg-type]
@@ -107,6 +100,18 @@ def test_builder_rejects_invalid_registration(operation: str, name: object) -> N
 
     with pytest.raises(ValidationError) as invalid:
         actions[operation]()
+    assert invalid.value.status is StatusCode.EVENTS_OPS_INVALID
+
+
+def test_shared_namespace_keeps_contributed_methods_unique() -> None:
+    builder = EventHandlerOpsBuilder()
+    builder.add_namespace("tool")
+    builder.add_method("tool", "call", _noop)
+    builder.add_namespace("tool")
+    builder.add_method("tool", "list", _noop)
+
+    with pytest.raises(ValidationError) as invalid:
+        builder.add_method("tool", "call", _noop)
     assert invalid.value.status is StatusCode.EVENTS_OPS_INVALID
 
 

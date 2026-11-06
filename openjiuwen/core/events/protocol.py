@@ -73,6 +73,8 @@ class ExtensionEventBusProtocol(Protocol):
         self,
         event: Event,
         session: Session | SessionContext | None = None,
+        *,
+        trigger_context: object | None = None,
     ) -> EventOutput | None:
         """Dispatch through matched handlers."""
         ...

@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.events import Event
+from openjiuwen.core.events.builtins.event_types.agent_spawn import (
+    AGENT_SPAWN,
+    AgentSpawnInput,
+    AgentSpawnOutput,
+    AgentSpawnTriggerContext,
+)
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
+from openjiuwen.core.runner import Runner
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.prompts.tools.subagent_tools import SUBAGENT_RESUME_IDLE_MESSAGE
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
@@ -159,23 +167,55 @@ class SubagentSpawnTool(Tool):
                 ),
             )
 
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        session = kwargs.get("session")
+        control = get_subagent_control(self._parent_agent, session)
         browser_capabilities = _parse_browser_capabilities(payload, normalized_type)
-        result = await control.spawn(
-            normalized_type,
-            str(task_description),
-            display_name=str(display_name),
-            role=str(role),
-            browser_capabilities=browser_capabilities,
-        )
-        await control.emit_status_update(result.subagent_id, session=kwargs.get("session"))
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            result = await control.spawn(
+                normalized_type,
+                str(task_description),
+                display_name=str(display_name),
+                role=str(role),
+                browser_capabilities=browser_capabilities,
+            )
+            await control.emit_status_update(result.subagent_id, session=session)
+            subagent_id = result.subagent_id
+            status = result.status.kind.value
+        else:
+            context = AgentSpawnTriggerContext(
+                control=control,
+                allowed_subagent_types=self._allowed_subagent_types,
+                browser_capabilities=browser_capabilities,
+            )
+            output = await bus.trigger(
+                Event(
+                    AGENT_SPAWN,
+                    AgentSpawnInput(
+                        subagent_type=normalized_type,
+                        task_description=str(task_description),
+                        display_name=str(display_name),
+                        role=str(role),
+                    ),
+                ),
+                session,
+                trigger_context=context,
+            )
+            if not isinstance(output, AgentSpawnOutput) or context.raw_result is None:
+                raise build_error(
+                    StatusCode.EVENTS_STATE_INVALID,
+                    reason="agent.spawn did not create a subagent",
+                )
+            result = context.raw_result
+            subagent_id = output.subagent_id
+            status = output.status
         return ToolOutput(
             success=True,
             data={
-                "subagent_id": result.subagent_id,
-                "sub_session_id": result.subagent_id,
+                "subagent_id": subagent_id,
+                "sub_session_id": subagent_id,
                 "task_id": result.task_id,
-                "status": result.status.kind.value,
+                "status": status,
             },
         )
 

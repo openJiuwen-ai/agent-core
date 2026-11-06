@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import (
+from tests.unit_tests.core.extension.conftest import (
     BUSINESS_EVENT,
     echo_core_handler,
     match_event_input,
@@ -206,12 +206,23 @@ from pathlib import Path
 from openjiuwen.core.events import ExtensionEventBus
 from openjiuwen.core.extension import Registry
 
+BUSINESS_EVENT = "business.event"
+
+def match_event_input(event_input, match_pattern):
+    if not match_pattern:
+        return True
+    return isinstance(event_input, dict) and all(
+        event_input.get(key) == value for key, value in match_pattern.items()
+    )
+
+async def echo_core_handler(event, ops, next_handler):
+    del ops, next_handler
+    return ("core", event.event_input)
+
 async def main():
     root, domain, ready, stop = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
     bus = ExtensionEventBus()
-    async def core(event, ops, next_handler):
-        return None
-    bus.register_event_type("tool.call", lambda value, pattern: True, core)
+    bus.register_event_type(BUSINESS_EVENT, match_event_input, echo_core_handler)
     registry = Registry()
     await registry.init(bus)
     await registry.open_install_dir(root, report_path=root.parent / "report.yaml", domain=domain,

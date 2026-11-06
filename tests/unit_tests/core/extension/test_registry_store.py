@@ -26,7 +26,7 @@ _BODY = (
     "    def register(self, registrar):\n"
     "        async def handler(event, ops, next_handler):\n"
     "            return await event.event_input['action'](ops)\n"
-    "        registrar.register_event_handler('tool.call', handler, {}, 'user')\n"
+    f"        registrar.register_event_handler('{BUSINESS_EVENT}', handler, {{}}, 'user')\n"
 )
 
 

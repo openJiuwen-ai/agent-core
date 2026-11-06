@@ -6,13 +6,14 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from openjiuwen.core.events.builtins.event_types.tool_call import ToolCallEventInput
 from openjiuwen.core.events.bus import ExtensionEventBus
 from openjiuwen.core.events.types import OPS_BUILD_EVENT_TYPE, Event
 from openjiuwen.core.extension.registry import Registry
 from openjiuwen.core.extension.schema.manifest import ExtensionDecl, Manifest, PackageDependency
 from openjiuwen.core.extension.schema.records import ActivePackageRecord
 
-BUSINESS_EVENT = "tool.call"
+BUSINESS_EVENT = "business.event"
 
 
 def make_manifest(
@@ -145,3 +146,22 @@ async def call_business_event(
 ) -> object:
     """Trigger the business event and return what the chain produced."""
     return await bus.trigger(Event(BUSINESS_EVENT, dict(payload or {"tool": "Bash"})))
+
+
+def make_tool_call_event(
+    tool_name: str = "Bash",
+    *,
+    tool_call_id: str = "extension-test-call",
+    arguments: object | None = None,
+) -> Event:
+    """Build a ``tool.call`` event that passes builtin input validation."""
+    return Event(
+        "tool.call",
+        (
+            ToolCallEventInput(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments={} if arguments is None else arguments,
+            ),
+        ),
+    )

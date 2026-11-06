@@ -7,6 +7,7 @@ import asyncio
 import copy
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from contextlib import AbstractAsyncContextManager, ExitStack, aclosing, contextmanager, suppress
 import warnings
@@ -19,6 +20,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Tuple,
     cast,
@@ -28,7 +30,7 @@ import anyio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
@@ -42,6 +44,15 @@ from openjiuwen.core.controller.schema.event import (
     TaskInteractionEvent,
 )
 from openjiuwen.core.controller.schema.task import TaskStatus
+from openjiuwen.core.events.builtins.event_types.turn import (
+    TURN_COMPLETE,
+    TURN_START,
+    TurnCompleteInput,
+    TurnCompleteOutput,
+    TurnStartInput,
+    TurnStartOutput,
+)
+from openjiuwen.core.events.types import Event
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
@@ -84,6 +95,7 @@ from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
     DeepAgentState,
+    TurnState,
 )
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.task_loop.loop_coordinator import (
@@ -1914,7 +1926,10 @@ class DeepAgent(BaseAgent):
         )
 
     @staticmethod
-    def _to_effective_inputs(invoke_inputs: InvokeInputs) -> Dict[str, Any]:
+    def _to_effective_inputs(
+        invoke_inputs: InvokeInputs,
+        turn_state: TurnState | None = None,
+    ) -> Dict[str, Any]:
         """Convert typed invoke inputs to ReAct input dict."""
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
@@ -1937,6 +1952,8 @@ class DeepAgent(BaseAgent):
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:
             effective_inputs["run_context"] = invoke_inputs.run_context
+        if turn_state is not None:
+            effective_inputs["_turn_state"] = turn_state
         return effective_inputs
 
     @staticmethod
@@ -2488,7 +2505,10 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        effective_inputs = self._to_effective_inputs(modified)
+        effective_inputs = self._to_effective_inputs(
+            modified,
+            ctx.extra.get("_turn_state"),
+        )
         steering_queue = ctx.steering_queue
         if steering_queue is None:
             steering_queue = asyncio.Queue()
@@ -2681,6 +2701,127 @@ class DeepAgent(BaseAgent):
         )
         self._write_runtime_state(session, loaded)
         return loaded
+
+    def _start_turn(self, session: Session) -> TurnState:
+        """Start a new logical turn on the session runtime state.
+
+        Turn identity is written to the session checkpoint when the
+        outer invoke/stream/run_one_round path exits (``save_state``).
+        """
+        state = self.load_state(session)
+        turn = TurnState(turn_id=uuid.uuid4().hex)
+        state.turn_state = turn
+        return turn
+
+    async def _bind_turn_state(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session | None,
+        is_resume: bool,
+    ) -> None:
+        """Bind the session turn to the current callback context."""
+        if session is None:
+            return
+        turn_state = (
+            self.load_state(session).turn_state
+            if is_resume
+            else self._start_turn(session)
+        )
+        if turn_state is None:
+            return
+        ctx.extra["_turn_state"] = turn_state
+        if is_resume:
+            return
+
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return
+        output = cast(
+            TurnStartOutput,
+            await bus.trigger(
+                Event(
+                    TURN_START,
+                    TurnStartInput(
+                        turn_id=turn_state.turn_id,
+                        text=str(ctx.inputs.query),
+                    ),
+                ),
+                session,
+            ),
+        )
+        if output.turn_id != turn_state.turn_id:
+            raise_error(
+                StatusCode.EVENTS_PAYLOAD_INVALID,
+                reason="turn.start cannot rewrite turn_id",
+            )
+
+    @staticmethod
+    def _is_terminal_turn_result(result: object) -> bool:
+        """Return whether a structured result terminates the current turn."""
+        if not isinstance(result, dict):
+            return False
+        result_type = result.get("result_type")
+        return (
+            result_type in ("answer", "error", "aborted")
+            or result.get("error") == "aborted"
+        )
+
+    @staticmethod
+    def _apply_turn_complete_output(
+        result: Dict[str, Any],
+        output: TurnCompleteOutput,
+    ) -> Dict[str, Any]:
+        """Copy a terminal result and apply only public completion fields."""
+        updated = dict(result)
+        updated["output"] = output.text
+        if output.usage is not None:
+            updated["usage"] = output.usage
+        return updated
+
+    async def _trigger_turn_complete(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session | None,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Trigger ``turn.complete`` for a structured terminal result."""
+        if session is None or not self._is_terminal_turn_result(result):
+            return result
+        turn_state = ctx.extra.get("_turn_state")
+        if not isinstance(turn_state, TurnState):
+            return result
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return result
+
+        result_type = result.get("result_type")
+        reason: Literal["completed", "aborted", "error"]
+        if result_type == "aborted" or result.get("error") == "aborted":
+            reason = "aborted"
+        elif result_type == "error":
+            reason = "error"
+        else:
+            reason = "completed"
+        answer = result.get("output")
+        if answer is None:
+            answer = result.get("error", "")
+        usage = result.get("usage")
+        output = cast(
+            TurnCompleteOutput,
+            await bus.trigger(
+                Event(
+                    TURN_COMPLETE,
+                    TurnCompleteInput(
+                        turn_id=turn_state.turn_id,
+                        reason=reason,
+                        answer=str(answer),
+                        usage=usage if isinstance(usage, Mapping) else None,
+                    ),
+                ),
+                session,
+            ),
+        )
+        return self._apply_turn_complete_output(result, output)
 
     def save_state(
         self,
@@ -3209,7 +3350,10 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        effective_inputs = self._to_effective_inputs(modified)
+        effective_inputs = self._to_effective_inputs(
+            modified,
+            ctx.extra.get("_turn_state"),
+        )
         steering_queue = ctx.steering_queue
         if steering_queue is None:
             steering_queue = asyncio.Queue()
@@ -3343,6 +3487,11 @@ class DeepAgent(BaseAgent):
                     AgentCallbackEvent.BEFORE_INVOKE,
                     AgentCallbackEvent.AFTER_INVOKE,
                 ):
+                    await self._bind_turn_state(
+                        ctx,
+                        session,
+                        self._is_resume_input(invoke_inputs),
+                    )
                     await self._sync_expert_role_attachment(invoke_inputs, session)
                     if (
                         task_loop_enabled
@@ -3353,6 +3502,7 @@ class DeepAgent(BaseAgent):
                         result = await self._run_single_round_invoke(
                             ctx, session, host_iteration_limit=host_iteration_limit,
                         )
+                    result = await self._trigger_turn_complete(ctx, session, result)
                     invoke_inputs.result = result
 
                 if session is not None:
@@ -3432,6 +3582,11 @@ class DeepAgent(BaseAgent):
                     AgentCallbackEvent.BEFORE_INVOKE,
                     AgentCallbackEvent.AFTER_INVOKE,
                 ):
+                    await self._bind_turn_state(
+                        ctx,
+                        session,
+                        self._is_resume_input(invoke_inputs),
+                    )
                     await self._sync_expert_role_attachment(invoke_inputs, session)
                     if (
                         task_loop_enabled
@@ -3467,6 +3622,11 @@ class DeepAgent(BaseAgent):
                             "result_type": "answer",
                         }
                     if stream_result is not None:
+                        stream_result = await self._trigger_turn_complete(
+                            ctx,
+                            session,
+                            stream_result,
+                        )
                         invoke_inputs.result = stream_result
 
                 if session is not None:
@@ -3745,6 +3905,11 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
+                await self._bind_turn_state(
+                    ctx,
+                    session,
+                    is_resume_input,
+                )
                 await self._sync_expert_role_attachment(invoke_inputs, session)
                 if is_resume_input:
                     result = await self._run_single_round_invoke(
@@ -3768,6 +3933,7 @@ class DeepAgent(BaseAgent):
                         else 600.0
                     )
                     result = await controller.wait_round_completion(timeout=timeout)
+                result = await self._trigger_turn_complete(ctx, session, result)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
                 proposal_result = result

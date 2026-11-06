@@ -9,9 +9,9 @@ import pytest
 
 from openjiuwen.core.events import Event, HandlerLevel, SessionContext
 from openjiuwen.core.extension.management.context import unbind_context
-from tests.unit_tests.core.extension.conftest import build_registry, write_package
+from tests.unit_tests.core.extension.conftest import BUSINESS_EVENT, build_registry, write_package
 
-_BODY = """\
+_BODY = f"""\
 def create_extension():
     return Extension()
 
@@ -24,7 +24,7 @@ class Extension:
                 await ops.package.root(),
                 ops.package_metadata.package_version,
             )
-        registrar.register_event_handler("tool.call", handler, {}, "LEVEL")
+        registrar.register_event_handler("{BUSINESS_EVENT}", handler, {{}}, "LEVEL")
 """
 
 
@@ -37,7 +37,10 @@ async def test_installed_package_reads_its_runtime_metadata(level: HandlerLevel,
     store = tmp_path / "installed"
     registry, bus = await build_registry(store)
     session = SessionContext("session", str(source), {"package_id": "forged.package", "root": str(source)})
-    event = Event("tool.call", {"tool": "Bash", "package_id": "forged.package", "root": source})
+    event = Event(
+        BUSINESS_EVENT,
+        {"tool": "Bash", "package_id": "forged.package", "root": source},
+    )
     try:
         reports = await registry.install(source)
         assert reports[0].status == "SUCCESS"
