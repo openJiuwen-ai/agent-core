@@ -54,6 +54,16 @@ the history was cut off.
 `enabled` defaults to `False`: when off, the historical behaviour is preserved
 (one compression attempt, otherwise the original model exception is raised).
 
+> `ptl_fallback_config: null` (not configured) and `enabled: false` both take
+> the legacy path: the former means the capability is absent or uninstalled,
+> the latter means it is installed but explicitly disabled. Use
+> `ContextEngine.ptl_fallback_state()` to distinguish `absent`, `disabled`, and
+> `enabled`.
+
+When the provider's reported limit is not above the fixed system/tool overhead,
+Phase B refuses to truncate and preserves the original error instead of dropping
+history with no chance of fitting.
+
 **Parameters:**
 
 - `enabled`: Master switch. Default: `False`.

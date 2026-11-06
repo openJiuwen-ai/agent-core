@@ -1,29 +1,34 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Pure-code fallback for prompt-too-long (PTL) rejections.
+"""Self-contained PTL (prompt-too-long) fallback capability.
 
-Unlike the LLM-backed compressors this module never calls a model. It drops
-whole completed dialogue turns, oldest first, until the estimated payload
-fits the target budget. A turn runs from a user message to the assistant
-reply without tool calls, so dropping one keeps ``tool_calls`` next to their
-``tool`` results and never separates the user's question from its answer.
+This module owns provider-limit parsing, dialogue-round truncation, archiving,
+and the Phase A/B orchestration. :class:`PtlFallbackConfig` lives in
+``schema/config.py`` so configuration stays in the schema layer.
 
-The public entry point is :func:`truncate_overflowed_context`. It is
-deliberately side-effect scoped to one :class:`ModelContext`: callers own
-persistence and event reporting.
+It is intentionally *uninstallable*: remove this ``recovery`` package only.
+``PtlFallbackConfig`` remains in ``schema/config.py`` with a ``None`` default,
+so the engine keeps its legacy path without importing this package. To remove
+the configuration surface as well, delete the class/field in
+``schema/config.py`` and the export in ``context_engine/__init__.py``. The
+package only imports lower-level modules (message schema, tool schema,
+logging, and the neutral dialogue-round helper), so deleting it cannot break
+the context engine's import graph.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
-from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.context_engine.schema.config import DEFAULT_OVERFLOW_TRUNCATE_MARKER
+from openjiuwen.core.context_engine.context.dialogue_rounds import find_all_dialogue_round
+from openjiuwen.core.context_engine.schema.config import (
+    DEFAULT_OVERFLOW_TRUNCATE_MARKER,
+    PtlFallbackConfig,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -31,12 +36,48 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.tool import ToolInfo
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-light
+    from openjiuwen.core.context_engine.base import ModelContext
+    from openjiuwen.core.context_engine.context_engine import ContextEngine
+    from openjiuwen.core.session.agent import Session
+
 
 TRUNCATE_MARKER_METADATA_KEY = "overflow_truncated_marker"
 DEFAULT_CONTEXT_LIMIT_FALLBACK = 200_000
 _CHARS_PER_TOKEN_FALLBACK = 4
 _MIN_PLAUSIBLE_CONTEXT_LIMIT = 1024
+
+
+@dataclass(frozen=True)
+class OverflowTruncationResult:
+    """Outcome of one pure-code truncation attempt."""
+
+    changed: bool
+    limit_tokens: int = 0
+    target_tokens: int = 0
+    tokens_before: int = 0
+    tokens_after: int = 0
+    dropped_rounds: int = 0
+    dropped_messages: int = 0
+    dropped_tool_exchanges: int = 0
+    archive_memory_id: str = ""
+    limit_source: str = ""
+    resolved_window_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RecoveryOutcome:
+    """Result of one two-phase recovery call.
+
+    ``trace`` contains only the phases attempted by *this* call; the caller
+    merges it into its own attempt trace. ``recover`` never mutates the
+    caller's ``attempted_recoveries`` list.
+    """
+
+    recovered: bool
+    trace: Tuple[str, ...] = ()
+
 
 # Ordered from most to least specific. Every pattern captures the provider's
 # *maximum* input budget, never the rejected request size.
@@ -55,21 +96,6 @@ _CONTEXT_HINT_RE = re.compile(r"(?i)(context|prompt|input|window|token|length|li
 _OUTPUT_HINT_RE = re.compile(r"(?i)(max[_ ]?tokens|output|completion)")
 
 
-@dataclass(frozen=True)
-class OverflowTruncationResult:
-    """Outcome of one pure-code truncation attempt."""
-
-    changed: bool
-    limit_tokens: int = 0
-    target_tokens: int = 0
-    tokens_before: int = 0
-    tokens_after: int = 0
-    dropped_rounds: int = 0
-    dropped_messages: int = 0
-    dropped_tool_exchanges: int = 0
-    archive_memory_id: str = ""
-
-
 class _TokenEstimator:
     """Thin wrapper that never lets a counter failure abort the fallback."""
 
@@ -77,7 +103,7 @@ class _TokenEstimator:
         self._counter = counter
 
     @classmethod
-    def from_context(cls, context: ModelContext) -> Optional["_TokenEstimator"]:
+    def from_context(cls, context: "ModelContext") -> Optional["_TokenEstimator"]:
         get_counter = getattr(context, "token_counter", None)
         counter = get_counter() if callable(get_counter) else get_counter
         if counter is None or not callable(getattr(counter, "count_messages", None)):
@@ -95,7 +121,7 @@ class _TokenEstimator:
                 for message in messages
             )
 
-    def tools(self, tools: Optional[Sequence[ToolInfo]]) -> int:
+    def tools(self, tools: Optional[Sequence[Any]]) -> int:
         if not tools:
             return 0
         count_tools = getattr(self._counter, "count_tools", None)
@@ -128,7 +154,7 @@ def parse_context_limit(error_texts: Iterable[str]) -> Optional[int]:
 
 
 def truncate_overflowed_context(
-    context: ModelContext,
+    context: "ModelContext",
     *,
     error_texts: Sequence[str] = (),
     attempt: int = 1,
@@ -137,7 +163,7 @@ def truncate_overflowed_context(
     archive_dropped_rounds: bool = True,
     marker_template: str = DEFAULT_OVERFLOW_TRUNCATE_MARKER,
     messages: Optional[Sequence[BaseMessage]] = None,
-    tools: Optional[Sequence[ToolInfo]] = None,
+    tools: Optional[Sequence[Any]] = None,
 ) -> OverflowTruncationResult:
     """Drop the oldest complete dialogue turns until the payload fits.
 
@@ -161,6 +187,10 @@ def truncate_overflowed_context(
     Returns:
         :class:`OverflowTruncationResult`; ``changed`` is False when nothing
         could be dropped and the caller should preserve the original error.
+        If the resolved limit is not above the fixed system/tool overhead, the
+        context is left unchanged: truncating history could not make it fit.
+        ``limit_source`` records whether the limit came from the provider
+        error, the context window, or the built-in fallback.
     """
     estimator = _TokenEstimator.from_context(context)
     if estimator is None:
@@ -181,8 +211,44 @@ def truncate_overflowed_context(
     overhead = max(payload_tokens - estimator.messages(cleaned), 0) + estimator.tools(tools)
     tokens_before = overhead + estimator.messages(cleaned)
 
-    limit_tokens = _resolve_limit(context, error_texts)
+    limit_tokens, limit_source = _resolve_limit(context, error_texts)
     target_tokens = _resolve_target(limit_tokens, target_ratio, attempt)
+    resolved_window_tokens = _resolved_window_tokens(context)
+
+    # The provider's limit is authoritative, but a value at or below the fixed
+    # system/tool overhead can never fit: truncating history would only lose
+    # data and still fail. Preserve the original error instead.
+    fixed_overhead = overhead + estimator.messages(prefix)
+    if limit_tokens <= fixed_overhead:
+        logger.warning(
+            "PTL fallback refuses to truncate: limit=%s (%s) is not above the fixed "
+            "system/tool overhead=%s; original error preserved",
+            limit_tokens,
+            limit_source,
+            fixed_overhead,
+        )
+        return OverflowTruncationResult(
+            changed=False,
+            limit_tokens=limit_tokens,
+            target_tokens=target_tokens,
+            tokens_before=tokens_before,
+            limit_source=limit_source,
+            resolved_window_tokens=resolved_window_tokens,
+        )
+
+    if resolved_window_tokens and limit_source == "provider":
+        if limit_tokens * 2 < resolved_window_tokens:
+            logger.warning(
+                "PTL provider limit %s is far below the resolved context window %s; the provider limit may be wrong",
+                limit_tokens,
+                resolved_window_tokens,
+            )
+        elif limit_tokens > resolved_window_tokens * 2:
+            logger.warning(
+                "PTL provider limit %s is far above the resolved context window %s; truncation may not be enough",
+                limit_tokens,
+                resolved_window_tokens,
+            )
 
     dropped: List[BaseMessage] = []
     dropped_rounds = 0
@@ -194,11 +260,7 @@ def truncate_overflowed_context(
 
     rounds = _dialogue_rounds(body)
     protected_from = max(0, len(rounds) - max(1, keep_last_rounds))
-    droppable_ends = [
-        end
-        for index, (_, end) in enumerate(rounds)
-        if index < protected_from and end is not None
-    ]
+    droppable_ends = [end for index, (_, end) in enumerate(rounds) if index < protected_from and end is not None]
     if droppable_ends and tokens_before > target_tokens:
         rounds_to_drop = 1
         while rounds_to_drop <= len(droppable_ends):
@@ -226,9 +288,10 @@ def truncate_overflowed_context(
     # budget, remove the oldest complete tool exchange inside the retained
     # text. An exchange is an assistant ``tool_calls`` message plus every
     # matching ``tool`` result, so pairing stays intact.
-    while _estimate(
-        estimator, prefix, retained, marker_template, dropped_rounds, _dropped_token_hint(dropped), overhead
-    ) > target_tokens:
+    while (
+        _estimate(estimator, prefix, retained, marker_template, dropped_rounds, _dropped_token_hint(dropped), overhead)
+        > target_tokens
+    ):
         units = _iter_tool_exchange_units(retained)
         if not units:
             break
@@ -245,6 +308,8 @@ def truncate_overflowed_context(
             limit_tokens=limit_tokens,
             target_tokens=target_tokens,
             tokens_before=tokens_before,
+            limit_source=limit_source,
+            resolved_window_tokens=resolved_window_tokens,
         )
 
     marker = _build_marker(marker_template, dropped_rounds or dropped_tool_exchanges, tokens_before - target_tokens)
@@ -265,6 +330,8 @@ def truncate_overflowed_context(
             limit_tokens=limit_tokens,
             target_tokens=target_tokens,
             tokens_before=tokens_before,
+            limit_source=limit_source,
+            resolved_window_tokens=resolved_window_tokens,
         )
 
     return OverflowTruncationResult(
@@ -277,7 +344,180 @@ def truncate_overflowed_context(
         dropped_messages=len(dropped),
         dropped_tool_exchanges=dropped_tool_exchanges,
         archive_memory_id=archive_memory_id,
+        limit_source=limit_source,
+        resolved_window_tokens=resolved_window_tokens,
     )
+
+
+async def recover(
+    engine: "ContextEngine",
+    *,
+    compress: Callable[..., Awaitable[bool]],
+    ptl_config: PtlFallbackConfig,
+    context_id: str,
+    session: Optional["Session"],
+    context: Optional["ModelContext"],
+    exception: Exception,
+    error_texts: Sequence[str],
+    messages: Optional[Sequence[BaseMessage]],
+    tools: Optional[Sequence[Any]],
+    attempt: int,
+    attempted_recoveries: Optional[List[str]],
+    compression_kwargs: Dict[str, Any],
+) -> RecoveryOutcome:
+    """Run the two-phase PTL recovery for one failed model call.
+
+    ``engine`` supplies persistence and pool lookup; ``compress`` is the
+    engine's Phase A entry point, injected by the caller so this module does
+    not reach into private engine methods. Keeping the module free of a hard
+    import of the engine is what makes it removable.
+
+    The returned :class:`RecoveryOutcome` carries only the phases attempted
+    by this call. The input ``attempted_recoveries`` list is read, never
+    mutated; the caller decides how to merge the trace.
+    """
+    tried = tuple(attempted_recoveries) if attempted_recoveries is not None else ()
+    new_trace: List[str] = []
+    phase_a_done = "phase_a_compress" in tried
+
+    if ptl_config.phase_a_compress and not phase_a_done:
+        new_trace.append("phase_a_compress")
+        compressed = await compress(
+            context_id=context_id,
+            session=session,
+            timeout_s=ptl_config.phase_a_timeout_s,
+            swallow_errors=True,
+            kwargs=compression_kwargs,
+        )
+        if compressed:
+            return RecoveryOutcome(True, tuple(new_trace))
+
+    if not ptl_config.enable_pure_code_truncate:
+        return RecoveryOutcome(False, tuple(new_trace))
+
+    truncated = await _recover_with_pure_code_truncation(
+        engine,
+        context_id=context_id,
+        session=session,
+        context=context,
+        error_texts=error_texts,
+        messages=messages,
+        tools=tools,
+        attempt=attempt,
+        config=ptl_config,
+    )
+    if truncated:
+        new_trace.append("phase_b_truncate")
+    return RecoveryOutcome(truncated, tuple(new_trace))
+
+
+async def _recover_with_pure_code_truncation(
+    engine: "ContextEngine",
+    *,
+    context_id: str,
+    session: Optional["Session"],
+    context: Optional["ModelContext"],
+    error_texts: Sequence[str],
+    messages: Optional[Sequence[BaseMessage]],
+    tools: Optional[Sequence[Any]],
+    attempt: int,
+    config: PtlFallbackConfig,
+) -> bool:
+    """Phase B: drop the oldest complete dialogue turns without a model."""
+    target_context = context
+    if target_context is None:
+        resolved_session_id = session.get_session_id() if session else "default_session_id"
+        target_context = engine.get_context(context_id=context_id, session_id=resolved_session_id)
+    if target_context is None:
+        logger.warning("model context recovery cannot find context %s", context_id)
+        return False
+
+    try:
+        result = truncate_overflowed_context(
+            target_context,
+            error_texts=error_texts,
+            attempt=attempt,
+            target_ratio=config.truncate_target_ratio,
+            keep_last_rounds=config.keep_last_rounds,
+            archive_dropped_rounds=config.archive_dropped_rounds,
+            marker_template=config.marker_template,
+            messages=messages,
+            tools=tools,
+        )
+    except Exception:  # noqa: BLE001 - keep the original model error visible
+        logger.warning("model context recovery truncation failed", exc_info=True)
+        return False
+
+    if not result.changed:
+        logger.info(
+            "model context recovery found nothing to truncate, limit=%s source=%s target=%s estimated=%s",
+            result.limit_tokens,
+            result.limit_source,
+            result.target_tokens,
+            result.tokens_before,
+        )
+        return False
+
+    await _persist_truncation(engine, session, target_context)
+
+    logger.info(
+        "model context recovery truncated context: rounds=%s messages=%s "
+        "tool_exchanges=%s tokens=%s->%s limit=%s source=%s target=%s "
+        "resolved_window=%s archive=%s",
+        result.dropped_rounds,
+        result.dropped_messages,
+        result.dropped_tool_exchanges,
+        result.tokens_before,
+        result.tokens_after,
+        result.limit_tokens,
+        result.limit_source,
+        result.target_tokens,
+        result.resolved_window_tokens,
+        result.archive_memory_id,
+    )
+    return True
+
+
+async def _persist_truncation(engine: "ContextEngine", session: Optional["Session"], context: "ModelContext") -> None:
+    """Persist the truncated context, tolerating storage failures."""
+    effective_session = session or _context_session_ref(context)
+    if effective_session is None:
+        return
+
+    if not _is_context_pooled(engine, effective_session, context):
+        # Saving an unpooled context would rewrite the session's context state
+        # with an empty payload, so persistence is skipped.
+        logger.info(
+            "model context recovery truncated context %s in memory; "
+            "it is not owned by this engine, skipping persistence",
+            context.context_id(),
+        )
+        return
+
+    # The model retry can proceed from the in-memory context even when
+    # persistence fails, so a storage problem must not undo the rescue.
+    try:
+        await engine.save_contexts(effective_session, context_ids=[context.context_id()])
+        await effective_session.commit()
+    except Exception:  # noqa: BLE001 - in-memory rescue still valid
+        logger.warning(
+            "model context recovery truncated in memory but failed to persist",
+            exc_info=True,
+        )
+
+
+def _context_session_ref(context: "ModelContext") -> Optional["Session"]:
+    getter = getattr(context, "get_session_ref", None)
+    return getter() if callable(getter) else None
+
+
+def _is_context_pooled(engine: "ContextEngine", session: "Session", context: "ModelContext") -> bool:
+    """Return whether ``context`` is the engine-owned instance for ``session``."""
+    try:
+        session_id = session.get_session_id()
+    except Exception:  # noqa: BLE001 - unknown session cannot own a pooled context
+        return False
+    return engine.get_context(context_id=context.context_id(), session_id=session_id) is context
 
 
 def _estimate(
@@ -295,8 +535,7 @@ def _estimate(
 
 def _dropped_token_hint(dropped: Sequence[BaseMessage]) -> int:
     return sum(
-        max(len(str(getattr(message, "content", "") or "")), 0) // _CHARS_PER_TOKEN_FALLBACK
-        for message in dropped
+        max(len(str(getattr(message, "content", "") or "")), 0) // _CHARS_PER_TOKEN_FALLBACK for message in dropped
     )
 
 
@@ -320,7 +559,7 @@ def _dialogue_rounds(messages: Sequence[BaseMessage]) -> List[Tuple[int, Optiona
     """
     rounds: List[Tuple[int, Optional[int]]] = []
     try:
-        raw_rounds = ContextUtils.find_all_dialogue_round(list(messages))
+        raw_rounds = find_all_dialogue_round(list(messages))
     except Exception:  # noqa: BLE001 - malformed context must not be truncated blindly
         return rounds
 
@@ -356,19 +595,26 @@ def _build_marker(template: str, rounds: int, tokens: int) -> UserMessage:
     return UserMessage(content=content, metadata={TRUNCATE_MARKER_METADATA_KEY: True})
 
 
-def _resolve_limit(context: ModelContext, error_texts: Sequence[str]) -> int:
+def _resolve_limit(context: "ModelContext", error_texts: Sequence[str]) -> Tuple[int, str]:
     parsed = parse_context_limit(error_texts)
     if parsed is not None:
-        return parsed
+        return parsed, "provider"
+    window = _resolved_window_tokens(context)
+    if window:
+        return window, "context"
+    return DEFAULT_CONTEXT_LIMIT_FALLBACK, "default"
+
+
+def _resolved_window_tokens(context: "ModelContext") -> int:
     resolver = getattr(context, "context_window_tokens", None)
     if callable(resolver):
         try:
             value = int(resolver())
             if value > 0:
                 return value
-        except Exception:  # noqa: BLE001 - resolution must not block truncation
+        except Exception:  # noqa: BLE001 - diagnostics must not block truncation
             pass
-    return DEFAULT_CONTEXT_LIMIT_FALLBACK
+    return 0
 
 
 def _resolve_target(limit_tokens: int, target_ratio: float, attempt: int) -> int:
@@ -400,7 +646,7 @@ def _generic_context_limits(text: str) -> List[int]:
         value = _to_int(match.group())
         if value is None or value < _MIN_PLAUSIBLE_CONTEXT_LIMIT:
             continue
-        window = text[max(0, match.start() - 32): match.end() + 32]
+        window = text[max(0, match.start() - 32) : match.end() + 32]
         if _OUTPUT_HINT_RE.search(window):
             continue
         if not _CONTEXT_HINT_RE.search(window):
@@ -436,11 +682,7 @@ def _iter_tool_exchange_units(messages: Sequence[BaseMessage]) -> List[Tuple[int
             index += 1
             continue
 
-        expected = {
-            str(getattr(tool_call, "id", "") or "")
-            for tool_call in tool_calls
-            if getattr(tool_call, "id", "")
-        }
+        expected = {str(getattr(tool_call, "id", "") or "") for tool_call in tool_calls if getattr(tool_call, "id", "")}
         if not expected:
             index += 1
             continue
@@ -464,7 +706,7 @@ def _iter_tool_exchange_units(messages: Sequence[BaseMessage]) -> List[Tuple[int
 
 
 def _archive_dropped(
-    context: ModelContext,
+    context: "ModelContext",
     prefix: Sequence[BaseMessage],
     dropped: Sequence[BaseMessage],
     original_messages: Sequence[BaseMessage],
@@ -493,8 +735,12 @@ def _archive_dropped(
 
 
 __all__ = [
+    "DEFAULT_OVERFLOW_TRUNCATE_MARKER",
     "OverflowTruncationResult",
+    "PtlFallbackConfig",
+    "RecoveryOutcome",
     "TRUNCATE_MARKER_METADATA_KEY",
     "parse_context_limit",
+    "recover",
     "truncate_overflowed_context",
 ]

@@ -1096,25 +1096,21 @@ class ReActAgent(BaseAgent):
     def _model_recovery_budget(self) -> int:
         """Return how many recovery retries this agent round may use.
 
-        The historical behaviour is one retry. The budget grows only when the
-        context engine explicitly enables the PTL fallback.
+        The historical behaviour is one retry. The context engine owns the
+        PTL policy and exposes the budget, so this method never inspects the
+        engine's config shape directly.
         """
         engine = self.context_engine
-        # Static inspection avoids triggering dynamic ``__getattr__`` hooks on
-        # mocks/proxies; an unconfigured engine keeps the legacy budget.
-        if inspect.getattr_static(engine, "config", None) is None:
+        budget = getattr(engine, "model_recovery_max_attempts", None)
+        if not callable(budget):
             return 1
         try:
-            engine_config = engine.config
+            value = budget()
         except Exception:  # noqa: BLE001 - fall back to legacy behaviour
             return 1
-        ptl_config = getattr(engine_config, "ptl_fallback_config", None)
-        if ptl_config is None or not getattr(ptl_config, "enabled", False):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             return 1
-        retries = getattr(ptl_config, "max_retries", 1)
-        if isinstance(retries, bool) or not isinstance(retries, int):
-            return 1
-        return max(1, retries)
+        return value
 
     @staticmethod
     def _model_recovery_attempts(ctx: AgentCallbackContext) -> int:

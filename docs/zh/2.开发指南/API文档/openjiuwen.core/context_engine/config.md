@@ -47,6 +47,10 @@ class openjiuwen.core.context_engine.PtlFallbackConfig(
 
 `enabled` 默认为 `False`：关闭时保持原有行为（只尝试一次压缩，失败则原样抛出模型异常）。
 
+> `ptl_fallback_config: null`（未配置）与 `enabled: false` 都走旧路径：前者表示能力不存在或已卸载，后者表示能力存在但显式关闭。可通过 `ContextEngine.ptl_fallback_state()` 区分 `absent` / `disabled` / `enabled`。
+
+当 provider 报错中的上限不大于固定 system/工具开销时，阶段 B 会拒绝截断并保留原错误，避免无意义地丢弃历史。
+
 **参数：**
 
 - `enabled`：总开关。默认 `False`。

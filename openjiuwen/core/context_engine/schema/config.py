@@ -70,6 +70,18 @@ class PtlFallbackConfig(BaseModel):
     marker_template : str
         Text of the marker injected where the dropped history used to be.
         Only ``{rounds}`` and ``{tokens}`` placeholders are supported.
+
+    Notes
+    -----
+    ``ContextEngineConfig.ptl_fallback_config`` has two "off" states:
+
+    * ``None``: the capability is absent (for example, the removable
+      ``recovery`` package was deleted). The legacy path is used without
+      importing it.
+    * a present config with ``enabled=False``: the capability is installed but
+      explicitly disabled. Behaviour is identical to ``None``.
+
+    Use :meth:`is_active` when a boolean "should this run" answer is needed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -84,18 +96,18 @@ class PtlFallbackConfig(BaseModel):
     archive_dropped_rounds: bool = Field(default=True)
     marker_template: str = Field(default=DEFAULT_OVERFLOW_TRUNCATE_MARKER)
 
+    def is_active(self) -> bool:
+        """Return whether the fallback should run (installed and enabled)."""
+        return bool(self.enabled)
+
     @model_validator(mode="after")
     def _validate_policy(self) -> "PtlFallbackConfig":
         try:
             self.marker_template.format(rounds=0, tokens=0)
         except (KeyError, IndexError, ValueError) as exc:
-            raise ValueError(
-                "marker_template must only use the {rounds} and {tokens} placeholders"
-            ) from exc
+            raise ValueError("marker_template must only use the {rounds} and {tokens} placeholders") from exc
         if self.enabled and not self.phase_a_compress and not self.enable_pure_code_truncate:
-            raise ValueError(
-                "ptl_fallback_config requires phase_a_compress or enable_pure_code_truncate"
-            )
+            raise ValueError("ptl_fallback_config requires phase_a_compress or enable_pure_code_truncate")
         return self
 
 
@@ -204,9 +216,10 @@ class ContextEngineConfig(BaseModel):
         ``OPENJIUWEN_CONTEXT_DEBUG_DIR`` env var, then to
         ``{workspace}/context/{session_id}_context/context_debug/``.
 
-    ptl_fallback_config : PtlFallbackConfig
-        Recovery policy for model prompt-too-long rejections. See
-        :class:`PtlFallbackConfig`.
+    ptl_fallback_config : PtlFallbackConfig, optional
+        Recovery policy for model prompt-too-long rejections. ``None`` means
+        the capability is absent and the legacy single-compression path is
+        used. See :class:`PtlFallbackConfig`.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -231,4 +244,4 @@ class ContextEngineConfig(BaseModel):
     )
     enable_context_debug: bool = Field(default=False)
     context_debug_dir: Optional[str] = Field(default=None)
-    ptl_fallback_config: PtlFallbackConfig = Field(default_factory=PtlFallbackConfig)
+    ptl_fallback_config: Optional[PtlFallbackConfig] = Field(default=None)
