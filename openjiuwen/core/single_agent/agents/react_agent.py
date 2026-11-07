@@ -47,6 +47,12 @@ from openjiuwen.core.context_engine.usage import (
     SessionKVCacheAggregator,
     request_usage_from_metadata,
 )
+from openjiuwen.core.events.builtins.event_types.prompt_compose import (
+    PROMPT_COMPOSE,
+    PromptComposeInput,
+    PromptComposeOutput,
+    PromptSectionSpec,
+)
 from openjiuwen.core.foundation.llm import (
     OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
     OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
@@ -1264,6 +1270,7 @@ class ReActAgent(BaseAgent):
         ctx: AgentCallbackContext,
         *,
         model_client_config: Any = None,
+        compose: bool = True,
     ) -> tuple[ContextWindow, tuple[tuple[ContextCategory, str, str], ...]]:
         """Build the final context window used by a model request.
 
@@ -1277,8 +1284,18 @@ class ReActAgent(BaseAgent):
         # can otherwise reintroduce tools even when _call_model receives None.
         if ctx.extra.get("_finalizing_max_iterations"):
             ctx.inputs.tools = None
-        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
-        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        compose_output = await self._compose_prompt_sections(ctx) if compose else None
+        if compose_output is None:
+            ctx.extra.pop("_prompt_compose_sections", None)
+            final_prompt = self.prompt_builder.build()
+            usage_prompt_sections = tuple(self._context_usage_prompt_sections())
+        else:
+            ctx.extra["_prompt_compose_sections"] = compose_output.sections
+            final_prompt = self.prompt_builder.render_sections(
+                section.text for section in compose_output.sections
+            )
+            usage_prompt_sections = tuple(self._context_usage_prompt_sections(compose_output.sections))
+        final_system = [SystemMessage(content=final_prompt)]
         await self._sync_prompt_attachments(ctx, ctx.context)
 
         context_window_kwargs = self._build_context_window_kwargs(
@@ -1312,6 +1329,51 @@ class ReActAgent(BaseAgent):
             ctx.inputs.tools = None
         return context_window, usage_prompt_sections
 
+    async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
+        """Trigger prompt composition at the final post-rail render boundary."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.runner import Runner
+
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return None
+        if ctx.session is None:
+            return None
+
+        from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+
+        session_id = ctx.session.get_session_id()
+        bound_agent = get_agent_runtime().get(session_id)
+        if bound_agent is None or not callable(getattr(bound_agent, "compose_prompt_sections", None)):
+            # Standalone ReActAgent callers can publish the Bus for unrelated
+            # events without having a DeepAgent composition owner.
+            return None
+
+        prompt_mode = getattr(self.prompt_builder, "mode", None)
+        compose_input = PromptComposeInput(
+            model=str(self._config.model_name or ""),
+            prompt_model=None,
+            surfaces=(),
+            tools=tuple(
+                str(getattr(tool, "name", ""))
+                for tool in (getattr(ctx.inputs, "tools", None) or ())
+                if str(getattr(tool, "name", ""))
+            ),
+            output_style=None,
+            traits=(),
+            detail={
+                "language": str(getattr(self.prompt_builder, "language", "")),
+                "prompt_mode": getattr(prompt_mode, "value", prompt_mode),
+            },
+        )
+        output = await bus.trigger(
+            Event(PROMPT_COMPOSE, compose_input),
+            ctx.session,
+        )
+        if not isinstance(output, PromptComposeOutput):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose returned an invalid output")
+        return output
+
     @staticmethod
     async def _hide_answered_images_shown_once(_context: ModelContext, window: ContextWindow) -> ContextWindow:
         """Leave out tool images marked ``keep_in_context: False`` once the model has answered after them.
@@ -1343,18 +1405,28 @@ class ReActAgent(BaseAgent):
         ]
         return message.model_copy(update={"content": content})
 
-    def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
+    def _context_usage_prompt_sections(
+        self,
+        composed_sections: Iterable[PromptSectionSpec] | None = None,
+    ) -> list[tuple[ContextCategory, str, str]]:
         """Return builder sections using the four-category product taxonomy."""
         sections: list[tuple[ContextCategory, str, str]] = []
-        get_sections_for_build = getattr(self.prompt_builder, "_get_sections_for_build", None)
-        prompt_sections = (
-            get_sections_for_build()
-            if callable(get_sections_for_build)
-            else self.prompt_builder.get_all_sections().values()
-        )
+        if composed_sections is None:
+            get_effective_sections = getattr(self.prompt_builder, "get_effective_sections", None)
+            prompt_sections = (
+                get_effective_sections()
+                if callable(get_effective_sections)
+                else self.prompt_builder.get_all_sections().values()
+            )
+        else:
+            prompt_sections = composed_sections
         for section in prompt_sections:
-            name = getattr(section, "name", "")
-            content = section.render(self.prompt_builder.language)
+            name = getattr(section, "id", getattr(section, "name", ""))
+            content = getattr(section, "text", None)
+            if content is None and hasattr(section, "render"):
+                content = section.render(self.prompt_builder.language)
+            if not isinstance(content, str):
+                continue
             if not content.strip():
                 continue
             raw_category = getattr(section, "category", None)
@@ -1567,7 +1639,9 @@ class ReActAgent(BaseAgent):
                 try:
                     report = build_report(
                         context_window,
-                        system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                        system_prompt_sections=tuple(
+                            self._context_usage_prompt_sections(ctx.extra.get("_prompt_compose_sections"))
+                        ),
                         model=model_name,
                         provider=model_provider or None,
                         deployment=str(self._config.api_base or "") or None,
@@ -1668,7 +1742,9 @@ class ReActAgent(BaseAgent):
                     agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
                     sequence=sequence,
                     provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
-                    system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                    system_prompt_sections=tuple(
+                        self._context_usage_prompt_sections(ctx.extra.get("_prompt_compose_sections"))
+                    ),
                     kv_cache=kv_cache,
                     deployment=str(self._config.api_base or "") or None,
                     attribution=attribution,
@@ -1708,8 +1784,10 @@ class ReActAgent(BaseAgent):
         run outside the normal model-call callback chain and therefore have no
         provider ``usage_metadata``.  The returned ``post_compact`` event is
         based on local measurement/estimation and is not an authoritative
-        provider token count.  The caller decides how to transport and persist
-        it.
+        provider token count.  They use the native prompt builder without
+        triggering prompt composition events, because those handlers may have
+        side effects and there is no provider request to compose.  The caller
+        decides how to transport and persist the snapshot.
         """
         if context is None:
             return None
@@ -1745,6 +1823,7 @@ class ReActAgent(BaseAgent):
         context_window, usage_prompt_sections = await self._build_model_context_window(
             ctx,
             model_client_config=getattr(self._llm, "model_client_config", None),
+            compose=False,
         )
 
         if isinstance(request_id, str) and request_id.strip():

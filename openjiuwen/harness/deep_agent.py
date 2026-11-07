@@ -52,7 +52,17 @@ from openjiuwen.core.events.builtins.event_types.turn import (
     TurnStartInput,
     TurnStartOutput,
 )
-from openjiuwen.core.events.types import Event
+from openjiuwen.core.events.builtins.event_types.prompt_compose import (
+    PromptComposeInput,
+    PromptComposeOutput,
+    PromptSectionSpec,
+)
+from openjiuwen.core.events.builtins.event_types.prompt_section import (
+    PROMPT_SECTION,
+    PromptSectionInput,
+    PromptSectionOutput,
+)
+from openjiuwen.core.events.types import Event, SessionContext
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
@@ -133,6 +143,7 @@ from openjiuwen.harness.schema.interaction import (
 from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
@@ -813,6 +824,87 @@ class DeepAgent(BaseAgent):
                 rail.system_prompt_builder = builder
             if hasattr(rail, "_system_prompt_builder"):
                 setattr(rail, "_system_prompt_builder", builder)
+
+    async def compose_prompt_sections(
+        self,
+        compose_input: PromptComposeInput,
+        bus: ExtensionEventBusProtocol,
+        session_context: SessionContext,
+    ) -> PromptComposeOutput:
+        """Build an immutable, event-processed view of the effective prompt sections.
+
+        The shared builder remains the source of native filtering and ordering. The
+        returned section view is request-local and can therefore be rendered without
+        re-reading mutable builder state after compose handlers have run.
+        """
+        builder = self.system_prompt_builder
+        if builder is None:
+            raise_error(
+                StatusCode.EVENTS_STATE_INVALID,
+                reason="prompt.compose requires an initialized system prompt builder",
+            )
+        if not isinstance(compose_input, PromptComposeInput):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose input is invalid")
+        if not isinstance(session_context, SessionContext) or not session_context.session_id:
+            raise_error(StatusCode.EVENTS_STATE_INVALID, reason="prompt.compose requires a session context")
+
+        output_style = compose_input.output_style
+        compose_detail = {
+            "model": compose_input.model,
+            "prompt_model": compose_input.prompt_model,
+            "surfaces": compose_input.surfaces,
+            "tools": compose_input.tools,
+            "traits": compose_input.traits,
+            "output_style": (
+                {
+                    "name": output_style.name,
+                    "is_keeping_coding_instructions": output_style.is_keeping_coding_instructions,
+                }
+                if output_style is not None
+                else None
+            ),
+            "detail": dict(compose_input.detail),
+        }
+        sections: list[PromptSectionSpec] = []
+        for section in builder.get_effective_sections():
+            rendered = section.render(builder.language)
+            section_input = PromptSectionInput(
+                name=str(section.name),
+                text=rendered if rendered.strip() else None,
+                detail={
+                    "priority": int(builder.get_effective_priority(section)),
+                    "declared_priority": int(section.priority),
+                    "category": getattr(section.category, "value", section.category),
+                    "carrier": str(getattr(section, "carrier", "system_message")),
+                    "language": builder.language,
+                    "prompt_mode": getattr(getattr(builder, "mode", None), "value", getattr(builder, "mode", None)),
+                    "compose": compose_detail,
+                },
+            )
+            section_output = await bus.trigger(
+                Event(PROMPT_SECTION, section_input),
+                session_context,
+            )
+            if not isinstance(section_output, PromptSectionOutput):
+                raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.section returned an invalid output")
+            if section_output.text is None or not section_output.text.strip():
+                continue
+
+            category = getattr(section.category, "value", section.category)
+            if category is not None and not isinstance(category, str):
+                category = str(category)
+            carrier = str(getattr(section, "carrier", "system_message"))
+            sections.append(
+                PromptSectionSpec(
+                    id=str(section.name),
+                    text=section_output.text,
+                    priority=int(builder.get_effective_priority(section)),
+                    category=category,
+                    carrier=carrier,
+                    detail=section_input.detail,
+                )
+            )
+        return PromptComposeOutput(sections=tuple(sections))
 
     def apply_prompt_builder_to_react_agent(self) -> None:
         """Re-render the current system_prompt_builder into the inner ReActAgent.

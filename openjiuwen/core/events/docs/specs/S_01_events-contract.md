@@ -8,7 +8,7 @@
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
 | 最近一次修订日期 | 2026-11-07 |
-| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
+| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)、[F_17 prompt.section](../features/F_17_prompt-section-event.md)、[F_18 prompt.compose](../features/F_18_prompt-compose-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
 本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。`trigger` 由事件类型的 matcher 选择 Handler，不接受调用级 Handler ID 白名单。
@@ -113,7 +113,7 @@ EventHandler: TypeAlias = Callable[
 ]
 ```
 
-EventType 使用字符串，不使用枚举。业务事件名由业务平台在自己的仓库中维护；Core 只定义 `OPS_BUILD_EVENT_TYPE`。
+EventType 使用字符串，不使用枚举。业务平台可以在自己的仓库中维护业务事件名；Core 除 `OPS_BUILD_EVENT_TYPE` 外，也会通过 builtin 自动注册本仓库明确提供的事件类型（例如 `prompt.section` 和 `prompt.compose`）。
 
 ### 2.2 标识与只读值
 
@@ -355,6 +355,16 @@ handler 按普通事件的既有 USER → BUILTIN → CORE 顺序运行，handle
 和无 bus 兼容语义由 Harness [S_06](../../../harness/docs/specs/S_06_prompts-and-l10n.md)
 与 [F_16](../features/F_16_prompt-attachment-event.md) 共同定义。
 
+### 4.6.4 Prompt section 与 compose 事件
+
+Core 预置 `prompt.section` 和 `prompt.compose` 两个提示词事件，详细字段表、示例和 Agent Loop 接入边界分别见 [F_17](../features/F_17_prompt-section-event.md) 与 [F_18](../features/F_18_prompt-compose-event.md)。本节只维护公共契约的不变量：
+
+- `prompt.section` 的输入为 `PromptSectionInput(name, text, detail)`，输出为 `PromptSectionOutput(text)`。它只允许影响当前 section 的可见文本；`None`/空白文本表示本次省略。CORE 透传，不访问 builder 或 ContextWindow；本事件没有同名 Ops。
+- `prompt.compose` 的输入为不包含 `sections` 的 `PromptComposeInput(model, prompt_model, surfaces, tools, output_style, traits, detail)`，输出为有序的 `PromptComposeOutput(sections)`，其中每项是 `PromptSectionSpec(id, text, priority, category, carrier, detail)`。输出 `id` 在一次结果中必须唯一，renderer 必须保留返回顺序，不得再次按 priority 重排。
+- `prompt.compose CORE` 必须从 `ops.session_context.session_id` 查找已绑定的 DeepAgent，并在其内部 composition 入口中按 native effective section 顺序串行触发 `prompt.section`；CORE 不调用同名 Ops，不把 Agent、builder、rail 或 section 列表放入 EventInput。
+- `ops.prompt.compose(input)` 是显式触发一条新的 `prompt.compose` 事件链的方法，使用当前 Ops 的 `SessionContext`，不推进调用方当前 EventNext；`prompt.section` 不提供同名方法。
+- Agent Loop 在所有 `BEFORE_MODEL_CALL` rail 完成后、最终 system message 渲染前触发 compose；无 Bus 时保留 native builder fallback。最终 SystemMessage、ContextWindow 和 usage report 复用同一 request-local section snapshot，不建立跨请求 prompt cache。
+
 ### 4.7 错误码与取消
 
 Events 不定义专属异常类。契约失败通过 Core `raise_error` 使用下列 StatusCode；均解析为不可自动重试的 ValidationError。
@@ -398,5 +408,6 @@ Events 实现与专项测试已建立，以下按开发计划当前工作项编�
 - EV-02 EventBus 注册与执行引擎：注册、匹配、快照和 EventNext → tests/unit_tests/core/events/test_event_bus_registration.py 与 test_event_bus_execution.py。
 - EV-03 Builder/Ops（已实现）：公开具体类、`build(package_metadata, session_context)`、Ops 隔离与动态调用 → EV-03-V-01～04。
 - EV-04 完整调用链集成：预置自动注册、外部 `ops.build`、Builder 门禁、PackageMetadata、SessionContext、逐 Handler Ops 和嵌套事件 → EV-04 验收组。
+- EV-16/EV-17 Prompt section/compose：事件 Validator、Matcher、AgentRuntime CORE、section 子链、PromptMode、显式 Ops 和 Agent Loop 最终 renderer → `tests/unit_tests/core/events/test_prompt_events.py`、`test_prompt_compose_ops.py`、`tests/unit_tests/agent/react_agent/test_prompt_event_integration.py`。
 
 完整场景、执行命令、版本环境和实际结果由对应 feature 及[开发计划](../designs/events-development-plan.md)记录。
