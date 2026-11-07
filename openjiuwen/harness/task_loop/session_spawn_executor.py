@@ -31,6 +31,7 @@ from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
 )
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
@@ -71,6 +72,7 @@ class SessionSpawnExecutor(TaskExecutor):
 
         meta = tasks[0].metadata or {}
         subagent_type = meta.get("subagent_type", "general-purpose")
+        subagent_type = resolve_subagent_type_name(self._deep_agent, subagent_type)
         query = meta.get("task_description", "")
         browser_capabilities = meta.get("browser_capabilities")
         affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self._deep_agent)

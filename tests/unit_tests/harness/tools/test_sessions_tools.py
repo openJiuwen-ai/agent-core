@@ -182,6 +182,36 @@ class TestSessionsSpawnTool:
         task = tm.add_task.await_args.args[0]
         assert task.metadata["browser_capabilities"] == ["pdf"]
 
+    @pytest.mark.parametrize("subagent_type", ["BROWSER_AGENT", "browser\u2011agent"])
+    async def test_browser_spawn_resolves_type_variant_before_capability_check(
+        self,
+        subagent_type: str,
+    ) -> None:
+        tm = MagicMock()
+        tm.add_task = AsyncMock()
+        browser_spec = SimpleNamespace(agent_card=SimpleNamespace(name="browser_agent"))
+        agent = SimpleNamespace(
+            deep_config=SimpleNamespace(enable_task_loop=True),
+            event_handler=SimpleNamespace(task_manager=tm),
+            _find_subagent_spec=MagicMock(return_value=browser_spec),
+        )
+        tool = SessionsSpawnTool(parent_agent=agent, toolkit=SessionToolkit(), language="en")
+        session = MagicMock(spec=Session)
+        session.get_session_id.return_value = "session-1"
+
+        await tool.invoke(
+            {
+                "subagent_type": subagent_type,
+                "task_description": "save the page",
+                "browser_capabilities": ["pdf"],
+            },
+            session=session,
+        )
+
+        task = tm.add_task.await_args.args[0]
+        assert task.metadata["subagent_type"] == "browser_agent"
+        assert task.metadata["browser_capabilities"] == ["pdf"]
+
     async def test_team_member_spawn_keeps_business_owner_and_uses_cache_lineage(self) -> None:
         tm = MagicMock()
         tm.add_task = AsyncMock()

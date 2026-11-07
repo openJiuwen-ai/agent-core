@@ -13,6 +13,7 @@ from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_ca
 from openjiuwen.harness.prompts.tools.subagent_tools import SUBAGENT_RESUME_IDLE_MESSAGE
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
 from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
 from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
 
@@ -146,7 +147,11 @@ class SubagentSpawnTool(Tool):
         role = payload.get("role")
         _validate_spawn_payload(payload)
 
-        normalized_type = str(subagent_type).strip()
+        normalized_type = resolve_subagent_type_name(
+            self._parent_agent,
+            subagent_type,
+            self._allowed_subagent_types,
+        )
         if (
             self._allowed_subagent_types is not None
             and normalized_type not in self._allowed_subagent_types

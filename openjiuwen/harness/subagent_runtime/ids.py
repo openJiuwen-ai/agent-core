@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from openjiuwen.harness.subagent_type import normalize_subagent_type
+
 
 def new_task_id() -> str:
     """Return a new opaque task identifier."""
@@ -19,7 +21,7 @@ def build_subagent_id(
     sticky: bool,
 ) -> str:
     """Build a subagent session id aligned with TaskTool._build_sub_session_id."""
-    normalized_type = str(subagent_type or "").strip()
+    normalized_type = normalize_subagent_type(subagent_type)
     if sticky:
         return f"{parent_session_id}_sub_{normalized_type}"
     return f"{parent_session_id}_sub_{normalized_type}_{uuid4().hex[:8]}"

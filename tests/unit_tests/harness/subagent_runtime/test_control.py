@@ -105,6 +105,36 @@ async def test_spawn_returns_pending_init() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_and_lookup_resolve_registered_type_variant() -> None:
+    spec = SimpleNamespace(
+        agent_card=SimpleNamespace(id="general-purpose", name="general-purpose"),
+        display_name="General Purpose",
+        role="worker",
+    )
+
+    class _ConfiguredParent(ControlParentAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.spec = spec
+
+        @property
+        def deep_config(self):
+            return SimpleNamespace(subagents=[self.spec])
+
+        def _find_subagent_spec(self, subagent_type: str):
+            return self.spec
+
+    parent = _ConfiguredParent()
+
+    async with _patched_control(parent=parent) as control:
+        result = await control.spawn("GENERAL_PURPOSE", "hello")
+
+        assert parent.create_calls[0][0] == "general-purpose"
+        assert result.subagent_id.startswith("parent_sub_general-purpose_")
+        assert control._lookup_subagent_config("general_purpose") is spec
+
+
+@pytest.mark.asyncio
 async def test_spawn_create_failure_rolls_back_quota() -> None:
     parent = ControlParentAgent(
         create_error=build_error(
