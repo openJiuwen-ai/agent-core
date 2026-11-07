@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -73,6 +73,8 @@ def _is_valid_input(value: object) -> bool:
         and (value.text is None or isinstance(value.text, str))
         and _is_detail(value.detail)
     )
+
+
 def _is_valid_output(value: object) -> bool:
     return isinstance(value, PromptSectionOutput) and (value.text is None or isinstance(value.text, str))
 
@@ -84,8 +86,7 @@ async def core_handler(
 ) -> PromptSectionOutput:
     """Pass through the rendered section text without touching the builder."""
     del ops, event_next
-    event_input = event.event_input
-    assert isinstance(event_input, PromptSectionInput)
+    event_input = cast(PromptSectionInput, event.event_input)
     return PromptSectionOutput(text=event_input.text)
 
 

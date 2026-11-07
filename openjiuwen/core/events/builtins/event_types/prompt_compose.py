@@ -84,15 +84,14 @@ def _is_string_tuple(value: object) -> bool:
 
 
 def _is_valid_output_style(value: object) -> bool:
-    return (
-        value is None
-        or (
-            isinstance(value, PromptOutputStyle)
-            and isinstance(value.name, str)
-            and bool(value.name)
-            and isinstance(value.is_keeping_coding_instructions, bool)
-        )
+    return value is None or (
+        isinstance(value, PromptOutputStyle)
+        and isinstance(value.name, str)
+        and bool(value.name)
+        and isinstance(value.is_keeping_coding_instructions, bool)
     )
+
+
 def _is_valid_input(value: object) -> bool:
     return (
         isinstance(value, PromptComposeInput)
@@ -132,10 +131,7 @@ def _is_valid_output(value: object) -> bool:
 
 def match_pattern_func(event_input: object, match_pattern: MatchPattern) -> bool:
     """Match all compositions, or filter by model and one declared trait."""
-    if any(
-        key not in {"model", "trait"} or not isinstance(value, str)
-        for key, value in match_pattern.items()
-    ):
+    if any(key not in {"model", "trait"} or not isinstance(value, str) for key, value in match_pattern.items()):
         raise build_error(StatusCode.EVENTS_MATCH_INVALID, reason="prompt.compose patterns support model and trait")
     if not isinstance(event_input, PromptComposeInput):
         return False
