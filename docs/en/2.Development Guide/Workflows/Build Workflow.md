@@ -7,6 +7,8 @@ The basic steps to create and execute a workflow are as follows:
 
 # Creating a Workflow
 
+Creating a `Workflow` and registering its components do not require an asyncio event loop. These steps can run in a synchronous worker thread. Execute the configured workflow from asynchronous code with `await workflow.invoke(...)` or `async for ... in workflow.stream(...)`, creating a workflow session for each execution.
+
 ## Initializing a Workflow
 
 Create and initialize a new workflow instance. Currently, two methods are supported: creation via default configuration and creation via custom configuration.
