@@ -2,12 +2,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import (
     Any,
     AsyncIterator,
     Optional,
     TYPE_CHECKING,
+    TypeGuard,
     Union,
 )
 
@@ -56,7 +59,47 @@ from openjiuwen.core.workflow import (
 )
 
 if TYPE_CHECKING:
+    from anyio.abc import TaskGroup
+
     from openjiuwen.agent_teams.runtime import TeamRuntimeManager
+
+
+@dataclass
+class _RootTaskGroupState:
+    """Loop-bound lifecycle state of the runner's root anyio task group.
+
+    The four lifecycle objects (owner task, ready/stop events, task group)
+    travel as one reference so a rebuild on a new event loop swaps a single
+    attribute: a stale owner's teardown mutates only its own state object and
+    can never clobber the state a newer loop installed.
+    """
+
+    owner: Optional[asyncio.Task] = field(default=None)
+    owner_loop: Optional[asyncio.AbstractEventLoop] = field(default=None)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
+    group: Optional["TaskGroup"] = field(default=None)
+
+
+def _is_live_task_on_running_loop(task: Optional[asyncio.Task]) -> TypeGuard[asyncio.Task]:
+    """Whether *task* is unfinished and bound to the currently running loop.
+
+    A single identity check covers every stale class a process-wide singleton
+    can accumulate: owner bound to a closed loop, owner bound to a live but
+    foreign loop, and an owner that already finished on this loop.
+    """
+    if task is None or task.done():
+        return False
+    try:
+        return task.get_loop() is asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+
+# Bounded retries for _ensure_root_task_group under concurrent cross-loop
+# rebuilds: each retry waits for the just-published state to become ready,
+# so in practice one retry settles any two-loop race.
+_ROOT_TASK_GROUP_ENSURE_RETRIES = 3
 
 
 class _RunnerImpl(_TeamRunnerMixin):
@@ -94,10 +137,11 @@ class _RunnerImpl(_TeamRunnerMixin):
         self.system_reply_sub: ReplyTopicSubscription | None = None
         self._distribute_message_queue = None
         self._callback_framework = AsyncCallbackFramework()
-        self._root_task_group = None
-        self._root_task_group_owner = None
-        self._root_task_group_ready = None
-        self._root_task_group_stop = None
+        self._root_state: Optional[_RootTaskGroupState] = None
+        # Serialises the check-signal-rebuild critical section of
+        # _ensure_root_task_group across threads, so a concurrent loser
+        # always signals the state the winner published.
+        self._root_state_lock = threading.Lock()
         self._team_runtime_manager: Optional["TeamRuntimeManager"] = None
 
     @property
@@ -131,64 +175,218 @@ class _RunnerImpl(_TeamRunnerMixin):
         return isinstance(agent_instance, RemoteAgent)
 
     def get_root_task_group(self):
-        """Get the runner-owned root task group, if Runner has been started."""
-        return self._root_task_group
+        """Get the runner-owned root task group, if Runner has been started.
+
+        Uses the same loop-ownership predicate as the ContextVar bindings:
+        a group whose owner is dead or bound to another loop is not
+        returned to callers on this loop.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Sync context: no loop owns the check. A done owner's group
+            # field is already cleared by the owner loop's finally, so a
+            # non-None group here still corresponds to a live owner; a
+            # foreign live owner is only a concern for cross-loop driving,
+            # which sync callers cannot do.
+            state = self._root_state
+            if state is None:
+                return None
+            return state.group
+        state = self._root_state
+        if state is None or not _is_live_task_on_running_loop(state.owner):
+            return None
+        return state.group
 
     async def _root_task_group_owner_loop(
         self,
-        ready: asyncio.Event,
-        stop: asyncio.Event,
+        state: _RootTaskGroupState,
     ) -> None:
         try:
             async with anyio.create_task_group() as task_group:
-                self._root_task_group = task_group
-                ready.set()
-                await stop.wait()
+                state.group = task_group
+                state.ready.set()
+                await state.stop.wait()
                 task_group.cancel_scope.cancel()
         finally:
-            self._root_task_group = None
-            ready.set()
+            # Only clear the group slot while this state is still the live
+            # one; a rebuild on another loop must not see its group vanish.
+            if self._root_state is state:
+                state.group = None
+            state.ready.set()
 
     async def _ensure_root_task_group(self) -> None:
-        if self._root_task_group is not None and self._root_task_group_owner is not None:
-            return
         # Import the manager so lower layers can schedule via manager.create_task().
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
         get_task_manager()
-        self._root_task_group_ready = asyncio.Event()
-        self._root_task_group_stop = asyncio.Event()
-        self._root_task_group_owner = asyncio.create_task(
-            self._root_task_group_owner_loop(
-                self._root_task_group_ready,
-                self._root_task_group_stop,
+        # The check-signal-rebuild sequence must be atomic across threads:
+        # without the lock, two concurrent rebuilds can interleave so that
+        # each thread signals only the state it read, and a just-published
+        # loser state is never signalled by anyone — its owner is orphaned.
+        # The critical section is synchronous and pure in-memory on purpose:
+        # no awaits, no logging, no cross-loop scheduling inside, so an
+        # event loop thread is never blocked on the lock by I/O.
+        stale_to_signal = None
+        with self._root_state_lock:
+            state = self._root_state
+            if state is not None and _is_live_task_on_running_loop(state.owner):
+                live_state = state
+            else:
+                live_state = None
+                if state is not None:
+                    # The state being replaced may still own a live owner on
+                    # another running loop; signal it to stop there so its
+                    # task group and child tasks are not parked for the
+                    # process lifetime. The runner is a process-wide
+                    # singleton, so the latest start() wins by definition:
+                    # a replaced owner is retired, not kept running.
+                    # Signalling (logging + cross-loop scheduling) happens
+                    # outside the lock so the critical section stays pure
+                    # in-memory work; the state is already unpublished, and
+                    # stop.set is idempotent, so a late duplicate signal is
+                    # harmless.
+                    stale_to_signal = state
+                # Bind the owner into the state before publishing it: the
+                # publish is the only write other loops observe, so no
+                # observer can ever see a live state whose owner is still
+                # None (which a concurrent loop would misread as stale and
+                # rebuild over, orphaning this owner).
+                state = _RootTaskGroupState()
+                owner = asyncio.create_task(self._root_task_group_owner_loop(state))
+                state.owner = owner
+                state.owner_loop = owner.get_loop()
+                self._root_state = state
+                live_state = state
+        if stale_to_signal is not None:
+            self._signal_stale_owner_to_stop(stale_to_signal)
+        # Outside the lock: both paths must observe a ready state — a caller
+        # that hit the fast path while the owner coroutine has not run yet
+        # would otherwise return with state.group still None.
+        await live_state.ready.wait()
+        # A concurrent rebuild on another loop may have replaced the state
+        # while we waited. Re-check under the lock and retry with the
+        # winner's state so this loop never returns while _root_state points
+        # at an owner bound to a different loop (the caller's start() would
+        # bind that foreign group into this loop's ContextVar).
+        for _ in range(_ROOT_TASK_GROUP_ENSURE_RETRIES):
+            stale_to_signal = None
+            with self._root_state_lock:
+                current = self._root_state
+                if current is not None and _is_live_task_on_running_loop(current.owner):
+                    live_state = current
+                    break
+                # current is None or stale again: rebuild once more.
+                if current is not None:
+                    # Signalled outside the lock (see entry path): the
+                    # state is already unpublished and stop.set is
+                    # idempotent, so a late duplicate signal is harmless.
+                    stale_to_signal = current
+                live_state = _RootTaskGroupState()
+                owner = asyncio.create_task(self._root_task_group_owner_loop(live_state))
+                live_state.owner = owner
+                live_state.owner_loop = owner.get_loop()
+                self._root_state = live_state
+            if stale_to_signal is not None:
+                self._signal_stale_owner_to_stop(stale_to_signal)
+            await live_state.ready.wait()
+        # The winner's state must also be ready before we inspect its group:
+        # adopting it at the break without waiting could inspect a state
+        # whose owner has not opened its task group yet, and awaiting a
+        # pending owner here would block start() until the group opens -
+        # the same hang the loop's ready waits exist to prevent.
+        await live_state.ready.wait()
+        # If the owner task died before opening its task group, awaiting it
+        # re-raises its exception into start() - the develop behaviour this
+        # refactor must preserve (a broken runner must not start silently).
+        # Our dead state is dropped from the slot first (identity-guarded,
+        # so a concurrent winner is never touched) so a failed start leaves
+        # no half-published state behind.
+        if live_state.group is None:
+            with self._root_state_lock:
+                if self._root_state is live_state:
+                    self._root_state = None
+            await live_state.owner
+        # Final ownership check: if another loop replaced the state (or
+        # signalled our owner to stop) after our last check, returning here
+        # would let start() silently succeed with a dead or foreign root
+        # task group. Retire only our own loser first - the winner (a
+        # healthy state owned by another loop) must not be torn down by our
+        # failure, and our retired owner must not be left orphaned waiting
+        # on its stop event. The identity guard keeps the slot untouched
+        # when it already belongs to the winner.
+        if self._root_state is not live_state or not _is_live_task_on_running_loop(live_state.owner):
+            with self._root_state_lock:
+                if self._root_state is live_state:
+                    self._root_state = None
+                live_state.stop.set()
+            raise RuntimeError(
+                "runner root task group was concurrently replaced during "
+                "startup; retry start() on the event loop that now owns it"
             )
-        )
-        await self._root_task_group_ready.wait()
-        if self._root_task_group is None and self._root_task_group_owner.done():
-            await self._root_task_group_owner
 
     async def _close_root_task_group(self) -> None:
-        if self._root_task_group_owner is None:
+        state = self._root_state
+        if state is None:
             return
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
-        owner = self._root_task_group_owner
+        owner = state.owner
         try:
-            await get_task_manager().cancel_all()
-            if self._root_task_group_stop is not None:
-                self._root_task_group_stop.set()
-            if self._root_task_group is not None:
-                self._root_task_group.cancel_scope.cancel()
-            with anyio.move_on_after(5, shield=True):
-                await owner
-            if not owner.done():
-                owner.cancel()
+            if _is_live_task_on_running_loop(owner):
+                # Owner alive on this loop: drain manager tasks, stop and
+                # await it. The drain failure stays isolated so one error
+                # cannot skip the rest of the teardown.
                 try:
-                    with anyio.move_on_after(1, shield=True):
-                        await owner
-                except asyncio.CancelledError:
-                    pass
+                    await get_task_manager().cancel_all()
+                except Exception as e:
+                    logger.warning(
+                        "cancel_all failed while closing runner root task group",
+                        event_type=LogEventType.RUNNER_STOP,
+                        runner_id=self._runner_id,
+                        exception=e,
+                    )
+                state.stop.set()
+                if state.group is not None:
+                    state.group.cancel_scope.cancel()
+                with anyio.move_on_after(5, shield=True):
+                    await owner
+                if not owner.done():
+                    owner.cancel()
+                    try:
+                        with anyio.move_on_after(1, shield=True):
+                            await owner
+                    except asyncio.CancelledError:
+                        # owner.cancel() above makes the shielded drain end in
+                        # CancelledError: that is the expected completion of
+                        # the fallback teardown, recorded rather than
+                        # swallowed silently so the shutdown stays auditable.
+                        logger.debug(
+                            "Runner root task group owner cancelled during fallback teardown",
+                            event_type=LogEventType.RUNNER_STOP,
+                            runner_id=self._runner_id,
+                        )
+                self._collect_owner_exception(owner)
+            elif owner is not None and owner.done() and owner.get_loop() is asyncio.get_running_loop():
+                # Owner already finished on this loop: its own teardown
+                # stopped it, but manager tasks it created may outlive it —
+                # drain them too (develop semantics).
+                try:
+                    await get_task_manager().cancel_all()
+                except Exception as e:
+                    logger.warning(
+                        "cancel_all failed while closing runner root task group",
+                        event_type=LogEventType.RUNNER_STOP,
+                        runner_id=self._runner_id,
+                        exception=e,
+                    )
+                self._collect_owner_exception(owner)
+            else:
+                # Owner lives on another loop: this loop can neither await
+                # nor cancel it. The helper settles it on its own loop when
+                # possible; manager tasks created there are drained by that
+                # loop's own stop.
+                self._signal_stale_owner_to_stop(state)
         except Exception as e:
             logger.warning(
                 "Failed to close runner root task group",
@@ -197,14 +395,75 @@ class _RunnerImpl(_TeamRunnerMixin):
                 exception=e,
             )
         finally:
-            self._root_task_group = None
-            self._root_task_group_owner = None
-            self._root_task_group_ready = None
-            self._root_task_group_stop = None
+            if self._root_state is state:
+                self._root_state = None
+
+    def _collect_owner_exception(self, owner: asyncio.Task) -> None:
+        """Log a finished owner's exception so it is not left unretrieved.
+
+        Pending owners are skipped: owner.exception() raises
+        InvalidStateError on an unfinished task, which would only produce a
+        misleading warning when the teardown timed out.
+        """
+        if not owner.done() or owner.cancelled():
+            return
+        exc = owner.exception()
+        if exc is not None:
+            logger.warning(
+                "Runner root task group owner exited with an exception",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+                exception=exc,
+            )
+
+    def _signal_stale_owner_to_stop(self, state: _RootTaskGroupState) -> None:
+        """Ask a non-current owner to stop on the loop that owns it.
+
+        An owner this loop can neither await nor cancel still owns a live
+        anyio task group; setting its stop event on its own loop makes it
+        cancel the group and exit there, so no task group or child task is
+        parked for the process lifetime. On a closed loop the owner can
+        never run again, so there is nothing to signal; on an idle loop the
+        callback runs the next time that loop executes.
+        """
+        owner = state.owner
+        owner_loop = state.owner_loop
+        if owner is None:
+            return
+        if owner.done():
+            self._collect_owner_exception(owner)
+            return
+        if owner_loop is None or owner_loop.is_closed():
+            logger.warning(
+                "Dropping runner root task group owner whose event loop is closed",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+            )
+            return
+        try:
+            owner_loop.call_soon_threadsafe(state.stop.set)
+        except RuntimeError as e:
+            logger.warning(
+                "Failed to signal runner root task group owner on its own loop",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+                exception=e,
+            )
+            return
+        logger.warning(
+            "Signalled runner root task group owner to stop on its own event loop",
+            event_type=LogEventType.RUNNER_STOP,
+            runner_id=self._runner_id,
+        )
 
     @contextmanager
     def _root_task_group_scope(self):
-        if self._root_task_group is None:
+        state = self._root_state
+        # Reuse the loop-ownership predicate: a group whose owner is dead or
+        # foreign must not be bound into this loop's ContextVar (running
+        # tasks in it would raise cross-loop errors).
+        group = state.group if state is not None and _is_live_task_on_running_loop(state.owner) else None
+        if group is None:
             yield
             return
         from openjiuwen.core.common.task_manager.context import get_task_group, reset_task_group, set_task_group
@@ -212,26 +471,32 @@ class _RunnerImpl(_TeamRunnerMixin):
         if get_task_group() is not None:
             yield
             return
-        token = set_task_group(self._root_task_group)
+        token = set_task_group(group)
         try:
             yield
         finally:
             reset_task_group(token)
 
     def _enter_root_task_group_context(self):
-        """Bind :attr:`_root_task_group` into ContextVar; return token for :meth:`_exit_root_task_group_context`.
+        """Bind the root task group from :attr:`_root_state` into ContextVar.
 
-        Async generators must use this with ``try``/``finally`` instead of :meth:`_root_task_group_scope`:
-        ``contextlib``'s sync ``yield`` + ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
+        Returns the token for :meth:`_exit_root_task_group_context`. Async
+        generators must use this with ``try``/``finally`` instead of
+        :meth:`_root_task_group_scope`: ``contextlib``'s sync ``yield`` +
+        ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
         context (e.g. A2A streaming on a uvicorn worker thread).
         """
-        if self._root_task_group is None:
+        state = self._root_state
+        # Same predicate as _root_task_group_scope: never bind a group whose
+        # owner is dead or bound to a different loop into this loop.
+        group = state.group if state is not None and _is_live_task_on_running_loop(state.owner) else None
+        if group is None:
             return None
         from openjiuwen.core.common.task_manager.context import get_task_group, set_task_group
 
         if get_task_group() is not None:
             return None
-        return set_task_group(self._root_task_group)
+        return set_task_group(group)
 
     def _exit_root_task_group_context(self, token) -> None:
         if token is None:
@@ -270,6 +535,14 @@ class _RunnerImpl(_TeamRunnerMixin):
         logger.info("Begin to start runner", event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
         from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
         ReadWriteLockManager.start()
+        # An ensure failure is either our own owner dying (ensure has
+        # already retired that state itself) or losing a concurrent rebuild
+        # to another loop's healthy winner. No global teardown runs here:
+        # ReadWriteLockManager.stop() also closes every business lock
+        # cached in the process, which a concurrent winner may still hold.
+        # The lock manager is self-healing - its next start() discards a
+        # cleanup task bound to a dead loop - so leaving it running is safe
+        # whether this loop survives or not.
         await self._ensure_root_task_group()
 
         try:
@@ -349,12 +622,34 @@ class _RunnerImpl(_TeamRunnerMixin):
                            exception=e)
             return False
         finally:
-            await self._resource_manager.release()
+            try:
+                await self._resource_manager.release()
+            except Exception as e:  # noqa: BLE001 - cleanup must not mask the stop result
+                logger.warning(
+                    "Failed to release runner resources during stop",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                    exception=e,
+                )
             try:
                 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
                 await ReadWriteLockManager.stop()
-            finally:
+            except Exception as e:  # noqa: BLE001 - cleanup must not mask the stop result
+                logger.warning(
+                    "Failed to stop read-write lock cleanup during stop",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                    exception=e,
+                )
+            try:
                 await self._close_root_task_group()
+            except Exception as e:  # noqa: BLE001 - teardown must not mask the stop result
+                logger.warning(
+                    "Failed to close runner root task group during stop",
+                    event_type=LogEventType.RUNNER_STOP,
+                    runner_id=self._runner_id,
+                    exception=e,
+                )
 
     async def run_workflow(self,
                            workflow: str | Workflow,
