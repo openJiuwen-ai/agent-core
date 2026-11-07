@@ -7,6 +7,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.base import (
     PrefixCompactProcessor,
     PrefixCompactSpan,
     adjust_keep_recent_for_tool_boundaries,
+    find_last_real_user_message_index,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.prompts.prompts import ROUND_COMPACT_PROMPT
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -50,6 +51,14 @@ class RoundLevelCompressor(PrefixCompactProcessor):
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:
         effective_keep = adjust_keep_recent_for_tool_boundaries(messages, self.config.keep_recent_messages)
         split_index = max(len(messages) - effective_keep, 0)
+        # The in-flight user turn is not completed history. The checkpoint the
+        # compressor produces states that it is not a new user request, so
+        # folding the latest real user message into it leaves the next model
+        # call with no request to answer. Keep the current turn raw; earlier
+        # rounds are what this processor is meant to summarize.
+        last_user_index = find_last_real_user_message_index(messages)
+        if last_user_index >= 0:
+            split_index = min(split_index, last_user_index)
         return PrefixCompactSpan(
             preserved_prefix=[],
             messages_to_compress=list(messages[:split_index]),
