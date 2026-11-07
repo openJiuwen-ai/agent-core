@@ -7,15 +7,25 @@ import asyncio
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.events.builtins.event_types.prompt_attachment import (
+    PROMPT_ATTACHMENT,
+    PromptAttachmentInput,
+    PromptAttachmentOutput,
+)
+from openjiuwen.core.events.types import Event, SessionContext
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
+
+if TYPE_CHECKING:
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
 
 
 class PromptAttachmentKind(str, Enum):
@@ -50,6 +60,7 @@ class PromptAttachment(BaseModel):
     content_kind: str = "text/plain"
     content_path: str | None = None
     content_sha256: str | None = None
+    origin: dict[str, str] = Field(default_factory=lambda: {"kind": "engine"})
 
 
 class PromptAttachmentUpdate(BaseModel):
@@ -62,6 +73,7 @@ class PromptAttachmentUpdate(BaseModel):
     expires_at: str | None = None
     metadata: dict[str, Any] | None = None
     content_kind: str | None = None
+    origin: dict[str, str] | None = None
 
 
 _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS = 12000
@@ -206,6 +218,7 @@ class PromptAttachmentContextWriter:
         metadata: dict[str, Any] | None = None,
         content_kind: str = "text/plain",
         expires_at: str | None = None,
+        origin: Mapping[str, str] | None = None,
     ) -> PromptAttachment:
         """Add or replace one section in the bound session."""
 
@@ -219,6 +232,7 @@ class PromptAttachmentContextWriter:
             metadata=metadata,
             content_kind=content_kind,
             expires_at=expires_at,
+            origin=origin,
         )
 
     async def add_from_prompt_section(
@@ -232,6 +246,7 @@ class PromptAttachmentContextWriter:
         metadata: dict[str, Any] | None = None,
         content_kind: str = "text/plain",
         expires_at: str | None = None,
+        origin: Mapping[str, str] | None = None,
     ) -> PromptAttachment | None:
         """Add or replace an attachment section from an existing PromptSection."""
 
@@ -251,6 +266,7 @@ class PromptAttachmentContextWriter:
             metadata=metadata,
             content_kind=content_kind,
             expires_at=expires_at,
+            origin=origin,
         )
 
     async def clear_section(self, section: str) -> int:
@@ -267,11 +283,17 @@ class PromptAttachmentContextWriter:
 class PromptAttachmentManager:
     """DeepAgent-private in-memory prompt attachment manager."""
 
-    def __init__(self, language: str = "en") -> None:
+    def __init__(
+        self,
+        language: str = "en",
+        *,
+        event_bus: "ExtensionEventBusProtocol | None" = None,
+    ) -> None:
         self._items: dict[str, dict[str, PromptAttachment]] = {}
         self._lock = asyncio.Lock()
         self._history_lock = asyncio.Lock()
         self.language = language
+        self.event_bus = event_bus
 
     def bind_context(self, ctx: Any) -> PromptAttachmentContextWriter:
         """Return a context-aware writer for rail prompt attachment migration."""
@@ -290,6 +312,7 @@ class PromptAttachmentManager:
         metadata: dict[str, Any] | None = None,
         content_kind: str = "text/plain",
         expires_at: str | None = None,
+        origin: Mapping[str, str] | None = None,
     ) -> PromptAttachment:
         """Add or replace one section in a session."""
 
@@ -310,6 +333,7 @@ class PromptAttachmentManager:
             expires_at=expires_at,
             metadata=merged_metadata,
             content_kind=content_kind,
+            origin=dict(origin) if origin is not None else {"kind": "engine"},
         )
         return await self._add(item)
 
@@ -556,7 +580,8 @@ class PromptAttachmentManager:
             if not has_snapshot:
                 if not prompt_attachments:
                     return None
-                rendered = self.render_history_snapshot(prompt_attachments)
+                changed = prompt_attachments
+                removed: list[str] = []
                 mode = _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
             else:
                 changed = [
@@ -567,8 +592,16 @@ class PromptAttachmentManager:
                 removed = sorted(set(previous_state) - set(current_state))
                 if not changed and not removed:
                     return None
-                rendered = self.render_delta(changed, removed)
                 mode = _PROMPT_ATTACHMENT_HISTORY_DELTA
+
+            changed = await self._run_attachment_events(changed, session_id)
+            if not changed and not removed:
+                return None
+            rendered = (
+                self.render_history_snapshot(changed)
+                if mode == _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
+                else self.render_delta(changed, removed)
+            )
 
             message = UserMessage(
                 content=rendered,
@@ -587,6 +620,68 @@ class PromptAttachmentManager:
                 sorted(current_state),
             )
             return message
+
+    async def _run_attachment_events(
+        self,
+        prompt_attachments: list[PromptAttachment],
+        session_id: str,
+    ) -> list[PromptAttachment]:
+        """Run one optional extension event per candidate and keep source order."""
+        event_bus = self.event_bus
+        if event_bus is None or not prompt_attachments:
+            return prompt_attachments
+
+        results = await asyncio.gather(
+            *(self._run_attachment_event(item, session_id, event_bus) for item in prompt_attachments)
+        )
+        return [item for item in results if item is not None]
+
+    async def _run_attachment_event(
+        self,
+        prompt_attachment: PromptAttachment,
+        session_id: str,
+        event_bus: "ExtensionEventBusProtocol",
+    ) -> PromptAttachment | None:
+        event_input = PromptAttachmentInput(
+            type=_kind_value(prompt_attachment.kind),
+            text=prompt_attachment.content or "",
+            origin=prompt_attachment.origin,
+            detail={
+                "id": prompt_attachment.id,
+                "section": prompt_attachment.section,
+                "priority": prompt_attachment.priority,
+                "source": prompt_attachment.source,
+                "content_kind": prompt_attachment.content_kind,
+                "metadata": prompt_attachment.metadata,
+            },
+        )
+        try:
+            output = await event_bus.trigger(
+                Event(PROMPT_ATTACHMENT, event_input),
+                SessionContext(session_id=session_id),
+            )
+            if not isinstance(output, PromptAttachmentOutput):
+                raise TypeError("prompt.attachment returned an invalid output")
+            if output.text is None:
+                return None
+            if output.text == prompt_attachment.content:
+                return prompt_attachment
+            return prompt_attachment.model_copy(
+                update={
+                    "content": output.text,
+                    "content_sha256": _content_sha256(output.text),
+                },
+                deep=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - one extension must not block the batch
+            logger.warning(
+                "[PromptAttachmentManager] prompt.attachment failed: session_id=%s attachment_id=%s error=%s",
+                session_id,
+                prompt_attachment.id,
+                exc,
+                exc_info=True,
+            )
+            return prompt_attachment
 
     @staticmethod
     def build_model_window_mutator(

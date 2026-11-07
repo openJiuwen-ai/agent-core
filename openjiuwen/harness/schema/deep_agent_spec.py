@@ -35,6 +35,7 @@ from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperati
 from openjiuwen.harness.schema.build_context import (
     PARENT_SYS_OPERATION_EXTRAS_KEY,
     BuildContext,
+    extension_bus as get_extension_bus,
 )
 from openjiuwen.harness.schema.config import (
     DEFAULT_ACR_BASE_URL,
@@ -598,6 +599,7 @@ class DeepAgentSpec(BaseModel):
         return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
+            extension_bus=get_extension_bus(build_ctx),
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
