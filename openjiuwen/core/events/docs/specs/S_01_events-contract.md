@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-11-05 |
-| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
+| 最近一次修订日期 | 2026-11-07 |
+| 关联 feature | [F_01 公共契约](../features/F_01_ev01-public-contract.md)、[F_06 包信息能力](../features/F_06_ops-package.md)、[F_14 store 持久化](../features/F_14_ops-store.md)、[F_16 prompt.attachment Agent Loop 事件](../features/F_16_prompt-attachment-event.md)；已撤回的限定派发提案见 [F_09](../features/F_09_handler-selection.md)，进度见[开发计划](../designs/events-development-plan.md) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
 本规约是 Events 公共模型、接口协议、错误码和调用语义的唯一维护位置。公共模型、EventBus、Builder/Ops 已有实现与测试；具体方案和验证范围见关联 feature 与开发计划。`trigger` 由事件类型的 matcher 选择 Handler，不接受调用级 Handler ID 白名单。
@@ -130,6 +130,9 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 - 标识与模型：EventType、EventInput、EventOutput、HandlerId、OPS_BUILD_EVENT_TYPE、HandlerLevel、Event、SessionContext、PackageMetadata、MatchPattern、MatchPatternFunc、EventInputValidator、EventOutputValidator。
 - 回调与协议：EventHandler、OpsMethod、ExtensionEventBusProtocol。
 - 运行时对象：EventNext（`openjiuwen/core/events/event_next.py`）、EventHandlerOpsBuilder 和 EventHandlerOps（`openjiuwen/core/events/ops.py`）、ExtensionEventBus。
+
+事件专属 DTO 不提升到顶层公共导出；例如 `prompt.attachment` 的输入、输出和 matcher
+从其内置事件模块直接导入，具体业务契约见 [F_16](../features/F_16_prompt-attachment-event.md)。
 
 不公开 `EventDefinition`、生命周期状态枚举、Handler 注册记录或注册表内部结构。Events 不导出专属异常类型。
 
@@ -328,6 +331,29 @@ state 能力的自动依赖收集由宿主构建入口与状态服务协作，�
 四个预置 `store.*` 事件、输入与返回值、Matcher、Ops 调用和文件服务注入见
 [S_02 store 规约](S_02_store.md)。它们通过现有 bootstrap 与 Build 登记，
 不改变 package 身份和 SessionContext，也不新增渲染上下文。
+
+### 4.6.3 `prompt.attachment`
+
+`prompt.attachment` 是 Agent Loop 在 prompt attachment 写入 context history 前触发的
+普通事件。它只提供事件链，不提供同名或等价 Ops 方法。事件专属 DTO 定义在
+`openjiuwen/core/events/builtins/event_types/prompt_attachment.py`：
+
+| 对象 | 契约 |
+| --- | --- |
+| `PromptAttachmentInput` | frozen DTO；`type`、`text`、Mods 风格 `origin`、可选 `agent_id` 和只读 `detail` |
+| `PromptAttachmentOutput` | `text: str \| None`；`None` 表示当前 attachment 不进入本次 renderer |
+| CORE | 原样返回输入 `text`，不执行外部副作用 |
+| Matcher | 支持 type、agent/origin 字段以及 section/source/content_kind 和 origin/detail 子字段精确匹配 |
+
+CORE 由 builtin bootstrap 自动登记。业务宿主将候选 attachment 逐条触发事件；USER / BUILTIN
+handler 按普通事件的既有 USER → BUILTIN → CORE 顺序运行，handler 可构造同类型新输入改写
+`text`，或直接返回合法输出短路。输入 origin 只表示 attachment 的产生通道，handler 改写
+不改变它；当前没有真实 agent id 时不得由宿主凭空补齐。
+
+该事件不使用 Ops，不接收或暴露 `PromptAttachment` 实例、DeepAgent 或 ContextVar。异常、
+取消和普通 handler 的 skip 继续遵循本规约 4.7 节；history 写入前的批量并发、原始 hash/state
+和无 bus 兼容语义由 Harness [S_06](../../../harness/docs/specs/S_06_prompts-and-l10n.md)
+与 [F_16](../features/F_16_prompt-attachment-event.md) 共同定义。
 
 ### 4.7 错误码与取消
 

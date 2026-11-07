@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
+    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
     from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
@@ -326,7 +327,12 @@ def _expert_role_unload_content(role_name: str, language: str = "cn") -> str:
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
-    def __init__(self, card: AgentCard):
+    def __init__(
+        self,
+        card: AgentCard,
+        *,
+        extension_bus: "ExtensionEventBusProtocol | None" = None,
+    ):
         self._deep_config: Optional[DeepAgentConfig] = None
         self._react_agent: Optional[ReActAgent] = None
         self._pending_rails: List[AgentRail] = []
@@ -346,7 +352,10 @@ class DeepAgent(BaseAgent):
         self._active_agent_template: tuple[str, str] | None = None
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
-        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
+        self._extension_bus = extension_bus
+        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager(
+            event_bus=extension_bus,
+        )
         self._interaction_session: Optional[Session] = None
         self._interaction_phase = InteractionPhase.IDLE
         self._active_interaction_round: Optional[ActiveInteractionRound] = None
@@ -383,6 +392,11 @@ class DeepAgent(BaseAgent):
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def set_extension_bus(self, bus: "ExtensionEventBusProtocol | None") -> None:
+        """Attach or clear the optional bus used by prompt attachment events."""
+        self._extension_bus = bus
+        self.prompt_attachment_manager.event_bus = bus
 
     def set_fresh_input_context_factory(
         self,

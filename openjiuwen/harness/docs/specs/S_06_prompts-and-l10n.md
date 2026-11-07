@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/prompts/`（67 文件） |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-11-07 |
+| 关联 feature | [F_26 Prompt Attachment Agent Loop 事件接入](../features/F_26_prompt-attachment-event-agent-loop.md) |
 
 ## 范围 / 边界
 
@@ -45,9 +45,10 @@ report。`prompts/` 67 文件是 DeepAgent 的"输入面"，只定义契约，�
    compression_recall / external_memory / context / offload / reload）。
    新增 section = 新模块 + 注册进 builder。
 5. **附件机制契约**：`PromptAttachment`（pydantic）是附件单元；`PromptAttachmentKind` 区分类型；
+   `origin` 默认是 `{ "kind": "engine" }`，可显式提供 hook/plugin 的产生事件；
    `PromptAttachmentManager.bind_context(ctx)` 返回 `PromptAttachmentContextWriter`，按 session
    + section 落库 `add_section` / `clear_section`；`hash_rendered` / `hash_prompt_attachment`
-   是内容指纹（sha256）。
+   是内容指纹（sha256），且 `origin` 不参与 attachment 状态 hash。
 6. **清洗唯一**：`sanitize_path(path)` 清洗路径字符串；`sanitize_user_content(content, max_len=2000)`
    截断用户内容。任何透传给 LLM 的用户内容必须先过这两道。
 7. **`prompts/__init__.py` 的 `__all__` 是契约**；`from openjiuwen.harness.prompts import sections`
@@ -87,6 +88,10 @@ class PromptAttachmentContextWriter:
     async def clear_section(self, section: str) -> int
 ```
 
+`add_section()` 与两个 context writer 写入方法接受可选 `origin`；不传时保持 engine
+默认值。`PromptAttachmentManager` 可选接收 live `ExtensionEventBus`，但 bus 不是
+`PromptAttachment`、`DeepAgentConfig` 或 `DeepAgentSpec` 的序列化字段。
+
 错误 / 返回语义：
 
 - `resolve_language` 未知语言 → 回退 `DEFAULT_LANGUAGE`（不抛）。
@@ -105,6 +110,15 @@ class PromptAttachmentContextWriter:
 | `language` | 语言标签 |
 | priority / order | 装配顺序（builder 侧） |
 
+### PromptAttachment（事件相关字段）
+
+| 字段 | 语义 |
+|---|---|
+| `kind` | attachment 类型，事件输入映射到 `type` |
+| `content` | attachment 原文，事件输入映射到 `text` |
+| `origin` | 产生通道：`engine`，或带上游事件名的 `hook` / `plugin`；默认 engine |
+| `metadata` / `source` / `section` / `priority` / `content_kind` | 作为事件 `detail` 快照；不改变原有 renderer 语义 |
+
 ### prompt 附件生命周期
 
 | 阶段 | 组件 | 说明 |
@@ -114,6 +128,18 @@ class PromptAttachmentContextWriter:
 | 落库 | `PromptAttachmentManager.add_section` / `clear_section` | 按 session_id + section 组织 |
 | 读取 | `get_by_id` / `update_by_id` | 单附件读/改 |
 | 注入 | `PromptAttachmentContextWriter` | 绑定 ctx 后直接写 section |
+
+### prompt.attachment Agent Loop 阶段
+
+`sync_to_context()` 在原始 snapshot/delta changed 集合确定后、renderer 和
+`context.add_messages()` 之前，为每个候选异步触发一次 `prompt.attachment`。有 bus 时批内
+并发、收集结果保持原候选顺序；没有 bus 时直接走旧路径，不创建事件任务。事件输入是
+独立只读 DTO，handler 可改写 `text`，返回 `text=None` 时省略本次渲染片段。
+
+事件改写后的文本写入本次 history `UserMessage`，但 history metadata 中的 state 仍按原始
+attachment 内容计算，因此改写不会制造新的 delta。异常 attachment 回退原文，取消继续向
+调用方传播；只有整批事件完成后才写入 history。没有用户或内置 handler 时由 CORE 原样
+透传，现有 attachment 内容、排序、framing、截断和 provider role projection 不变。
 
 ## 与其它 spec 的关系
 

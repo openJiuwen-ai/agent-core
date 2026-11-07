@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 # distributed remote, cold recovery) sees None here and falls back to the
 # previous behaviour.
 PARENT_SYS_OPERATION_EXTRAS_KEY = "_parent_sys_operation"
+EXTENSION_BUS_EXTRAS_KEY = "openjiuwen.extension_bus"
 
 
 def parent_sys_operation(context: Any) -> Any:
@@ -46,6 +47,21 @@ def parent_sys_operation(context: Any) -> Any:
     """
     extras = getattr(context, "extras", None) or {}
     return extras.get(PARENT_SYS_OPERATION_EXTRAS_KEY)
+
+
+def extension_bus(context: Any) -> Any:
+    """Return an explicitly injected extension bus from a build context."""
+    if context is None:
+        return None
+    direct = getattr(context, "extension_bus", None)
+    if direct is not None:
+        return direct
+    extras = getattr(context, "extras", None) or {}
+    for key in (EXTENSION_BUS_EXTRAS_KEY, "extension_bus", "_extension_bus", "team.extension_bus"):
+        bus = extras.get(key)
+        if bus is not None:
+            return bus
+    return None
 
 
 @dataclass
@@ -68,6 +84,9 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
+        extension_bus: Optional host-provided extension event bus. It is a live
+            runtime handle and is not serialized; ``None`` keeps prompt
+            attachment processing on its original no-extension path.
         moa: Invocation policy for this root agent only; not inherited by
             capability providers or serialized as part of a spec.
     """
@@ -81,6 +100,7 @@ class BuildContext:
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
     moa: MoAConfig | None = None
+    extension_bus: Any = None
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.
@@ -163,7 +183,9 @@ def build_context_from_seed(seed: Optional[dict[str, Any]]) -> Optional["BuildCo
 __all__ = [
     "BuildContext",
     "PARENT_SYS_OPERATION_EXTRAS_KEY",
+    "EXTENSION_BUS_EXTRAS_KEY",
     "parent_sys_operation",
+    "extension_bus",
     "register_build_context_factory",
     "build_context_from_seed",
 ]
