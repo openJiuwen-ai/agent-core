@@ -18,15 +18,16 @@ from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 
 class FakeTeamAgent:
     """Minimal mock for finalize_member's agent argument."""
 
     def __init__(
-        self,
-        member_name: str = "test_member",
-        team_member: TeamMember | MagicMock | None = None,
+            self,
+            member_name: str = "test_member",
+            team_member: TeamMember | MagicMock | None = None,
     ) -> None:
         self.member_name = member_name
         self.team_member = team_member
@@ -219,6 +220,90 @@ class TestFinalizeMember:
         assert agent.stop_coordination_calls == 0
         assert agent.pause_coordination_calls == 1
         assert fake_member.update_status_calls == [MemberStatus.READY]
+
+
+class TestInteractInteractiveInputGate:
+    """manager.interact 的 InteractiveInput 准入门（S_17 + id 匹配）。
+
+    has_pending_interrupt()=True 只证明"有中断在等"，不证明作答
+    能消解它——id 不匹配（过期卡片作答）必须在 manager 层显式拒绝，
+    不能报 success 后由 resume_interrupt 静默丢弃。
+    """
+
+    class FakeInterruptGateAgent:
+        """Minimal agent stub exposing the two interrupt gate predicates."""
+
+        def __init__(self, *, pending: bool, valid: bool) -> None:
+            self._pending = pending
+            self._valid = valid
+            self.resume_calls: list = []
+
+        def has_pending_interrupt(self) -> bool:
+            return self._pending
+
+        def is_valid_interrupt_resume(self, user_input) -> bool:
+            return self._valid
+
+        async def resume_interrupt(self, user_input) -> None:
+            self.resume_calls.append(user_input)
+
+    @staticmethod
+    def _make_answer(*ids: str) -> InteractiveInput:
+        answer = InteractiveInput()
+        for tool_call_id in ids:
+            answer.update(tool_call_id, {"approved": True})
+        return answer
+
+    async def _interact(self, agent) -> "DeliverResult":
+        manager = TeamRuntimeManager()
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+        return await manager.interact(
+            self._make_answer("tc-1"),
+            team_name="alpha",
+            session_id="session-1",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_pending_and_matching_ids_is_delivered(self):
+        """正常作答（pending + id 匹配）：受理并投递 resume。"""
+        agent = self.FakeInterruptGateAgent(pending=True, valid=True)
+
+        result = await self._interact(agent)
+
+        assert result.ok is True
+        assert len(agent.resume_calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_pending_but_stale_ids_is_rejected_not_dropped(self):
+        """过期卡片作答（pending 但 id 不匹配）：显式拒绝，不得静默丢弃。"""
+        agent = self.FakeInterruptGateAgent(pending=True, valid=False)
+
+        result = await self._interact(agent)
+
+        assert result.ok is False
+        assert result.reason == "unsupported_interactive_input"
+        assert agent.resume_calls == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_no_pending_is_rejected(self):
+        """无挂起中断的作答：S_17 显式拒绝（原语义保持）。"""
+        agent = self.FakeInterruptGateAgent(pending=False, valid=False)
+
+        result = await self._interact(agent)
+
+        assert result.ok is False
+        assert result.reason == "unsupported_interactive_input"
+        assert agent.resume_calls == []
 
 
 class TestExternalEventIngress:

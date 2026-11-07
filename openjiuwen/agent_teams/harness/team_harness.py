@@ -36,7 +36,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, INTERRUPTION_INFLIGHT_KEY
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.agent_teams.harness.state import HarnessState
 
@@ -53,14 +53,14 @@ class TeamHarness:
     """Sole adapter between TeamAgent and a NativeHarness-backed DeepAgent."""
 
     def __init__(
-        self,
-        agent_spec: "DeepAgentSpec",
-        build_context: "BuildContext | None",
-        native: NativeHarness,
-        *,
-        role: "TeamRole",
-        member_name: Optional[str],
-        initial_plan_mode: bool = False,
+            self,
+            agent_spec: "DeepAgentSpec",
+            build_context: "BuildContext | None",
+            native: NativeHarness,
+            *,
+            role: "TeamRole",
+            member_name: Optional[str],
+            initial_plan_mode: bool = False,
     ) -> None:
         self._agent_spec = agent_spec
         self._build_context = build_context
@@ -79,13 +79,13 @@ class TeamHarness:
 
     @classmethod
     def build(
-        cls,
-        *,
-        agent_spec: "DeepAgentSpec",
-        role: "TeamRole",
-        member_name: Optional[str],
-        initial_plan_mode: bool = False,
-        build_context: "BuildContext | None" = None,
+            cls,
+            *,
+            agent_spec: "DeepAgentSpec",
+            role: "TeamRole",
+            member_name: Optional[str],
+            initial_plan_mode: bool = False,
+            build_context: "BuildContext | None" = None,
     ) -> "TeamHarness":
         """Construct the native via forward construction and configure it.
 
@@ -331,10 +331,10 @@ class TeamHarness:
         return self._native is not None and self._active_agent_session is not None
 
     async def subscribe(
-        self,
-        *,
-        on_state: Callable[..., Any] | None = None,
-        on_round: Callable[..., Any] | None = None,
+            self,
+            *,
+            on_state: Callable[..., Any] | None = None,
+            on_round: Callable[..., Any] | None = None,
     ) -> None:
         """Register phase/round callbacks on the native (no-op before start)."""
         if self._native is not None:
@@ -345,11 +345,21 @@ class TeamHarness:
     # ------------------------------------------------------------------
 
     def has_pending_interrupt(self) -> bool:
-        """Return True if the agent has an interruption state to resume."""
+        """Return True if the agent has an interruption state to resume.
+
+        除正式态（INTERRUPTION_KEY，批末 commit_interrupt 写入）外，在途登记
+        （INTERRUPTION_INFLIGHT_KEY，ToolInterruptException 逐工具捕获边界写入）
+        同样视为 pending——卡片在抛出瞬间即已下发用户可答，批末 commit 前的
+        窗口内作答必须能被受理，否则会被 manager 以
+        unsupported_interactive_input 拒收。
+        """
         session = self._interrupt_session()
         if session is None:
             return False
-        return session.get_state(INTERRUPTION_KEY) is not None
+        if session.get_state(INTERRUPTION_KEY) is not None:
+            return True
+        inflight = session.get_state(INTERRUPTION_INFLIGHT_KEY)
+        return isinstance(inflight, dict) and bool(inflight)
 
     def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
         """Return True if ``user_input`` matches the pending interrupt requests."""
@@ -360,7 +370,14 @@ class TeamHarness:
             return False
         state = session.get_state(INTERRUPTION_KEY)
         if state is None:
-            return False
+            # 正式态未 commit 时退查在途登记（窗口内作答）：在途记录的
+            # 键即 outer tool_call id，与正式态的 inner id 同构（非子代理中断
+            # 场景 inner_id == outer_id，见 ToolInterruptHandler）。
+            inflight = session.get_state(INTERRUPTION_INFLIGHT_KEY)
+            if not isinstance(inflight, dict) or not inflight:
+                return False
+            resume_ids = set(user_input.user_inputs.keys())
+            return bool(resume_ids) and resume_ids.issubset(set(inflight.keys()))
         interrupted = getattr(state, "interrupted_tools", {}) or {}
         pending_ids: set = set()
         for entry in interrupted.values():
