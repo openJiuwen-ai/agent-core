@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-03T10:53+08:00 -->
+<!-- generated-at: 2026-11-05T15:15+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -21,7 +21,9 @@ generated: true
 | [agent_teams/workflow](#module-3) |
 | [extensions/observability](#module-4) |
 | [harness](#module-5) |
-| [未分类](#module-6) |
+| [jiuwenswarm/jiuwenswarm/symphony](#module-6) |
+| [symphony](#module-7) |
+| [未分类](#module-8) |
 
 <a id="module-1"></a>
 
@@ -119,6 +121,33 @@ generated: true
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
 <a id="module-6"></a>
+
+## jiuwenswarm/jiuwenswarm/symphony
+
+### 开发前 (proposals)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261029-1619-skill-directory-graph-api](proposals/D-20261029-1619-skill-directory-graph-api/design.md) | Symphony Runtime 统一配置与检索编排接口收敛 | draft | lin-xiaoyu | core | 2026-10-31 |
+
+<a id="module-7"></a>
+
+## symphony
+
+### 开发前 (proposals)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261029-1619-skill-directory-graph-api](proposals/D-20261029-1619-skill-directory-graph-api/design.md) | Symphony Runtime 统一配置与检索编排接口收敛 | draft | lin-xiaoyu | core | 2026-10-31 |
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261031-1614-symphony-config-contract](active/D-20261031-1614-symphony-config-contract/design.md) | Symphony 配置契约先行 | in-development | lin-xiaoyu | core | 2026-11-03 |
+| [D-20261103-1438-symphony-capability-retirement](active/D-20261103-1438-symphony-capability-retirement/design.md) | Symphony 旧检索与独立经验库退役 | in-development | lin-xiaoyu | core | 2026-11-03 |
+
+<a id="module-8"></a>
 
 ## 未分类
 

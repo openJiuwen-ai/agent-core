@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import openjiuwen.symphony.retrieval.build.workflows.index_builder as workflows_module
 from openjiuwen.symphony.retrieval.build.io import load_catalog_records, load_manifest, load_tree_preset
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig, BuildMethod
+from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 
 
@@ -107,7 +107,6 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             beta = _write_skill_dir(root, "beta", "beta description")
             output_dir = root / "index"
             config = BuildConfig(
-                method=BuildMethod.TREE,
                 llm_openai_client=_fake_tree_client(),
                 llm_model="fake-tree-model",
             )
@@ -165,7 +164,6 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             add_dir = root / "add-index"
             delete_dir = root / "delete-index"
             config = BuildConfig(
-                method=BuildMethod.TREE,
                 llm_openai_client=_fake_tree_client(),
                 llm_model="fake-tree-model",
                 incremental_max_change_ratio=1.0,
@@ -198,7 +196,6 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             alpha_zip = _zip_item_dir(alpha, root / "alpha.zip")
             uploaded: dict[str, bytes] = {}
             config = BuildConfig(
-                method=BuildMethod.TREE,
                 llm_openai_client=_fake_tree_client(),
                 llm_model="fake-tree-model",
             )
@@ -238,7 +235,6 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             plugin_zip = _zip_item_dir(plugin, root / "demo-plugin.zip")
             legacy = _write_legacy_plugin_dir(root, "legacy-plugin", "legacy plugin description")
             config = BuildConfig(
-                method=BuildMethod.TREE,
                 llm_openai_client=cast(Any, object()),
                 llm_model="fake-tree-model",
             )
@@ -323,7 +319,6 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             add_dir = root / "add-index"
             delete_dir = root / "delete-index"
             config = BuildConfig(
-                method=BuildMethod.TREE,
                 llm_openai_client=_fake_tree_client(),
                 llm_model="fake-tree-model",
                 incremental_max_change_ratio=1.0,

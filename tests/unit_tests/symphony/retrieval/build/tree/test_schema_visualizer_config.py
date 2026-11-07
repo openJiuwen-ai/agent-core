@@ -10,8 +10,6 @@ from openjiuwen.symphony.retrieval.build.tree.root_categories import (
     resolve_tree_root_categories,
 )
 from openjiuwen.symphony.retrieval.build.tree.schema import (
-    MultiLevelSearchResult,
-    SearchStep,
     Skill,
     TreeNode,
     parse_json_from_response,
@@ -76,7 +74,7 @@ class TreeSchemaVisualizerConfigTests(unittest.TestCase):
         self.assertIn("select_when", node.to_dict()["children"][0])
         self.assertEqual(capability.children[0].children[0].skills[0].path, "dev/testing")
 
-    def test_skill_search_result_and_json_response_parsing(self) -> None:
+    def test_skill_content_and_json_response_parsing(self) -> None:
         skill = Skill(
             id="alpha",
             name="Alpha",
@@ -85,17 +83,8 @@ class TreeSchemaVisualizerConfigTests(unittest.TestCase):
             content="body",
             select_when="Use alpha.",
         )
-        step = SearchStep(level=1, node_id="root", options=["a", "b"], selected=["a"], is_parallel=True)
-        result = MultiLevelSearchResult(
-            query="alpha",
-            selected_skills=[skill.to_dict()],
-            steps=[step],
-            llm_calls=2,
-            parallel_rounds=1,
-        )
 
         self.assertNotIn("content", skill.to_dict(include_content=False))
-        self.assertEqual(result.steps[0].selected, ["a"])
         self.assertEqual(parse_json_from_response('```json\n{"ok": true}\n```'), {"ok": True})
         self.assertEqual(parse_json_from_response('prefix {"value": [1, 2]} suffix'), {"value": [1, 2]})
         self.assertEqual(parse_json_from_response("prefix [1, 2] suffix"), [1, 2])

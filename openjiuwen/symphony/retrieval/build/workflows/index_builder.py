@@ -47,7 +47,6 @@ class IndexBuilder:
         *,
         item_type: str = "skill",
         config: BuildConfig | None = None,
-        runtime_config: BuildConfig | None = None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.build", logger=LOGGER)
@@ -60,7 +59,7 @@ class IndexBuilder:
                     item_jsonl_path=item_jsonl_path,
                     operation="build",
                 )
-                resolved_config = resolve_build_config(config=config, runtime_config=runtime_config)
+                resolved_config = resolve_build_config(config=config)
                 pre_scanned_skills, manifest_item_paths = load_pre_scanned_items(
                     item_jsonl_path=item_jsonl_path,
                     default_paths=normalized_item_paths,
@@ -95,7 +94,6 @@ class IndexBuilder:
         *,
         item_type: str = "skill",
         config: BuildConfig | None = None,
-        runtime_config: BuildConfig | None = None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.add", logger=LOGGER)
@@ -119,7 +117,7 @@ class IndexBuilder:
                     default_paths=normalized_item_paths,
                 )
                 combined = normalize_item_paths([*existing, *added_paths])
-                resolved_config = resolve_build_config(config=config, runtime_config=runtime_config)
+                resolved_config = resolve_build_config(config=config)
                 output_value = str(output_dir).strip()
 
             def workflow_factory(local_output_dir: Path):
@@ -153,7 +151,6 @@ class IndexBuilder:
         *,
         item_type: str = "skill",
         config: BuildConfig | None = None,
-        runtime_config: BuildConfig | None = None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.delete", logger=LOGGER)
@@ -180,7 +177,7 @@ class IndexBuilder:
                 )
                 removed = set(removed_paths)
                 normalized_remaining = normalize_item_paths([path for path in existing if path not in removed])
-                resolved_config = resolve_build_config(config=config, runtime_config=runtime_config)
+                resolved_config = resolve_build_config(config=config)
                 output_value = str(output_dir).strip()
 
             def workflow_factory(local_output_dir: Path):

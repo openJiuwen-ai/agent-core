@@ -23,6 +23,7 @@ generated: true
 | [core/session](#module-6) |
 | [extensions/a2a](#module-7) |
 | [harness](#module-8) |
+| [symphony](#module-9) |
 
 <a id="module-1"></a>
 
@@ -135,3 +136,11 @@ generated: true
 | [S_17_personal-context](harness/S_17_personal-context.md) | S | S_17 Personal Context | yangzequ | openjiuwen/harness | — | — |
 | [S_18_subagents-and-lifecycle](harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
+
+<a id="module-9"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_configuration-contract](symphony/S_01_configuration-contract.md) | S | Symphony 目标配置模型规约 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |
