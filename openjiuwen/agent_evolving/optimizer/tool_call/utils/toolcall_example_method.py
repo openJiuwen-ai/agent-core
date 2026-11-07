@@ -3,13 +3,14 @@
 
 import copy
 import json
-import os
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.base_method import BaseMethod
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.format import format_prompt_llama, parse_json
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 from openjiuwen.core.common.logging import logger
+
+_LF = "\n"  # platform-independent newline for LLM prompt text
 
 
 class APICallToExampleMethod(BaseMethod):
@@ -150,7 +151,7 @@ Documentation:
         if example_calls is not None and len(example_calls) > 0:
             user_prompt += f'''
 Example use cases for this API tool are: 
-{os.linesep.join(f'"{api_call}"' for api_call in example_calls)}
+{_LF.join(f'"{api_call}"' for api_call in example_calls)}
 
 '''
         if self.api_keys is not None and len(self.api_keys) > 0:
@@ -374,7 +375,7 @@ You can begin your task now.'''
             ):
                 formatted_lines.append(f'{i}. instruction="{inst}" score={score}')
 
-            formatted = os.linesep.join(formatted_lines)
+            formatted = _LF.join(formatted_lines)
             
             user_prompt += f'''Previously you generated the following 
 instructions for this function call, which were rated and analyzed:
@@ -517,7 +518,7 @@ be a number between 1 and 3. You can begin your task now.'''
             line = f'{i}. instruction="{inst}" score={score} analysis="{ana}"'
             lines.append(line)
 
-        formatted = os.linesep.join(lines)
+        formatted = _LF.join(lines)
         user_prompt = f'''You are given an API tool with the 
 following documentation, which includes the functionality 
 description, required parameters, code snippets for API calls, etc.
