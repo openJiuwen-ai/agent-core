@@ -673,8 +673,6 @@ class PromptAttachmentManager:
                 },
                 deep=True,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 - one extension must not block the batch
             logger.warning(
                 "[PromptAttachmentManager] prompt.attachment failed: session_id=%s attachment_id=%s error=%s",

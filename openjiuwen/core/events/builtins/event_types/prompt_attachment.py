@@ -128,7 +128,7 @@ def match_pattern_func(event_input: object, match_pattern: MatchPattern) -> bool
         "content_kind": current.detail.get("content_kind"),
     }
     for key in allowed_fields - {"origin", "detail"}:
-        if key in match_pattern and match_pattern[key] != actual[key]:
+        if key in match_pattern and match_pattern.get(key) != actual[key]:
             return False
 
     if "origin" in match_pattern:
