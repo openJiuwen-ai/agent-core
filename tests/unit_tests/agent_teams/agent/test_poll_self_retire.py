@@ -48,6 +48,8 @@ def _stale_handler(task_manager, poll) -> StaleTaskHandler:
             spec=SimpleNamespace(
                 stale_claim_idle_timeout=300.0,
                 stale_pending_idle_timeout=300.0,
+                stale_inprogress_silence_timeout=300.0,
+                stale_inprogress_age_timeout=300.0,
             ),
         ),
         infra=SimpleNamespace(task_manager=task_manager),

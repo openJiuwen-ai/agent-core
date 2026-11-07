@@ -128,6 +128,8 @@ def _blueprint(member_name: str, role: TeamRole):
             reliability=None,
             stale_claim_idle_timeout=600,
             stale_pending_idle_timeout=600,
+            stale_inprogress_silence_timeout=600,
+            stale_inprogress_age_timeout=1800,
         ),
     )
 
