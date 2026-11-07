@@ -54,6 +54,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -826,11 +827,52 @@ class NativeHarness(DeepAgent):
         if fut is not None and not fut.done():
             fut.set_result(value)
 
+    def _has_pending_tool_interrupt(self) -> bool:
+        """True while a committed tool interrupt awaits its answer.
+
+        只读正式态 INTERRUPTION_KEY：在途登记（INTERRUPTION_INFLIGHT_KEY）
+        覆盖的是 RUNNING 批内窗口，IDLE 时批末 commit 必然
+        已发生（异常中止由 invoke finally 清残），无需并查。读态失败不
+        阻断开轮——warning 放行，与「不吞异常」纪律一致。
+        """
+        session = self.loop_session or self._session
+        if session is None:
+            return False
+        try:
+            return session.get_state(INTERRUPTION_KEY) is not None
+        except Exception as exc:
+            logger.warning("[NativeHarness] pending-interrupt probe failed: %s", exc)
+            return False
+
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
         content = cmd.msg.content
         phase = self._st.phase
+        # 挂起工具中断（等待用户作答）期间，只有 InteractiveInput 作答有权
+        # 开轮：其余输入（看板 nudge/成员消息/godview）若直开新轮，invoke
+        # 入口会无条件清 INTERRUPTION_KEY 并把该输入当 resume 答复喂给挂起
+        # 工具（react_agent._inner_invoke -> _handle_resume
+        if (
+            phase is HarnessState.IDLE
+            and not isinstance(content, InteractiveInput)
+            and self._has_pending_tool_interrupt()
+        ):
+            if self.loop_controller is not None:
+                self.loop_controller.enqueue_follow_up(content)
+                logger.info(
+                    "[NativeHarness] tool interrupt pending; deferred non-answer "
+                    "input to follow-up queue (kind=%s)",
+                    getattr(content, "kind", type(content).__name__),
+                )
+            else:
+                logger.warning(
+                    "[NativeHarness] tool interrupt pending but loop_controller "
+                    "is None; dropping non-answer input (kind=%s)",
+                    getattr(content, "kind", type(content).__name__),
+                )
+            self._ack(cmd.ack, seq)
+            return
         # A deferred input stays deferred only on its way to the follow-up
         # queue (RUNNING + not immediate) — every immediately-consumed path
         # (round start, steer, paused resume) needs the text now. A render
@@ -1166,7 +1208,35 @@ class NativeHarness(DeepAgent):
             return
 
         result_type = (cmd.result or {}).get("result_type")
-        if result_type == "interrupt" or coordinator.is_aborted:
+        if result_type == "interrupt":
+            # 中断收尾前必须排空 follow-up 队列：中断等待期（工具批尚未走完、
+            # commit 未发生）按 RUNNING 语义入队的输入——修复后窗口内
+            # 早到的 InteractiveInput 作答即走此路——若随旧逻辑直接 IDLE 将
+            # 滞留队列永久悬挂（中断已 commit，但没有任何路径再消费该队列）。
+            # 含 InteractiveInput 时以它直接开 resume 轮：此时 INTERRUPTION_KEY
+            # 已在批末 commit，新轮 invoke 读取正式态走 handle_resume，与
+            # 「IDLE 后晚到作答经 send 直开新轮」的正常路径同效。队列中的其余
+            # 输入（如看板 DeferredInput）重新入队，resume 轮收尾时按既有
+            # drain 顺序消费（resume 轮 settle 先 drain 再判 is_resume 落 IDLE）。
+            follow_ups = await self._drain_pending_follow_ups(session)
+            resume_payload: Any = None
+            if follow_ups:
+                residuals: list = []
+                for item in follow_ups:
+                    if resume_payload is None and isinstance(item, InteractiveInput):
+                        resume_payload = item
+                    else:
+                        residuals.append(item)
+                if residuals and self.loop_controller is not None:
+                    for item in residuals:
+                        self.loop_controller.enqueue_follow_up(item)
+            if resume_payload is not None:
+                nxt = self._start_round(resume_payload)
+                await self._emit_round("started", nxt.round_id)
+                return
+            await self._transition(HarnessState.IDLE)
+            return
+        if coordinator.is_aborted:
             await self._transition(HarnessState.IDLE)
             return
 
