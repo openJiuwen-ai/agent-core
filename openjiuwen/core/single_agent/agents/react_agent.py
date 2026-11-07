@@ -236,6 +236,27 @@ EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或�
 # Ordinary reasoning-only / blank no-tool turns (not RAS soft-stop): bounded
 # same-round retry after injecting [EMPTY_RESPONSE], then hard error.
 EMPTY_RESPONSE_MAX_RETRIES = 1
+# Truncated streams (finish_reason == "length"): first a retry with a larger
+# budget, then persist-continuations across iterations. Real server-side
+# "length" cuts keep the historical unbounded-until-max_iterations behavior,
+# but normalized gateway cuts (model client sets metadata
+# finish_reason_detail == "gateway_cut"; the cut is not the model's own limit)
+# tend to repeat on every request, so persist-continuations are capped for
+# those to bound worst-case cost.
+TRUNCATION_MAX_PERSISTS = 2
+
+
+def _truncation_gives_up(persist_count: int, finish_reason_detail: object) -> bool:
+    """Whether to stop persist-continuations for a truncated turn.
+
+    Only normalized gateway cuts (model client sets metadata
+    finish_reason_detail == "gateway_cut") are capped: the cut is not the
+    model's own limit, so it tends to repeat on every request (budget/quota
+    exhaustion) and re-asking cannot complete the reply. Real server-side
+    "length" cuts keep the historical unbounded persist-until-max_iterations
+    behavior.
+    """
+    return finish_reason_detail == "gateway_cut" and persist_count >= TRUNCATION_MAX_PERSISTS
 
 
 def _termination_requests_soft_stop_continue(exc: Termination) -> bool:
@@ -3026,6 +3047,7 @@ class ReActAgent(BaseAgent):
 
                 if invoke_inputs.result is None:
                     _truncation_retry_count = 0
+                    _truncation_persist_count = 0
                     _empty_response_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
@@ -3150,23 +3172,49 @@ class ReActAgent(BaseAgent):
                                 )
 
                             if _truncation_detected:
-                                logger.info(
-                                    "[ReActAgent] truncation persists session_id=%s iteration=%s, "
-                                    "continuing to next iteration with truncation notice",
-                                    session.get_session_id(),
-                                    iteration + 1,
+                                _cut_detail = (getattr(ai_message, "metadata", None) or {}).get(
+                                    "finish_reason_detail"
                                 )
-                                await self._inject_truncation_notice(ai_message, context)
-                                await session.write_stream(OutputSchema(
-                                    type="truncation_retry",
-                                    index=0,
-                                    payload={
-                                        "finish_reason": "length",
-                                        "truncated_content": (ai_message.content or "")[:200],
-                                        "phase": "persist",
-                                    },
-                                ))
-                                continue
+                                if _truncation_gives_up(_truncation_persist_count, _cut_detail):
+                                    # Normalized gateway cuts that keep coming back
+                                    # (budget/quota exhaustion) will not complete by
+                                    # re-asking: keep the truncated content and fall
+                                    # through to the normal completion path below.
+                                    logger.warning(
+                                        "[ReActAgent] gateway-cut truncation persists %s times, "
+                                        "give up session_id=%s iteration=%s",
+                                        _truncation_persist_count + 1,
+                                        session.get_session_id(),
+                                        iteration + 1,
+                                    )
+                                    await session.write_stream(OutputSchema(
+                                        type="truncation_retry",
+                                        index=0,
+                                        payload={
+                                            "finish_reason": "length",
+                                            "truncated_content": (ai_message.content or "")[:200],
+                                            "phase": "exhausted",
+                                        },
+                                    ))
+                                else:
+                                    _truncation_persist_count += 1
+                                    logger.info(
+                                        "[ReActAgent] truncation persists session_id=%s iteration=%s, "
+                                        "continuing to next iteration with truncation notice",
+                                        session.get_session_id(),
+                                        iteration + 1,
+                                    )
+                                    await self._inject_truncation_notice(ai_message, context)
+                                    await session.write_stream(OutputSchema(
+                                        type="truncation_retry",
+                                        index=0,
+                                        payload={
+                                            "finish_reason": "length",
+                                            "truncated_content": (ai_message.content or "")[:200],
+                                            "phase": "persist",
+                                        },
+                                    ))
+                                    continue
 
                             await context.add_messages(
                                 AssistantMessage(

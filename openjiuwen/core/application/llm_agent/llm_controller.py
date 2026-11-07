@@ -792,6 +792,7 @@ class LLMController(BaseController):
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
                 finish_reason=accumulated_chunk.finish_reason,
+                metadata=accumulated_chunk.metadata,
                 parser_content=accumulated_chunk.parser_content,
                 reasoning_content=accumulated_chunk.reasoning_content,
             )
