@@ -64,3 +64,7 @@ class AgentTeamSession(BaseSession):
 
     def team_id(self) -> str:
         return self._team_id
+
+    def group_id(self) -> str:
+        """Alias of team_id for Redis checkpointer / AgentGroupStorage."""
+        return self._team_id
