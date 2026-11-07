@@ -26,7 +26,9 @@ from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 
 
 class TaskBoardHandler(BaseCoordinationHandler):
@@ -441,59 +443,77 @@ class TaskBoardHandler(BaseCoordinationHandler):
         not surfaced — a teammate is woken to take on work it can act on, not
         to survey what everyone else is doing.
 
+        The board rides the follow-up queue as a **deferred input**: it
+        renders when the queue is drained (consumption time), not when the
+        triggering event arrived. A member busy through a long round reads
+        the board as of round end — never a survey rendered mid-round that
+        is stale by delivery — and a board that would say nothing anymore
+        (a poll finding all done, an empty teammate slice) drops out
+        silently. Deferred boards share one collapse key, so a batch of
+        them drains as a single fresh render.
+
         Args:
             member_name: The calling member's own name.
             from_poll: True when the nudge originates from a routine
                 POLL_TASK tick. In that case an idle leader with no
                 incomplete tasks (covers all-done / no-tasks /
-                empty-team) returns silently — real task-completion
+                empty-team) renders nothing — real task-completion
                 prompts arrive via the TASK_EVENTS path so polling
                 should not re-trigger them.
         """
-        all_tasks = await self._infra.task_manager.list_tasks()
-        terminal = {"completed", "cancelled"}
-        incomplete = [tk for tk in all_tasks if tk.status not in terminal]
 
-        if from_poll and self._blueprint.role == TeamRole.LEADER and not incomplete:
-            return
+        async def render_board() -> str | None:
+            all_tasks = await self._infra.task_manager.list_tasks()
+            terminal = {"completed", "cancelled"}
+            incomplete = [tk for tk in all_tasks if tk.status not in terminal]
 
-        team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
-        if self._blueprint.role == TeamRole.LEADER:
-            if not incomplete:
-                lifecycle = self._blueprint.lifecycle
-                if lifecycle == "persistent":
-                    prompt = t("dispatcher.all_done_persistent")
-                else:
-                    prompt = t("dispatcher.all_done_temporary")
-                await self._round.deliver_input(render_event(kind="all-done", body=prompt))
-                return
-            lines = [t("dispatcher.leader_task_board")]
-            board_tasks = incomplete
-        else:
-            # Teammate: surface claimable work (pending + unassigned) and
-            # explicitly assigned self work. Assigned pending tasks may have
-            # been created before this member started; feeding them here makes
-            # the startup poll actionable without exposing other members' work.
-            board_tasks = [
-                task
-                for task in incomplete
-                if (task.status == "pending" and not task.assignee) or task.assignee == member_name
-            ]
-            if not board_tasks:
-                return
-            lines = [t("dispatcher.teammate_task_list")]
+            if from_poll and self._blueprint.role == TeamRole.LEADER and not incomplete:
+                return None
 
-        now_ms = get_current_time()
-        for task in board_tasks:
-            lines.append(render_task_line(task, now_ms=now_ms))
+            team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
+            if self._blueprint.role == TeamRole.LEADER:
+                if not incomplete:
+                    lifecycle = self._blueprint.lifecycle
+                    if lifecycle == "persistent":
+                        prompt = t("dispatcher.all_done_persistent")
+                    else:
+                        prompt = t("dispatcher.all_done_temporary")
+                    return render_event(kind="all-done", body=prompt)
+                lines = [t("dispatcher.leader_task_board")]
+                board_tasks = incomplete
+            else:
+                # Teammate: surface claimable work (pending + unassigned) and
+                # explicitly assigned self work. Assigned pending tasks may have
+                # been created before this member started; feeding them here makes
+                # the startup poll actionable without exposing other members' work.
+                board_tasks = [
+                    task
+                    for task in incomplete
+                    if (task.status == "pending" and not task.assignee) or task.assignee == member_name
+                ]
+                if not board_tasks:
+                    return None
+                lines = [t("dispatcher.teammate_task_list")]
+
+            now_ms = get_current_time()
+            for task in board_tasks:
+                lines.append(render_task_line(task, now_ms=now_ms))
+            lines.append(t("dispatcher.task_board_rendered_at", render_time=format_absolute_time(now_ms)))
+            return render_event(kind="task-board", body="\n".join(lines))
 
         # A board survey is a reminder, not a reason to drop what the member is
         # doing (decision dimension 3): it never says "the work you are on is
         # void", so it goes to the follow-up queue and is read when the current
         # round ends. Steering it in used to interrupt the member's reasoning
-        # with a survey it had no reason to act on yet.
+        # with a survey it had no reason to act on yet. The all-done variant
+        # rides the same deferred path — it too arrives fresh at round end
+        # rather than steering into the active round.
         await self._round.deliver_input(
-            render_event(kind="task-board", body="\n".join(lines)),
+            DeferredInput(
+                kind="task-board",
+                collapse_key="task-board",
+                renderer=render_board,
+            ),
             use_steer=False,
         )
 

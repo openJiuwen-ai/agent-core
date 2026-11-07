@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -992,6 +993,21 @@ async def test_member_status_change_does_not_nudge_about_stale_claims():
     agent._configurator.message_manager.send_message.assert_not_called()
 
 
+async def _render_delivery(agent) -> str:
+    """Render the text of the latest deliver_input call.
+
+    Board nudges arrive as ``DeferredInput`` — rendered when the follow-up
+    queue drains in production, rendered on the spot here. Plain string
+    deliveries (steers, stale-sweep nudges) pass through unchanged.
+    """
+    content = agent.deliver_input.await_args.args[0]
+    if isinstance(content, DeferredInput):
+        text = await content.renderer()
+        assert text is not None
+        return text
+    return content
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
@@ -1027,9 +1043,15 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     )
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    deferred = agent.deliver_input.await_args.args[0]
+    assert isinstance(deferred, DeferredInput)
+    assert deferred.kind == "task-board" and deferred.collapse_key == "task-board"
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
+    # Nothing is read at event time — the board renders at drain time.
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    content = await deferred.renderer()
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     assert "task-7" in content
     assert "Investigate crash" in content
 
@@ -1127,12 +1149,12 @@ async def test_verified_frees_the_author():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy():
-    """A leader already running a round is nudged via steer on a teammate claim.
+    """A leader already running a round still gets the board on a teammate claim.
 
     Previously the ``on_task_board_event`` guard on ``has_in_flight_round``
-    silently dropped the nudge.  After the fix, ``deliver_input`` handles
-    the busy state internally (steer / pending_inputs), so the board
-    context still reaches the leader.
+    silently dropped the nudge.  The board now rides the follow-up queue as
+    a ``DeferredInput`` — delivered regardless of busy state, rendered fresh
+    when the active round drains it.
     """
     agent = _make_leader()
     incomplete_task = MagicMock()
@@ -1161,9 +1183,8 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
     # Leader is busy → board context still delivered (not silently dropped).
-    agent._configurator.task_manager.list_tasks.assert_awaited_once()
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    content = await _render_delivery(agent)
     assert "task-8" in content
 
 
@@ -3396,9 +3417,10 @@ async def test_task_completed_nudges_leader_with_all_done_when_idle():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    # Leader idle → the "all done" summary prompt is delivered.
+    # Leader idle → the "all done" summary prompt is delivered (a deferred
+    # input the idle supervisor resolves immediately in production).
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    content = await _render_delivery(agent)
     assert "完成" in content or "complete" in content.lower()
 
 
@@ -3406,13 +3428,13 @@ async def test_task_completed_nudges_leader_with_all_done_when_idle():
 @pytest.mark.level0
 async def test_task_completed_nudges_leader_via_steer_when_busy():
     """When the last task completes and the leader is busy, the
-    "all tasks done" summary prompt is delivered via steer instead of
-    being silently dropped.
+    "all tasks done" summary prompt still reaches the leader.
 
     Regression guard: previously ``on_task_board_event`` returned early
     when ``has_in_flight_round()`` was True, causing the summary prompt
-    to never reach the leader.  The fix delegates queuing to
-    ``deliver_input`` which uses steer / pending_inputs internally.
+    to never reach the leader.  The prompt now rides the follow-up queue
+    as a ``DeferredInput`` and renders at drain time — fresh by
+    construction, never silently dropped.
     """
     agent = _make_leader()
     completed_task = MagicMock()
@@ -3438,10 +3460,10 @@ async def test_task_completed_nudges_leader_via_steer_when_busy():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    # Leader busy → the "all done" summary prompt is still delivered (the
-    # supervisor steers it into the running round, not silently dropped).
+    # Leader busy → the "all done" prompt is queued as a deferred follow-up
+    # and rendered fresh when the running round drains it.
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    content = await _render_delivery(agent)
     assert "完成" in content or "complete" in content.lower()
 
 
@@ -3483,7 +3505,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
 
     # Not all done → leader gets the task board overview
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    content = await _render_delivery(agent)
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
@@ -3518,9 +3540,9 @@ async def test_teammate_nudged_on_task_created():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     agent.deliver_input.assert_awaited_once()
-    assert "task-9" in agent.deliver_input.await_args.args[0]
+    assert "task-9" in await _render_delivery(agent)
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -3547,9 +3569,9 @@ async def test_teammate_nudged_on_task_unblocked():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     agent.deliver_input.assert_awaited_once()
-    assert "task-11" in agent.deliver_input.await_args.args[0]
+    assert "task-11" in await _render_delivery(agent)
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -3617,9 +3639,9 @@ async def test_teammate_nudged_on_task_released():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     agent.deliver_input.assert_awaited_once()
-    assert "task-13" in agent.deliver_input.await_args.args[0]
+    assert "task-13" in await _render_delivery(agent)
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -3655,7 +3677,7 @@ async def test_teammate_board_shows_only_claimable_tasks():
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
     agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
+    content = await _render_delivery(agent)
     assert "task-free" in content
     assert "task-busy" not in content
 
@@ -3664,7 +3686,8 @@ async def test_teammate_board_shows_only_claimable_tasks():
 @pytest.mark.level1
 async def test_teammate_skips_nudge_when_no_claimable_task():
     """Even on a claimable-growth event, a teammate is not woken when no
-    task is actually claimable (e.g. the new task was already taken)."""
+    task is actually claimable (e.g. the new task was already taken) — the
+    deferred board renders to None at drain time and drops silently."""
     agent = _make_teammate()
     claimed = MagicMock()
     claimed.task_id = "task-gone"
@@ -3684,7 +3707,13 @@ async def test_teammate_skips_nudge_when_no_claimable_task():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    agent.deliver_input.assert_not_called()
+    # The skip moved from event time to render time: a deferred input is
+    # delivered, its renderer finds nothing claimable → None → the drain
+    # drops it silently and no round starts.
+    agent.deliver_input.assert_awaited_once()
+    deferred = agent.deliver_input.await_args.args[0]
+    assert isinstance(deferred, DeferredInput)
+    assert await deferred.renderer() is None
 
 
 @pytest.mark.asyncio
@@ -3711,9 +3740,54 @@ async def test_leader_nudged_on_task_updated_despite_filter():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
     agent.deliver_input.assert_awaited_once()
-    assert "task-3" in agent.deliver_input.await_args.args[0]
+    assert "task-3" in await _render_delivery(agent)
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_board_nudge_renders_current_state_at_drain_time():
+    """PM-64 regression: a board queued while tasks were incomplete renders
+    as the all-done prompt when everything completed before the drain — the
+    leader never reads a survey that went stale inside its own long round."""
+    agent = _make_leader(lifecycle="persistent")
+    incomplete = MagicMock()
+    incomplete.task_id = "task-1"
+    incomplete.title = "Closing task"
+    incomplete.content = "Wrap up"
+    incomplete.status = "in_progress"
+    incomplete.assignee = "dev-1"
+    incomplete.updated_at = 1_700_000_000_000
+    completed = MagicMock()
+    completed.task_id = "task-1"
+    completed.title = "Closing task"
+    completed.content = "Wrap up"
+    completed.status = "completed"
+    completed.assignee = "dev-1"
+    completed.updated_at = 1_700_000_100_000
+
+    agent._configurator.task_manager = MagicMock()
+    # Event-time state (pre-deferral this was what got rendered)…
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete])
+    agent._is_agent_running = lambda: True   # leader busy: nudge queues up
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-1")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_awaited_once()
+    deferred = agent.deliver_input.await_args.args[0]
+    assert isinstance(deferred, DeferredInput)
+
+    # …but by drain time the task has completed: the render must reflect
+    # NOW — the all-done prompt, not a stale board listing.
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
+    content = await deferred.renderer()
+    assert "Closing task" not in content
+    assert "完成" in content or "complete" in content.lower()
 
 
 @pytest.mark.asyncio
