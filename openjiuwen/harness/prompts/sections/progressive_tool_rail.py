@@ -167,7 +167,9 @@ def _compact_tool_description(description: str) -> str:
         (
             index
             for index, char in enumerate(compact)
-            if char in sentence_endings and index > 0
+            if char in sentence_endings
+            and index > 0
+            and (char in "。！？" or index + 1 == len(compact) or compact[index + 1] == " ")
         ),
         default=-1,
     )
