@@ -18,9 +18,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails.skills.skill_authorization_rail import SkillAuthorizationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.code_agent import create_code_agent
 
@@ -86,3 +88,17 @@ def test_injected_general_purpose_subagent_carries_parent_sys_operation(tmp_path
     assert spec is not None
     assert spec.sys_operation is sys_operation
     assert spec.workspace is agent.deep_config.workspace
+
+
+def test_injected_general_purpose_subagent_does_not_inherit_the_parent_skill_gate(tmp_path) -> None:
+    agent = create_deep_agent(
+        model=_fake_model(),
+        card=AgentCard(name="deep_agent"),
+        workspace=str(tmp_path),
+        rails=[AgentRail(), SkillAuthorizationRail()],
+        add_general_purpose_agent=True,
+    )
+    spec = _spec_by_name(agent.deep_config.subagents, "general-purpose")
+    assert spec is not None
+    assert any(type(rail) is AgentRail for rail in spec.rails)
+    assert not any(isinstance(rail, SkillAuthorizationRail) for rail in spec.rails)

@@ -22,6 +22,7 @@ class InterruptKind:
     PERMISSION = "permission"
     CONFIRM = "confirm"
     ASK_USER = "ask_user"
+    SKILL_AUTHORIZATION = "skill_authorization"
     SKILL_EVOLUTION_APPROVAL = "skill_evolution_approval"
     TEAM_TOOL_APPROVAL = "team_tool_approval"
     CLIENT_TOOL = "client_tool"
