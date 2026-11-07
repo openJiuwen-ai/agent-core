@@ -154,14 +154,15 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 收不到）。空片静默不烧轮次。**刻意不挂在周期 `POLL_TASK` 上**：挂上去就变成 teammate 每 30s
 重扫一次没变化的板。
 
-### `StaleTaskHandler`（1 个事件，持 4 个私有记账容器）
+### `StaleTaskHandler`（1 个事件，持 6 个私有记账容器）
 
-`POLL_TASK` 上的两个 sweep，按 assignee 把看板划成互不重叠的两半：
+`POLL_TASK` 上的三个 sweep，前两个按 assignee 把看板划成互不重叠的两半，第三个补 busy 盲区：
 
 | sweep | 覆盖 | 全部前置 |
 |---|---|---|
 | `_check_stale_claimed_tasks`（**self-only**，每个成员扫自己） | `_own_stalled_tasks()`：持有的 `{PLANNING, IN_PROGRESS}`；**一个活跃任务都没有时**回落到名下最早的**一个** `PENDING(assignee=self)`（F_69） | 本成员 `idle_seconds() >= stale_claim_idle_timeout` + per-task 节流 |
 | `_check_stale_pending_tasks`（**leader-only**） | 两片：`assignee` 为空的 `PENDING`（受空闲容量闸）；**`assignee` 仍 UNSTARTED 的 `PENDING`**（拉起失败回滚，成员侧兜底全不可见，不受容量闸） | leader 自己 idle 超 `stale_pending_idle_timeout`；未指派片另需 roster 里至少一个非 leader 成员处于 READY/UNSTARTED/STARTING（可拉起容量，spawn-on-delegation 后全新名册恰是 UNSTARTED） |
+| `_check_stale_inprogress_tasks`（**leader-only**，F_65 busy 盲区的补面） | 全部有 assignee 的 `IN_PROGRESS` 任务，双阶梯：**沉默**（witness=assignee 最近邮箱消息与任务 `updated_at` 的较大者，超 `stale_inprogress_silence_timeout` 无新产出）与**长寿**（任务在 IN_PROGRESS 累计超 `stale_inprogress_age_timeout`，不问产出——治「输出不停但不收尾」） | 时长一律 **tick 差值累加**（单 tick 封顶 300s），不读墙钟跨度——pause 时 poll 冻结，F_65 假停滞无法沿此路径复活；witness 刷新只重置沉默阶梯；两阶梯各自 tier1（复核提示）→ tier2（附一刀切最终通知模板）后**档后静默**（每任务每阶梯最多提醒两次，防告警疲劳）；leader 的催收消息不算 witness（只认成员产出） |
 
 几条不能改错的判断：
 
@@ -176,9 +177,10 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   id + title + 当前处境 + idle 分钟，**详情让成员自己调 `view_task`**。
 - 自催连续 `_STALE_CLAIM_ESCALATE_STREAK`(3) 个窗口无效 → 由**停滞成员自己** `send_message`
   上报 leader。方向是成员→leader，与 F_53 砍掉的 leader→成员**方向相反**，不违反其设计。
-- 四个记账容器（`_last_stale_nudge` / `_last_pending_nudge` / `_stale_claim_streak` /
-  `_escalated_claims`）全是**私有**：self-only 之后不再需要跨 handler 共享 throttle。每次
-  sweep 按当前结果做差集 GC。**节流用墙钟秒（`time.time`），停滞判定用 idle 时钟**，两者
+- 六个记账容器（`_last_stale_nudge` / `_last_pending_nudge` / `_stale_claim_streak` /
+  `_escalated_claims` / `_inprogress_watch` / `_last_inprogress_tick_at`）全是**私有**：
+  self-only 之后不再需要跨 handler 共享 throttle。每次 sweep 按当前结果做差集 GC。
+  **节流用墙钟秒（`time.time`），停滞判定用 idle 时钟或 tick 差值累加**，两者
   单位与用途不同，不要混。
 
 ### `TeamCompletionHandler`（3 个事件，持上升沿标志 + 回调表）

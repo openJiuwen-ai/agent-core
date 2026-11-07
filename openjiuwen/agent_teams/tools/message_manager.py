@@ -334,6 +334,20 @@ class TeamMessageManager:
         """
         return await self.db.message.get_team_messages(team_name=team_name)
 
+    async def latest_timestamps_by_sender(
+        self, *, since_timestamp: int = 0
+    ) -> dict[str, tuple[int, int]]:
+        """Per-sender (latest message timestamp, message count) in this team.
+
+        Witness source for the stale-inprogress sweep: any mailbox message
+        from a member counts as output from that member. ``since_timestamp``
+        bounds the scan to messages posted after the oldest watched task
+        started — see the DAO method for the correctness argument.
+        """
+        return await self.db.message.get_latest_timestamps_by_sender(
+            self.team_name, since_timestamp=since_timestamp
+        )
+
     async def has_unread_messages(self, *, include_broadcast: bool = True) -> bool:
         """Whether any team message is still unread by its intended reader.
 

@@ -2122,6 +2122,320 @@ async def test_stale_pending_teammate_skips_check():
     agent.deliver_input.assert_not_called()
 
 
+def _stub_inprogress_sweep(
+        agent: TeamAgent,
+        tasks: list,
+        sender_activity: dict | None = None,
+) -> None:
+    """Wire the stale-inprogress sweep's infra: task list + sender witness."""
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=list(tasks))
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.latest_timestamps_by_sender = AsyncMock(
+        return_value=dict(sender_activity or {}),
+    )
+    agent.deliver_input = AsyncMock()
+
+
+def _seed_inprogress_watch(handler, task_id: str, **overrides) -> dict:
+    """Pre-seed one watch entry, so a single sweep call exercises a ladder rung."""
+    watch = {
+        "last_witness": 0.0,
+        "silent_accum": 0.0,
+        "tenure_accum": 0.0,
+        "silence_tier": 0,
+        "age_tier": 0,
+        "silence_scale": 1,
+    }
+    watch.update(overrides)
+    handler._inprogress_watch[task_id] = watch
+    return watch
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_query_uses_oldest_task_bound():
+    """The sender-activity query is bounded by the oldest watched task's
+    updated_at — the scan stays proportional to "messages posted after the
+    oldest in-flight task started", not the whole session mailbox."""
+    agent = _make_leader()
+    older = _make_claimed_task("t-old", assignee="dev-1", updated_at=1_600_000_000_000)
+    newer = _make_claimed_task("t-new", assignee="dev-2", updated_at=1_700_000_000_000)
+    _stub_inprogress_sweep(agent, [older, newer])
+
+    handler = agent._coordination.dispatcher.stale_task
+    await handler._check_stale_inprogress_tasks()
+
+    agent._configurator.message_manager.latest_timestamps_by_sender.assert_awaited_once_with(
+        since_timestamp=1_600_000_000_000,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_silence_prompts_review():
+    """An IN_PROGRESS task past the silence threshold prompts the leader to
+    review and send a convergence order; the prompt is appended, not steered."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-1", assignee="dev-1", updated_at=0, title="Long research")
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    watch = _seed_inprogress_watch(handler, "t-1", silent_accum=600.0)
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
+    assert "t-1" in content
+    assert "dev-1" in content
+    assert "Long research" in content
+    assert watch["silence_tier"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_refresh_resets_silence_ladder():
+    """A fresh assignee message resets the silence clock and re-arms the
+    ladder from tier 0 — and because the fired ladder (tier 1) is being
+    re-armed, the silence tolerance doubles (backoff against nagging)."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-2", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task], sender_activity={"dev-1": (1_700_000_000_000, 3)})
+
+    handler = agent._coordination.dispatcher.stale_task
+    watch = _seed_inprogress_watch(handler, "t-2", silent_accum=700.0, silence_tier=1)
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert watch["silent_accum"] == 0.0
+    assert watch["silence_tier"] == 0
+    assert watch["silence_scale"] == 2
+    assert watch["last_witness"] == 1_700_000_000.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_refresh_unfired_ladder_keeps_scale():
+    """A refresh that re-arms an UNFIRED ladder (tier 0) keeps the base
+    tolerance — the backoff answers actual nagging, not mere output."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-2b", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task], sender_activity={"dev-1": (1_700_000_000_000, 1)})
+
+    handler = agent._coordination.dispatcher.stale_task
+    watch = _seed_inprogress_watch(handler, "t-2b", silent_accum=100.0, silence_tier=0)
+
+    await handler._check_stale_inprogress_tasks()
+
+    assert watch["silence_tier"] == 0
+    assert watch["silence_scale"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_rearmed_ladder_needs_doubled_silence():
+    """After a re-arm the next quiet episode must run 2x the configured
+    silence timeout before the review prompt fires again."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-2c", assignee="dev-1", updated_at=0, title="Backoff task")
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    # One full episode already happened: re-armed at doubled tolerance.
+    watch = _seed_inprogress_watch(handler, "t-2c", silence_scale=2)
+
+    watch["silent_accum"] = 700.0  # >= 600 base, < 1200 doubled budget
+    await handler._check_stale_inprogress_tasks()
+    agent.deliver_input.assert_not_called()
+
+    watch["silent_accum"] = 1200.0
+    await handler._check_stale_inprogress_tasks()
+    agent.deliver_input.assert_awaited_once()
+    assert "t-2c" in agent.deliver_input.await_args.args[0]
+    assert watch["silence_tier"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_query_failure_freezes_silence_clock():
+    """A failed witness query must not read as 'no output': the silence
+    clock freezes for the tick (tenure still accrues), so a transient read
+    error cannot fabricate a stall against a healthy, reporting member."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-2d", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+    agent._configurator.message_manager.latest_timestamps_by_sender = AsyncMock(
+        side_effect=RuntimeError("database is locked"),
+    )
+
+    handler = agent._coordination.dispatcher.stale_task
+    # 590s silent; the coming tick would add 300s (capped) and cross the
+    # 600s threshold — a fabricated review prompt without the freeze.
+    watch = _seed_inprogress_watch(handler, "t-2d", silent_accum=590.0)
+    handler._last_inprogress_tick_at = time.time() - 10000.0
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert watch["silent_accum"] == 590.0   # frozen, not 590 + 300
+    assert watch["tenure_accum"] == 300.0   # tenure still accrues
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_skips_leader_own_tasks():
+    """Tasks assigned to the leader itself are not swept: the leader's own
+    stalls belong to the self-only idle-clock claim sweep, and a prompt
+    telling the leader to send itself a convergence order would be noise.
+    A pre-existing watch entry for a leader-own task is GC'd."""
+    agent = _make_leader()  # member_name="leader-1"
+    own = _make_claimed_task("t-self", assignee="leader-1", updated_at=0, title="Leader own")
+    other = _make_claimed_task("t-other", assignee="dev-1", updated_at=0, title="Member task")
+    _stub_inprogress_sweep(agent, [own, other])
+
+    handler = agent._coordination.dispatcher.stale_task
+    _seed_inprogress_watch(handler, "t-self", silent_accum=5000.0)
+    _seed_inprogress_watch(handler, "t-other", silent_accum=5000.0)
+
+    await handler._check_stale_inprogress_tasks()
+
+    assert "t-self" not in handler._inprogress_watch
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "t-other" in content
+    assert "t-self" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_age_ladder_fires_despite_output():
+    """The age ladder catches 'active but never converging': the member's
+    fresh witness keeps the silence ladder cold, but tenure alone fires the
+    review prompt."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-3", assignee="dev-1", updated_at=0, title="Spinning task")
+    _stub_inprogress_sweep(agent, [task], sender_activity={"dev-1": (1_700_000_000_000, 9)})
+
+    handler = agent._coordination.dispatcher.stale_task
+    # Witness already matches the sender high-water mark: no silence reset,
+    # silence accumulator stays at zero for the whole call.
+    watch = _seed_inprogress_watch(
+        handler, "t-3", last_witness=1_700_000_000.0, tenure_accum=1800.0,
+    )
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    assert "t-3" in agent.deliver_input.await_args.args[0]
+    assert watch["age_tier"] == 1
+    assert watch["silence_tier"] == 0
+    assert watch["silent_accum"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_final_notice_includes_template():
+    """Second consecutive silent window escalates to tier 2: the prompt
+    carries the ready-made final notice the leader can send verbatim."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-4", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    watch = _seed_inprogress_watch(handler, "t-4", silent_accum=1200.0, silence_tier=1)
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "shutdown_member(force=true)" in content  # final header's fallback hint
+    assert "send_message" in content  # final notice template body
+    assert watch["silence_tier"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_silent_after_final_tier():
+    """After tier 2 the ladder goes quiet: the leader was told twice, and
+    choosing to wait is a legitimate verdict (no alarm fatigue)."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-5", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    _seed_inprogress_watch(
+        handler, "t-5",
+        silent_accum=5000.0, tenure_accum=9999.0, silence_tier=2, age_tier=2,
+    )
+
+    await handler._check_stale_inprogress_tasks()
+
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_gc_when_task_leaves():
+    """Leaving IN_PROGRESS drops the watch entry and re-arms the tick clock,
+    so a later task starts accumulating from its own first tick."""
+    agent = _make_leader()
+    _stub_inprogress_sweep(agent, [])
+
+    handler = agent._coordination.dispatcher.stale_task
+    handler._inprogress_watch["t-6"] = {
+        "last_witness": 0.0,
+        "silent_accum": 0.0,
+        "tenure_accum": 0.0,
+        "silence_tier": 0,
+        "age_tier": 0,
+    }
+    handler._last_inprogress_tick_at = time.time()
+
+    await handler._check_stale_inprogress_tasks()
+
+    assert "t-6" not in handler._inprogress_watch
+    assert handler._last_inprogress_tick_at is None
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_tick_delta_capped():
+    """Tick accumulation caps a single tick's contribution, so a long pause
+    or event-loop congestion cannot fabricate a stall in one jump."""
+    agent = _make_leader()
+    task = _make_claimed_task("t-7", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+
+    await handler._check_stale_inprogress_tasks()  # first tick: delta 0
+    handler._last_inprogress_tick_at = time.time() - 10000.0  # simulate huge gap
+    await handler._check_stale_inprogress_tasks()
+
+    assert handler._inprogress_watch["t-7"]["tenure_accum"] == 300.0
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_teammate_skips_check():
+    """Only the leader runs the in-progress review sweep."""
+    agent = _make_teammate()
+    agent._state.team_member = None
+    task = _make_claimed_task("t-8", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    await handler._check_stale_inprogress_tasks()
+
+    agent._configurator.task_manager.list_tasks.assert_not_called()
+    agent.deliver_input.assert_not_called()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_pending_throttle_survives_starting_transition():
