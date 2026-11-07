@@ -29,12 +29,12 @@ requires_yuanrong = pytest.mark.skipif(
 
 
 def _base_url() -> str:
-    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:8080")
+    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:18093")
 
 
 def _executor() -> str:
-    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "default").strip().lower()
-    return value if value in {"default", "docker"} else "default"
+    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "supervisor").strip().lower().strip("'\"")
+    return value if value in {"supervisor", "docker"} else "supervisor"
 
 
 def _extra_params() -> dict:
