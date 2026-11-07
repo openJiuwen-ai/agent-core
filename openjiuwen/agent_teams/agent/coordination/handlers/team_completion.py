@@ -69,6 +69,14 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         # single-leader state — a leader restart re-arms it, and a re-emitted
         # event is harmless since consumers treat the event as at-least-once.
         self._team_completed_emitted = False
+        # Latched by the round-end edge poll (payload round_settled) and
+        # cleared only by rearm(). Once a round has settled in this run
+        # cycle, later polls in the same cycle may also treat an empty task
+        # board as terminal: a solo leader round creates no task, and the
+        # round-end poll runs only once — a transient miss there (e.g. the
+        # leader's READY write still in flight) must not strand a persistent
+        # team forever with an open leader stream.
+        self._round_settled = False
         # Callbacks fired on TASK_LIST_DRAINED. Populated once after the
         # DeepAgent is built (TeamAgent._register_team_completion_callbacks)
         # — e.g. TeamSkillRail.notify_team_completed. Empty on members that
@@ -89,9 +97,12 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         Called by the kernel on every ``start`` (cold start / resume /
         recover) so each run cycle evaluates team completion independently:
         a paused team that resumes can conclude again without first having
-        to leave and re-enter the completed state.
+        to leave and re-enter the completed state. The round-settled latch
+        is cycle-scoped too: a fresh cycle must not inherit the previous
+        cycle's empty-board permission before it has run a round.
         """
         self._team_completed_emitted = False
+        self._round_settled = False
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Leader-idle tick: evaluate the three completion conditions.
@@ -100,6 +111,14 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         conclusion) and to a genuinely idle leader — a mid-round leader's
         own status is BUSY, which fails condition 1 anyway, so the early
         return just skips a wasted DB scan.
+
+        ``payload["round_settled"]`` marks the poll enqueued on the round-end
+        edge (:meth:`TeamAgent._request_completion_poll`). It latches empty-
+        board permission for the rest of the run cycle: a leader doing the
+        round by itself never creates a task, and without this the team could
+        never conclude — so it would never auto-pause and its leader stream
+        would stay open forever. Cycles that have not settled a round yet
+        keep the strict rule, as do temporary teams.
         """
         if self._blueprint.role != TeamRole.LEADER:
             return
@@ -116,7 +135,11 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             )
             return
 
-        snapshot = await team_backend.is_team_completed()
+        payload = getattr(event, "payload", None) or {}
+        if isinstance(payload, dict) and payload.get("round_settled") is True:
+            self._round_settled = True
+        allow_empty_board = self._round_settled and self._blueprint.lifecycle == "persistent"
+        snapshot = await team_backend.is_team_completed(allow_empty_board=allow_empty_board)
         if snapshot is None:
             # Falling edge: re-arm so the next rising edge emits again.
             self._team_completed_emitted = False
