@@ -23,7 +23,7 @@
 | `self._infra` | `TeamInfra` | per-process 容器（task_manager / message_manager / team_backend / messager / workspace_manager）|
 | `self._round` | `AgentRoundController` | 跟 TeamHarness 打交道（deliver_input / cancel_agent / resume_interrupt / has_in_flight_round / has_pending_interrupt / is_agent_running / announce_task_revisions）|
 | `self._lifecycle` | `TeamLifecycleController` | TeamAgent 级副作用（`shutdown_self` / `conclude_completed_round` / `observe_member_status`）|
-| `self._poll` | `PollController` | EventBus 自身的 poll 控制（pause_polls / resume_polls）|
+| `self._poll` | `PollController` | EventBus 自身的 poll 控制（pause_polls / resume_polls）与入队（enqueue，团队规则路由器重新扫邮箱用）|
 
 handler **不持有原始 host 引用**。新增依赖一律通过 narrow protocol 字段或显式构造参数注入，避免重新滑回上帝接口。
 

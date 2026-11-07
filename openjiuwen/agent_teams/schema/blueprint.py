@@ -49,6 +49,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.team_rules.config import TeamRulesConfig
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -675,6 +676,13 @@ class TeamAgentSpec(BaseModel):
     """Optional team reliability framework configuration. Opt-in via
     ``reliability.enabled``; attaches a monitoring rail to the configured roles
     and a remediation handler on the leader."""
+
+    team_rules: Optional[TeamRulesConfig] = None
+    """Optional Group team rules delivery routing (F_130). Opt-in via ``team_rules.enabled``
+    and ``team_rules.mode == "active"``; swaps the mailbox handlers for routing
+    variants that decide how a new message reaches a busy member (interrupt and
+    replan / steer / append / deliver now / record only). Stores only the NAME
+    of the API key environment variable, never the key."""
 
     """
     Signature: ``(deep_agent: DeepAgent) -> None``.

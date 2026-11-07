@@ -2083,6 +2083,10 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        # team_rules is host configuration, not session state: the live spec wins,
+        # so turning the supervisor off or changing it applies on restart.
+        if runtime_spec is not None:
+            spec.team_rules = runtime_spec.team_rules
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based

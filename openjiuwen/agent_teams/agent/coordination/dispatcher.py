@@ -19,6 +19,7 @@ framework swallowing as silent error handling.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import (
     Any,
     ClassVar,
@@ -180,6 +181,9 @@ class PollController(Protocol):
         """Resume periodic polling on the event bus."""
         ...
 
+    async def enqueue(self, event: Any) -> None:
+        """Push an event into the event bus queue (e.g. a mailbox re-drain)."""
+
 
 @runtime_checkable
 class DispatcherHost(AgentRoundController, TeamLifecycleController, Protocol):
@@ -219,6 +223,12 @@ class EventDispatcher:
         "scheduled": ScheduledStaleTaskHandler,
     }
 
+    # Roles whose mailbox deliveries the team rules router may route (F_130). Human
+    # agent avatars and bridge avatars keep the original handlers.
+    _TEAM_RULES_ROLES: ClassVar[frozenset[TeamRole]] = frozenset(
+        {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
+    )
+
     def __init__(
         self,
         host: DispatcherHost,
@@ -238,8 +248,12 @@ class EventDispatcher:
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
-        self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
-        self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
+        # Team rules delivery routing (F_130) mounts only when the team opts in:
+        # the two mailbox handlers are swapped for their routing variants here,
+        # at assembly, exactly like the reliability handler below. Disabled
+        # teams construct the original classes and behave as before.
+        self.team_rules_router = None
+        self._mount_mailbox_handlers(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -325,6 +339,44 @@ class EventDispatcher:
         handler = self.group_message if await self.group_message.handles(event) else self.message
         method_name = MessageHandler.EVENT_METHOD_MAP[event.event_type]
         await getattr(handler, method_name)(event)
+
+    async def aclose(self) -> None:
+        """Release dispatcher-owned background work (the team rules judge worker)."""
+        if self.team_rules_router is not None:
+            await self.team_rules_router.aclose()
+
+    def _mount_mailbox_handlers(
+        self,
+        host: DispatcherHost,
+        blueprint: TeamAgentBlueprint,
+        infra: TeamInfra,
+        poll_ctrl: PollController,
+    ) -> None:
+        """Build the message / group-message handlers, routed through team rules when opted in."""
+        team_rules_cfg = getattr(blueprint.spec, "team_rules", None)
+        if (
+            team_rules_cfg is not None
+            and team_rules_cfg.active
+            and blueprint.role in self._TEAM_RULES_ROLES
+            and blueprint.member_name
+        ):
+            from openjiuwen.agent_teams.team_rules.handlers import TeamRulesGroupMessageHandler, TeamRulesMessageHandler
+            from openjiuwen.agent_teams.team_rules.router import TeamRulesRouter
+
+            self.team_rules_router = TeamRulesRouter(
+                host,
+                infra,
+                blueprint.member_name,
+                team_rules_cfg,
+                redrain=partial(poll_ctrl.enqueue, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)),
+            )
+            self.message = TeamRulesMessageHandler(host, blueprint, infra, poll_ctrl, router=self.team_rules_router)
+            self.group_message = TeamRulesGroupMessageHandler(
+                host, blueprint, infra, poll_ctrl, router=self.team_rules_router
+            )
+        else:
+            self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+            self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
 
     @property
     def dispatch_mode(self) -> str:
