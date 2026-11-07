@@ -110,7 +110,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     react_agent.invoke = AsyncMock(return_value=result)
     agent._react_agent = react_agent
     write_result = AsyncMock()
-    build_next_work = MagicMock(return_value=None)
+    build_next_work = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
         agent,

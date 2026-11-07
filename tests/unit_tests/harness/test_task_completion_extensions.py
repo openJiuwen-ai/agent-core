@@ -22,7 +22,7 @@ from openjiuwen.harness.schema.stop_condition import (
     CompletionPromiseEvaluator,
     StopEvaluationContext,
 )
-from openjiuwen.harness.task_loop.loop_queues import LoopQueues
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput, LoopQueues
 from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
 )
@@ -35,7 +35,7 @@ class _Coordinator:
         )
 
     def get_completion_promise_evaluator(
-        self,
+            self,
     ) -> CompletionPromiseEvaluator:
         return self.evaluator
 
@@ -331,7 +331,8 @@ def test_completion_promise_evaluator_absent_clears_state() -> None:
     assert state["matched_text"] == ""
 
 
-def test_task_loop_controller_can_enqueue_follow_up() -> None:
+@pytest.mark.asyncio
+async def test_task_loop_controller_can_enqueue_follow_up() -> None:
     """Rails can enqueue follow-up messages through the controller."""
     controller = TaskLoopController()
     queues = LoopQueues()
@@ -345,7 +346,96 @@ def test_task_loop_controller_can_enqueue_follow_up() -> None:
     controller.enqueue_follow_up("confirm completion")
 
     assert controller.has_follow_up()
-    assert controller.drain_follow_up() == ["confirm completion"]
+    assert await controller.drain_follow_up() == ["confirm completion"]
+
+
+def _wired_controller() -> tuple[TaskLoopController, LoopQueues]:
+    """A controller backed by real interaction queues."""
+    controller = TaskLoopController()
+    queues = LoopQueues()
+    handler = type(
+        "Handler",
+        (),
+        {"interaction_queues": queues},
+    )()
+    controller.set_event_handler(handler)
+    return controller, queues
+
+
+@pytest.mark.asyncio
+async def test_deferred_input_renders_at_drain_time() -> None:
+    """A DeferredInput renders when the queue drains, not when enqueued."""
+    controller, _ = _wired_controller()
+    state = {"value": "stale"}
+
+    async def render() -> str:
+        return state["value"]
+
+    controller.enqueue_follow_up(DeferredInput(kind="task-board", renderer=render))
+    state["value"] = "fresh"
+
+    assert await controller.drain_follow_up() == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_input_none_render_drops_silently() -> None:
+    """A renderer returning None means 'nothing to say anymore' — the item
+    is dropped while plain strings around it survive in order."""
+    controller, _ = _wired_controller()
+
+    async def nothing() -> None:
+        return None
+
+    controller.enqueue_follow_up("keep-me")
+    controller.enqueue_follow_up(DeferredInput(kind="task-board", renderer=nothing))
+
+    assert await controller.drain_follow_up() == ["keep-me"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_inputs_with_same_collapse_key_keep_latest() -> None:
+    """Drained deferred items sharing a collapse_key are idempotent
+    snapshots of the same state — only the latest survives, at its own
+    position; other keys and plain strings are unaffected. And only the
+    survivor's renderer ever runs (superseded renders would be pure waste)."""
+    controller, _ = _wired_controller()
+    render_calls: list[str] = []
+
+    async def board_v1() -> str:
+        render_calls.append("v1")
+        return "board-v1"
+
+    async def board_v2() -> str:
+        render_calls.append("v2")
+        return "board-v2"
+
+    async def other() -> str:
+        return "other-kind"
+
+    controller.enqueue_follow_up(DeferredInput(kind="task-board", renderer=board_v1, collapse_key="task-board"))
+    controller.enqueue_follow_up("plain")
+    controller.enqueue_follow_up(DeferredInput(kind="task-board", renderer=board_v2, collapse_key="task-board"))
+    controller.enqueue_follow_up(DeferredInput(kind="note", renderer=other, collapse_key="note"))
+
+    assert await controller.drain_follow_up() == ["plain", "board-v2", "other-kind"]
+    assert render_calls == ["v2"]  # superseded v1 never rendered
+
+
+@pytest.mark.asyncio
+async def test_deferred_input_render_error_drops_item_not_batch() -> None:
+    """A renderer that raises drops only its own item (with a warning) —
+    one bad render must not kill the whole drain: the drain runs on the
+    round-done path, an escaping exception would stall the harness there."""
+    controller, _ = _wired_controller()
+
+    async def boom() -> str:
+        raise RuntimeError("database is locked")
+
+    controller.enqueue_follow_up("before")
+    controller.enqueue_follow_up(DeferredInput(kind="task-board", renderer=boom))
+    controller.enqueue_follow_up("after")
+
+    assert await controller.drain_follow_up() == ["before", "after"]
 
 
 @pytest.mark.asyncio

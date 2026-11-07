@@ -191,6 +191,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- 已指派给你的任务请先用 view_task 查看详情，再按任务工具推进"
         ),
         "dispatcher.task_unassigned_marker": " (待领取)",
+        "dispatcher.task_board_rendered_at": (
+            "（本看板渲染于 {render_time}，为彼时状态快照；行动前可用 view_task 复核实时状态）"
+        ),
         # agent/dispatcher.py — stale-pending leader self-prompt
         "dispatcher.stale_pending_header": (
             "[催促建议] 以下任务已长时间处于 pending 状态未被认领（如需回顾详情用 view_task）。"
@@ -482,6 +485,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "- For tasks already assigned to you, use view_task for details and proceed with the task tools"
         ),
         "dispatcher.task_unassigned_marker": " (unassigned)",
+        "dispatcher.task_board_rendered_at": (
+            "(Board rendered at {render_time} — a snapshot of that moment; "
+            "verify with view_task before acting)"
+        ),
         # agent/dispatcher.py — stale-pending leader self-prompt
         "dispatcher.stale_pending_header": (
             "[Nudge suggestion] The following tasks have been pending unclaimed for a long time "

@@ -15,6 +15,7 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
+    resolve_follow_ups,
 )
 
 
@@ -115,22 +116,30 @@ class TaskLoopController(Controller):
             timeout=timeout,
         )
 
-    def drain_follow_up(self) -> List[str]:
-        """Drain follow-up messages from handler queues.
+    async def drain_follow_up(self) -> List[str]:
+        """Drain follow-up messages from handler queues, resolved.
+
+        The single resolution point for deferred inputs: every consumer of
+        the follow-up queue goes through here, so a :class:`DeferredInput`
+        is always rendered at consumption time (and collapsed by
+        ``collapse_key``) before it can reach a query or the persisted
+        ``pending_follow_ups`` state — both of which hold plain strings only.
 
         Returns:
             List of follow-up message strings.
         """
         queues = self._get_interaction_queues()
         if queues is not None:
-            return queues.drain_follow_up()
+            return await resolve_follow_ups(queues.drain_follow_up())
         return []
 
-    def enqueue_follow_up(self, msg: str) -> None:
+    def enqueue_follow_up(self, msg) -> None:
         """Enqueue a follow-up message for the next outer round.
 
         Rails can use this to request a continuation or confirmation
         round without coupling to the handler's queue implementation.
+        ``msg`` may be a :class:`DeferredInput` whose text is rendered when
+        the queue is drained.
         """
         queues = self._get_interaction_queues()
         if queues is not None:
