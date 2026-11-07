@@ -333,6 +333,63 @@ def test_userprofile_kube_config_hits_file_guard(tmp_path: Path) -> None:
     assert "file_guard" in (matched or "")
 
 
+def test_extract_expands_home_var_env(tmp_path: Path) -> None:
+    expected = (Path.home() / ".env").resolve()
+    cases = (
+        ("cat $HOME/.env", "read"),
+        ("cat ${HOME}/.env", "read"),
+        ('cat "$HOME/.env"', "read"),
+        ('echo SECRET=1 > "$HOME/.env"', "write"),
+        ("echo SECRET=1 > ${HOME}/.env", "write"),
+        ('test -f "$HOME/.env" && echo EXISTS', "read"),
+        ("test -e ~/.env", "read"),
+        ("[ -f ~/.env ]", "read"),
+    )
+    for cmd, action in cases:
+        accesses = extract_shell_path_accesses(cmd, tmp_path)
+        assert any(
+            p.resolve() == expected and act == action for p, act in accesses
+        ), (cmd, [(str(p), a) for p, a in accesses])
+
+
+def test_extract_leaves_other_vars_unresolved(tmp_path: Path) -> None:
+    cmds = (
+        "cat $HOMEDIR/.env",
+        "cat $HOME_BACKUP/.env",
+        "cat $HOME.env",
+        "cat $HOME/$PROJECT/.env",
+        "echo x > $OUT",
+        'test "$a" = "$b"',
+    )
+    for cmd in cmds:
+        accesses = extract_shell_path_accesses(cmd, tmp_path)
+        assert accesses == [], (cmd, [(str(p), a) for p, a in accesses])
+
+
+def test_home_var_env_hits_builtin_env_deny(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = {
+        "enabled": True,
+        "tools": {"bash": "ask"},
+        "defaults": {"*": "ask"},
+        "rules": [],
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+            "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
+        },
+    }
+    engine = _engine(cfg, workspace_root=workspace)
+    for cmd in ('echo SECRET=1 > "$HOME/.env"', 'test -f "$HOME/.env" && echo EXISTS'):
+        level, matched = engine.evaluate_global_policy_directly(
+            "bash",
+            {"command": cmd, "workdir": str(workspace)},
+        )
+        assert level == PermissionLevel.DENY, (cmd, matched)
+        assert "file_guard" in (matched or ""), cmd
+
+
 def test_extract_set_content_env_path(tmp_path: Path) -> None:
     accesses = extract_shell_path_accesses(
         "Set-Content -Path .env -Value x", tmp_path,
