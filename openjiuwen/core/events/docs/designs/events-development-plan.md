@@ -196,6 +196,22 @@
   嵌套能力无需透传，普通业务使用 state 不建立面板依赖；结果见 F_15 第 5 节。
   已完成组件、公开入口和下游正式装配验证；真实应用展示和部署路由不作为 SDK 组件验收。
 
+### EV-16 `prompt.section` 事件
+
+- **目标与范围：** 为一次最终 system prompt 组合中的单个 section 提供值型输入、文本改写/省略和 pass-through CORE；由 `prompt.compose` CORE 串行触发，不提供同名 Ops。
+- **契约与记录：** [`F_17 prompt.section`](../features/F_17_prompt-section-event.md)。
+- **前置：** EV-04/05 EventBus 与 Builder/Ops、EV-07 AgentRuntime 链路；复用 Harness 的 DeepAgent builder 和 ReActAgent 最终模型边界。
+- **状态：** 已实现；事件定义、section 子链、PromptMode 兼容和最终 provider request 接入已完成。
+- **不交付：** JiuwenSwarm 业务触发入口、prompt cache、ContextEngine 内部触发和独立 `ops.prompt.section`。
+
+### EV-17 `prompt.compose` 事件与 Ops
+
+- **目标与范围：** 在 before-model-call rails 完成后触发一次完整 prompt section 组合；CORE 经显式 SessionContext 查找 DeepAgent，生成 section output 并串行触发 EV-16；提供同名 `ops.prompt.compose` 的显式新链能力。
+- **契约与记录：** [`F_18 prompt.compose`](../features/F_18_prompt-compose-event.md)。
+- **前置：** EV-16、EV-07 AgentRuntime；最终 renderer、ContextWindow 和 usage report 复用同一 request-local compose snapshot。
+- **状态：** 已实现；事件/输出 Validator、CORE、Ops Build、Agent Loop 最终渲染和定向回归已完成。
+- **不交付：** 通过 Handler Ops 反向触发 agent-loop 自身、隐式当前 Agent/ContextVar、跨请求缓存和 JiuwenSwarm 生产业务接线。
+
 ## 3. 依赖关系与开发顺序
 
 ```mermaid
@@ -212,6 +228,8 @@ flowchart LR
 
     EV04 --> EV14["EV-14 store 持久化与清理"]
     EV14 --> EV15["EV-15 State 持久化\n与构建依赖"]
+    EV07 --> EV16["EV-16 prompt.section\n事件"]
+    EV16 --> EV17["EV-17 prompt.compose\n事件与 Ops"]
     PackageOps["EV-06 包信息"] --> EV14
     Extension["Extension 包管理与发布"] --> EV14
 
@@ -244,6 +262,8 @@ flowchart LR
 7. EV-08 依赖 EV-04 和 EV-05，独立提供 Handler ID 限定派发能力。
 8. EV-12 依赖 EV-07 的 AgentRuntime 与会话绑定，先完成 FS 事件及 `ops.fs`，再扩展其他能力事件族。
 9. EV-13 复用 EV-07 的运行时解析与 `ops.build` 装配，新增 `ResourceMgr` 依赖和包内 `mcp.json` 声明生命周期。
+10. EV-16 复用已有 EventBus Handler 链和 DeepAgent builder，只增加单 section 值型事件；EV-17 在 EV-16 之后接入完整 compose CORE、显式 Ops 和 ReActAgent 最终渲染。
+11. EV-16/EV-17 的 Core/Harness 验收与 JiuwenSwarm 生产业务入口分离；后者由消费方另行接线和联调。
 
 建议 EV-02、EV-03、EV-04、EV-05、EV-06、EV-07、EV-08、EV-12、EV-13 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
 
@@ -285,6 +305,8 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | M-01 EventBus MVP                | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力；真实 Agent 业务可等待 EV-06 |
 | EV-14 store 持久化与卸载清理 | 已完成 | 未登记 | EV-04、EV-06、Extension | Windows 修复后 810 passed、2 skipped | 定义、登记与文件回归见 [F_14](../features/F_14_ops-store.md)；应用装配由消费方维护 |
 | EV-15 State 持久化与构建依赖 | 已开发 | 李志远 | EV-04、EV-06、EV-14、Extension | 810 passed、2 skipped、0 failed | [F_15 State](../features/F_15_ops-state.md)；宿主展示和路由由消费方验收 |
+| EV-16 `prompt.section` 事件 | 已完成 | 未登记 | EV-04、EV-05、EV-07 | 定向组合回归 12 passed、2 warnings | [F_17](../features/F_17_prompt-section-event.md)；单 section 文本改写/省略、顺序和 PromptMode 已覆盖；无独立 Ops |
+| EV-17 `prompt.compose` 事件与 Ops | 已完成 | 未登记 | EV-16、EV-07 | 定向组合回归 12 passed、2 warnings | [F_18](../features/F_18_prompt-compose-event.md)；CORE、显式新链 Ops、最终 renderer 和 usage snapshot 接入已覆盖 |
 | M-02 Swarm 联合验收                  | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
 工作项逐项记录进度，交付节点单独记录联合验收结果。
@@ -320,3 +342,4 @@ git diff --check
 | 2026-11-03 | 1.9 | `mcp.register` 并入 `ops.mcp` 事件族，统一模型、服务与 Ops 装配 | 动态登记不随插件 uninstall 自动清理，见 F_13 第 7 节 |
 | 2026-11-03 | 2.0 | 撤回 EV-08 的调用级 handler_ids 接口；session.start 定向选择转到 JiuwenSwarm 宿主的注册与匹配阶段 | 当前契约见 S_01；旧版验证保留在 F_09，不用于证明撤回后的行为 |
 | 2026-11-03 | 2.1 | 新增 EV-15 State 持久化、版本与构建依赖；构树期间的 state.get 记录面板依赖 | 宿主真实展示和部署路由不作为 SDK 验收，见 [F_15](../features/F_15_ops-state.md) |
+| 2026-11-07 | 2.2 | 新增 EV-16/EV-17：`prompt.section` 单 section 事件、`prompt.compose` 完整组合事件及同名 Ops；接入 rails 后 ReActAgent 最终 system prompt renderer | Core/Harness 定向验证完成；JiuwenSwarm 生产业务触发和跨仓联调仍由消费方维护，见 [F_17](../features/F_17_prompt-section-event.md)、[F_18](../features/F_18_prompt-compose-event.md) |
