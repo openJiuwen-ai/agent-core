@@ -59,6 +59,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     InvokeInputs,
 )
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.agent_teams.harness.control import (
@@ -526,7 +527,7 @@ class NativeHarness(DeepAgent):
     # External API: send / abort / pause
     # ------------------------------------------------------------------
 
-    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
+    async def send(self, content: "str | InteractiveInput | DeferredInput", *, immediate: bool = False) -> str:
         """Push an inbound message to the supervisor.
 
         ``content`` may be an ``InteractiveInput`` carrying an interrupt resume.
@@ -534,6 +535,11 @@ class NativeHarness(DeepAgent):
         extracts the InteractiveInput and the inner ReAct agent resumes the
         interrupted turn instead of starting fresh. A resume round settles to
         IDLE on completion rather than continuing the task plan.
+
+        ``content`` may also be a ``DeferredInput`` (rendered at consumption
+        time): it stays deferred only when queued as a follow-up; on every
+        immediately-consumed path it is rendered up front, and a None render
+        starts nothing.
 
         Behavior by phase:
         - IDLE: starts a new round with ``content``.
@@ -823,9 +829,37 @@ class NativeHarness(DeepAgent):
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
-        msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
-
+        content = cmd.msg.content
         phase = self._st.phase
+        # A deferred input stays deferred only on its way to the follow-up
+        # queue (RUNNING + not immediate) — every immediately-consumed path
+        # (round start, steer, paused resume) needs the text now. A render
+        # returning None means the state it would describe no longer needs
+        # saying: ack and start nothing.
+        if isinstance(content, DeferredInput) and not (
+                phase is HarnessState.RUNNING and not cmd.msg.immediate
+        ):
+            try:
+                rendered = await content.renderer()
+            except Exception as e:
+                # 渲染失败只丢本输入——异常逃逸到 supervisor 会把整条成员
+                # harness 打进 TERMINATED（改动前同类 DB 异常发生在事件
+                # handler 回调里，被回调框架吞掉只丢一轮 nudge）。与
+                # resolve_follow_ups 的 drain 路径同口径：warning + 丢弃。
+                logger.warning(
+                    "[NativeHarness] deferred input render failed on direct path, "
+                    "dropping send (kind=%s): %s",
+                    content.kind,
+                    e,
+                )
+                self._ack(cmd.ack, seq)
+                return
+            if rendered is None:
+                self._ack(cmd.ack, seq)
+                return
+            content = rendered
+        msg = InboxMessage(seq=seq, content=content, immediate=cmd.msg.immediate)
+
         if phase is HarnessState.IDLE:
             active = self._start_round(msg.content)
             await self._transition(HarnessState.RUNNING)
@@ -1093,7 +1127,7 @@ class NativeHarness(DeepAgent):
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
         if was_graceful:
-            self._drain_follow_ups_discard(session)
+            await self._drain_follow_ups_discard(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1138,7 +1172,7 @@ class NativeHarness(DeepAgent):
 
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
-        follow_ups = self._drain_pending_follow_ups(session)
+        follow_ups = await self._drain_pending_follow_ups(session)
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
@@ -1421,7 +1455,7 @@ class NativeHarness(DeepAgent):
         if handler is not None and handler.interaction_queues is not None:
             handler.interaction_queues.push_steer(content)
 
-    def _drain_pending_follow_ups(self, session: Session) -> list[str] | None:
+    async def _drain_pending_follow_ups(self, session: Session) -> list[str] | None:
         """Drain every queued follow-up as the next round's batch of inputs.
 
         Mirrors ``_run_task_loop`` in draining ``LoopQueues.follow_up`` into
@@ -1450,7 +1484,7 @@ class NativeHarness(DeepAgent):
             The queued inputs, oldest first, or None when nothing is pending.
         """
         controller = self.loop_controller
-        new_follow_ups = controller.drain_follow_up() if controller is not None else []
+        new_follow_ups = await controller.drain_follow_up() if controller is not None else []
         st = self.load_state(session)
         if new_follow_ups:
             st.pending_follow_ups.extend(new_follow_ups)
@@ -1461,11 +1495,15 @@ class NativeHarness(DeepAgent):
         self.save_state(session, st)
         return batch
 
-    def _drain_follow_ups_discard(self, session: Session) -> None:
-        """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""
+    async def _drain_follow_ups_discard(self, session: Session) -> None:
+        """Drop all queued follow-ups (LoopQueues + state) on graceful stop.
+
+        Deferred inputs are discarded unresolved — nothing renders on a
+        stop path.
+        """
         controller = self.loop_controller
         if controller is not None:
-            controller.drain_follow_up()
+            await controller.drain_follow_up()
         st = self.load_state(session)
         if st.pending_follow_ups:
             st.pending_follow_ups.clear()

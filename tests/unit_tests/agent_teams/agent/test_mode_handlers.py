@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCreatedEvent,
@@ -95,7 +96,7 @@ class FakeHost:
         return None
 
     async def deliver_input(self, content, *, use_steer: bool = True) -> None:
-        self.delivered.append(str(content))
+        self.delivered.append(content)
 
     async def resume_interrupt(self, user_input) -> None:
         return None
@@ -105,6 +106,24 @@ class FakeHost:
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
         return None
+
+
+async def render_deliveries(deliveries: list) -> list[str]:
+    """Resolve recorded deliveries to their texts.
+
+    Board surveys arrive as ``DeferredInput`` (rendered at follow-up drain
+    time in production); render them here. A None render means the survey
+    found nothing to say and is dropped, so it burns no round.
+    """
+    texts: list[str] = []
+    for item in deliveries:
+        if isinstance(item, DeferredInput):
+            text = await item.renderer()
+            if text is not None:
+                texts.append(text)
+        else:
+            texts.append(item)
+    return texts
 
 
 class FakePoll:
@@ -338,7 +357,9 @@ async def test_startup_survey_surfaces_work_assigned_while_member_was_down(db, b
     await handler.on_initial_task_poll(InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK))
 
     assert len(host.delivered) == 1
-    assert "t1" in host.delivered[0]
+    rendered = await render_deliveries(host.delivered)
+    assert len(rendered) == 1
+    assert "t1" in rendered[0]
 
 
 @pytest.mark.asyncio
@@ -356,7 +377,9 @@ async def test_startup_survey_is_silent_when_nothing_is_for_this_member(db, bus)
     handler = TaskBoardHandler(host, blueprint, infra, poll)
     await handler.on_initial_task_poll(InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK))
 
-    assert host.delivered == []
+    # A deferred survey is queued but renders to None (nothing for this
+    # member) — the drain drops it, so no round burns.
+    assert await render_deliveries(host.delivered) == []
 
 
 @pytest.mark.asyncio

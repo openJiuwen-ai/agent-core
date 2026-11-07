@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 
 
 class HarnessState(str, Enum):
@@ -79,13 +80,15 @@ class InboxMessage:
     Attributes:
         seq: Monotonically increasing sequence number; defines global FIFO.
         content: Raw user content. An ``InteractiveInput`` carries an interrupt
-            resume; the supervisor starts a single-round resume for it.
+            resume; the supervisor starts a single-round resume for it. A
+            ``DeferredInput`` is rendered at consumption time (kept deferred
+            only when queued as a follow-up).
         immediate: When True, inject into the active round's steering channel;
             when False, buffer until the active round finishes.
     """
 
     seq: int
-    content: "str | InteractiveInput"
+    content: "str | InteractiveInput | DeferredInput"
     immediate: bool
 
 

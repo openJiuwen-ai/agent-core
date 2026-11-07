@@ -79,6 +79,15 @@ def _format_absolute(timestamp_ms: int) -> str:
     return f"{base} {offset[:3]}:{offset[3:]}"
 
 
+def format_absolute_time(timestamp_ms: int) -> str:
+    """Public wrapper for ``_format_absolute`` — local wall-clock with tz offset.
+
+    Used by deferred board rendering to stamp the render moment into the
+    snapshot (a board read long after its events must say when it speaks of).
+    """
+    return _format_absolute(timestamp_ms)
+
+
 def format_time_context(timestamp_ms: int | None, now_ms: int) -> str:
     """Render a timestamp as ``<absolute local time> (<relative diff>)``.
 

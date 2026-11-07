@@ -392,7 +392,7 @@ async def test_root_finalization_cancels_unfinished_group_before_final_output(tm
 
             controller = SimpleNamespace(submit_round=AsyncMock(), wait_round_completion=finish)
             monkeypatch.setattr(parent, "prepare_interaction_task_loop", AsyncMock(return_value=(None, controller)))
-            monkeypatch.setattr(parent, "_build_interaction_next_work", lambda **kwargs: None)
+            monkeypatch.setattr(parent, "_build_interaction_next_work", AsyncMock(return_value=None))
             saved = []
 
             async def write(result, session):
@@ -545,7 +545,8 @@ async def test_interaction_internal_followup_reuses_scope_until_logical_task_fin
     controller = SimpleNamespace(submit_round=AsyncMock(), wait_round_completion=result)
     monkeypatch.setattr(parent, "prepare_interaction_task_loop", AsyncMock(return_value=(None, controller)))
     monkeypatch.setattr(
-        parent, "_build_interaction_next_work", lambda **kwargs: next_work if len(snapshots) == 1 else None
+        parent, "_build_interaction_next_work",
+        AsyncMock(side_effect=lambda **kwargs: next_work if len(snapshots) == 1 else None),
     )
     writes = []
 

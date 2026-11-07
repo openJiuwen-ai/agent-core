@@ -2405,7 +2405,7 @@ class DeepAgent(BaseAgent):
             while coordinator.should_continue():
                 outer_round += 1
                 # Drain new follow-ups, merge into state buffer
-                new_follow_ups = controller.drain_follow_up()
+                new_follow_ups = await controller.drain_follow_up()
                 _state = self.load_state(session)
                 if new_follow_ups:
                     _state.pending_follow_ups.extend(
@@ -3055,7 +3055,7 @@ class DeepAgent(BaseAgent):
                 next_work = (
                     None
                     if is_resume_input
-                    else self._build_interaction_next_work(
+                    else await self._build_interaction_next_work(
                         work=work,
                         result=result,
                         session=session,
@@ -3104,7 +3104,7 @@ class DeepAgent(BaseAgent):
         finally:
             self._invoke_active = False
 
-    def _build_interaction_next_work(
+    async def _build_interaction_next_work(
         self,
         *,
         work: RoundWorkItem,
@@ -3118,7 +3118,7 @@ class DeepAgent(BaseAgent):
         coordinator.set_last_result(result)
         state = self.load_state(session)
         state.stop_condition_state = coordinator.get_state()
-        state.pending_follow_ups.extend(controller.drain_follow_up())
+        state.pending_follow_ups.extend(await controller.drain_follow_up())
         self.save_state(session, state)
 
         if result.get("result_type") == "interrupt" or coordinator.is_aborted:
@@ -3557,7 +3557,7 @@ class DeepAgent(BaseAgent):
         controller = self.loop_controller
         if controller is None or not controller.has_follow_up():
             return
-        for query in controller.drain_follow_up():
+        for query in await controller.drain_follow_up():
             self._event_manager.push_user(
                 RoundWorkItem.user(
                     request_id=None,
