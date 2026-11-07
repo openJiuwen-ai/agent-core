@@ -72,7 +72,8 @@ from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
     RESUME_START_ITERATION_KEY,
     ToolInterruptionState,
-    INTERRUPTION_KEY
+    INTERRUPTION_KEY,
+    INTERRUPTION_INFLIGHT_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
@@ -1188,10 +1189,10 @@ class ReActAgent(BaseAgent):
                 ))
                 return ai_message
             if (
-                not overflow_recovery_used
-                and accumulated_chunk is None
-                and chunk_index == 0
-                and await self._recover_context_overflow(ctx, exc)
+                    not overflow_recovery_used
+                    and accumulated_chunk is None
+                    and chunk_index == 0
+                    and await self._recover_context_overflow(ctx, exc)
             ):
                 # 413 溢出在网关拒绝请求时发生，必然先于任何 chunk；
                 # 零 chunk 时重试不会造成重复输出，已有增量则不重试。
@@ -1838,6 +1839,21 @@ class ReActAgent(BaseAgent):
             return session.get_state(INTERRUPTION_KEY)
         return None
 
+    @staticmethod
+    def _clear_interrupt_inflight_state(session) -> None:
+        """清残「在途中断」登记键。
+
+        正常路径批末 commit_interrupt 已转正并清键；invoke 异常中止时批末
+        commit 永不发生，残留会让 has_pending_interrupt() 恒真、后续作答被
+        resume 进死中断。任何异常必须吞掉——本方法在 invoke finally 中调用，
+        不得放大原异常或阻断既有清理。
+        """
+        try:
+            if session is not None and session.get_state(INTERRUPTION_INFLIGHT_KEY) is not None:
+                session.update_state({INTERRUPTION_INFLIGHT_KEY: None})
+        except Exception:
+            logger.warning("clear interruption inflight state failed", exc_info=True)
+
     def _clear_interruption_state(self, session) -> None:
         if session:
             session.update_state({INTERRUPTION_KEY: None})
@@ -2337,6 +2353,11 @@ class ReActAgent(BaseAgent):
             await self._save_contexts_on_cancel(session)
             raise  # Re-raise to propagate cancellation signal
         finally:
+            # 在途中断标记清残：正常路径批末 commit_interrupt 已转正并清键；
+            # invoke 异常中止（cancel/abort/未捕获异常）时批末 commit 永不发生，
+            # 残留的 inflight 会让 has_pending_interrupt() 恒真、后续作答被
+            # resume 进一个死中断。finally 兜底清键（commit 后此处为幂等空操作）。
+            self._clear_interrupt_inflight_state(session)
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
                 await session.close_stream()
