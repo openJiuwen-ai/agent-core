@@ -1270,6 +1270,7 @@ class ReActAgent(BaseAgent):
         ctx: AgentCallbackContext,
         *,
         model_client_config: Any = None,
+        compose: bool = True,
     ) -> tuple[ContextWindow, tuple[tuple[ContextCategory, str, str], ...]]:
         """Build the final context window used by a model request.
 
@@ -1283,7 +1284,7 @@ class ReActAgent(BaseAgent):
         # can otherwise reintroduce tools even when _call_model receives None.
         if ctx.extra.get("_finalizing_max_iterations"):
             ctx.inputs.tools = None
-        compose_output = await self._compose_prompt_sections(ctx)
+        compose_output = await self._compose_prompt_sections(ctx) if compose else None
         if compose_output is None:
             ctx.extra.pop("_prompt_compose_sections", None)
             final_prompt = self.prompt_builder.build()
@@ -1783,8 +1784,10 @@ class ReActAgent(BaseAgent):
         run outside the normal model-call callback chain and therefore have no
         provider ``usage_metadata``.  The returned ``post_compact`` event is
         based on local measurement/estimation and is not an authoritative
-        provider token count.  The caller decides how to transport and persist
-        it.
+        provider token count.  They use the native prompt builder without
+        triggering prompt composition events, because those handlers may have
+        side effects and there is no provider request to compose.  The caller
+        decides how to transport and persist the snapshot.
         """
         if context is None:
             return None
@@ -1820,6 +1823,7 @@ class ReActAgent(BaseAgent):
         context_window, usage_prompt_sections = await self._build_model_context_window(
             ctx,
             model_client_config=getattr(self._llm, "model_client_config", None),
+            compose=False,
         )
 
         if isinstance(request_id, str) and request_id.strip():

@@ -52,7 +52,7 @@ sequenceDiagram
     W-->>R: context messages / usage 与同一 snapshot 对齐
 ```
 
-触发点是 `ReActAgent._build_model_context_window()`，发生在所有 before-model-call rail 完成后。preview 消息仍在 rail 前使用 `prompt_builder.build()`，不触发 compose；attachment 同步也不重新触发 compose。没有 EventBus，或 standalone `ReActAgent` 没有绑定可提供 composition 入口的 DeepAgent 时，直接沿用原生 builder，保持旧调用方兼容；只有存在可解析的 session-bound composition owner 时才触发该事件。
+触发点是 `ReActAgent._build_model_context_window()` 的真实模型请求路径，发生在所有 before-model-call rail 完成后。preview 消息仍在 rail 前使用 `prompt_builder.build()`，不触发 compose；attachment 同步也不重新触发 compose。`build_context_usage_snapshot()` 等 out-of-band usage 操作使用原生 builder，不触发 `prompt.compose` / `prompt.section`，因为它们不对应一次需要发送给 Provider 的请求，且扩展 Handler 可能具有副作用。没有 EventBus，或 standalone `ReActAgent` 没有绑定可提供 composition 入口的 DeepAgent 时，直接沿用原生 builder，保持旧调用方兼容；只有存在可解析的 session-bound composition owner 时才触发该事件。
 
 一次最终模型请求只组成一次 request-local prompt snapshot。`prompt.compose` 返回后，渲染器不能调用无参 `builder.build()` 覆盖返回结果，也不能按 priority 再排序；返回顺序就是最终语义。
 
@@ -193,7 +193,7 @@ DeepAgent 内部 composition 入口：
 
 该链路不使用 ContextVar 保存当前 Agent、builder 或 compose state。`AgentRuntime` 仍是现有显式 session-id 到 Agent 的进程内弱引用映射；生命周期由 DeepAgent 的 bind/unbind 负责。
 
-### 5.2 最终 system prompt 与 usage 一致
+### 5.2 实际请求的最终 system prompt 与 usage 一致
 
 ReActAgent 将 compose 输出保存到本次 `AgentCallbackContext.extra` 的 request-local 字段 `_prompt_compose_sections`，随后：
 
@@ -203,6 +203,8 @@ ReActAgent 将 compose 输出保存到本次 `AgentCallbackContext.extra` 的 re
 - 不再次读取 builder 生成 system prompt，不按 priority 覆盖 Handler 的重排/增删结果。
 
 这份 tuple 只属于当前显式调用链，不是全局缓存、ContextVar 或 Agent 字段。没有 EventBus 时不产生该字段，直接沿用原有 builder.build()。
+
+手工 `build_context_usage_snapshot()` 是本地估算路径，不触发 compose 事件链，直接使用原生 builder 生成 usage snapshot。它不会反映仅由 compose/section Handler 加入的改写，但该结果本身不是 Provider 的权威 token 统计；这样可以避免 usage 操作重复执行扩展 Handler 或因事件链故障阻断调用方。
 
 ### 5.3 自动注册与不涉及范围
 
