@@ -556,7 +556,7 @@ class TestOtelWorkflowHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         s = finished[0]
-        assert s.name == "wf_root"
+        assert s.name == "MyWorkflow"
         assert s.attributes[OJ_WORKFLOW_ID] == "wf1"
         # Base attributes (field-completion)
         assert OJ_TRACE_ID in s.attributes
@@ -863,7 +863,7 @@ class TestOtelWorkflowHandler:
         await handler2.on_call_done(invoke_id="wf_root2")
 
         finished = _EXPORTER.get_finished_spans()
-        start_span = next(s for s in finished if s.name == "component.start_node")
+        start_span = next(s for s in finished if s.name == "component.start")
         assert start_span.kind == trace.SpanKind.INTERNAL
 
     async def test_workflow_attributes_set(self):
@@ -1047,9 +1047,9 @@ class TestOtelWorkflowHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 3
 
-        root_wf = next(s for s in finished if s.name == "wf_root")
+        root_wf = next(s for s in finished if s.name == "RootWF")
         host_comp = next(s for s in finished if s.name == "chat")
-        sub_wf = next(s for s in finished if s.name == "sub_wf_root")
+        sub_wf = next(s for s in finished if s.name == "SubWF")
 
         # root_wf has no parent (or zero span_id parent)
         assert root_wf.parent is None or root_wf.parent.span_id == 0
@@ -1122,9 +1122,9 @@ class TestOtelWorkflowHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 4
 
-        root_wf = next(s for s in finished if s.name == "wf_root")
-        host_comp = next(s for s in finished if s.name == "component.sub_wf_node")
-        start_node = next(s for s in finished if s.name == "component.sub_wf_node.start")
+        root_wf = next(s for s in finished if s.name == "RootWF")
+        host_comp = next(s for s in finished if s.name == "component.sub_wf")
+        start_node = next(s for s in finished if s.name == "component.start")
         llm_node = next(s for s in finished if s.name == "chat")
 
         # root_wf — top level

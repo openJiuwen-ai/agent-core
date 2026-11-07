@@ -1198,7 +1198,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             is_tool_component = any(s in component_type for s in _TOOL_SUBSTRINGS)
             is_retrieval_component = any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
             if is_workflow_root:
-                span_name = invoke_id
+                span_name = metadata.get("workflow_name") or invoke_id
             elif is_llm_component:
                 request_model = str(metadata.get("model_name") or metadata.get("model") or "")
                 span_name = f"chat {request_model}" if request_model else "chat"
@@ -1209,7 +1209,8 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 retrieval_name = str(metadata.get("component_name") or invoke_id)
                 span_name = f"retrieval {retrieval_name}"
             else:
-                span_name = f"component.{invoke_id}"
+                component_name = metadata.get("component_name") or invoke_id
+                span_name = f"component.{component_name}"
 
             otel_span = self._otel_tracer.start_span(
                 name=span_name,
