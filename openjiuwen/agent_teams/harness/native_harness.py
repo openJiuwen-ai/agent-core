@@ -1166,7 +1166,35 @@ class NativeHarness(DeepAgent):
             return
 
         result_type = (cmd.result or {}).get("result_type")
-        if result_type == "interrupt" or coordinator.is_aborted:
+        if result_type == "interrupt":
+            # 中断收尾前必须排空 follow-up 队列：中断等待期（工具批尚未走完、
+            # commit 未发生）按 RUNNING 语义入队的输入——修复后窗口内
+            # 早到的 InteractiveInput 作答即走此路——若随旧逻辑直接 IDLE 将
+            # 滞留队列永久悬挂（中断已 commit，但没有任何路径再消费该队列）。
+            # 含 InteractiveInput 时以它直接开 resume 轮：此时 INTERRUPTION_KEY
+            # 已在批末 commit，新轮 invoke 读取正式态走 handle_resume，与
+            # 「IDLE 后晚到作答经 send 直开新轮」的正常路径同效。队列中的其余
+            # 输入（如看板 DeferredInput）重新入队，resume 轮收尾时按既有
+            # drain 顺序消费（resume 轮 settle 先 drain 再判 is_resume 落 IDLE）。
+            follow_ups = await self._drain_pending_follow_ups(session)
+            resume_payload: Any = None
+            if follow_ups:
+                residuals: list = []
+                for item in follow_ups:
+                    if resume_payload is None and isinstance(item, InteractiveInput):
+                        resume_payload = item
+                    else:
+                        residuals.append(item)
+                if residuals and self.loop_controller is not None:
+                    for item in residuals:
+                        self.loop_controller.enqueue_follow_up(item)
+            if resume_payload is not None:
+                nxt = self._start_round(resume_payload)
+                await self._emit_round("started", nxt.round_id)
+                return
+            await self._transition(HarnessState.IDLE)
+            return
+        if coordinator.is_aborted:
             await self._transition(HarnessState.IDLE)
             return
 
