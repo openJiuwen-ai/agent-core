@@ -207,3 +207,16 @@ source .venv/bin/activate && export PYTHONPATH=.:$PYTHONPATH
 - **`_extract_input_parts` 在 rail 改写过 query 时主动放弃**（`iter_inputs.query == query` 才
   透传）。改写过 query 说明这一轮跑的已经不是原批次，parts 与 query 不再是同一份内容；宁可
   退回单条，不做不一致的猜测。
+
+## 修订：看板改延迟渲染，「渲染前合流」遗留落地
+
+上方「已知遗留」第二条的正解已实施：`_nudge_idle_agent` 不再在事件到达时渲染看板字符串，
+而是投递 `DeferredInput`（`openjiuwen/harness/task_loop/loop_queues.py`：kind + collapse_key +
+异步渲染回调，None = 静默丢弃）。队列存对象，`TaskLoopController.drain_follow_up` 改 async
+成为唯一解析点（drain 时渲染 + 同 collapse_key 折叠留最新），四个消费点各加 `await`；
+`NativeHarness._on_send` 的 IDLE/PAUSED/steer 直通路径先解析（None 不起轮）。看板内容恒为
+排空时刻的当前状态，全终态直接渲染成 all-done——过期快照驱动空转轮的触发源消除。
+
+与 D6 的关系：延迟项同 key 渲染结果恒等，差异信号为零，折叠无损——D6 豁免的前提是
+「各份过期快照各承载转场信息」，该前提对延迟项不复存在；D6 对非延迟快照串继续有效。
+行为变化：all-done 分支由 steer 改为随延迟项轮末到达（与 D1「巡视不打断」哲学一致）。

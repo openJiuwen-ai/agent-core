@@ -9,6 +9,7 @@ import pytest
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.harness.task_loop.loop_queues import DeferredInput
 from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
     answer_outputs,
@@ -42,6 +43,39 @@ async def test_idle_to_running_to_idle_single_round() -> None:
         assert mock_chunks(collected) == [{"query": "hello"}]
         assert answer_outputs(collected) == ["hi"]
         assert [inv["query"] for inv in fake.invocations] == ["hello"]
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_deferred_send_render_error_drops_without_crashing() -> None:
+    """IDLE 直通路径上 DeferredInput 渲染抛错：ack 后丢弃本输入，harness
+    不得被打进 TERMINATED（渲染异常逃逸到 supervisor 曾会终止整条成员
+    harness——改动前同类 DB 异常发生在事件 handler 回调里，被回调框架
+    吞掉只丢一轮 nudge；与 drain 路径 resolve_follow_ups 同口径）。"""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="ok")
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            async def boom() -> str:
+                raise RuntimeError("database is locked")
+
+            seq = await harness.send(DeferredInput(kind="task-board", renderer=boom))
+            assert seq == 1
+            # harness 存活：后续正常 send 仍能起轮并回答
+            seq2 = await harness.send("hello")
+            assert seq2 == 2
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert [inv["query"] for inv in fake.invocations] == ["hello"]
+        assert answer_outputs(collected) == ["ok"]
     finally:
         await Runner.stop()
 
