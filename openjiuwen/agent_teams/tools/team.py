@@ -252,6 +252,10 @@ class TeamBackend:
         self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
+        # Resident team workspace manager — owns the evolvable-workspace cache.
+        # Attached at assembly via ``attach_workspace_manager``; until then
+        # ``workspace_cache`` reads as ``None``.
+        self._workspace_manager: Any | None = None
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -323,6 +327,28 @@ class TeamBackend:
         if not path:
             return
         self._cleanup_paths.add(str(Path(path).expanduser()))
+
+    @property
+    def workspace_cache(self) -> Any | None:
+        """The resident per-team evolvable-workspace cache.
+
+        Delegates to the team workspace manager — the manager owns the
+        single resident instance attached at assembly. ``None`` until
+        assembly attaches a cache to the manager (or no manager is wired).
+        """
+        if self._workspace_manager is None:
+            return None
+        return self._workspace_manager.workspace_cache
+
+    def attach_workspace_manager(self, manager: Any | None) -> None:
+        """Point backend cache reads at the team workspace manager.
+
+        Assembly-time, once: the manager owns the resident workspace cache
+        (single source of truth); the backend only holds the manager
+        reference so A/B-class reads always see the same instance every
+        other consumer uses.
+        """
+        self._workspace_manager = manager
 
     async def _remove_cleanup_paths(self) -> None:
         """Remove every registered cleanup path with ``shutil.rmtree``.

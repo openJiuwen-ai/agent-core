@@ -353,10 +353,45 @@ class TeamContextTracker:
             )
 
 
+class TaskOutcomeTracker:
+    """Placeholder for task-verified next-input notices (F_119).
+
+    Full tracker logic lives in tmp's team_context; this stub keeps the type
+    importable for callers that optionally bind it.
+    """
+
+    def __init__(
+        self,
+        *,
+        team_backend: Any = None,
+        member_name: str | None = None,
+    ) -> None:
+        self._team_backend = team_backend
+        self._member_name = member_name
+
+    async def claim(self, session: Any) -> Any:
+        return None
+
+    def release(self, notice: Any) -> None:
+        return None
+
+    async def persist(self, session: Any) -> None:
+        return None
+
+    async def announce(self, session: Any, send: Any) -> bool:
+        return False
+
+
+class TaskRevisionTracker(TaskOutcomeTracker):
+    """Placeholder for task-revision next-input notices (F_129)."""
+
+
 __all__ = [
     "ROSTER_CHANGE_EVENT_KIND",
     "ROSTER_EVENT_KIND",
     "ROSTER_NOTE_KIND",
     "TEAM_CONTEXT_STATE_KEY",
+    "TaskOutcomeTracker",
+    "TaskRevisionTracker",
     "TeamContextTracker",
 ]

@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 _configured_openjiuwen_home: Path | None = None
+_configured_global_skills_dir: Path | None = None
 
 
 def configure_openjiuwen_home(path: str | Path) -> None:
@@ -90,12 +91,34 @@ def independent_member_workspace(member_name: str) -> Path:
     return get_openjiuwen_home() / f"{member_name}_workspace"
 
 
+def team_workspace_dir(team_name: str) -> Path:
+    """Return the shared team workspace directory."""
+    return team_home(team_name) / "team-workspace"
+
+
+def team_member_workspace_dir(team_name: str, member_name: str) -> Path:
+    """Return the stable-base workspace directory for one team member."""
+    return team_home(team_name) / "workspaces" / f"{member_name}_workspace"
+
+
+def global_skills_dir() -> Path:
+    """Return the one physical Skill library shared by every team member."""
+    if _configured_global_skills_dir is not None:
+        return _configured_global_skills_dir
+    return get_openjiuwen_home() / "workspace" / "skills"
+
+
 def team_memory_dir(team_name: str) -> Path:
     """Return the per-team shared memory directory.
 
     Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-memory/``
     """
     return team_home(team_name) / "team-workspace" / "team-memory"
+
+
+def safe_path_segment(value: str, fallback: str = "_") -> str:
+    """Return the canonical filesystem-safe form of an untrusted path segment."""
+    return _safe_segment(value, fallback)
 
 
 def _safe_segment(value: str, fallback: str = "_") -> str:
@@ -188,6 +211,64 @@ def workflow_journal_path(team_name: str, session_id: str, workflow_name: str) -
         workflow_name: Workflow name from the script ``META``.
     """
     return workflow_run_dir(team_name, session_id, workflow_name) / "journal.jsonl"
+
+
+def workflow_run_journal_path(
+    team_name: str, session_id: str, workflow_name: str, run_id: str | None
+) -> Path:
+    """Return the per-run journal snapshot path for a swarmflow run.
+
+    Layout:
+        ``{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal-{run_id}.jsonl``
+
+    Each run owns its own journal file, so two concurrent runs of the same
+    workflow never overwrite each other's snapshot (per-run_id isolation).
+    ``run_id`` is sanitized like every other path segment; ``None`` falls back
+    to the legacy shared ``journal.jsonl`` (offline / no-run callers).
+
+    Args:
+        team_name: Team identifier.
+        session_id: Session identifier.
+        workflow_name: Workflow name from the script ``META``.
+        run_id: The workflow run id (``wf_{12hex}``), or ``None`` for the
+            shared fallback.
+    """
+    if not run_id:
+        return workflow_journal_path(team_name, session_id, workflow_name)
+    return (
+        workflow_run_dir(team_name, session_id, workflow_name)
+        / f"journal-{_safe_segment(run_id)}.jsonl"
+    )
+
+
+def workflow_run_wal_path(
+    team_name: str, session_id: str, workflow_name: str, run_id: str | None
+) -> Path:
+    """Return the per-run WAL path for a swarmflow run.
+
+    Layout:
+        ``{team_home}/sessions/{session_id}/workflows/{workflow_name}/wal/{run_id}.wal``
+
+    The WAL is append-only and never actively deleted; splitting it by run_id
+    means two concurrent runs never append to / truncate each other's log
+    (the concurrency races on a shared WAL file). ``run_id=None`` falls back
+    to the legacy sidecar ``journal.jsonl.wal``.
+
+    Args:
+        team_name: Team identifier.
+        session_id: Session identifier.
+        workflow_name: Workflow name from the script ``META``.
+        run_id: The workflow run id, or ``None`` for the legacy sidecar path.
+    """
+    if not run_id:
+        return workflow_journal_path(team_name, session_id, workflow_name).with_suffix(
+            ".jsonl.wal"
+        )
+    return (
+        workflow_run_dir(team_name, session_id, workflow_name)
+        / "wal"
+        / f"{_safe_segment(run_id)}.wal"
+    )
 
 
 def async_tool_output_dir(team_name: str, session_id: str) -> Path:
