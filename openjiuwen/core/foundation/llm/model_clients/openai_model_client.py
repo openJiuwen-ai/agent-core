@@ -2815,7 +2815,8 @@ class OpenAIModelClient(BaseModelClient):
             input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
 
             usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
+                model_name=self._served_model_name(response)
+                or self.model_config.model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
@@ -2932,7 +2933,8 @@ class OpenAIModelClient(BaseModelClient):
         if hasattr(chunk, 'usage') and chunk.usage:
             input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
             usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
+                model_name=self._served_model_name(chunk)
+                or self.model_config.model_name,
                 input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,

@@ -588,6 +588,10 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     assert attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 3
     assert attrs[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 2
     assert attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 2
+    # Usage cost values stay business data only — never span attributes.
+    assert "openjiuwen.gen_ai.usage.total_cost" not in attrs
+    assert "openjiuwen.gen_ai.usage.input_cost" not in attrs
+    assert "openjiuwen.gen_ai.usage.output_cost" not in attrs
     assert list(attrs[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
     assert attrs[GEN_AI_RESPONSE_ID] == "resp-1"
     assert attrs[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] >= 0

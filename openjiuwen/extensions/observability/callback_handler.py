@@ -102,9 +102,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
     OJ_MODEL_GROUP_ID,
     OJ_MODEL_GROUP_ROUTE_ID,
@@ -1398,14 +1395,6 @@ class OtelCallbackHandler:
                 GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
                 max(int(cache_write_tokens), 0),
             )
-
-        for value, dst_attr in (
-            (float(getattr(usage, "input_cost", 0) or 0), OJ_GEN_AI_USAGE_INPUT_COST),
-            (float(getattr(usage, "output_cost", 0) or 0), OJ_GEN_AI_USAGE_OUTPUT_COST),
-            (float(getattr(usage, "total_cost", 0) or 0), OJ_GEN_AI_USAGE_TOTAL_COST),
-        ):
-            if value and not (skip_existing and dst_attr in state.span.attributes):
-                state.span.set_attribute(dst_attr, value)
 
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         # Measure between token-carrying chunks: a framing-only first chunk

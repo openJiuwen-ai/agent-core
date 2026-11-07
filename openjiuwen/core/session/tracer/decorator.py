@@ -127,7 +127,11 @@ def decorate_model_with_trace(model, agent_session):
     try:
         model_name = model.config.model_config.model_name
     except Exception:
-        model_name = type(model).__name__
+        try:
+            # foundation Model keeps its ModelRequestConfig at the top level.
+            model_name = model.model_config.model_name
+        except Exception:
+            model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
     proxy = _TraceProxy(model)
     proxy.invoke = async_trace(model.invoke, session, InvokeType.LLM, instance_info,
