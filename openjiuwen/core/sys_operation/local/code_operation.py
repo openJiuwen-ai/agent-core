@@ -1,7 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
+import os
 import platform
+import shutil
+import subprocess
 from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, Tuple
 import sys
 
@@ -26,10 +29,14 @@ class CodeOperation(BaseCodeOperation):
     """Code operation"""
     _WINDOWS_CMD_LIMIT: int = 8000
     _UNIX_CMD_LIMIT: int = 100000
+    # Successfully resolved interpreter, cached to skip re-probing.
+    _python_exe_cache: Optional[str] = None
+    # exec_cli/exec_file lambdas resolve the python interpreter internally
+    # (cache hit after the pre-warm in _build_subprocess_cmd).
     _SUPPORT_LANGUAGE_CONFIG_DICT: Dict[str, Any] = {
         "python": {
-            "exec_cli": lambda code: [sys.executable, "-u", "-c", code],
-            "exec_file": lambda path: [sys.executable, "-u", path],
+            "exec_cli": lambda code: [CodeOperation._resolve_python_executable(), "-u", "-c", code],
+            "exec_file": lambda path: [CodeOperation._resolve_python_executable(), "-u", path],
             "file_suffix": ".py",
         },
         "javascript": {
@@ -38,6 +45,99 @@ class CodeOperation(BaseCodeOperation):
             "file_suffix": ".js",
         }
     }
+
+    @staticmethod
+    def _is_frozen() -> bool:
+        """Whether the current process is a frozen executable (PyInstaller etc.)."""
+        return bool(getattr(sys, "frozen", False))
+
+    @classmethod
+    def _verify_python_candidate(cls, candidate: str) -> bool:
+        """Verifies a candidate path is a real python interpreter.
+
+        Runs ``<candidate> --version`` and checks the output, so that frozen
+        GUI binaries or OS stub aliases (e.g. Windows Store python alias) are
+        rejected instead of silently launched.
+
+        Args:
+            candidate: Absolute path to the candidate executable.
+
+        Returns:
+            True if the candidate is a working python interpreter.
+        """
+        if not candidate or not os.path.isfile(candidate):
+            return False
+        if cls._is_frozen():
+            if os.path.normcase(os.path.abspath(candidate)) == \
+                    os.path.normcase(os.path.abspath(sys.executable)):
+                return False
+        run_kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "timeout": 10,
+        }
+        if platform.system() == "Windows":
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = subprocess.run([candidate, "--version"], **run_kwargs)
+        except Exception:
+            return False
+        return proc.returncode == 0 and b"Python" in (proc.stdout or b"")
+
+    @classmethod
+    def _resolve_python_executable(cls) -> Optional[str]:
+        """Resolves the python interpreter used to run code.
+
+        Resolution rules:
+            - Non-frozen environments always use ``sys.executable`` as-is
+              (zero fallback), so behavior stays unchanged.
+            - Frozen builds never use ``sys.executable`` because it points
+              to the GUI executable itself; instead ``python3``/``python``
+              is discovered via PATH and every candidate is verified by
+              running ``--version``.
+
+        A successful result is cached; failures are re-probed on the next
+        call.
+
+        Returns:
+            Absolute path of a usable interpreter, or None if no usable
+            interpreter was found.
+        """
+        if cls._python_exe_cache:
+            return cls._python_exe_cache
+
+        if not cls._is_frozen():
+            resolved = sys.executable or None
+        else:
+            resolved = None
+            if platform.system() == "Windows":
+                candidates = ["python", "python3"]
+            else:
+                candidates = ["python3", "python"]
+            seen: set = set()
+            for cand in candidates:
+                target = shutil.which(cand)
+                if not target:
+                    continue
+                key = os.path.normcase(target)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if cls._verify_python_candidate(target):
+                    resolved = target
+                    break
+
+        if resolved is None:
+            sys_operation_logger.warning(
+                f"Failed to resolve python interpreter for code operation "
+                f"(frozen={cls._is_frozen()}, hint: install python and "
+                f"add it to your system environment variable PATH)")
+        else:
+            cls._python_exe_cache = resolved
+            if cls._is_frozen():
+                sys_operation_logger.info(
+                    f"Resolved external python interpreter in frozen environment: {resolved}")
+        return resolved
 
     @classmethod
     def _get_default_cmd_limit(cls):
@@ -61,20 +161,31 @@ class CodeOperation(BaseCodeOperation):
 
         Returns:
             A tuple containing:
-                - The subprocess command list (None if language is unsupported or temp file creation fails).
+                - The subprocess command list (None on failure).
                 - Path to the temporary file (None if code is short enough for CLI execution or on failure).
+                - Failure reason string (None when the command is built successfully),
+                  e.g. interpreter not resolved or temp file creation failed.
         """
         lang_config = cls._SUPPORT_LANGUAGE_CONFIG_DICT.get(language)
         if lang_config is None:
-            return None, None
+            return None, None, None
+
+        if language == "python":
+            # Pre-warm the interpreter resolution (the lambdas resolve it
+            # again from cache); failure fails fast.
+            interpreter = cls._resolve_python_executable()
+            if interpreter is None:
+                return None, None, ("python interpreter not found, please install "
+                                    "Python and add it to your system environment "
+                                    "variable PATH.")
 
         if not force_file and len(code) <= cls._get_default_cmd_limit():
-            return lang_config["exec_cli"](code), None
+            return lang_config["exec_cli"](code), None, None
 
         temp_path = await OperationUtils.create_tmp_file(code, lang_config["file_suffix"])
         if temp_path is None:
-            return None, None
-        return lang_config["exec_file"](temp_path), temp_path
+            return None, None, f"failed to create temp file for {language} code"
+        return lang_config["exec_file"](temp_path), temp_path, None
 
     async def execute_code(
             self,
@@ -141,9 +252,9 @@ class CodeOperation(BaseCodeOperation):
         cmd, code_file_path = None, None
         try:
             force_file = (options or {}).get("force_file", False)
-            cmd, code_file_path = await self._build_subprocess_cmd(code, language, force_file)
+            cmd, code_file_path, build_error = await self._build_subprocess_cmd(code, language, force_file)
             if cmd is None:
-                return _create_exec_code_err(error_msg="subprocess cmd can not be none",
+                return _create_exec_code_err(error_msg=build_error or "subprocess cmd can not be none",
                                              data=ExecuteCodeData(code_content=code, language=language))
 
             env = OperationUtils.prepare_environment(environment)
@@ -280,9 +391,9 @@ class CodeOperation(BaseCodeOperation):
             return
 
         force_file = (options or {}).get("force_file", False)
-        cmd, code_file_path = await self._build_subprocess_cmd(code, language, force_file)
+        cmd, code_file_path, build_error = await self._build_subprocess_cmd(code, language, force_file)
         if cmd is None:
-            yield _create_exec_code_stream_err(error_msg="subprocess cmd can not be none",
+            yield _create_exec_code_stream_err(error_msg=build_error or "subprocess cmd can not be none",
                                                data=ExecuteCodeChunkData(chunk_index=chunk_index, exit_code=-1))
             if code_file_path:
                 await OperationUtils.delete_tmp_file(code_file_path)
