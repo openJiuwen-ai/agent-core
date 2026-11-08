@@ -178,6 +178,12 @@ class OtelRail(AgentRail):
             # call will actually use (see _resolve_model_config).
             model_config = self._resolve_model_config(ctx.agent)
             model_name = str(getattr(model_config, "model_name", "") or "") or "LLM"
+            # Gateway models carry a service id as model_name; a display name
+            # supplied by the caller (see _resolve_model_display_name) wins so
+            # the span shows the human-readable model.
+            display_name = self._resolve_model_display_name(ctx.agent, model_config)
+            if display_name:
+                model_name = display_name
             instance_info = {
                 **self._build_common_info(ctx),
                 "class_name": model_name,
@@ -272,6 +278,28 @@ class OtelRail(AgentRail):
         if model_config is None:
             model_config = getattr(getattr(agent, "config", None), "model_config_obj", None)
         return model_config
+
+    @staticmethod
+    def _resolve_model_display_name(agent: Any, model_config: Any) -> str:
+        """Optional human-readable model display name, when the caller set one.
+
+        Optional carriers, first hit wins:
+        - ``model_display_name`` on the resolved request config, then on the
+          agent config's ``model_config_obj`` — an ``extra="allow"`` field on
+          ``ModelRequestConfig``, the same ride-through ``top_k`` uses in
+          ``_extract_request_params``;
+        - ``agent._llm.model_display_name`` — the foundation ``Model``
+          forwards unknown attributes to its ``model_client_config``, so a
+          display name set on the client config surfaces here.
+        Empty when none carries one — the span then keeps the plain
+        ``model_name`` exactly as before (gateway service ids included).
+        """
+        config_obj = getattr(getattr(agent, "config", None), "model_config_obj", None)
+        for source in (model_config, config_obj, getattr(agent, "_llm", None)):
+            display = getattr(source, "model_display_name", None)
+            if display:
+                return str(display)
+        return ""
 
     @staticmethod
     def _extract_request_params(model_config: Any) -> dict[str, Any]:

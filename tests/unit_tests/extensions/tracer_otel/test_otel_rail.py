@@ -241,6 +241,72 @@ class TestOtelRailAgentCallbacks:
         assert kwargs["instance_info"]["message_count"] == 0
         assert kwargs["instance_info"]["class_name"] == "LLM"
 
+    async def test_before_model_call_display_name_wins_over_service_id(self):
+        """Gateway models put a service id in model_name; the optional
+        model_display_name extra field (same ride-through as top_k) makes
+        the span carry the human-readable name instead."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        config = _StubAgentConfig(
+            ModelRequestConfig(model="3f2b8c1e-uuid", model_display_name="Qwen-Max")
+        )
+        agent = _StubAgent(config=config)
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "Qwen-Max"
+
+    async def test_before_model_call_display_name_from_llm_object(self):
+        """The foundation Model forwards unknown attributes to its
+        model_client_config, so a display name set on the client config
+        surfaces on the llm object — no config extra field needed."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(ModelRequestConfig(model="3f2b8c1e-uuid")),
+            llm=_StubLlm(ModelRequestConfig(model="3f2b8c1e-uuid")),
+        )
+        agent._llm.model_display_name = "DeepSeek-V3"
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "DeepSeek-V3"
+
+    async def test_before_model_call_config_display_name_beats_llm_object(self):
+        """Both carriers set: the explicit config extra field wins."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(
+                ModelRequestConfig(model="3f2b8c1e-uuid", model_display_name="FromConfig")
+            ),
+            llm=_StubLlm(ModelRequestConfig(model="3f2b8c1e-uuid")),
+        )
+        agent._llm.model_display_name = "FromLlm"
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "FromConfig"
+
+    async def test_before_model_call_without_display_name_keeps_service_id(self):
+        """Red line: no display name anywhere — class_name stays the plain
+        model_name, gateway service ids included."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(config=_StubAgentConfig(ModelRequestConfig(model="3f2b8c1e-uuid")))
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "3f2b8c1e-uuid"
+
 
 class TestOtelRailToolCallbacks:
     async def test_before_tool_call_forwards_tool_semconv_payload(self):
