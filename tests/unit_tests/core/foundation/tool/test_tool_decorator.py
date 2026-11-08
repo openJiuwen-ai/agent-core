@@ -2,6 +2,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
+import inspect
 from typing import Annotated, List, Literal, Optional, Tuple
 import pytest
 from pydantic import Field, BaseModel
@@ -386,3 +387,71 @@ class TestToolDecorator:
         self.assertEqual(len(items_any_of), 2)
         self.assertEqual(items_any_of[0], {"type": "integer"})
         self.assertEqual(items_any_of[1], {"type": "integer"})
+
+
+class TestLocalFunctionPublicIdentity:
+    """issue #2495: @tool 装饰对象应暴露公开的工具名与直接调用入口"""
+
+    def test_name_reflects_card_name(self):
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.name == "greet"
+        # 与 ToolCard 保持一致（ToolCard.name 才是注册用的名字）
+        assert greet.name == greet.card.name
+
+    def test_name_reflects_explicit_override(self):
+        @tool(name="greeter")
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.name == "greeter"
+
+    def test_func_is_the_decorated_function(self):
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.func is not None
+        assert greet.func("world") == "hello, world"
+        # 与被装饰的原始函数同名，而不是内部包装器
+        assert greet.func.__name__ == "greet"
+
+    def test_func_bypasses_var_positional_wrapper(self):
+        """声明了 *args 时 _func 是内部包装器，func 必须仍是原函数"""
+
+        @tool
+        def total(base: int, *rest: int) -> int:
+            """Sum a base with the remaining numbers."""
+            return base + sum(rest)
+
+        # 原函数签名保持不变，可以直接按 Python 语义调用
+        assert str(__import__("inspect").signature(total.func)) == "(base: int, *rest: int) -> int"
+        assert total.func(1, 2, 3) == 6
+
+    @pytest.mark.asyncio
+    async def test_invoke_path_is_unchanged(self):
+        """新增 name / func 只是读属性，invoke 的 schema 校验与回调不受影响"""
+
+        @tool
+        def add(a: int, b: int) -> int:
+            """Add two integers."""
+            return a + b
+
+        assert await add.invoke({"a": 2, "b": 3}) == 5
+        # 非法入参仍应被 schema 拦下，不会绕过去
+        with pytest.raises(Exception):
+            await add.invoke({"a": "not-an-int", "b": 3})
+
+    def test_name_lives_on_tool_base(self):
+        """name 放在 Tool 基类上，MCP / REST 工具同样受益"""
+        from openjiuwen.core.foundation.tool.base import Tool
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction
+
+        assert isinstance(inspect.getattr_static(Tool, "name"), property)
+        # 子类不再需要自己实现
+        assert "name" not in LocalFunction.__dict__

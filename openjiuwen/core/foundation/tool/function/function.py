@@ -61,6 +61,10 @@ class LocalFunction(Tool):
         if func is None:
             raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED, card=self._card)
         self._render = render
+        # The function as written, before any *args adaptation below. Exposed as
+        # ``func`` so tests and registries can reach the real callable instead of
+        # the private ``_func``, which may be a wrapper (see ``support_args_param``).
+        self._raw_func = func
 
         sig = inspect.signature(func)
         parameters = sig.parameters
@@ -72,6 +76,18 @@ class LocalFunction(Tool):
             self._func = support_args_param(arg_param_name, parameters, func)
         else:
             self._func = func
+
+    @property
+    def func(self) -> Callable:
+        """The decorated function, unchanged.
+
+        Call this when you want the plain Python function — unit-testing tool
+        logic, or reading ``__name__``/``__doc__`` — rather than going through
+        ``invoke``, which validates inputs against the schema and fires the tool
+        lifecycle callbacks. It is always the original callable, even when the
+        tool takes ``*args`` and ``_func`` is an adaptation wrapper.
+        """
+        return self._raw_func
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         if self.card.input_params is not None:

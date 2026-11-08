@@ -245,6 +245,15 @@ class Tool(metaclass=_ToolMeta):
     def card(self) -> ToolCard:
         return self._card
 
+    @property
+    def name(self) -> str:
+        """The tool's name, as registered and sent to the model.
+
+        Mirrors ``card.name`` so callers do not have to reach through the card
+        for the one field they almost always want.
+        """
+        return self._card.name
+
     def is_parallel_safe(self) -> bool:
         """Return whether this tool may run concurrently with sibling tool calls."""
         return bool(getattr(self.card, "parallel_safe", True))
