@@ -16,6 +16,12 @@ a built graph is reusable, and ``compile`` only *derives* per-run state.
 # Import order matters: openjiuwen.core.graph.graph sits in a circular import
 # chain (graph -> vertex -> workflow.components.base -> workflow), so the
 # workflow package must be imported first.
+import gc
+import weakref
+from unittest.mock import patch
+
+import pytest
+
 from openjiuwen.core.workflow import Workflow  # noqa: F401
 from openjiuwen.core.graph.graph import PregelGraph
 from openjiuwen.core.session.internal.workflow import WorkflowSession
@@ -122,3 +128,65 @@ def test_graph_structure_is_not_rebuilt_by_compile():
 
     assert dict(graph.nodes) == before
     assert list(graph.edges) == edges_before
+
+
+class _LargeOutput(str):
+    """Immutable weak-referenceable output; retain identity across state copies."""
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+@pytest.mark.parametrize("compile_workflow", [False, True])
+def test_cached_topology_does_not_keep_session_or_large_output(compile_workflow):
+    flow = _build_flow()
+    session = _session(flow, "output-owner")
+    output = _LargeOutput("x" * (4 * 1024 * 1024))
+    session.state().commit_user_inputs({"large_output": output})
+    session_ref, output_ref = weakref.ref(session), weakref.ref(output)
+    owner = flow._internal if compile_workflow else flow._internal._graph
+    compiled = owner.compile(session)
+
+    # A live execution owns its state; compiling must not erase valid results.
+    assert session.state().get_global("large_output") is output
+    del session, output
+    gc.collect()
+    assert session_ref() is not None
+    assert output_ref() is not None
+
+    # Keeping the reusable Workflow alive must not keep the ended execution.
+    del compiled
+    gc.collect()
+    assert session_ref() is None
+    assert output_ref() is None
+    assert flow._internal._graph.nodes
+
+
+def test_failed_compile_does_not_bind_session_to_cached_workflow():
+    flow = _build_flow()
+    session = _session(flow, "compile-failed")
+    session_ref = weakref.ref(session)
+    with patch.object(flow._internal._graph, "compile", side_effect=RuntimeError("compile failed")):
+        with pytest.raises(Exception, match="compile failed"):
+            flow._internal.compile(session)
+    del session
+    gc.collect()
+    assert session_ref() is None
+
+
+def test_releasing_one_compiled_execution_preserves_another():
+    flow = _build_flow()
+    first, second = _session(flow, "first"), _session(flow, "second")
+    first_ref, second_ref = weakref.ref(first), weakref.ref(second)
+    second.state().commit_user_inputs({"result": "still-running"})
+    compiled_first = flow._internal.compile(first)
+    compiled_second = flow._internal.compile(second)
+    del first, second
+    del compiled_first
+    gc.collect()
+    assert first_ref() is None
+    assert second_ref() is not None
+    assert second_ref().state().get_global("result") == "still-running"
+    del compiled_second
+    gc.collect()
+    assert second_ref() is None
