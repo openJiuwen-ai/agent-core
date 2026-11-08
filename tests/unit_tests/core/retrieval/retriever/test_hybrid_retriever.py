@@ -129,3 +129,56 @@ class TestHybridRetriever:
         queries = ["query 1", "query 2"]
         results_list = await retriever.batch_retrieve(queries, top_k=5)
         assert len(results_list) == 2
+
+
+class TestHybridRetrieverFilters:
+    """issue #2431: filters 在 hybrid / vector / sparse 三条分支上都要透传"""
+
+    @pytest.mark.asyncio
+    async def test_hybrid_branch_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = HybridRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve("query", top_k=3, mode="hybrid", filters={"doc_type": "code"})
+
+        assert mock_vector_store.hybrid_search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_vector_branch_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = HybridRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve("query", top_k=3, mode="vector", filters={"doc_type": "code"})
+
+        assert mock_vector_store.search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_sparse_branch_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = HybridRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve("query", top_k=3, mode="sparse", filters={"doc_type": "code"})
+
+        assert mock_vector_store.sparse_search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_retrieve_search_results_hybrid_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = HybridRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve_search_results("query", top_k=3, mode="hybrid", filters={"doc_type": "code"})
+
+        assert mock_vector_store.hybrid_search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+
+class TestRetrievalConfigFiltersEndToEnd:
+    """issue #2431 的原始报告路径：RetrievalConfig.filters → 知识库 → retriever → 存储层"""
+
+    @pytest.mark.asyncio
+    async def test_config_filters_reach_the_store(self, mock_vector_store, mock_embed_model):
+        from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
+        from openjiuwen.core.retrieval.simple_knowledge_base import SimpleKnowledgeBase
+
+        retriever = HybridRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        kb = SimpleKnowledgeBase(
+            config=KnowledgeBaseConfig(kb_id="kb", index_type="hybrid"),
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+            retriever=retriever,
+        )
+
+        await kb.retrieve("query", RetrievalConfig(top_k=3, filters={"doc_type": "code"}))
+
+        assert mock_vector_store.hybrid_search.await_args.kwargs["filters"] == {"doc_type": "code"}

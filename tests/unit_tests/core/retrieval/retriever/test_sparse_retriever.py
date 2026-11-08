@@ -54,3 +54,21 @@ class TestSparseRetriever:
         assert len(results_list) == 2
         assert len(results_list[0]) == 2
         assert len(results_list[1]) == 2
+
+
+class TestSparseRetrieverFilters:
+    """issue #2431: filters 透传到 sparse_search"""
+
+    @pytest.mark.asyncio
+    async def test_retrieve_forwards_filters(self, mock_vector_store):
+        retriever = SparseRetriever(vector_store=mock_vector_store)
+        await retriever.retrieve("query", top_k=3, filters={"doc_type": "code"})
+
+        assert mock_vector_store.sparse_search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_retrieve_search_results_forwards_filters(self, mock_vector_store):
+        retriever = SparseRetriever(vector_store=mock_vector_store)
+        await retriever.retrieve_search_results("query", top_k=3, filters={"doc_type": "code"})
+
+        assert mock_vector_store.sparse_search.await_args.kwargs["filters"] == {"doc_type": "code"}

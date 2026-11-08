@@ -111,3 +111,39 @@ class TestVectorRetriever:
         assert len(results_list) == 2
         assert len(results_list[0]) == 2
         assert len(results_list[1]) == 2
+
+
+class TestVectorRetrieverFilters:
+    """issue #2431: RetrievalConfig.filters 必须在 retriever 层透传到存储层"""
+
+    @pytest.mark.asyncio
+    async def test_retrieve_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = VectorRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve("query", top_k=3, filters={"doc_type": "code"})
+
+        assert mock_vector_store.search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_sparse_fallback_keeps_filters(self, mock_vector_store, mock_embed_model):
+        """向量无结果回退 BM25 时，过滤条件不能丢"""
+        mock_vector_store.search = AsyncMock(return_value=[])
+        retriever = VectorRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+
+        await retriever.retrieve("query", top_k=3, filters={"doc_type": "code"})
+
+        assert mock_vector_store.sparse_search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_retrieve_search_results_forwards_filters(self, mock_vector_store, mock_embed_model):
+        retriever = VectorRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve_search_results("query", top_k=3, filters={"doc_type": "code"})
+
+        assert mock_vector_store.search.await_args.kwargs["filters"] == {"doc_type": "code"}
+
+    @pytest.mark.asyncio
+    async def test_no_filters_stays_none(self, mock_vector_store, mock_embed_model):
+        """不传过滤条件时仍传 None，不引入空 dict 改变底层行为"""
+        retriever = VectorRetriever(vector_store=mock_vector_store, embed_model=mock_embed_model)
+        await retriever.retrieve("query", top_k=3)
+
+        assert mock_vector_store.search.await_args.kwargs["filters"] is None
