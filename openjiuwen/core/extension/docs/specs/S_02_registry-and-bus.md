@@ -8,7 +8,7 @@
 | 编号 / slug | `S_02 / registry-and-bus` |
 | 关联模块 | `openjiuwen/core/extension/`；九类事件登记模块在 `openjiuwen/core/events/builtins/` |
 | 最近一次修订日期 | 2026-11-06 |
-| 关联 feature | [F_03](../features/F_03_registry.md)、[F_04](../features/F_04_bus-wiring.md) |
+| 关联 feature | [F_03](../features/F_03_registry.md)、[F_04](../features/F_04_bus-wiring.md)、[F_06](../features/F_06_package-enable.md) |
 | 设计依据 | [开发计划](../designs/extension-development-plan.md)、[架构](../designs/extension-architecture.md) |
 
 本规约维护 Registry 入口、candidate 发布到 EventBus、以及九类包管理事件的输入输出与完成依据。控制面不变量仍以 [S_01](S_01_package-loading.md) 为准。
@@ -36,6 +36,9 @@
 | `install(source)` | `package.install` | 每个包一个 `ActivationReport` |
 | `uninstall(package_id)` | `package.uninstall` | 一个 `ActivationReport` |
 | `reload(package_id)` | `package.reload` | 一个 `ActivationReport` |
+| `set_enabled(package_id, enabled)` | 内部复用安装或卸载编排 | 一个 `ActivationReport` |
+
+`set_enabled` 不新增管理事件。`enabled=True` 先将受管副本写为启用，再按安装的 plan/apply 路径发布；失败时恢复为禁用。`enabled=False` 采用卸载的依赖、在途调用、注销和资源清理约束，但不删除受管安装副本，最后写入禁用状态。成功结果的 `operation` 为 `enable` 或 `disable`。该方法只接受通用包标识和布尔状态，不包含宿主产品概念。
 
 `init(event_bus, *, host_event_types=None, host_handlers=None, store=None, states=None,`
 `state_dependencies=None, cleanup_callbacks=())`

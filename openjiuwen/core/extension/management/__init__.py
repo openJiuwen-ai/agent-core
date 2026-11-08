@@ -29,6 +29,7 @@ from openjiuwen.core.extension.management.handlers import (
     handle_package_reload,
     handle_package_resolve,
     handle_package_uninstall,
+    set_package_enabled,
 )
 from openjiuwen.core.extension.management.registration import ensure_management_events
 from openjiuwen.core.extension.management.types import (
@@ -137,5 +138,6 @@ __all__ = [
     "handle_package_reload",
     "handle_package_resolve",
     "handle_package_uninstall",
+    "set_package_enabled",
     "unbind_context",
 ]

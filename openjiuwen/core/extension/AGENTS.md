@@ -40,13 +40,14 @@
 | --- | --- |
 | [设计概览](docs/designs/extension-overview.md) | 整体定位、核心对象、包管理流程、职责边界及能力开放条件 |
 | [详细架构](docs/designs/extension-architecture.md) | Registry、Package Manager、Orchestrator 与 Runtime 分工，管理事件、两级依赖与顺序、注册归属、生命周期 |
-| [开发计划](docs/designs/extension-development-plan.md) | EX-01～EX-04 工作项、依赖顺序、负责人与进度 |
+| [开发计划](docs/designs/extension-development-plan.md) | EX-01～EX-06 工作项、依赖顺序、负责人与进度 |
 | [包加载规约](docs/specs/S_01_package-loading.md) | 控制面契约：manifest、安装目录、依赖排序、Plan/candidate、生效记录、错误码 |
 | [Registry 与 Bus 规约](docs/specs/S_02_registry-and-bus.md) | Registry、九类管理事件、candidate 发布语义 |
 | [F_01 声明与定序](docs/features/F_01_package-source.md) | EX-01：来源、安装目录、依赖选择与排序 |
 | [F_02 Plan 与 Runtime](docs/features/F_02_plan-runtime.md) | EX-02：单包 Plan、candidate、生效记录与卸载判断 |
 | [F_03 Registry](docs/features/F_03_registry.md) | EX-03：Registry 与九类事件编排 |
 | [F_04 Bus 接线](docs/features/F_04_bus-wiring.md) | EX-04：candidate 发布与 Runtime–Bus 接线 |
+| [F_06 包启用状态](docs/features/F_06_package-enable.md) | EX-06：可选 `enable`、受管副本默认值与启用/禁用编排 |
 
 九类包管理事件的 feature/spec 维护在本模块 docs；`events/builtins` 仅保留登记与转发。Events 公共机制见
 [Events 设计概览](../events/docs/designs/events-overview.md)与

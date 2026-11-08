@@ -113,6 +113,7 @@ def parse_manifest_mapping(
     requires_packages = _package_dependencies(requires.get("packages"))
 
     extensions = _extensions(raw.get("extensions"), package_root)
+    enable = _enable(raw)
     return Manifest(
         schema_version=1,
         package_id=package_id,
@@ -123,7 +124,21 @@ def parse_manifest_mapping(
         requires_packages=requires_packages,
         extensions=extensions,
         domain=domain,
+        enable=enable,
     )
+
+
+def _enable(raw: Mapping[str, Any]) -> bool:
+    """Read the optional package loading flag without coercing its type."""
+    if "enable" not in raw:
+        return True
+    value = raw["enable"]
+    if not isinstance(value, bool):
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason=f"enable must be a boolean, got {value!r}",
+        )
+    return value
 
 
 def _required_package_id(value: object) -> str:

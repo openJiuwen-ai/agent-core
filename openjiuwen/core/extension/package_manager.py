@@ -3,6 +3,8 @@
 
 """Install-directory layout, zip opening, and copies that never delete user source."""
 
+import json
+import os
 import shutil
 import stat
 import tempfile
@@ -176,6 +178,11 @@ class PackageManager:
             )
         try:
             shutil.copytree(source_root, staging, symlinks=False)
+            _write_manifest_enable(staging, manifest.enable)
+        except ExtensionFailure:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
         except OSError as exc:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
@@ -197,6 +204,64 @@ class PackageManager:
                 cause=exc,
             ) from exc
         return target
+
+    def normalize_legacy_enable(self) -> None:
+        """Add the default enable field to valid managed copies that lack it.
+
+        Callers that coordinate multiple processes hold the install-report
+        discovery lock while invoking this maintenance operation.
+        """
+        for root in self.list_installed():
+            try:
+                manifest = load_manifest(root, require_domain=self.require_domain)
+                self.validate_manifest(manifest, match_domain=False)
+                if manifest.package_id != root.parent.name or manifest.version != root.name:
+                    continue
+                document = _read_manifest_document(root)
+            except ExtensionFailure:
+                continue
+            if "enable" not in document:
+                try:
+                    _write_manifest_enable(root, True)
+                except ExtensionFailure:
+                    # Omitting enable is already equivalent to True. A legacy
+                    # copy that cannot be rewritten must not block startup.
+                    continue
+
+    def set_enabled(self, package_id: str, version: str, enabled: bool) -> None:
+        """Persist the loading state of one verified managed package copy."""
+        if not isinstance(enabled, bool):
+            raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="enable must be a boolean")
+        self._guard_mutation(package_id)
+        target = self.version_dir(package_id, version)
+        original = self.store / package_id / version
+        unsafe_components = any(
+            (
+                original.is_symlink(),
+                original.parent.is_symlink(),
+                Path(package_id).name != package_id,
+                Path(version).name != version,
+            )
+        )
+        outside_store = not target.is_relative_to(self.store)
+        wrong_depth = target.parent.parent != self.store
+        if unsafe_components or outside_store or wrong_depth:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="refusing to update a path outside the install store",
+            )
+        if not target.is_dir() or not has_manifest(target):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
+                package_id=package_id,
+                reason=f"install store has no {package_id} {version}",
+            )
+        _assert_no_symlinks(target)
+        manifest = load_manifest(target, require_domain=self.require_domain)
+        self.validate_manifest(manifest)
+        if manifest.package_id != package_id or manifest.version != version:
+            raise ExtensionFailure(StatusCode.EXTENSION_SOURCE_INVALID, reason="managed copy identity mismatch")
+        _write_manifest_enable(target, enabled)
 
     def managed_versions(self, package_id: str, *, known_versions: Sequence[str] = ()) -> tuple[str, ...]:
         """Verify copies, retaining ownership facts from active or pending records."""
@@ -318,6 +383,44 @@ def _assert_no_symlinks(src: Path) -> None:
         raise ExtensionFailure(
             StatusCode.EXTENSION_SOURCE_INVALID,
             reason=f"failed to inspect package for symlinks: {exc}",
+            cause=exc,
+        ) from exc
+
+
+def _read_manifest_document(package_root: Path) -> dict[str, object]:
+    """Read a validated package manifest as the mapping that will be updated."""
+    path = package_root / "manifest.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason=f"cannot read {path.name}: {exc}",
+            cause=exc,
+        ) from exc
+    if not isinstance(document, dict):
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason="manifest.json top level must be a mapping",
+        )
+    return document
+
+
+def _write_manifest_enable(package_root: Path, enabled: bool) -> None:
+    """Atomically write an already validated loading flag in one package root."""
+    document = _read_manifest_document(package_root)
+    document["enable"] = enabled
+    path = package_root / "manifest.json"
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError as exc:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+            reason=f"cannot update manifest enable state: {exc}",
             cause=exc,
         ) from exc
 

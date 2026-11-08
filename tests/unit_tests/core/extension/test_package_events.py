@@ -2,14 +2,15 @@
 
 """EX-03: orchestration of the nine package management events."""
 
-import json
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.events.types import Event
+from openjiuwen.core.extension import package_manager as package_manager_module
 from openjiuwen.core.extension.errors import ExtensionFailure
 from openjiuwen.core.extension.install_report import PackageOperationToken
 from openjiuwen.core.extension.management import (
@@ -30,6 +31,7 @@ from openjiuwen.core.extension.management import (
     RollbackRequest,
 )
 from openjiuwen.core.extension.manifest import load_manifest
+from openjiuwen.core.extension.package_manager import PackageManager
 from openjiuwen.core.extension.schema.manifest import PackageDependency
 from openjiuwen.core.extension.schema.records import ActivationReport
 from tests.unit_tests.core.extension.conftest import (
@@ -261,6 +263,134 @@ async def test_install_reports_a_source_that_cannot_be_parsed(tmp_path: Path) ->
     assert broken.error.status == StatusCode.EXTENSION_SOURCE_INVALID
     demo = next(item for item in result if item.package_id == "demo")
     assert demo is not None and demo.status == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_disabled_package_is_stored_then_can_be_enabled_and_disabled(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source", "demo")
+    document = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    document["enable"] = False
+    (source / "manifest.json").write_text(json.dumps(document), encoding="utf-8")
+    store = tmp_path / "store"
+    registry, bus = await build_registry(store)
+
+    installed = (await registry.install(source))[0]
+
+    assert installed.status == "SUCCESS"
+    assert registry.runtime.get_active("demo") is None
+    assert await call_business_event(bus) == ("core", {"tool": "Bash"})
+    copied = store / "demo" / "1.0.0" / "manifest.json"
+    assert json.loads(copied.read_text(encoding="utf-8"))["enable"] is False
+
+    reloaded = await registry.reload("demo")
+
+    assert reloaded.status == "SUCCESS"
+    assert reloaded.operation == "reload"
+    assert registry.runtime.get_active("demo") is None
+    assert await call_business_event(bus) == ("core", {"tool": "Bash"})
+    assert json.loads(copied.read_text(encoding="utf-8"))["enable"] is False
+
+    enabled = await registry.set_enabled("demo", True)
+
+    assert enabled.status == "SUCCESS"
+    assert enabled.operation == "enable"
+    assert await call_business_event(bus) == 1
+    assert json.loads(copied.read_text(encoding="utf-8"))["enable"] is True
+
+    disabled = await registry.set_enabled("demo", False)
+
+    assert disabled.status == "SUCCESS"
+    assert disabled.operation == "disable"
+    assert registry.runtime.get_active("demo") is None
+    assert await call_business_event(bus) == ("core", {"tool": "Bash"})
+    assert json.loads(copied.read_text(encoding="utf-8"))["enable"] is False
+
+
+@pytest.mark.asyncio
+async def test_installing_a_dependent_fails_immediately_when_its_dependency_is_disabled(tmp_path: Path) -> None:
+    base = _source(tmp_path, "base", "base")
+    base_manifest = base / "manifest.json"
+    base_document = json.loads(base_manifest.read_text(encoding="utf-8"))
+    base_document["enable"] = False
+    base_manifest.write_text(json.dumps(base_document), encoding="utf-8")
+    child = _source(
+        tmp_path,
+        "child",
+        "child",
+        requires=(PackageDependency("base", ">=1.0.0"),),
+    )
+    registry, _ = await build_registry(tmp_path / "store")
+    registry.context.install_report.dependency_timeout = 0.01
+
+    reports = await registry.install([base, child])
+    child_report = next(report for report in reports if report.package_id == "child")
+
+    assert child_report.status == "FAILED"
+    assert child_report.error is not None
+    assert child_report.error.status == StatusCode.EXTENSION_DEPENDENCY_NOT_MET
+    assert registry.runtime.get_active("child") is None
+
+
+@pytest.mark.asyncio
+async def test_startup_normalizes_a_legacy_installed_manifest(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source", "demo")
+    store = tmp_path / "store"
+    manager = PackageManager(store)
+    copied = manager.copy_into_store(source, load_manifest(source))
+    document = json.loads((copied / "manifest.json").read_text(encoding="utf-8"))
+    document.pop("enable")
+    (copied / "manifest.json").write_text(json.dumps(document), encoding="utf-8")
+    registry, bus = await build_registry(store)
+
+    reports = await registry.load_installed()
+
+    assert reports[0].status == "SUCCESS"
+    assert json.loads((copied / "manifest.json").read_text(encoding="utf-8"))["enable"] is True
+    assert await call_business_event(bus) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_loads_a_legacy_manifest_when_enable_backfill_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path, "source", "demo")
+    store = tmp_path / "store"
+    manager = PackageManager(store)
+    copied = manager.copy_into_store(source, load_manifest(source))
+    manifest_path = copied / "manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document.pop("enable")
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def cannot_backfill(_root: Path, _enabled: bool) -> None:
+        raise ExtensionFailure(StatusCode.EXTENSION_INSTALL_COPY_FAILED, reason="read-only manifest")
+
+    monkeypatch.setattr(package_manager_module, "_write_manifest_enable", cannot_backfill)
+    registry, bus = await build_registry(store)
+
+    reports = await registry.load_installed()
+
+    assert reports[0].status == "SUCCESS"
+    assert "enable" not in json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert await call_business_event(bus) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_import_a_disabled_installed_package(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source", "demo")
+    document = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    document["enable"] = False
+    (source / "manifest.json").write_text(json.dumps(document), encoding="utf-8")
+    store = tmp_path / "store"
+    PackageManager(store).copy_into_store(source, load_manifest(source))
+    registry, bus = await build_registry(store)
+
+    reports = await registry.load_installed()
+
+    assert reports == ()
+    assert registry.runtime.get_active("demo") is None
+    assert await call_business_event(bus) == ("core", {"tool": "Bash"})
 
 
 @pytest.mark.asyncio

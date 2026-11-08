@@ -37,3 +37,4 @@ class Manifest:
     requires_packages: tuple[PackageDependency, ...]
     extensions: tuple[ExtensionDecl, ...]
     domain: str | None = None
+    enable: bool = True

@@ -342,7 +342,7 @@ class PackageInstallReport:
     @staticmethod
     def _pending(manifest: Manifest, operation: str) -> dict[str, Any]:
         return {"operation_id": uuid.uuid4().hex, "operation": operation,
-                "version": manifest.version, "requires": _requirements(manifest)}
+                "version": manifest.version, "requires": _requirements(manifest), "enable": manifest.enable}
 
     @classmethod
     def _row(cls, manifest: Manifest) -> dict[str, Any]:
@@ -354,6 +354,7 @@ class PackageInstallReport:
 
         def prepare(data: dict[str, Any]) -> Any:
             self._require_owner(data)
+            package_manager.normalize_legacy_enable()
             manifests = []
             errors = []
             for root in package_manager.list_installed():
@@ -362,6 +363,8 @@ class PackageInstallReport:
                     package_manager.validate_manifest(manifest, match_domain=False)
                     if manifest.package_id != root.parent.name or manifest.version != root.name:
                         _fail(StatusCode.EXTENSION_MANIFEST_INVALID, reason=f"manifest does not match directory {root}")
+                    if not manifest.enable:
+                        continue
                     manifests.append(manifest)
                 except ExtensionFailure as exc:
                     errors.append(RejectedPackage(root.parent.name, exc.as_error()))
@@ -610,6 +613,12 @@ class PackageInstallReport:
                 ):
                     _fail(StatusCode.EXTENSION_DEPENDENCY_NOT_MET, package_id=token.package_id,
                           reason=f"dependency {package_id} unavailable: {dependency['reason']}")
+                if dependency["pending"] is None and dependency["active_version"] is None:
+                    _fail(
+                        StatusCode.EXTENSION_DEPENDENCY_NOT_MET,
+                        package_id=token.package_id,
+                        reason=f"dependency {package_id} is not enabled",
+                    )
                 row["status"] = "waiting" if pending["operation"] == "install" else "reloading"
                 return False
             row["status"] = "installing" if pending["operation"] == "install" else "reloading"
@@ -733,12 +742,15 @@ class PackageInstallReport:
             if report.status == "SUCCESS" and report.operation == "uninstall":
                 del data["packages"][token.package_id]
                 return
-            if report.status == "SUCCESS" and active is None:
+            pending = row["pending"]
+            disabled_operation = _is_disabled_operation(report, pending)
+            if report.status == "SUCCESS" and active is None and not disabled_operation:
                 _report_error("success was not confirmed by the local runtime")
             if report.status == "SUCCESS":
-                self._require_dependencies(data, row["pending"]["requires"], token.package_id)
-                if active.version != row["pending"]["version"] or active.domain != row["domain"]:
-                    _report_error("local activation does not match the admitted package")
+                if not disabled_operation:
+                    self._require_dependencies(data, pending["requires"], token.package_id)
+                    if active.version != pending["version"] or active.domain != row["domain"]:
+                        _report_error("local activation does not match the admitted package")
             if active is not None:
                 row.update(active_version=active.version,
                            requires={item.package_id: item.version for item in active.requires_packages})
@@ -816,3 +828,12 @@ class PackageInstallReport:
             self._owner_lock.release()
             self._owner_lock = None
             self.run_id = None
+
+
+def _is_disabled_operation(report: ActivationReport, pending: dict[str, Any] | None) -> bool:
+    """Return whether a successful disabled install or reload has no active runtime."""
+    if report.status != "SUCCESS" or report.operation not in {"install", "reload"}:
+        return False
+    if pending is None:
+        return False
+    return pending.get("enable", True) is False

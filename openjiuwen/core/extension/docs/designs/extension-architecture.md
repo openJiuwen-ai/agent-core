@@ -573,7 +573,7 @@ sequenceDiagram
 
 #### 5.2.3 重载与停止
 
-`Registry.reload` 触发 `package.reload`。它不先卸载。Core Handler 按 `package.id` 找到安装目录，重新读取 manifest，并用 Runtime 的生效记录检查两件事：这个包自己的依赖是否仍然满足；已经依赖它的包是否仍然接受新版本。两项都通过才触发 `extension.plan` 和 `extension.apply`。
+`Registry.reload` 触发 `package.reload`。它不先卸载。已安装但 `enable: false` 的包没有生效记录，重载成功返回但不导入模块或发布 Handler，且不改变该字段。其它包由 Core Handler 按 `package.id` 找到安装目录，重新读取 manifest，并用 Runtime 的生效记录检查两件事：这个包自己的依赖是否仍然满足；已经依赖它的包是否仍然接受新版本。两项都通过才触发 `extension.plan` 和 `extension.apply`。
 
 `extension.apply` 用新的模块名加载安装目录里的当前文件，把 Handler 收进 candidate。全部成功后，在一次没有 `await` 的同步更新里替换该包在 Bus 注册表上的 Handler。此后开始的 `trigger` 使用新快照和新模块。更新开始前已经取得快照的调用继续执行旧模块里的代码。这些调用结束后再从 `sys.modules` 去掉旧模块，`reload` 的返回不等这一步。准备或校验失败时，Bus 上的当前 Handler 保持不变。
 
@@ -731,7 +731,7 @@ sequenceDiagram
 **Core Handler 的处理逻辑：**
 
 1. 核对 Plan 的包、操作和当前生效记录。id 已经生效时，不把这个包再装一遍。
-2. 安装或重载时，按 Plan 加载入口并调用受限 `register`。声明先进入 candidate，不写入 Bus。该包全部成功后，一次把整套 Handler 写入注册表，并更新 Runtime 的生效记录。
+2. 安装或重载时，按 Plan 加载入口并调用受限 `register`。已禁用包的重载不创建 Plan 或 candidate，直接成功返回并保持禁用。其它声明先进入 candidate，不写入 Bus。该包全部成功后，一次把整套 Handler 写入注册表，并更新 Runtime 的生效记录。
 3. 写入之前失败时，触发 `extension.rollback`，丢掉 candidate。已经生效的注册表不变。
 4. 卸载时，先确认没有反向依赖、也没有在途调用。否则失败返回，不改注册表，不删安装目录。通过后移除该包的 Handler，并删除安装副本。
 5. Report 只有 SUCCESS 或 FAILED。依赖问题写在失败原因里。

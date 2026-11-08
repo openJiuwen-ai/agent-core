@@ -12,6 +12,7 @@ can request it separately and read the same result.
 """
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.mcp import McpServerSpec, declarations
 from openjiuwen.core.extension.schema.records import ActivationReport, ActivePackageRecord, ExtensionPlan
 from openjiuwen.core.extension.selection import resolve_install_set
+from openjiuwen.core.extension.versions import parse_version
 
 
 def _management_context(bus: ExtensionEventBusProtocol) -> ManagementContext:
@@ -450,14 +452,24 @@ async def _install_one(
         with service.operation_scope(token):
             root = await run_file_operation(lambda: context.package_manager.copy_into_store(package.root, manifest))
         created = root != package.root.resolve()
-        report = await _plan_and_apply_report(
-            bus,
-            "install",
-            manifest,
-            root,
-            token,
-            store_copy_created=created,
-        )
+        if manifest.enable:
+            report = await _plan_and_apply_report(
+                bus,
+                "install",
+                manifest,
+                root,
+                token,
+                store_copy_created=created,
+            )
+        else:
+            report = ActivationReport(
+                plan_id="",
+                package_id=manifest.package_id,
+                operation="install",
+                status="SUCCESS",
+                previous_generation=None,
+                current_generation=None,
+            )
         inactive = context.runtime.get_active(manifest.package_id) is None
         if report.status == "FAILED" and created and inactive:
             with service.operation_scope(token):
@@ -521,7 +533,16 @@ async def _managed_existing(
             await service.wait_for_dependencies(token)
         await service.validate_operation(token, manifest, operation)
         if operation == "reload":
-            result = await _handle_package_reload(request, token)
+            if record is None and not manifest.enable:
+                # A disabled installed copy has no Runtime record to hot-switch.
+                # Its requested state is already on disk, so reload succeeds as
+                # a no-op and must not turn the package back on.
+                result = PackageOperationResult(
+                    operation,
+                    (ActivationReport("", request.package_id, operation, "SUCCESS", None, None),),
+                )
+            else:
+                result = await _handle_package_reload(request, token)
         else:
             result = await _handle_package_uninstall(request, token)
         if operation == "uninstall" and _reports_not_installed(result):
@@ -585,6 +606,195 @@ async def handle_package_uninstall(request: UninstallRequest) -> PackageOperatio
 
 async def handle_package_reload(request: ReloadRequest) -> PackageOperationResult:
     return await _managed_existing(request, "reload")
+
+
+async def set_package_enabled(
+    context: ManagementContext,
+    bus: ExtensionEventBusProtocol,
+    package_id: str,
+    enabled: bool,
+) -> ActivationReport:
+    """Enable or disable one installed package without deleting its copy.
+
+    This Registry-facing function composes the existing install and uninstall
+    lifecycles while preserving the install directory. Hosts supply only a
+    generic package identifier and desired boolean state.
+    """
+    if not isinstance(enabled, bool):
+        raise ExtensionFailure(StatusCode.EXTENSION_MANIFEST_INVALID, reason="enable must be a boolean")
+    manifest, root = _installed_manifest(context, package_id)
+    active = context.runtime.get_active(package_id)
+    if enabled and active is not None:
+        return _state_report(package_id, "enable", active.generation)
+    if not enabled and active is None and not manifest.enable:
+        return _state_report(package_id, "disable", None)
+    if enabled:
+        return await _enable_installed_package(context, bus, manifest, root)
+    return await _disable_installed_package(context, bus, manifest)
+
+
+def _installed_manifest(context: ManagementContext, package_id: str) -> tuple[Manifest, Path]:
+    """Return the highest verified managed version for one package identifier."""
+    candidates: list[tuple[Manifest, Path]] = []
+    for root in context.package_manager.list_installed():
+        if root.parent.name != package_id:
+            continue
+        try:
+            manifest = load_manifest(root, require_domain=context.package_manager.require_domain)
+            context.package_manager.validate_manifest(manifest)
+        except ExtensionFailure:
+            continue
+        if manifest.package_id == package_id and manifest.version == root.name:
+            candidates.append((manifest, root))
+    if not candidates:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
+            package_id=package_id,
+            reason="no managed install copy",
+        )
+    return max(candidates, key=lambda item: parse_version(item[0].version))
+
+
+async def _enable_installed_package(
+    context: ManagementContext,
+    bus: ExtensionEventBusProtocol,
+    manifest: Manifest,
+    root: Path,
+) -> ActivationReport:
+    service = context.install_report
+    target_manifest = replace(manifest, enable=True)
+    token = None
+    report = None
+    enable_written = False
+    try:
+        token = await service.begin_operation(target_manifest, "install")
+        await service.wait_for_dependencies(token)
+        await service.validate_operation(token, target_manifest, "install")
+        with service.operation_scope(token):
+            await run_file_operation(
+                lambda: context.package_manager.set_enabled(
+                    target_manifest.package_id,
+                    target_manifest.version,
+                    True,
+                )
+            )
+        enable_written = True
+        report = await _plan_and_apply_report(
+            bus,
+            "install",
+            target_manifest,
+            root,
+            token,
+        )
+        if report.status == "FAILED":
+            with service.operation_scope(token):
+                await run_file_operation(
+                    lambda: context.package_manager.set_enabled(
+                        target_manifest.package_id,
+                        target_manifest.version,
+                        False,
+                    )
+                )
+            enable_written = False
+    except ExtensionFailure as exc:
+        report = _report(target_manifest.package_id, "install", exc.as_error())
+        if enable_written:
+            with service.operation_scope(token):
+                await run_file_operation(
+                    lambda: context.package_manager.set_enabled(
+                        target_manifest.package_id,
+                        target_manifest.version,
+                        False,
+                    )
+                )
+    finally:
+        if token is not None:
+            await _finish_operation(
+                service,
+                token,
+                report=report,
+                active=context.runtime.get_active(target_manifest.package_id),
+                cleanup_pending=False,
+            )
+    if report is None:
+        raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="package enable produced no report")
+    return replace(report, operation="enable")
+
+
+async def _disable_installed_package(
+    context: ManagementContext,
+    bus: ExtensionEventBusProtocol,
+    manifest: Manifest,
+) -> ActivationReport:
+    service = context.install_report
+    token = None
+    report = None
+    try:
+        token = await service.begin_operation(manifest, "uninstall")
+        await service.validate_operation(token, manifest, "uninstall")
+        report = await _deactivate_keep_copy(context, bus, manifest)
+        if report.status == "SUCCESS":
+            with service.operation_scope(token):
+                await run_file_operation(
+                    lambda: context.package_manager.set_enabled(
+                        manifest.package_id,
+                        manifest.version,
+                        False,
+                    )
+                )
+    except ExtensionFailure as exc:
+        report = _report(manifest.package_id, "uninstall", exc.as_error())
+    finally:
+        if token is not None:
+            await _finish_operation(
+                service,
+                token,
+                report=report,
+                active=context.runtime.get_active(manifest.package_id),
+                cleanup_pending=False,
+            )
+    if report is None:
+        raise ExtensionFailure(StatusCode.EXTENSION_LOAD_FAILED, reason="package disable produced no report")
+    return replace(report, operation="disable")
+
+
+async def _deactivate_keep_copy(
+    context: ManagementContext,
+    bus: ExtensionEventBusProtocol,
+    manifest: Manifest,
+) -> ActivationReport:
+    """Remove published resources while retaining the verified install tree."""
+    package_id = manifest.package_id
+    record = context.runtime.get_active(package_id)
+    if record is None:
+        return ActivationReport("", package_id, "uninstall", "SUCCESS", None, None)
+    lock = context.runtime.package_lock(package_id)
+    if lock.locked():
+        return _report(
+            package_id,
+            "uninstall",
+            operation_error(
+                StatusCode.EXTENSION_PACKAGE_BUSY,
+                package_id=package_id,
+                reason="another management operation is running",
+            ),
+        )
+    async with lock:
+        decision = context.runtime.uninstall_decision(package_id)
+        if decision is not None:
+            return _report(package_id, "uninstall", decision)
+        try:
+            context.runtime.unpublish(package_id, bus, keep_record=True)
+            await _release_package_resources(context, package_id, record.generation)
+            context.runtime.drop_active(package_id)
+        except Exception as exc:
+            return _report(package_id, "uninstall", _cleanup_error(exc))
+    return ActivationReport("", package_id, "uninstall", "SUCCESS", record.generation, None)
+
+
+def _state_report(package_id: str, operation: str, generation: int | None) -> ActivationReport:
+    """Return a successful no-op state transition report."""
+    return ActivationReport("", package_id, operation, "SUCCESS", generation, generation)
 
 
 async def _apply_load(context: ManagementContext, request: ApplyRequest) -> ActivationReport:
@@ -790,12 +1000,17 @@ def _resource_mgr_or_none() -> object | None:
 
 
 async def _remove_package_resources(context: ManagementContext, package_id: str, generation: int) -> None:
+    await _release_package_resources(context, package_id, generation)
+    for version in context.runtime.uninstall_versions(package_id):
+        await run_file_operation(lambda: context.package_manager.remove_installed(package_id, version, missing_ok=True))
+
+
+async def _release_package_resources(context: ManagementContext, package_id: str, generation: int) -> None:
+    """Release runtime-owned resources without changing managed package files."""
     stripped = await _remove_mcp_servers(declarations.specs_for(package_id))
     if stripped is not None:
         raise ExtensionFailure(stripped.status, **stripped.params)
     await context.runtime.cleanup_package_resources(package_id, generation, reason="uninstall")
-    for version in context.runtime.uninstall_versions(package_id):
-        await run_file_operation(lambda: context.package_manager.remove_installed(package_id, version, missing_ok=True))
     declarations.withdraw(package_id)
 
 
