@@ -154,7 +154,9 @@ def decorate_tool_with_trace(tool, agent_session):
         # mirroring decorate_workflow_with_trace's stream wrapping. Tools
         # without astream are untouched; on cores predating this wrapper the
         # proxy's __getattr__ passes astream through undecorated.
-        proxy.astream = async_trace_stream(tool_astream, session, InvokeType.PLUGIN, instance_info)
+        proxy.astream = async_trace_stream(
+            tool_astream, session, InvokeType.PLUGIN, instance_info
+        )
     return proxy
 
 

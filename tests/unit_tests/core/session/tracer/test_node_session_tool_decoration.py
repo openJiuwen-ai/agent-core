@@ -112,7 +112,7 @@ async def test_tool_left_undecorated_without_tracer():
     assert decorate_tool_with_trace(raw_tool, session) is raw_tool
 
 
-async def test_tool_astream_decorated_through_node_session_fires_plugin_events(recording_handler):
+async def test_tool_astream_decorated_fires_plugin_events(recording_handler):
     """Streaming tools get their astream wrapped, not just invoke.
 
     Studio's workflow stream paths (FlowApi/FlowCustomApi.stream) call
