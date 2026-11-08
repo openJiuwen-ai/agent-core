@@ -41,6 +41,8 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema, TraceSchema, BaseStreamMode
+from openjiuwen.core.session.tracer import TracerHandlerRegistry
+from openjiuwen.core.session.tracer.handler import TraceExtWorkflowHandler
 
 pytestmark = pytest.mark.asyncio
 
@@ -81,6 +83,46 @@ class InteractiveNode(WorkflowComponent):
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         result = await self.invoke(inputs, session, context)
         yield result
+
+
+class FinalizeRecorderHandler(TraceExtWorkflowHandler):
+    """Extension handler recording every workflow tracer event per invoke_id.
+
+    Unlike the built-in TraceWorkflowHandler (which ignores unknown events
+    via hasattr dispatch), this handler also implements the OTel-only
+    on_call_finalize marker so emitter-side ordering can be asserted.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    async def on_call_start(self, **kwargs):
+        self.events.append(("on_call_start", kwargs))
+
+    async def on_call_done(self, **kwargs):
+        self.events.append(("on_call_done", kwargs))
+
+    async def on_call_finalize(self, **kwargs):
+        self.events.append(("on_call_finalize", kwargs))
+
+    async def on_pre_invoke(self, **kwargs):
+        self.events.append(("on_pre_invoke", kwargs))
+
+    async def on_pre_stream(self, **kwargs):
+        self.events.append(("on_pre_stream", kwargs))
+
+    async def on_post_invoke(self, **kwargs):
+        self.events.append(("on_post_invoke", kwargs))
+
+    async def on_post_stream(self, **kwargs):
+        self.events.append(("on_post_stream", kwargs))
+
+    async def on_invoke(self, **kwargs):
+        self.events.append(("on_invoke", kwargs))
+
+    async def on_interact(self, **kwargs):
+        self.events.append(("on_interact", kwargs))
 
 
 class TestTraceWorkflow:
@@ -856,3 +898,69 @@ class TestTraceWorkflow:
             payload: dict = chunk.payload
             if payload.get("invokeId") == "end":
                 assert payload.get("componentType") is not None
+
+    async def test_stream_end_node_defer_span_start_marker(self):
+        """Stream-consumer end nodes defer their span start to the finalize marker.
+
+        The end node's on_call_start fires at the first consumed chunk but must
+        carry defer_span_start=True so OTel consumers open the span at
+        on_call_finalize (stream fully consumed) instead; every other component
+        keeps the immediate-start semantics and never sees the marker.
+        """
+        for response_mode in ("streaming", None):
+            handler = FinalizeRecorderHandler()
+            TracerHandlerRegistry.register_handler("finalize_recorder", handler)
+            try:
+                workflow = Workflow(card=WorkflowCard(id="test"))
+                workflow.set_start_comp("start", Start())
+                workflow.add_workflow_comp("producer", Producer(), inputs_schema={"array": "${inputs}"})
+                workflow.set_end_comp("end", End(), stream_inputs_schema={"output": "${producer.output}"},
+                                      response_mode=response_mode)
+                workflow.add_connection("start", "producer")
+                workflow.add_stream_connection("producer", "end")
+
+                async for _ in workflow.stream(inputs={"inputs": [1, 2, 3]},
+                                               session=create_workflow_session(),
+                                               stream_modes=[BaseStreamMode.TRACE]):
+                    pass
+            finally:
+                TracerHandlerRegistry.unregister_handler("finalize_recorder")
+
+            events_by_id = {}
+            for name, kwargs in handler.events:
+                events_by_id.setdefault(kwargs.get("invoke_id"), []).append((name, kwargs))
+
+            # Workflow-level and non-end components keep immediate start semantics.
+            start_metadata = {
+                kwargs.get("invoke_id"): kwargs.get("metadata")
+                for name, kwargs in handler.events if name == "on_call_start"
+            }
+            assert start_metadata["end"].get("defer_span_start") is True, response_mode
+            for invoke_id, metadata in start_metadata.items():
+                if invoke_id != "end":
+                    assert not metadata or "defer_span_start" not in metadata, response_mode
+
+            # The marker is exclusive to the end node's event stream.
+            end_events = events_by_id["end"]
+            end_names = [name for name, _ in end_events]
+            assert "on_call_finalize" in end_names, response_mode
+            for invoke_id, pairs in events_by_id.items():
+                if invoke_id != "end":
+                    assert "on_call_finalize" not in [name for name, _ in pairs], response_mode
+
+            # End-node ordering: begin (deferred) -> all consumed chunks -> marker -> done.
+            # stream_call's finally block sends a synthetic empty-chunk on_pre_stream
+            # flush after the marker; it carries no data, so it stays out of the contract.
+            def is_data_stream_event(pair):
+                name, kwargs = pair
+                if name == "on_post_stream":
+                    return True
+                return name == "on_pre_stream" and kwargs.get("chunk") not in (None, {})
+
+            assert end_names[0] == "on_call_start", response_mode
+            assert sum(is_data_stream_event(p) for p in end_events if p[0] == "on_pre_stream") >= 3, response_mode
+            last_stream_index = max(i for i, pair in enumerate(end_events) if is_data_stream_event(pair))
+            finalize_index = end_names.index("on_call_finalize")
+            done_index = end_names.index("on_call_done")
+            assert last_stream_index < finalize_index < done_index, response_mode
+            assert end_names[-1] == "on_call_done", response_mode

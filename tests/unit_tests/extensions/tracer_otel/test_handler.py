@@ -2106,3 +2106,118 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
 
+
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+
+
+
+class TestOtelWorkflowHandlerDeferredEndNode:
+    """Stream-consumer end nodes: span opens at the finalize marker, not the first chunk.
+
+    Mix-mode end nodes fire on_call_start at the FIRST CHUNK (passive stream
+    consumption), which made the end-node span appear before downstream batch
+    nodes in the waterfall and inflated its duration by the whole streaming
+    window. The begin event now carries metadata.defer_span_start for
+    stream-path end nodes; the handler stashes it and opens the span at
+    on_call_finalize (emitted when the stream is fully consumed). Fallback:
+    if the marker never arrives, on_call_done materializes the span with the
+    stashed first-chunk timestamp, reproducing the old [begin, done] window.
+    """
+
+    _END_METADATA = {
+        "workflow_id": "wf1",
+        "component_id": "end1",
+        "component_name": "结束",
+        "component_type": "End",
+        "defer_span_start": True,
+    }
+
+    async def _start_deferred_end_node(self, handler):
+        await handler.on_call_start(
+            invoke_id="end1",
+            metadata=dict(self._END_METADATA),
+            parent_node_id="",
+            session_id="workflow-session-123",
+        )
+
+    async def test_end_node_span_deferred_until_finalize_marker(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # No span yet: first chunk is passive consumption, not execution.
+        assert "end1" in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+        # Stream chunks during the deferral window are buffered, not dropped.
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_pre_stream("end1", {"payload": "chunk-2"})
+        assert len(handler._deferred_end_starts["end1"]["stream_inputs"]) == 2
+
+        await handler.on_call_finalize("end1")
+        assert "end1" not in handler._deferred_end_starts
+        assert handler._span_manager.get("end1") is not None
+
+        await handler.on_call_done("end1", outputs={"answer": "done"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.end1"
+        # Buffered stream inputs replayed onto the materialized span.
+        assert OJ_STREAM_INPUTS in s.attributes
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "chunk-2" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_SESSION_ID] == "workflow-session-123"
+
+    async def test_end_node_fallback_opens_span_with_begin_timestamp(self):
+        """Marker never arrived (stream error): on_call_done falls back to the
+        old [first-chunk, done] window via the stashed begin timestamp."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        # No on_call_finalize — straight to done (error path).
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert "end1" not in handler._deferred_end_starts
+
+    async def test_finalize_marker_without_stash_is_ignored(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_finalize("unknown-end")
+        assert handler._span_manager.get("unknown-end") is None
+        assert len(_EXPORTER.get_finished_spans()) == 0
+
+    async def test_regular_component_untouched_by_deferral(self):
+        """Components without defer_span_start keep the immediate-span path."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="llm1",
+            metadata={
+                "workflow_id": "wf1",
+                "component_id": "llm1",
+                "component_name": "大模型",
+                "component_type": "LLM",
+            },
+            parent_node_id="",
+        )
+        assert handler._span_manager.get("llm1") is not None
+        assert handler._deferred_end_starts == {}

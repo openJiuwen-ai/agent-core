@@ -568,7 +568,11 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
     async def _pre_stream(self, ability: ComponentAbility) -> dict:
         try:
-            await self.__trace_component_begin__()
+            # Stream-consumer end nodes defer their span start to the finalize
+            # marker (see stream_call): pass the flag through the begin event
+            # so OTel consumers can stash instead of opening the span at the
+            # first chunk. Batch-path begins keep the old behavior.
+            await self.__trace_component_begin__(defer_span_start=self.is_end_node)
             actor_manager = self._session.actor_manager()
             inputs_schema = self._node_config.stream_io_configs.inputs_schema if self._node_config else None
             if not isinstance(inputs_schema, dict):
@@ -747,6 +751,20 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             for result in results:
                 if isinstance(result, Exception):
                     raise result
+            if self.is_end_node:
+                # End-node span semantics: on_call_start fired at the first
+                # chunk arrival (passive stream consumption), which predates
+                # the upstream nodes' completion and misplaces the end node in
+                # trace waterfalls. Stream-in consumers pull their input
+                # lazily inside the component method, so the input stream is
+                # only provably exhausted once the strategy task has fully
+                # returned — emit the finalize marker here (still before
+                # _stream_done resolves, so on_call_done cannot overtake it)
+                # so OTel consumers open the end-node span at the true
+                # finalization point instead. OTel-only event: the built-in
+                # trace-schema handler has no on_call_finalize attribute and
+                # skips it.
+                await self.__trace_component_finalize__()
             logger.debug(f"Succeed to call stream-in node [{self._node_id}]",
                          event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
                          **self._log_message)
@@ -824,7 +842,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             return
         await TracerWorkflowUtils.trace_component_outputs(self._session, outputs)
 
-    async def __trace_component_begin__(self) -> None:
+    async def __trace_component_begin__(self, defer_span_start: bool = False) -> None:
         if not self._trace_enable():
             return
         if not self._is_started.is_set():
@@ -843,7 +861,15 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                         exception=e,
                         **self._log_message
                     )
+            if defer_span_start:
+                extra_metadata = dict(extra_metadata) if extra_metadata else {}
+                extra_metadata["defer_span_start"] = True
             await TracerWorkflowUtils.trace_component_begin(self._session, extra_metadata=extra_metadata)
+
+    async def __trace_component_finalize__(self) -> None:
+        if not self._trace_enable():
+            return
+        await TracerWorkflowUtils.trace_component_finalize(self._session)
 
     async def __trace_component_done__(self) -> None:
         if not self._trace_enable():
