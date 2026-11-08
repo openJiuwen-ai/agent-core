@@ -1250,8 +1250,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             parent_node_id = kwargs.get("parent_node_id", "")
             # Stream-consumer end nodes: on_call_start fires at the FIRST CHUNK
             # (passive stream consumption), so opening the span here makes the
-            # end node appear before downstream batch nodes in the waterfall
-            # and inflates its duration by the whole streaming window. Stash
+            # end node appear before the upstream nodes still streaming in the
+            # waterfall and inflates its duration by the whole streaming
+            # window. Stash
             # the payload and open the span at the on_call_finalize marker;
             # on_call_done falls back to the first-chunk timestamp when the
             # marker never arrives (error path), preserving old semantics.
