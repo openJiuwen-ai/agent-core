@@ -97,8 +97,11 @@ class TripleExtractor(Extractor):
         """
 
         messages = [{"role": "user", "content": prompt}]
-        
+
+        # `model` is what actually selects the model for this request; dropping it
+        # silently made the `model_name` constructor argument a no-op.
         completion = await self.llm_client.invoke(
+            model=self.model_name,
             messages=messages,
             temperature=self.temperature,
         )

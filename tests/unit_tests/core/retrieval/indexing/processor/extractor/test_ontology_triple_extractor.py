@@ -283,3 +283,24 @@ class TestOntologyTripleExtractor:
         ex = _TestableOntologyTripleExtractor(llm_client=mock_llm_client, model_name="m", ontology_name="o")
         triples, ok = ex.parse_triples_for_test('{"triples": [["x"], {"bad": 1}]}', "d1", "c1")
         assert not ok and triples == []
+
+
+class TestOntologyTripleExtractorForwardsModelName:
+    """issue #2460: 两处 LLM 调用（实体抽取 / 关系抽取）都必须转交 model_name"""
+
+    @pytest.mark.asyncio
+    async def test_extract_forwards_model_name_to_both_calls(self, mock_llm_client):
+        extractor = OntologyTripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="chosen-model",
+            ontology_name="test-ontology",
+            temperature=0.3,
+        )
+
+        await extractor.extract([TextChunk(id_="1", text="Aristotle is a Person", doc_id="doc_1")])
+
+        # 实体抽取 + 关系抽取，两次调用都要带
+        assert mock_llm_client.invoke.await_count == 2
+        for call in mock_llm_client.invoke.await_args_list:
+            assert call.kwargs["model"] == "chosen-model"
+            assert call.kwargs["temperature"] == 0.3

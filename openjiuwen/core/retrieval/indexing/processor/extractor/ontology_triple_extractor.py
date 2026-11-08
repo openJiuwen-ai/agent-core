@@ -160,6 +160,7 @@ class OntologyTripleExtractor(Extractor):
         )
 
         completion = await self.llm_client.invoke(
+            model=self.model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=self.temperature,
         )
@@ -317,6 +318,7 @@ Passage:
         )
 
         completion = await self.llm_client.invoke(
+            model=self.model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=self.temperature,
         )
