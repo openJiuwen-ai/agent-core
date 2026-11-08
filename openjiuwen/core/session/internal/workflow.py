@@ -157,13 +157,14 @@ class NodeSession(BaseSession):
     def span(self):
         """Span-protocol stub so the tracer decorators accept node sessions.
 
-        React agents embedded in workflow components (e.g. studio's FlowAgent)
-        resolve tools via ``Runner.resource_mgr.get_tool(tool_id, session=...)``,
-        which decorates them with ``decorate_tool_with_trace``. Its
-        ``_should_decorate`` gate requires the ``span`` protocol (the agent
-        parent-span source on AgentSession); without this method every
-        workflow-session fetch was silently undecorated, so tool calls inside
-        workflows emitted no execute_tool span. Returning None leaves the
+        Workflow tool calls reach ``decorate_tool_with_trace(tool, session)``
+        either directly from components (e.g. studio's FlowApi/FlowCustomApi/
+        FlowMcp nodes) or via ``ResourceMgr.get_tool(tool_id, session=...)``.
+        Its ``_should_decorate`` gate requires the ``span`` protocol (the
+        agent parent-span source on AgentSession); without this method every
+        decoration attempt with a node session silently returned the tool
+        undecorated, so tool calls inside workflows emitted no execute_tool
+        span. Returning None leaves the
         TraceAgentSpan parentless — the OTel handler then falls back to the
         ambient context, which during node execution is the component's own
         node span (attached in on_call_start), yielding correct parenting.
