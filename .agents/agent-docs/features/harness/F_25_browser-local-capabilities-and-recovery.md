@@ -1,3 +1,16 @@
+---
+title: Browser local capabilities and recovery
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_25_browser-local-capabilities-and-recovery
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser local capabilities and recovery
 
 ## Metadata

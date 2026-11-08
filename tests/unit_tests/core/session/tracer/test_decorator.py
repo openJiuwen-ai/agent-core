@@ -419,3 +419,77 @@ class TestDecator:
         for item in results:
             print(item)
         assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}
+    async def test_decorate_model_display_name_wins_over_service_id(self):
+        """Gateway models put a service id in model_name; the optional
+        model_display_name on the client config makes the span (name and
+        gen_ai.request.model) carry the human-readable name instead."""
+
+        class _DisplayModel:
+            def __init__(self, model: str, display):
+                self.model_config = ModelRequestConfig(model=model)
+                self.model_client_config = (
+                    type("_Cfg", (), {"model_display_name": display})() if display else None
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        wrapped = decorate_model_with_trace(_DisplayModel("3f2b8c1e-uuid", "Qwen-Max"), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "Qwen-Max"
+
+    async def test_decorate_model_without_display_name_keeps_probe_result(self):
+        """Red line: no display name set — class_name stays the probe's
+        model_name exactly as before."""
+
+        class _PlainModel:
+            def __init__(self):
+                # 组件配置形态：ModelRequestConfig 挂在 .config 下（develop
+                # 探针支持的第一跳）。
+                self.config = type(
+                    "_CompCfg", (), {"model_config": ModelRequestConfig(model="3f2b8c1e-uuid")}
+                )()
+                self.model_client_config = None
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+
+        async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
+            results.append([handler_class_name, event_name, kwargs])
+
+        mock_tracer = MagicMock()
+        mock_tracer.trigger = mock_trigger
+        mock_tracer.tracer_agent_span_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = MagicMock()
+
+        wrapped = decorate_model_with_trace(_PlainModel(), mock_session)
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "3f2b8c1e-uuid"

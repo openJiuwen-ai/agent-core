@@ -1,12 +1,12 @@
 ---
 title: 设计文档索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: yidaaichixia
+author_email: 1046386000@qq.com
 generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-03T10:53+08:00 -->
+<!-- generated-at: 2026-11-08T20:29+08:00 -->
 
 # 设计文档索引 (INDEX)
 
