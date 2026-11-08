@@ -151,4 +151,5 @@ async def test_tool_without_astream_keeps_invoke_only_decoration(recording_handl
 
     raw_tool = _InvokeOnlyTool(card=ToolCard(name="doc_generate", description="doc tool"))
     wrapped = decorate_tool_with_trace(raw_tool, session)
-    assert "astream" not in wrapped.__dict__, "no astream wrapper for invoke-only tools"
+    # 未造 astream 包装：proxy.__getattr__ 透传到工具的 None 属性
+    assert getattr(wrapped, "astream", "unset") is None
