@@ -146,6 +146,15 @@ def decorate_tool_with_trace(tool, agent_session):
     instance_info = {"class_name": tool.card.name if hasattr(tool, "card") else type(tool).__name__, "type": "tool"}
     proxy = _TraceProxy(tool)
     proxy.invoke = async_trace(tool.invoke, session, InvokeType.PLUGIN, instance_info)
+    tool_astream = getattr(tool, "astream", None)
+    if callable(tool_astream):
+        # Streaming tool executions (e.g. studio's FlowApi/FlowCustomApi stream
+        # paths) go through astream, not invoke; wrap it the same way so they
+        # emit plugin spans too (start at first chunk, end at exhaustion),
+        # mirroring decorate_workflow_with_trace's stream wrapping. Tools
+        # without astream are untouched; on cores predating this wrapper the
+        # proxy's __getattr__ passes astream through undecorated.
+        proxy.astream = async_trace_stream(tool_astream, session, InvokeType.PLUGIN, instance_info)
     return proxy
 
 
