@@ -534,6 +534,115 @@ class TestOtelAgentHandler:
 # ---------------------------------------------------------------------------
 
 
+class TestOtelAgentHandlerRetriever:
+    """Retrieval operation child spans emitted by tool bodies via TracerAgentUtils."""
+
+    async def test_retriever_span_nests_under_open_tool_span(self):
+        """The retrieval span emitted inside a tool call parents onto the
+        still-open execute_tool span via the ambient OTel context."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        tool_span = span_manager.create_agent_span(agent_span)
+
+        await handler.on_plugin_start(
+            span=tool_span,
+            inputs={"inputs": {"query": "什么是九问"}},
+            instance_info={"class_name": "retrieval", "type": "plugin"},
+        )
+
+        retrieval_span = span_manager.create_agent_span(None)
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "什么是九问"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_end(
+            span=retrieval_span, outputs={"results": ["doc-a", "doc-b"]}
+        )
+        await handler.on_plugin_end(span=tool_span, outputs={"outputs": "ok"})
+
+        finished = _EXPORTER.get_finished_spans()
+        # Locate spans by operation attribute — display names differ across
+        # release branches (tool.<name> vs execute_tool <name>).
+        by_op = {s.attributes.get(GEN_AI_OPERATION_NAME): s for s in finished}
+        assert set(by_op) == {"execute_tool", "retrieval"}
+
+        retrieval = by_op["retrieval"]
+        tool = by_op["execute_tool"]
+        assert retrieval.name == "retrieval"
+        assert retrieval.kind == trace.SpanKind.INTERNAL
+        assert retrieval.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是九问"
+        assert list(retrieval.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-a", "doc-b"]
+        # Child-of-tool parenting: the retrieval span ended before the tool
+        # span, so the tool span context was the ambient context at start.
+        assert retrieval.parent is not None
+        assert retrieval.parent.span_id == tool.context.span_id
+
+    async def test_retriever_error_marks_error_and_ends(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs=None,
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        await handler.on_retriever_error(span=retrieval_span, error=RuntimeError("kb down"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.attributes[OJ_AGENT_ERROR_MESSAGE] == "kb down"
+        # No query inputs → no query attribute.
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert handler._span_manager.get(retrieval_span.invoke_id) is None
+
+    async def test_retriever_done_without_documents_skips_attribute(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retrieval_span = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_start(
+            span=retrieval_span,
+            inputs={"query": "q"},
+            instance_info={"class_name": "retrieval", "type": "retriever"},
+        )
+        # Empty results list → extractor returns None → attribute absent.
+        await handler.on_retriever_end(span=retrieval_span, outputs={"results": []})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "q"
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
+        assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_retriever_done_without_open_span_is_noop(self):
+        """A done/error event whose start never registered a span must not
+        raise nor fabricate a span."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        orphan = span_manager.create_agent_span(None)
+
+        await handler.on_retriever_end(span=orphan, outputs={"results": ["x"]})
+        await handler.on_retriever_error(span=orphan, error=RuntimeError("late"))
+
+        assert _EXPORTER.get_finished_spans() == []
+
+
 class TestOtelWorkflowHandler:
     async def test_workflow_call_start_creates_span(self):
         config = OtelTracerConfig(redaction_enabled=False)
