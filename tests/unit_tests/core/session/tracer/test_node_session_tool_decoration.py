@@ -54,6 +54,10 @@ class MockNodeTool(Tool):
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield {}
 
+    async def astream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        yield {"chunk": 1}
+        yield {"chunk": 2}
+
     def get_tool_info(self) -> ToolInfo:
         return ToolInfo(name=self.card.name, description=self.card.description)
 
@@ -106,3 +110,45 @@ async def test_tool_left_undecorated_without_tracer():
 
     raw_tool = MockNodeTool(card=ToolCard(name="doc_generate", description="doc tool"))
     assert decorate_tool_with_trace(raw_tool, session) is raw_tool
+
+
+async def test_tool_astream_decorated_through_node_session_fires_plugin_events(recording_handler):
+    """Streaming tools get their astream wrapped, not just invoke.
+
+    Studio's workflow stream paths (FlowApi/FlowCustomApi.stream) call
+    ``tool.astream`` on the decorated proxy; without this wrapper those
+    executions bypass execute_tool spans entirely.
+    """
+    tracer = Tracer()
+    tracer.init()
+    session = _make_node_session(tracer)
+
+    raw_tool = MockNodeTool(card=ToolCard(name="doc_generate", description="doc tool"))
+    wrapped = decorate_tool_with_trace(raw_tool, session)
+    assert wrapped is not raw_tool
+
+    chunks = [chunk async for chunk in wrapped.astream({"query": "hello"})]
+    assert chunks == [{"chunk": 1}, {"chunk": 2}]
+
+    assert [e[0] for e in recording_handler.events] == ["on_plugin_start", "on_plugin_end"]
+    _, start_span, start_inputs, instance_info = recording_handler.events[0]
+    assert instance_info["class_name"] == "doc_generate"
+    assert instance_info["type"] == "tool"
+    assert start_span.parent_invoke_id is None
+
+
+async def test_tool_without_astream_keeps_invoke_only_decoration(recording_handler):
+    """Tools lacking astream stay decorated on invoke alone.
+
+    The proxy must not manufacture an astream attribute for them.
+    """
+    tracer = Tracer()
+    tracer.init()
+    session = _make_node_session(tracer)
+
+    class _InvokeOnlyTool(MockNodeTool):
+        astream = None
+
+    raw_tool = _InvokeOnlyTool(card=ToolCard(name="doc_generate", description="doc tool"))
+    wrapped = decorate_tool_with_trace(raw_tool, session)
+    assert "astream" not in wrapped.__dict__, "no astream wrapper for invoke-only tools"
