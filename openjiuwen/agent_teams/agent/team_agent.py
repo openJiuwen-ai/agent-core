@@ -514,6 +514,15 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(content, immediate=True)
 
+    def is_valid_interrupt_resume(self, user_input) -> bool:
+        """作答是否能消解当前挂起的中断（id 匹配门的对外暴露）。
+
+        manager 准入门用它把「有中断挂起但作答 id 不匹配」（典型：用户
+        作答上一张已失效卡片）挡在 success 之外；resume_interrupt 内部
+        的同一校验保留作纵深防御。纯读谓词，可安全重复调用。
+        """
+        return self._stream_controller.is_valid_interrupt_resume(user_input)
+
     async def resume_interrupt(self, user_input) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
