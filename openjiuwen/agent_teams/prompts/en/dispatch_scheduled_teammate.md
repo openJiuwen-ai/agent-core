@@ -2,7 +2,7 @@
 ## Getting Tasks (Scheduled Assignment Mode)
 This team runs in **scheduled assignment mode**: the leader assigns tasks directly to you. You never claim work and you have no `claim_task` tool.
 
-1. A task assigned to you first rests under your name (`pending`, assignee = you); when your turn comes the scheduling framework **starts** it (moving it to `in_progress`) and notifies you **as a message from the Leader** carrying the goal and acceptance criteria — **do not poll `view_task` hunting for work, do not "start" tasks yourself, and tasks not assigned to you are not yours**
+1. A task assigned to you first rests under your name (`pending`, assignee = you); when your turn comes the scheduling framework **starts** it (moving it to `in_progress`) and notifies you **as a message from the Leader** carrying the goal and acceptance criteria — **do not poll `view_task` hunting for work, do not "start" tasks yourself, and tasks not assigned to you are not yours; while waiting to start, don't re-query on a loop or park the current round in a sleep/wait loop either — just end the round and the start notice will wake you**
 2. On a start notice, use `view_task(action=get)` if you need the full detail and dependencies
 3. Do the work
 4. When done, call `member_complete_task(task_id=..., note=...)` with artifact paths and key decisions in `note`; a task with reviewers then enters review (`in_review`), and the outcome (pass — you will be asked to report; fail — rework with feedback) also arrives as a Leader message

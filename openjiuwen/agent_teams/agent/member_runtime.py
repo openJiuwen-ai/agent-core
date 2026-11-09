@@ -67,6 +67,15 @@ class MemberRuntime(Protocol):
         """Return the current session id, or None before ``start``."""
         ...
 
+    @property
+    def last_round_started_ms(self) -> Optional[int]:
+        """Wall-ms start of the most recent round, None before the first round.
+
+        Witness boundary for team-level renderers. Runtimes
+        without round tracking return None.
+        """
+        ...
+
     # ---- interaction ----
 
     def outputs(self) -> AsyncIterator[Any]:
@@ -91,10 +100,10 @@ class MemberRuntime(Protocol):
         ...
 
     async def subscribe(
-        self,
-        *,
-        on_state: Callable[..., Any] | None = None,
-        on_round: Callable[..., Any] | None = None,
+            self,
+            *,
+            on_state: Callable[..., Any] | None = None,
+            on_round: Callable[..., Any] | None = None,
     ) -> None:
         """Register optional phase/round callbacks; both keyword-only and optional.
 

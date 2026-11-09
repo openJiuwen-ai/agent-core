@@ -196,6 +196,10 @@ class HarnessInternalState:
     output_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     supervisor_task: asyncio.Task | None = None
     round_id_counter: int = 0
+    # 本运行时最近一次 outer round 的起跑时刻（wall ms，与任务行 updated_at
+    # 同源）。leader 的 all-done 渲染以此判断「上一轮是否已见证
+    # 全部终态迁移」；None = 本运行时还没跑过任何轮。
+    last_round_started_ms: int | None = None
 
     def next_seq(self) -> int:
         """Return and increment the InboxMessage sequence counter."""
