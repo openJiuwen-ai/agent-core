@@ -1394,6 +1394,13 @@ class TeamRuntimeManager:
             # cancellation inside the TTL window is not misreported as user_pause.
             clear_cancellation_cause(team_session.get_session_id())
             await self._pre_run_with_inputs(team_session, inputs)
+            # Same agent, same session: the conversation carries on, so the
+            # leader is treated as restored like a cold recovery. The policy
+            # rail clears this if the transcript turns out not to hold the
+            # policy (a team the host built without a leader turn).
+            backend = getattr(pool_entry.agent, "team_backend", None)
+            if backend is not None:
+                backend.mark_history_restored()
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
