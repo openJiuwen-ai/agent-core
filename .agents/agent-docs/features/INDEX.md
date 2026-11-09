@@ -17,9 +17,13 @@ generated: true
 |---|
 | [agent_evolving/ttse](#module-1) |
 | [agent_teams](#module-2) |
-| [harness](#module-3) |
-| [harness/subagents](#module-4) |
-| [harness/tools/browser_move](#module-5) |
+| [core/context_engine](#module-3) |
+| [core/foundation/llm](#module-4) |
+| [core/single_agent](#module-5) |
+| [extensions/observability](#module-6) |
+| [harness](#module-7) |
+| [harness/subagents](#module-8) |
+| [harness/tools/browser_move](#module-9) |
 
 <a id="module-1"></a>
 
@@ -91,6 +95,7 @@ generated: true
 | [F_19_monitor-hide-dm-switch](agent_teams/F_19_monitor-hide-dm-switch.md) | F | Monitor `hide_dm` Switch | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_20261022_2319_inline-member-worktree-isolation](F_20261022_2319_inline-member-worktree-isolation.md) | F | 调度模式内联成员支持 worktree 隔离 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/tools/tool_task.py, openjiuwen/agent_teams/tools/locales/cn.py, openjiuwen/agent_teams/tools/locales/en.py, openjiuwen/agent_teams/tools/locales/descs/cn/fragments/create_task_inline_member.md, openjiuwen/agent_teams/tools/locales/descs/en/fragments/create_task_inline_member.md | 无独立 D：对 F_118 内联成员参数遗漏的小范围补齐，复用既有 `isolation` 契约，无独立设计 |
 | [F_20261030_2012_teammate-swarmflow-orchestration](agent_teams/F_20261030_2012_teammate-swarmflow-orchestration.md) | F | 集群模式teammate支持swarmflow工具（agent-core 侧实现） | @xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/swarmflow_infra.py, openjiuwen/agent_teams/workflow/tool_swarmflow.py | [SDD-0031](../designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) |
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20_human-agent-mailbox-unread-flip](agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_external-agent-access](agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_team-completion-auto-pause](agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
@@ -188,6 +193,38 @@ generated: true
 
 <a id="module-3"></a>
 
+## core/context_engine
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261106_1803_context-persistence-preparation](F_20261106_1803_context-persistence-preparation.md) | F | 原生 context 保存准备 hook 与延迟原文版本 | 刘瑜 | openjiuwen/core/context_engine, openjiuwen/core/single_agent, openjiuwen/harness | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/base.py, openjiuwen/core/context_engine/context/file_offload_store.py, openjiuwen/core/context_engine/context/message_buffer.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/single_agent/rail/base.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/core/context_engine/test_durable_context_persistence.py | 无独立 D：用户在 issue6134 会话中确认第二批方案并直接授权实施；本次按该方案提供通用 Core 扩展点，不新增独立 D。 |
+
+<a id="module-4"></a>
+
+## core/foundation/llm
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+
+<a id="module-5"></a>
+
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261106_1803_context-persistence-preparation](F_20261106_1803_context-persistence-preparation.md) | F | 原生 context 保存准备 hook 与延迟原文版本 | 刘瑜 | openjiuwen/core/context_engine, openjiuwen/core/single_agent, openjiuwen/harness | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/base.py, openjiuwen/core/context_engine/context/file_offload_store.py, openjiuwen/core/context_engine/context/message_buffer.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/single_agent/rail/base.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/core/context_engine/test_durable_context_persistence.py | 无独立 D：用户在 issue6134 会话中确认第二批方案并直接授权实施；本次按该方案提供通用 Core 扩展点，不新增独立 D。 |
+
+<a id="module-6"></a>
+
+## extensions/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+
+<a id="module-7"></a>
+
 ## harness
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -202,7 +239,9 @@ generated: true
 | [F_05_browser-task-integrity](harness/F_05_browser-task-integrity.md) | F | F_05 Browser Task Integrity | m056838700 | openjiuwen/harness | — | 待核实 |
 | [F_05_claude-turn-boundary-from-delivery-receipts](harness/F_05_claude-turn-boundary-from-delivery-receipts.md) | F | F_05 Claude Turn Boundaries from Delivery Receipts | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_06_browser-execution-and-completion](harness/F_06_browser-execution-and-completion.md) | F | Browser Execution and Completion Boundaries | m056838700 | openjiuwen/harness | — | 待核实 |
+| [F_06_opt-in-stream-task-lifecycle](harness/F_06_opt-in-stream-task-lifecycle.md) | F | F_06 可选流式后台任务生命周期 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_browser-jev-policy](harness/F_07_browser-jev-policy.md) | F | Browser Jev Policy with LLM Fallback | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_07_session-checkpointer-injection](harness/F_07_session-checkpointer-injection.md) | F | F_07 Session 级 checkpointer 注入 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_third-party-harness-provider-packages](harness/F_07_third-party-harness-provider-packages.md) | F | 第三方 Harness Provider 包：entry point 发现与生成 skill | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_08_browser-jev-handover](harness/F_08_browser-jev-handover.md) | F | Browser Jev Segmented Handover | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_08_provider-owned-model-config](harness/F_08_provider-owned-model-config.md) | F | Provider 自有的模型映射：`ModelChoice` + `model_config` | alan_cheng | openjiuwen/harness | — | 待核实 |
@@ -220,6 +259,8 @@ generated: true
 | [F_18_browser-receipts-and-local-continuity](harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20261027_1810_ttse-plugin-runtime](F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+| [F_20261106_1803_context-persistence-preparation](F_20261106_1803_context-persistence-preparation.md) | F | 原生 context 保存准备 hook 与延迟原文版本 | 刘瑜 | openjiuwen/core/context_engine, openjiuwen/core/single_agent, openjiuwen/harness | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/base.py, openjiuwen/core/context_engine/context/file_offload_store.py, openjiuwen/core/context_engine/context/message_buffer.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/single_agent/rail/base.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/core/context_engine/test_durable_context_persistence.py | 无独立 D：用户在 issue6134 会话中确认第二批方案并直接授权实施；本次按该方案提供通用 Core 扩展点，不新增独立 D。 |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
@@ -236,7 +277,7 @@ generated: true
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | openjiuwen/harness | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/policy_page_action.py, tests/unit_tests/harness/tools/browser_move/test_browser_contract_compatibility.py | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 
-<a id="module-4"></a>
+<a id="module-8"></a>
 
 ## harness/subagents
 
@@ -244,7 +285,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-5"></a>
+<a id="module-9"></a>
 
 ## harness/tools/browser_move
 

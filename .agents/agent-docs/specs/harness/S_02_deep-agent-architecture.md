@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-28 |
+| 最近一次修订日期 | 2026-11-09 |
 | 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_06_opt-in-stream-task-lifecycle.md` |
 
 ## 范围 / 边界
@@ -52,8 +52,9 @@ author_email: yangzequ1@huawei.com
 1. `DeepAgent` 的公开执行入口**只有** `invoke` / `stream` / `follow_up` / `steer` /
    `abort` / `start` / `stop` / `send_input` 八个（外加 `run_one_round` 供 supervisor
    内部单轮执行）。任何宿主不得直接触碰 `_run_task_loop*` 私有方法。
-2. `invoke(inputs, session)`（单轮或 task-loop 模式）在返回前**必先** `_ensure_initialized()`；
-   未初始化前的 `invoke` 抛 `build_error`（react agent 未构造）。
+2. `invoke(inputs, session)`（单轮或 task-loop 模式）在执行前**必先** `_ensure_initialized()`；
+   宿主也可在恢复上下文前显式 `await ensure_initialized()`，幂等完成 rails、处理器与模型绑定，不消费输入或调用模型。
+   `start()` 的交互循环绑定不替代这一步；react agent 尚未构造时仍抛 `build_error`。
 3. `start(*, session)` 绑定会话并启动交互式 supervisor；`session=None` 时创建
    `create_agent_session()` （id 为 `"default"`，仅测试 / 简单嵌入用）。`start` 是**幂等的**
    ——已启动时 `_ensure_interaction_running()` 只复位运行态，不二次绑定；`stop()` 走后

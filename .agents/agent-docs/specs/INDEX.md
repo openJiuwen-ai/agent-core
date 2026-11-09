@@ -21,8 +21,9 @@ generated: true
 | [core/controller](#module-4) |
 | [core/runner/drunner/dmessage_queue](#module-5) |
 | [core/session](#module-6) |
-| [extensions/a2a](#module-7) |
-| [harness](#module-8) |
+| [core/single_agent](#module-7) |
+| [extensions/a2a](#module-8) |
+| [harness](#module-9) |
 
 <a id="module-1"></a>
 
@@ -76,6 +77,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
+| [S_01_durable-context-persistence](core/context_engine/S_01_durable-context-persistence.md) | S | 原生上下文持久化准备与延迟卸载恢复 | 刘瑜 | openjiuwen/core/context_engine, openjiuwen/core/single_agent | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/base.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/message_buffer.py, openjiuwen/core/context_engine/context/file_offload_store.py, openjiuwen/core/single_agent/rail/base.py, openjiuwen/core/single_agent/agents/react_agent.py | — |
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
 
 <a id="module-4"></a>
@@ -104,13 +106,21 @@ generated: true
 
 <a id="module-7"></a>
 
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_durable-context-persistence](core/context_engine/S_01_durable-context-persistence.md) | S | 原生上下文持久化准备与延迟卸载恢复 | 刘瑜 | openjiuwen/core/context_engine, openjiuwen/core/single_agent | openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/context_engine/base.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/message_buffer.py, openjiuwen/core/context_engine/context/file_offload_store.py, openjiuwen/core/single_agent/rail/base.py, openjiuwen/core/single_agent/agents/react_agent.py | — |
+
+<a id="module-8"></a>
+
 ## extensions/a2a
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
 
-<a id="module-8"></a>
+<a id="module-9"></a>
 
 ## harness
 
