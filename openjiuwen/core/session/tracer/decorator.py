@@ -281,6 +281,27 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
     return create_wrap_decorator(handler)(_as_async_gen)
 
 
+def _model_display_name(model) -> str:
+    """Optional human-readable model display name, when the caller set one.
+
+    Probes the client-config carriers first (the foundation ``Model`` keeps
+    its ``ModelClientConfig`` at the top level; component configs nest it
+    under ``config``), then the request configs (``extra="allow"`` field).
+    Empty when absent — the probe result below stays untouched, so spans of
+    models built without a display name are byte-identical to before.
+    """
+    for config in (
+        getattr(model, "model_client_config", None),
+        getattr(getattr(model, "config", None), "model_client_config", None),
+        getattr(model, "model_config", None),
+        getattr(getattr(model, "config", None), "model_config", None),
+    ):
+        display = getattr(config, "model_display_name", None)
+        if display:
+            return str(display)
+    return ""
+
+
 def decorate_model_with_trace(model, agent_session, identity: dict | None = None):
     """Decorate a Model so every invoke/stream emits on_llm_* tracer events.
 
@@ -305,6 +326,12 @@ def decorate_model_with_trace(model, agent_session, identity: dict | None = None
             model_name = model.model_config.model_name
         except Exception:
             model_name = type(model).__name__
+    # Gateway models carry a service id as model_name; a display name set by
+    # the caller (client config or request-config extra field) wins so the
+    # span name and gen_ai.request.model show the human-readable model.
+    display_name = _model_display_name(model)
+    if display_name:
+        model_name = display_name
     instance_info = {"class_name": model_name, "type": "llm"}
     if identity:
         instance_info.update({k: v for k, v in identity.items() if v})

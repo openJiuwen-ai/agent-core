@@ -795,3 +795,50 @@ class TestDecator:
         assert events == ["on_llm_start", "on_llm_end"]
         # No partial result existed: the closing event says so honestly.
         assert results[1][2]["outputs"] == {"outputs": None}
+
+    async def test_decorate_model_display_name_wins_over_service_id(self):
+        """Gateway models put a service id in model_name; the optional
+        model_display_name on the client config makes the span (name and
+        gen_ai.request.model) carry the human-readable name instead."""
+
+        class _DisplayModel:
+            def __init__(self, model: str, display):
+                self.model_config = ModelRequestConfig(model=model)
+                self.model_client_config = (
+                    type("_Cfg", (), {"model_display_name": display})() if display else None
+                )
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+        wrapped = decorate_model_with_trace(
+            _DisplayModel("3f2b8c1e-uuid", "Qwen-Max"), self._tpot_mock_env(results)
+        )
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "Qwen-Max"
+
+    async def test_decorate_model_without_display_name_keeps_probe_result(self):
+        """Red line: no display name set — class_name stays the probe's
+        model_name exactly as before."""
+
+        class _PlainModel:
+            def __init__(self):
+                self.model_config = ModelRequestConfig(model="3f2b8c1e-uuid")
+                self.model_client_config = None
+
+            async def invoke(self, messages, **kwargs):
+                return BaseMessage(role="assistant", content="ok")
+
+            async def stream(self, messages, **kwargs):
+                yield BaseMessage(role="assistant", content="ok")
+
+        results = []
+        wrapped = decorate_model_with_trace(_PlainModel(), self._tpot_mock_env(results))
+        await wrapped.invoke([BaseMessage(role="user", content="hi")])
+
+        assert results[0][2]["instance_info"]["class_name"] == "3f2b8c1e-uuid"
