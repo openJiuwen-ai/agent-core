@@ -45,8 +45,12 @@ async def test_group_history_uses_bound_member_session_not_ambient_scope(tmp_pat
     home = set_task_openjiuwen_home(tmp_path)
     token = set_session_id("parent-session")
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="outer")
-    backend = TeamBackend("outer", "representative", False,
-                          SimpleNamespace(create_cur_session_tables=AsyncMock()), AsyncMock())
+    db = SimpleNamespace(
+        create_cur_session_tables=AsyncMock(return_value=True),
+        initialize=AsyncMock(return_value=None),
+        meeting=SimpleNamespace(get_team_meeting=AsyncMock(return_value=None)),
+    )
+    backend = TeamBackend("outer", "representative", False, db, AsyncMock())
     backend.group_chat_spec = spec
     configurator = SimpleNamespace(team_backend=backend, spec=spec, role=TeamRole.TEAMMATE)
     manager = SessionManager(state=TeamAgentState(), configurator=configurator, recovery_manager=SimpleNamespace())

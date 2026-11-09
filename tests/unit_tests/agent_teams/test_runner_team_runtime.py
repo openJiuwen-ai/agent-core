@@ -1033,6 +1033,7 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
+        get_meeting=AsyncMock(return_value=None),
         list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),
@@ -1093,6 +1094,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
+        get_meeting=AsyncMock(return_value=None),
         list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),

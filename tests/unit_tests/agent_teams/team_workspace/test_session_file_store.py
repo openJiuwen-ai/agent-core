@@ -10,6 +10,7 @@ and the DAOs dereference placeholder rows transparently (design-v5
 """
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import pytest
@@ -91,6 +92,35 @@ class TestSessionFileStore:
         store.put("v1", addr)
         store.put("v2", addr)
         assert store.get(addr) == "v2"
+
+    @pytest.mark.parametrize("kind", ["direct", "broadcast"])
+    def test_message_content_cannot_be_overwritten(self, store, kind):
+        addr = self._addr(kind=kind, object_id="m1", to_member="a" if kind == "direct" else None)
+        assert store.put("original", addr) == CONTENT_IN_FILE
+        assert store.put("original", addr) == CONTENT_IN_FILE
+        with pytest.raises(FileExistsError, match="different text"):
+            store.put("conflict", addr)
+        assert store.get(addr) == "original"
+
+    @pytest.mark.parametrize("same_content", [False, True], ids=["conflicting", "identical"])
+    def test_concurrent_message_writers_publish_complete_content(self, store, same_content):
+        addr = self._addr(kind="direct", object_id="m1", to_member="a")
+        barrier = threading.Barrier(2)
+        texts = ["first body", "first body" if same_content else "second body"]
+
+        def put(text):
+            barrier.wait(timeout=10)
+            try:
+                store.put(text, addr)
+                return text
+            except FileExistsError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            accepted = [text for text in executor.map(put, texts) if text is not None]
+        assert len(accepted) == (2 if same_content else 1)
+        assert store.get(addr) == accepted[0]
+        assert not list(store._resolve(addr).parent.glob("*.tmp"))
 
     def test_get_missing_file_raises(self, store):
         """A placeholder with no backing file must not surface silently."""
