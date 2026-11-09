@@ -48,11 +48,8 @@ def _write_terminal(text: str, *, utf8_redirect: bool = False) -> None:
             Redirected Windows output uses UTF-8 by default.
     """
     stdout = sys.stdout
-    if (
-        (utf8_redirect or sys.platform == "win32")
-        and isinstance(stdout, io.TextIOWrapper)
-        and not stdout.isatty()
-    ):
+    write_utf8 = utf8_redirect or sys.platform == "win32"
+    if write_utf8 and isinstance(stdout, io.TextIOWrapper) and not stdout.isatty():
         stdout.flush()
         stdout.buffer.write(text.encode("utf-8", errors=stdout.errors or "strict"))
         stdout.buffer.flush()
