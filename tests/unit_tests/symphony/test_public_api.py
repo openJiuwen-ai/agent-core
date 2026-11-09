@@ -1,10 +1,11 @@
+from openjiuwen.symphony.config import RetrievalBuildConfig
 import pytest
 
 from openjiuwen import symphony
 from openjiuwen.harness import rails
 from openjiuwen.symphony.agent import AgenticSkillRetrievalToolkit
 from openjiuwen.symphony.retrieval.common.prompts import INDEXING_YAML, get_prompt
-from openjiuwen.symphony.retrieval.build.workflows import BuildConfig, IndexBuilder
+from openjiuwen.symphony.retrieval.build.workflows import IndexBuilder
 from openjiuwen.symphony.retrieval.search.artifacts import load_retriever_index
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalIndex
 
@@ -35,7 +36,7 @@ def test_builtin_prompt_resource_is_available() -> None:
 @pytest.mark.parametrize("operation", ["build", "add", "delete"])
 def test_index_operations_reject_retired_runtime_config_alias(operation) -> None:
     with pytest.raises(TypeError, match="unexpected keyword argument 'runtime_config'"):
-        getattr(IndexBuilder, operation)(runtime_config=BuildConfig())
+        getattr(IndexBuilder, operation)(runtime_config=RetrievalBuildConfig())
 
 
 @pytest.mark.parametrize("option", ["retrieval_config", "visible_skill_names"])

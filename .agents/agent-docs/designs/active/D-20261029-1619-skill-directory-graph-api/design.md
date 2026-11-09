@@ -2,29 +2,47 @@
 id: D-20261029-1619-skill-directory-graph-api
 title: Symphony Runtime 统一配置与检索编排接口收敛
 slug: skill-directory-graph-api
-status: draft
-stage: proposals
+status: in-development
+stage: active
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 reviewers: []
 created: 2026-10-29
-updated: 2026-10-31
+updated: 2026-11-09
+approved-date: 2026-11-09
 domain: core
-modules: [symphony, jiuwenswarm/jiuwenswarm/symphony]
+modules: [symphony, jiuwenswarm/jiuwenswarm/runtime/symphony]
 tags: [symphony, runtime, configuration, retrieval, orchestration, capability]
-scope: 优先确定通用目录型 Runtime 配置，再收敛检索与编排接入；覆盖多种对象的独立树与图
+scope: 统一配置接入运行链路，Core拥有扫描与服务组装，Swarm同步配置和会话接入；首轮skill读取器
 related: [SDD-0001]
 type: D
-files: [openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/config.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/shared/fingerprint/settings.py]
+files: [openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/config.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/shared/fingerprint/settings.py]
 ---
 
 # Symphony Runtime 统一配置与检索编排接口收敛
 
-配置模型的最新确认范围已由 [D-20261031-1614-symphony-config-contract](../../active/D-20261031-1614-symphony-config-contract/design.md) 承接：多层 Pydantic 配置先行，运行链路迁移后续进行。下文保留整体 Runtime 草案及其历史字段示例；新配置契约以该独立设计为准，本文其余范围仍为 draft。
+## 2026-11-09 已确认接入方案
 
-本文是目标方案，配置与调用示例尚未实现。先确定配置项、默认值和责任边界，再推进接口及两仓迁移。完整配置见同目录 [config.example.yaml](config.example.yaml)；该文件用于评审，不能直接替换当前应用配置。
+用户在本会话明确要求执行“SymphonyConfig 运行链路接入计划”，据此沿用本设计标识进入开发。配置模型继续以 D-20261031-1614-symphony-config-contract 的分层 Pydantic 契约为基础；本节替代以下旧草案中的检索模型服务、Source 注入和兼容安排。旧章节仅保留决策历史，不再用于开发验收。
 
-沿用原设计标识和目录，继续维护同一项接口收敛工作。历史标识中的 `skill` 不表示新接口仍限定于这一种对象。本文替代 2026-10-29 草稿的 `for_skill_directory` 工厂和低层构造参数方案；历史组件化设计 `SDD-0001` 关于指纹复用的判断继续有效。
+- Runtime 仅接收 `model` 与 `config`，复制并固定路径；构造不扫描、不构建、不调用模型、不启动后台任务。新增公共变量使用 capability 命名。
+- Runtime 负责扫描、指纹、TreeEngine、GraphEngine、Discovery 会话和默认 Flow 的组装，入口为 `retrieval`、`orchestration`、`flow`。保留 `capture_graph_snapshot()` 和 `submit_evolution()`。
+- 首轮只实现 skill 读取器；其他枚举显式报不支持。业务消费者直接使用统一子模型；删除重复配置与 RetrievalModelConfig，不保留旧构造、配置别名、旧 YAML 解析或旧缓存签名兼容。
+- 树与图构建入口提供 status/read/build/cancel_build；进度与附属产物回调按 build 调用传入。Discovery 会话的目录、权限、来源、冻结预算和索引版本属于调用上下文，不增加 Source 层。
+- 构树通过注入的原生 Model.invoke 执行，保留同步算法调度，在所属事件循环调用模型，处理超时、取消、重试、截断和用量。Runtime 不关闭宿主模型。
+- `model=None` 可查询状态、读取产物和进行无模型发现；构树服从回退配置，构图和规划明确拒绝缺少模型。禁用能力可查询状态，执行入口拒绝。
+- 指纹并发取构图与提取上限较小值；构图和规划共用 min_edge_confidence。动态观测开关只控制规划是否消费观测。
+- Flow 惰性组装，按调用创建受限存储视图；宿主继续负责用户隔离、确认和安装授权。临时规划 Runtime 关闭 Flow。
+- 新布局为 artifact_root 下 inventory/cache/tree/graph/flow，带布局与集合身份。不同集合拒绝复用目录；旧产物明确拒绝并要求重建，不自动删除或迁移。签名包含内容、相关构建策略、协议与模型身份；展示、规划与 Flow 阈值不能无故使树失效。
+- Swarm 直接构造 Core 配置，负责目录、环境、产品缺省和会话模型解析。检索、编排、Flow 缺省关闭，共同阈值0.5、共识false、Flow成功次数3；模板显式并发4、匹配批量16、提取批量2保留。null由宿主解析为有效bool。构建使用宿主默认模型，在线编排使用会话模型。
+- Swarm 工具与 Rail 共用 Discovery 会话，保留全局目录与会话附加目录边界、动态禁用、冻结预算及索引版本。显式上下文容量优先，缺省从会话模型解析。设置面板演进开关同时保存 Flow 与动态观测开关。
+- 按 Core 配置/模型消费、Runtime接口、Swarm接入、跨仓验证顺序推进；分别形成 Core/Swarm 提交，Swarm全部Core依赖和锁文件固定到含新接口提交。
+
+验收通过真实入口和模型替身验证配置消费；覆盖构造惰性、模型缺失/类型/路径/快照/关闭，构建增量/并发/超时/取消/回退/原子发布/失败保留，Discovery可见性和冻结，fast/beam与观测，Flow隔离和单次启动，YAML拒绝旧字段、null、面板保存，以及实际固定Core依赖的确定性跨仓流程。仅运行相关行为测试，不运行格式化和静态检查。实际实现、审查修复、验证结果及未完成项归档到 feature，不回填为设计事实。
+
+## 历史草案（2026-10-29 至 2026-10-31）
+
+以下内容只保留当时方案及理由。与上节冲突的配置、接口、读取器范围和兼容安排均已失效；`config.example.yaml` 由本次当前配置示例替换。
 
 ## 1. 已确定的方向与当前事实
 

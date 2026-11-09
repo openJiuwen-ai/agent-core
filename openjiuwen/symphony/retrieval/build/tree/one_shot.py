@@ -6,8 +6,11 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Sequence
 
-from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig, ReasoningConfig
-from openjiuwen.core.foundation.llm.reasoning import apply_reasoning_plan, resolve_reasoning_plan
+from openjiuwen.core.foundation.llm import ReasoningConfig
+from openjiuwen.symphony.config import OneShotTreeBuildConfig, RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _is_transient_model_error, _model_scope, _response_content, _response_finish_reason, _response_usage
+from .root_categories import resolve_tree_root_categories
+from .schema import normalize_root_categories
 from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, text_tokens, unique_child_cid
 
 from .json_parser import parse_json_from_response
@@ -100,25 +103,6 @@ class OneShotLeaf:
 
 
 @dataclass(frozen=True)
-class OneShotTreeBuildConfig:
-    """Limits for each request in the one-shot tree build."""
-
-    max_depth: int = 4
-    max_output_tokens: int = 32768
-    timeout_seconds: float = 420.0
-    reasoning_effort: str | None = None
-    seed: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.max_depth < 1:
-            raise ValueError("max_depth must be at least 1")
-        if self.max_output_tokens < 1:
-            raise ValueError("max_output_tokens must be at least 1")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-
-
-@dataclass(frozen=True)
 class OneShotTreeBuildResult:
     """Validated tree preset plus build observability."""
 
@@ -156,28 +140,47 @@ class OneShotSkillTreeBuilder:
     def __init__(
         self,
         *,
-        client: Any,
-        model: str,
-        config: OneShotTreeBuildConfig | None = None,
+        model: Any,
+        config: OneShotTreeBuildConfig | RetrievalBuildConfig | None = None,
     ) -> None:
-        if client is None:
-            raise ValueError("client is required")
-        if not str(model or "").strip():
+        if model is None:
             raise ValueError("model is required")
-        self.client = client
-        self.model = str(model).strip()
-        self.config = config or OneShotTreeBuildConfig()
+        self.model = model
+        self.policy = config.model_copy(deep=True) if isinstance(config, RetrievalBuildConfig) else None
+        if self.policy is None:
+            self.config = (config or OneShotTreeBuildConfig()).model_copy(deep=True)
+        else:
+            defaults = OneShotTreeBuildConfig()
+            self.config = OneShotTreeBuildConfig(
+                max_depth=self.policy.structure.max_depth,
+                max_output_tokens=self.policy.request.max_output_tokens or defaults.max_output_tokens,
+                timeout_seconds=self.policy.request.timeout_seconds,
+            )
+        self._root_categories = normalize_root_categories(
+            resolve_tree_root_categories(self.policy.structure.root_categories)
+        ) if self.policy is not None else None
 
     def build(self, skills: Sequence[OneShotSkill]) -> OneShotTreeBuildResult:
+        with _model_scope(self.model) as model:
+            original = self.model
+            self.model = model
+            try:
+                return self._build(skills)
+            finally:
+                self.model = original
+
+    def _build(self, skills: Sequence[OneShotSkill]) -> OneShotTreeBuildResult:
         started = perf_counter()
+        self._llm_calls = 0
         normalized = self._normalize_skills(skills)
+        if self.policy is not None and self.policy.prompt.deterministic:
+            normalized = tuple(sorted(normalized, key=lambda skill: (skill.name.casefold(), skill.worker_id)))
         if not normalized:
             raise ValueError("at least one Skill is required")
 
         user_prompt = self._build_prompt(normalized)
         response_text, usage = self._call_model(user_prompt, len(normalized))
         prompt_tokens, completion_tokens, total_tokens = usage
-        llm_calls = 1
         try:
             leaves, diagnostics = self._validate_response(response_text, normalized, allow_missing=True)
             assigned = {name for leaf in leaves for name in leaf.skills}
@@ -190,7 +193,6 @@ class OneShotSkillTreeBuilder:
                     len(missing),
                     system_prompt=_REPAIR_SYSTEM_PROMPT.format(max_depth=self.config.max_depth),
                 )
-                llm_calls += 1
                 prompt_tokens += repair_usage[0]
                 completion_tokens += repair_usage[1]
                 total_tokens += repair_usage[2]
@@ -209,7 +211,7 @@ class OneShotSkillTreeBuilder:
         return OneShotTreeBuildResult(
             tree_preset=tree_preset,
             leaves=leaves,
-            llm_calls=llm_calls,
+            llm_calls=self._llm_calls,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -225,7 +227,13 @@ class OneShotSkillTreeBuilder:
         return "\n\n".join(sections)
 
     def _build_system_prompt(self, skill_count: int) -> str:
-        return _SYSTEM_PROMPT.format(skill_count=skill_count, max_depth=self.config.max_depth)
+        prompt = _SYSTEM_PROMPT.format(skill_count=skill_count, max_depth=self.config.max_depth)
+        if self.policy is not None:
+            prompt += f"\n每层同级目录最多 {self.policy.structure.branching_factor} 个。"
+        if self._root_categories:
+            prompt += "\n按以下指定分类层级分配对象，路径使用分类 id，空分类可以省略：\n"
+            prompt += json.dumps(self._root_categories, ensure_ascii=False, sort_keys=True)
+        return prompt
 
     def _call_model(
         self,
@@ -235,47 +243,36 @@ class OneShotSkillTreeBuilder:
         system_prompt: str | None = None,
     ) -> tuple[str, tuple[int, int, int]]:
         request: dict[str, Any] = {
-            "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt or self._build_system_prompt(skill_count)},
                 {"role": "user", "content": user_prompt},
             ],
             "max_tokens": self.config.max_output_tokens,
             "timeout": self.config.timeout_seconds,
-            "extra_body": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-            },
+            "temperature": 0.0,
+            "top_p": 1.0,
         }
-        reasoning = ReasoningConfig(
+        request["reasoning"] = ReasoningConfig(
             mode="enabled" if self.config.reasoning_effort else "disabled",
             effort=self.config.reasoning_effort,
         )
-        apply_reasoning_plan(
-            request,
-            resolve_reasoning_plan(
-                # Resolve wire parameters only; authentication belongs to the supplied client.
-                ModelClientConfig.model_construct(
-                    client_provider="OpenAI",
-                    api_base=str(getattr(self.client, "base_url", "") or ""),
-                ),
-                ModelRequestConfig(model=self.model, reasoning=reasoning),
-            ),
-        )
         if self.config.seed is not None:
-            request["extra_body"]["seed"] = self.config.seed
-        response = self.client.chat.completions.create(**request)
-        choice = response.choices[0]
-        if getattr(choice, "finish_reason", None) == "length":
+            request["seed"] = self.config.seed
+        retries = self.policy.request.max_retries if self.policy is not None else 0
+        for attempt in range(retries + 1):
+            try:
+                self._llm_calls += 1
+                response = self.model.invoke(**request)
+                break
+            except Exception as exc:
+                if attempt >= retries or not _is_transient_model_error(exc):
+                    raise
+        if _response_finish_reason(response) == "length":
             raise OneShotTreeBuildError("model output was truncated")
-        content = getattr(choice.message, "content", "")
-        if not isinstance(content, str) or not content.strip():
+        content = _response_content(response)
+        if not content.strip():
             raise OneShotTreeBuildError("model returned empty content")
-        usage = getattr(response, "usage", None)
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-        return content, (prompt_tokens, completion_tokens, total_tokens)
+        return content, _response_usage(response)
 
     @staticmethod
     def _normalize_skills(skills: Sequence[OneShotSkill]) -> tuple[OneShotSkill, ...]:
@@ -330,6 +327,15 @@ class OneShotSkillTreeBuilder:
                         f"1-{self.config.max_depth} directories below skills/",
                     )
                 )
+            configured = self._root_categories
+            for label in path:
+                if not configured:
+                    break
+                if label not in configured:
+                    raise _ResponseValidationError((f"classification path {raw_path!r} violates configured categories",))
+                configured = configured[label].get("children")
+            if configured:
+                raise _ResponseValidationError((f"classification path {raw_path!r} stops above configured categories",))
             invalid_labels = [label for label in path if _KEBAB_CASE_RE.fullmatch(label) is None]
             if invalid_labels:
                 raise _ResponseValidationError(
@@ -358,6 +364,13 @@ class OneShotSkillTreeBuilder:
                 bucket["skills"].append(canonical_name)
 
         path_keys = tuple(key for key, bucket in merged.items() if bucket["skills"])
+        if self.policy is not None:
+            children: dict[tuple[str, ...], set[str]] = {}
+            for path in path_keys:
+                for depth, label in enumerate(path):
+                    children.setdefault(path[:depth], set()).add(label)
+            if any(len(labels) > self.policy.structure.branching_factor for labels in children.values()):
+                raise _ResponseValidationError(("classification exceeds configured branching_factor",))
         path_conflicts = [
             " > ".join(merged[path_key]["path"])
             for path_key in path_keys

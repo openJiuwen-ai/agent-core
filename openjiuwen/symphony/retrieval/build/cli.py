@@ -1,15 +1,18 @@
+import asyncio
 import logging
 import os
 import shutil
 import time
 
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _bind_model_to_loop
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 
 logger = logging.getLogger(__name__)
 
 
-def main():
+async def main():
     # 记录开始时间
     start_time = time.time()
 
@@ -21,10 +24,11 @@ def main():
 
     # 配置初始化
     config_start = time.time()
-    config = BuildConfig(
-        llm_model=os.getenv("LLM_MODEL_NAME"),
-        llm_api_key=os.getenv("OPENAI_API_KEY"),
-        llm_base_url=os.getenv("OPENAI_BASE_URL"),
+    config = RetrievalBuildConfig()
+    model = Model(
+        ModelClientConfig(client_provider="OpenAI", api_key=os.getenv("OPENAI_API_KEY"),
+                          api_base=os.getenv("OPENAI_BASE_URL")),
+        ModelRequestConfig(model=os.getenv("LLM_MODEL_NAME")),
     )
     config_cost = time.time() - config_start
     logger.info("配置初始化完成，耗时: %.2f 秒", config_cost)
@@ -32,11 +36,13 @@ def main():
     # 索引构建
     build_start = time.time()
     logger.info("\n开始执行索引构建...")
-    IndexBuilder.build(
+    await asyncio.to_thread(
+        IndexBuilder.build,
         # 自动获取 skills_dir 下所有文件夹
         item_paths=[f.path for f in os.scandir(os.getenv("skills_dir")) if f.is_dir()][:15],
         output_dir=os.getenv("OUTPUT_DIR"),
         config=config,
+        model=_bind_model_to_loop(model, asyncio.get_running_loop()),
     )
     build_cost = time.time() - build_start
     logger.info("索引构建完成，耗时: %.2f 秒", build_cost)
@@ -67,4 +73,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

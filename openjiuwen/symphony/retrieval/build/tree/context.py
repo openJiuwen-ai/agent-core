@@ -5,15 +5,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .schema import TreeManagerConfig, TreeNode
+from openjiuwen.symphony.config import RetrievalBuildConfig
+
+from .schema import TreeNode
 
 
 @dataclass
 class TreeBuildSettings:
     """Resolved build settings shared by the tree engines."""
 
-    manager_config: TreeManagerConfig
-    llm_seed: int | None
+    config: RetrievalBuildConfig
     postprocess_enabled: bool
     postprocess_max_passes: int
     postprocess_min_skills: int
@@ -23,7 +24,6 @@ class TreeBuildSettings:
     equiv_min_lexical_similarity: float
     deterministic_prompts: bool
     discovery_seed: int
-    prompt_fingerprint_version: str
     cache_observability: bool
     skill_profiles_enabled: bool
     skill_profile_select_rules_enabled: bool
@@ -33,35 +33,24 @@ class TreeBuildSettings:
     max_consecutive_failures: int = 5
 
     @classmethod
-    def from_manager_config(
-        cls,
-        manager_config: TreeManagerConfig,
-        *,
-        llm_seed: int | None,
-    ) -> TreeBuildSettings:
-        build_config = manager_config.build
+    def from_config(cls, config: RetrievalBuildConfig) -> TreeBuildSettings:
         return cls(
-            manager_config=manager_config,
-            llm_seed=llm_seed,
-            postprocess_enabled=bool(build_config.postprocess_enabled),
-            postprocess_max_passes=max(0, int(build_config.postprocess_max_passes)),
-            postprocess_min_skills=max(2, int(build_config.postprocess_min_skills)),
-            equiv_grouping_enabled=bool(build_config.equiv_grouping_enabled),
-            equiv_max_groups_per_parent=max(2, int(build_config.equiv_max_groups_per_parent)),
-            equiv_allow_singleton_groups=bool(build_config.equiv_allow_singleton_groups),
-            equiv_min_lexical_similarity=max(
-                0.0,
-                min(1.0, float(build_config.equiv_min_lexical_similarity)),
-            ),
-            deterministic_prompts=build_config.deterministic_prompts,
-            discovery_seed=build_config.discovery_seed,
-            prompt_fingerprint_version=build_config.prompt_fingerprint_version,
-            cache_observability=build_config.cache_observability,
-            skill_profiles_enabled=bool(build_config.skill_profiles_enabled),
-            skill_profile_select_rules_enabled=bool(build_config.skill_profile_select_rules_enabled),
-            skill_profile_batch_size=max(1, int(build_config.skill_profile_batch_size)),
-            skill_profile_description_limit=max(40, int(build_config.skill_profile_description_limit)),
-            skill_profile_rule_limit=max(40, int(build_config.skill_profile_rule_limit)),
+            config=config,
+            postprocess_enabled=config.postprocess.enabled,
+            postprocess_max_passes=config.postprocess.max_passes,
+            postprocess_min_skills=config.postprocess.min_capabilities,
+            equiv_grouping_enabled=config.equivalence.enabled,
+            equiv_max_groups_per_parent=config.equivalence.max_groups_per_parent,
+            equiv_allow_singleton_groups=config.equivalence.allow_singleton_groups,
+            equiv_min_lexical_similarity=config.equivalence.min_lexical_similarity,
+            deterministic_prompts=config.prompt.deterministic,
+            discovery_seed=config.prompt.discovery_seed,
+            cache_observability=config.output.cache_metrics_enabled,
+            skill_profiles_enabled=config.profiles.enabled,
+            skill_profile_select_rules_enabled=config.profiles.select_rules_enabled,
+            skill_profile_batch_size=config.profiles.batch_size,
+            skill_profile_description_limit=config.profiles.max_description_chars,
+            skill_profile_rule_limit=config.profiles.max_rule_chars,
         )
 
 
@@ -69,10 +58,13 @@ class TreeBuildSettings:
 class TreeBuildState:
     """Mutable runtime state shared by concurrent tree-build workers."""
 
-    client: Any
+    model: Any
     max_workers: int
     llm_calls: int = 0
     retry_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
     cache_unknown: int = 0

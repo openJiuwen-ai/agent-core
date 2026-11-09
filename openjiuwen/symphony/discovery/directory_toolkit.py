@@ -23,7 +23,6 @@ _MIN_OUTPUT_CHARS = 512
 _MAX_OUTPUT_CHARS = 48_000
 _MAX_LINES = 5_000
 _SKILL_DESCRIPTION_CHARS = 180
-_DEFAULT_SEARCH_PAGE_SIZE = 10
 _MAX_CURSORS = 32
 _CURSOR_FOOTER_CHARS = 96
 _OPERATIONS = ("list", "search", "read")
@@ -182,7 +181,7 @@ class InstalledSkillsDirectoryToolkit:
         if not isinstance(environment, SkillFS):
             raise TypeError("environment must be a SkillFS")
         self._environment = environment
-        self._default_max_output_chars = environment.settings.max_output_chars
+        self._default_max_output_chars = environment.settings.output.max_chars
         if not _MIN_OUTPUT_CHARS <= self._default_max_output_chars <= _MAX_OUTPUT_CHARS:
             raise ValueError("settings.max_output_chars must be between 512 and 48000")
         scope = str(session_scope or "").strip()
@@ -245,7 +244,7 @@ class InstalledSkillsDirectoryToolkit:
         arguments["query"] = query
         arguments["category"] = category
         if simple_request:
-            _apply_simple_defaults(arguments, limit)
+            _apply_simple_defaults(arguments, limit, self._environment.settings.output.max_results)
         elif limit is not None:
             raise ValueError("limit cannot be combined with advanced arguments")
         async with self._lock:
@@ -344,9 +343,10 @@ class InstalledSkillsDirectoryToolkit:
         )
         complete = execution.complete and pipeline_complete
         all_rows = rows
-        if page_size == 0:
-            # Show the branch choices together; Skill candidate pages stay bounded.
-            page_size = 10 if any(row.worker_id for row in rows) else max(1, len(rows))
+        maximum = self._environment.settings.output.max_results
+        if operation == "list":
+            maximum = min(maximum, self._environment.settings.output.max_list_entries)
+        page_size = min(page_size or maximum, maximum)
         if page_size is not None:
             page_end = page_offset + page_size
             rows = all_rows[page_offset:page_end]
@@ -443,7 +443,7 @@ class InstalledSkillsDirectoryToolkit:
             "skillfs_layout": artifact.layout,
             "candidate_count": len(artifact.items),
             "estimated_candidate_tokens": _candidate_tokens(artifact.items),
-            "candidate_budget_tokens": self._environment.settings.candidate_budget_tokens,
+            "candidate_budget_tokens": self._environment.settings.prompt.candidate_budget_tokens,
             "index_state": artifact.index_state,
             "runtime": "Symphony.SkillIndex",
         }
@@ -1062,11 +1062,10 @@ def _cursor_query(arguments: Mapping[str, Any]) -> str | tuple[str, ...] | None:
     return values[0] if len(values) == 1 else values
 
 
-def _apply_simple_defaults(arguments: dict[str, Any], limit: Any) -> None:
+def _apply_simple_defaults(arguments: dict[str, Any], limit: Any, maximum: int) -> None:
     operation = _enum(arguments["operation"], _OPERATIONS, "operation")
     result_limit = _positive(limit, "limit", optional=True)
-    result_limit = result_limit or 10
-    maximum = 10
+    result_limit = result_limit or maximum
     if result_limit > maximum:
         raise ValueError(f"limit must not exceed {maximum} for {operation}")
     if operation == "list":
@@ -1079,9 +1078,7 @@ def _apply_simple_defaults(arguments: dict[str, Any], limit: Any) -> None:
         if arguments.get("skills") is not None:
             raise ValueError("skills are valid only for read")
         queries = _queries(arguments.get("query"), None)
-        arguments["_page_size"] = (
-            result_limit if limit is not None else min(20, _DEFAULT_SEARCH_PAGE_SIZE * len(queries))
-        )
+        arguments["_page_size"] = result_limit
         arguments["_page_offset"] = 0
     else:
         if arguments.get("query") is not None:

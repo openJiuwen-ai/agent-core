@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -7,7 +8,7 @@ import shutil
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,7 +23,10 @@ from openjiuwen.symphony.retrieval.build.scanners.common import (
     read_skill_file,
     sha256_file,
 )
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _BuildInterrupted, _bind_model_to_loop, _model_identity, _model_scope, _validate_model_binding
+from openjiuwen.symphony.retrieval.build.tree.root_categories import resolve_tree_root_categories
+from openjiuwen.symphony.retrieval.build.workflows.artifacts import resolve_build_config
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 from openjiuwen.symphony.retrieval.search.artifacts.loading import CatalogRecord, load_retriever_index
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
@@ -33,6 +37,10 @@ MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
 COMMIT_FILENAME = "commit.json"
 _INDEX_PUBLISH_LOCK_FILENAME = ".skill-index.publish.lock"
+_INDEX_IDENTITY_FIELDS = (
+    "fingerprint", "build_policy_fingerprint", "build_settings_fingerprint", "indexed_count",
+    "record_hashes", "source_file_hashes",
+)
 
 _TASKS: dict[str, "_BuildTask"] = {}
 _TASKS_LOCK = threading.RLock()
@@ -54,53 +62,6 @@ class SkillRecord:
         return str(self.worker_id or self.name).strip()
 
 
-@dataclass(frozen=True)
-class LLMConfig:
-    model: str = ""
-    api_key: str = ""
-    base_url: str = ""
-    client: Any | None = None
-    seed: int | None = None
-
-
-@dataclass(frozen=True)
-class SkillIndexBuildConfig:
-    max_depth: int = 6
-    branching_factor: int = 128
-    max_workers: int = 2
-    max_retries: int = 2
-    request_timeout_seconds: float = 420.0
-    total_timeout_seconds: float = 0.0
-    classification_batch_limit: int = 32
-    root_categories: Any = None
-    caching: bool = False
-    context_window: int = 0
-    max_output_tokens: int = 0
-    discovery_seed: int = 42
-    postprocess_enabled: bool = True
-    postprocess_max_passes: int = 1
-    postprocess_min_skills: int = 6
-    equivalence_enabled: bool = False
-    equivalence_max_groups_per_parent: int = 6
-    equivalence_allow_singleton_groups: bool = True
-    equivalence_min_lexical_similarity: float = 0.0
-    deterministic_prompts: bool = True
-    prompt_fingerprint_version: str = "v1"
-    cache_observability: bool = True
-    skill_profiles_enabled: bool = False
-    skill_profile_select_rules_enabled: bool = True
-    skill_profile_batch_size: int = 48
-    skill_profile_description_limit: int = 140
-    skill_profile_rule_limit: int = 120
-    incremental_max_change_ratio: float = 0.25
-    incremental_min_add_confidence: float = 0.18
-    incremental_min_add_confidence_margin: float = 0.04
-    incremental_branch_imbalance_ratio: float = 3.0
-    generate_tree_html: bool = False
-    preserve_previous_index_on_failure: bool = True
-    strict_failure: bool = False
-
-
 @dataclass
 class _BuildTask:
     thread: threading.Thread
@@ -115,11 +76,11 @@ class _IndexBuildPlan:
     response_worker_ids: tuple[str, ...] = ()
 
 
-class SkillIndexBuildCancelled(RuntimeError):
+class SkillIndexBuildCancelled(_BuildInterrupted):
     """Raised when a cooperative index build cancellation is requested."""
 
 
-class SkillIndexBuildTimeout(RuntimeError):
+class SkillIndexBuildTimeout(_BuildInterrupted):
     """Raised when an index build exceeds the configured total timeout."""
 
 
@@ -128,17 +89,17 @@ class AgenticSkillRetrievalToolkit:
 
     def __init__(
         self,
-        *,
         index_root: str | Path,
+        *,
         skills: Sequence[SkillRecord | dict[str, Any]] | None = None,
         skills_dir: str | Path | None = None,
-        build_config: SkillIndexBuildConfig | None = None,
-        llm_config: LLMConfig | None = None,
+        config: RetrievalBuildConfig,
+        model: Any = None,
     ) -> None:
         self.index_root = Path(index_root).expanduser().resolve()
         self.index_dir = self.index_root / "index"
-        self._build_config = build_config or SkillIndexBuildConfig()
-        self._llm_config = llm_config or LLMConfig()
+        self._config = config.model_copy(deep=True)
+        self._model = model
         self._skills = _coerce_skill_records(skills)
         self._skills_dir = Path(skills_dir).expanduser().resolve() if skills_dir else None
 
@@ -148,31 +109,35 @@ class AgenticSkillRetrievalToolkit:
         skills: Sequence[SkillRecord | dict[str, Any]] | None = None,
         skills_dir: str | Path | None = None,
         force: bool = False,
-        build_config: SkillIndexBuildConfig | None = None,
-        llm_config: LLMConfig | None = None,
+        config: RetrievalBuildConfig | None = None,
+        model: Any = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        prepare_artifact: Callable[[Path], None] | None = None,
         cancel_token: Callable[[], bool] | threading.Event | None = None,
         _build_id: str | None = None,
     ) -> dict[str, Any]:
+        resolved_model = model if model is not None else self._model
+        _validate_model_binding(resolved_model)
         records = [
             _snapshot_record_source(record) for record in self._resolve_records(skills=skills, skills_dir=skills_dir)
         ]
         if skills_dir is not None:
             self._skills_dir = Path(skills_dir).expanduser()
         self._skills = list(records)
-        build_cfg = build_config or self._build_config
-        llm_cfg = llm_config or self._llm_config
-        if build_config is not None:
-            self._build_config = build_cfg
-        if llm_config is not None:
-            self._llm_config = llm_cfg
+        self._config = (config or self._config).model_copy(deep=True)
+        build_cfg = resolve_build_config(config=self._config)
+        self._model = resolved_model
         started = time.monotonic()
         build_id = str(_build_id or _new_build_id())
         record_hashes = _record_hashes(records)
         source_file_hashes = _source_file_hashes(records)
+        policy_fingerprint = _build_policy_fingerprint(build_cfg, model=resolved_model)
+        settings_fingerprint = _build_settings_fingerprint(build_cfg)
         fingerprint = _index_fingerprint(
             records,
             build_cfg,
+            model=resolved_model,
+            policy_fingerprint=policy_fingerprint,
             record_hashes=record_hashes,
             source_file_hashes=source_file_hashes,
         )
@@ -184,7 +149,7 @@ class AgenticSkillRetrievalToolkit:
         self.index_root.mkdir(parents=True, exist_ok=True)
 
         if not records:
-            if not build_cfg.preserve_previous_index_on_failure:
+            if not build_cfg.task.preserve_previous_index_on_failure:
                 _cleanup_index(self.index_dir)
             state = _build_state(
                 status="failed",
@@ -202,7 +167,7 @@ class AgenticSkillRetrievalToolkit:
                 state,
                 previous_state=previous_index_state,
                 previous_index_available=previous_index_available,
-                previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
+                previous_index_preserved=build_cfg.task.preserve_previous_index_on_failure,
                 attempted_fingerprint=fingerprint,
             )
             self._write_state(state, expected_build_id=build_id, claim=True)
@@ -224,6 +189,9 @@ class AgenticSkillRetrievalToolkit:
                 finished=True,
                 elapsed_seconds=time.monotonic() - started,
             )
+            state["build_policy_fingerprint"] = policy_fingerprint
+            state["build_settings_fingerprint"] = settings_fingerprint
+            state["build"]["operation"] = "reuse"
             _set_capability_category_paths(state, capability_category_paths)
             self._write_state(state, expected_build_id=build_id, claim=True)
             return _result(
@@ -236,7 +204,7 @@ class AgenticSkillRetrievalToolkit:
         build_check = _build_check(
             cancel_check=cancel_check,
             started=started,
-            total_timeout_seconds=build_cfg.total_timeout_seconds,
+            total_timeout_seconds=build_cfg.task.total_timeout_seconds,
         )
         self._set_running_state(
             build_id=build_id,
@@ -259,18 +227,18 @@ class AgenticSkillRetrievalToolkit:
                 started=started,
                 fingerprint=fingerprint,
                 force=force,
-                preserve_previous_index=build_cfg.preserve_previous_index_on_failure,
+                preserve_previous_index=build_cfg.task.preserve_previous_index_on_failure,
                 previous_state=previous_index_state,
                 previous_index_available=previous_index_available,
             )
 
-        if build_cfg.strict_failure and not (llm_cfg.model and (llm_cfg.client is not None or llm_cfg.api_key)):
-            error = "Skill index build requires a model and API key in strict failure mode."
-            if not build_cfg.preserve_previous_index_on_failure:
+        if not build_cfg.task.allow_fallback_tree and resolved_model is None:
+            error = "Skill index build requires an injected model when fallback is disabled."
+            if not build_cfg.task.preserve_previous_index_on_failure:
                 _cleanup_index(self.index_dir)
             state = _build_state(
                 status="failed",
-                stage="llm_config",
+                stage="model",
                 message="Build LLM configuration is missing.",
                 error=error,
                 progress=1.0,
@@ -285,7 +253,7 @@ class AgenticSkillRetrievalToolkit:
                 state,
                 previous_state=previous_index_state,
                 previous_index_available=previous_index_available,
-                previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
+                previous_index_preserved=build_cfg.task.preserve_previous_index_on_failure,
                 attempted_fingerprint=fingerprint,
             )
             self._write_state(state, expected_build_id=build_id)
@@ -297,13 +265,15 @@ class AgenticSkillRetrievalToolkit:
                     "index_updated": False,
                     "previous_index_available": previous_index_available,
                     "previous_index_preserved": (
-                        previous_index_available and build_cfg.preserve_previous_index_on_failure
+                        previous_index_available and build_cfg.task.preserve_previous_index_on_failure
                     ),
                 },
-                error={"code": "llm_config_missing", "message": error},
+                error={"code": "model_missing", "message": error},
             )
 
-        with TemporaryDirectory(prefix="symphony-skill-index-") as tmp:
+        with TemporaryDirectory(prefix="symphony-skill-index-") as tmp, _model_scope(
+            resolved_model, check=build_check,
+        ) as build_model:
             tmp_root = Path(tmp)
             item_jsonl = tmp_root / "skills.jsonl"
             base_index_dir = tmp_root / "base-index"
@@ -313,9 +283,11 @@ class AgenticSkillRetrievalToolkit:
                 force=force,
                 base_index_dir=base_index_dir,
                 committed_state=base_state,
+                policy_fingerprint=policy_fingerprint,
             )
             _write_records_jsonl(plan.records, item_jsonl)
             output_dir = tmp_root / "index"
+            operation = plan.operation
             published = False
             committed_state: dict[str, Any] = {}
             try:
@@ -333,10 +305,10 @@ class AgenticSkillRetrievalToolkit:
                     build_check("build")
                 except SkillIndexBuildCancelled:
                     return self._cancelled_result(build_id=build_id, started=started, fingerprint=fingerprint)
-                config = _to_retrieval_build_config(build_cfg, llm_cfg)
-                if previous_index_available and build_cfg.preserve_previous_index_on_failure:
+                config = build_cfg.model_copy(deep=True)
+                if previous_index_available and build_cfg.task.preserve_previous_index_on_failure:
                     # A successful flat fallback must not replace a usable taxonomy after an LLM failure.
-                    config = replace(config, allow_fallback_tree=False)
+                    config = config.model_copy(update={"task": config.task.model_copy(update={"allow_fallback_tree": False})})
                 if plan.operation == "build":
                     _run_index_builder(
                         operation=plan.operation,
@@ -344,6 +316,8 @@ class AgenticSkillRetrievalToolkit:
                         output_dir=output_dir,
                         base_index_dir=base_index_dir,
                         config=config,
+                        model=build_model,
+                        check=build_check,
                     )
                 else:
                     try:
@@ -353,8 +327,13 @@ class AgenticSkillRetrievalToolkit:
                             output_dir=output_dir,
                             base_index_dir=base_index_dir,
                             config=config,
+                            model=build_model,
+                            check=build_check,
                         )
+                    except _BuildInterrupted:
+                        raise
                     except Exception:
+                        operation = "build"
                         self._set_running_state(
                             build_id=build_id,
                             stage="build",
@@ -372,7 +351,12 @@ class AgenticSkillRetrievalToolkit:
                             output_dir=output_dir,
                             base_index_dir=base_index_dir,
                             config=config,
+                            model=build_model,
+                            check=build_check,
                         )
+                if prepare_artifact is not None:
+                    build_check("prepare_artifact")
+                    prepare_artifact(output_dir)
                 try:
                     build_check("publish")
                 except SkillIndexBuildCancelled:
@@ -390,6 +374,9 @@ class AgenticSkillRetrievalToolkit:
                 committed_state = _committed_index_state(
                     build_id=build_id,
                     fingerprint=fingerprint,
+                    policy_fingerprint=policy_fingerprint,
+                    settings_fingerprint=settings_fingerprint,
+                    operation=operation,
                     record_hashes=record_hashes,
                     source_file_hashes=source_file_hashes,
                 )
@@ -403,7 +390,8 @@ class AgenticSkillRetrievalToolkit:
                     indexed_count=len(records),
                     fingerprint=fingerprint,
                 )
-                _publish_index(candidate_dir=output_dir, index_dir=self.index_dir, expected_build_id=build_id)
+                _publish_index(candidate_dir=output_dir, index_dir=self.index_dir, expected_build_id=build_id,
+                               check=build_check)
                 published = True
                 elapsed = time.monotonic() - started
                 state = _build_state(
@@ -420,6 +408,10 @@ class AgenticSkillRetrievalToolkit:
                     finished=True,
                     elapsed_seconds=elapsed,
                 )
+                state["build_policy_fingerprint"] = policy_fingerprint
+                state["build_settings_fingerprint"] = settings_fingerprint
+                state["build"]["operation"] = operation
+                state["build"]["planned_operation"] = plan.operation
                 _set_capability_category_paths(state, capability_category_paths)
                 self._write_state(state, expected_build_id=build_id)
                 return _result(
@@ -447,7 +439,7 @@ class AgenticSkillRetrievalToolkit:
                             "status_warning": error,
                         },
                     )
-                if not build_cfg.preserve_previous_index_on_failure:
+                if not build_cfg.task.preserve_previous_index_on_failure:
                     _cleanup_index(self.index_dir)
                 state = _build_state(
                     status="failed",
@@ -466,7 +458,7 @@ class AgenticSkillRetrievalToolkit:
                     state,
                     previous_state=previous_index_state,
                     previous_index_available=previous_index_available,
-                    previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
+                    previous_index_preserved=build_cfg.task.preserve_previous_index_on_failure,
                     attempted_fingerprint=fingerprint,
                 )
                 self._write_state(state, expected_build_id=build_id)
@@ -478,7 +470,7 @@ class AgenticSkillRetrievalToolkit:
                         "index_updated": False,
                         "previous_index_available": previous_index_available,
                         "previous_index_preserved": (
-                            previous_index_available and build_cfg.preserve_previous_index_on_failure
+                            previous_index_available and build_cfg.task.preserve_previous_index_on_failure
                         ),
                     },
                     error={"code": "build_failed", "message": error},
@@ -490,10 +482,17 @@ class AgenticSkillRetrievalToolkit:
         skills: Sequence[SkillRecord | dict[str, Any]] | None = None,
         skills_dir: str | Path | None = None,
         force: bool = False,
-        build_config: SkillIndexBuildConfig | None = None,
-        llm_config: LLMConfig | None = None,
+        config: RetrievalBuildConfig | None = None,
+        model: Any = None,
         replace_running: bool = False,
+        prepare_artifact: Callable[[Path], None] | None = None,
     ) -> dict[str, Any]:
+        resolved_model = model if model is not None else self._model
+        try:
+            resolved_model = _bind_model_to_loop(resolved_model, asyncio.get_running_loop())
+        except RuntimeError:
+            pass
+        _validate_model_binding(resolved_model)
         key = str(self.index_root)
         with _TASKS_LOCK:
             existing = _TASKS.get(key)
@@ -520,8 +519,9 @@ class AgenticSkillRetrievalToolkit:
                     "skills": skills,
                     "skills_dir": skills_dir,
                     "force": force,
-                    "build_config": build_config,
-                    "llm_config": llm_config,
+                    "config": config,
+                    "model": resolved_model,
+                    "prepare_artifact": prepare_artifact,
                     "_build_id": build_id,
                 },
                 daemon=True,
@@ -633,10 +633,11 @@ class AgenticSkillRetrievalToolkit:
                         "error": "",
                         "progress": 1.0,
                         "finished_at": str(committed.get("committed_at") or _now_iso()),
+                        "operation": str(committed.get("operation") or ""),
                     }
                 )
                 state["build"] = build
-                for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+                for key in _INDEX_IDENTITY_FIELDS:
                     if key in committed:
                         state[key] = committed[key]
                 self._write_state(state, expected_build_id=committed_build_id)
@@ -660,10 +661,19 @@ class AgenticSkillRetrievalToolkit:
         if build.get("status") == "success":
             capability_category_paths = list(build.get("capability_category_paths") or [])
         current_records = self._current_records(refresh=refresh_inventory)
-        current_fingerprint = _index_fingerprint(current_records, self._build_config)
+        model_identity_checked = self._model is not None
+        current_policy = (
+            _build_policy_fingerprint(self._config, model=self._model)
+            if model_identity_checked else str(committed.get("build_policy_fingerprint") or "")
+        )
+        current_fingerprint = _index_fingerprint(current_records, self._config, policy_fingerprint=current_policy)
+        policy_matches = _matches_build_policy(
+            committed, self._config, model=self._model, check_model=model_identity_checked,
+        )
         status = {
             "status": str(build.get("status") or "idle"),
             "stage": str(build.get("stage") or ""),
+            "operation": str(build.get("operation") or committed.get("operation") or ""),
             "progress": _coerce_progress(build.get("progress")),
             "message": str(build.get("message") or ""),
             "error": str(build.get("error") or ""),
@@ -675,7 +685,8 @@ class AgenticSkillRetrievalToolkit:
             "elapsed_seconds": float(build.get("elapsed_seconds") or 0.0),
             "index_dir": str(self.index_dir),
             "index_exists": index_exists,
-            "fresh": index_exists and str(committed.get("fingerprint") or "") == current_fingerprint,
+            "fresh": index_exists and policy_matches and str(committed.get("fingerprint") or "") == current_fingerprint,
+            "model_identity_checked": model_identity_checked,
             "indexed_count": int(committed.get("indexed_count") or 0) if index_exists else 0,
             "fingerprint": str(committed.get("fingerprint") or ""),
             "capability_category_paths": capability_category_paths,
@@ -793,6 +804,7 @@ class AgenticSkillRetrievalToolkit:
         force: bool,
         base_index_dir: Path | None = None,
         committed_state: dict[str, Any] | None = None,
+        policy_fingerprint: str | None = None,
     ) -> _IndexBuildPlan:
         resolved_base_dir = base_index_dir or self.index_dir
         if force or not _is_complete_index(resolved_base_dir):
@@ -802,6 +814,10 @@ class AgenticSkillRetrievalToolkit:
             if committed_state is not None
             else self._read_committed_index_state(fallback=self._read_state())
         )
+        expected_policy = policy_fingerprint or _build_policy_fingerprint(self._config, model=self._model)
+        if (str(state.get("build_policy_fingerprint") or "") != expected_policy
+                or str(state.get("build_settings_fingerprint") or "") != _build_settings_fingerprint(self._config)):
+            return _IndexBuildPlan("build", tuple(records))
         previous_hashes = dict(state.get("record_hashes") or {})
         current_hashes = _record_hashes(records)
         if not previous_hashes:
@@ -832,17 +848,25 @@ class AgenticSkillRetrievalToolkit:
 
     def _is_fresh(self, fingerprint: str) -> bool:
         state = self._read_committed_index_state(fallback=self._read_state())
-        return _is_complete_index(self.index_dir) and str(state.get("fingerprint") or "") == fingerprint
+        return (
+            _is_complete_index(self.index_dir)
+            and str(state.get("fingerprint") or "") == fingerprint
+            and _matches_build_policy(state, self._config, model=self._model)
+        )
 
 
     def _index_readiness_error(self, *, refresh_inventory: bool = False) -> str | None:
         state = self._read_committed_index_state(fallback=self._read_state())
         if not _is_complete_index(self.index_dir):
             return f"Skill index is missing or incomplete: {self.index_dir}"
+        if not _matches_build_policy(state, self._config, model=self._model, check_model=self._model is not None):
+            return "Skill index is stale because build settings or the signature protocol changed."
         records = self._current_records(refresh=refresh_inventory)
         if not records:
             return None
-        expected = _index_fingerprint(records, self._build_config)
+        expected = _index_fingerprint(
+            records, self._config, policy_fingerprint=str(state.get("build_policy_fingerprint") or ""),
+        )
         actual = str(state.get("fingerprint") or "")
         if actual != expected:
             return "Skill index is stale because skills or build settings changed."
@@ -920,8 +944,9 @@ class AgenticSkillRetrievalToolkit:
                     error="",
                     progress=1.0,
                     finished_at=str(committed.get("committed_at") or _now_iso()),
+                    operation=str(committed.get("operation") or ""),
                 )
-                for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+                for key in _INDEX_IDENTITY_FIELDS:
                     if key in committed:
                         state[key] = committed[key]
             if previous_build.get("status") == "running" and active_build_id:
@@ -1029,11 +1054,13 @@ class AgenticSkillRetrievalToolkit:
             }
         )
         if _is_complete_index(self.index_dir):
-            for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+            for key in _INDEX_IDENTITY_FIELDS:
                 if key in committed:
                     state[key] = committed[key]
         else:
             state["fingerprint"] = ""
+            state["build_policy_fingerprint"] = ""
+            state["build_settings_fingerprint"] = ""
             state["indexed_count"] = 0
             state["record_hashes"] = {}
             state["source_file_hashes"] = {}
@@ -1209,7 +1236,9 @@ def _run_index_builder(
     item_jsonl_path: Path,
     output_dir: Path,
     base_index_dir: Path,
-    config: BuildConfig,
+    config: RetrievalBuildConfig,
+    model=None,
+    check=None,
 ) -> None:
     if operation == "add":
         IndexBuilder.add(
@@ -1218,6 +1247,8 @@ def _run_index_builder(
             output_dir=output_dir,
             item_type="skill",
             config=config,
+            model=model,
+            check=check,
         )
         return
     if operation == "delete":
@@ -1227,6 +1258,8 @@ def _run_index_builder(
             output_dir=output_dir,
             item_type="skill",
             config=config,
+            model=model,
+            check=check,
         )
         return
     IndexBuilder.build(
@@ -1235,48 +1268,8 @@ def _run_index_builder(
         output_dir=output_dir,
         item_type="skill",
         config=config,
-    )
-
-
-def _to_retrieval_build_config(config: SkillIndexBuildConfig, llm: LLMConfig) -> BuildConfig:
-    return BuildConfig(
-        llm_openai_client=llm.client,
-        llm_model=llm.model,
-        llm_api_key=llm.api_key,
-        llm_base_url=llm.base_url,
-        llm_seed=llm.seed,
-        tree_branching_factor=config.branching_factor,
-        tree_max_depth=config.max_depth,
-        tree_root_categories=config.root_categories,
-        tree_max_workers=config.max_workers,
-        tree_caching=config.caching,
-        tree_num_retries=config.max_retries,
-        tree_timeout_seconds=config.request_timeout_seconds,
-        tree_classify_batch_cap=config.classification_batch_limit,
-        tree_context_window=config.context_window,
-        tree_max_output_tokens=config.max_output_tokens,
-        tree_postprocess_enabled=config.postprocess_enabled,
-        tree_postprocess_max_passes=config.postprocess_max_passes,
-        tree_postprocess_min_skills=config.postprocess_min_skills,
-        tree_equiv_grouping_enabled=config.equivalence_enabled,
-        tree_equiv_max_groups_per_parent=config.equivalence_max_groups_per_parent,
-        tree_equiv_allow_singleton_groups=config.equivalence_allow_singleton_groups,
-        tree_equiv_min_lexical_similarity=config.equivalence_min_lexical_similarity,
-        tree_deterministic_prompts=config.deterministic_prompts,
-        tree_discovery_seed=config.discovery_seed,
-        tree_prompt_fingerprint_version=config.prompt_fingerprint_version,
-        tree_cache_observability=config.cache_observability,
-        tree_skill_profiles_enabled=config.skill_profiles_enabled,
-        tree_skill_profile_select_rules_enabled=config.skill_profile_select_rules_enabled,
-        tree_skill_profile_batch_size=config.skill_profile_batch_size,
-        tree_skill_profile_description_limit=config.skill_profile_description_limit,
-        tree_skill_profile_rule_limit=config.skill_profile_rule_limit,
-        incremental_max_change_ratio=config.incremental_max_change_ratio,
-        incremental_min_add_confidence=config.incremental_min_add_confidence,
-        incremental_min_add_confidence_margin=config.incremental_min_add_confidence_margin,
-        incremental_branch_imbalance_ratio=config.incremental_branch_imbalance_ratio,
-        generate_tree_html=config.generate_tree_html,
-        allow_fallback_tree=not config.strict_failure,
+        model=model,
+        check=check,
     )
 
 
@@ -1511,11 +1504,15 @@ def _set_failed_index_state(
 ) -> None:
     if previous_index_available and previous_index_preserved:
         state["fingerprint"] = str(previous_state.get("fingerprint") or "")
+        state["build_policy_fingerprint"] = str(previous_state.get("build_policy_fingerprint") or "")
+        state["build_settings_fingerprint"] = str(previous_state.get("build_settings_fingerprint") or "")
         state["indexed_count"] = int(previous_state.get("indexed_count") or 0)
         state["record_hashes"] = dict(previous_state.get("record_hashes") or {})
         state["source_file_hashes"] = dict(previous_state.get("source_file_hashes") or {})
     else:
         state["fingerprint"] = ""
+        state["build_policy_fingerprint"] = ""
+        state["build_settings_fingerprint"] = ""
         state["indexed_count"] = 0
         state["record_hashes"] = {}
         state["source_file_hashes"] = {}
@@ -1529,13 +1526,19 @@ def _committed_index_state(
     *,
     build_id: str,
     fingerprint: str,
+    policy_fingerprint: str,
+    settings_fingerprint: str,
+    operation: str,
     record_hashes: dict[str, str],
     source_file_hashes: dict[str, str],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 3,
         "build_id": build_id,
         "fingerprint": fingerprint,
+        "build_policy_fingerprint": policy_fingerprint,
+        "build_settings_fingerprint": settings_fingerprint,
+        "operation": operation,
         "indexed_count": len(record_hashes),
         "record_hashes": dict(record_hashes),
         "source_file_hashes": dict(source_file_hashes),
@@ -1592,7 +1595,10 @@ def _recover_index_directory_unlocked(
     return True
 
 
-def _publish_index(*, candidate_dir: Path, index_dir: Path, expected_build_id: str) -> None:
+def _publish_index(
+    *, candidate_dir: Path, index_dir: Path, expected_build_id: str,
+    check: Callable[[str], None] | None = None,
+) -> None:
     parent = index_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
     token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
@@ -1612,6 +1618,10 @@ def _publish_index(*, candidate_dir: Path, index_dir: Path, expected_build_id: s
             build = dict(current.get("build") or {})
             if str(build.get("build_id") or "") != expected_build_id or str(build.get("status") or "") != "running":
                 raise SkillIndexBuildCancelled("Skill index build was superseded before publication.")
+            # Copying and waiting for the lock can outlive the last task check.
+            # Recheck at the generation-switch boundary while the lock is held.
+            if check is not None:
+                check("publish")
             pending.replace(staging)
             if index_dir.exists():
                 index_dir.replace(backup)
@@ -1649,8 +1659,10 @@ def _is_complete_index(index_dir: Path) -> bool:
 
 def _index_fingerprint(
     records: Sequence[SkillRecord],
-    config: SkillIndexBuildConfig,
+    config: RetrievalBuildConfig,
     *,
+    model=None,
+    policy_fingerprint: str | None = None,
     record_hashes: dict[str, str] | None = None,
     source_file_hashes: dict[str, str] | None = None,
 ) -> str:
@@ -1662,7 +1674,46 @@ def _index_fingerprint(
     payload = {
         "records": dict(record_hashes or _record_hashes(snapshot_records)),
         "source_files": dict(source_file_hashes or _source_file_hashes(snapshot_records)),
-        "config": asdict(config),
+        "build_policy_fingerprint": policy_fingerprint or _build_policy_fingerprint(config, model=model),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_policy_fingerprint(config: RetrievalBuildConfig, *, model=None) -> str:
+    payload = {
+        "build_settings_fingerprint": _build_settings_fingerprint(config),
+        "model": _model_identity(model),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _matches_build_policy(state: dict[str, Any], config: RetrievalBuildConfig, *, model=None, check_model=True) -> bool:
+    policy = str(state.get("build_policy_fingerprint") or "")
+    return (
+        bool(policy)
+        and str(state.get("build_settings_fingerprint") or "") == _build_settings_fingerprint(config)
+        and (not check_model or policy == _build_policy_fingerprint(config, model=model))
+    )
+
+
+def _build_settings_fingerprint(config: RetrievalBuildConfig) -> str:
+    payload = {
+        "protocol": "symphony-tree-build.v3",
+        "config": {
+            "structure": {
+                **config.structure.model_dump(mode="json"),
+                "root_categories": resolve_tree_root_categories(config.structure.root_categories),
+            },
+            "request": config.request.model_dump(mode="json"),
+            "profiles": config.profiles.model_dump(mode="json"),
+            "prompt": config.prompt.model_dump(mode="json"),
+            "postprocess": config.postprocess.model_dump(mode="json"),
+            "equivalence": config.equivalence.model_dump(mode="json"),
+            "incremental": config.incremental.model_dump(mode="json"),
+            "allow_fallback_tree": config.task.allow_fallback_tree,
+        },
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

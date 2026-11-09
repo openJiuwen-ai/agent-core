@@ -2,20 +2,16 @@
 
 遵循仓库根 AGENTS.md 和 jw-coding-flow，不运行格式化或静态检查。
 
-## 目标配置边界
+## 运行配置与生命周期
 
-- 用户可调策略通过 `SymphonyConfig` 的五个分组组合，每个参数只有一个可写路径。
-  指纹协议、一次性构树与构建模型连接参数独立维护；归一化结果保留在原运行模块。
-  目标 config.py 不再为旧入口的不同默认值声明同义镜像或包装，也不为测试恢复已退役模型。
-  新配置尚未接入运行链路。
-- 公共构建使用索引入口默认值和约束，旧底层入口的不同默认值继续由原业务模块维护。
-  树结构和 max_capabilities_per_node_multiplier 统一来自 retrieval.build.structure；叶节点容量阈值留给后续运行层计算。
-  不恢复无消费者的重平衡间隔、五个扩展倍率或 retrieval.build.dynamic 包装。
-  回退树策略归 retrieval.build.task，构建展示归 retrieval.build.output，不增加第二个可写路径。
-  request.caching 不进入目标配置；现有业务字段仅透传并参与签名，不控制缓存，后续清理须单独核对签名影响。
-  缓存指标与指纹缓存继续分别由 output.cache_metrics_enabled 和 capability.fingerprint.cache.enabled 配置。
-- `PUBLIC_CONFIG_MODELS` 覆盖根 Schema 可达的子模型，`INTERNAL_CONFIG_MODELS` 登记其余模型。
-  模型登记不等于 `__all__` 便利导出范围，新增子节点不自动增加独立导出。
+- `SymphonyRuntime(model, config)` 是统一组装入口；子服务直接使用 `config.py` 的子模型，解析快照不另设默认值。
+- Runtime 构造只复制配置、固定路径；不得扫描、请求模型或启动后台任务。入口为 retrieval、orchestration、flow。
+- 构建采用宿主注入模型；同步树算法通过宿主事件循环桥接。取消必须等待模型和文件写入工作收尾，不关闭宿主模型。
+- 全量和增量发布前复核集合身份；失败或取消保留已发布版本。布局绑定对象根和类型，不兼容旧签名和旧布局，不自动删旧目录。
+- 配置有唯一可写路径；树结构与容量倍率在 retrieval.build.structure，任务策略在 task，展示及缓存指标在 output。
+  指纹协议和一次性构树内部预算独立维护；模型连接、凭证和计量由宿主负责，禁止恢复 RetrievalModelConfig 和旧转换包装。
+- `PUBLIC_CONFIG_MODELS` 覆盖 31 个公共树模型，`INTERNAL_CONFIG_MODELS` 登记 2 个内部模型；登记不等于便利导出范围。
+- Discovery 会话目录、可见和禁用对象、来源标签属于调用上下文。保持预算与索引版本冻结，并实时过滤禁用对象。
 
 ## 能力退役边界
 
@@ -23,7 +19,7 @@
 - Discovery 继续使用 `retrieval/search/artifacts/loading.py`、`retrieval/search/runtime/lexical.py`
   和 `agent/retrieval_toolkit.py` 的发布恢复函数；这些共享路径不能随旧检索服务一并删除。
 - 构树、指纹、编排、动态观测与 Flow 保留；Flow 的 `symphony.experience_recipe.v1` 是现有产物协议，
-  不等于已退役的独立经验库。保持构建指纹和工件格式，不能将新配置 dump 直接替换旧签名输入。
+  不等于已退役的独立经验库。Runtime 使用显式新版构建签名，不能直接把全量配置 dump 作为缓存身份。
 
 ## 配置文档同步
 

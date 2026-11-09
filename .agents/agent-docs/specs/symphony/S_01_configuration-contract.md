@@ -1,21 +1,21 @@
 ---
 id: S_01_configuration-contract
-title: Symphony 目标配置模型规约
+title: Symphony 运行配置与 Runtime 契约
 type: S
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-10-31
-updated: 2026-11-06
-modules: [symphony]
+updated: 2026-11-09
+modules: [openjiuwen/symphony]
 files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
-designs: [D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement]
+designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement]
 ---
 
-# Symphony 目标配置模型规约
+# Symphony 运行配置与 Runtime 契约
 
 ## 1. 当前边界
 
-`openjiuwen.symphony.config` 提供纯配置模型，是后续 Runtime 接入的目标契约。当前 Runtime、引擎和 Swarm 仍使用保留业务模块的原定义；包根不重导出新配置，`SymphonyRuntime(model, config)` 尚未实现。
+`openjiuwen.symphony.config` 提供唯一运行配置定义；包根导出 SymphonyConfig、SymphonyRuntime 和 DiscoverySession。Runtime 仅接收 model/config，内部组装扫描、指纹、树、图、Discovery 和默认 Flow，业务消费者直接使用统一子模型。
 
 配置构造不扫描目录、不读取环境或根分类文件、不创建模型客户端，也不启动服务。目录有效性、扫描、模型调用、执行权限、缓存签名和发布由运行层处理。
 
@@ -27,7 +27,7 @@ designs: [D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-cap
 from openjiuwen.symphony.config import SymphonyConfig
 
 config = SymphonyConfig.model_validate({
-    "capability": {"root": "./capabilities", "type": "expert"},
+    "capability": {"root": "./capabilities", "type": "skill"},
     "storage": {"artifact_root": "./.symphony"},
     "retrieval": {
         "build": {"request": {"max_concurrency": 4}},
@@ -55,15 +55,15 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 
 ## 3. 单一可写路径与保留模型
 
-树结构唯一位于 retrieval.build.structure，包含 max_capabilities_per_node_multiplier。该倍率对应递归构树的叶节点容量阈值，后续运行层按 int(branching_factor * max_capabilities_per_node_multiplier) 计算；对象数不超过阈值时可停止细分，配置本身不计算阈值。原 retrieval.build.dynamic 节点及目标 DynamicTreeConfig、TreeExpansionConfig 已删除，不提供兼容别名。
+树结构唯一位于 retrieval.build.structure，包含 max_capabilities_per_node_multiplier。该倍率对应递归构树的叶节点容量阈值，递归构树按 int(branching_factor * max_capabilities_per_node_multiplier) 计算；对象数不超过阈值时可停止细分，配置本身不计算阈值。原 retrieval.build.dynamic 节点及目标 DynamicTreeConfig、TreeExpansionConfig 已删除，不提供兼容别名。
 
-重平衡间隔 rebalance_interval，以及 expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier 五个倍率没有实际功能消费者，不再进入目标配置。业务 schema.py 中的定义与派生属性留待后续迁移清理；request.classification_batch_limit 的有效批量上限继续保留。
+重平衡间隔 rebalance_interval，以及 expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier 五个倍率没有实际功能消费者，不再进入目标配置。对应业务重复定义已清理；request.classification_batch_limit 的有效批量上限继续保留。
 
-构建任务策略位于 retrieval.build.task，展示与缓存指标位于 output。allow_fallback_tree 反向对应业务 strict_failure，目标不再接受第二个反向开关。旧索引保护与回退树独立配置：存在可用旧索引且 preserve_previous_index_on_failure=True 时，失败应优先保护旧索引；allow_fallback_tree=False 时缺模型配置或构建失败不能生成回退树。模型和工件是否存在由业务判断，尚不接入目标配置。
+构建任务策略位于 retrieval.build.task，展示与缓存指标位于 output。allow_fallback_tree 反向对应业务 strict_failure，目标不再接受第二个反向开关。旧索引保护与回退树独立配置：存在可用旧索引且 preserve_previous_index_on_failure=True 时，失败应优先保护旧索引；allow_fallback_tree=False 时缺模型配置或构建失败不能生成回退树。模型和工件是否存在由构建入口判断。
 
-构图整体并发唯一位于 orchestration.build.max_concurrency，阶段上限位于 capability.fingerprint.extraction.max_concurrency；后续接入构图时取两者较小值。关系阈值唯一位于 orchestration.min_edge_confidence。plan.dynamic_graph_enabled 保留，控制是否在规划中使用已有动态观测，不触发执行或构图。
+构图整体并发唯一位于 orchestration.build.max_concurrency，阶段上限位于 capability.fingerprint.extraction.max_concurrency；构图时取两者较小值。关系阈值唯一位于 orchestration.min_edge_confidence。plan.dynamic_graph_enabled 保留，控制是否在规划中使用已有动态观测，不触发执行或构图。
 
-缓存指标位于 retrieval.build.output.cache_metrics_enabled，只控制缓存命中和提示指纹统计，不控制缓存是否启用；指纹缓存仍由 capability.fingerprint.cache.enabled 配置。request.caching 已从目标配置删除，对应业务字段仅透传并通过 asdict 参与现有索引签名，没有缓存控制逻辑；本轮不修改业务字段或签名输入。prompt 只保留确定性策略和发现种子。Discovery 上下文、候选比例和优先对象统一位于 retrieval.discovery.prompt；candidate_budget_tokens 为只读派生值，不进入输入和序列化。
+缓存指标位于 retrieval.build.output.cache_metrics_enabled，只控制缓存命中和提示指纹统计，不控制缓存是否启用；指纹缓存仍由 capability.fingerprint.cache.enabled 配置。request.caching 已从目标配置删除，对应业务字段与旧签名输入一并删除，旧产物不兼容。prompt 只保留确定性策略和发现种子。Discovery 上下文、候选比例和优先对象统一位于 retrieval.discovery.prompt；candidate_budget_tokens 为只读派生值，不进入输入和序列化。
 
 | 原目标路径 | 当前路径 |
 |---|---|
@@ -72,7 +72,7 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 | retrieval.build.task.strict_failure | 删除，反向由 retrieval.build.task.allow_fallback_tree 表达 |
 | retrieval.build.dynamic.expansion.max_capabilities_per_node_multiplier | retrieval.build.structure.max_capabilities_per_node_multiplier |
 | retrieval.build.dynamic 的其余字段与节点 | 删除，无实际功能消费者 |
-| retrieval.build.request.caching | 删除，仅在业务定义中保留透传和签名输入 |
+| retrieval.build.request.caching | 删除，业务定义和旧签名输入也已移除 |
 | retrieval.build.prompt.cache_observability | retrieval.build.output.cache_metrics_enabled |
 | retrieval.discovery.budget | retrieval.discovery.prompt |
 | capability.fingerprint.extraction.body_limit / max_tokens | max_body_chars / max_output_tokens |
@@ -84,7 +84,7 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 
 TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildConfig、IndexTreeBuildConfig、TreeManagerConfig、TreePromptConfig、IndexBuildConfig、IndexArtifactConfig、TreeBuildOptions 等同义目标包装不恢复。树策略直接由 RetrievalBuildConfig 的子节点组合；DiscoveryPromptConfig 直接维护预算和优先对象。
 
-PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONFIG_MODELS 只登记 FingerprintProtocolConfig、OneShotTreeBuildConfig、RetrievalModelConfig，CONFIG_MODELS 合计 34 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
+PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONFIG_MODELS 只登记 FingerprintProtocolConfig、OneShotTreeBuildConfig，CONFIG_MODELS 合计 33 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
 
 `config.__all__` 只提供 CapabilityType 和 9 个核心模型：SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、FlowConfig。登记表、基类和其余子模型不进入便利导出，但可显式访问模块属性。
 
@@ -96,9 +96,9 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 - 整数拒绝 bool、数字字符串、浮点数；数值拒绝 NaN/Infinity。构建 method、BuildMethod 和 runtime_config 入参别名在业务工作流中也已删除，统一传 config。
 - 路径接受非空文本或 pathlib 纯路径，仅保存文本。根分类可包含 JSON 值；路径不触发读取。
 - capability.type 仍为 skill/expert/connector/mcp，表达目标格式范围，不表示所有读取器已实现；通用字段名不含 skill。
-- 所有目标配置模型禁止属性重新赋值。嵌套容器不是深层冻结，各实例默认容器和子模型独立。
+- 所有配置模型禁止属性重新赋值。嵌套容器不是深层冻结，各实例默认容器和子模型独立。
 - model_dump(mode="json") / model_validate、model_dump_json / model_validate_json 可往返；不接受客户端、线程池、回调和缓存句柄。
-- 公共构建默认深度 6、分支 128（至少 2）、并发 2、请求超时 420 秒、分类批量 32；旧底层树入口的并发 1、超时 180 秒、批量 20、分支 8 继续由业务维护。
+- 公共构建默认深度 6、分支 128（至少 2）、并发 2、请求超时 420 秒、分类批量 32；底层构树与统一公共默认值一致，不保留旧入口默认值镜像。
 - structure.max_capabilities_per_node_multiplier 默认 1.5，保持正数、严格数值和有限值约束；计算基数仍为分支数。
 - task.allow_fallback_tree=True、preserve_previous_index_on_failure=True；output.verbose=False、show_tree=True、display_capability_root=None、generate_tree_html=False、cache_metrics_enabled=True。show_tree 与 HTML 开关独立，原工作流的显式展示覆盖不变。
 - 指纹提取 max_body_chars=16000、max_output_tokens=2048（也接受 None，表示沿用注入模型）、评估 max_evidence_chars=512。协议 extraction_version 为 symphony-capability-extraction-v3，不在配置阶段生成缓存签名。
@@ -106,7 +106,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 - Discovery 默认提示比例 0.01、上下文 200000、派生预算 2000、输出字符 12000、结果数 10、列表条目 40、增量提示字符 4000；优先对象列表与 use_existing_index=False 保持不变。
 - 图构建并发 1、指纹提取并发 4、关系共识 True、min_edge_confidence=0.7、plan.mode=fast、top_k=3、max_depth=4、dynamic_graph_enabled=False。Flow 默认 enabled=True、min_successes=1、min_pack_success_rate=0.8、max_examples=5。
 
-除节点容量倍率迁至 structure 外，所有保留配置的默认值、约束和路径不变；构建签名、工件格式与 Flow 的 symphony.experience_recipe.v1 协议不变。目标 model_dump 不能直接替换原缓存签名输入。
+本轮保留公共字段的路径、默认值和约束，以基线 dcdcef3e 导出的独立测试快照验证。构建采用新版布局和签名，不兼容旧产物；Flow 的 symphony.experience_recipe.v1 协议继续保留。配置全量 model_dump 不作为缓存签名。
 
 ## 5. 导出与验证
 
@@ -117,3 +117,40 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 配置验证入口是 tests/unit_tests/symphony/test_config.py 和 test_config_export.py，覆盖默认补全、深层覆盖、错误路径、往返、独立容器、元数据、登记和退役字段拒绝。共享构树/Discovery 生命周期见 test_discovery_index_lifecycle.py，验证真实临时工件与确定性模型替身。
 
 配置整理及无效目标字段清理的实施与验证见 F_20261031_1614_symphony-config-contract；能力退役依据为 D-20261103-1438-symphony-capability-retirement，实际验证与跨仓适配由其对应 feature 记录维护。
+
+
+## 6. Runtime 当前运行契约（2026-11-09）
+
+- 构造固定能力根、产物根和根分类文件相对路径，复制嵌套配置。构造不做扫描、模型调用、目录创建或后台工作。
+- `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
+- `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用；source_by_id 以 capability_id 为键。预算和索引版本可冻结，目录、可见与禁用条件可动态提供，不进入配置。
+- 检索、编排和 Flow 开关独立。禁用状态可查询，执行入口拒绝；model=None 允许只读和确定性发现、按任务策略回退构树，构图和规划拒绝缺模型。
+- skill 读取器已实现；expert/connector/mcp 读取器明确报不支持。相同目录只绑定一种对象集合。
+- 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
+- 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。动态观测开关只控制规划读，观测提交仍由 Rail 使用。
+- Runtime 持有惰性默认 Flow，create_scope(store=...) 共享默认打包/审核组件并使用宿主受限存储；授权、确认和安装是宿主职责。
+- aclose 为单次拥有的关闭任务，等待者取消不取消清理。图构建、嵌套规划和增量任务以及文件写入线程必须完成取消/收尾；不关闭宿主模型。
+
+| 配置路径 | 真实消费者 | 生效阶段 |
+|---|---|---|
+| capability.root/type | DirectoryInventory、RuntimeStorage | 显式扫描、集合身份；首轮skill读取 |
+| capability.scan.max_depth/limits/manifest | SkillFolderScanner、SkillManifestParser | 扫描及解析 |
+| capability.fingerprint.extraction | FingerprintService / Extractor | 提取批次、并发、正文、输出与超时 |
+| capability.fingerprint.evaluation/cache | EvaluationSuite、FingerprintCache | 提取后的评估和缓存复用 |
+| storage.artifact_root | RuntimeStorage、三个引擎 | inventory/cache/tree/graph/flow及发布 |
+| retrieval.build.structure/request | TreeBuilder/OneShotBuilder/ModelBridge | 结构与模型请求，递归叶容量倍率 |
+| retrieval.build.profiles/prompt | 画像和提示构建 | 文本裁剪、协议、种子 |
+| retrieval.build.postprocess/equivalence | 树后处理与等价分组 | 生成后的整理 |
+| retrieval.build.incremental | 增量工作流 | 增量阈值、重分类与升级全量 |
+| retrieval.build.task | toolkit任务调度 | 总超时、回退、旧索引保护 |
+| retrieval.build.output | 构建产物/展示/缓存指标 | 输出阶段，不进入树内容签名 |
+| retrieval.discovery.prompt | SkillFS | 会话预算和优先对象；宿主解析模型缺省容量 |
+| retrieval.discovery.output/use_existing_index | DiscoverySession、SkillFS | 搜索、列表、游标输出、索引快照 |
+| orchestration.build | OrchestrationService / Matcher | 构图并发、候选和匹配批量 |
+| orchestration.min_edge_confidence | Matcher、Fast/BeamPlanner | 构图与规划共用阈值 |
+| orchestration.plan | Fast/BeamPlanner、GraphEngine | 模式、top_k、深度与动态观测读取 |
+| flow.acceptance/narrative | SymphonyFlowEngine、蒸馏与叙事组件 | 接纳、叙事样例与候选生成 |
+
+新版 runtime.json 绑定绝对能力根与类型；非空无布局标记目录、错误布局版本、不同集合均拒绝，不删除历史目录。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
+
+运行接入替代设计旧草案中的 Source 注入、retrieval.search 和兼容路线，历史设计与历史测试记录保留，不视作当前行为。

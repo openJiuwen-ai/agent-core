@@ -19,7 +19,7 @@ from openjiuwen.symphony.retrieval.common.models import RetrieverItem, Retriever
 from openjiuwen.symphony.retrieval.search.artifacts import CatalogRecord, build_tree_root, load_retriever_index
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
-from .config import DiscoverySettings
+from openjiuwen.symphony.config import DiscoveryConfig
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
 
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
@@ -396,7 +396,7 @@ class SkillFS:
         self,
         records_provider: SkillRecordsProvider,
         *,
-        settings: DiscoverySettings,
+        settings: DiscoveryConfig,
         visible_skill_names: VisibleSkillNames = None,
         artifact_root: Path | str,
         index_root: Path | str | None = None,
@@ -441,7 +441,7 @@ class SkillFS:
         return self._artifact
 
     @property
-    def settings(self) -> DiscoverySettings:
+    def settings(self) -> DiscoveryConfig:
         return self._settings
 
     @property
@@ -470,7 +470,7 @@ class SkillFS:
         documents = tuple(sorted(self._artifact.items, key=lambda item: (item.worker_id.casefold(), item.worker_id)))
         rendered = "\n".join(f"- {item.worker_id}: {' '.join(item.description.split())}" for item in documents)
         estimated = _estimate_tokens(rendered)
-        small = estimated < self._settings.candidate_budget_tokens
+        small = estimated < self._settings.prompt.candidate_budget_tokens
         selected = documents if small else self._large_prompt_items(documents)
         mode = (
             "small"
@@ -492,7 +492,7 @@ class SkillFS:
                 SkillPromptEntry(item.worker_id, item.description or item.name, item.source) for item in selected
             ),
             estimated_candidate_tokens=estimated,
-            candidate_budget_tokens=self._settings.candidate_budget_tokens,
+            candidate_budget_tokens=self._settings.prompt.candidate_budget_tokens,
             index_state=self._artifact.index_state,
             branches=branches,
             omitted_branch_count=omitted,
@@ -500,7 +500,7 @@ class SkillFS:
 
     def _prompt_branches(self) -> tuple[tuple[SkillPromptBranch, ...], int]:
         directories = tuple(entry for entry in self._view.children("/") if entry.kind == "dir")
-        limit = self._settings.max_list_entries
+        limit = self._settings.output.max_list_entries
         frontier = tuple(SkillPromptBranch(entry.path, entry.label, entry.description) for entry in directories[:limit])
         omitted = max(0, len(directories) - len(frontier))
         if omitted:
@@ -639,11 +639,11 @@ class SkillFS:
         self._view = view
 
     def _large_prompt_items(self, items: tuple[SkillRecord, ...]) -> tuple[SkillRecord, ...]:
-        preferred = {name.casefold() for name in self._settings.prompt_preferred_skills}
+        preferred = {name.casefold() for name in self._settings.prompt.preferred_capability_ids}
         selected = [
             item for item in items if item.worker_id.casefold() in preferred or item.name.casefold() in preferred
         ]
-        return tuple(selected[: self._settings.max_list_entries])
+        return tuple(selected[: self._settings.output.max_list_entries])
 
 
 def capture_index_snapshot(root: Path | str) -> SkillIndexSnapshot | None:
@@ -651,7 +651,8 @@ def capture_index_snapshot(root: Path | str) -> SkillIndexSnapshot | None:
 
     index_root = Path(root).expanduser().resolve()
     index_dir = index_root / "index"
-    index_root.mkdir(parents=True, exist_ok=True)
+    if not index_root.is_dir():
+        return None
     with portalocker.Lock(str(index_root / _INDEX_LOCK_FILENAME), mode="a+", timeout=30):
         from openjiuwen.symphony.agent.retrieval_toolkit import _recover_index_directory_unlocked
 

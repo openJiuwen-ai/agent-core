@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import openjiuwen.symphony.retrieval.build.workflows.index_builder as workflows_module
 from openjiuwen.symphony.retrieval.build.io import load_catalog_records, load_manifest, load_tree_preset
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 
 
@@ -85,18 +85,16 @@ def _fake_build_tree(**kwargs):
     return {"nodes": nodes}
 
 
-def _fake_tree_client() -> Mock:
+def _fake_tree_model() -> SimpleNamespace:
     def create(**kwargs):
         names = re.findall(r"^### (.+)$", kwargs["messages"][1]["content"], re.MULTILINE)
         content = json.dumps({"skills/workflows": names})
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason="stop")],
-            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20, total_tokens=120),
+            content=content, finish_reason="stop",
+            usage_metadata=SimpleNamespace(input_tokens=100, output_tokens=20, total_tokens=120),
         )
 
-    client = Mock()
-    client.chat.completions.create.side_effect = create
-    return client
+    return SimpleNamespace(invoke=Mock(side_effect=create))
 
 
 class IndexBuilderWorkflowTests(unittest.TestCase):
@@ -106,13 +104,11 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             alpha = _write_skill_dir(root, "alpha", "alpha description")
             beta = _write_skill_dir(root, "beta", "beta description")
             output_dir = root / "index"
-            config = BuildConfig(
-                llm_openai_client=_fake_tree_client(),
-                llm_model="fake-tree-model",
-            )
+            config = RetrievalBuildConfig()
+            model = _fake_tree_model()
 
             with patch.object(workflows_module, "build_tree", side_effect=_fake_build_tree):
-                result = IndexBuilder.build([str(alpha), str(beta)], output_dir, config=config)
+                result = IndexBuilder.build([str(alpha), str(beta)], output_dir, config=config, model=model)
 
             self.assertEqual(result, output_dir.resolve())
             self.assertTrue((output_dir / "tree_index.yaml").exists())
@@ -139,7 +135,7 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             output_dir = root / "index"
 
             with patch.object(workflows_module, "build_tree", side_effect=AssertionError("LLM builder should not run")):
-                result = IndexBuilder.build([str(alpha)], output_dir, config=BuildConfig())
+                result = IndexBuilder.build([str(alpha)], output_dir, config=RetrievalBuildConfig())
 
             self.assertEqual(result, output_dir.resolve())
             tree = load_tree_preset(output_dir / "tree_index.yaml")
@@ -152,7 +148,7 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             alpha = _write_skill_dir(root, "alpha", "alpha description")
 
             with self.assertRaisesRegex(ValueError, "fallback is disabled"):
-                IndexBuilder.build([str(alpha)], root / "index", config=BuildConfig(allow_fallback_tree=False))
+                IndexBuilder.build([str(alpha)], root / "index", config=RetrievalBuildConfig(task={"allow_fallback_tree": False}))
 
     def test_add_and_delete_update_existing_tree_without_full_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,17 +159,14 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             base_dir = root / "base-index"
             add_dir = root / "add-index"
             delete_dir = root / "delete-index"
-            config = BuildConfig(
-                llm_openai_client=_fake_tree_client(),
-                llm_model="fake-tree-model",
-                incremental_max_change_ratio=1.0,
-            )
+            config = RetrievalBuildConfig(incremental={"max_change_ratio": 1.0})
+            model = _fake_tree_model()
 
             with patch.object(workflows_module, "build_tree", side_effect=_fake_build_tree) as build_tree_mock:
-                IndexBuilder.build([str(alpha), str(beta)], base_dir, config=config)
-                config.llm_openai_client.chat.completions.create.assert_called_once()
-                IndexBuilder.add([str(gamma)], base_dir, add_dir, config=config)
-                IndexBuilder.delete([str(beta)], add_dir, delete_dir, config=config)
+                IndexBuilder.build([str(alpha), str(beta)], base_dir, config=config, model=model)
+                model.invoke.assert_called_once()
+                IndexBuilder.add([str(gamma)], base_dir, add_dir, config=config, model=model)
+                IndexBuilder.delete([str(beta)], add_dir, delete_dir, config=config, model=model)
 
             build_tree_mock.assert_not_called()
             add_manifest = load_manifest(add_dir)
@@ -195,10 +188,8 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             alpha = _write_skill_dir(root, "alpha", "alpha description")
             alpha_zip = _zip_item_dir(alpha, root / "alpha.zip")
             uploaded: dict[str, bytes] = {}
-            config = BuildConfig(
-                llm_openai_client=_fake_tree_client(),
-                llm_model="fake-tree-model",
-            )
+            config = RetrievalBuildConfig()
+            model = _fake_tree_model()
 
             def fake_download(uri: str, destination: Path) -> Path:
                 self.assertEqual(uri, "s3://bucket/skills/alpha.zip")
@@ -218,7 +209,7 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
                         result = IndexBuilder.build(
                             ["s3://bucket/skills/alpha.zip"],
                             "s3://bucket/index",
-                            config=config,
+                            config=config, model=model,
                         )
 
             self.assertEqual(result, "s3://bucket/index")
@@ -234,14 +225,12 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             plugin = _write_plugin_dir(root, "demo-plugin", "plugin description")
             plugin_zip = _zip_item_dir(plugin, root / "demo-plugin.zip")
             legacy = _write_legacy_plugin_dir(root, "legacy-plugin", "legacy plugin description")
-            config = BuildConfig(
-                llm_openai_client=cast(Any, object()),
-                llm_model="fake-tree-model",
-            )
+            config = RetrievalBuildConfig()
+            model = _fake_tree_model()
 
             with patch.object(workflows_module, "build_tree", side_effect=_fake_build_tree):
-                IndexBuilder.build([str(plugin_zip)], root / "zip-index", item_type="plugin", config=config)
-                IndexBuilder.build([str(legacy)], root / "legacy-index", item_type="plugin", config=config)
+                IndexBuilder.build([str(plugin_zip)], root / "zip-index", item_type="plugin", config=config, model=model)
+                IndexBuilder.build([str(legacy)], root / "legacy-index", item_type="plugin", config=config, model=model)
 
             zip_catalog = load_catalog_records(root / "zip-index" / "catalog.jsonl")
             legacy_catalog = load_catalog_records(root / "legacy-index" / "catalog.jsonl")
@@ -274,7 +263,7 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             result = IndexBuilder.build(
                 output_dir=root / "index",
                 item_jsonl_path=str(jsonl_path),
-                config=BuildConfig(),
+                config=RetrievalBuildConfig(),
             )
 
             self.assertEqual(result, (root / "index").resolve())
@@ -318,33 +307,30 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             base_dir = root / "base-index"
             add_dir = root / "add-index"
             delete_dir = root / "delete-index"
-            config = BuildConfig(
-                llm_openai_client=_fake_tree_client(),
-                llm_model="fake-tree-model",
-                incremental_max_change_ratio=1.0,
-                incremental_min_add_confidence=0.0,
-                incremental_min_add_confidence_margin=0.0,
-            )
+            config = RetrievalBuildConfig(incremental={
+                "max_change_ratio": 1.0, "min_add_confidence": 0.0, "min_add_confidence_margin": 0.0,
+            })
+            model = _fake_tree_model()
 
             with patch.object(workflows_module, "build_tree", side_effect=_fake_build_tree) as build_tree_mock:
-                IndexBuilder.build(output_dir=base_dir, item_jsonl_path=str(base_jsonl), config=config)
+                IndexBuilder.build(output_dir=base_dir, item_jsonl_path=str(base_jsonl), config=config, model=model)
                 IndexBuilder.add(
                     base_index_dir=base_dir,
                     output_dir=add_dir,
                     item_jsonl_path=str(add_jsonl),
-                    config=config,
+                    config=config, model=model,
                 )
                 IndexBuilder.delete(
                     base_index_dir=add_dir,
                     output_dir=delete_dir,
                     item_jsonl_path=str(delete_jsonl),
-                    config=config,
+                    config=config, model=model,
                 )
 
             add_catalog = load_catalog_records(add_dir / "catalog.jsonl")
             delete_catalog = load_catalog_records(delete_dir / "catalog.jsonl")
             build_tree_mock.assert_not_called()
-            config.llm_openai_client.chat.completions.create.assert_called_once()
+            model.invoke.assert_called_once()
             self.assertEqual([record.worker_id for record in add_catalog], ["alpha", "beta", "gamma"])
             self.assertEqual([record.worker_id for record in delete_catalog], ["alpha", "gamma"])
             self.assertEqual(load_manifest(add_dir)["item_paths"], [

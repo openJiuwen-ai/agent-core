@@ -1,3 +1,6 @@
+
+from openjiuwen.symphony.config import FingerprintPolicyConfig, FingerprintProtocolConfig
+from pydantic import ValidationError
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
@@ -27,7 +30,6 @@ from openjiuwen.symphony.models import (
 from openjiuwen.symphony.shared.fingerprint import (
     CapabilityFingerprintExtractor,
     FingerprintService,
-    FingerprintSettings,
     build_io_name_vocabulary,
     normalize_io_specs,
 )
@@ -418,7 +420,7 @@ async def test_extraction_prompt_redacts_common_secret_name_conventions(tmp_path
         FakeProvider("snapshot-1", [descriptor]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -452,7 +454,7 @@ async def test_provider_model_copy_cannot_bypass_nested_io_redaction(tmp_path) -
         FakeProvider("snapshot-1", [descriptor]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -477,7 +479,7 @@ async def test_direct_extractor_revalidates_descriptor_before_llm_input() -> Non
     descriptor = _descriptors()[0].model_copy(update={"inputs": (unsafe_io,)})
 
     outcome = await CapabilityFingerprintExtractor(
-        FingerprintSettings(enable_llm_extraction=True),
+        FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         llm,
     ).extract(descriptor)
 
@@ -496,7 +498,7 @@ async def test_indented_markdown_rule_is_not_mistaken_for_frontmatter(tmp_path) 
         FakeProvider("snapshot-1", [descriptor]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -512,7 +514,7 @@ async def test_incremental_cache_reuses_complete_fingerprint(tmp_path) -> None:
         FakeProvider("snapshot-1", _descriptors()),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=evaluation,
     )
 
@@ -547,11 +549,7 @@ async def test_extraction_progress_advances_only_after_concurrent_completion(tmp
         FakeProvider("snapshot-1", descriptors),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(
-            enable_llm_extraction=True,
-            batch_size=3,
-            max_concurrency=3,
-        ),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True, 'batch_size': 3, 'max_concurrency': 3}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -618,13 +616,13 @@ async def test_progress_callback_failure_does_not_abort_fingerprint_build(tmp_pa
 async def test_llm_unseen_io_name_is_persisted_and_restored_without_explicit_io(tmp_path) -> None:
     llm = NamedInputLLM("customer_prompt")
     provider = FakeProvider("snapshot-1", _descriptors()[:1])
-    settings = FingerprintSettings(enable_llm_extraction=True)
+    settings = FingerprintPolicyConfig(extraction={'llm_enabled': True})
 
     first = await FingerprintService(
         provider,
         tmp_path,
         llm=llm,
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     cache_payload = json.loads((tmp_path / ".fingerprint-cache.json").read_text(encoding="utf-8"))
@@ -632,7 +630,7 @@ async def test_llm_unseen_io_name_is_persisted_and_restored_without_explicit_io(
         provider,
         tmp_path,
         llm=llm,
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -652,12 +650,12 @@ async def test_llm_unseen_plural_alias_is_persisted_and_used(tmp_path) -> None:
             _descriptors()[1],
         ],
     )
-    settings = FingerprintSettings(enable_llm_extraction=True)
+    settings = FingerprintPolicyConfig(extraction={'llm_enabled': True})
     service = FingerprintService(
         provider,
         tmp_path,
         llm=llm,
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -667,7 +665,7 @@ async def test_llm_unseen_plural_alias_is_persisted_and_used(tmp_path) -> None:
         provider,
         tmp_path,
         llm=llm,
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     terms = {term["name"]: term for term in cache_payload["io_name_vocabulary"]["terms"]}
@@ -689,14 +687,14 @@ async def test_dynamic_vocabulary_is_deterministic_across_concurrency(tmp_path) 
         provider,
         serial_root,
         llm=DelayedVocabularyLLM(),
-        settings=FingerprintSettings(enable_llm_extraction=True, max_concurrency=1),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True, 'max_concurrency': 1}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     concurrent = await FingerprintService(
         provider,
         concurrent_root,
         llm=DelayedVocabularyLLM(),
-        settings=FingerprintSettings(enable_llm_extraction=True, max_concurrency=4),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True, 'max_concurrency': 4}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     serial_cache = json.loads((serial_root / ".fingerprint-cache.json").read_text(encoding="utf-8"))
@@ -716,7 +714,7 @@ async def test_final_vocabulary_reconciliation_preserves_rejected_io_diagnostics
         FakeProvider("snapshot-1", _descriptors()),
         tmp_path,
         llm=InvalidEntryVocabularyLLM(),
-        settings=FingerprintSettings(enable_llm_extraction=True, max_concurrency=4),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True, 'max_concurrency': 4}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -792,7 +790,7 @@ async def test_trace_change_invalidates_quality_without_repeating_extraction(tmp
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=evaluation,
     )
     first_trace = EvaluationCase(
@@ -840,7 +838,7 @@ async def test_descriptor_change_is_not_hidden_by_provider_content_hash(tmp_path
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
     await service.build()
@@ -862,7 +860,7 @@ async def test_llm_identity_change_invalidates_extraction_cache(tmp_path) -> Non
         provider,
         tmp_path,
         llm=first_llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     second_llm = CountingLLM("model-b")
@@ -871,7 +869,7 @@ async def test_llm_identity_change_invalidates_extraction_cache(tmp_path) -> Non
         provider,
         tmp_path,
         llm=second_llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -886,7 +884,7 @@ async def test_core_assistant_message_content_is_used_for_extraction(tmp_path) -
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=CoreMessageLLM(),
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -903,7 +901,7 @@ async def test_opaque_llm_disables_extraction_reuse_by_default(tmp_path) -> None
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -920,7 +918,7 @@ async def test_one_llm_extraction_failure_does_not_abort_other_capabilities(tmp_
         FakeProvider("snapshot-1", _descriptors()),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -936,13 +934,13 @@ async def test_one_llm_extraction_failure_does_not_abort_other_capabilities(tmp_
 
 @pytest.mark.asyncio
 async def test_framework_model_failure_aborts_and_preserves_published_artifact(tmp_path) -> None:
-    settings = FingerprintSettings(enable_llm_extraction=True)
+    settings = FingerprintPolicyConfig(extraction={'llm_enabled': True})
     provider = FakeProvider("snapshot-1", _descriptors()[:1])
     initial = await FingerprintService(
         provider,
         tmp_path,
         llm=CountingLLM("initial"),
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
     artifact_path = tmp_path / "fingerprint.json"
@@ -953,7 +951,7 @@ async def test_framework_model_failure_aborts_and_preserves_published_artifact(t
         provider,
         tmp_path,
         llm=FrameworkFailingLLM(),
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     )
     progress = []
@@ -975,14 +973,14 @@ async def test_extraction_token_limit_can_inherit_injected_model_default(tmp_pat
             calls.append(kwargs)
             return await super().invoke(messages, **kwargs)
 
-    settings = FingerprintSettings(enable_llm_extraction=True)
+    settings = FingerprintPolicyConfig(extraction={'llm_enabled': True})
     if max_tokens != 2048:
-        settings = FingerprintSettings(enable_llm_extraction=True, llm_max_tokens=max_tokens)
+        settings = FingerprintPolicyConfig(extraction={'llm_enabled': True, 'max_output_tokens': max_tokens})
     await FingerprintService(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=Model(),
-        settings=settings,
+        config=settings,
         evaluation_suite=NoopEvaluationSuite(),
     ).build()
 
@@ -1038,7 +1036,7 @@ async def test_extraction_response_observer_runs_after_request_context_exits(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=Model(),
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
         model_response_observer=awaitable_observer if async_observer else sync_observer,
     ).build()
@@ -1066,7 +1064,7 @@ async def test_extraction_observer_failure_does_not_change_model_outcome(tmp_pat
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=Model(),
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         model_response_observer=observe,
     )
     if finish_reason == "length":
@@ -1083,10 +1081,10 @@ async def test_extraction_observer_failure_does_not_change_model_outcome(tmp_pat
 async def test_truncated_extraction_is_observed_before_failure_and_never_parsed_or_published(
     tmp_path, monkeypatch, response_kind,
 ) -> None:
-    settings = FingerprintSettings(enable_llm_extraction=True)
+    settings = FingerprintPolicyConfig(extraction={'llm_enabled': True})
     provider = FakeProvider("snapshot-1", _descriptors()[:1])
     await FingerprintService(
-        provider, tmp_path, llm=CountingLLM(), settings=settings, evaluation_suite=NoopEvaluationSuite(),
+        provider, tmp_path, llm=CountingLLM(), config=settings, evaluation_suite=NoopEvaluationSuite(),
     ).build()
     artifact_path = tmp_path / "fingerprint.json"
     cache_path = tmp_path / ".fingerprint-cache.json"
@@ -1111,7 +1109,7 @@ async def test_truncated_extraction_is_observed_before_failure_and_never_parsed_
 
     monkeypatch.setattr("openjiuwen.symphony.shared.fingerprint.extractor._response_payload", reject_parsing)
     service = FingerprintService(
-        provider, tmp_path, llm=Model(), settings=settings, evaluation_suite=evaluation,
+        provider, tmp_path, llm=Model(), config=settings, evaluation_suite=evaluation,
         model_response_observer=observe,
     )
     with pytest.raises(BaseError) as exc_info:
@@ -1147,7 +1145,7 @@ async def test_extraction_thinking_context_is_task_local_and_restored_on_every_e
                 raise error
             return '{}'
 
-    extractor = CapabilityFingerprintExtractor(FingerprintSettings(enable_llm_extraction=True), Model())
+    extractor = CapabilityFingerprintExtractor(FingerprintPolicyConfig(extraction={'llm_enabled': True}), Model())
 
     async def extract():
         try:
@@ -1183,7 +1181,7 @@ async def test_force_build_invalidates_incremental_reuse(tmp_path) -> None:
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
     await service.build()
@@ -1201,10 +1199,8 @@ async def test_protocol_signature_change_invalidates_incremental_reuse(tmp_path)
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(
-            enable_llm_extraction=True,
-            extraction_protocol_version="symphony-capability-extraction-v2",
-        ),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
+        protocol=FingerprintProtocolConfig(extraction_version="symphony-capability-extraction-v2"),
         evaluation_suite=NoopEvaluationSuite(),
     )
     await first_service.build()
@@ -1212,7 +1208,7 @@ async def test_protocol_signature_change_invalidates_incremental_reuse(tmp_path)
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1226,7 +1222,7 @@ async def test_missing_required_llm_is_an_explicit_configuration_error(tmp_path)
     service = FingerprintService(
         FakeProvider("snapshot-1", _descriptors()),
         tmp_path,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1273,33 +1269,16 @@ async def test_trace_model_copy_cannot_bypass_message_validation(tmp_path) -> No
     assert exc_info.value.status is StatusCode.COMPONENT_SYMPHONY_SCHEMA_INVALID
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "settings",
-    [
-        FingerprintSettings(batch_size=True),
-        FingerprintSettings(max_concurrency=0),
-        FingerprintSettings(llm_max_tokens=True),
-        FingerprintSettings(llm_max_tokens=0),
-        FingerprintSettings(llm_max_tokens=-1),
-        FingerprintSettings(llm_max_tokens=cast(Any, 1.5)),
-        FingerprintSettings(body_limit=-1),
-        FingerprintSettings(llm_timeout=float("inf")),
-        FingerprintSettings(cache_enabled=cast(Any, 1)),
-    ],
-)
-async def test_runtime_settings_reject_wrong_types_and_bounds(tmp_path, settings) -> None:
-    service = FingerprintService(
-        FakeProvider("snapshot-1", _descriptors()),
-        tmp_path,
-        settings=settings,
-        evaluation_suite=NoopEvaluationSuite(),
-    )
-
-    with pytest.raises(BaseError) as exc_info:
-        await service.build()
-
-    assert exc_info.value.status is StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR
+@pytest.mark.parametrize("settings", [
+    {"extraction": {"batch_size": True}}, {"extraction": {"max_concurrency": 0}},
+    {"extraction": {"max_output_tokens": True}}, {"extraction": {"max_output_tokens": 0}},
+    {"extraction": {"max_output_tokens": -1}}, {"extraction": {"max_output_tokens": 1.5}},
+    {"extraction": {"max_body_chars": -1}}, {"extraction": {"timeout_seconds": float("inf")}},
+    {"cache": {"enabled": 1}},
+])
+def test_runtime_settings_reject_wrong_types_and_bounds(settings):
+    with pytest.raises(ValidationError):
+        FingerprintPolicyConfig.model_validate(settings)
 
 
 @pytest.mark.asyncio
@@ -1344,7 +1323,7 @@ async def test_cancelled_build_preserves_last_successful_artifact(tmp_path) -> N
         FakeProvider("snapshot-2", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1368,7 +1347,7 @@ async def test_concurrent_build_is_rejected(tmp_path) -> None:
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
     active = asyncio.create_task(service.build())
@@ -1470,7 +1449,7 @@ async def test_corpus_vocabulary_normalization_audit_is_reused_from_cache(tmp_pa
         FakeProvider("snapshot-1", descriptors),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1508,7 +1487,7 @@ async def test_corpus_vocabulary_change_invalidates_other_capability_cache(tmp_p
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
     first = await service.build()
@@ -1538,7 +1517,7 @@ async def test_cache_entry_missing_normalization_audit_is_not_reused(tmp_path) -
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
     await service.build()
@@ -1562,7 +1541,7 @@ async def test_known_capability_type_alias_is_canonicalized_before_cache_identit
         FakeProvider("snapshot-1", [descriptor]),
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        config=FingerprintPolicyConfig(extraction={'llm_enabled': True}),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1644,7 +1623,7 @@ async def test_empty_provider_description_remains_empty_for_quality_evaluation(t
 @pytest.mark.asyncio
 async def test_failed_extraction_does_not_invent_a_description(monkeypatch) -> None:
     descriptor = _descriptors()[0].model_copy(update={"description": ""})
-    extractor = CapabilityFingerprintExtractor(FingerprintSettings())
+    extractor = CapabilityFingerprintExtractor(FingerprintPolicyConfig())
 
     async def fail_extract(*_args, **_kwargs):
         raise RuntimeError("injected")

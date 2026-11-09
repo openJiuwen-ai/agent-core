@@ -1,14 +1,16 @@
+from __future__ import annotations
+from openjiuwen.symphony.config import DiscoveryConfig, RetrievalBuildConfig
 """Verify the shared build/Discovery boundary after legacy retrieval retirement."""
 
 import hashlib
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.symphony.agent import AgenticSkillRetrievalToolkit, LLMConfig, SkillIndexBuildConfig, SkillRecord
-from openjiuwen.symphony.discovery import DiscoverySettings, InstalledSkillsDirectoryToolkit, SkillFS
+from openjiuwen.symphony.agent import AgenticSkillRetrievalToolkit, SkillRecord
+from openjiuwen.symphony.discovery import InstalledSkillsDirectoryToolkit, SkillFS
 from openjiuwen.symphony.discovery.models import SkillRecord as DiscoveryRecord
 from openjiuwen.symphony.discovery.skillfs import capture_index_snapshot
 from openjiuwen.symphony.retrieval.search.artifacts import load_retriever_index
@@ -33,15 +35,15 @@ def built_index(tmp_path):
             worker_id=name, name=name, description=f"{name} invoice processor",
             skill_file=str(path), source_root=str(directory), content_hash=digest,
         ))
-    create = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(
-        finish_reason="stop",
-        message=SimpleNamespace(content=json.dumps({"skills/documents": ["alpha", "beta", "hidden"]})),
-    )]))
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    create = AsyncMock(return_value=SimpleNamespace(
+        content=json.dumps({"skills/documents": ["alpha", "beta", "hidden"]}),
+        finish_reason="stop", usage_metadata={"input_tokens": 10, "output_tokens": 5},
+    ))
+    client = SimpleNamespace(invoke=create, model_name="fixture-model")
     builder = AgenticSkillRetrievalToolkit(
         index_root=tmp_path / "artifacts", skills=records,
-        llm_config=LLMConfig(model="fixture-model", client=client),
-        build_config=SkillIndexBuildConfig(strict_failure=True),
+        model=client,
+        config=RetrievalBuildConfig(task={"allow_fallback_tree": False}),
     )
     result = builder.build_index(force=True)
     assert result["success"] is True, result
@@ -52,7 +54,6 @@ def built_index(tmp_path):
     commit = json.loads((builder.index_dir / "commit.json").read_text())
     assert set(commit["source_file_hashes"]) == {"alpha", "beta", "hidden"}
     create.assert_called_once()
-    assert create.call_args.kwargs["model"] == "fixture-model"
     assert create.call_args.kwargs["timeout"] == 420.0
     return builder, inventory, create
 
@@ -61,7 +62,7 @@ def built_index(tmp_path):
 async def test_one_shot_build_feeds_discovery_search_visibility_and_pagination(built_index):
     builder, inventory, _ = built_index
     environment = SkillFS(
-        lambda: inventory, settings=DiscoverySettings(use_existing_index=True),
+        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True),
         artifact_root=builder.index_root, visible_skill_names={"alpha", "beta"},
         pin_index_revision=True,
     )
@@ -98,7 +99,7 @@ def test_discovery_recovers_committed_backup_after_interrupted_publish(built_ind
     builder.index_dir.replace(backup)
 
     environment = SkillFS(
-        lambda: inventory, settings=DiscoverySettings(use_existing_index=True),
+        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True),
         artifact_root=builder.index_root,
     )
     assert environment.artifact.layout == "tree"
@@ -116,7 +117,7 @@ def test_failed_rebuild_preserves_committed_files_and_discovery(built_index):
     assert result["data"]["previous_index_preserved"]
     assert {path.name: path.read_bytes() for path in builder.index_dir.iterdir() if path.is_file()} == previous
     environment = SkillFS(
-        lambda: inventory, settings=DiscoverySettings(use_existing_index=True), artifact_root=builder.index_root,
+        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True), artifact_root=builder.index_root,
     )
     assert environment.artifact.index_state == "fresh"
     assert environment.search_content(inventory, "invoice", case_insensitive=True, fixed_strings=True) == (
@@ -130,7 +131,7 @@ async def test_missing_index_keeps_live_inventory_search_and_prompt(tmp_path):
     path.write_text("Invoice document processing", encoding="utf-8")
     record = DiscoveryRecord("invoice", "Invoice", "Process invoices", str(path), content_hash="fixture")
     environment = SkillFS(
-        lambda: [record], settings=DiscoverySettings(use_existing_index=True), artifact_root=tmp_path / "missing",
+        lambda: [record], settings=DiscoveryConfig(use_existing_index=True), artifact_root=tmp_path / "missing",
     )
     assert environment.artifact.layout == "flat" and environment.artifact.index_state == "missing"
     assert environment.prompt_snapshot().entries[0].worker_id == "invoice"

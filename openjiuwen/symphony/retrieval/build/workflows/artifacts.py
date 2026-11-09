@@ -1,149 +1,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence
+from typing import Dict, List, Mapping, Sequence
 
-if TYPE_CHECKING:
-    from openai import OpenAI
-else:
-    try:
-        from openai import OpenAI
-    except ModuleNotFoundError:
-        OpenAI = Any
-
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _unwrap_model
 from openjiuwen.symphony.retrieval.build.models import CatalogRecord
 from openjiuwen.symphony.retrieval.build.tree.root_categories import RootCategoryInput, resolve_tree_root_categories
 from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, unique_child_cid
 
 
-@dataclass(frozen=True)
-class BuildConfig:
-    llm_openai_client: OpenAI | None = None
-    llm_model: str = ""
-    llm_api_key: str = ""
-    llm_base_url: str = ""
-    llm_seed: int | None = None
-    tree_branching_factor: int = 128
-    tree_max_depth: int = 6
-    tree_root_categories: RootCategoryInput = None
-    tree_max_workers: int = 2
-    tree_caching: bool = False
-    tree_num_retries: int = 2
-    tree_timeout_seconds: float = 420.0
-    tree_classify_batch_cap: int = 32
-    tree_context_window: int = 0
-    tree_max_output_tokens: int = 0
-    tree_postprocess_enabled: bool = True
-    tree_postprocess_max_passes: int = 1
-    tree_postprocess_min_skills: int = 6
-    tree_equiv_grouping_enabled: bool = False
-    tree_equiv_max_groups_per_parent: int = 6
-    tree_equiv_allow_singleton_groups: bool = True
-    tree_equiv_min_lexical_similarity: float = 0.0
-    tree_deterministic_prompts: bool = True
-    tree_discovery_seed: int = 42
-    tree_prompt_fingerprint_version: str = "v1"
-    tree_cache_observability: bool = True
-    tree_skill_profiles_enabled: bool = False
-    tree_skill_profile_select_rules_enabled: bool = True
-    tree_skill_profile_batch_size: int = 48
-    tree_skill_profile_description_limit: int = 140
-    tree_skill_profile_rule_limit: int = 120
-    incremental_max_change_ratio: float = 0.25
-    incremental_min_add_confidence: float = 0.18
-    incremental_min_add_confidence_margin: float = 0.04
-    incremental_branch_imbalance_ratio: float = 3.0
-    generate_tree_html: bool = False
-    allow_fallback_tree: bool = True
-
-
-@dataclass(frozen=True)
-class ResolvedBuildConfig:
-    llm_openai_client: Any | None
-    llm_model: str
-    llm_seed: int | None
-    tree_llm_api_key: str
-    tree_llm_base_url: str
-    tree_branching_factor: int
-    tree_max_depth: int
-    tree_root_categories: list[str | dict[str, object]] | None
-    tree_max_workers: int
-    tree_caching: bool
-    tree_num_retries: int
-    tree_timeout_seconds: float
-    tree_classify_batch_cap: int
-    tree_context_window: int
-    tree_max_output_tokens: int
-    tree_postprocess_enabled: bool
-    tree_postprocess_max_passes: int
-    tree_postprocess_min_skills: int
-    tree_equiv_grouping_enabled: bool
-    tree_equiv_max_groups_per_parent: int
-    tree_equiv_allow_singleton_groups: bool
-    tree_equiv_min_lexical_similarity: float
-    tree_deterministic_prompts: bool
-    tree_discovery_seed: int
-    tree_prompt_fingerprint_version: str
-    tree_cache_observability: bool
-    tree_skill_profiles_enabled: bool
-    tree_skill_profile_select_rules_enabled: bool
-    tree_skill_profile_batch_size: int
-    tree_skill_profile_description_limit: int
-    tree_skill_profile_rule_limit: int
-    incremental_max_change_ratio: float
-    incremental_min_add_confidence: float
-    incremental_min_add_confidence_margin: float
-    incremental_branch_imbalance_ratio: float
-    generate_tree_html: bool
-    allow_fallback_tree: bool
-
-
-def resolve_build_config(
-    *,
-    config: BuildConfig | None = None,
-) -> ResolvedBuildConfig:
-    cfg = config or BuildConfig()
-    return ResolvedBuildConfig(
-        llm_openai_client=cfg.llm_openai_client,
-        llm_model=str(cfg.llm_model or "").strip(),
-        llm_seed=cfg.llm_seed,
-        tree_llm_api_key=str(cfg.llm_api_key or "").strip(),
-        tree_llm_base_url=str(cfg.llm_base_url or "").strip(),
-        tree_branching_factor=max(1, int(cfg.tree_branching_factor or 8)),
-        tree_max_depth=max(1, int(cfg.tree_max_depth or 6)),
-        tree_root_categories=resolve_tree_root_categories(cfg.tree_root_categories),
-        tree_max_workers=max(1, int(cfg.tree_max_workers or 1)),
-        tree_caching=bool(cfg.tree_caching),
-        tree_num_retries=max(0, int(cfg.tree_num_retries or 0)),
-        tree_timeout_seconds=float(cfg.tree_timeout_seconds),
-        tree_classify_batch_cap=max(1, int(cfg.tree_classify_batch_cap or 1)),
-        tree_context_window=max(0, int(cfg.tree_context_window or 0)),
-        tree_max_output_tokens=max(0, int(cfg.tree_max_output_tokens or 0)),
-        tree_postprocess_enabled=bool(cfg.tree_postprocess_enabled),
-        tree_postprocess_max_passes=max(0, int(cfg.tree_postprocess_max_passes or 0)),
-        tree_postprocess_min_skills=max(2, int(cfg.tree_postprocess_min_skills or 2)),
-        tree_equiv_grouping_enabled=bool(cfg.tree_equiv_grouping_enabled),
-        tree_equiv_max_groups_per_parent=max(2, int(cfg.tree_equiv_max_groups_per_parent or 2)),
-        tree_equiv_allow_singleton_groups=bool(cfg.tree_equiv_allow_singleton_groups),
-        tree_equiv_min_lexical_similarity=max(0.0, min(1.0, float(cfg.tree_equiv_min_lexical_similarity))),
-        tree_deterministic_prompts=bool(cfg.tree_deterministic_prompts),
-        tree_discovery_seed=int(cfg.tree_discovery_seed),
-        tree_prompt_fingerprint_version=str(cfg.tree_prompt_fingerprint_version or "v1"),
-        tree_cache_observability=bool(cfg.tree_cache_observability),
-        tree_skill_profiles_enabled=bool(cfg.tree_skill_profiles_enabled),
-        tree_skill_profile_select_rules_enabled=bool(cfg.tree_skill_profile_select_rules_enabled),
-        tree_skill_profile_batch_size=max(1, int(cfg.tree_skill_profile_batch_size or 1)),
-        tree_skill_profile_description_limit=max(40, int(cfg.tree_skill_profile_description_limit or 40)),
-        tree_skill_profile_rule_limit=max(40, int(cfg.tree_skill_profile_rule_limit or 40)),
-        incremental_max_change_ratio=max(0.0, float(cfg.incremental_max_change_ratio)),
-        incremental_min_add_confidence=max(0.0, min(1.0, float(cfg.incremental_min_add_confidence))),
-        incremental_min_add_confidence_margin=max(0.0, min(1.0, float(cfg.incremental_min_add_confidence_margin))),
-        incremental_branch_imbalance_ratio=max(1.0, float(cfg.incremental_branch_imbalance_ratio or 1.0)),
-        generate_tree_html=bool(cfg.generate_tree_html),
-        allow_fallback_tree=bool(cfg.allow_fallback_tree),
-    )
+def resolve_build_config(*, config: RetrievalBuildConfig | None = None) -> RetrievalBuildConfig:
+    """Snapshot validated policy and resolve root-category input at execution time."""
+    cfg = (config or RetrievalBuildConfig()).model_copy(deep=True)
+    return cfg.model_copy(update={"structure": cfg.structure.model_copy(update={
+        "root_categories": resolve_tree_root_categories(cfg.structure.root_categories),
+    })})
 
 
 def build_catalog_records_from_nodes(
@@ -276,36 +149,11 @@ def compact_text(text: str, *, limit: int) -> str:
     return normalized[: max(0, limit - 1)].rstrip() + "..."
 
 
-def can_build_tree_with_llm(runtime_config: BuildConfig | ResolvedBuildConfig | None = None) -> bool:
-    """检查是否可以用LLM构建树索引。
-
-    Args:
-        runtime_config: BuildConfig 或 ResolvedBuildConfig
-
-    Returns:
-        如果配置了LLM模型和API密钥/客户端，返回True
-    """
-    if isinstance(runtime_config, ResolvedBuildConfig):
-        return bool(str(runtime_config.llm_model or "").strip()) and (
-            runtime_config.llm_openai_client is not None or bool(str(runtime_config.tree_llm_api_key or "").strip())
-        )
-    # BuildConfig
-    if runtime_config is None:
-        runtime_config = BuildConfig()
-    # BuildConfig 使用 llm_model 和 llm_api_key/llm_base_url
-    if hasattr(runtime_config, "llm_model"):
-        return bool(str(runtime_config.llm_model or "").strip()) and (
-            runtime_config.llm_openai_client is not None or bool(str(runtime_config.llm_api_key or "").strip())
-        )
-    # Legacy runtime configurations used tree-prefixed field names.
-    tree_llm_model = getattr(runtime_config, "tree_llm_model", "")
-    tree_llm_api_key = getattr(runtime_config, "tree_llm_api_key", "")
-    return bool(str(tree_llm_model or "").strip()) and bool(str(tree_llm_api_key or "").strip())
+def can_build_tree_with_llm(model=None) -> bool:
+    return callable(getattr(_unwrap_model(model), "invoke", None))
 
 
 __all__ = [
-    "BuildConfig",
-    "ResolvedBuildConfig",
     "build_catalog_records_from_nodes",
     "build_fallback_tree_nodes",
     "build_fallback_tree_nodes_from_records",

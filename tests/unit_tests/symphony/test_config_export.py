@@ -123,7 +123,7 @@ def test_optional_reference_covers_all_remaining_internal_fields(exporter):
         assert len(block.splitlines()) == len(model.model_fields) + 1
         for field in model.model_fields:
             assert f"── {field} # " in block or f"── {field} → " in block
-    for name in ("FingerprintProtocolConfig", "OneShotTreeBuildConfig", "RetrievalModelConfig"):
+    for name in ("FingerprintProtocolConfig", "OneShotTreeBuildConfig"):
         assert "\n" + name + " # " in internal
     for name in (
         "TreeRequestConfig", "TreeStructureConfig", "IndexTreeStructureConfig", "TreeBuildConfig",

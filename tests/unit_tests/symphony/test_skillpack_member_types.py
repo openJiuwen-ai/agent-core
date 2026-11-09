@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openjiuwen.symphony.config import FlowConfig
+
 import asyncio
 from unittest.mock import AsyncMock
 
@@ -12,7 +14,6 @@ from openjiuwen.symphony.flow import (
     CapabilityPackager, SkillPackAdapter, SkillPackNotInstallableError, SymphonyFlowEngine,
 )
 from openjiuwen.symphony.flow.distill import normalize_execution_graph
-from openjiuwen.symphony.orchestration import SymphonyFlowConfig
 from tests.unit_tests.symphony.test_capability_flow import _execution_graph
 
 
@@ -85,7 +86,7 @@ async def test_type_is_preserved_through_distillation_and_rendering(tmp_path):
 @pytest.mark.parametrize("fresh_count", [2, 3, 4])
 @pytest.mark.asyncio
 async def test_fresh_typed_evidence_rebuilds_legacy_recipe_without_rewriting_history(tmp_path, fresh_count):
-    config = SymphonyFlowConfig(min_successes=3)
+    config = FlowConfig(acceptance={'min_successes': 3})
     legacy = SymphonyFlowEngine(tmp_path, config=config)
     for index in range(3):
         legacy.ingest(_typed_graph(f"old-{index}", None))
@@ -106,8 +107,8 @@ async def test_fresh_typed_evidence_rebuilds_legacy_recipe_without_rewriting_his
     assert current.version > old_recipe.version
     assert current.quality["execution_count"] == fresh_count
     assert all(node["metadata"]["skill_type"] == "skill" for node in current.combination_structure["nodes"].values())
-    assert (current.grade == "verified") is (fresh_count >= config.min_successes)
-    assert bool(upgraded.list_candidates()) is (fresh_count >= config.min_successes)
+    assert (current.grade == "verified") is (fresh_count >= config.acceptance.min_successes)
+    assert bool(upgraded.list_candidates()) is (fresh_count >= config.acceptance.min_successes)
     assert upgraded.get_candidate(recipe_id, version=old_recipe.version) is None
     assert old_version_file.read_bytes() == original_bytes
 
@@ -137,7 +138,7 @@ async def test_filtered_historical_evidence_does_not_redistill_after_restart(tmp
 
 @pytest.mark.asyncio
 async def test_untyped_generic_flow_keeps_existing_version_and_counts(tmp_path):
-    engine = SymphonyFlowEngine(tmp_path, config=SymphonyFlowConfig(min_successes=3))
+    engine = SymphonyFlowEngine(tmp_path, config=FlowConfig(acceptance={'min_successes': 3}))
     for index in range(3):
         assert engine.ingest(_typed_graph(f"old-{index}", None))
     first = await engine.distill()

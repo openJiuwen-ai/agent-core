@@ -1,5 +1,5 @@
 # 由 scripts/export_symphony_config.py 自动生成，请修改 config.py 后重新生成。
-# 目标配置，尚未接入运行链路；当前运行行为仍以原有模块配置为准。
+# SymphonyRuntime(model, config) 的运行配置；宿主产品可显式覆盖默认值。
 # 注释标明默认值或必填；→ 表示子模型类型，用户可调子模型在根树完整展开。
 # 不列只读派生属性；长列表展示数量，完整默认内容保留在 config.py。
 # 用户配置树覆盖 31 个模型。
@@ -46,7 +46,7 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │   │   │   ├── branching_factor # 默认=128；每个分类节点的最大分支数；公共入口至少允许两个分支。
 │   │   │   ├── max_depth # 默认=6；索引分类树的最大深度。
 │   │   │   ├── root_categories # 默认=None；根分类列表或配置文件路径文本；模型本身不读取路径。
-│   │   │   └── max_capabilities_per_node_multiplier # 默认=1.5；递归构树时，叶节点容量阈值相对 branching_factor 的倍率；对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由后续运行层计算。
+│   │   │   └── max_capabilities_per_node_multiplier # 默认=1.5；递归构树时，叶节点容量阈值相对 branching_factor 的倍率；对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由递归构树运行层计算。
 │   │   ├── request → IndexRequestConfig # 默认=IndexRequestConfig()；模型请求的并发、超时、重试和分类批量。
 │   │   │   ├── max_concurrency # 默认=2；索引构建模型请求的并发上限。
 │   │   │   ├── max_retries # 默认=2；模型请求失败后的最多重试次数。

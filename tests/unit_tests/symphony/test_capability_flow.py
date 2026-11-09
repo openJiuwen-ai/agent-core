@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openjiuwen.symphony.config import FlowConfig
+
 import asyncio
 import json
 from dataclasses import FrozenInstanceError
@@ -42,7 +44,6 @@ from openjiuwen.symphony.flow.distill import (
     topological_order,
 )
 from openjiuwen.symphony.flow.models import content_hash
-from openjiuwen.symphony.orchestration import SymphonyFlowConfig
 
 
 class _ApprovingReviewAgent:
@@ -137,10 +138,7 @@ def _execution_graph(
 
 
 def _engine(tmp_path: Path) -> SymphonyFlowEngine:
-    config = SymphonyFlowConfig(
-        min_successes=5,
-        min_pack_success_rate=0.8,
-    )
+    config = FlowConfig(acceptance={'min_successes': 5, 'min_pack_success_rate': 0.8})
     return SymphonyFlowEngine(tmp_path / "flow", config=config)
 
 
@@ -167,16 +165,10 @@ def _feed_verified_engine(tmp_path: Path) -> SymphonyFlowEngine:
     return engine
 
 
-def test_engine_compatibility_config_falls_back_to_effective_defaults(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow", config=SimpleNamespace())
-    assert engine.ingest(_execution_graph("trace-defaults"))
-
-    report = asyncio.run(engine.distill())
-    recipe = engine.get_recipe(report.recipes_saved[0])
-
-    assert recipe is not None
-    assert recipe.grade == RECIPE_GRADE_VERIFIED
-    assert recipe.status == RECIPE_STATUS_ACTIVE
+def test_engine_rejects_untyped_legacy_configuration(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="FlowConfig"):
+        SymphonyFlowEngine(tmp_path / "flow", config=SimpleNamespace())
+    assert not (tmp_path / "flow").exists()
 
 
 def test_ingest_and_distill_end_to_end(tmp_path: Path) -> None:
@@ -290,7 +282,7 @@ def test_narrative_deferred_until_verified_threshold(tmp_path: Path) -> None:
         }
     )
     llm = Mock(invoke=AsyncMock(return_value=response))
-    config = SymphonyFlowConfig(min_successes=3, min_pack_success_rate=0.8)
+    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config, llm_client=llm)
 
     assert engine.ingest(_execution_graph("trace-1", query="first task"))
@@ -447,10 +439,7 @@ def test_legacy_delivery_acknowledgement_does_not_hide_candidate(tmp_path: Path)
 
 
 def test_ack_uses_current_verified_state_when_immutable_version_was_candidate(tmp_path: Path) -> None:
-    config = SymphonyFlowConfig(
-        min_successes=2,
-        min_pack_success_rate=0.8,
-    )
+    config = FlowConfig(acceptance={'min_successes': 2, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
     assert asyncio.run(engine.submit(_execution_graph("trace-1"))) == ()
@@ -1090,10 +1079,7 @@ def test_stale_recipe_version_is_rejected(tmp_path: Path) -> None:
 
 
 def test_branching_recipe_is_not_installable_in_v1(tmp_path: Path) -> None:
-    config = SymphonyFlowConfig(
-        min_successes=1,
-        min_pack_success_rate=0.5,
-    )
+    config = FlowConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("branch", [("s1", "s2", True), ("s1", "s3", True)]))
     report = asyncio.run(engine.distill())
@@ -1342,10 +1328,7 @@ _DOCUMENTED_EXECUTION_GRAPH = {
 def test_ingest_accepts_documented_execution_graph(tmp_path: Path) -> None:
     """4.3.1 文档格式的执行图可直接接入：失败边剔除成员、分支边保留。"""
 
-    config = SymphonyFlowConfig(
-        min_successes=1,
-        min_pack_success_rate=0.5,
-    )
+    config = FlowConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
     assert engine.ingest(_DOCUMENTED_EXECUTION_GRAPH) is True
@@ -1372,10 +1355,7 @@ def test_ingest_accepts_documented_execution_graph(tmp_path: Path) -> None:
 def test_non_success_evidence_does_not_reduce_pack_success_rate(tmp_path: Path) -> None:
     """Flow only distills overall-success executions."""
 
-    config = SymphonyFlowConfig(
-        min_successes=3,
-        min_pack_success_rate=0.8,
-    )
+    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     for index in range(6):
         assert engine.ingest(_execution_graph(f"trace-{index}", query=f"调研任务 {index}"))
@@ -1447,10 +1427,7 @@ def test_same_nodes_different_structures_split_groups(tmp_path: Path) -> None:
     不给 s1→s2→s5 组虚增成功经验（边方向由 source→target 决定）。
     """
 
-    config = SymphonyFlowConfig(
-        min_successes=3,
-        min_pack_success_rate=0.8,
-    )
+    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("t1", [("s1", "s2", True), ("s2", "s5", True)]))
     engine.ingest(_graph_with_edges("t2", [("s1", "s2", True), ("s2", "s5", True)]))

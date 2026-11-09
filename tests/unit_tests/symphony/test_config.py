@@ -10,17 +10,6 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.symphony import config as target
-from openjiuwen.symphony.agent.retrieval_toolkit import (
-    SkillIndexBuildConfig as CurrentIndexBuildConfig,
-)
-from openjiuwen.symphony.discovery.config import DiscoverySettings
-from openjiuwen.symphony.orchestration.config import (
-    OrchestrationConfig as CurrentPlanningConfig,
-    SymphonyFlowConfig as CurrentFlowConfig,
-)
-from openjiuwen.symphony.retrieval.build.tree import schema as current_tree
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig as CurrentWorkflowConfig
-from openjiuwen.symphony.shared.fingerprint.settings import FingerprintSettings
 
 
 MINIMAL = {"capability": {"root": "./capabilities", "type": "skill"}, "storage": {"artifact_root": "./.symphony"}}
@@ -32,52 +21,8 @@ def _get(instance, path):
     return list(instance) if isinstance(instance, tuple) else instance
 
 
-def _assert_defaults(current, planned, mapping, *, excluded=()):
-    baseline = asdict(current)
-    for name in excluded:
-        baseline.pop(name)
-    assert set(baseline) == set(mapping), "每个既有纯配置字段都应有明确的目标位置"
-    for old_name, new_path in mapping.items():
-        expected = baseline[old_name]
-        if isinstance(expected, tuple):
-            expected = list(expected)
-        assert _get(planned, new_path) == expected, (old_name, new_path)
 
 
-INDEX_MAPPING = {
-    "max_depth": "structure.max_depth",
-    "branching_factor": "structure.branching_factor",
-    "root_categories": "structure.root_categories",
-    "max_workers": "build.request.max_concurrency",
-    "max_retries": "build.request.max_retries",
-    "request_timeout_seconds": "build.request.timeout_seconds",
-    "total_timeout_seconds": "task.total_timeout_seconds",
-    "classification_batch_limit": "build.request.classification_batch_limit",
-    "context_window": "build.request.context_window_tokens",
-    "max_output_tokens": "build.request.max_output_tokens",
-    "discovery_seed": "build.prompt.discovery_seed",
-    "postprocess_enabled": "build.postprocess.enabled",
-    "postprocess_max_passes": "build.postprocess.max_passes",
-    "postprocess_min_skills": "build.postprocess.min_capabilities",
-    "equivalence_enabled": "build.equivalence.enabled",
-    "equivalence_max_groups_per_parent": "build.equivalence.max_groups_per_parent",
-    "equivalence_allow_singleton_groups": "build.equivalence.allow_singleton_groups",
-    "equivalence_min_lexical_similarity": "build.equivalence.min_lexical_similarity",
-    "deterministic_prompts": "build.prompt.deterministic",
-    "prompt_fingerprint_version": "build.prompt.fingerprint_version",
-    "cache_observability": "output.cache_metrics_enabled",
-    "skill_profiles_enabled": "build.profiles.enabled",
-    "skill_profile_select_rules_enabled": "build.profiles.select_rules_enabled",
-    "skill_profile_batch_size": "build.profiles.batch_size",
-    "skill_profile_description_limit": "build.profiles.max_description_chars",
-    "skill_profile_rule_limit": "build.profiles.max_rule_chars",
-    "incremental_max_change_ratio": "incremental.max_change_ratio",
-    "incremental_min_add_confidence": "incremental.min_add_confidence",
-    "incremental_min_add_confidence_margin": "incremental.min_add_confidence_margin",
-    "incremental_branch_imbalance_ratio": "incremental.branch_imbalance_ratio",
-    "generate_tree_html": "output.generate_tree_html",
-    "preserve_previous_index_on_failure": "task.preserve_previous_index_on_failure",
-}
 
 
 def test_minimal_config_has_independent_enabled_features_and_expected_defaults():
@@ -139,7 +84,7 @@ def test_fingerprint_output_budget_supports_injected_model_default(value):
     })
     assert config.capability.fingerprint.extraction.max_output_tokens == value
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
-    assert target.FingerprintExtractionConfig().max_output_tokens == FingerprintSettings().llm_max_tokens == 2048
+    assert target.FingerprintExtractionConfig().max_output_tokens == 2048
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "2048"])
@@ -325,19 +270,6 @@ def test_runtime_dependencies_are_not_configuration_fields():
         target.SymphonyConfig.model_validate({**MINIMAL, "model": object()})
 
 
-def test_public_build_preserves_every_configurable_toolkit_default():
-    config = target.SymphonyConfig.model_validate(MINIMAL)
-    mapping = {
-        old: path.removeprefix("build.") for old, path in INDEX_MAPPING.items()
-        if old != "prompt_fingerprint_version"
-    }
-    _assert_defaults(
-        CurrentIndexBuildConfig(), config.retrieval.build, mapping,
-        excluded=("prompt_fingerprint_version", "strict_failure", "caching"),
-    )
-    # caching 只在旧业务配置中透传并参与签名，没有缓存控制逻辑；目标配置不再镜像。
-    # 旧 strict_failure 反向映射到唯一回退策略，不再保留第二个可写开关。
-    assert config.retrieval.build.task.allow_fallback_tree is not CurrentIndexBuildConfig().strict_failure
 
 
 def test_public_groups_preserve_existing_module_defaults():
@@ -535,76 +467,10 @@ def test_index_failure_policy_rejects_the_previous_output_path(field):
     assert error.value.errors()[0]["loc"] == ("output", field)
 
 
-def test_public_build_matches_existing_workflow_and_shared_tree_defaults():
-    tree_mapping = {
-        "max_workers": "request.max_concurrency",
-        "num_retries": "request.max_retries", "timeout": "request.timeout_seconds",
-        "context_window": "request.context_window_tokens", "max_output_tokens": "request.max_output_tokens",
-        "classify_batch_cap": "request.classification_batch_limit",
-        "postprocess_enabled": "postprocess.enabled", "postprocess_max_passes": "postprocess.max_passes",
-        "postprocess_min_skills": "postprocess.min_capabilities",
-        "equiv_grouping_enabled": "equivalence.enabled",
-        "equiv_max_groups_per_parent": "equivalence.max_groups_per_parent",
-        "equiv_allow_singleton_groups": "equivalence.allow_singleton_groups",
-        "equiv_min_lexical_similarity": "equivalence.min_lexical_similarity",
-        "deterministic_prompts": "prompt.deterministic", "discovery_seed": "prompt.discovery_seed",
-        "cache_observability": "output.cache_metrics_enabled",
-        "skill_profiles_enabled": "profiles.enabled", "skill_profile_select_rules_enabled": "profiles.select_rules_enabled",
-        "skill_profile_batch_size": "profiles.batch_size", "skill_profile_description_limit": "profiles.max_description_chars",
-        "skill_profile_rule_limit": "profiles.max_rule_chars",
-    }
-    config = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build
-    # 底层入口的并发 1、超时 180、批量 20 留在业务模块；提示版本是协议身份，caching 没有功能消费者。
-    excluded_tree_fields = ("max_workers", "timeout", "classify_batch_cap", "prompt_fingerprint_version", "caching")
-    _assert_defaults(current_tree.TreeBuildConfig(), config, {
-        name: path for name, path in tree_mapping.items() if name not in excluded_tree_fields
-    }, excluded=excluded_tree_fields)
-    workflow_mapping = {"tree_" + name: path for name, path in tree_mapping.items()}
-    workflow_mapping["tree_timeout_seconds"] = workflow_mapping.pop("tree_timeout")
-    workflow_mapping.update({
-        "tree_branching_factor": "structure.branching_factor", "tree_max_depth": "structure.max_depth",
-        "tree_root_categories": "structure.root_categories", "generate_tree_html": "output.generate_tree_html",
-        "allow_fallback_tree": "task.allow_fallback_tree",
-        **{old: new for old, new in INDEX_MAPPING.items() if old.startswith("incremental_")},
-    })
-    _assert_defaults(CurrentWorkflowConfig(), config, workflow_mapping, excluded=(
-        "llm_openai_client", "llm_model", "llm_api_key", "llm_base_url", "llm_seed",
-        "tree_prompt_fingerprint_version", "tree_caching",
-    ))
 
 
-def test_fingerprint_flow_and_discovery_defaults_match_existing_sources():
-    public = target.SymphonyConfig.model_validate(MINIMAL)
-    current_fingerprint = FingerprintSettings()
-    _assert_defaults(current_fingerprint, public.capability.fingerprint, {
-        "enable_llm_extraction": "extraction.llm_enabled", "enable_llm_evaluation": "evaluation.llm_enabled",
-        "batch_size": "extraction.batch_size", "max_concurrency": "extraction.max_concurrency",
-        "body_limit": "extraction.max_body_chars", "llm_max_tokens": "extraction.max_output_tokens",
-        "llm_timeout": "extraction.timeout_seconds", "evidence_text_limit": "evaluation.max_evidence_chars",
-        "cache_enabled": "cache.enabled",
-    }, excluded=("extraction_protocol_version", "evaluation_protocol_version", "configuration_signature"))
-    protocol = target.FingerprintProtocolConfig()
-    assert protocol.extraction_version == current_fingerprint.extraction_protocol_version
-    assert protocol.evaluation_version == current_fingerprint.evaluation_protocol_version
-    assert protocol.configuration_signature == current_fingerprint.configuration_signature
-    _assert_defaults(CurrentFlowConfig(), target.FlowConfig(), {
-        "enabled": "enabled", "min_successes": "acceptance.min_successes",
-        "min_pack_success_rate": "acceptance.min_pack_success_rate", "max_narrative_examples": "narrative.max_examples",
-    })
-    _assert_defaults(DiscoverySettings(), target.DiscoveryConfig(), {
-        "candidate_budget_ratio": "prompt.candidate_budget_ratio", "context_window_tokens": "prompt.context_window_tokens",
-        "max_output_chars": "output.max_chars", "max_results": "output.max_results",
-        "max_list_entries": "output.max_list_entries", "incremental_notice_max_chars": "output.incremental_notice_max_chars",
-        "use_existing_index": "use_existing_index", "prompt_preferred_skills": "prompt.preferred_capability_ids",
-    })
 
 
-def test_planning_defaults_preserve_the_current_contract():
-    public = target.SymphonyConfig.model_validate(MINIMAL)
-    _assert_defaults(CurrentPlanningConfig(), public.orchestration, {
-        "mode": "plan.mode", "top_k": "plan.top_k", "max_depth": "plan.max_depth",
-        "min_edge_confidence": "min_edge_confidence", "dynamic_graph_enabled": "plan.dynamic_graph_enabled",
-    })
 
 
 @pytest.mark.parametrize("fingerprint_cache_enabled", [True, False])
@@ -634,7 +500,7 @@ def test_discovery_prompt_budget_keeps_derivation_and_default_priority_list(rati
     })
     prompt = config.retrieval.discovery.prompt
     assert prompt.candidate_budget_tokens == expected
-    assert prompt.preferred_capability_ids == list(DiscoverySettings().prompt_preferred_skills)
+    assert prompt.preferred_capability_ids == ["skill-creator", "swarmskill-creator", "symphony-assistant"]
     assert "candidate_budget_tokens" not in prompt.model_dump()
     assert "candidate_budget_tokens" not in prompt.model_json_schema()["properties"]
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
@@ -653,10 +519,10 @@ def test_discovery_budget_errors_are_located_under_prompt(field, value):
 def test_public_structure_and_output_defaults_preserve_source_values_without_runtime_settings():
     config = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build
     assert config.structure.model_dump() == {
-        "branching_factor": CurrentIndexBuildConfig().branching_factor,
-        "max_depth": CurrentIndexBuildConfig().max_depth,
-        "root_categories": CurrentIndexBuildConfig().root_categories,
-        "max_capabilities_per_node_multiplier": current_tree.MAX_SKILLS_PER_NODE_MULTIPLIER,
+        "branching_factor": 128,
+        "max_depth": 6,
+        "root_categories": None,
+        "max_capabilities_per_node_multiplier": 1.5,
     }
     assert config.output.model_dump() == {
         "generate_tree_html": False, "verbose": False, "show_tree": True, "display_capability_root": None,
@@ -687,9 +553,8 @@ def test_independent_derived_configuration_values_and_explicit_overrides():
 def test_existing_package_exports_continue_to_use_the_existing_configuration():
     import openjiuwen.symphony as symphony
 
-    assert symphony.OrchestrationConfig is CurrentPlanningConfig
-    assert symphony.OrchestrationConfig is not target.OrchestrationConfig
-    assert "SymphonyConfig" not in symphony.__all__
+    assert symphony.SymphonyConfig is target.SymphonyConfig
+    assert "SymphonyConfig" in symphony.__all__
 
 
 @pytest.mark.parametrize("payload, location", [
@@ -719,13 +584,23 @@ def test_retired_capabilities_are_rejected_without_compatibility_aliases(payload
 
 def test_registry_contains_only_retained_capabilities():
     assert len(target.PUBLIC_CONFIG_MODELS) == 31
-    assert len(target.INTERNAL_CONFIG_MODELS) == 3
-    assert len(target.CONFIG_MODELS) == 34
+    assert len(target.INTERNAL_CONFIG_MODELS) == 2
+    assert len(target.CONFIG_MODELS) == 33
     assert {m.__name__ for m in target.INTERNAL_CONFIG_MODELS} == {
-        "FingerprintProtocolConfig", "OneShotTreeBuildConfig", "RetrievalModelConfig",
+        "FingerprintProtocolConfig", "OneShotTreeBuildConfig",
     }
     for name in (
         "_DEFAULT_COMPACT_CODES", "LLMClientConfig", "RetrievalSearchConfig", "AgenticRetrievalConfig",
         "ExperienceConfig", "CapabilityIndexStorageConfig", "ScoreTruncationConfig",
     ):
         assert not hasattr(target, name)
+
+
+def test_all_public_defaults_match_the_committed_pre_integration_contract():
+    # 独立基线来自 dcdcef3ef 的公共配置，不能用运行中的消费者反向生成期望值。
+    expected = json.loads((Path(__file__).parent / "fixtures" / "config_defaults_dcdcef3ef.json").read_text())
+    assert target.SymphonyConfig.model_validate(MINIMAL).model_dump(mode="json") == expected
+
+
+def test_model_connection_configuration_is_owned_by_host():
+    assert not hasattr(target, "RetrievalModelConfig")

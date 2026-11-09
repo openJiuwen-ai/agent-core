@@ -23,7 +23,7 @@ scope: 分层纯配置模型、树形文档导出和配置验证；运行链路�
 
 ## 1. 决策归属与确认
 
-本设计记录用户已在会话中确认并明确要求实施的“Symphony 配置先行计划”。它承接 [Runtime 总体草案](../../proposals/D-20261029-1619-skill-directory-graph-api/design.md) 的配置部分，将配置模型和运行链路迁移拆为两个阶段。
+本设计记录用户已在会话中确认并明确要求实施的“Symphony 配置先行计划”。它承接 [Runtime 总体草案](../../active/D-20261029-1619-skill-directory-graph-api/design.md) 的配置部分，将配置模型和运行链路迁移拆为两个阶段。
 
 2026-10-31，用户先要求多层配置、Pydantic 和中文说明，再明确要求先整理 config 文件，最后以“PLEASE IMPLEMENT THIS PLAN”确认本阶段范围。该确认只覆盖配置契约及验证，不表示整个 Runtime 重构方案已批准。评审者账号未提供，reviewers 不推断为 Git 作者。
 

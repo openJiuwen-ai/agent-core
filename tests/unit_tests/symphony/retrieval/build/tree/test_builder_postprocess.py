@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
@@ -24,8 +26,7 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         self.addCleanup(tmp_dir.cleanup)
         builder = TreeBuilder(
             skills_dir=Path(tmp_dir.name),
-            model="test-tree-model",
-            client=cast(Any, object()),
+            model=SimpleNamespace(invoke=lambda **kwargs: None),
         )
         builder.settings.postprocess_min_skills = 2
         builder.settings.equiv_allow_singleton_groups = False
@@ -232,12 +233,12 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
 
     def test_configured_taxonomy_keeps_fixed_levels_and_builds_terminal_groups(self) -> None:
         builder = self._builder()
-        builder.config.root_categories = {
+        builder.config = replace(builder.config, root_categories={
             "office": {
                 "name": "Office",
                 "children": {"issues": {"name": "Issue Management"}},
             }
-        }
+        })
         builder.operations = replace(
             builder.operations,
             discover_equivalence_groups=lambda scope, leaves, verbose=False: {

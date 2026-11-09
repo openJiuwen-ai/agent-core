@@ -112,7 +112,7 @@ def render_document(config: ModuleType, *, include_internal: bool = False) -> st
     command = "scripts/export_symphony_config.py" + (" --include-internal" if include_internal else "")
     lines = [
         f"# 由 {command} 自动生成，请修改 config.py 后重新生成。",
-        "# 目标配置，尚未接入运行链路；当前运行行为仍以原有模块配置为准。",
+        "# SymphonyRuntime(model, config) 的运行配置；宿主产品可显式覆盖默认值。",
         "# 注释标明默认值或必填；→ 表示子模型类型，用户可调子模型在根树完整展开。",
         "# 不列只读派生属性；长列表展示数量，完整默认内容保留在 config.py。",
         f"# 用户配置树覆盖 {len(config.PUBLIC_CONFIG_MODELS)} 个模型。",

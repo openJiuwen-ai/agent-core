@@ -1,14 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Symphony 目标配置，尚未接入运行链路。
+"""Symphony 运行配置，供 SymphonyRuntime(model, config) 及内部消费者统一使用。
 
 公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration、
 flow 组合可调策略；子配置均有默认值，仅对象目录、类型和产物目录必填。
-指纹协议、一次性构树及构建模型连接参数仍单独定义；解析设置仅由原运行模块维护。
+指纹协议和一次性构树内部预算单独定义；解析后的运行快照不另设策略默认值。
 公共树模型与内部模型分别登记；便利导出只保留核心配置类，供验证和文档读取完整登记。
-现有模块配置仍是运行行为的依据；本文件不读取环境、扫描目录或创建模型客户端。
+本文件不读取环境、扫描目录或创建模型客户端；目录检查和服务组装由 Runtime 负责。
 
 字段的中文 title、description 和约束用于后续生成配置文档。同义策略只在公共树定义一次；
-旧入口的不同默认值由原业务模块保留，配置中的 capability 命名不修改现有产物字段或工具标识。
+宿主产品默认值通过本配置显式覆盖；capability 命名不修改现有对象文件格式或工具标识。
 客户端实例、线程池、取消/进度回调、扫描结果和前缀缓存句柄属于运行参数，
 不进入这些可序列化模型。文件中的路径只保存文本，不检查存在性或解析绝对路径。
 """
@@ -356,16 +356,6 @@ class OneShotTreeBuildConfig(SymphonyConfigModel):
     seed: int | None = Field(None, title="一次性构建种子", description="可选的模型随机种子。")
 
 
-# 构建模型连接：只保留纯数据字段，不接收 client 或 llm_openai_client 句柄。
-class RetrievalModelConfig(SymphonyConfigModel):
-    """现有 toolkit LLMConfig 和索引工作流模型参数的纯数据部分。"""
-
-    model: str = Field("", title="模型名称", description="模型服务识别的模型名称；空值表示尚未绑定模型。")
-    api_key: str = Field("", title="模型访问凭证", description="独立后端的访问凭证；文档只导出空默认值。", repr=False)
-    base_url: str = Field("", title="模型服务地址", description="独立模型服务的基础 URL。")
-    seed: int | None = Field(None, title="模型随机种子", description="可选的模型随机种子。")
-
-
 # 公共组合在子模型定义之后声明，默认工厂不需要运行模块或前向引用修复。
 class CapabilityConfig(SymphonyConfigModel):
     """一个 Runtime 所管理的对象定义集合及扫描、指纹策略；不同类型使用独立集合。"""
@@ -387,7 +377,7 @@ class CapabilityConfig(SymphonyConfigModel):
 
 
 class StorageConfig(SymphonyConfigModel):
-    """Runtime 产物存储位置；路径检查和目录创建由后续运行层负责。"""
+    """Runtime 产物存储位置；路径检查和目录创建由运行层负责。"""
 
     artifact_root: ConfigPath = Field(
         title="产物根目录", description="保存 inventory、缓存、tree 和 graph 的根目录；模型校验不会创建目录。",
@@ -408,7 +398,7 @@ class RetrievalTreeStructureConfig(SymphonyConfigModel):
     max_capabilities_per_node_multiplier: PositiveFloat = Field(
         1.5, title="节点容量倍率",
         description="递归构树时，叶节点容量阈值相对 branching_factor 的倍率；"
-        "对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由后续运行层计算。",
+        "对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由递归构树运行层计算。",
     )
 
 
@@ -512,7 +502,7 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
 )
 
 INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    FingerprintProtocolConfig, OneShotTreeBuildConfig, RetrievalModelConfig,
+    FingerprintProtocolConfig, OneShotTreeBuildConfig,
 )
 
 CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + INTERNAL_CONFIG_MODELS

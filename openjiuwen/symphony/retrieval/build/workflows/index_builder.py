@@ -31,7 +31,10 @@ from openjiuwen.symphony.shared.storage import (
 )
 from openjiuwen.symphony.shared.storage import is_s3_uri, upload_local_dir_to_s3
 
-from .artifacts import BuildConfig, resolve_build_config
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _model_scope
+
+from .artifacts import resolve_build_config
 
 build_tree = _build_tree
 download_s3_object_to_path = _download_s3_object_to_path
@@ -46,7 +49,9 @@ class IndexBuilder:
         output_dir: str | Path | None = None,
         *,
         item_type: str = "skill",
-        config: BuildConfig | None = None,
+        config: RetrievalBuildConfig | None = None,
+        model=None,
+        check=None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.build", logger=LOGGER)
@@ -70,19 +75,21 @@ class IndexBuilder:
                 return _IndexBuildWorkflow(
                     item_paths=manifest_item_paths,
                     output_dir=local_output_dir,
-                    resolved_config=resolved_config,
+                    config=resolved_config,
+                    model=build_model,
                     item_type=item_type,
                     pre_scanned_skills=pre_scanned_skills,
                     manifest_item_paths=manifest_item_paths,
                 )
 
-            return _build_and_maybe_upload_s3(
-                output_value=output_value,
-                local_output_dir=Path(output_dir),
-                temp_prefix="retriever-index-s3-output-",
-                workflow_factory=workflow_factory,
-                timer=timer,
-            )
+            with _model_scope(model, check=check) as build_model:
+                return _build_and_maybe_upload_s3(
+                    output_value=output_value,
+                    local_output_dir=Path(output_dir),
+                    temp_prefix="retriever-index-s3-output-",
+                    workflow_factory=workflow_factory,
+                    timer=timer,
+                )
         finally:
             timer.finish()
 
@@ -93,7 +100,9 @@ class IndexBuilder:
         output_dir: str | Path | None = None,
         *,
         item_type: str = "skill",
-        config: BuildConfig | None = None,
+        config: RetrievalBuildConfig | None = None,
+        model=None,
+        check=None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.add", logger=LOGGER)
@@ -124,7 +133,8 @@ class IndexBuilder:
                 return _IncrementalIndexBuildWorkflow(
                     item_paths=combined,
                     output_dir=local_output_dir,
-                    resolved_config=resolved_config,
+                    config=resolved_config,
+                    model=build_model,
                     base_index_dir=base_dir,
                     added_paths=added_paths,
                     removed_paths=[],
@@ -133,13 +143,14 @@ class IndexBuilder:
                     manifest_item_paths=combined,
                 )
 
-            return _build_and_maybe_upload_s3(
-                output_value=output_value,
-                local_output_dir=Path(output_dir),
-                temp_prefix="retriever-index-add-s3-output-",
-                workflow_factory=workflow_factory,
-                timer=timer,
-            )
+            with _model_scope(model, check=check) as build_model:
+                return _build_and_maybe_upload_s3(
+                    output_value=output_value,
+                    local_output_dir=Path(output_dir),
+                    temp_prefix="retriever-index-add-s3-output-",
+                    workflow_factory=workflow_factory,
+                    timer=timer,
+                )
         finally:
             timer.finish()
 
@@ -150,7 +161,9 @@ class IndexBuilder:
         output_dir: str | Path | None = None,
         *,
         item_type: str = "skill",
-        config: BuildConfig | None = None,
+        config: RetrievalBuildConfig | None = None,
+        model=None,
+        check=None,
         item_jsonl_path: str | None = None,
     ) -> str | Path:
         timer = StageTimer("IndexBuilder.delete", logger=LOGGER)
@@ -184,7 +197,8 @@ class IndexBuilder:
                 return _IncrementalIndexBuildWorkflow(
                     item_paths=normalized_remaining,
                     output_dir=local_output_dir,
-                    resolved_config=resolved_config,
+                    config=resolved_config,
+                    model=build_model,
                     base_index_dir=base_dir,
                     added_paths=[],
                     removed_paths=sorted(removed),
@@ -192,13 +206,14 @@ class IndexBuilder:
                     manifest_item_paths=normalized_remaining,
                 )
 
-            return _build_and_maybe_upload_s3(
-                output_value=output_value,
-                local_output_dir=Path(output_dir),
-                temp_prefix="retriever-index-delete-s3-output-",
-                workflow_factory=workflow_factory,
-                timer=timer,
-            )
+            with _model_scope(model, check=check) as build_model:
+                return _build_and_maybe_upload_s3(
+                    output_value=output_value,
+                    local_output_dir=Path(output_dir),
+                    temp_prefix="retriever-index-delete-s3-output-",
+                    workflow_factory=workflow_factory,
+                    timer=timer,
+                )
         finally:
             timer.finish()
 
