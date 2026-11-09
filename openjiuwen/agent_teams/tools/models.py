@@ -5,7 +5,7 @@
 
 Static tables: Team, TeamMember.
 Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage,
-MessageReadStatus, TeamTaskReviewVote.
+MessageReadStatus, TeamTaskReviewVote, TeamMeeting, TeamSpeechRequest.
 Configuration: DatabaseType, DatabaseConfig.
 """
 
@@ -14,18 +14,23 @@ import hashlib
 import json
 from typing import Dict, Optional, cast
 
-from sqlalchemy import BigInteger, Index, Table
+from sqlalchemy import BigInteger, ForeignKeyConstraint, Index, Table, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.schema.meeting import MeetingStatus, SpeechRequestStatus
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 
 TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_dependency_",
     "team_task_",
+    "team_speech_request_",
     "team_message_",
     "message_read_status_",
     "team_review_vote_",
+    "team_meeting_",
 )
 TEAM_STATIC_TABLES_TO_CLEAR = (
     "team_info",
@@ -104,6 +109,49 @@ class TeamMember(SQLModel, table=True):
 
 
 # ============== Dynamic Table Base Classes (abstract) ==============
+
+
+class TeamMeetingBase(SQLModel):
+    """Base for meeting speaking state tables, one table per session."""
+
+    __abstract__ = True
+
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
+    meeting_id: str = Field(primary_key=True)
+    leader_member_name: str
+    addressed_members: str = Field(default="[]")
+    next_sequence: int = Field(default=0, sa_type=BigInteger)
+    revision: int = Field(default=0, sa_type=BigInteger)
+    status: str = Field(default=MeetingStatus.ACTIVE)
+    owner_request_id: str | None = Field(default=None)
+    lease_token: str | None = Field(default=None)
+    interruption_id: str | None = Field(default=None)
+
+    @property
+    def closed(self) -> bool:
+        """Whether the meeting has permanently closed."""
+        return self.status == MeetingStatus.CLOSED
+
+
+class TeamSpeechRequestBase(SQLModel):
+    """Pending requests own content; sent requests reference Team messages."""
+
+    __abstract__ = True
+
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
+    meeting_id: str = Field(primary_key=True)
+    request_id: str = Field(primary_key=True)
+    member_name: str
+    source_message_id: str | None = Field(default=None, nullable=True)
+    content: str | None = Field(default=None, sa_type=Text)
+    speech_text: str = Field(nullable=False, sa_type=Text)
+    mentions: str = Field(default="[]", sa_type=Text)
+    routing: str = Field(default='{"kind":"group_chat","recipients":[],"protocol":"plain"}', sa_type=Text)
+    sequence: int = Field(sa_type=BigInteger)
+    status: str = Field(default=SpeechRequestStatus.QUEUED)
+    lease_token: str | None = Field(default=None)
+    created_at: int = Field(sa_type=BigInteger)
+    granted_at: int | None = Field(default=None, sa_type=BigInteger)
 
 
 class TeamTaskBase(SQLModel):
@@ -382,6 +430,47 @@ _task_dependency_models: Dict[str, type[TeamTaskDependencyBase]] = {}
 _message_models: Dict[str, type[TeamMessageBase]] = {}
 _message_read_status_models: Dict[str, type[MessageReadStatusBase]] = {}
 _review_vote_models: Dict[str, type[TeamTaskReviewVoteBase]] = {}
+_meeting_models: dict[str, type[TeamMeetingBase]] = {}
+_speech_request_models: dict[str, type[TeamSpeechRequestBase]] = {}
+
+
+def _get_meeting_model(session_id: str | None = None) -> type[TeamMeetingBase]:
+    """Get or create the meeting model for an explicit or currently bound session."""
+    session_id = get_session_id() if session_id is None else session_id
+    if not session_id:
+        raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="A session ID is required for meeting tables")
+    if session_id not in _meeting_models:
+        suffix = _sanitize_session_id_for_table(session_id)
+        attrs = {"__tablename__": f"team_meeting_{suffix}"}
+        model_cls = SQLModelMetaclass(f"TeamMeeting_{suffix}", (TeamMeetingBase,), attrs, table=True)
+        _meeting_models[session_id] = cast(type[TeamMeetingBase], model_cls)
+    return _meeting_models[session_id]
+
+
+def _get_speech_request_model(session_id: str | None = None) -> type[TeamSpeechRequestBase]:
+    """Get or create the speech request model for an explicit or bound session."""
+    session_id = get_session_id() if session_id is None else session_id
+    if not session_id:
+        raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="A session ID is required for speech request tables")
+    if session_id not in _speech_request_models:
+        suffix = _sanitize_session_id_for_table(session_id)
+        table_name = f"team_speech_request_{suffix}"
+        message_model = _get_message_model(session_id)
+        attrs = {
+            "__tablename__": table_name,
+            "__table_args__": (
+                Index(f"ix_{table_name}_pending", "team_name", "meeting_id", "status", "sequence"),
+                UniqueConstraint("team_name", "meeting_id", "source_message_id"),
+                ForeignKeyConstraint(
+                    ["source_message_id"],
+                    [f"{message_model.__tablename__}.message_id"],
+                    ondelete="RESTRICT",
+                ),
+            ),
+        }
+        model_cls = SQLModelMetaclass(f"TeamSpeechRequest_{suffix}", (TeamSpeechRequestBase,), attrs, table=True)
+        _speech_request_models[session_id] = cast(type[TeamSpeechRequestBase], model_cls)
+    return _speech_request_models[session_id]
 
 
 def _get_task_model() -> type[TeamTaskBase]:
@@ -441,9 +530,9 @@ def _get_task_dependency_model() -> type[TeamTaskDependencyBase]:
     return _task_dependency_models[session_id]
 
 
-def _get_message_model() -> type[TeamMessageBase]:
-    """Get or create dynamic message model for current session"""
-    session_id = get_session_id()
+def _get_message_model(session_id: str | None = None) -> type[TeamMessageBase]:
+    """Get or create the message model for an explicit or currently bound session."""
+    session_id = get_session_id() if session_id is None else session_id
     if session_id not in _message_models:
         suffix = _sanitize_session_id_for_table(session_id)
         class_name = f"TeamMessage_{suffix}"
@@ -549,3 +638,5 @@ def _clear_session_model_cache(session_id: str) -> None:
     _message_models.pop(session_id, None)
     _message_read_status_models.pop(session_id, None)
     _review_vote_models.pop(session_id, None)
+    _meeting_models.pop(session_id, None)
+    _speech_request_models.pop(session_id, None)

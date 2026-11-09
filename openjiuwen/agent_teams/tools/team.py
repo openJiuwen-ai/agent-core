@@ -21,6 +21,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.meeting.coordinator import MeetingCoordinator
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -35,6 +36,7 @@ from openjiuwen.agent_teams.interaction.bridge_protocol import BridgeProtocolAda
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
+    MeetingStateChangedEvent,
     MemberCanceledEvent,
     MemberShutdownEvent,
     MemberSpawnedEvent,
@@ -43,6 +45,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamTopic,
     ToolApprovalResultEvent,
 )
+from openjiuwen.agent_teams.schema.meeting import MeetingScope, MeetingStatus
 from openjiuwen.agent_teams.schema.status import (
     MEMBER_SETTLED_STATUSES,
     ExecutionStatus,
@@ -71,6 +74,8 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -266,6 +271,8 @@ class TeamBackend:
         self.group_chat_spec = None
         self.group_session_id = ""
         self._group_conversation = None
+        self.meeting: "MeetingCoordinator | None" = None
+        self.meeting_enabled = False
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
@@ -544,10 +551,90 @@ class TeamBackend:
 
     def bind_group_session(self, session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id.strip():
-            raise ValueError("Group chat requires a nonempty runtime session_id")
+            raise ValueError("Team runtime requires a nonempty session_id")
         if self._group_conversation is not None and self.group_session_id != session_id:
             raise ValueError("A group backend cannot switch sessions; stop and rebuild the team")
+        if self.group_session_id != session_id:
+            self.meeting = None
+            self.meeting_enabled = False
         self.group_session_id = session_id
+
+    def _meeting_session_id(self) -> str:
+        if not self.group_session_id:
+            raise_error(StatusCode.AGENT_TEAM_STATE_INVALID, reason="Bind the Team session before using meeting")
+        return self.group_session_id
+
+    def _meeting_scope(self, meeting_id: str) -> MeetingScope:
+        if not isinstance(meeting_id, str) or not meeting_id.strip():
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Meeting ID must be a nonempty string")
+        return MeetingScope(self._meeting_session_id(), self.team_name, meeting_id)
+
+    def _meeting_coordinator(self, scope: MeetingScope) -> "MeetingCoordinator":
+        from openjiuwen.agent_teams.meeting.coordinator import MeetingCoordinator
+
+        if self.meeting is None or self.meeting.scope != scope:
+            self.meeting = MeetingCoordinator(
+                self.db, scope, messager=self.messager, on_state_change=self._on_meeting_state_change,
+            )
+        return self.meeting
+
+    async def enable_meeting(self, *, meeting_id: str | None = None) -> "MeetingCoordinator":
+        """Create or resume the Team/session meeting without changing text delivery."""
+        if not self.is_leader:
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Only the Team leader may enable meeting")
+        session_id = self._meeting_session_id()
+        if meeting_id is not None:
+            self._meeting_scope(meeting_id)
+        await self.db.initialize()
+        row = await self.db.meeting.enable_team_meeting(session_id, self.team_name, meeting_id=meeting_id)
+        meeting = self._meeting_coordinator(self._meeting_scope(row.meeting_id))
+        await self._on_meeting_state_change()
+        await meeting.notify_queue_changed()
+        return meeting
+
+    async def _on_meeting_state_change(self) -> None:
+        await self.get_meeting()
+        if self.messager is not None:
+            try:
+                await self.messager.publish(
+                    topic_id=TeamTopic.TEAM.build(self._meeting_session_id(), self.team_name),
+                    message=EventMessage.from_event(MeetingStateChangedEvent(team_name=self.team_name)),
+                )
+            except Exception as exc:
+                team_logger.warning("Meeting state wake failed for %s: %s", self.team_name, exc)
+
+    async def get_meeting(self) -> "MeetingCoordinator | None":
+        """Refresh the locally cached handle and enabled flag from the Team database."""
+        session_id = self._meeting_session_id()
+        await self.db.initialize()
+        row = await self.db.meeting.get_team_meeting(session_id, self.team_name)
+        if row is None:
+            self.meeting = None
+            self.meeting_enabled = False
+            return None
+        meeting = self._meeting_coordinator(self._meeting_scope(row.meeting_id))
+        self.meeting_enabled = row.status == MeetingStatus.ACTIVE
+        return meeting
+
+    async def disable_meeting(self, *, meeting_id: str) -> bool:
+        """Stop admitting or granting speech while retaining queued requests and any lease."""
+        if not self.is_leader:
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Only the Team leader may disable meeting")
+        scope = self._meeting_scope(meeting_id)
+        meeting = await self.get_meeting()
+        if meeting is None or meeting.scope != scope:
+            return False
+        return await meeting.disable()
+
+    async def close_meeting(self, *, meeting_id: str) -> bool:
+        """Permanently close this meeting; the host remains responsible for stopping audio."""
+        if not self.is_leader:
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Only the Team leader may close meeting")
+        scope = self._meeting_scope(meeting_id)
+        meeting = await self.get_meeting()
+        if meeting is None or meeting.scope != scope:
+            return False
+        return await meeting.close()
 
     async def group_conversation(self):
         if self._group_conversation is None:
@@ -2272,9 +2359,6 @@ class TeamBackend:
         enable_task_verification = overrides.enable_task_verification if overrides is not None else None
         # Step A: enforce spec ceiling
         if enable_hitt is True and not self._spec_enable_hitt:
-            from openjiuwen.core.common.exception.codes import StatusCode
-            from openjiuwen.core.common.exception.errors import raise_error
-
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason=(
@@ -2284,9 +2368,6 @@ class TeamBackend:
                 ),
             )
         if enable_bridge is True and not self._spec_enable_bridge:
-            from openjiuwen.core.common.exception.codes import StatusCode
-            from openjiuwen.core.common.exception.errors import raise_error
-
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason=(

@@ -270,6 +270,9 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+                # Refresh after subscription so a concurrent lifecycle event is not missed.
+                if infra.team_backend is not None:
+                    await infra.team_backend.get_meeting()
         await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.REFRESH_TEAM_CONTEXT))
         # Re-arm the team-completion rising-edge guard on every start (cold
         # start / resume / recover) so each run cycle evaluates completion
@@ -657,6 +660,10 @@ class CoordinationKernel:
 
         await messager.register_direct_message_handler(self._event_bus.enqueue)
         for topic in TeamTopic:
+            if topic == TeamTopic.MEETING_QUEUE:
+                # Host audio consumers may subscribe via MeetingCoordinator.queue_topic;
+                # agent runtimes do not process queue wakes.
+                continue
             topic_str = topic.build(session_id, team_name)
             await messager.subscribe(topic_str, _filter_self)
             self._subscribed_topics.append(topic_str)

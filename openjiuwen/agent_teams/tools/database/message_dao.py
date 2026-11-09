@@ -68,6 +68,10 @@ class MessageDao:
         (and read-back correct) without any path stored in the DB. Empty
         content (templated messages, UC-B6) stays inline — ``""`` is not a
         placeholder, so no file is created and no read is triggered.
+
+        Message files cannot be overwritten. A conflicting file (including an
+        orphan from a rolled-back insert) falls back inline; the database still
+        decides which message ID is accepted without changing an existing body.
         """
         if not content:
             return content
@@ -166,6 +170,17 @@ class MessageDao:
         if not any(self._is_placeholder(row.content) for row in rows):
             return rows
         return await asyncio.to_thread(self._hydrate_rows, rows)
+
+    async def get_message_identity(
+        self, message_id: str, *, session_id: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Read a message's team and sender without hydrating text or changing read state."""
+        model = _get_message_model(session_id)
+        async with self._sessions.read() as session:
+            row = (await session.execute(select(model.team_name, model.from_member_name).where(
+                model.message_id == message_id,
+            ))).one_or_none()
+            return (row.team_name, row.from_member_name) if row is not None else None
 
     async def get_message(self, message_id: str) -> Optional[TeamMessageBase]:
         """Get message information by ID."""

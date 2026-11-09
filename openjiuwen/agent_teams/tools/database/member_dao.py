@@ -266,6 +266,14 @@ class MemberDao:
             )
             return (await session.execute(stmt)).scalar_one_or_none()
 
+    async def get_member_role_status(self, member_name: str, team_name: str) -> tuple[str, str] | None:
+        """Read the current identity fields without loading the member's runtime configuration."""
+        async with self._sessions.read() as session:
+            row = (await session.execute(select(TeamMember.role, TeamMember.status).where(
+                TeamMember.team_name == team_name, TeamMember.member_name == member_name,
+            ))).one_or_none()
+            return (row.role, row.status) if row is not None else None
+
     async def member_exists(self, member_name: str, team_name: str) -> bool:
         """Check whether a member row exists, without loading it.
 

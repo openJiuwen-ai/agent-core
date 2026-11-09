@@ -27,9 +27,11 @@ from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, Databas
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
     TEAM_STATIC_TABLES_TO_CLEAR,
+    _get_meeting_model,
     _get_message_model,
     _get_message_read_status_model,
     _get_review_vote_model,
+    _get_speech_request_model,
     _get_task_dependency_model,
     _get_task_model,
     _sanitize_session_id_for_table,
@@ -279,6 +281,11 @@ async def retry_on_transient(
 def _get_table_names(sync_conn) -> list[str]:
     """Return all table names currently present in the database."""
     return list(inspect(sync_conn).get_table_names())
+
+
+def _meeting_drop_order(table_name: str) -> int:
+    """Drop audio requests before their referenced message tables."""
+    return 0 if table_name.startswith("team_speech_request_") else 1
 
 
 def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
@@ -919,6 +926,8 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    meeting_model = _get_meeting_model()
+    speech_request_model = _get_speech_request_model()
     conn = await session.connection()
     # Snapshot which migration-candidate tables already exist *before* create
     # runs. ``create(checkfirst=True)`` leaves a pre-existing table untouched,
@@ -926,13 +935,37 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     # scheme and can be skipped without a single ``get_indexes`` PRAGMA call.
     candidates = _current_session_migration_tables()
     existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
-    for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+    for model in (
+        task_model,
+        dep_model,
+        message_model,
+        read_status_model,
+        review_vote_model,
+        meeting_model,
+        speech_request_model,
+    ):
         await conn.run_sync(model.__table__.create, checkfirst=True)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
     await conn.run_sync(
         _ensure_dynamic_table_indexes, candidates, existing_before_create
     )
+
+
+async def create_meeting_tables(sessions: DbSessions, session_id: str) -> None:
+    """Create explicitly scoped meeting storage under the shared DDL/write lock."""
+    meeting_model = _get_meeting_model(session_id)
+    message_model = _get_message_model(session_id)
+    speech_request_model = _get_speech_request_model(session_id)
+
+    async def _ddl_once() -> None:
+        async with sessions.write() as session:
+            conn = await session.connection()
+            for model in (message_model, meeting_model, speech_request_model):
+                await conn.run_sync(model.__table__.create, checkfirst=True)
+            await session.commit()
+
+    await retry_on_transient(_ddl_once, label=f"create_meeting_tables(session={session_id})")
 
 
 async def create_cur_session_tables(sessions: DbSessions) -> bool:
@@ -1002,10 +1035,20 @@ async def drop_cur_session_tables(sessions: DbSessions) -> None:
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    meeting_model = _get_meeting_model()
+    speech_request_model = _get_speech_request_model()
 
     async with sessions.write() as session:
         conn = await session.connection()
-        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+        for model in (
+            task_model,
+            dep_model,
+            speech_request_model,
+            message_model,
+            read_status_model,
+            review_vote_model,
+            meeting_model,
+        ):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
         await session.commit()
 
@@ -1030,7 +1073,7 @@ async def cleanup_all_runtime_state(
         conn = await session.connection()
         table_names = await conn.run_sync(_get_table_names)
 
-        for table_name in table_names:
+        for table_name in sorted(table_names, key=_meeting_drop_order):
             if not table_name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES):
                 continue
             await conn.run_sync(_drop_table, table_name)

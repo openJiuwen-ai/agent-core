@@ -35,10 +35,28 @@ class ExternalTeamToolGateway:
         session_id: str,
         team_backend: TeamBackend,
         tools: Iterable[Tool],
+        language: str = "en",
     ) -> None:
         self._session_id = session_id
         self._team_backend = team_backend
         self._tools = {tool.card.name: tool for tool in tools}
+        self._language = language
+
+    async def install_meeting_tools(self) -> None:
+        """Explicitly add member-scoped Meeting controls to this gateway."""
+        token = set_session_id(self._session_id)
+        try:
+            meeting = await self._team_backend.get_meeting()
+            if meeting is None:
+                raise ValueError("An open meeting is required before installing member tools")
+            from openjiuwen.agent_teams.meeting.tools import create_meeting_tools
+
+            tools = await create_meeting_tools(
+                meeting.for_member(self._team_backend.member_name), language=self._language,
+            )
+            self._tools.update(tools)
+        finally:
+            reset_session_id(token)
 
     async def definitions(self) -> tuple[ToolDefinition, ...]:
         """Return the definitions of the bound local team tools."""
@@ -123,7 +141,7 @@ def build_external_team_tool_gateway(
                 make_translator(language, ws_cache=team_backend.workspace_cache),
             )
         )
-    return ExternalTeamToolGateway(session_id=session_id, team_backend=team_backend, tools=tools)
+    return ExternalTeamToolGateway(session_id=session_id, team_backend=team_backend, tools=tools, language=language)
 
 
 __all__ = ["ExternalTeamToolGateway", "build_external_team_tool_gateway"]

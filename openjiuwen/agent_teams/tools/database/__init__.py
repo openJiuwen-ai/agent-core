@@ -6,7 +6,7 @@
 ``TeamDatabase`` owns the engine lifecycle and cross-table transactions
 that span more than one DAO. Single-table operations live on the DAO
 instances exposed as attributes (``team`` / ``member`` / ``task`` /
-``message``) — call them directly instead of going through the facade.
+``message`` / ``meeting``) — call them directly instead of going through the facade.
 Model definitions live in models.py.
 """
 
@@ -56,6 +56,7 @@ from openjiuwen.agent_teams.tools.database.graph import (
 from openjiuwen.agent_teams.tools.database.graph import (
     detect_cycle_in_adjacency as detect_cycle_in_adjacency,
 )
+from openjiuwen.agent_teams.tools.database.meeting_dao import MeetingDao as MeetingDao
 from openjiuwen.agent_teams.tools.database.member_dao import MemberDao as MemberDao
 from openjiuwen.agent_teams.tools.database.member_dao import (
     MemberExecutionUpdateResult as MemberExecutionUpdateResult,
@@ -88,7 +89,7 @@ class TeamDatabase:
 
     Owns the engine lifecycle and cross-table transactions. Single-table
     operations live on the DAO attributes (``team`` / ``member`` /
-    ``task`` / ``message``) — call them directly.
+    ``task`` / ``message`` / ``meeting``) — call them directly.
     """
 
     def __init__(self, config: DatabaseConfig):
@@ -117,6 +118,7 @@ class TeamDatabase:
         self.member: Optional[MemberDao] = None
         self.task: Optional[TaskDao] = None
         self.message: Optional[MessageDao] = None
+        self.meeting: MeetingDao | None = None
 
     @staticmethod
     def get_current_time() -> int:
@@ -181,6 +183,7 @@ class TeamDatabase:
         self.member = MemberDao(sessions)
         self.task = TaskDao(sessions, file_store=file_store)
         self.message = MessageDao(sessions, file_store=file_store)
+        self.meeting = MeetingDao(sessions)
 
         self._maybe_start_checkpointer()
 
@@ -365,6 +368,7 @@ class TeamDatabase:
         self.member = None
         self.task = None
         self.message = None
+        self.meeting = None
 
     async def _ensure_initialized(self) -> None:
         """Initialize on first call; idempotent thereafter."""

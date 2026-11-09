@@ -19,9 +19,11 @@ is exactly one root kind (session), so no provider interface exists.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from openjiuwen.agent_teams.paths import team_session_dir
 
@@ -66,15 +68,40 @@ class SessionFileStore:
         """Write ``text`` and return the ``#file#`` placeholder for the DB.
 
         Raises:
-            OSError: on IO failure — the DAO layer decides the degradation
-                (falls back to storing the raw text inline).
+            OSError: on IO failure or conflicting message content — the DAO
+                layer decides the degradation (stores the raw text inline).
+
+        Message bodies are immutable: identical retries reuse the file and
+        conflicting retries never overwrite it. Task bodies remain mutable.
         """
         target = self._resolve(address)
         target.parent.mkdir(parents=True, exist_ok=True)
+        if address.kind in (KIND_DIRECT, KIND_BROADCAST):
+            return self._put_message(text, target)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         tmp.replace(target)
         return CONTENT_IN_FILE
+
+    @staticmethod
+    def _put_message(text: str, target: Path) -> str:
+        """Publish a complete body without replacing another writer's file."""
+        staged = NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                    prefix=".message-", suffix=".tmp", delete=False)
+        tmp = Path(staged.name)
+        try:
+            with staged:
+                staged.write(text)
+            try:
+                # Linking is atomic and fails if the destination exists, across
+                # processes too. A shared temp name or replace() would race.
+                os.link(tmp, target)
+            except FileExistsError:
+                if target.read_text(encoding="utf-8") != text:
+                    raise FileExistsError(f"message content already exists with different text: {target}") from None
+            return CONTENT_IN_FILE
+        finally:
+            tmp.unlink(missing_ok=True)
 
     # ── read ───────────────────────────────────────────────────────────────
 
