@@ -66,7 +66,7 @@ class TreeEngine:
             skill_md_path=item.skill_file, content_hash=item.content_hash,
             metadata={"source": item.source, "version": item.version, "author": item.author},
         ) for item in records)
-        return AgenticSkillRetrievalToolkit(self.artifact_root, skills=indexed, config=self.config.build,
+        return AgenticSkillRetrievalToolkit(self.artifact_root, skills=indexed, config=self.config.index_build,
                                            model=self.model if model is None else model)
 
     @staticmethod
@@ -211,7 +211,7 @@ class TreeEngine:
                        visible_capability_ids=None, disabled_capability_ids=None, source_by_id=None,
                        config: DiscoveryConfig | None = None, pin_index_revision=False, **snapshot):
         self._check()
-        settings = (config or self.config.discovery).model_copy(deep=True)
+        settings = (config or self.config).for_session()
         records = lambda: self._records(capability_directories, disabled_capability_ids, source_by_id)
         environment = SkillFS(
             records, settings=settings, visible_skill_names=visible_capability_ids,

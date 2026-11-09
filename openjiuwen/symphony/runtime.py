@@ -61,9 +61,10 @@ class SymphonyRuntime:
             raise ValueError("artifact_root must not equal or contain capability.root")
         values["capability"]["root"] = str(capability_root)
         values["storage"]["artifact_root"] = str(artifact_root)
-        categories = values["retrieval"]["build"]["structure"]["root_categories"]
+        structure = values["retrieval"]["index_build"]["structure"]
+        categories = structure["root_categories"]
         if isinstance(categories, str):
-            values["retrieval"]["build"]["structure"]["root_categories"] = str(Path(categories).expanduser().resolve())
+            structure["root_categories"] = str(Path(categories).expanduser().resolve())
         self.config = SymphonyConfig.model_validate(values)
         self.model = model
         self._closed = False

@@ -9,7 +9,7 @@ author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 reviewers: []
 created: 2026-10-31
-updated: 2026-11-06
+updated: 2026-11-09
 approved-date: 2026-10-31
 domain: core
 modules: [symphony]
@@ -180,3 +180,11 @@ SymphonyConfig
 - 保留缓存指标、指纹缓存、动态观测开关、Discovery、Flow、一次性构树和三个内部模型。缓存指标只表示观测，不作为缓存开关；冻结策略不再保留已删除 dynamic 节点的可变例外。
 
 验收：按上述删除项和唯一迁移路径核对修改前后的默认值与 Schema 约束；旧 dynamic 节点和 request.caching 在字典/JSON 输入中按未知字段拒绝，新路径支持深层覆盖和完整错误定位。保留配置往返、独立容器、中文元数据及导出覆盖，自动生成 config.tree.txt 并同步现行规约、示例和文档索引。仅运行配置和导出测试，不运行格式化、静态检查或业务集成测试；实际实施与验证结果续写 F_20261031_1614_symphony-config-contract，历史验证事实不改写。
+
+## 15. 2026-11-09 合并 Retrieval 与 Discovery 配置
+
+用户确认保留 `retrieval` 顶层。构树策略移到 `retrieval.index_build`，会话提示、输出和已有索引开关分别移到 `retrieval.prompt`、`retrieval.output`、`retrieval.use_existing_index`。本节替代第 8、12、14 节涉及这些配置路径及配置先行的安排。Core 和 Swarm 同步切换。部署时重新获取 Swarm YAML，旧路径按未知字段拒绝。
+
+`retrieval.enabled` 继续控制构树、读树和会话创建。Runtime 保留 `runtime.retrieval` 入口。会话提取独立策略，v2 快照沿用原有的三字段结构。默认值、校验约束和构树签名输入沿用现行契约。
+
+验收覆盖重排后的历史默认值、新旧路径校验、配置树、禁用入口、分类树复用和旧 v2 会话恢复。Swarm 通过固定 Core 提交安装后验证 YAML、设置保存、构树和会话发现。

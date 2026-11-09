@@ -11,8 +11,8 @@ config = SymphonyConfig.model_validate({
     "capability": {"root": "./capabilities", "type": "skill"},
     "storage": {"artifact_root": "./.symphony/runtime"},
     "retrieval": {
-        "build": {"request": {"max_concurrency": 2}},
-        "discovery": {"use_existing_index": True},
+        "index_build": {"request": {"max_concurrency": 2}},
+        "use_existing_index": True,
     },
     "orchestration": {"min_edge_confidence": 0.7, "plan": {"mode": "fast"}},
     "flow": {"acceptance": {"min_successes": 3}},
@@ -59,7 +59,7 @@ finally:
 
 ## 构建与模型
 
-分类树保留一次性生成、递归细分、后处理、等价分组和增量更新算法，直接消费 `retrieval.build` 的子模型。同步算法由 Runtime 在工作线程调度，模型请求桥接至宿主事件循环。未绑定事件循环的原生 `Model` 不支持直接同步构建；异步 Runtime 和 CLI 会完成绑定。
+分类树保留一次性生成、递归细分、后处理、等价分组和增量更新算法，直接消费 `retrieval.index_build` 的子模型。同步算法由 Runtime 在工作线程调度，模型请求桥接至宿主事件循环。未绑定事件循环的原生 `Model` 不支持直接同步构建；异步 Runtime 和 CLI 会完成绑定。
 
 请求超时、任务超时和取消均传播到模型请求。鉴权和参数等永久 HTTP 错误不会重试；瞬态错误按请求策略重试，前一次调用完成清理后才允许下一次调用。取消清理超界时终止整个构建，不重试、不回退、不发布。截断结果会被拒绝，模型用量由宿主响应观察器计量。
 
@@ -71,7 +71,7 @@ finally:
 
 `create_session` 的会话标识、目录范围、可见对象、禁用对象、来源和索引快照属于调用上下文，不放进配置，也没有 Source 构造层。来源以对象 ID 为键。返回的 `DiscoverySession` 同时服务工具和提示 Rail；动态禁用实时生效，冻结的预算和索引版本不随后续配置修改漂移。
 
-`use_existing_index=True` 在已有索引时读取分类树；尚无索引时仍可使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `output.max_results` 限制，列表同时受 `max_list_entries` 限制；续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
+`retrieval.use_existing_index=True` 在已有索引时读取分类树。尚无索引时使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `retrieval.output.max_results` 限制，列表同时受 `max_list_entries` 限制。续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
 
 ## 产物与版本
 

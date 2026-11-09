@@ -33,8 +33,8 @@ async def test_constructor_is_lazy_isolated_and_does_not_close_host_model(tmp_pa
     model = SimpleNamespace(invoke=AsyncMock(), aclose=AsyncMock())
     config = SymphonyConfig(capability={"root": "capabilities", "type": "skill"}, storage={"artifact_root": "runtime"})
     runtime = SymphonyRuntime(model, config)
-    config.retrieval.discovery.prompt.preferred_capability_ids.append("external-mutation")
-    assert "external-mutation" not in runtime.config.retrieval.discovery.prompt.preferred_capability_ids
+    config.retrieval.prompt.preferred_capability_ids.append("external-mutation")
+    assert "external-mutation" not in runtime.config.retrieval.prompt.preferred_capability_ids
     assert runtime.config.capability.root == str(tmp_path / "capabilities")
     assert runtime.config.storage.artifact_root == str(tmp_path / "runtime")
     assert not (tmp_path / "runtime").exists()
@@ -55,6 +55,8 @@ async def test_independent_disabled_capabilities_are_queryable_but_reject_execut
     for operation in (runtime.retrieval.build, runtime.orchestration.build):
         with pytest.raises(RuntimeError, match="disabled"):
             await operation()
+    with pytest.raises(RuntimeError, match="disabled"):
+        runtime.retrieval.read()
     with pytest.raises(RuntimeError, match="disabled"):
         runtime.retrieval.create_session()
     with pytest.raises(RuntimeError, match="disabled"):
@@ -77,10 +79,14 @@ async def test_unimplemented_reader_fails_explicitly_on_use(tmp_path, kind):
 @pytest.mark.asyncio
 async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_path):
     write_capability(tmp_path)
-    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"discovery": {"prompt": {"context_window_tokens": 4000}, "output": {"max_results": 2}}}))
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"prompt": {"context_window_tokens": 4000}, "output": {"max_results": 2}}))
     session = runtime.retrieval.create_session(session_scope="test")
+    settings = session.environment.settings
+    assert set(settings.model_dump()) == {"prompt", "output", "use_existing_index"}
+    runtime.config.retrieval.prompt.preferred_capability_ids.append("runtime-mutation")
+    assert "runtime-mutation" not in settings.prompt.preferred_capability_ids
     assert [r.worker_id for r in session.records()] == ["alpha"]
-    assert session.environment.settings.prompt.candidate_budget_tokens == 40
+    assert settings.prompt.candidate_budget_tokens == 40
     result = await session.skill_index(operation="search", query="invoice")
     assert "alpha" in str(result)
     built = await runtime.retrieval.build()
@@ -261,7 +267,7 @@ async def test_inventory_change_in_prepare_hook_keeps_previous_version(tmp_path,
 @pytest.mark.asyncio
 async def test_first_discovery_session_does_not_claim_unbound_storage(tmp_path):
     write_capability(tmp_path)
-    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"discovery": {"use_existing_index": True}}))
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"use_existing_index": True}))
     session = runtime.retrieval.create_session(pin_index_revision=True)
     assert session.records()
     assert not (tmp_path / "runtime").exists()
@@ -302,7 +308,7 @@ async def test_discovery_limits_and_source_ids_apply_through_session(tmp_path):
         write_capability(tmp_path, f"object-{index}")
     path = tmp_path / "capabilities" / "object-0" / "SKILL.md"
     path.write_text(path.read_text().replace("name: object-0", "name: Display Name"))
-    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"discovery": {"output": {"max_results": 2, "max_list_entries": 1}}}))
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"output": {"max_results": 2, "max_list_entries": 1}}))
     session = runtime.retrieval.create_session(source_by_id={"object-0": "session"})
     assert next(item for item in session.records() if item.worker_id == "object-0").source == "session"
     listed = await session.skill_index(operation="list")

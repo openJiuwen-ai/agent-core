@@ -237,7 +237,7 @@ class DiscoveryPromptConfig(SymphonyConfigModel):
 
 
 class DiscoveryConfig(SymphonyConfigModel):
-    """Discovery 的纯配置；不包含应用 YAML 加载和模型上下文推断。"""
+    """Discovery 会话使用的提示、输出和索引读取策略。"""
 
     prompt: DiscoveryPromptConfig = Field(
         default_factory=DiscoveryPromptConfig, title="提示策略", description="候选提示的上下文容量、预算比例和优先对象设置。",
@@ -246,6 +246,10 @@ class DiscoveryConfig(SymphonyConfigModel):
         default_factory=DiscoveryOutputConfig, title="输出预算", description="发现结果、列表和增量提示的限制。",
     )
     use_existing_index: bool = Field(False, title="使用已有索引", description="是否使用已经构建的检索索引辅助发现。")
+
+    def for_session(self) -> DiscoveryConfig:
+        """复制会话策略，构建配置与功能开关由 Runtime 管理。"""
+        return DiscoveryConfig.model_validate(self.model_dump(include=set(DiscoveryConfig.model_fields)))
 
 
 # 树构建：保留底层树、索引工作流、agent toolkit 三个入口各自的默认值。
@@ -434,15 +438,12 @@ class RetrievalBuildConfig(SymphonyConfigModel):
     )
 
 
-class RetrievalConfig(SymphonyConfigModel):
+class RetrievalConfig(DiscoveryConfig):
     """公共检索配置；组合分类树构建和对象发现，启用不会自动构建索引。"""
 
-    enabled: bool = Field(True, title="启用检索", description="允许使用检索入口；独立于编排开关。")
-    build: RetrievalBuildConfig = Field(
+    enabled: bool = Field(True, title="启用检索", description="允许构建和读取分类树、创建发现会话；独立于编排开关。")
+    index_build: RetrievalBuildConfig = Field(
         default_factory=RetrievalBuildConfig, title="索引构建", description="显式构建分类树时使用的策略。",
-    )
-    discovery: DiscoveryConfig = Field(
-        default_factory=DiscoveryConfig, title="对象发现", description="对象发现的候选、输出和提示预算。",
     )
 
 
@@ -474,7 +475,7 @@ class OrchestrationConfig(SymphonyConfigModel):
 
 
 class SymphonyConfig(SymphonyConfigModel):
-    """Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。"""
+    """SymphonyRuntime 使用的公共运行配置。"""
 
     capability: CapabilityConfig = Field(title="对象集合", description="显式声明对象目录、类型及预处理策略。")
     storage: StorageConfig = Field(title="产物存储", description="显式声明本集合的产物根目录。")
@@ -496,13 +497,13 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
     StorageConfig, RetrievalConfig, RetrievalBuildConfig, RetrievalTreeStructureConfig, IndexRequestConfig,
     TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,
     TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
-    DiscoveryConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,
+    DiscoveryOutputConfig, DiscoveryPromptConfig,
     OrchestrationConfig, OrchestrationBuildConfig, GraphMatchingPolicyConfig, OrchestrationPlanConfig,
     FlowConfig, FlowAcceptanceConfig, FlowNarrativeConfig,
 )
 
 INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    FingerprintProtocolConfig, OneShotTreeBuildConfig,
+    FingerprintProtocolConfig, OneShotTreeBuildConfig, DiscoveryConfig,
 )
 
 CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + INTERNAL_CONFIG_MODELS

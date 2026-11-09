@@ -30,8 +30,8 @@ config = SymphonyConfig.model_validate({
     "capability": {"root": "./capabilities", "type": "skill"},
     "storage": {"artifact_root": "./.symphony"},
     "retrieval": {
-        "build": {"request": {"max_concurrency": 4}},
-        "discovery": {"prompt": {"candidate_budget_ratio": 0.02}},
+        "index_build": {"request": {"max_concurrency": 4}},
+        "prompt": {"candidate_budget_ratio": 0.02},
     },
     "flow": {"acceptance": {"min_successes": 2}},
 })
@@ -45,36 +45,37 @@ schema = SymphonyConfig.model_json_schema()
 |---|---|
 | capability | root、type、scan（深度/预算/解析）、fingerprint（extraction/evaluation/cache） |
 | storage | artifact_root |
-| retrieval | enabled、build、discovery |
-| retrieval.build | structure（深度/分支/根分类/容量倍率）、request、postprocess、equivalence、profiles、prompt、incremental、task、output |
-| retrieval.discovery | prompt（候选提示预算/优先对象）、output、use_existing_index |
+| retrieval | enabled、index_build、prompt（候选提示预算和优先对象）、output、use_existing_index |
+| retrieval.index_build | structure（深度/分支/根分类/容量倍率）、request、postprocess、equivalence、profiles、prompt、incremental、task、output |
 | orchestration | enabled、min_edge_confidence、build（max_concurrency/matching）、plan |
 | flow | enabled、acceptance、narrative |
 
-retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点仍校验。Flow 的 enabled 默认 True，配置存在或启用不表示启动服务。
+retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点仍校验。Flow 的 enabled 默认 True，配置存在或启用不表示启动服务。retrieval.enabled 统一控制构树、读取分类树和创建发现会话。
 
 ## 3. 单一可写路径与保留模型
 
-树结构唯一位于 retrieval.build.structure，包含 max_capabilities_per_node_multiplier。该倍率对应递归构树的叶节点容量阈值，递归构树按 int(branching_factor * max_capabilities_per_node_multiplier) 计算；对象数不超过阈值时可停止细分，配置本身不计算阈值。原 retrieval.build.dynamic 节点及目标 DynamicTreeConfig、TreeExpansionConfig 已删除，不提供兼容别名。
+树结构唯一位于 retrieval.index_build.structure，包含 max_capabilities_per_node_multiplier。该倍率对应递归构树的叶节点容量阈值，递归构树按 int(branching_factor * max_capabilities_per_node_multiplier) 计算；对象数不超过阈值时可停止细分，配置本身不计算阈值。原 retrieval.build.dynamic 节点及目标 DynamicTreeConfig、TreeExpansionConfig 已删除，不提供兼容别名。
 
 重平衡间隔 rebalance_interval，以及 expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier 五个倍率没有实际功能消费者，不再进入目标配置。对应业务重复定义已清理；request.classification_batch_limit 的有效批量上限继续保留。
 
-构建任务策略位于 retrieval.build.task，展示与缓存指标位于 output。allow_fallback_tree 反向对应业务 strict_failure，目标不再接受第二个反向开关。旧索引保护与回退树独立配置：存在可用旧索引且 preserve_previous_index_on_failure=True 时，失败应优先保护旧索引；allow_fallback_tree=False 时缺模型配置或构建失败不能生成回退树。模型和工件是否存在由构建入口判断。
+构建任务策略位于 retrieval.index_build.task，构建展示与缓存指标位于 retrieval.index_build.output。allow_fallback_tree 反向对应业务 strict_failure，目标不再接受第二个反向开关。旧索引保护与回退树独立配置：存在可用旧索引且 preserve_previous_index_on_failure=True 时，失败应优先保护旧索引；allow_fallback_tree=False 时缺模型配置或构建失败不能生成回退树。模型和工件是否存在由构建入口判断。
 
 构图整体并发唯一位于 orchestration.build.max_concurrency，阶段上限位于 capability.fingerprint.extraction.max_concurrency；构图时取两者较小值。关系阈值唯一位于 orchestration.min_edge_confidence。plan.dynamic_graph_enabled 保留，控制是否在规划中使用已有动态观测，不触发执行或构图。
 
-缓存指标位于 retrieval.build.output.cache_metrics_enabled，只控制缓存命中和提示指纹统计，不控制缓存是否启用；指纹缓存仍由 capability.fingerprint.cache.enabled 配置。request.caching 已从目标配置删除，对应业务字段与旧签名输入一并删除，旧产物不兼容。prompt 只保留确定性策略和发现种子。Discovery 上下文、候选比例和优先对象统一位于 retrieval.discovery.prompt；candidate_budget_tokens 为只读派生值，不进入输入和序列化。
+缓存指标位于 retrieval.index_build.output.cache_metrics_enabled，只控制缓存命中和提示指纹统计，不控制缓存是否启用；指纹缓存仍由 capability.fingerprint.cache.enabled 配置。request.caching 已从目标配置删除，对应业务字段与旧签名输入一并删除，旧产物不兼容。retrieval.index_build.prompt 提供确定性策略和发现种子。会话上下文、候选比例和优先对象统一位于 retrieval.prompt；candidate_budget_tokens 为只读派生值，不进入输入和序列化。
 
-| 原目标路径 | 当前路径 |
+| 原配置路径 | 当前路径 |
 |---|---|
-| retrieval.build.max_depth / branching_factor | retrieval.build.structure 下的同名字段 |
-| retrieval.build.max_concurrency / request_timeout_seconds | retrieval.build.request.max_concurrency / timeout_seconds |
-| retrieval.build.task.strict_failure | 删除，反向由 retrieval.build.task.allow_fallback_tree 表达 |
-| retrieval.build.dynamic.expansion.max_capabilities_per_node_multiplier | retrieval.build.structure.max_capabilities_per_node_multiplier |
+| retrieval.build.* | retrieval.index_build.* |
+| retrieval.discovery.prompt / output / use_existing_index | retrieval 下的同名字段 |
+| retrieval.build.max_depth / branching_factor | retrieval.index_build.structure 下的同名字段 |
+| retrieval.build.max_concurrency / request_timeout_seconds | retrieval.index_build.request.max_concurrency / timeout_seconds |
+| retrieval.build.task.strict_failure | 删除，反向由 retrieval.index_build.task.allow_fallback_tree 表达 |
+| retrieval.build.dynamic.expansion.max_capabilities_per_node_multiplier | retrieval.index_build.structure.max_capabilities_per_node_multiplier |
 | retrieval.build.dynamic 的其余字段与节点 | 删除，无实际功能消费者 |
 | retrieval.build.request.caching | 删除，业务定义和旧签名输入也已移除 |
-| retrieval.build.prompt.cache_observability | retrieval.build.output.cache_metrics_enabled |
-| retrieval.discovery.budget | retrieval.discovery.prompt |
+| retrieval.build.prompt.cache_observability | retrieval.index_build.output.cache_metrics_enabled |
+| retrieval.discovery.budget | retrieval.prompt |
 | capability.fingerprint.extraction.body_limit / max_tokens | max_body_chars / max_output_tokens |
 | capability.fingerprint.evaluation.evidence_text_limit | max_evidence_chars |
 | retrieval.build.profiles.description_limit / rule_limit | max_description_chars / max_rule_chars |
@@ -82,9 +83,11 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 | orchestration.build.extraction_mode | capability.fingerprint.extraction.llm_enabled |
 | orchestration.build.require_consensus | orchestration.build.matching.require_consensus |
 
+`retrieval.build` 和 `retrieval.discovery` 作为未知字段拒绝。Swarm 使用更新后的 YAML 模板。
+
 TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildConfig、IndexTreeBuildConfig、TreeManagerConfig、TreePromptConfig、IndexBuildConfig、IndexArtifactConfig、TreeBuildOptions 等同义目标包装不恢复。树策略直接由 RetrievalBuildConfig 的子节点组合；DiscoveryPromptConfig 直接维护预算和优先对象。
 
-PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONFIG_MODELS 只登记 FingerprintProtocolConfig、OneShotTreeBuildConfig，CONFIG_MODELS 合计 33 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
+PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig、OneShotTreeBuildConfig 和会话策略 DiscoveryConfig，CONFIG_MODELS 合计 33 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
 
 `config.__all__` 只提供 CapabilityType 和 9 个核心模型：SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、FlowConfig。登记表、基类和其余子模型不进入便利导出，但可显式访问模块属性。
 
@@ -106,7 +109,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 - Discovery 默认提示比例 0.01、上下文 200000、派生预算 2000、输出字符 12000、结果数 10、列表条目 40、增量提示字符 4000；优先对象列表与 use_existing_index=False 保持不变。
 - 图构建并发 1、指纹提取并发 4、关系共识 True、min_edge_confidence=0.7、plan.mode=fast、top_k=3、max_depth=4、dynamic_graph_enabled=False。Flow 默认 enabled=True、min_successes=1、min_pack_success_rate=0.8、max_examples=5。
 
-本轮保留公共字段的路径、默认值和约束，以基线 dcdcef3e 导出的独立测试快照验证。构建采用新版布局和签名，不兼容旧产物；Flow 的 symphony.experience_recipe.v1 协议继续保留。配置全量 model_dump 不作为缓存签名。
+测试将 dcdcef3ef 导出的历史默认值按迁移表重排后与当前配置比较。当前 Runtime 布局与签名继续用于分类树复用，签名从构树子模型提取。Flow 继续采用 symphony.experience_recipe.v1 协议。
 
 ## 5. 导出与验证
 
@@ -123,7 +126,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 
 - 构造固定能力根、产物根和根分类文件相对路径，复制嵌套配置。构造不做扫描、模型调用、目录创建或后台工作。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
-- `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用；source_by_id 以 capability_id 为键。预算和索引版本可冻结，目录、可见与禁用条件可动态提供，不进入配置。
+- `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。`for_session()` 从 RetrievalConfig 提取独立的 prompt、output 和 use_existing_index 供会话使用。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
 - 检索、编排和 Flow 开关独立。禁用状态可查询，执行入口拒绝；model=None 允许只读和确定性发现、按任务策略回退构树，构图和规划拒绝缺模型。
 - skill 读取器已实现；expert/connector/mcp 读取器明确报不支持。相同目录只绑定一种对象集合。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
@@ -138,14 +141,14 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型，INTERNAL_CONF
 | capability.fingerprint.extraction | FingerprintService / Extractor | 提取批次、并发、正文、输出与超时 |
 | capability.fingerprint.evaluation/cache | EvaluationSuite、FingerprintCache | 提取后的评估和缓存复用 |
 | storage.artifact_root | RuntimeStorage、三个引擎 | inventory/cache/tree/graph/flow及发布 |
-| retrieval.build.structure/request | TreeBuilder/OneShotBuilder/ModelBridge | 结构与模型请求，递归叶容量倍率 |
-| retrieval.build.profiles/prompt | 画像和提示构建 | 文本裁剪、协议、种子 |
-| retrieval.build.postprocess/equivalence | 树后处理与等价分组 | 生成后的整理 |
-| retrieval.build.incremental | 增量工作流 | 增量阈值、重分类与升级全量 |
-| retrieval.build.task | toolkit任务调度 | 总超时、回退、旧索引保护 |
-| retrieval.build.output | 构建产物/展示/缓存指标 | 输出阶段，不进入树内容签名 |
-| retrieval.discovery.prompt | SkillFS | 会话预算和优先对象；宿主解析模型缺省容量 |
-| retrieval.discovery.output/use_existing_index | DiscoverySession、SkillFS | 搜索、列表、游标输出、索引快照 |
+| retrieval.index_build.structure/request | TreeBuilder/OneShotBuilder/ModelBridge | 结构与模型请求，递归叶容量倍率 |
+| retrieval.index_build.profiles/prompt | 画像和提示构建 | 文本裁剪、协议、种子 |
+| retrieval.index_build.postprocess/equivalence | 树后处理与等价分组 | 生成后的整理 |
+| retrieval.index_build.incremental | 增量工作流 | 增量阈值、重分类与升级全量 |
+| retrieval.index_build.task | toolkit任务调度 | 总超时、回退、旧索引保护 |
+| retrieval.index_build.output | 构建产物/展示/缓存指标 | 输出阶段，不进入树内容签名 |
+| retrieval.prompt | SkillFS | 会话预算和优先对象；宿主解析模型缺省容量 |
+| retrieval.output/use_existing_index | DiscoverySession、SkillFS | 搜索、列表、游标输出、索引快照 |
 | orchestration.build | OrchestrationService / Matcher | 构图并发、候选和匹配批量 |
 | orchestration.min_edge_confidence | Matcher、Fast/BeamPlanner | 构图与规划共用阈值 |
 | orchestration.plan | Fast/BeamPlanner、GraphEngine | 模式、top_k、深度与动态观测读取 |

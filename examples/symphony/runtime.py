@@ -7,7 +7,7 @@ async def build_and_plan(model, capability_root: str, artifact_root: str, query:
     config = SymphonyConfig(
         capability={"root": capability_root, "type": "skill"},
         storage={"artifact_root": artifact_root},
-        retrieval={"discovery": {"use_existing_index": True}},
+        retrieval={"use_existing_index": True},
         flow={"enabled": False},
     )
     runtime = SymphonyRuntime(model, config)

@@ -60,7 +60,7 @@ async def test_native_model_rejects_unbound_sync_build_and_keeps_owner_loop_conn
     config = SymphonyConfig.model_validate({
         "capability": {"root": str(root), "type": "skill"},
         "storage": {"artifact_root": str(tmp_path / "runtime")},
-        "retrieval": {"enabled": True, "build": {
+        "retrieval": {"enabled": True, "index_build": {
             "request": {"max_retries": 0, "timeout_seconds": 2.0},
             "task": {"allow_fallback_tree": False},
             "output": {"show_tree": False, "cache_metrics_enabled": False},
@@ -80,7 +80,7 @@ async def test_native_model_rejects_unbound_sync_build_and_keeps_owner_loop_conn
 
         with pytest.raises(RuntimeError, match="owner event loop"):
             await asyncio.to_thread(reject_unbound_scope)
-        toolkit = AgenticSkillRetrievalToolkit(tmp_path / "unbound", config=config.retrieval.build,
+        toolkit = AgenticSkillRetrievalToolkit(tmp_path / "unbound", config=config.retrieval.index_build,
                                               model=model, skills=[SkillRecord(name="Alpha")])
         for action in (toolkit.build_index, toolkit.build_index_async):
             with pytest.raises(RuntimeError, match="owner event loop"):
