@@ -1281,12 +1281,32 @@ class TeamTaskManager:
 
         if task.status == TaskStatus.PENDING.value:
             # A PENDING task with no owner is reserved into the plan gate
-            # (PENDING -> PLANNING) by the first submission. Scheduled tasks
-            # never reach here as PENDING with a free assignee.
-            claimed = await self.db.task.claim_task(task_id, member_name, to_status=TaskStatus.PLANNING)
-            if not claimed:
-                return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
-            active_status = TaskStatus.PLANNING.value
+            # (PENDING -> PLANNING) by the first submission. A task already
+            # assigned to this member (scheduled/pre-assigned, reassigned, or
+            # unblocked) must be started with start_task: claim_task only
+            # accepts rows whose assignee is still NULL.
+            if task.assignee == member_name:
+                # An already-owned PENDING row is the pre-assigned,
+                # reassigned, or unblocked case. The resume marker keeps a
+                # parent returning from its subtasks out of the plan gate.
+                entry_status = TaskStatus.IN_PROGRESS if task.resume_pending else TaskStatus.PLANNING
+                moved = await self.db.task.start_task(
+                    task_id,
+                    member_name,
+                    to_status=entry_status,
+                )
+                if not moved:
+                    return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+                active_status = entry_status.value
+            else:
+                claimed = await self.db.task.claim_task(
+                    task_id,
+                    member_name,
+                    to_status=TaskStatus.PLANNING,
+                )
+                if not claimed:
+                    return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+                active_status = TaskStatus.PLANNING.value
         elif task.assignee != member_name:
             return {
                 "success": False,
