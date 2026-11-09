@@ -556,8 +556,10 @@ class TaskPlanningRail(DeepAgentRail):
             )
             return
 
+        if not getattr(getattr(todos, "snapshot", None), "read_authoritative", True):
+            return
         if not todos:
-            if getattr(todos, "snapshot", None) is not None:
+            if getattr(getattr(todos, "snapshot", None), "versioned", False):
                 state.task_plan = None
                 ctx.agent.save_state(ctx.session, state)
             return

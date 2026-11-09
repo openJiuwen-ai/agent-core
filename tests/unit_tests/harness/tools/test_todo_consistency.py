@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.common.exception.errors import FrameworkError
+from openjiuwen.core.common.exception.errors import BaseError, FrameworkError
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
@@ -53,6 +53,158 @@ async def create(tool, session, **kwargs):
 
 async def update(tool, session, ident, **fields):
     return await tool.invoke({"action": "update", "todos": [{"id": ident, **fields}]}, session=session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inputs,reason", [
+    ({}, "is required"),
+    ({"tasks": "[]"}, "must be a JSON array"),
+    ({"tasks": []}, "non-empty"),
+    ({"tasks": ["bad"]}, "JSON object"),
+    ({"tasks": [{"content": ""}]}, "nonempty content"),
+])
+async def test_create_input_errors_preserve_domain_code_without_io(env, monkeypatch, inputs, reason):
+    from unittest.mock import AsyncMock
+
+    creator, _, _, session, path = env
+    read = AsyncMock(side_effect=AssertionError("Invalid input must not read storage"))
+    monkeypatch.setattr(creator.fs, "read_file", read)
+    with pytest.raises(BaseError, match=reason) as caught:
+        await creator.invoke(inputs, session=session)
+    assert caught.value.code == 182503
+    assert caught.value.details["field"] == "tasks"
+    assert str(caught.value).count("[182503]") == 1
+    read.assert_not_awaited()
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_todo_outcomes_are_internal_and_preserve_partial_update_semantics(env):
+    creator, modifier, listing, session, path = env
+    created = await create(creator, session)
+    assert set(created) == {"message"}
+    assert created.tool_execution_status == "success"
+    assert created.tool_item_counts["applied_count"] == 2
+    partial = await modifier.invoke({"action": "update", "todos": [
+        {"id": "A", "status": "completed"}, {"id": "missing", "status": "completed"},
+    ]}, session=session)
+    assert partial.tool_execution_status == "partial"
+    assert partial.tool_item_counts == {"requested_count": 2, "accepted_count": 1,
+                                        "failed_count": 1, "unmatched_count": 0, "applied_count": 1}
+    before = path.read_bytes()
+    failed = await modifier.invoke({"action": "update", "todos": [{"id": "missing"}]}, session=session)
+    assert failed.tool_execution_status == "failure"
+    assert failed.tool_commit_state == "not_needed"
+    noop = await update(modifier, session, "A", status="completed")
+    assert noop.tool_execution_status == "noop"
+    assert path.read_bytes() == before
+    read = await listing.invoke({}, session=session)
+    assert set(read) == {"tasks"}
+    assert read.tool_execution_status == "success"
+    assert "tool_execution_status" not in json.dumps(read)
+
+
+def test_old_result_attributes_remain_readable_after_upgrade():
+    from openjiuwen.harness.tools.todo_store import TodoResult, decode_snapshot, snapshot_from_result
+
+    result = TodoResult({"message": "old"}, decode_snapshot({"plan_id": "P", "revision": 4, "todos": []}))
+    del result.todo_snapshot_versioned
+    del result.todo_read_authoritative
+    restored = snapshot_from_result(result)
+    assert restored.plan_id == "P" and restored.revision == 4
+    assert restored.read_authoritative is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_result", [
+    SimpleNamespace(code=1, message="backend read failed", data=None),
+    SimpleNamespace(code=0, data=SimpleNamespace(content="broken", exists=True, content_sha256="0" * 64)),
+])
+async def test_snapshot_failures_keep_the_load_error_code(env, monkeypatch, read_result):
+    from unittest.mock import AsyncMock
+
+    _, modifier, listing, session, path = env
+    monkeypatch.setattr(listing.fs, "read_file", AsyncMock(return_value=read_result))
+    for operation in (lambda: listing.invoke({}, session=session), lambda: modifier.load_todos("session")):
+        with pytest.raises(BaseError) as caught:
+            await operation()
+        assert caught.value.code == 182500
+        assert str(caught.value).count("[182500]") == 1
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_inflight_publication_failure_does_not_claim_zero_writes(env, monkeypatch, cancel):
+    from unittest.mock import patch
+    from openjiuwen.core.foundation.tool import execution_logging
+
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    published = asyncio.Event()
+    calls = 0
+
+    async def accept_then_lose_response(_path, content, **_kwargs):
+        nonlocal calls
+        calls += 1
+        path.write_text(content)
+        published.set()
+        if cancel:
+            await asyncio.Future()
+        raise OSError("accepted, but response lost")
+
+    monkeypatch.setattr(modifier.fs, "write_file", accept_then_lose_response)
+    with patch.object(execution_logging.logger, "warning") as warning:
+        task = asyncio.create_task(modifier.invoke({"action": "update", "todos": [
+            {"id": "A", "status": "completed"},
+        ]}, session=session, tool_call_id="inflight"))
+        await published.wait()
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else BaseError):
+            await task
+    assert calls == 1
+    assert json.loads(path.read_text())["todos"][0]["status"] == "completed"
+    records = [call.kwargs["metadata"] for call in warning.call_args_list
+               if call.kwargs.get("metadata", {}).get("event_role") == "terminal"]
+    assert len(records) == 1
+    assert records[0]["commit_state"] == "unknown"
+    assert records[0]["item_counts"]["applied_count"] is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_migration_validates_the_published_plan(env):
+    _, modifier, _, session, path = env
+    path.parent.mkdir()
+    path.write_text(json.dumps([
+        {"id": "old", "content": "old", "status": "in_progress", "generation_token": "old"},
+    ]))
+    session.update_state({"todo_generation_token": "new"})
+    before = path.read_bytes()
+    with pytest.raises(BaseError, match="More than one") as caught:
+        await modifier.invoke({"action": "append", "todos": [
+            {"id": "new", "content": "new", "status": "in_progress"},
+        ]}, session=session)
+    assert caught.value.code == 182503
+    assert caught.value.details["reason"] == "migration_conflict"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_legal_legacy_migration_allows_followup_and_preserves_extensions(env):
+    _, modifier, _, session, path = env
+    path.parent.mkdir()
+    path.write_text(json.dumps([
+        {"id": "old", "content": "old", "status": "completed", "extension": {"keep": True}},
+    ]))
+    await modifier.invoke({"action": "append", "todos": [
+        {"id": "new", "content": "new", "status": "in_progress"},
+    ]}, session=session)
+    await update(modifier, session, "new", content="changed")
+    saved = json.loads(path.read_text())
+    assert saved["revision"] == 2
+    assert saved["todos"][0]["extension"] == {"keep": True}
+    assert saved["todos"][1]["content"] == "changed"
 
 
 @pytest.mark.asyncio
@@ -201,6 +353,7 @@ async def test_deleted_file_cannot_be_recreated_by_new_or_rebuild(env):
 @pytest.mark.asyncio
 async def test_create_boundary_and_batch_plan(env):
     c, m, _, session, path = env
+    c.require_explicit_plan_action = True
     await create(c, session)
     c.reset_invoke_marker("session")
     with pytest.raises(FrameworkError, match="active plan"):
@@ -219,6 +372,43 @@ async def test_create_boundary_and_batch_plan(env):
     prepare_todo_batch(ctx)
     bind_todo_batch(ctx)
     await update(m, session, "A", status="completed")
+
+
+@pytest.mark.asyncio
+async def test_active_plan_creation_policy_is_scoped_to_the_tool_instance(env):
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    before = json.loads(path.read_text())
+
+    guarded = TodoCreateTool(SimpleNamespace(fs=lambda: modifier.fs), modifier.workspace)
+    guarded.snapshot_guard = creator.snapshot_guard
+    guarded.require_explicit_plan_action = True
+    with pytest.raises(FrameworkError, match="active plan"):
+        await create(guarded, session)
+    assert json.loads(path.read_text()) == before
+
+    creator.reset_invoke_marker("session")
+    result = await create(creator, session)
+    assert result.todo_snapshot["plan_id"] != before["plan_id"]
+    assert result.todo_snapshot["revision"] == before["revision"] + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_empty_plan_sync_preserves_legacy_behavior(env, versioned):
+    from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
+
+    _, _, reader, session, path = env
+    path.parent.mkdir()
+    path.write_text(json.dumps({"plan_id": "P", "revision": 1, "todos": []} if versioned else []))
+    result = await reader.invoke({}, session=session)
+    state = SimpleNamespace(task_plan=TaskPlan(tasks=[TodoItem(id="old", content="old")]))
+    agent = SimpleNamespace(load_state=lambda _session: state, save_state=lambda *_args: None)
+    rail = TaskPlanningRail()
+    rail.tools = [reader]
+    ctx = SimpleNamespace(session=session, agent=agent, inputs=SimpleNamespace(tool_result=result))
+    await rail._sync_plan_from_todos(ctx)
+    assert (state.task_plan is None) is versioned
 
 
 @pytest.mark.asyncio
@@ -441,10 +631,63 @@ async def test_unsupported_provider_todo_reports_contract_before_write(env, monk
     write = AsyncMock()
     monkeypatch.setattr(provider, "write_file", write)
     tool = getattr(todo, tool_name)(SimpleNamespace(fs=lambda: provider), str(path.parent.parent))
+
+    async def lifecycle(*_args, **_kwargs):
+        pass
+
+    tool.snapshot_guard = lifecycle
+    inputs = {
+        "TodoCreateTool": {"tasks": [{"id": "A", "content": "valid"}]},
+        "TodoGetTool": {"id": "A"},
+        "TodoModifyTool": {"action": "update", "todos": [{"id": "A"}]},
+        "TodoListTool": {},
+    }[tool_name]
     with pytest.raises(FrameworkError, match="does not support snapshot reads.*exists and content_sha256"):
-        await tool.invoke({}, session=session)
+        await tool.invoke(inputs, session=session)
     write.assert_not_awaited()
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["aio", "yuanrong"])
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_ordinary_reads_on_legacy_provider_do_not_enable_unprotected_writes(
+    env, monkeypatch, provider_name, versioned
+):
+    from unittest.mock import AsyncMock, Mock
+
+    from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+    from openjiuwen.extensions.sys_operation.sandbox.providers.aio import AIOFSProvider
+    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import YuanrongFSProvider
+
+    _, _, _, session, path = env
+    rows = [{"id": "A", "content": "existing", "status": "pending"}]
+    content = json.dumps({"plan_id": "P", "revision": 1, "todos": rows} if versioned else rows)
+    endpoint = SandboxEndpoint(base_url="test://sandbox", sandbox_id="box", isolation_key="session")
+    if provider_name == "aio":
+        provider = AIOFSProvider(endpoint)
+        client = SimpleNamespace(file=SimpleNamespace(read_file=Mock(
+            return_value=SimpleNamespace(data=SimpleNamespace(content=content)))))
+        monkeypatch.setattr(provider, "_get_client", lambda: client)
+    else:
+        provider = YuanrongFSProvider(endpoint)
+        monkeypatch.setattr(provider, "_fs_read_sync", lambda *args, **kwargs: content)
+    write = AsyncMock()
+    monkeypatch.setattr(provider, "write_file", write)
+    operation = SimpleNamespace(fs=lambda: provider)
+    reader = TodoListTool(operation, str(path.parent.parent))
+    getter = TodoGetTool(operation, str(path.parent.parent))
+    modifier = TodoModifyTool(operation, str(path.parent.parent))
+
+    listed = await reader.invoke({}, session=session)
+    assert listed["tasks"][0]["id"] == "A"
+    assert not hasattr(listed, "todo_snapshot")
+    assert (await getter.invoke({"id": "A"}, session=session))["todo"]["id"] == "A"
+    items = await modifier.load_todos("session")
+    assert items[0].id == "A"
+    with pytest.raises(FrameworkError, match="does not support snapshot reads"):
+        await modifier.save_todos("session", items)
+    write.assert_not_awaited()
 
 
 @pytest.mark.parametrize("revision", [True, False, 1.0, "1", -1, 2**53])
@@ -547,7 +790,7 @@ async def test_revision_exhaustion_and_missing_id_do_not_commit(env):
     with pytest.raises(FrameworkError, match="safe integer"):
         await update(m, session, "A", content="changed")
     assert path.read_bytes() == before
-    with pytest.raises(FrameworkError, match="Missing required field"):
+    with pytest.raises(BaseError, match="Missing required field"):
         await m.invoke({"action": "append", "todos": [{"content": "invalid", "status": "pending"}]}, session=session)
     assert path.read_bytes() == before
 

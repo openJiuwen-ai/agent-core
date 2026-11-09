@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import inspect
+import asyncio
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from typing import Any, AsyncIterator, Dict, Type
@@ -13,6 +14,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.foundation.tool.execution_logging import begin_execution, finish_execution
 
 Input = TypeVar('Input', contravariant=True)
 Output = TypeVar('Output', contravariant=True)
@@ -64,19 +66,24 @@ class _ToolMeta(ABCMeta):
 
         @wraps(_original_invoke)
         async def _lifecycle_invoke(*a, **kw):
-            await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
-                              tool_name=instance.card.name,
-                              tool_id=instance.card.id,
-                              inputs=(a, kw))
+            execution = begin_execution(instance, a, kw)
+            result = None
+            error = None
+            if execution is None:
+                await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
+                                  tool_name=instance.card.name, tool_id=instance.card.id, inputs=(a, kw))
             try:
+                if execution is not None:
+                    await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
+                                      tool_name=instance.card.name, tool_id=instance.card.id, inputs=(a, kw))
                 result = await _original_invoke(*a, **kw)
                 _success = getattr(result, "success", None)
-                if _success is True:
+                if execution is None and _success is True:
                     logger.info(
                         "[Tool] invoke success tool=%s tool_id=%s result=%s",
                         instance.card.name, instance.card.id, result,
                     )
-                elif _success is False:
+                elif execution is None and _success is False:
                     logger.warning(
                         "[Tool] invoke failed tool=%s tool_id=%s result=%s",
                         instance.card.name, instance.card.id, result,
@@ -87,16 +94,23 @@ class _ToolMeta(ABCMeta):
                                   inputs=(a, kw),
                                   result=result)
                 return result
+            except asyncio.CancelledError as exc:
+                error = exc
+                raise
             except Exception as e:
-                logger.warning(
-                    "[Tool] invoke error tool=%s tool_id=%s error=%s",
-                    instance.card.name, instance.card.id, e,
-                )
+                error = e
+                if execution is None:
+                    logger.warning(
+                        "[Tool] invoke error tool=%s tool_id=%s error=%s",
+                        instance.card.name, instance.card.id, e,
+                    )
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_ERROR,
                                   tool_name=instance.card.name,
                                   tool_id=instance.card.id,
                                   error=e)
                 raise
+            finally:
+                finish_execution(execution, result, error)
 
         instance.invoke = _lifecycle_invoke
 
