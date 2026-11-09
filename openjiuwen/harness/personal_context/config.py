@@ -364,6 +364,7 @@ class PersonalContextConfig(BaseModel):
     collection_enabled: bool = False
     agent_use_enabled: bool = False
     strategy_profile: Literal["rules", "balanced", "agent"]
+    max_context_size_mb: int = Field(default=50, strict=True, ge=10, le=10000)
     max_pages_per_directory: int = Field(
         default=DEFAULT_MAX_PAGES_PER_DIRECTORY,
         strict=True,

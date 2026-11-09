@@ -28,6 +28,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from filelock import Timeout
+
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, Model, UserMessage
@@ -35,6 +37,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.harness.personal_context.agent_support import run_personal_context_agent
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
+from openjiuwen.harness.personal_context.context_usage import context_update_lock, publish_with_usage
 from openjiuwen.harness.personal_context.file_tools import _ReclusterApply, _ReclusterPlan
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.path_safety import (
@@ -1042,6 +1045,20 @@ async def _cancel_safe_to_thread(
             task.result()
         raise cancellation
     return task.result()
+
+
+@contextlib.asynccontextmanager
+async def _publication_lock(lock: asyncio.Lock):
+    """Never leave another operation waiting indefinitely for publication."""
+    try:
+        async with asyncio.timeout(0.5):
+            await lock.acquire()
+    except TimeoutError as exc:
+        raise _publish_error("context publication is busy; retry later") from exc
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 _COOPERATIVE_THREAD_CANCELLATIONS: dict[asyncio.Task[object], threading.Event] = {}
@@ -7781,6 +7798,8 @@ class ContextPipelineService:
                         with contextlib.suppress(asyncio.CancelledError):
                             await event_task
                     raise
+            except Timeout:
+                self._fail_active(_publish_error("Context publication is busy; retry the collection"))
             except BaseError as error:
                 self._fail_active(error)
             except Exception:
@@ -7810,13 +7829,17 @@ class ContextPipelineService:
         elif tag == "finish":
             if payload is not None:
                 raise _pipeline_error("finish event payload must be None")
-            await self._finish_run_event(safe_service, safe_run)
+            # Normal preparation also reads the published tree. Maintenance
+            # must yield throughout it, not merely during the final replacement.
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run)
         elif tag == "retain":
             if payload is not None:
                 raise _pipeline_error("retain event payload must be None")
             if (safe_service, safe_run) not in self._invalidated_run_keys:
                 self._cancelled_run_keys.discard((safe_service, safe_run))
-            await self._finish_run_event(safe_service, safe_run, retaining=True)
+            async with context_update_lock(self._home):
+                await self._finish_run_event(safe_service, safe_run, retaining=True)
         elif tag == "abort":
             if payload is not None:
                 raise _pipeline_error("abort event payload must be None")
@@ -9527,7 +9550,7 @@ class ContextPipelineService:
         run_time: datetime | None = None,
     ) -> None:
         del batch
-        async with self._publish_lock:
+        async with _publication_lock(self._publish_lock):
             relocations = cast(dict[str, str], processed.get("_context_relocations", {}))
             _assert_path_chain_no_symlinks(self._home / "workspace")
             candidate_context = sandbox / "context"
@@ -9648,14 +9671,20 @@ class ContextPipelineService:
                 self._profile_callback(service_id, run_id, actual_profile)
             # Measure this publication under the same lock as the commit, not
             # across the whole fetch (other services can publish in between).
-            before = await _cancel_safe_to_thread(_snapshot_context_nodes, self._context_root, relocations=relocations)
-            after = await _cancel_safe_to_thread(_snapshot_context_nodes, candidate_context)
+            before_usage = {}
+            after_usage = {}
+            before = await _cancel_safe_to_thread(
+                _snapshot_context_nodes, self._context_root, relocations=relocations, usage=before_usage,
+            )
+            after = await _cancel_safe_to_thread(
+                _snapshot_context_nodes, candidate_context, usage=after_usage, previous=(before, before_usage),
+            )
             result = _count_published_nodes(before, after, relocations=relocations)
             committed = False
 
             def commit() -> None:
                 nonlocal committed
-                _commit_context_tree(candidate_context, self._context_root)
+                publish_with_usage(self._home, candidate_context, relocations, snapshots=(before_usage, after_usage))
                 committed = True
 
             try:
@@ -9797,6 +9826,8 @@ def _record_context_relocations(relocations: dict[str, str] | None, mapping: Map
 
 def _snapshot_context_nodes(
     root: Path, *, relocations: Mapping[str, str] | None = None,
+    usage: dict[str, tuple[str, str, float] | None] | None = None,
+    previous: tuple[dict, dict] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Keep exact and relocation fingerprints for graph Markdown nodes."""
 
@@ -9824,6 +9855,18 @@ def _snapshot_context_nodes(
             markdown = _extended_path(root / relative).read_text(encoding="utf-8")
             relocated = rewrite_markdown_prose(markdown, lambda text: _MARKDOWN_LINK_TOKEN.sub(relocate_link, text))
             result[relative] = (fingerprint, hashlib.sha256(relocated.encode("utf-8")).hexdigest())
+            if usage is not None and not _is_program_description(relative):
+                try:
+                    from openjiuwen.harness.personal_context.context_usage import _fingerprint
+
+                    cached = previous[1].get(relative) if previous is not None else None
+                    unchanged = cached is not None and previous[0].get(relative, (None,))[0] == fingerprint
+                    original = cached[0] if unchanged else _fingerprint(root, relative, {}, markdown=markdown)
+                    mapped = _fingerprint(root, relative, relocations, markdown=markdown) if relocations else original
+                    usage[relative] = (original, mapped, _extended_path(root / relative).stat().st_mtime)
+                except Exception as exc:
+                    usage[relative] = None
+                    logger.warning("PersonalContext optional usage fingerprint failed (%s)", type(exc).__name__)
     return result
 
 
