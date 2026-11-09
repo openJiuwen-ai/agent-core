@@ -1,15 +1,20 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Unit tests for openjiuwen.harness.cli.ui.renderer."""
 
 from __future__ import annotations
 
 import io
+import json
 import sys
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
 from rich.console import Console
 
+from openjiuwen.harness.cli.agent.config import CLIConfig
+from openjiuwen.harness.cli.ui import renderer, runner
 from openjiuwen.harness.cli.ui.renderer import render_stream
 
 
@@ -42,6 +47,67 @@ async def _async_iter(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("platform", "is_terminal", "utf8_redirect", "encoding"),
+    [
+        ("win32", True, False, "utf-16-le"),
+        ("win32", True, True, "utf-16-le"),
+        ("win32", False, False, "utf-8"),
+        ("linux", False, False, "utf-16-le"),
+        ("linux", False, True, "utf-8"),
+    ],
+)
+def test_write_terminal_respects_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    is_terminal: bool,
+    utf8_redirect: bool,
+    encoding: str,
+) -> None:
+    class Output(io.TextIOWrapper):
+        def isatty(self) -> bool:
+            return is_terminal
+
+    buffer = io.BytesIO()
+    with Output(buffer, encoding="utf-16-le") as stdout:
+        monkeypatch.setattr(renderer, "sys", SimpleNamespace(platform=platform, stdout=stdout))
+
+        renderer._write_terminal("中文🙂", utf8_redirect=utf8_redirect)
+
+        assert buffer.getvalue() == "中文🙂".encode(encoding)
+
+
+def test_windows_terminal_write_respects_replaced_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    stdout = io.StringIO()
+    monkeypatch.setattr(renderer, "sys", SimpleNamespace(platform="win32", stdout=stdout))
+
+    renderer._write_terminal("中文🙂", utf8_redirect=True)
+
+    assert stdout.getvalue() == "中文🙂"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_json", [False, True])
+async def test_run_formats_write_redirected_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+    stream_json: bool,
+) -> None:
+    stream = _async_iter([FakeChunk("llm_output", 0, {"content": "中文🙂"})])
+    buffer = io.BytesIO()
+    with io.TextIOWrapper(buffer, encoding="cp1252") as stdout:
+        monkeypatch.setattr(renderer, "sys", SimpleNamespace(platform="win32", stdout=stdout))
+        if stream_json:
+            exit_code = await runner._output_stream_json(stream)
+        else:
+            exit_code = await runner._output_json(stream, CLIConfig())
+
+        assert exit_code == 0
+        output = buffer.getvalue().decode("utf-8")
+        assert output.endswith("\n")
+        data = json.loads(output)
+        assert (data["payload"]["content"] if stream_json else data["result"]) == "中文🙂"
 
 
 class TestRenderStream:
@@ -80,29 +146,6 @@ class TestRenderStream:
 
         assert stdout.writes == ["中文🙂"]
         assert stdout.flush_count == 1
-
-    def test_write_terminal_forces_utf8_on_windows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Windows should write UTF-8 bytes even if stdout.encoding is legacy."""
-
-        module = sys.modules[render_stream.__module__]
-        written: list[bytes] = []
-
-        class FakeStdout:
-            encoding = "cp1252"
-            errors = "strict"
-
-        monkeypatch.setattr(
-            module,
-            "sys",
-            type("FakeSys", (), {"platform": "win32", "stdout": FakeStdout()})(),
-        )
-        monkeypatch.setattr(module.os, "write", lambda _fd, data: written.append(data))
-
-        module._write_terminal("中文")
-
-        assert written == ["中文".encode("utf-8")]
 
     @pytest.mark.asyncio
     async def test_unicode_stream_uses_stdout_text_stream(

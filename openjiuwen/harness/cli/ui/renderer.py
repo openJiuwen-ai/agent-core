@@ -16,7 +16,7 @@ Supports eight chunk types:
 
 from __future__ import annotations
 
-import os
+import io
 import re
 import sys
 from dataclasses import dataclass, field
@@ -39,18 +39,23 @@ from openjiuwen.harness.cli.ui.todo_render import (
 )
 
 
-def _write_terminal(text: str) -> None:
-    """Write user-facing text through stdout and flush streaming output.
+def _write_terminal(text: str, *, utf8_redirect: bool = False) -> None:
+    """Write and flush stdout, preserving its Unicode console path.
 
-    On Windows, force UTF-8 via ``os.write``: ``sys.stdout.encoding`` often
-    stays on a legacy code page (cp1252/GBK) even when the console is UTF-8
-    (``chcp 65001`` / Windows Terminal), which mojibakes CJK CLI output.
+    Args:
+        text: Text to emit.
+        utf8_redirect: Use UTF-8 for redirected output on all platforms.
+            Redirected Windows output uses UTF-8 by default.
     """
     stdout = sys.stdout
-    if sys.platform == "win32":
-        encoding = "utf-8"
-        errors = getattr(stdout, "errors", None) or "replace"
-        os.write(1, text.encode(encoding, errors=errors))
+    if (
+        (utf8_redirect or sys.platform == "win32")
+        and isinstance(stdout, io.TextIOWrapper)
+        and not stdout.isatty()
+    ):
+        stdout.flush()
+        stdout.buffer.write(text.encode("utf-8", errors=stdout.errors or "strict"))
+        stdout.buffer.flush()
         return
     stdout.write(text)
     stdout.flush()
