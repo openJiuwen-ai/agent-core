@@ -96,7 +96,7 @@ class SymphonyRuntime:
         )
         self.orchestration = SymphonyGraphEngine(service, storage=self._storage, inventory=inventory)
         self.retrieval = TreeEngine(model, self.config.retrieval, self._storage, inventory)
-        self.flow = RuntimeFlow(model, self.config.flow, self._storage)
+        self.flow = RuntimeFlow(model, self.config.orchestration, self._storage)
         self._graph_scope_id = self._storage.scope_id
 
     async def submit_evolution(
@@ -111,20 +111,20 @@ class SymphonyRuntime:
 
         if self._closed:
             raise RuntimeError("Symphony runtime is closed")
-        receipt = None
-        if self.config.orchestration.enabled:
-            try:
-                observation = await self._build_graph_evolution_input(
-                    planned_graph, execution_graph, session_id=session_id, capture_mode=capture_mode,
-                )
-                receipt = self.orchestration.submit_observation(observation)
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Symphony graph evolution submission failed (%s)", type(exc).__name__,
-                )
-                return EvolutionSubmitResult(None)
+        if not self.config.orchestration.experience_enabled:
+            return EvolutionSubmitResult(None)
+        try:
+            observation = await self._build_graph_evolution_input(
+                planned_graph, execution_graph, session_id=session_id, capture_mode=capture_mode,
+            )
+            receipt = self.orchestration.submit_observation(observation)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Symphony graph evolution submission failed (%s)", type(exc).__name__,
+            )
+            return EvolutionSubmitResult(None)
         projected = _successful_execution_graph(execution_graph)
-        if not self.flow.enabled or projected is None:
+        if projected is None:
             return EvolutionSubmitResult(receipt)
         try:
             candidates = await self.flow.submit(projected)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openjiuwen.symphony.config import FlowConfig
+from openjiuwen.symphony.config import OrchestrationExperienceConfig
 
 import asyncio
 from unittest.mock import AsyncMock
@@ -86,7 +86,7 @@ async def test_type_is_preserved_through_distillation_and_rendering(tmp_path):
 @pytest.mark.parametrize("fresh_count", [2, 3, 4])
 @pytest.mark.asyncio
 async def test_fresh_typed_evidence_rebuilds_legacy_recipe_without_rewriting_history(tmp_path, fresh_count):
-    config = FlowConfig(acceptance={'min_successes': 3})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 3})
     legacy = SymphonyFlowEngine(tmp_path, config=config)
     for index in range(3):
         legacy.ingest(_typed_graph(f"old-{index}", None))
@@ -115,14 +115,15 @@ async def test_fresh_typed_evidence_rebuilds_legacy_recipe_without_rewriting_his
 
 @pytest.mark.asyncio
 async def test_filtered_historical_evidence_does_not_redistill_after_restart(tmp_path, monkeypatch):
-    engine = SymphonyFlowEngine(tmp_path, skill_adapter=SkillPackAdapter())
+    config = OrchestrationExperienceConfig(acceptance={"min_successes": 1})
+    engine = SymphonyFlowEngine(tmp_path, config=config, skill_adapter=SkillPackAdapter())
     for index in range(3):
         engine.store.append_evidence(normalize_execution_graph(_typed_graph(f"old-{index}", None)))
     report = await engine.distill()
     assert report.evidence_total == 0
     assert engine.store.read_distillation_fingerprint() == engine.store.evidence_fingerprint()
 
-    restarted = SymphonyFlowEngine(tmp_path, skill_adapter=SkillPackAdapter())
+    restarted = SymphonyFlowEngine(tmp_path, config=config, skill_adapter=SkillPackAdapter())
     distill = AsyncMock(wraps=restarted.distill)
     monkeypatch.setattr(restarted, "distill", distill)
     try:
@@ -138,7 +139,7 @@ async def test_filtered_historical_evidence_does_not_redistill_after_restart(tmp
 
 @pytest.mark.asyncio
 async def test_untyped_generic_flow_keeps_existing_version_and_counts(tmp_path):
-    engine = SymphonyFlowEngine(tmp_path, config=FlowConfig(acceptance={'min_successes': 3}))
+    engine = SymphonyFlowEngine(tmp_path, config=OrchestrationExperienceConfig(acceptance={'min_successes': 3}))
     for index in range(3):
         assert engine.ingest(_typed_graph(f"old-{index}", None))
     first = await engine.distill()

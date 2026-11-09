@@ -8,7 +8,7 @@ created: 2026-10-31
 updated: 2026-11-09
 modules: [openjiuwen/symphony]
 files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
-designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement]
+designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement, D-20261109-1603-symphony-orchestration-experience]
 ---
 
 # Symphony 运行配置与 Runtime 契约
@@ -33,7 +33,7 @@ config = SymphonyConfig.model_validate({
         "index_build": {"request": {"max_concurrency": 4}},
         "prompt": {"candidate_budget_ratio": 0.02},
     },
-    "flow": {"acceptance": {"min_successes": 2}},
+    "orchestration": {"experience": {"enabled": True, "acceptance": {"min_successes": 2}}},
 })
 restored = SymphonyConfig.model_validate_json(config.model_dump_json())
 schema = SymphonyConfig.model_json_schema()
@@ -47,10 +47,10 @@ schema = SymphonyConfig.model_json_schema()
 | storage | artifact_root |
 | retrieval | enabled、index_build、prompt（候选提示预算和优先对象）、output、use_existing_index |
 | retrieval.index_build | structure（深度/分支/根分类/容量倍率）、request、postprocess、equivalence、profiles、prompt、incremental、task、output |
-| orchestration | enabled、min_edge_confidence、build（max_concurrency/matching）、plan |
-| flow | enabled、acceptance、narrative |
+| orchestration | enabled、min_edge_confidence、build（max_concurrency/matching）、plan、experience |
+| orchestration.experience | enabled、acceptance、narrative |
 
-retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点仍校验。Flow 的 enabled 默认 True，配置存在或启用不表示启动服务。retrieval.enabled 统一控制构树、读取分类树和创建发现会话。
+retrieval 和 orchestration 可独立禁用，同时关闭合法。`orchestration.experience` 默认关闭，禁用节点仍校验。`retrieval.enabled` 统一控制构树、读取分类树和创建发现会话。
 
 ## 3. 单一可写路径与保留模型
 
@@ -89,7 +89,7 @@ TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildCo
 
 PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig 和 OneShotTreeBuildConfig，CONFIG_MODELS 合计 32 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
 
-`config.__all__` 只提供 CapabilityType 和 9 个核心模型：SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、FlowConfig。登记表、基类和其余子模型不进入便利导出，但可显式访问模块属性。
+`config.__all__` 提供 CapabilityType 以及 SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、OrchestrationExperienceConfig。登记表、基类和其余子模型可显式访问模块属性。
 
 检索专用模型后端、联合类型 LLMClientConfig、紧凑码表、生成约束、单次请求覆盖、得分截断、工具浏览和 Experience 模型已删除。真实树解析设置保留在 retrieval/build/tree/context.py 和 retrieval/build/workflows/artifacts.py，不在目标配置中镜像。
 
@@ -107,7 +107,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 - 指纹提取 max_body_chars=16000、max_output_tokens=2048（也接受 None，表示沿用注入模型）、评估 max_evidence_chars=512。协议 extraction_version 为 symphony-capability-extraction-v3，不在配置阶段生成缓存签名。
 - 画像 max_description_chars=140、max_rule_chars=120（均至少 40）；构建 context_window_tokens=0、max_output_tokens=0，0 表示未指定，不与 None 互换。
 - Discovery 默认提示比例 0.01、上下文 200000、派生预算 2000、输出字符 12000、结果数 10、列表条目 40、增量提示字符 4000；优先对象列表与 use_existing_index=False 保持不变。
-- 图构建并发 1、指纹提取并发 4、关系共识 True、min_edge_confidence=0.7、plan.mode=fast、top_k=3、max_depth=4、dynamic_graph_enabled=False。Flow 默认 enabled=True、min_successes=1、min_pack_success_rate=0.8、max_examples=5。
+- 图构建并发 1、指纹提取并发 4、关系共识 True、min_edge_confidence=0.7、plan.mode=fast、top_k=3、max_depth=4、dynamic_graph_enabled=False。编排经验默认 enabled=False、min_successes=3、min_pack_success_rate=0.8、max_examples=5。
 
 测试将 dcdcef3ef 导出的历史默认值按迁移表重排后与当前配置比较。当前 Runtime 布局与签名继续用于分类树复用，签名从构树子模型提取。Flow 继续采用 symphony.experience_recipe.v1 协议。
 
@@ -127,10 +127,11 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 - 构造固定能力根、产物根和根分类文件相对路径，复制嵌套配置。构造不做扫描、模型调用、目录创建或后台工作。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
 - `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
-- 检索、编排和 Flow 开关独立。禁用状态可查询，执行入口拒绝；model=None 允许只读和确定性发现、按任务策略回退构树，构图和规划拒绝缺模型。
+- 检索与编排独立。编排和经验都开启才接收新执行证据及使用 Runtime Flow。禁用时 `submit_evolution()` 返回空结果，直接观测写入与 Flow 执行入口在创建存储前拒绝。
+- model=None 允许只读和确定性发现，并可按任务策略回退构树。构图和规划需要模型。
 - skill 读取器已实现；expert/connector/mcp 读取器明确报不支持。相同目录只绑定一种对象集合。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
-- 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。动态观测开关只控制规划读，观测提交仍由 Rail 使用。
+- 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。规划读取已有动态观测与经验写入独立，Rail 的新观测提交受经验开关控制。
 - Runtime 持有惰性默认 Flow，create_scope(store=...) 共享默认打包/审核组件并使用宿主受限存储；授权、确认和安装是宿主职责。
 - aclose 为单次拥有的关闭任务，等待者取消不取消清理。图构建、嵌套规划和增量任务以及文件写入线程必须完成取消/收尾；不关闭宿主模型。
 
@@ -152,7 +153,8 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 | orchestration.build | OrchestrationService / Matcher | 构图并发、候选和匹配批量 |
 | orchestration.min_edge_confidence | Matcher、Fast/BeamPlanner | 构图与规划共用阈值 |
 | orchestration.plan | Fast/BeamPlanner、GraphEngine | 模式、top_k、深度与动态观测读取 |
-| flow.acceptance/narrative | SymphonyFlowEngine、蒸馏与叙事组件 | 接纳、叙事样例与候选生成 |
+| orchestration.experience.enabled | Runtime、GraphEngine、RuntimeFlow | 图观测写入和 Flow 启停 |
+| orchestration.experience.acceptance/narrative | SymphonyFlowEngine、蒸馏与叙事组件 | 接纳、叙事样例与候选生成 |
 
 新版 runtime.json 绑定绝对能力根与类型；非空无布局标记目录、错误布局版本、不同集合均拒绝，不删除历史目录。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
 

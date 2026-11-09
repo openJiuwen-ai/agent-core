@@ -46,7 +46,7 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
     assert config.orchestration.plan.mode == "fast"
     assert config.orchestration.plan.top_k == 3
     assert config.orchestration.plan.max_depth == 4
-    assert config.flow.enabled
+    assert not config.orchestration.experience_enabled
 
 
 @pytest.mark.parametrize("capability_type", ["skill", "expert", "connector", "mcp"])
@@ -240,7 +240,7 @@ def test_public_exports_are_limited_to_the_runtime_configuration_tree():
     expected = {
         "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig",
         "RetrievalConfig", "OrchestrationBuildConfig", "OrchestrationPlanConfig", "OrchestrationConfig", "SymphonyConfig",
-        "FlowConfig",
+        "OrchestrationExperienceConfig",
     }
     assert set(target.__all__) == expected
     public_names = {model.__name__ for model in target.PUBLIC_CONFIG_MODELS}
@@ -277,7 +277,7 @@ def test_public_groups_preserve_existing_module_defaults():
     config = target.SymphonyConfig.model_validate(MINIMAL)
     assert config.capability.scan == target.DirectoryScanConfig()
     assert config.retrieval == target.RetrievalConfig()
-    assert config.flow == target.FlowConfig()
+    assert config.orchestration.experience == target.OrchestrationExperienceConfig()
     assert config.orchestration.build.matching.model_dump() == {
         "batch_size": 12, "require_consensus": True, "max_candidates_per_capability_relation": 32,
         "max_port_mappings_per_candidate": 12, "max_exact_io_pair_fanout": 64,
@@ -311,8 +311,11 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
             },
             "prompt": {"candidate_budget_ratio": 0.02, "preferred_capability_ids": ["expert-a"]},
         },
-        "orchestration": {"build": {"matching": {"require_consensus": False}}, "plan": {"mode": "beam"}},
-        "flow": {"enabled": False, "acceptance": {"min_successes": 2}, "narrative": {"max_examples": 3}},
+        "orchestration": {
+            "build": {"matching": {"require_consensus": False}},
+            "plan": {"mode": "beam"},
+            "experience": {"enabled": True, "acceptance": {"min_successes": 2}, "narrative": {"max_examples": 3}},
+        },
     })
     assert config.capability.scan.limits.max_entrypoints == 200
     assert config.capability.scan.manifest.max_frontmatter_depth == 8
@@ -340,7 +343,9 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     assert config.retrieval.prompt.candidate_budget_tokens == 4000
     assert config.retrieval.prompt.preferred_capability_ids == ["expert-a"]
     assert not config.orchestration.build.matching.require_consensus and config.orchestration.plan.mode == "beam"
-    assert not config.flow.enabled and config.flow.acceptance.min_successes == 2 and config.flow.narrative.max_examples == 3
+    experience = config.orchestration.experience
+    assert config.orchestration.experience_enabled
+    assert experience.acceptance.min_successes == 2 and experience.narrative.max_examples == 3
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
     assert target.SymphonyConfig.model_validate(config.model_dump(mode="json")) == config
 
@@ -392,8 +397,8 @@ def test_duplicate_or_internal_input_paths_are_rejected(path, value):
 
 @pytest.mark.parametrize("payload, location", [
     ({"retrieval": {"index_build": {"structure": {"branching_factor": 1}}}}, ("retrieval", "index_build", "structure", "branching_factor")),
-    ({"flow": {"enabled": False, "acceptance": {"min_pack_success_rate": -0.1}}},
-     ("flow", "acceptance", "min_pack_success_rate")),
+    ({"orchestration": {"experience": {"acceptance": {"min_pack_success_rate": -0.1}}}},
+     ("orchestration", "experience", "acceptance", "min_pack_success_rate")),
     ({"retrieval": {"index_build": {"structure": {"max_capabilities_per_node_multiplier": 0}}}},
      ("retrieval", "index_build", "structure", "max_capabilities_per_node_multiplier")),
     ({"retrieval": {"index_build": {"task": {"allow_fallback_tree": "false"}}}},
@@ -605,6 +610,10 @@ def test_all_public_defaults_match_the_committed_pre_integration_contract():
     retrieval = expected["retrieval"]
     retrieval["index_build"] = retrieval.pop("build")
     retrieval.update(retrieval.pop("discovery"))
+    experience = expected.pop("flow")
+    experience["enabled"] = False
+    experience["acceptance"]["min_successes"] = 3
+    expected["orchestration"]["experience"] = experience
     assert target.SymphonyConfig.model_validate(MINIMAL).model_dump(mode="json") == expected
 
 

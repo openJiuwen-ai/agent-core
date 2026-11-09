@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from weakref import WeakSet
 
+from openjiuwen.symphony.config import OrchestrationConfig
 from openjiuwen.symphony.flow.engine import SymphonyFlowEngine
 from openjiuwen.symphony.flow.render import SkillPackAdapter
 from openjiuwen.symphony.flow.review import LLMPackageReviewAgent, PackageReviewGate
@@ -13,8 +14,9 @@ from openjiuwen.symphony.flow.review import LLMPackageReviewAgent, PackageReview
 class RuntimeFlow:
     """Create persistent Flow resources only when an enabled operation is used."""
 
-    def __init__(self, model, config, storage):
-        self.config = config
+    def __init__(self, model, config: OrchestrationConfig, storage):
+        self.config = config.experience
+        self._orchestration = config
         self._model = model
         self._storage = storage
         self._engine = None
@@ -22,8 +24,8 @@ class RuntimeFlow:
         self._closed = False
 
     @property
-    def enabled(self):
-        return self.config.enabled
+    def enabled(self) -> bool:
+        return self._orchestration.experience_enabled
 
     def status(self):
         return {"enabled": self.enabled, "started": self._engine is not None, "closed": self._closed}

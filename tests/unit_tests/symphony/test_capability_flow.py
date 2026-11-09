@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from openjiuwen.symphony.config import FlowConfig
-
 import asyncio
 import json
 from dataclasses import FrozenInstanceError
@@ -14,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import yaml
 
+from openjiuwen.symphony.config import OrchestrationExperienceConfig
 from openjiuwen.symphony.flow import (
     RECIPE_GRADE_VERIFIED,
     RECIPE_STATUS_ACTIVE,
@@ -44,6 +43,9 @@ from openjiuwen.symphony.flow.distill import (
     topological_order,
 )
 from openjiuwen.symphony.flow.models import content_hash
+
+
+SINGLE_SUCCESS_EXPERIENCE = OrchestrationExperienceConfig(acceptance={"min_successes": 1})
 
 
 class _ApprovingReviewAgent:
@@ -138,7 +140,7 @@ def _execution_graph(
 
 
 def _engine(tmp_path: Path) -> SymphonyFlowEngine:
-    config = FlowConfig(acceptance={'min_successes': 5, 'min_pack_success_rate': 0.8})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 5, 'min_pack_success_rate': 0.8})
     return SymphonyFlowEngine(tmp_path / "flow", config=config)
 
 
@@ -166,7 +168,7 @@ def _feed_verified_engine(tmp_path: Path) -> SymphonyFlowEngine:
 
 
 def test_engine_rejects_untyped_legacy_configuration(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="FlowConfig"):
+    with pytest.raises(TypeError, match="OrchestrationExperienceConfig"):
         SymphonyFlowEngine(tmp_path / "flow", config=SimpleNamespace())
     assert not (tmp_path / "flow").exists()
 
@@ -246,7 +248,7 @@ def test_ingest_and_submit_reject_non_success_outcomes(tmp_path: Path, outcome: 
 
 
 def test_unchanged_recipe_updates_current_quality_without_new_version(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     assert engine.ingest(_execution_graph("trace-1", query="same task"))
     first = asyncio.run(engine.distill())
     recipe_id = first.recipes_saved[0]
@@ -282,7 +284,7 @@ def test_narrative_deferred_until_verified_threshold(tmp_path: Path) -> None:
         }
     )
     llm = Mock(invoke=AsyncMock(return_value=response))
-    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config, llm_client=llm)
 
     assert engine.ingest(_execution_graph("trace-1", query="first task"))
@@ -315,7 +317,7 @@ def test_narrative_deferred_until_verified_threshold(tmp_path: Path) -> None:
 
 
 def test_submit_replays_candidate_until_explicit_ack(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
 
     first = asyncio.run(engine.submit(_execution_graph("trace-1")))
     duplicate = asyncio.run(engine.submit(_execution_graph("trace-1")))
@@ -351,11 +353,11 @@ def test_duplicate_and_restart_replay_without_redistilling(tmp_path: Path) -> No
     )
     llm = Mock(invoke=AsyncMock(return_value=response))
     flow_dir = tmp_path / "flow"
-    engine = SymphonyFlowEngine(flow_dir, llm_client=llm)
+    engine = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm)
 
     first = asyncio.run(engine.submit(_execution_graph("trace-1")))
     duplicate = asyncio.run(engine.submit(_execution_graph("trace-1")))
-    restarted = SymphonyFlowEngine(flow_dir, llm_client=llm)
+    restarted = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm)
     replayed = asyncio.run(restarted.start())
 
     assert first == duplicate == replayed
@@ -364,7 +366,7 @@ def test_duplicate_and_restart_replay_without_redistilling(tmp_path: Path) -> No
     assert not restarted.store.recipe_version_path(first[0].recipe_id, 2).exists()
 
     assert restarted.acknowledge_candidate(first[0].recipe_id, first[0].version)
-    assert asyncio.run(SymphonyFlowEngine(flow_dir, llm_client=llm).start()) == ()
+    assert asyncio.run(SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm).start()) == ()
     assert llm.invoke.await_count == 1
 
 
@@ -379,12 +381,12 @@ def test_restart_distills_new_evidence_before_replaying_unacknowledged_candidate
     )
     llm = Mock(invoke=AsyncMock(return_value=response))
     flow_dir = tmp_path / "flow"
-    first_engine = SymphonyFlowEngine(flow_dir, llm_client=llm)
+    first_engine = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm)
     first = asyncio.run(first_engine.submit(_execution_graph("trace-1")))
     assert len(first) == 1
     assert first_engine.ingest(_execution_graph("trace-2"))
 
-    restarted = SymphonyFlowEngine(flow_dir, llm_client=llm)
+    restarted = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm)
     refreshed = asyncio.run(restarted.start())
 
     assert len(refreshed) == 1
@@ -401,11 +403,11 @@ def test_restart_distills_new_evidence_before_replaying_unacknowledged_candidate
 
 
 def test_candidate_ack_persists_across_engine_instances(tmp_path: Path) -> None:
-    first_engine = SymphonyFlowEngine(tmp_path / "flow")
+    first_engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     candidate = asyncio.run(first_engine.submit(_execution_graph("trace-1")))[0]
     assert first_engine.acknowledge_candidate(candidate.recipe_id, candidate.version)
 
-    restarted = SymphonyFlowEngine(tmp_path / "flow")
+    restarted = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
 
     assert asyncio.run(restarted.start()) == ()
     assert restarted.get_candidate(candidate.recipe_id) == candidate
@@ -413,20 +415,20 @@ def test_candidate_ack_persists_across_engine_instances(tmp_path: Path) -> None:
 
 def test_released_candidate_is_offered_again_after_restart(tmp_path: Path) -> None:
     flow_dir = tmp_path / "flow"
-    engine = SymphonyFlowEngine(flow_dir)
+    engine = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     candidate = asyncio.run(engine.submit(_execution_graph("trace-1")))[0]
     assert engine.acknowledge_candidate(candidate.recipe_id, candidate.version)
 
     assert engine.release_candidate(candidate.recipe_id, candidate.version) is True
     assert engine.release_candidate(candidate.recipe_id, candidate.version) is False
 
-    restarted = SymphonyFlowEngine(flow_dir)
+    restarted = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     assert asyncio.run(restarted.start()) == (candidate,)
 
 
 def test_legacy_delivery_acknowledgement_does_not_hide_candidate(tmp_path: Path) -> None:
     flow_dir = tmp_path / "flow"
-    engine = SymphonyFlowEngine(flow_dir)
+    engine = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     candidate = asyncio.run(engine.submit(_execution_graph("trace-1")))[0]
     legacy_path = flow_dir / "candidate_acknowledgements.json"
     legacy_path.write_text(
@@ -434,12 +436,12 @@ def test_legacy_delivery_acknowledgement_does_not_hide_candidate(tmp_path: Path)
         encoding="utf-8",
     )
 
-    restarted = SymphonyFlowEngine(flow_dir)
+    restarted = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     assert asyncio.run(restarted.start()) == (candidate,)
 
 
 def test_ack_uses_current_verified_state_when_immutable_version_was_candidate(tmp_path: Path) -> None:
-    config = FlowConfig(acceptance={'min_successes': 2, 'min_pack_success_rate': 0.8})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 2, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
     assert asyncio.run(engine.submit(_execution_graph("trace-1"))) == ()
@@ -463,7 +465,7 @@ def test_ack_uses_current_verified_state_when_immutable_version_was_candidate(tm
 
 @pytest.mark.asyncio
 async def test_distillation_worker_is_single_and_notifies_only_one_concurrent_waiter(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     original_distill = engine.distill
     started = asyncio.Event()
     release = asyncio.Event()
@@ -495,7 +497,7 @@ async def test_distillation_worker_is_single_and_notifies_only_one_concurrent_wa
 
 @pytest.mark.asyncio
 async def test_failed_distillation_retries_on_next_duplicate_submission(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     original_distill = engine.distill
     calls = 0
 
@@ -519,13 +521,13 @@ async def test_failed_distillation_retries_on_next_duplicate_submission(tmp_path
 @pytest.mark.asyncio
 async def test_failed_distillation_recovers_after_engine_restart(tmp_path: Path) -> None:
     flow_dir = tmp_path / "flow"
-    failed = SymphonyFlowEngine(flow_dir)
+    failed = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     failed.distill = AsyncMock(side_effect=RuntimeError("distill failed"))  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="distill failed"):
         await failed.submit(_execution_graph("trace-1"))
 
-    restarted = SymphonyFlowEngine(flow_dir)
+    restarted = SymphonyFlowEngine(flow_dir, config=SINGLE_SUCCESS_EXPERIENCE)
     recovered = await restarted.start()
 
     assert len(recovered) == 1
@@ -557,7 +559,7 @@ async def test_failed_worker_releases_waiters_queued_during_distillation(tmp_pat
 
 @pytest.mark.asyncio
 async def test_close_flushes_worker_and_rejects_later_submissions(tmp_path: Path) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     submitted = asyncio.create_task(engine.submit(_execution_graph("trace-1")))
     await asyncio.sleep(0)
 
@@ -587,10 +589,10 @@ async def test_close_records_worker_failure_and_still_closes(
 
 
 def test_start_recovers_persisted_evidence(tmp_path: Path) -> None:
-    first = SymphonyFlowEngine(tmp_path / "flow")
+    first = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     assert first.ingest(_execution_graph("trace-1"))
 
-    recovered = SymphonyFlowEngine(tmp_path / "flow")
+    recovered = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE)
     candidates = asyncio.run(recovered.start())
 
     assert len(candidates) == 1
@@ -1079,7 +1081,7 @@ def test_stale_recipe_version_is_rejected(tmp_path: Path) -> None:
 
 
 def test_branching_recipe_is_not_installable_in_v1(tmp_path: Path) -> None:
-    config = FlowConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("branch", [("s1", "s2", True), ("s1", "s3", True)]))
     report = asyncio.run(engine.distill())
@@ -1102,7 +1104,7 @@ def test_narrative_prefers_symphony_llm_invoke(tmp_path: Path) -> None:
         }
     )
     llm = Mock(invoke=AsyncMock(return_value=response))
-    engine = SymphonyFlowEngine(tmp_path / "flow", llm_client=llm)
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=SINGLE_SUCCESS_EXPERIENCE, llm_client=llm)
     engine.ingest(_execution_graph("trace-1"))
 
     report = asyncio.run(engine.distill())
@@ -1126,6 +1128,7 @@ def test_narrative_rejects_skill_chain_as_package_name(tmp_path: Path) -> None:
     )
     engine = SymphonyFlowEngine(
         tmp_path / "flow",
+        config=SINGLE_SUCCESS_EXPERIENCE,
         llm_client=Mock(invoke=AsyncMock(return_value=response)),
     )
 
@@ -1147,6 +1150,7 @@ def test_package_redacts_raw_queries_examples_traces_and_credentials(tmp_path: P
     )
     engine = SymphonyFlowEngine(
         tmp_path / "flow",
+        config=SINGLE_SUCCESS_EXPERIENCE,
         llm_client=Mock(invoke=AsyncMock(return_value=response)),
         gate=PackageReviewGate(review_agent=_ApprovingReviewAgent()),
     )
@@ -1185,6 +1189,7 @@ def test_common_bare_credentials_never_enter_prompt_recipe_or_package(tmp_path: 
     llm = Mock(invoke=AsyncMock(return_value=response))
     engine = SymphonyFlowEngine(
         tmp_path / "flow",
+        config=SINGLE_SUCCESS_EXPERIENCE,
         llm_client=llm,
         gate=PackageReviewGate(review_agent=_ApprovingReviewAgent()),
     )
@@ -1328,7 +1333,7 @@ _DOCUMENTED_EXECUTION_GRAPH = {
 def test_ingest_accepts_documented_execution_graph(tmp_path: Path) -> None:
     """4.3.1 文档格式的执行图可直接接入：失败边剔除成员、分支边保留。"""
 
-    config = FlowConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 1, 'min_pack_success_rate': 0.5})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
     assert engine.ingest(_DOCUMENTED_EXECUTION_GRAPH) is True
@@ -1355,7 +1360,7 @@ def test_ingest_accepts_documented_execution_graph(tmp_path: Path) -> None:
 def test_non_success_evidence_does_not_reduce_pack_success_rate(tmp_path: Path) -> None:
     """Flow only distills overall-success executions."""
 
-    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     for index in range(6):
         assert engine.ingest(_execution_graph(f"trace-{index}", query=f"调研任务 {index}"))
@@ -1427,7 +1432,7 @@ def test_same_nodes_different_structures_split_groups(tmp_path: Path) -> None:
     不给 s1→s2→s5 组虚增成功经验（边方向由 source→target 决定）。
     """
 
-    config = FlowConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
+    config = OrchestrationExperienceConfig(acceptance={'min_successes': 3, 'min_pack_success_rate': 0.8})
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("t1", [("s1", "s2", True), ("s2", "s5", True)]))
     engine.ingest(_graph_with_edges("t2", [("s1", "s2", True), ("s2", "s5", True)]))

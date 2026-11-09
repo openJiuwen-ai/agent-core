@@ -107,12 +107,11 @@ def _runtime(graph_engine: object, flow_engine: object | None) -> SymphonyRuntim
     runtime = SymphonyRuntime(None, SymphonyConfig(
         capability={"root": "unused-capabilities", "type": "skill"},
         storage={"artifact_root": "unused-artifacts"},
+        orchestration={"experience": {"enabled": True}},
     ))
     runtime.orchestration = graph_engine
     if flow_engine is None:
-        flow_engine = SimpleNamespace(enabled=False, close=AsyncMock())
-    else:
-        flow_engine.enabled = True
+        flow_engine = SimpleNamespace(submit=AsyncMock(return_value=()), close=AsyncMock())
     runtime.flow = flow_engine
     runtime._graph_scope_id = "workspace:test"
     return runtime
@@ -225,7 +224,7 @@ async def test_runtime_accepts_capability_metadata_and_submits_to_flow() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("member_type", ["skill", "swarm_skill", "skillpack", "unknown"])
-async def test_runtime_keeps_host_member_type_for_flow_only(tmp_path, member_type) -> None:
+async def test_runtime_keeps_host_member_type_only_in_flow_evidence(tmp_path, member_type) -> None:
     receipt = ObservationReceipt(
         evidence_id="execution-1", graph_scope_id="workspace:test", sequence=1, status="accepted",
     )
