@@ -33,7 +33,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.session.agent import create_agent_session
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY, INTERRUPTION_INFLIGHT_KEY
 from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 
 # Ability type definition
@@ -934,11 +934,15 @@ class AbilityManager:
                 )
             tool_contexts.append(tool_ctx)
             tasks.append(
-                self._railed_execute_single_tool_call(
-                    ctx=tool_ctx,
+                self._track_interrupt_inflight(
+                    self._railed_execute_single_tool_call(
+                        ctx=tool_ctx,
+                        tool_call=single_tool_call,
+                        session=session,
+                        tag=tag,
+                    ),
                     tool_call=single_tool_call,
                     session=session,
-                    tag=tag,
                 )
             )
 
@@ -1092,6 +1096,57 @@ class AbilityManager:
 
         return final_results
 
+    async def _track_interrupt_inflight(
+            self,
+            coro,
+            *,
+            tool_call: ToolCall,
+            session: Session,
+    ) -> Tuple[Any, ToolMessage]:
+        """Register an in-flight interrupt the moment a tool raises one.
+
+        ask_user / 权限 rail 抛出的 ToolInterruptException 要等整批工具完成
+        后才由 ReAct 循环 commit 成 INTERRUPTION_KEY；卡片（ON_TOOL_EXCEPTION）
+        却在抛出瞬间就已下发——窗口内用户作答会因 has_pending_interrupt()=False
+        被 unsupported_interactive_input 拒收。在逐工具异常边界把
+        {outer_tool_call_id: InterruptRequest} 登记为在途标记，批末由
+        ToolInterruptHandler.commit_interrupt 转正并清键，invoke 异常中止由
+        react_agent 的 finally 清键。工具内抛与 BEFORE_TOOL_CALL rail 抛
+        （权限审批）都会穿透本包装，两来源同规覆盖。
+        """
+        try:
+            return await coro
+        except ToolInterruptException as exc:
+            self._record_interrupt_inflight(session, tool_call, exc)
+            raise
+
+    @staticmethod
+    def _record_interrupt_inflight(
+            session: Session,
+            tool_call: ToolCall,
+            exc: ToolInterruptException,
+    ) -> None:
+        if session is None:
+            return
+        try:
+            inflight = session.get_state(INTERRUPTION_INFLIGHT_KEY)
+            if not isinstance(inflight, dict):
+                inflight = {}
+            else:
+                # 避免在持有方可见的同一 dict 上原地改（状态对象的共享语义不明）。
+                inflight = dict(inflight)
+            outer_id = str(getattr(tool_call, "id", "") or "")
+            if not outer_id:
+                return
+            inflight[outer_id] = getattr(exc, "request", None)
+            session.update_state({INTERRUPTION_INFLIGHT_KEY: inflight})
+        except Exception:
+            logger.warning(
+                "record interrupt inflight failed for tool_call=%s",
+                getattr(tool_call, "id", None),
+                exc_info=True,
+            )
+
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,
         after=AgentCallbackEvent.AFTER_TOOL_CALL,
@@ -1163,8 +1218,8 @@ class AbilityManager:
             context=workflow_context,
         )
         if (
-            isinstance(workflow_output, WorkflowOutput)
-            and workflow_output.state == WorkflowExecutionState.INPUT_REQUIRED
+                isinstance(workflow_output, WorkflowOutput)
+                and workflow_output.state == WorkflowExecutionState.INPUT_REQUIRED
         ):
             return workflow_output, None
 

@@ -557,6 +557,18 @@ class TeamRuntimeManager:
 
         if isinstance(payload, InteractiveInput):
             if entry.agent.has_pending_interrupt():
+                # pending 只证明"有中断在等"，不证明"这份作答能消解它"：
+                # 作答 id 不在 pending 集合（典型=用户点了上一张已失效卡片）
+                # 时若直接报 success，resume_interrupt 的 id 匹配门会把作答
+                # 静默丢弃——用户答案丢失而调用方误以为已受理。S_17 的显式
+                # 拒绝必须覆盖 id 不匹配，不能只覆盖无 pending。
+                if not entry.agent.is_valid_interrupt_resume(payload):
+                    team_logger.info(
+                        "[{}] rejecting stale interactive input: ids={} do not match pending interrupt",
+                        team_name,
+                        sorted(getattr(payload, "user_inputs", {}) or {}),
+                    )
+                    return DeliverResult.failure("unsupported_interactive_input")
                 await entry.agent.resume_interrupt(payload)
                 return DeliverResult.success(None)
             return DeliverResult.failure("unsupported_interactive_input")

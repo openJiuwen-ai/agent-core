@@ -22,7 +22,11 @@ from openjiuwen.core.single_agent.interrupt.response import (
     InterruptRequest,
     ToolCallInterruptRequest,
 )
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, RESUME_USER_INPUT_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    RESUME_USER_INPUT_KEY,
+    INTERRUPTION_INFLIGHT_KEY
+)
 from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptEntry,
     ToolInterruptionState,
@@ -283,6 +287,11 @@ class ToolInterruptHandler:
         """Persist tool interruption state and return interrupt dict."""
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
+        if session is not None:
+            # 中断正式 commit：在途登记（ability_manager 逐工具捕获边界写入，
+            # 用于批末前的 has_pending_interrupt 准入查询）同步清键，
+            # 此后查询只认本方法的正式态。
+            session.update_state({INTERRUPTION_INFLIGHT_KEY: None})
         result = self.build_interrupt_result(sub_agent_outputs)
         invoke_inputs.result = result
         return result
