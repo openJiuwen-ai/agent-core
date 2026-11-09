@@ -84,6 +84,13 @@ async def test_one_shot_build_feeds_discovery_search_visibility_and_pagination(b
         shown = set(first.detailed_output["observed_skill_ids"]) | set(second.detailed_output["observed_skill_ids"])
         assert shown == {"alpha", "beta"}
 
+        tool, = toolkit.get_tools(unified=True)
+        assert tool.card.name == "capability_search"
+        page = await tool.invoke({"type": "skill", "operation": "list", "category": "documents", "top_k": 1})
+        next_page = await tool.invoke({"operation": "list", "cursor": page.detailed_output["next_cursor"]})
+        assert next_page.detailed_output["result_complete"]
+        assert set(page.detailed_output["observed_skill_ids"]) | set(next_page.detailed_output["observed_skill_ids"]) == shown
+
         result = await toolkit.skill_index("search", query="invoice")
         assert set(result.detailed_output["observed_skill_ids"]) == {"alpha", "beta"}
         assert "invoice" in result.data["content"]

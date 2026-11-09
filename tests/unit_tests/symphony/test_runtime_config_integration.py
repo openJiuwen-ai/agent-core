@@ -258,6 +258,66 @@ class GraphModel:
 
 
 @pytest.mark.asyncio
+async def test_retrieval_build_and_graph_share_fingerprint_extraction(tmp_path):
+    skill = write_capability(tmp_path) / "SKILL.md"
+
+    class FingerprintModel(GraphModel):
+        model_config = SimpleNamespace(model_name="fixture")
+        extractions = 0
+
+        async def invoke(self, messages, **kwargs):
+            if "Extract a capability fingerprint" in messages[0]["content"]:
+                self.extractions += 1
+                return SimpleNamespace(content=json.dumps({
+                    "semantic_profile": {"summary": "Invoice helper", "use_cases": ["escrowreconciliation"]},
+                }))
+            return await super().invoke(messages, **kwargs)
+
+    config = make_config(tmp_path, orchestration={"enabled": False}).model_dump()
+    config["capability"]["fingerprint"]["extraction"]["llm_enabled"] = True
+    model = FingerprintModel()
+    runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
+    disabled = set()
+    try:
+        assert (await runtime.retrieval.build())["success"]
+        assert model.extractions == 1
+        session = runtime.retrieval.create_session(disabled_capability_ids=lambda: disabled)
+        tool = session.get_tools(unified=True)[0]
+        result = await tool.invoke({"type": "skill", "query": "escrowreconciliation"})
+        assert result.detailed_output["observed_skill_ids"] == ["alpha"]
+        assert "Invoice helper" in result
+        legacy = await session.skill_index("search", query="escrowreconciliation")
+        assert legacy.detailed_output["observed_skill_ids"] == ["alpha"]
+        assert model.extractions == 1
+    finally:
+        await runtime.aclose()
+
+    config["orchestration"]["enabled"] = True
+    runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
+    try:
+        graph = await runtime.orchestration.build()
+        assert graph.counts["reused_count"] == 1
+        assert model.extractions == 1
+        published = graph.graph_path.with_name("fingerprint.json")
+        shared = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        assert published.read_bytes() == shared.read_bytes()
+        session = runtime.retrieval.create_session(disabled_capability_ids=lambda: disabled)
+        disabled.add("alpha")
+        hidden = await session.capability_search("escrowreconciliation", type="skill")
+        assert not hidden.detailed_output["observed_skill_ids"]
+        disabled.clear()
+        skill.write_text(skill.read_text().replace("Process invoice documents", "Prepare payroll"))
+        stale = await session.capability_search("escrowreconciliation", type="skill")
+        assert not stale.detailed_output["observed_skill_ids"]
+        current = await session.capability_search("payroll", type="skill")
+        assert "Prepare payroll" in current
+        assert (await runtime.retrieval.build())["success"]
+        assert model.extractions == 2
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_experience_distills_on_third_success_and_planning_can_read_after_disabling_it(tmp_path):
     for name in ("alpha", "beta"):
         write_capability(tmp_path, name)
