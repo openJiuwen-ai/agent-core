@@ -41,7 +41,7 @@ from openjiuwen.symphony.flow.render import (
 )
 from openjiuwen.symphony.flow.review import PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
-from openjiuwen.symphony.config import FlowConfig
+from openjiuwen.symphony.config import OrchestrationExperienceConfig
 
 
 @dataclass
@@ -62,16 +62,16 @@ class SymphonyFlowEngine:
         self,
         flow_dir: str | Any,
         *,
-        config: FlowConfig | None = None,
+        config: OrchestrationExperienceConfig | None = None,
         llm_client: Any | None = None,
         store: FlowStore | None = None,
         packager: CapabilityPackager | None = None,
         gate: PackageReviewGate | None = None,
         skill_adapter: SkillArtifactAdapter | None = None,
     ) -> None:
-        if config is not None and not isinstance(config, FlowConfig):
-            raise TypeError("config must be a FlowConfig")
-        self.config = config or FlowConfig()
+        if config is not None and not isinstance(config, OrchestrationExperienceConfig):
+            raise TypeError("config must be an OrchestrationExperienceConfig")
+        self.config = config or OrchestrationExperienceConfig()
         self.llm_client = llm_client
         self.store = store or FlowStore(flow_dir)
         self.packager = packager or CapabilityPackager()

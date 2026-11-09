@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
+from openjiuwen.symphony import EvolutionSubmitResult, SymphonyConfig, SymphonyRuntime
 
 
 def make_config(tmp_path, **overrides):
@@ -61,7 +61,7 @@ def test_runtime_rejects_multiple_sources_before_creating_artifacts(tmp_path):
 
 @pytest.mark.asyncio
 async def test_independent_disabled_capabilities_are_queryable_but_reject_execution(tmp_path):
-    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"enabled": False}, orchestration={"enabled": False}, flow={"enabled": False}))
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"enabled": False}, orchestration={"enabled": False}))
     assert runtime.retrieval.status()["enabled"] is False
     assert runtime.orchestration.status().enabled is False
     assert runtime.flow.status()["enabled"] is False
@@ -76,6 +76,24 @@ async def test_independent_disabled_capabilities_are_queryable_but_reject_execut
         await runtime.flow.start()
     await runtime.aclose()
     assert not (tmp_path / "runtime").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("orchestration", [{}, {"enabled": False, "experience": {"enabled": True}}])
+async def test_disabled_experience_rejects_all_new_evidence_without_creating_storage(tmp_path, orchestration):
+    runtime = SymphonyRuntime(None, make_config(tmp_path, orchestration=orchestration))
+    try:
+        assert not runtime.flow.enabled
+        assert await runtime.submit_evolution(
+            None, {}, session_id="session", capture_mode="agent",
+        ) == EvolutionSubmitResult(None)
+        with pytest.raises(RuntimeError, match="disabled"):
+            runtime.orchestration.submit_observation(None)
+        with pytest.raises(RuntimeError, match="disabled"):
+            await runtime.flow.start()
+        assert not (tmp_path / "runtime").exists()
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.parametrize("kind", ["expert", "connector", "mcp"])
@@ -240,6 +258,51 @@ class GraphModel:
 
 
 @pytest.mark.asyncio
+async def test_experience_distills_on_third_success_and_planning_can_read_after_disabling_it(tmp_path):
+    for name in ("alpha", "beta"):
+        write_capability(tmp_path, name)
+    runtime = SymphonyRuntime(GraphModel(), make_config(tmp_path, orchestration={"experience": {"enabled": True}}))
+    try:
+        await runtime.orchestration.build()
+        initial = runtime.capture_graph_snapshot()
+        for index in range(3):
+            trace_id = f"trace-{index}"
+            execution = {
+                "trace_id": trace_id, "query": "Process invoice documents", "outcome": "success",
+                "graph_snapshot": initial,
+                "graph": {
+                    "id": trace_id, "type": "execution_graph", "directed": True,
+                    "nodes": {
+                        f"skill:{name}": {"label": "skill", "metadata": {
+                            "capability_type": "skill", "version": "1.0.0", "skill_type": "skill",
+                        }}
+                        for name in ("alpha", "beta")
+                    },
+                    "edges": [{"source": "skill:alpha", "target": "skill:beta", "relation": "can_feed",
+                               "metadata": {"success": True}}],
+                },
+            }
+            result = await runtime.submit_evolution(None, execution, session_id=trace_id, capture_mode="agent")
+            assert result.graph_receipt.status == "accepted"
+            assert bool(result.new_candidates) == (index == 2)
+        await asyncio.to_thread(runtime.orchestration.flush_observations)
+        learned = runtime.capture_graph_snapshot()
+        assert learned["observation_revision"] != initial["observation_revision"]
+        assert len(runtime.flow.store.read_evidence()) == 3
+    finally:
+        await runtime.aclose()
+
+    config = make_config(tmp_path, orchestration={"plan": {"dynamic_graph_enabled": True}})
+    reader = SymphonyRuntime(GraphModel(), config)
+    try:
+        assert not reader.flow.enabled
+        planned = (await reader.orchestration.plan("invoice", candidate_ids=[])).to_dict()["planned_graph"]
+        assert planned["graph_snapshot"]["observation_revision"] == learned["observation_revision"]
+    finally:
+        await reader.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
 @pytest.mark.parametrize("candidates", [[], ["unavailable"]])
 async def test_empty_or_unknown_candidate_set_never_expands_to_inventory(tmp_path, mode, candidates):
@@ -337,7 +400,7 @@ async def test_discovery_limits_and_source_ids_apply_through_session(tmp_path):
 @pytest.mark.asyncio
 async def test_cancelled_close_waiter_still_drains_nested_graph_operation_and_flow(tmp_path):
     write_capability(tmp_path)
-    config = make_config(tmp_path)
+    config = make_config(tmp_path, orchestration={"experience": {"enabled": True}})
     runtime = SymphonyRuntime(GraphModel(), config)
     original = await runtime.orchestration.build()
     entered, release_flow = asyncio.Event(), asyncio.Event()

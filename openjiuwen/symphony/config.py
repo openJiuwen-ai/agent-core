@@ -183,7 +183,7 @@ class GraphMatchingPolicyConfig(SymphonyConfigModel):
 class FlowAcceptanceConfig(SymphonyConfigModel):
     """Flow 组合能力包的接纳条件，按能力包整体统计判定。"""
 
-    min_successes: PositiveInt = Field(1, title="最少成功次数", description="接纳能力包所需的成功记录数。")
+    min_successes: PositiveInt = Field(3, title="最少成功次数", description="接纳能力包所需的成功记录数。")
     min_pack_success_rate: Probability = Field(0.8, title="最低成功率", description="能力包整体成功率下限。")
 
 
@@ -193,10 +193,10 @@ class FlowNarrativeConfig(SymphonyConfigModel):
     max_examples: PositiveInt = Field(5, title="叙述示例上限", description="每个能力包叙述保留的最多示例数。")
 
 
-class FlowConfig(SymphonyConfigModel):
-    """组合能力包沉淀策略，默认值对应现有 SymphonyFlowConfig；配置构造不启动服务。"""
+class OrchestrationExperienceConfig(SymphonyConfigModel):
+    """执行观测与组合能力包的经验沉淀策略。"""
 
-    enabled: bool = Field(True, title="启用经验沉淀", description="是否启用 Flow 的经验沉淀与能力包处理。")
+    enabled: bool = Field(False, title="启用经验沉淀", description="编排开启时接收执行观测并沉淀组合能力包。")
     acceptance: FlowAcceptanceConfig = Field(
         default_factory=FlowAcceptanceConfig, title="接纳条件", description="能力包的成功次数和成功率要求。",
     )
@@ -477,6 +477,15 @@ class OrchestrationConfig(SymphonyConfigModel):
     plan: OrchestrationPlanConfig = Field(
         default_factory=OrchestrationPlanConfig, title="计划生成", description="使用已有图生成编排计划时的策略。",
     )
+    experience: OrchestrationExperienceConfig = Field(
+        default_factory=OrchestrationExperienceConfig, title="编排经验",
+        description="从执行证据更新动态图并沉淀组合能力包。",
+    )
+
+    @property
+    def experience_enabled(self) -> bool:
+        """Whether this orchestration runtime accepts new experience."""
+        return self.enabled and self.experience.enabled
 
 
 class SymphonyConfig(SymphonyConfigModel):
@@ -488,10 +497,7 @@ class SymphonyConfig(SymphonyConfigModel):
         default_factory=RetrievalConfig, title="检索能力", description="分类树构建与对象发现的默认配置。",
     )
     orchestration: OrchestrationConfig = Field(
-        default_factory=OrchestrationConfig, title="编排能力", description="关系图构建和计划生成的默认配置。",
-    )
-    flow: FlowConfig = Field(
-        default_factory=FlowConfig, title="组合能力沉淀", description="能力包接纳与叙述策略；配置存在或启用不表示服务已启动。",
+        default_factory=OrchestrationConfig, title="编排能力", description="关系图构建、计划生成和经验沉淀的默认配置。",
     )
 
 
@@ -505,7 +511,7 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
     TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
     DiscoveryOutputConfig, DiscoveryPromptConfig,
     OrchestrationConfig, OrchestrationBuildConfig, GraphMatchingPolicyConfig, OrchestrationPlanConfig,
-    FlowConfig, FlowAcceptanceConfig, FlowNarrativeConfig,
+    OrchestrationExperienceConfig, FlowAcceptanceConfig, FlowNarrativeConfig,
 )
 
 INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
@@ -518,5 +524,5 @@ CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + IN
 __all__ = [
     "CapabilityType", "CapabilityConfig", "StorageConfig", "RetrievalBuildConfig",
     "RetrievalConfig", "OrchestrationBuildConfig", "OrchestrationPlanConfig", "OrchestrationConfig",
-    "FlowConfig", "SymphonyConfig",
+    "OrchestrationExperienceConfig", "SymphonyConfig",
 ]

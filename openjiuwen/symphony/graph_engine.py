@@ -58,11 +58,14 @@ class SymphonyGraphEngine:
         self._operations: set[asyncio.Task] = set()
         self._scope_id = storage.scope_id if storage is not None else "default"
 
-    def _check(self, *, write: bool = False) -> None:
+    def _check(self, *, write: bool = False, require_experience: bool = False) -> None:
         if self._closed:
             raise RuntimeError("Symphony runtime is closed")
-        if not self._orchestration_service.config.enabled:
+        config = self._orchestration_service.config
+        if not config.enabled:
             raise RuntimeError("Symphony orchestration is disabled")
+        if require_experience and not config.experience_enabled:
+            raise RuntimeError("Symphony experience is disabled")
         if self._storage is not None:
             self._storage.check(write=write)
 
@@ -256,7 +259,7 @@ class SymphonyGraphEngine:
     def submit_observation(self, value: GraphEvolutionInput) -> ObservationReceipt:
         """Append one canonical execution observation for asynchronous learning."""
 
-        self._check(write=True)
+        self._check(write=True, require_experience=True)
         return self._observations.submit(value)
 
     def get_snapshot(

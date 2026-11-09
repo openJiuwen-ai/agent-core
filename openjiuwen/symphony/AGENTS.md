@@ -6,6 +6,7 @@
 
 - `SymphonyRuntime(model, config)` 是统一组装入口；子服务直接使用 `config.py` 的子模型，解析快照不另设默认值。
 - 配置接受非空的 `capability.sources` 列表，当前 Runtime 构造要求单个来源。构造只复制配置并固定路径。扫描、模型调用和后台任务由运行入口触发。入口为 retrieval、orchestration、flow。
+- `orchestration.experience.enabled` 与编排开关共同控制图观测写入和 Flow。规划使用已有动态图由 `orchestration.plan.dynamic_graph_enabled` 独立控制。
 - 构建采用宿主注入模型；同步树算法通过宿主事件循环桥接。取消必须等待模型和文件写入工作收尾，不关闭宿主模型。
 - 全量和增量发布前复核集合身份；失败或取消保留已发布版本。布局绑定对象根和类型，不兼容旧签名和旧布局，不自动删旧目录。
 - 配置有唯一可写路径；树结构与容量倍率在 retrieval.index_build.structure，任务策略在 index_build.task，构建展示及缓存指标在 index_build.output。

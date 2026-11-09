@@ -73,12 +73,12 @@ def test_default_document_contains_only_public_configuration(exporter):
         assert "\n" + model.__name__ + " # " not in public
         assert "→ " + model.__name__ + " # " not in public
     assert "全量配置" in public
-    assert "search →" not in public and "toolkit →" not in public and "experience →" not in public
+    assert "search →" not in public and "toolkit →" not in public
     assert "scan → DirectoryScanConfig" in public
     assert "fingerprint → FingerprintPolicyConfig" in public
     assert "index_build → RetrievalBuildConfig" in public
     assert "discovery →" not in public
-    assert "flow → FlowConfig" in public
+    assert "    └── experience → OrchestrationExperienceConfig" in public
     assert "allow_fallback_tree # 默认=true" in public
     assert "strict_failure #" not in public
     structure = public.split("structure → RetrievalTreeStructureConfig", 1)[1].split("request → IndexRequestConfig", 1)[0]

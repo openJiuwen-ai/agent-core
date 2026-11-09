@@ -14,8 +14,11 @@ config = SymphonyConfig.model_validate({
         "index_build": {"request": {"max_concurrency": 2}},
         "use_existing_index": True,
     },
-    "orchestration": {"min_edge_confidence": 0.7, "plan": {"mode": "fast"}},
-    "flow": {"acceptance": {"min_successes": 3}},
+    "orchestration": {
+        "min_edge_confidence": 0.7,
+        "plan": {"mode": "fast"},
+        "experience": {"enabled": True},
+    },
 })
 
 # model 是宿主已创建的 openjiuwen.core.foundation.llm.Model。
@@ -93,14 +96,16 @@ storage.artifact_root/
 
 不兼容旧 Runtime 构造参数、配置别名、旧缓存签名及旧布局。历史目录不自动迁移或删除，请为新配置选择独立产物目录并重新构建。
 
-## Flow 与宿主职责
+## 编排经验与宿主职责
 
-Runtime 惰性组装默认 Flow，消费 `flow.acceptance/narrative`；`runtime.flow.create_scope(store=user_store)` 用宿主受限存储创建隔离视图，共用默认服务的打包和审核组件。用户证据范围、候选确认与安装授权仍由宿主决定，Core 不替用户授权。
+`orchestration.experience.enabled` 默认关闭。与 `orchestration.enabled` 同时开启时，Runtime 接收图观测，并将合格的成功子图送给 Flow 沉淀组合能力包。`orchestration.plan.dynamic_graph_enabled` 独立控制规划是否采用已有动态图。
+
+`orchestration.experience.acceptance` 默认要求至少 3 次成功及 0.8 成功率，`narrative.max_examples` 默认保留最多 5 个示例。`runtime.flow.create_scope(store=user_store)` 用宿主受限存储创建隔离视图，共用默认服务的打包和审核组件。用户证据范围、候选确认和安装授权由宿主决定。
 
 `capture_graph_snapshot()` 和 `submit_evolution()` 保留供现有 Rail 使用。旧模型检索服务、分支浏览工具、紧凑码表和独立 Experience 包已退役，不恢复旧入口。
 
 ## 配置文档与验证
 
-修改配置后运行 `python scripts/export_symphony_config.py` 自动更新配置树；`--include-internal` 额外输出指纹协议和一次性构树预算参考。公共树可达模型 31 个，内部模型 2 个，总计 33 个。
+修改配置后运行 `python scripts/export_symphony_config.py` 自动更新配置树。`--include-internal` 额外输出内部配置参考。
 
 相关行为测试位于 `tests/unit_tests/symphony/`。配置默认值与基线快照比较；运行测试覆盖真实目录、模型替身、HTTP 连接复用、取消、原子发布、会话可见性、观测和 Flow。此流程不运行格式化或静态检查。

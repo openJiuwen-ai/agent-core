@@ -32,8 +32,9 @@ generated: true
 | [harness/tools/browser_move/decision](#module-15) |
 | [harness/tools/subagent](#module-16) |
 | [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-17) |
-| [symphony](#module-18) |
-| [未分类](#module-19) |
+| [jiuwenswarm/runtime/symphony](#module-18) |
+| [symphony](#module-19) |
+| [未分类](#module-20) |
 
 <a id="module-1"></a>
 
@@ -475,6 +476,14 @@ generated: true
 
 <a id="module-18"></a>
 
+## jiuwenswarm/runtime/symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [D-20261109-1603-symphony-orchestration-experience](designs/active/D-20261109-1603-symphony-orchestration-experience/design.md) | D | Symphony 编排经验配置收敛 | lin-xiaoyu | symphony, jiuwenswarm/runtime/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, jiuwenswarm/common/symphony_config.py, jiuwenswarm/runtime/symphony/service.py | — |
+
+<a id="module-19"></a>
+
 ## symphony
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -482,14 +491,16 @@ generated: true
 | [D-20261029-1619-skill-directory-graph-api](designs/active/D-20261029-1619-skill-directory-graph-api/design.md) | D | Symphony Runtime 统一配置与检索编排接口收敛 | lin-xiaoyu | symphony, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/config.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/shared/fingerprint/settings.py | — |
 | [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) | D | Symphony 配置契约先行 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |
 | [D-20261103-1438-symphony-capability-retirement](designs/active/D-20261103-1438-symphony-capability-retirement/design.md) | D | Symphony 旧检索与独立经验库退役 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/retrieval, openjiuwen/symphony/experience, tests/unit_tests/symphony | — |
+| [D-20261109-1603-symphony-orchestration-experience](designs/active/D-20261109-1603-symphony-orchestration-experience/design.md) | D | Symphony 编排经验配置收敛 | lin-xiaoyu | symphony, jiuwenswarm/runtime/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, jiuwenswarm/common/symphony_config.py, jiuwenswarm/runtime/symphony/service.py | — |
 | [F_20261031_1614_symphony-config-contract](features/F_20261031_1614_symphony-config-contract.md) | F | Symphony 多层 Pydantic 配置契约 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [F_20261103_1458_symphony-capability-retirement](features/F_20261103_1458_symphony-capability-retirement.md) | F | Symphony 旧检索与独立经验库退役实施 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/retrieval, openjiuwen/symphony/experience, tests/unit_tests/symphony, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/README.md | [D-20261103-1438-symphony-capability-retirement](designs/active/D-20261103-1438-symphony-capability-retirement/design.md) |
 | [F_20261109_1135_symphony-runtime-config-integration](features/F_20261109_1135_symphony-runtime-config-integration.md) | F | SymphonyConfig 接入 Core Runtime 与模型调用 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/runtime.py, openjiuwen/symphony/config.py, openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/runtime_flow.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/model_bridge.py, openjiuwen/symphony/orchestration, openjiuwen/symphony/retrieval/build, openjiuwen/symphony/discovery, tests/unit_tests/symphony, examples/symphony/runtime.py | [D-20261029-1619-skill-directory-graph-api](designs/active/D-20261029-1619-skill-directory-graph-api/design.md)<br>[D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) |
+| [F_20261109_1618_symphony-orchestration-experience](features/F_20261109_1618_symphony-orchestration-experience.md) | F | Symphony 编排经验配置与写入门控 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_flow.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/flow/engine.py, tests/unit_tests/symphony | [D-20261109-1603-symphony-orchestration-experience](designs/active/D-20261109-1603-symphony-orchestration-experience/design.md) |
 | [F_20261109_1631_symphony-capability-sources](features/F_20261109_1631_symphony-capability-sources.md) | F | Symphony 多类型来源配置 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/config.tree.txt | [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [B_20261102_1507_symphony-build-method-strict-integer](bugfix/symphony/B_20261102_1507_symphony-build-method-strict-integer.md) | B | Symphony 构建方式严格整数校验 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | [D-20261031-1614-symphony-config-contract](designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [S_01_configuration-contract](specs/symphony/S_01_configuration-contract.md) | S | Symphony 运行配置与 Runtime 契约 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |
 
-<a id="module-19"></a>
+<a id="module-20"></a>
 
 ## 未分类
 
