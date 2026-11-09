@@ -16,6 +16,12 @@ from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compression_events import (
+    count_messages_tokens_if_available,
+    log_compression_applied,
+    messages_total_chars,
+    resolve_session_id,
+)
 from openjiuwen.core.context_engine.processor.compressor.util import (
     build_team_collaboration_reinjected_messages,
     message_to_text,
@@ -31,7 +37,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-
 
 DEFAULT_COMPRESSION_PROMPT: str = """\
 You are a **Task Data Preservation Expert** focused on compressing historical ReAct blocks with high fidelity.
@@ -238,6 +243,7 @@ class DialogueCompressor(ContextProcessor):
         replacements, modified_indices = await self._build_json_replacements(context, targets, response.parser_content)
         if replacements:
             updated_messages = self._apply_replacements(context_messages, replacements)
+            self._log_compression_applied(context, context_messages, updated_messages)
             event = ContextEvent(
                 event_type=self.processor_type(),
                 messages_to_modify=modified_indices,
@@ -251,6 +257,7 @@ class DialogueCompressor(ContextProcessor):
             fallback_replacement = await self._build_fallback_replacement(context, targets, response.content or "")
             if fallback_replacement:
                 updated_messages = self._apply_replacements(context_messages, [fallback_replacement])
+                self._log_compression_applied(context, context_messages, updated_messages)
                 start_idx, end_idx, _ = fallback_replacement
                 event = ContextEvent(
                     event_type=self.processor_type(),
@@ -581,6 +588,24 @@ class DialogueCompressor(ContextProcessor):
         if original_tokens <= 0:
             return False
         return compressed_tokens < original_tokens
+
+    def _log_compression_applied(
+        self,
+        context: ModelContext,
+        before_messages: List[BaseMessage],
+        after_messages: List[BaseMessage],
+    ) -> None:
+        log_compression_applied(
+            logger,
+            session_id=resolve_session_id(context),
+            processor=self.processor_type() or type(self).__name__,
+            strategy="llm_summary",
+            trigger="threshold",
+            before_chars=messages_total_chars(before_messages),
+            after_chars=messages_total_chars(after_messages),
+            before_tokens=count_messages_tokens_if_available(context, before_messages),
+            after_tokens=count_messages_tokens_if_available(context, after_messages),
+        )
 
     def _count_messages_tokens(self, context: ModelContext, messages: List[BaseMessage]) -> int:
         token_counter = context.token_counter()

@@ -13,6 +13,12 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     find_message_index_by_context_message_id,
     get_session_memory_runtime,
 )
+from openjiuwen.core.context_engine.processor.compression_events import (
+    count_messages_tokens_if_available,
+    log_compression_applied,
+    messages_total_chars,
+    resolve_session_id,
+)
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
@@ -87,6 +93,17 @@ class SessionMemoryCompressor(ContextProcessor):
 
         context_window.context_messages = new_messages
         context.set_messages(new_messages)
+        log_compression_applied(
+            logger,
+            session_id=resolve_session_id(context),
+            processor=self.processor_type() or type(self).__name__,
+            strategy="session_memory_notes",
+            trigger="context_threshold",
+            before_chars=messages_total_chars(original_messages),
+            after_chars=messages_total_chars(new_messages),
+            before_tokens=count_messages_tokens_if_available(context, original_messages),
+            after_tokens=count_messages_tokens_if_available(context, new_messages),
+        )
         return (
             ContextEvent(
                 event_type=self.processor_type(),
