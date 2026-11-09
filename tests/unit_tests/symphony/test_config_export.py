@@ -64,6 +64,7 @@ def test_default_document_contains_only_public_configuration(exporter):
     public = exporter.render_document(config)
     assert f"用户配置树覆盖 {len(config.PUBLIC_CONFIG_MODELS)} 个模型" in public
     assert "├── capability → CapabilityConfig # 必填" in public
+    assert "├── sources → CapabilitySourceConfig # 必填" in public
     assert "│   ├── enabled # 默认=true；允许构建和读取分类树、创建发现会话" in public
     assert "min_edge_confidence # 默认=0.7" in public
     for model in config.PUBLIC_CONFIG_MODELS:

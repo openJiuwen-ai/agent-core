@@ -7,7 +7,7 @@ author_email: xiaoyu.lin.work@outlook.com
 created: 2026-10-31
 updated: 2026-11-09
 modules: [openjiuwen/symphony]
-files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
+files: [openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
 designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement]
 ---
 
@@ -27,7 +27,7 @@ designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-co
 from openjiuwen.symphony.config import SymphonyConfig
 
 config = SymphonyConfig.model_validate({
-    "capability": {"root": "./capabilities", "type": "skill"},
+    "capability": {"sources": [{"type": "skill", "root": "./capabilities"}]},
     "storage": {"artifact_root": "./.symphony"},
     "retrieval": {
         "index_build": {"request": {"max_concurrency": 4}},
@@ -39,11 +39,11 @@ restored = SymphonyConfig.model_validate_json(config.model_dump_json())
 schema = SymphonyConfig.model_json_schema()
 ```
 
-仅 capability.root、capability.type、storage.artifact_root 必填；所有策略节点用独立默认工厂补全，可以只覆盖深层字段。
+`capability.sources` 和 `storage.artifact_root` 必填。来源列表至少一项，每项必填 `type` 和 `root`。同类型可指定多个目录，所有目录共用集合级扫描、指纹策略和产物根。旧的集合级 `capability.root` 和 `capability.type` 按未知字段拒绝。策略节点用独立默认工厂补全，可以只覆盖深层字段。
 
 | 公共分组 | 子配置与职责 |
 |---|---|
-| capability | root、type、scan（深度/预算/解析）、fingerprint（extraction/evaluation/cache） |
+| capability | sources（逐项 type、root）、scan（深度/预算/解析）、fingerprint（extraction/evaluation/cache） |
 | storage | artifact_root |
 | retrieval | enabled、index_build、prompt（候选提示预算和优先对象）、output、use_existing_index |
 | retrieval.index_build | structure（深度/分支/根分类/容量倍率）、request、postprocess、equivalence、profiles、prompt、incremental、task、output |
@@ -87,7 +87,7 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 
 TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildConfig、IndexTreeBuildConfig、TreeManagerConfig、TreePromptConfig、IndexBuildConfig、IndexArtifactConfig、TreeBuildOptions 等同义目标包装不恢复。树策略直接由 RetrievalBuildConfig 的子节点组合；DiscoveryPromptConfig 直接维护预算和优先对象。
 
-PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig 和 OneShotTreeBuildConfig，CONFIG_MODELS 合计 32 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
+PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig 和 OneShotTreeBuildConfig，CONFIG_MODELS 合计 33 个。JsonValue 是根分类数据的 JSON 类型。
 
 `config.__all__` 只提供 CapabilityType 和 9 个核心模型：SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、FlowConfig。登记表、基类和其余子模型不进入便利导出，但可显式访问模块属性。
 
@@ -98,7 +98,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 - 使用 Pydantic v2 原生校验、序列化和 Schema；未知字段、类型错误和越界值给出完整嵌套路径。
 - 整数拒绝 bool、数字字符串、浮点数；数值拒绝 NaN/Infinity。构建 method、BuildMethod 和 runtime_config 入参别名在业务工作流中也已删除，统一传 config。
 - 路径接受非空文本或 pathlib 纯路径，仅保存文本。根分类可包含 JSON 值；路径不触发读取。
-- capability.type 仍为 skill/expert/connector/mcp，表达目标格式范围，不表示所有读取器已实现；通用字段名不含 skill。
+- `capability.sources[].type` 的目标格式为 skill/expert/connector/mcp。当前运行层实现 skill 读取器。
 - 所有配置模型禁止属性重新赋值。嵌套容器不是深层冻结，各实例默认容器和子模型独立。
 - model_dump(mode="json") / model_validate、model_dump_json / model_validate_json 可往返；不接受客户端、线程池、回调和缓存句柄。
 - 公共构建默认深度 6、分支 128（至少 2）、并发 2、请求超时 420 秒、分类批量 32；底层构树与统一公共默认值一致，不保留旧入口默认值镜像。
@@ -109,7 +109,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 - Discovery 默认提示比例 0.01、上下文 200000、派生预算 2000、输出字符 12000、结果数 10、列表条目 40、增量提示字符 4000；优先对象列表与 use_existing_index=False 保持不变。
 - 图构建并发 1、指纹提取并发 4、关系共识 True、min_edge_confidence=0.7、plan.mode=fast、top_k=3、max_depth=4、dynamic_graph_enabled=False。Flow 默认 enabled=True、min_successes=1、min_pack_success_rate=0.8、max_examples=5。
 
-测试将 dcdcef3ef 导出的历史默认值按迁移表重排后与当前配置比较。当前 Runtime 布局与签名继续用于分类树复用，签名从构树子模型提取。Flow 继续采用 symphony.experience_recipe.v1 协议。
+测试将 dcdcef3ef 导出的历史默认值按迁移表重排，并将基线单目录映射为 sources 的单项写法。分类树复用使用当前 Runtime 布局和从构树子模型提取的签名。Flow 使用 symphony.experience_recipe.v1 协议。
 
 ## 5. 导出与验证
 
@@ -124,11 +124,11 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 
 ## 6. Runtime 当前运行契约（2026-11-09）
 
-- 构造固定能力根、产物根和根分类文件相对路径，复制嵌套配置。构造不做扫描、模型调用、目录创建或后台工作。
+- 构造先校验 `capability.sources` 恰有一项，再固定能力根、产物根和根分类文件相对路径，复制嵌套配置。多来源由配置模型验证，Runtime 在创建产物前明确拒绝。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
 - `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
 - 检索、编排和 Flow 开关独立。禁用状态可查询，执行入口拒绝；model=None 允许只读和确定性发现、按任务策略回退构树，构图和规划拒绝缺模型。
-- skill 读取器已实现；expert/connector/mcp 读取器明确报不支持。相同目录只绑定一种对象集合。
+- skill 读取器已实现。expert/connector/mcp 在读取时明确报不支持。多来源及混合类型构建由独立的运行方案定义。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
 - 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。动态观测开关只控制规划读，观测提交仍由 Rail 使用。
 - Runtime 持有惰性默认 Flow，create_scope(store=...) 共享默认打包/审核组件并使用宿主受限存储；授权、确认和安装是宿主职责。
@@ -136,7 +136,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 
 | 配置路径 | 真实消费者 | 生效阶段 |
 |---|---|---|
-| capability.root/type | DirectoryInventory、RuntimeStorage | 显式扫描、集合身份；首轮skill读取 |
+| capability.sources[0].root/type | DirectoryInventory、RuntimeStorage | 当前单来源入口的显式扫描和集合身份 |
 | capability.scan.max_depth/limits/manifest | SkillFolderScanner、SkillManifestParser | 扫描及解析 |
 | capability.fingerprint.extraction | FingerprintService / Extractor | 提取批次、并发、正文、输出与超时 |
 | capability.fingerprint.evaluation/cache | EvaluationSuite、FingerprintCache | 提取后的评估和缓存复用 |

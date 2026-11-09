@@ -143,4 +143,4 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [S_01_configuration-contract](symphony/S_01_configuration-contract.md) | S | Symphony 运行配置与 Runtime 契约 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |
+| [S_01_configuration-contract](symphony/S_01_configuration-contract.md) | S | Symphony 运行配置与 Runtime 契约 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |

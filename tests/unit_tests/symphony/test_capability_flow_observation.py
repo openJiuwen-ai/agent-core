@@ -105,7 +105,7 @@ def _execution_graph_with_capability_metadata() -> dict:
 
 def _runtime(graph_engine: object, flow_engine: object | None) -> SymphonyRuntime:
     runtime = SymphonyRuntime(None, SymphonyConfig(
-        capability={"root": "unused-capabilities", "type": "skill"},
+        capability={"sources": [{"type": "skill", "root": "unused-capabilities"}]},
         storage={"artifact_root": "unused-artifacts"},
     ))
     runtime.orchestration = graph_engine

@@ -2,13 +2,14 @@
 # SymphonyRuntime(model, config) 的运行配置；宿主产品可显式覆盖默认值。
 # 注释标明默认值或必填；→ 表示子模型类型，用户可调子模型在根树完整展开。
 # 不列只读派生属性；长列表展示数量，完整默认内容保留在 config.py。
-# 用户配置树覆盖 30 个模型。
+# 用户配置树覆盖 31 个模型。
 
 # 全量配置
 SymphonyConfig # SymphonyRuntime 使用的公共运行配置。
-├── capability → CapabilityConfig # 必填；显式声明对象目录、类型及预处理策略。
-│   ├── root # 必填；静态对象定义所在目录；相对路径的解析由后续 Runtime 接入负责。
-│   ├── type # 必填；对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。 可选：skill / expert / connector / mcp。
+├── capability → CapabilityConfig # 必填；显式声明来源目录列表及共享的预处理策略。
+│   ├── sources → CapabilitySourceConfig # 必填；按目录声明对象定义格式；同一类型可以配置多个目录。
+│   │   ├── type # 必填；对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。 可选：skill / expert / connector / mcp。
+│   │   └── root # 必填；静态对象定义所在的本地目录；运行层负责解析相对路径。
 │   ├── scan → DirectoryScanConfig # 默认=DirectoryScanConfig()；目录深度、资源预算和入口文档解析限制。
 │   │   ├── max_depth # 默认=None；目录递归深度；None 表示不单独限制深度，仍受扫描预算约束。
 │   │   ├── limits → ScanLimitsConfig # 默认=ScanLimitsConfig()；目录和资源读取预算。

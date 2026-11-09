@@ -8,7 +8,7 @@ Symphony 从一个能力目录构建分类树与关系图，提供会话发现�
 from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
 
 config = SymphonyConfig.model_validate({
-    "capability": {"root": "./capabilities", "type": "skill"},
+    "capability": {"sources": [{"type": "skill", "root": "./capabilities"}]},
     "storage": {"artifact_root": "./.symphony/runtime"},
     "retrieval": {
         "index_build": {"request": {"max_concurrency": 2}},
@@ -41,7 +41,9 @@ finally:
 
 `on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
 
-公共配置树及默认值由 [config.tree.txt](config.tree.txt) 展示。默认值只有 `config.py` 一个来源。`expert`、`connector`、`mcp` 保留为类型扩展点；本轮只有 `skill` 读取器，其他类型在需要读取时明确报错。Skill 文件仍为 `SKILL.md`，工具名仍为 `skill_index`。
+`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。配置可声明多个同类或不同类型的目录。当前 Runtime 要求单个来源，并提供 `skill` 读取器。旧的 `capability.root` 和 `capability.type` 会被校验拒绝。
+
+公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
 ## 三个入口
 

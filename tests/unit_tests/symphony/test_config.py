@@ -12,7 +12,10 @@ from pydantic import ValidationError
 from openjiuwen.symphony import config as target
 
 
-MINIMAL = {"capability": {"root": "./capabilities", "type": "skill"}, "storage": {"artifact_root": "./.symphony"}}
+MINIMAL = {
+    "capability": {"sources": [{"type": "skill", "root": "./capabilities"}]},
+    "storage": {"artifact_root": "./.symphony"},
+}
 
 
 def _get(instance, path):
@@ -27,8 +30,8 @@ def _get(instance, path):
 
 def test_minimal_config_has_independent_enabled_features_and_expected_defaults():
     config = target.SymphonyConfig.model_validate(MINIMAL)
-    assert config.capability.root == "./capabilities"
-    assert config.capability.type == "skill"
+    assert config.capability.sources[0].root == "./capabilities"
+    assert config.capability.sources[0].type == "skill"
     assert config.storage.artifact_root == "./.symphony"
     assert config.retrieval.enabled and config.orchestration.enabled
     assert config.retrieval.index_build.structure.max_depth == 6
@@ -52,13 +55,34 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
 @pytest.mark.parametrize("capability_type", ["skill", "expert", "connector", "mcp"])
 def test_supported_types_do_not_imply_runtime_loading(capability_type):
     config = target.SymphonyConfig.model_validate({
-        "capability": {"root": "missing-directory", "type": capability_type},
+        "capability": {"sources": [{"type": capability_type, "root": "missing-directory"}]},
         "storage": {"artifact_root": "missing-artifacts"},
         "orchestration": {"enabled": False},
     })
-    assert config.capability.type == capability_type
+    assert config.capability.sources[0].type == capability_type
     assert config.retrieval.enabled
     assert not config.orchestration.enabled
+
+
+def test_mixed_capability_sources_round_trip_in_input_order():
+    sources = [
+        {"type": "skill", "root": "./skills"},
+        {"type": "skill", "root": "./shared-skills"},
+        {"type": "expert", "root": "./experts"},
+    ]
+    config = target.SymphonyConfig.model_validate({**MINIMAL, "capability": {"sources": sources}})
+    assert config.model_dump(mode="json")["capability"]["sources"] == sources
+    assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
+
+
+def test_old_capability_fields_are_rejected_as_unknown():
+    with pytest.raises(ValidationError) as error:
+        target.SymphonyConfig.model_validate({**MINIMAL, "capability": {"root": "./skills", "type": "skill"}})
+    assert {(item["loc"], item["type"]) for item in error.value.errors()} == {
+        (("capability", "sources"), "missing"),
+        (("capability", "root"), "extra_forbidden"),
+        (("capability", "type"), "extra_forbidden"),
+    }
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 2.5, "10", None])
@@ -107,7 +131,12 @@ def test_fingerprint_output_budget_rejects_invalid_values(value):
     ({"retrieval": None}, ("retrieval",)),
     ({"retrieval": {"enabled": "false"}}, ("retrieval", "enabled")),
     ({"orchestration": {"plan": {"mode": "unknown"}}}, ("orchestration", "plan", "mode")),
-    ({"capability": {"root": "x", "type": "tool"}}, ("capability", "type")),
+    ({"capability": {"sources": None}}, ("capability", "sources")),
+    ({"capability": {"sources": []}}, ("capability", "sources")),
+    ({"capability": {"sources": [{"type": "tool", "root": "x"}]}}, ("capability", "sources", 0, "type")),
+    ({"capability": {"sources": [{"type": "skill", "root": "  "}]}}, ("capability", "sources", 0, "root")),
+    ({"capability": {"sources": [{"root": "x"}]}}, ("capability", "sources", 0, "type")),
+    ({"capability": {"sources": [{"type": "skill"}]}}, ("capability", "sources", 0, "root")),
     ({"storage": {"artifact_root": "  "}}, ("storage", "artifact_root")),
 ])
 def test_unknown_fields_and_invalid_groups_are_rejected(payload, location):
@@ -135,10 +164,10 @@ def test_configuration_does_not_resolve_paths_or_read_environment(monkeypatch):
         monkeypatch.setattr(Path, name, unexpected)
     monkeypatch.setenv("SYMPHONY_DISCOVERY_MAX_RESULTS", "999")
     config = target.SymphonyConfig.model_validate({
-        "capability": {"root": Path("missing/../capabilities"), "type": "expert"},
+        "capability": {"sources": [{"type": "expert", "root": Path("missing/../capabilities")}]},
         "storage": {"artifact_root": Path("./artifacts")},
     })
-    assert config.capability.root == "missing/../capabilities"
+    assert config.capability.sources[0].root == "missing/../capabilities"
     assert config.storage.artifact_root == "artifacts"
     assert config.retrieval.output.max_results == 10
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
@@ -158,13 +187,14 @@ def test_root_category_path_is_serialized_without_loading(monkeypatch):
     })
     assert config.retrieval.index_build.structure.root_categories == "categories.yaml"
     assert config.retrieval.index_build.output.display_capability_root == "display"
-    assert config.capability.root == "./capabilities"
+    assert config.capability.sources[0].root == "./capabilities"
     assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
 
 
 def _example(model):
     examples = {
-        target.CapabilityConfig: {"root": "./capabilities", "type": "skill"},
+        target.CapabilityConfig: MINIMAL["capability"],
+        target.CapabilitySourceConfig: MINIMAL["capability"]["sources"][0],
         target.StorageConfig: {"artifact_root": "./artifacts"},
         target.SymphonyConfig: MINIMAL,
     }
@@ -198,14 +228,18 @@ def test_schema_preserves_bounds_enum_and_examples():
     capacity = schema["$defs"]["RetrievalTreeStructureConfig"]["properties"]["max_capabilities_per_node_multiplier"]
     assert capacity["default"] == 1.5 and capacity["exclusiveMinimum"] == 0
     assert capacity["type"] == "number"
-    assert schema["$defs"]["CapabilityConfig"]["properties"]["root"]["examples"] == ["./capabilities"]
-    assert schema["$defs"]["CapabilityConfig"]["properties"]["type"]["enum"] == [
+    sources = schema["$defs"]["CapabilityConfig"]["properties"]["sources"]
+    assert sources["minItems"] == 1 and sources["items"]["$ref"] == "#/$defs/CapabilitySourceConfig"
+    assert schema["$defs"]["CapabilityConfig"]["required"] == ["sources"]
+    source = schema["$defs"]["CapabilitySourceConfig"]
+    assert source["properties"]["root"]["examples"] == ["./capabilities"]
+    assert source["properties"]["type"]["enum"] == [
         "skill", "expert", "connector", "mcp",
     ]
-    assert schema["$defs"]["CapabilityConfig"]["required"] == ["root", "type"]
+    assert source["required"] == ["type", "root"]
     assert schema["$defs"]["StorageConfig"]["required"] == ["artifact_root"]
     for model in target.PUBLIC_CONFIG_MODELS:
-        if model not in (target.SymphonyConfig, target.CapabilityConfig, target.StorageConfig):
+        if model not in (target.SymphonyConfig, target.CapabilityConfig, target.CapabilitySourceConfig, target.StorageConfig):
             assert not any(info.is_required() for info in model.model_fields.values()), model.__name__
 
 
@@ -586,9 +620,9 @@ def test_retired_capabilities_are_rejected_without_compatibility_aliases(payload
 
 
 def test_registry_contains_only_retained_capabilities():
-    assert len(target.PUBLIC_CONFIG_MODELS) == 30
+    assert len(target.PUBLIC_CONFIG_MODELS) == 31
     assert len(target.INTERNAL_CONFIG_MODELS) == 2
-    assert len(target.CONFIG_MODELS) == 32
+    assert len(target.CONFIG_MODELS) == 33
     assert {m.__name__ for m in target.INTERNAL_CONFIG_MODELS} == {
         "FingerprintProtocolConfig", "OneShotTreeBuildConfig",
     }
@@ -605,6 +639,8 @@ def test_all_public_defaults_match_the_committed_pre_integration_contract():
     retrieval = expected["retrieval"]
     retrieval["index_build"] = retrieval.pop("build")
     retrieval.update(retrieval.pop("discovery"))
+    capability = expected["capability"]
+    capability["sources"] = [{"type": capability.pop("type"), "root": capability.pop("root")}]
     assert target.SymphonyConfig.model_validate(MINIMAL).model_dump(mode="json") == expected
 
 

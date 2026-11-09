@@ -2,7 +2,7 @@
 """Symphony 运行配置，供 SymphonyRuntime(model, config) 及内部消费者统一使用。
 
 公共入口为 SymphonyConfig，按 capability、storage、retrieval、orchestration、
-flow 组合可调策略；子配置均有默认值，仅对象目录、类型和产物目录必填。
+flow 组合可调策略；能力来源列表和产物目录必填，其余策略由默认值补全。
 指纹协议和一次性构树内部预算单独定义；解析后的运行快照不另设策略默认值。
 公共树模型与内部模型分别登记；便利导出只保留核心配置类，供验证和文档读取完整登记。
 本文件不读取环境、扫描目录或创建模型客户端；目录检查和服务组装由 Runtime 负责。
@@ -95,7 +95,7 @@ class ManifestParseConfig(SymphonyConfigModel):
 
 
 class DirectoryScanConfig(SymphonyConfigModel):
-    """内部目录扫描配置；对象目录和类型由集合配置提供，无需公共 Source 对象。"""
+    """各能力来源共用的目录扫描配置。"""
 
     max_depth: NonNegativeInt | None = Field(
         None, title="目录扫描深度", description="目录递归深度；None 表示不单独限制深度，仍受扫描预算约束。",
@@ -345,16 +345,24 @@ class OneShotTreeBuildConfig(SymphonyConfigModel):
 
 
 # 公共组合在子模型定义之后声明，默认工厂不需要运行模块或前向引用修复。
-class CapabilityConfig(SymphonyConfigModel):
-    """一个 Runtime 所管理的对象定义集合及扫描、指纹策略；不同类型使用独立集合。"""
+class CapabilitySourceConfig(SymphonyConfigModel):
+    """能力集合中的一个本地目录及其对象定义格式。"""
 
-    root: ConfigPath = Field(
-        title="对象根目录", description="静态对象定义所在目录；相对路径的解析由后续 Runtime 接入负责。",
-        examples=["./capabilities"],
-    )
     type: CapabilityType = Field(
         title="对象类型", description="对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。",
         examples=["skill", "expert"],
+    )
+    root: ConfigPath = Field(
+        title="对象根目录", description="静态对象定义所在的本地目录；运行层负责解析相对路径。",
+        examples=["./capabilities"],
+    )
+
+
+class CapabilityConfig(SymphonyConfigModel):
+    """一个 Runtime 的对象定义集合及共享的扫描、指纹策略。"""
+
+    sources: list[CapabilitySourceConfig] = Field(
+        min_length=1, title="能力来源目录", description="按目录声明对象定义格式；同一类型可以配置多个目录。",
     )
     scan: DirectoryScanConfig = Field(
         default_factory=DirectoryScanConfig, title="目录扫描", description="目录深度、资源预算和入口文档解析限制。",
@@ -362,6 +370,12 @@ class CapabilityConfig(SymphonyConfigModel):
     fingerprint: FingerprintPolicyConfig = Field(
         default_factory=FingerprintPolicyConfig, title="指纹策略", description="对象指纹的提取、评估和缓存策略。",
     )
+
+    def require_single_source(self) -> CapabilitySourceConfig:
+        """Return the sole source for runtime consumers that require one directory."""
+        if len(self.sources) != 1:
+            raise ValueError("The current Symphony runtime requires exactly one capability.sources entry")
+        return self.sources[0]
 
 
 class StorageConfig(SymphonyConfigModel):
@@ -468,7 +482,7 @@ class OrchestrationConfig(SymphonyConfigModel):
 class SymphonyConfig(SymphonyConfigModel):
     """SymphonyRuntime 使用的公共运行配置。"""
 
-    capability: CapabilityConfig = Field(title="对象集合", description="显式声明对象目录、类型及预处理策略。")
+    capability: CapabilityConfig = Field(title="对象集合", description="显式声明来源目录列表及共享的预处理策略。")
     storage: StorageConfig = Field(title="产物存储", description="显式声明本集合的产物根目录。")
     retrieval: RetrievalConfig = Field(
         default_factory=RetrievalConfig, title="检索能力", description="分类树构建与对象发现的默认配置。",
@@ -483,7 +497,8 @@ class SymphonyConfig(SymphonyConfigModel):
 
 # 登记范围用于 Schema 覆盖和文档；只有根模型可达的配置属于公共树。
 PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    SymphonyConfig, CapabilityConfig, DirectoryScanConfig, ScanLimitsConfig, ManifestParseConfig,
+    SymphonyConfig, CapabilityConfig, CapabilitySourceConfig,
+    DirectoryScanConfig, ScanLimitsConfig, ManifestParseConfig,
     FingerprintPolicyConfig, FingerprintExtractionConfig, FingerprintEvaluationConfig, FingerprintCacheConfig,
     StorageConfig, RetrievalConfig, RetrievalBuildConfig, RetrievalTreeStructureConfig, IndexRequestConfig,
     TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,

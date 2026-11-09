@@ -54,12 +54,13 @@ class SymphonyRuntime:
     def __init__(self, model: Model | None, config: SymphonyConfig) -> None:
         if not isinstance(config, SymphonyConfig):
             raise TypeError("config must be a SymphonyConfig")
+        source = config.capability.require_single_source()
         values = config.model_dump(mode="python")
-        capability_root = Path(config.capability.root).expanduser().resolve()
+        capability_root = Path(source.root).expanduser().resolve()
         artifact_root = Path(config.storage.artifact_root).expanduser().resolve()
         if capability_root == artifact_root or capability_root.is_relative_to(artifact_root):
-            raise ValueError("artifact_root must not equal or contain capability.root")
-        values["capability"]["root"] = str(capability_root)
+            raise ValueError("artifact_root must not equal or contain capability.sources.0.root")
+        values["capability"]["sources"][0]["root"] = str(capability_root)
         values["storage"]["artifact_root"] = str(artifact_root)
         structure = values["retrieval"]["index_build"]["structure"]
         categories = structure["root_categories"]

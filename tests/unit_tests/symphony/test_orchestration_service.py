@@ -447,7 +447,7 @@ def _directory_runtime(root, *, model, orchestration_config=None):
                     "outputs": [item.model_dump(mode="json") for item in capability.outputs]}
         (directory / "SKILL.md").write_text("---\n" + json.dumps(metadata) + "\n---\nCapability instructions.")
     return SymphonyRuntime(model, SymphonyConfig(
-        capability={"root": str(root / "capabilities"), "type": "skill"},
+        capability={"sources": [{"type": "skill", "root": str(root / "capabilities")}]},
         storage={"artifact_root": str(root / "runtime")},
         orchestration=orchestration_config or OrchestrationConfig(),
     ))

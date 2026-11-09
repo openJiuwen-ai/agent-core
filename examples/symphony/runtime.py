@@ -5,7 +5,7 @@ from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
 
 async def build_and_plan(model, capability_root: str, artifact_root: str, query: str):
     config = SymphonyConfig(
-        capability={"root": capability_root, "type": "skill"},
+        capability={"sources": [{"type": "skill", "root": capability_root}]},
         storage={"artifact_root": artifact_root},
         retrieval={"use_existing_index": True},
         flow={"enabled": False},

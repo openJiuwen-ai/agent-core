@@ -18,15 +18,16 @@ class DirectoryInventory:
 
     def __init__(self, config: CapabilityConfig, storage: RuntimeStorage) -> None:
         self.config = config
+        self.source = config.require_single_source()
         self.storage = storage
         self.last_scan: ScanResult | None = None
 
     def scan(self, root: Path | None = None) -> ScanResult:
-        if self.config.type != "skill":
-            raise ValueError(f"Unsupported capability reader: {self.config.type}")
+        if self.source.type != "skill":
+            raise ValueError(f"Unsupported capability reader: {self.source.type}")
         parser = SkillManifestParser(**self.config.scan.manifest.model_dump())
         scanner = SkillFolderScanner(
-            root or self.config.root,
+            root or self.source.root,
             parser=parser,
             max_depth=self.config.scan.max_depth,
             **self.config.scan.limits.model_dump(),
@@ -54,7 +55,7 @@ class DirectoryInventory:
         records: dict[str, SkillRecord] = {}
         disabled_ids = set(disabled)
         source_labels = sources or {}
-        for directory in directories if directories is not None else (self.config.root,):
+        for directory in directories if directories is not None else (self.source.root,):
             root = Path(directory).expanduser().resolve()
             for item in self.scan(root).capabilities:
                 if item.capability_id in disabled_ids or not item.available:

@@ -19,8 +19,9 @@ class RuntimeStorage:
 
     def __init__(self, config: SymphonyConfig) -> None:
         self.root = Path(config.storage.artifact_root)
-        self.capability_root = Path(config.capability.root)
-        self.capability_type = config.capability.type
+        source = config.capability.require_single_source()
+        self.capability_root = Path(source.root)
+        self.capability_type = source.type
         self.identity = {
             "schema_version": LAYOUT_SCHEMA,
             "capability_root": str(self.capability_root),

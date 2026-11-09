@@ -58,7 +58,7 @@ async def test_native_model_rejects_unbound_sync_build_and_keeps_owner_loop_conn
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: Alpha\ndescription: Write documents\n---\nDocument instructions\n")
     config = SymphonyConfig.model_validate({
-        "capability": {"root": str(root), "type": "skill"},
+        "capability": {"sources": [{"type": "skill", "root": str(root)}]},
         "storage": {"artifact_root": str(tmp_path / "runtime")},
         "retrieval": {"enabled": True, "index_build": {
             "request": {"max_retries": 0, "timeout_seconds": 2.0},

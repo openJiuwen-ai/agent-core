@@ -137,7 +137,7 @@ def _inventory() -> list[Fingerprint]:
 
 def test_runtime_wires_internal_fingerprint_service(tmp_path: Path) -> None:
     runtime = SymphonyRuntime(None, SymphonyConfig(
-        capability={"root": str(tmp_path / "capabilities"), "type": "skill"},
+        capability={"sources": [{"type": "skill", "root": str(tmp_path / "capabilities")}]},
         storage={"artifact_root": str(tmp_path / "runtime")},
     ))
     assert isinstance(runtime.orchestration, SymphonyGraphEngine)
@@ -323,7 +323,7 @@ def test_runtime_exposes_orchestration_and_package_has_no_jiuwenswarm_dependency
     tmp_path: Path,
 ) -> None:
     runtime = SymphonyRuntime(_FakeLLM(), SymphonyConfig(
-        capability={"root": str(tmp_path / "capabilities"), "type": "skill"},
+        capability={"sources": [{"type": "skill", "root": str(tmp_path / "capabilities")}]},
         storage={"artifact_root": str(tmp_path / "runtime")},
     ))
     assert isinstance(runtime.orchestration, SymphonyGraphEngine)

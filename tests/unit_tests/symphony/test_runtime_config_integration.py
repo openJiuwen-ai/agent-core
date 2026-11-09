@@ -14,7 +14,7 @@ from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
 
 def make_config(tmp_path, **overrides):
     return SymphonyConfig.model_validate({
-        "capability": {"root": str(tmp_path / "capabilities"), "type": "skill"},
+        "capability": {"sources": [{"type": "skill", "root": str(tmp_path / "capabilities")}]},
         "storage": {"artifact_root": str(tmp_path / "runtime")},
         **overrides,
     })
@@ -31,11 +31,14 @@ def write_capability(tmp_path, name="alpha", description="Process invoice docume
 async def test_constructor_is_lazy_isolated_and_does_not_close_host_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     model = SimpleNamespace(invoke=AsyncMock(), aclose=AsyncMock())
-    config = SymphonyConfig(capability={"root": "capabilities", "type": "skill"}, storage={"artifact_root": "runtime"})
+    config = SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": "capabilities"}]},
+        storage={"artifact_root": "runtime"},
+    )
     runtime = SymphonyRuntime(model, config)
     config.retrieval.prompt.preferred_capability_ids.append("external-mutation")
     assert "external-mutation" not in runtime.config.retrieval.prompt.preferred_capability_ids
-    assert runtime.config.capability.root == str(tmp_path / "capabilities")
+    assert runtime.config.capability.sources[0].root == str(tmp_path / "capabilities")
     assert runtime.config.storage.artifact_root == str(tmp_path / "runtime")
     assert not (tmp_path / "runtime").exists()
     assert not hasattr(runtime, "graph_engine") and not hasattr(runtime, "flow_engine")
@@ -43,6 +46,16 @@ async def test_constructor_is_lazy_isolated_and_does_not_close_host_model(tmp_pa
     await runtime.aclose()
     model.invoke.assert_not_called()
     model.aclose.assert_not_called()
+    assert not (tmp_path / "runtime").exists()
+
+
+def test_runtime_rejects_multiple_sources_before_creating_artifacts(tmp_path):
+    config = make_config(tmp_path, capability={"sources": [
+        {"type": "skill", "root": str(tmp_path / "skills")},
+        {"type": "expert", "root": str(tmp_path / "experts")},
+    ]})
+    with pytest.raises(ValueError, match=r"exactly one capability\.sources entry"):
+        SymphonyRuntime(None, config)
     assert not (tmp_path / "runtime").exists()
 
 
@@ -68,7 +81,7 @@ async def test_independent_disabled_capabilities_are_queryable_but_reject_execut
 @pytest.mark.parametrize("kind", ["expert", "connector", "mcp"])
 @pytest.mark.asyncio
 async def test_unimplemented_reader_fails_explicitly_on_use(tmp_path, kind):
-    config = make_config(tmp_path, capability={"root": str(tmp_path / "capabilities"), "type": kind})
+    config = make_config(tmp_path, capability={"sources": [{"type": kind, "root": str(tmp_path / "capabilities")}]})
     runtime = SymphonyRuntime(None, config)
     with pytest.raises(ValueError, match="Unsupported capability reader"):
         runtime.retrieval.status()
@@ -115,7 +128,7 @@ async def test_live_session_visibility_and_additional_directory_do_not_enter_con
     assert set(session.environment.selection_cards()) == {"alpha", "session-only"}
     disabled.add("session-only")
     assert set(session.environment.selection_cards(refresh=True)) == {"alpha"}
-    assert runtime.config.capability.root == str(tmp_path / "capabilities")
+    assert runtime.config.capability.sources[0].root == str(tmp_path / "capabilities")
     await runtime.aclose()
 
 
@@ -135,7 +148,9 @@ async def test_layout_rejects_legacy_and_different_collection_without_deleting_f
     runtime = SymphonyRuntime(None, make_config(tmp_path))
     assert (await runtime.retrieval.build())["success"]
     await runtime.aclose()
-    other = SymphonyRuntime(None, make_config(tmp_path, capability={"root": str(tmp_path / "other"), "type": "skill"}))
+    other = SymphonyRuntime(None, make_config(tmp_path, capability={
+        "sources": [{"type": "skill", "root": str(tmp_path / "other")}],
+    }))
     with pytest.raises(ValueError, match="different collection"):
         other.retrieval.read()
     await other.aclose()
