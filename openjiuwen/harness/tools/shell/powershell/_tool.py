@@ -104,6 +104,15 @@ class PowerShellTool(Tool):
         )
         self._agent_id = agent_id or "default"
 
+    def resolve_workdir(self, inputs: Dict[str, Any]) -> str | None:
+        """Execution directory after input clamping; ``None`` when unset.
+
+        Public hook so permission layers (e.g. deletion counting) that live
+        outside this class can read the workdir without touching the
+        protected ``_parse_inputs``.
+        """
+        return self._parse_inputs(inputs).workdir or None
+
     @staticmethod
     def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
         """Parse and validate a timeout value."""

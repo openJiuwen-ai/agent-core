@@ -172,6 +172,15 @@ class ToolPermissionHost:
     behavior. Errors or invalid dialects reject the shell call without fallback.
     """
 
+    resolve_shell_cwd: Callable[[Any, Any, dict[str, Any]], str | None | Awaitable[str | None]] | None = None
+    """Best-effort execution cwd for deletion counting, never a permission proof.
+
+    Receives callback context, raw ToolCall and decoded args. The rail uses the
+    returned directory only to expand relative delete targets when counting;
+    it grants no path access. Returning None for an unknown executor keeps the
+    registered native shell tool's own cwd inference.
+    """
+
 
 __all__ = [
     "PermissionEvaluatedHook",
