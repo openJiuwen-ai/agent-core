@@ -168,6 +168,12 @@ class NodeSession(BaseSession):
         TraceAgentSpan parentless — the OTel handler then falls back to the
         ambient context, which during node execution is the component's own
         node span (attached in on_call_start), yielding correct parenting.
+
+        The gate is shared by the sibling decorators: once node sessions pass
+        it, ``decorate_model_with_trace`` / ``decorate_workflow_with_trace``
+        (reachable via ModelMgr.get_model / WorkflowMgr.get_workflow with a
+        node session) also decorate and rely on the same ambient-context
+        parenting instead of an explicit parent span.
         """
         return None
 
