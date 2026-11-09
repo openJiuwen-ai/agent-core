@@ -978,7 +978,8 @@ class ReActAgent(BaseAgent):
                 lands after it rather than displacing it.
         """
         previous_inputs = ctx.inputs
-        ctx.inputs = UserMessageInputs(parts=parts, source=source)
+        message_inputs = UserMessageInputs(parts=parts, source=source)
+        ctx.inputs = message_inputs
         try:
             await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
         finally:
@@ -991,6 +992,7 @@ class ReActAgent(BaseAgent):
             UserMessage(
                 content=f"{prefix}{body}",
                 metadata={
+                    **message_inputs.metadata,
                     OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
                     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
                 },

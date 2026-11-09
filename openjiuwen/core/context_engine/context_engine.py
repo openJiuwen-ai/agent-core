@@ -87,9 +87,33 @@ class ContextEngine:
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
+        self._persistence_hook = None
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
+
+    @property
+    def persistence_hook(self):
+        """Host-owned preparation hook; the Session still owns checkpoint commit."""
+        return self._persistence_hook
+
+    def set_persistence_hook(self, hook: Callable[[Session, dict], Awaitable[dict]]) -> None:
+        """Prepare durable context artifacts before installing state on Session.
+
+        The hook must return the complete context-state mapping and may place
+        references on the same Session. It must not commit the Session or call
+        save_contexts recursively. Failure aborts the context save.
+        """
+        if not callable(hook):
+            raise TypeError("Context persistence hook must be callable")
+        if self._persistence_hook is not None and self._persistence_hook is not hook:
+            raise ValueError("A context persistence hook is already registered")
+        self._persistence_hook = hook
+
+    def clear_persistence_hook(self, hook) -> None:
+        """Remove only the hook registered by this owner."""
+        if self._persistence_hook is hook:
+            self._persistence_hook = None
 
     def register_window_mutator(
             self,
@@ -693,6 +717,10 @@ class ContextEngine:
                 continue
             context_state = context.save_state()
             states[context_id] = context_state
+        if self._persistence_hook is not None:
+            states = await self._persistence_hook(session, states)
+            if not isinstance(states, dict):
+                raise TypeError("Context persistence hook must return a state mapping")
         self._save_state_to_session(session, states)
         return states
 

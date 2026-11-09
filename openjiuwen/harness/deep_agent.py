@@ -1559,7 +1559,12 @@ class DeepAgent(BaseAgent):
         return False
 
     async def ensure_initialized(self) -> None:
-        """Perform lazy initialization. For testing only."""
+        """Initialize configured rails/resources before host context recovery.
+
+        Idempotent; does not consume user input or start an agent invocation.
+        Hosts that restore context before the first round use this barrier so
+        processor/model bindings are complete before creating a context.
+        """
         await self._ensure_initialized()
 
     async def init_workspace(self) -> None:

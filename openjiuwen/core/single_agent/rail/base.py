@@ -392,9 +392,13 @@ class UserMessageInputs:
         source: Where the batch came from — ``"query"`` (a new round or a
             follow-up), ``"steering"`` (injected mid-round), or ``"resume"``
             (a workflow interrupt being resumed).
+        metadata: Application metadata copied onto the admitted UserMessage.
+            Native origin/source fields remain owned by Core. If all parts
+            are dropped, neither the message nor its metadata is installed.
     """
     parts: list[str] = field(default_factory=list)
     source: str = "query"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

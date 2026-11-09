@@ -48,6 +48,15 @@ class ModelContext(ABC):
     get_context_window() : Construct context window for model inference
     """
 
+    def persist_offloaded_messages(self, directory: str) -> bool:
+        """Optionally move raw offloads to immutable, lazily loaded storage.
+
+        The host owns the absolute directory and its lifetime. Native contexts
+        preserve handle/type semantics and record content versions in state.
+        Custom contexts may return False when this capability is unsupported.
+        """
+        return False
+
     @abstractmethod
     def __len__(self):
         """

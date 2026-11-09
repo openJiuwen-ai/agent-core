@@ -6,6 +6,7 @@ from typing import List, Optional, Union, Dict
 
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.context.file_offload_store import FileOffloadStore
 
 
 class ContextMessageBuffer:
@@ -84,11 +85,39 @@ class OffloadMessageBuffer:
     def __init__(
             self,
             init_messages: Dict[str, List[BaseMessage]] = None,
+            storage_directory: str | None = None,
+            storage_versions: Dict[str, str] | None = None,
     ):
-        self._in_memory_offload_messages: Dict[str, List[BaseMessage]] = init_messages or dict()
+        self._in_memory_offload_messages: Dict[str, List[BaseMessage]] = dict(init_messages or {})
         self._sys_operation = None
         self._workspace_dir = None
         self._session_id = None
+        self._file_store = FileOffloadStore(storage_directory) if storage_directory else None
+        if storage_versions is not None and not isinstance(storage_versions, dict):
+            raise ValueError("Invalid offload version index")
+        self._storage_versions = dict(storage_versions or {})
+        if self._storage_versions and self._file_store is None:
+            raise ValueError("Offload versions require a storage directory")
+        for handle, version in self._storage_versions.items():
+            self._file_store.path(handle, version)
+
+    def persist(self, directory: str) -> None:
+        """Publish all raw offloads before replacing their checkpoint payloads."""
+        store = FileOffloadStore(directory)
+        if self._file_store is not None and self._file_store.directory != store.directory:
+            raise ValueError("Cannot move live offload storage")
+        versions = dict(self._storage_versions)
+        for handle, messages in self._in_memory_offload_messages.items():
+            versions[handle] = store.put(handle, messages)
+        self._file_store = store
+        self._storage_versions = versions
+        self._in_memory_offload_messages = {}
+
+    def storage_directory(self) -> str | None:
+        return str(self._file_store.directory) if self._file_store is not None else None
+
+    def storage_versions(self) -> Dict[str, str]:
+        return dict(self._storage_versions)
 
     def set_sys_operation(self, sys_operation):
         """Set sys_operation for filesystem-based offload reload."""
@@ -106,7 +135,10 @@ class OffloadMessageBuffer:
             messages: List[BaseMessage],
     ):
         if offload_type == "in_memory":
-            self._in_memory_offload_messages[offload_handle] = messages
+            if self._file_store is not None:
+                self._storage_versions[offload_handle] = self._file_store.put(offload_handle, messages)
+            else:
+                self._in_memory_offload_messages[offload_handle] = messages
 
     async def reload(
             self,
@@ -114,6 +146,8 @@ class OffloadMessageBuffer:
             offload_type: str
     ) -> List[BaseMessage]:
         if offload_type == "in_memory":
+            if self._file_store is not None:
+                return self._file_store.get(offload_handle, version=self._storage_versions.get(offload_handle))
             return self._in_memory_offload_messages.get(offload_handle, [])
         if offload_type == "filesystem":
             return await self._reload_from_filesystem(offload_handle)
@@ -163,9 +197,12 @@ class OffloadMessageBuffer:
     ):
         if offload_type == "in_memory":
             self._in_memory_offload_messages.pop(offload_handle, None)
+            if self._file_store is not None:
+                # Immutable versions may still belong to an older checkpoint.
+                self._storage_versions.pop(offload_handle, None)
         return
 
     def get_all(
             self
     ):
-        return self._in_memory_offload_messages
+        return dict(self._in_memory_offload_messages)

@@ -1585,15 +1585,36 @@ class SessionModelContext(ModelContext):
     def offload_messages(self, offload_handle: str, messages: List[BaseMessage]):
         self._offload_message_buffer.offload(offload_handle, "in_memory", messages)
 
+    def persist_offloaded_messages(self, directory: str) -> bool:
+        """Move raw in-memory offloads to durable files without restoring them.
+
+        The directory belongs to the host and must remain available for the
+        session's lifetime. Existing handle/type pairs remain valid.
+        """
+        self._offload_message_buffer.persist(directory)
+        return True
+
     def save_state(self) -> Dict[str, Any]:
-        return {
+        state = {
             "messages": self._message_buffer.get_back(),
             "offload_messages": self._offload_message_buffer.get_all(),
             "last_context_window_access_at": self._last_context_window_access_at,
         }
+        directory = self._offload_message_buffer.storage_directory()
+        if directory is not None:
+            state["offload_directory"] = directory
+            state["offload_versions"] = self._offload_message_buffer.storage_versions()
+        return state
 
     def load_state(self, state: Dict[str, Any]):
         context_state = state.get(self._context_id, {})
+        directory = context_state.get("offload_directory")
+        offload_messages = context_state.get("offload_messages")
+        if offload_messages:
+            for _, msg_list in offload_messages.items():
+                ContextUtils.validate_messages(msg_list)
+        offload_buffer = OffloadMessageBuffer(offload_messages, storage_directory=directory,
+                                              storage_versions=context_state.get("offload_versions"))
         messages = context_state.get("messages", [])
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
@@ -1611,10 +1632,5 @@ class SessionModelContext(ModelContext):
         self._last_context_window_access_at = (
             float(last_access_at) if isinstance(last_access_at, (int, float)) else None
         )
-        offload_messages = context_state.get("offload_messages")
-        self._offload_message_buffer = OffloadMessageBuffer()
-        if offload_messages:
-            for _, msg_list in offload_messages.items():
-                ContextUtils.validate_messages(msg_list)
-            self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
+        self._offload_message_buffer = offload_buffer
         self._configure_offload_message_buffer()
