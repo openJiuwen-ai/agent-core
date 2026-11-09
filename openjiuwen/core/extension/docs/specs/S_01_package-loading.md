@@ -8,7 +8,7 @@
 | 编号 / slug | `S_01 / package-loading` |
 | 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
 | 最近一次修订日期 | 2026-11-06 |
-| 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md) |
+| 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)、[F_06](../features/F_06_package-enable.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
 本规约是扩展包**加载控制面**的唯一契约维护位置：声明与安装目录、依赖与排序、Plan 与 candidate、生效记录与卸载判断、错误码。对应 EX-01、EX-02。Registry、九类管理事件与 Bus 发布见 [S_02](S_02_registry-and-bus.md)。
@@ -56,6 +56,9 @@
 7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。任何安装失败清理与卸载都不删除用户来源。
 8. 同一 ID 可以有多个磁盘版本，但只能属于一个 domain。启动选最高合法版本；仍存活进程中的包使用实际生效版本。选中版本失败不自动降级。显式安装批次中重复 ID 仍整批拒绝。
 9. 可选的 `mcp.json` 与 `manifest.json` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
+10. `enable` 是可选布尔字段，省略时按 `true` 处理。它表示安装副本是否参与当前进程的加载与 Handler 发布；`false` 的包保留在安装目录中，但不导入包模块、不登记 Handler 或 MCP 声明。非布尔值使声明非法。
+
+安装来源中省略 `enable` 时，安装副本会补写 `"enable": true`；启动扫描到的旧安装副本也会在加载前补写该字段。该补写只作用于受管安装副本，不修改用户提供的来源目录或 zip。
 
 `package.domain` 为可选字符串；设置 `domain` 或 `allowed_domains` 后必须填写非空字符串。匹配保留大小写和首尾字符，不自动修正。`allowed_domains` 由宿主指定；SDK 不固定产品域名。显式安装归属不匹配报 `EXTENSION_DOMAIN_MISMATCH`，启动只过滤合法的其它域包。
 
@@ -91,7 +94,7 @@
 | --- | --- | --- |
 | `load_manifest` / `parse_manifest_mapping` | `manifest` | 读并校验声明 |
 | `PackageManager.open_source` | `package_manager` | 打开目录或 zip |
-| `PackageManager.copy_into_store` / `remove_installed` / `list_installed` | `package_manager` | 安装副本读写 |
+| `PackageManager.copy_into_store` / `remove_installed` / `list_installed` / `set_enabled` | `package_manager` | 安装副本读写与启用状态更新 |
 | `PackageManager.managed_versions` | `package_manager` | 逐版本校验并枚举可确认的受管副本；单个损坏目录不阻断其它版本 |
 | `build_startup_plan` | `selection` | 全目录选版、检查跨域依赖并稳定排序 |
 | `resolve_install_set` | `selection` | 一批安装的接受、拒绝与包序 |
@@ -100,6 +103,7 @@
 | `Orchestrator.build_plan` | `orchestrator` | 单包 Plan |
 | `Runtime.prepare` / `abort` / `record_active` / `drop_active` | `runtime` | candidate 与生效记录 |
 | `Runtime.begin_calls` / `end_calls` / `uninstall_decision` / `check_reload` | `runtime` | 在途计数与生命周期判断 |
+| `Registry.set_enabled` | `registry` | 保留安装副本地启用或禁用一个包 |
 | `ExtensionFailure` / `OperationError` / `operation_error` | `errors` | 同步失败与 Report 错误 |
 
 ## 3. 依赖、排序与选择
@@ -143,7 +147,9 @@
 
 generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`；重启后重新从 `1`。卸载 Plan 不递增。
 
-包内扩展成环 → `EXTENSION_DEPENDENCY_CYCLE`。reload/uninstall 且无生效记录 → `EXTENSION_PACKAGE_NOT_INSTALLED`。install 且已传入生效记录 → `EXTENSION_PACKAGE_EXISTS`。
+包内扩展成环 → `EXTENSION_DEPENDENCY_CYCLE`。uninstall 且无生效记录按安装副本与报告状态决定是否清理；reload 对
+已安装且 `enable: false` 的包返回成功的空操作，保持禁用状态。其它无生效记录的 reload →
+`EXTENSION_PACKAGE_NOT_INSTALLED`。install 且已传入生效记录 → `EXTENSION_PACKAGE_EXISTS`。
 
 ### 4.2 prepare 与登记
 
@@ -216,6 +222,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 - 报告格式、运行锁和重启判断见 [F_05](../features/F_05_domain-install-report.md)。
 - 受管版本按目录独立校验；合法的其它域版本可参与全局判断，无法验证身份的旧目录只跳过。损坏目录只有在报告或 Runtime 已知其版本时才允许进入清理流程。
 - 公共名称、错误码或不变量变更时，必须同步本规约与 `tests/unit_tests/core/extension/`。
+- 启用、禁用仅控制本 Registry 及其绑定 Bus 中的加载结果。已开始的业务调用不回滚，调用方应按自身停止与资源释放约束处理。
 
 ## 7. 验证索引
 

@@ -3,6 +3,7 @@
 """EX-01: manifest, install store, selection, and ordering."""
 
 import hashlib
+import json
 import stat
 import zipfile
 from pathlib import Path
@@ -281,6 +282,18 @@ def test_manifest_reads_display_block(tmp_path: Path) -> None:
     assert manifest.display_name == "演示包"
     assert manifest.description == "演示描述"
 
+
+def test_manifest_enable_defaults_to_true_and_rejects_non_boolean(tmp_path: Path) -> None:
+    write_package(tmp_path, "demo")
+    document = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+
+    assert parse_manifest_mapping(document, tmp_path).enable is True
+
+    document["enable"] = "true"
+    with pytest.raises(ExtensionFailure) as caught:
+        parse_manifest_mapping(document, tmp_path)
+    assert caught.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
+
 def test_manifest_rejects_unknown_extension_dependency(tmp_path: Path) -> None:
     write_package(tmp_path, "demo")
     with pytest.raises(ExtensionFailure) as caught:
@@ -353,6 +366,20 @@ def test_copy_into_store_is_idempotent_for_install_copy(tmp_path: Path) -> None:
 
     assert first == second
     assert (source / "manifest.json").is_file()
+
+
+def test_copy_into_store_adds_default_enable_without_changing_the_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    write_package(source, "demo")
+    manager = PackageManager(tmp_path / "store")
+    manifest = load_manifest(source)
+
+    installed = manager.copy_into_store(source, manifest)
+
+    source_document = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    installed_document = json.loads((installed / "manifest.json").read_text(encoding="utf-8"))
+    assert "enable" not in source_document
+    assert installed_document["enable"] is True
 
 
 def test_copy_into_store_refuses_to_overwrite_existing_version(tmp_path: Path) -> None:

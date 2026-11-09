@@ -31,6 +31,7 @@ from openjiuwen.core.extension.management import (
     UninstallRequest,
     bind_context,
     replace_context,
+    set_package_enabled,
     unbind_context,
 )
 from openjiuwen.core.extension.orchestrator import Orchestrator
@@ -271,13 +272,29 @@ class Registry:
         return _one_report(result)
 
     async def reload(self, package_id: str) -> ActivationReport:
-        """Trigger ``package.reload`` for one active package."""
+        """Reload one installed package without changing its requested enabled state.
+
+        A disabled managed copy has no active handlers to hot-switch. Its reload
+        therefore succeeds without importing the package or changing ``enable``.
+        """
         context = self._require_store()
         result = await self._trigger(
             PACKAGE_RELOAD_EVENT,
             ReloadRequest(bus=context.bus, package_id=package_id),
         )
         return _one_report(result)
+
+    async def set_enabled(self, package_id: str, enabled: bool) -> ActivationReport:
+        """Keep an installed package while changing whether this Registry loads it."""
+        context = self._require_store()
+        if self._closing:
+            raise ExtensionFailure(StatusCode.EXTENSION_PACKAGE_BUSY, package_id="*", reason="registry is stopping")
+        task = asyncio.current_task()
+        self._operations.add(task)
+        try:
+            return await set_package_enabled(context, context.bus, package_id, enabled)
+        finally:
+            self._operations.discard(task)
 
     async def _trigger(self, event_type: str, request: object) -> PackageOperationResult:
         context = self._require_ready()
