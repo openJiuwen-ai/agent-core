@@ -33,6 +33,22 @@ from openjiuwen.harness.personal_context.source_metadata import (
 )
 
 
+@pytest.fixture(params=["completed", "skipped"])
+def capacity_maintenance_result(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    result = {"status": "failed", "reason": "time_budget"} if request.param == "skipped" else {
+        "status": "succeeded", "limit_bytes": 50_000_000, "before_bytes": 0,
+        "after_bytes": 0, "removed_count": 0, "oversized_count": 0,
+    }
+
+    async def maintenance(*_args, **_kwargs):
+        return dict(result)
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.personal_context.context_capacity.run_capacity_maintenance", maintenance,
+    )
+    return result
+
+
 def _config(tmp_path: Path, *, interval: float = 0.01) -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
@@ -940,7 +956,9 @@ async def test_manual_run_retries_a_quarantined_revision(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(tmp_path: Path) -> None:
+async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
+    tmp_path: Path, capacity_maintenance_result: dict[str, object],
+) -> None:
     personal_context = PersonalContext(home=tmp_path)
     await personal_context.set_configuration(_config(tmp_path))
     assert personal_context._config is not None
@@ -1015,6 +1033,7 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": capacity_maintenance_result,
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -1136,7 +1155,9 @@ async def test_run_progress_names_message_less_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_path: Path) -> None:
+async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(
+    tmp_path: Path, capacity_maintenance_result: dict[str, object],
+) -> None:
     class EmptyProvider(ContextFetchService):
         async def prepare_run(
             self,
@@ -1187,6 +1208,7 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
 
     await personal_context._run_fetch_once("notes", EmptyProvider(service_config, home=tmp_path))
     assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "capacity_maintenance": capacity_maintenance_result,
         "service_id": "notes",
         "run_state": "succeeded",
         "progress_percent": 100,
@@ -1209,6 +1231,7 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
     assert replacement["run_state"] == "running"
     assert replacement["progress_percent"] == 0
     assert replacement["total_items"] == 0
+    assert "capacity_maintenance" not in replacement
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -2684,10 +2707,15 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         for _attempt in range(500):
             status = await personal_context.snapshot()
             cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
+            runs = [
+                await personal_context.get_fetch_run_status(item["service_id"], run_id=item["run_id"])
+                for item in accepted["runs"]
+            ]
             if (
                 status.context_ready
                 and len(cursor_files) == 2
                 and status.fetch_service_states == {"notes-a": "RUNNING", "notes-b": "RUNNING"}
+                and all(run["run_state"] == "succeeded" for run in runs)
             ):
                 break
             assert status.fetch_service_errors == {}
@@ -2747,6 +2775,7 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         persistent_files = {path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()}
         assert all(
             path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/"))
+            or path in {"state/context_usage.json", "state/context_usage.lock", "state/context_update.lock"}
             for path in persistent_files
         )
         assert not list((home / "workspace" / "sandboxes").rglob("*"))
