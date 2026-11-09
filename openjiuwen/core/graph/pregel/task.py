@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import weakref
 from typing import Any, Callable, Dict, NamedTuple, Optional, List, Union
 
 from openjiuwen.core.common.logging import graph_logger, LogEventType
@@ -17,7 +18,7 @@ from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
 _SIGNATURE_CACHE_LIMIT = 1024
-_signature_cache: dict[int, tuple[Callable[..., Any], inspect.Signature]] = {}
+_signature_cache: dict[int, tuple[weakref.ReferenceType, inspect.Signature]] = {}
 _signature_cache_lock = threading.Lock()
 
 # 反射特征缓存：签名成员（config/state）与协程性对同一 callable 恒定。键取
@@ -61,18 +62,24 @@ def _get_callable_signature(func: Callable[..., Any]) -> inspect.Signature:
 
     cache_key = id(func)
     cached = _signature_cache.get(cache_key)
-    if cached is not None and cached[0] is func:
+    if cached is not None and cached[0]() is func:
         return cached[1]
 
     signature = inspect.signature(func)
+    # Callable instances and bound methods may own an entire execution. Cache
+    # their signatures without making the reflection cache an execution owner.
+    try:
+        func_ref = weakref.ref(func)
+    except TypeError:
+        return signature
     with _signature_cache_lock:
         cached = _signature_cache.get(cache_key)
-        if cached is not None and cached[0] is func:
+        if cached is not None and cached[0]() is func:
             return cached[1]
 
         if len(_signature_cache) >= _SIGNATURE_CACHE_LIMIT:
             _signature_cache.pop(next(iter(_signature_cache)))
-        _signature_cache[cache_key] = (func, signature)
+        _signature_cache[cache_key] = (func_ref, signature)
     return signature
 
 

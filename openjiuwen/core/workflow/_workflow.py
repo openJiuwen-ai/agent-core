@@ -327,7 +327,8 @@ class BaseWorkflow:
                     if main_workflow_config
                     else self._workflow_config.card.to_str(),
                 )
-        self._session.set_session(session)
+        # The reusable workflow must not own the current execution session.
+        # Routers resolve it through the execution context in CompiledGraph._invoke.
         try:
             return self._graph.compile(session, context=context)
         except Exception as e:

@@ -56,6 +56,7 @@ class Branch:
 
 class PregelGraph(Graph):
     def __init__(self):
+        # Legacy attributes remain unbound: execution state belongs to CompiledGraph.
         self.pregel: Pregel | None = None
         self.edges: list[Tuple[str | list[str], str]] = []
         self.waits: set[str] = set()
@@ -264,7 +265,7 @@ class PregelGraph(Graph):
            残留不跨执行携带）；
         3. after_step 闭包捕获 session 参数（不读 self._session——共享实例
            并发 compile 时会互相覆盖）；
-        4. 保留 self.pregel/checkpointer/_session 属性写入，兼容既有读取方。
+        4. 执行产物仅由返回的 CompiledGraph 持有，不写回可复用的图实例。
         """
         fresh_nodes = {}
         for node_id, node in self.nodes.items():
@@ -304,9 +305,9 @@ class PregelGraph(Graph):
                 if fresh is not None:
                     actor.set_vertex(fresh)
 
-        self.pregel = pregel
-        self.checkpointer = checkpointer
-        self._session = session
+        # The cached topology outlives individual executions. Keeping the last
+        # Pregel here would also retain its vertices, callback, session and outputs.
+        # CompiledGraph owns these references for the duration of this execution.
         return CompiledGraph(pregel, checkpointer)
 
     def _compile(self, graph_store=None, step_callback=None, nodes=None) -> Pregel:

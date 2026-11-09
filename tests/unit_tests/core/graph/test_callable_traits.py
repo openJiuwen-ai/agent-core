@@ -19,10 +19,12 @@ These tests pin the trait-cache contract:
 """
 
 import asyncio
+import gc
 import inspect
+import weakref
 
 from openjiuwen.core.graph.pregel.router import ConditionalRouter
-from openjiuwen.core.graph.pregel.task import _callable_traits, _reflection_key
+from openjiuwen.core.graph.pregel.task import _callable_traits, _get_callable_signature, _reflection_key
 
 
 class _FakeVertex:
@@ -136,3 +138,39 @@ def test_router_sync_selector_without_state():
     messages = asyncio.run(router.dispatch("src"))
 
     assert [m.target for m in messages] == ["plain-target"]
+
+
+def test_signature_cache_does_not_keep_callable_execution_instances():
+    class Execution:
+        def __call__(self, config=None, state=None):
+            return None
+
+    execution = Execution()
+    ref = weakref.ref(execution)
+    first = _get_callable_signature(execution)
+    assert _get_callable_signature(execution) is first
+    _callable_traits(execution)
+    del execution
+    gc.collect()
+    assert ref() is None
+
+
+def test_signature_cache_does_not_keep_bound_method_owner():
+    execution = _FakeVertex()
+    ref = weakref.ref(execution)
+    method = execution.method
+    signature = _get_callable_signature(method)
+    assert "state" in signature.parameters
+    del execution, method
+    gc.collect()
+    assert ref() is None
+
+
+def test_signature_of_non_weak_referenceable_callable_is_supported():
+    class Execution:
+        __slots__ = ()
+
+        def __call__(self, config=None):
+            return None
+
+    assert "config" in _get_callable_signature(Execution()).parameters
