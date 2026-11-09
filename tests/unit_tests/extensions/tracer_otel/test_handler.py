@@ -8,6 +8,7 @@ relationships, and error marking.
 """
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from opentelemetry import trace
@@ -2221,3 +2222,62 @@ class TestOtelWorkflowHandlerDeferredEndNode:
         )
         assert handler._span_manager.get("llm1") is not None
         assert handler._deferred_end_starts == {}
+
+
+class TestSpanTimestampsUseBusinessClock:
+    """OTel span start/end timestamps must carry the agent span's business
+    times, not the event-processing wall clock. Field reports showed every
+    span with a zero duration while openjiuwen.elapsedTime was correct:
+    start_span/end() were both stamped at processing time when events
+    flushed together."""
+
+    async def test_llm_span_duration_uses_business_times(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=10)
+        end_dt = datetime.now() - timedelta(seconds=2)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs={"response": "world"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)
+        # Real 8s duration, not the microseconds between the two handler calls
+        assert s.end_time - s.start_time >= 7 * 10**9
+
+    async def test_error_span_end_uses_business_end_time(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        start_dt = datetime.now() - timedelta(seconds=30)
+        end_dt = datetime.now() - timedelta(seconds=1)
+        span_manager.update_span(agent_span, {"start_time": start_dt})
+        span_manager.update_span(agent_span, {"end_time": end_dt})
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await handler.on_llm_error(span=agent_span, error=ValueError("boom"))
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.start_time == int(start_dt.timestamp() * 1e9)
+        assert s.end_time == int(end_dt.timestamp() * 1e9)

@@ -397,7 +397,18 @@ class OtelAgentHandler(TraceExtAgentHandler):
         parent_ctx: otel_context.Context | None,
         agent_span: TraceAgentSpan,
     ) -> OtelSpanState:
-        otel_span = self._otel_tracer.start_span(name=name, kind=kind, context=parent_ctx)
+        start_time = agent_span.start_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
+        # The SDK start_span expects int nanoseconds; the datetime form is
+        # kept for OJ_START_TIME / elapsed-time math. Passing the true start
+        # (same idiom as the workflow/component span site) keeps the span's
+        # own timestamps on the business clock instead of the event-processing
+        # wall clock, so the duration is real even when events flush together.
+        otel_span = self._otel_tracer.start_span(
+            name=name,
+            kind=kind,
+            context=parent_ctx,
+            start_time=int(start_time.timestamp() * 1e9),
+        )
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
         # Instrumentation provider on every span (standard key; the non-standard
@@ -409,7 +420,6 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(OJ_SESSION_ID, session_id)
         otel_span.set_attribute(OJ_INVOKE_ID, agent_span.invoke_id or "")
         otel_span.set_attribute(OJ_PARENT_INVOKE_ID, agent_span.parent_invoke_id or "")
-        start_time = agent_span.start_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_START_TIME, str(start_time))
         context_token = otel_context.attach(trace.set_span_in_context(otel_span))
         state = OtelSpanState(
@@ -423,19 +433,25 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     # --- helper: end span and pop from manager ---
 
-    def _end_and_pop(self, invoke_id: str) -> None:
+    def _end_and_pop(self, invoke_id: str, end_time: datetime | None = None) -> None:
         state = self._span_manager.pop(invoke_id)
         if state is None:
             return
         state.span.set_status(Status(StatusCode.OK))
-        state.span.end()
+        # Explicit end timestamp (true business end) instead of the
+        # event-processing wall clock — spans flushed in one pass would
+        # otherwise end ~instantly and report a zero duration.
+        state.span.end(
+            end_time=int(end_time.timestamp() * 1e9) if end_time is not None else None
+        )
         otel_context.detach(state.context_token)
 
     # --- helper: set end-time attributes before closing a span ---
 
-    def _set_end_attrs(self, otel_span: trace.Span, agent_span: TraceAgentSpan) -> None:
+    def _set_end_attrs(self, otel_span: trace.Span, agent_span: TraceAgentSpan) -> datetime:
         """Set TraceSpan end-time fields as attributes before span closes.
-        Uses span values if present, otherwise sets ourselves (matching TraceAgentHandler)."""
+        Uses span values if present, otherwise sets ourselves (matching TraceAgentHandler).
+        Returns the resolved end_time so the caller can stamp it on span.end()."""
         end_time = agent_span.end_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_END_TIME, str(end_time))
         if agent_span.elapsed_time is not None:
@@ -451,10 +467,11 @@ class OtelAgentHandler(TraceExtAgentHandler):
         if agent_span.child_invokes_id is not None:
             otel_span.set_attribute(OJ_CHILD_INVOKE_IDS, _serialize(agent_span.child_invokes_id))
         otel_span.set_attribute(OJ_STATUS, agent_span.status or NodeStatus.FINISH.value)
+        return end_time
 
     # --- helper: set error on span and end ---
 
-    def _mark_error_and_end(self, invoke_id: str, error: Any) -> None:
+    def _mark_error_and_end(self, invoke_id: str, error: Any, end_time: datetime | None = None) -> None:
         state = self._span_manager.pop(invoke_id)
         if state is None:
             return
@@ -473,7 +490,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             )
         otel_span.set_attribute(ERROR_TYPE, type(error).__name__)
         otel_span.record_exception(error)
-        otel_span.end()
+        otel_span.end(
+            end_time=int(end_time.timestamp() * 1e9) if end_time is not None else None
+        )
         otel_context.detach(state.context_token)
 
     # --- helper: set GenAI agent identity attributes on any span ---
@@ -603,6 +622,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
             state = self._span_manager.get(span.invoke_id)
             if state is None:
                 return
+            end_time = None
             if state.recorded:
                 if outputs is not None:
                     # Unwrap the {"outputs": AssistantMessage} container OtelRail
@@ -615,14 +635,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
                             _redacted_json(messages, self._config, field="completions"),
                         )
                     _set_llm_response_attrs(state.span, outputs)
-                self._set_end_attrs(state.span, span)
-            self._end_and_pop(span.invoke_id)
+                end_time = self._set_end_attrs(state.span, span)
+            self._end_and_pop(span.invoke_id, end_time)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_end failed: %s", exc)
 
     async def on_llm_error(self, span: TraceAgentSpan, error, **kwargs):
         try:
-            self._mark_error_and_end(span.invoke_id, error)
+            self._mark_error_and_end(span.invoke_id, error, span.end_time)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_error failed: %s", exc)
 
@@ -670,16 +690,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
         state = self._span_manager.get(span.invoke_id)
         if state is None:
             return
+        end_time = None
         if state.recorded:
             if outputs is not None:
                 state.span.set_attribute(OJ_AGENT_OUTPUTS, redact(outputs, self._config))
-            self._set_end_attrs(state.span, span)
-        self._end_and_pop(span.invoke_id)
+            end_time = self._set_end_attrs(state.span, span)
+        self._end_and_pop(span.invoke_id, end_time)
 
     # --- helper: mark error on a non-LLM span and end ---
 
     def _error_non_llm_span(self, span: TraceAgentSpan, error: Any) -> None:
-        self._mark_error_and_end(span.invoke_id, error)
+        self._mark_error_and_end(span.invoke_id, error, span.end_time)
 
     # ================================================================
     # Plugin (Tool) events — SpanKind.INTERNAL
