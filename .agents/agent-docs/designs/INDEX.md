@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-09T16:51+08:00 -->
+<!-- generated-at: 2026-11-09T18:22+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -130,6 +130,7 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261029-1619-skill-directory-graph-api](active/D-20261029-1619-skill-directory-graph-api/design.md) | Symphony Runtime 统一配置与检索编排接口收敛 | in-development | lin-xiaoyu | core | 2026-11-09 |
+| [D-20261109-1745-shared-capability-fingerprints](active/D-20261109-1745-shared-capability-fingerprints/design.md) | Symphony 检索与编排共用能力指纹 | in-development | lin-xiaoyu | core | 2026-11-09 |
 
 <a id="module-7"></a>
 
@@ -153,6 +154,7 @@ generated: true
 | [D-20261031-1614-symphony-config-contract](active/D-20261031-1614-symphony-config-contract/design.md) | Symphony 配置契约先行 | in-development | lin-xiaoyu | core | 2026-11-09 |
 | [D-20261103-1438-symphony-capability-retirement](active/D-20261103-1438-symphony-capability-retirement/design.md) | Symphony 旧检索与独立经验库退役 | in-development | lin-xiaoyu | core | 2026-11-03 |
 | [D-20261109-1603-symphony-orchestration-experience](active/D-20261109-1603-symphony-orchestration-experience/design.md) | Symphony 编排经验配置收敛 | in-development | lin-xiaoyu | core | 2026-11-09 |
+| [D-20261109-1745-shared-capability-fingerprints](active/D-20261109-1745-shared-capability-fingerprints/design.md) | Symphony 检索与编排共用能力指纹 | in-development | lin-xiaoyu | core | 2026-11-09 |
 
 <a id="module-9"></a>
 

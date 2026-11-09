@@ -37,7 +37,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-28 |
+| 最近一次修订日期 | 2026-11-09 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md、F_123_team-tools-direct-under-progressive-exposure.md、F_125_team-expert-catalog-and-spawn.md、F_20261022_2319_inline-member-worktree-isolation.md、F_128_scheduled-member-subtasks.md、F_129_task-revision-and-staleness.md |
 
 ## 范围 / 边界
@@ -189,6 +189,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     绑定团**，其余情况是单个专家。描述里讲默认范围的 capability 槽 `view_experts_bound_scope` 与之同一门控，
     leader 系统提示词的 `team_bound_group` section 也是（见 S_09 1b）。三个
     工具不在事件循环线程上做文件 IO：包读取经 `asyncio.to_thread` 在工作线程里执行。
+    宿主通过 `ViewExpertsTool.discoverable_cards()` 读取同一默认范围内可拉起的专家卡片。
+    返回项携带 `ExpertRef` 和模板卡片，团队 leader 及缺少已声明外部运行时的专家不进入结果。
     `spawn_expert` 是又一个 `_SpawnToolBase` 子类：模板来源由 `group` 决定（等于
     `TeamAgentSpec.agent_group_name` 且宿主把该成员组装进了本 Team spec（预定义成员）时取 spec，不调目录、不读磁盘；
     spec 里没有的绑定团成员（调度模式团队从空名册起步）与其它来源一样经目录

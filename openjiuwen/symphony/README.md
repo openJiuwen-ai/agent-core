@@ -33,7 +33,7 @@ try:
         source_by_id={"extract": "installed"},
         pin_index_revision=True,
     )
-    candidates = await session.skill_index(operation="search", query=["summarize documents"])
+    candidates = await session.capability_search(type="skill", query="summarize documents")
     plan = await runtime.orchestration.plan(
         "Summarize the document", candidate_ids=["extract", "summarize"],
         disabled_capability_ids=disabled_ids,
@@ -79,6 +79,10 @@ finally:
 可通过 `create_session(config=...)` 传入 `RetrievalConfig` 来覆盖单个会话的提示、输出和索引读取策略。Runtime 持有统一的检索开关与构树策略。
 
 `retrieval.use_existing_index=True` 在已有索引时读取分类树。尚无索引时使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `retrieval.output.max_results` 限制，列表同时受 `max_list_entries` 限制。续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
+
+`runtime.retrieval.build()` 与构图使用同一个 Skill 集合指纹服务和缓存。构图版本随附本次使用的 `fingerprint.json`。Skill 目录按会话可见范围读取记录，并按来源及内容哈希匹配指纹。有效指纹的摘要、场景和关键词参与检索，缺失或过期时使用当前目录描述。
+
+`session.get_tools(unified=True)` 提供单个 `capability_search` 工具。`type` 默认为 `skill`，支持分类、批量关键词和游标。宿主可向 `create_session(search_catalog=...)` 提供当前会话中 `expert`、`connector` 和 `mcp` 的查询实现，并用 `openjiuwen.symphony.discovery.search_capabilities()` 对授权候选排序。原 `session.skill_index()` 继续服务 SDK 调用。
 
 ## 产物与版本
 
