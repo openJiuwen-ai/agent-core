@@ -21,8 +21,9 @@ the context engine's import graph.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
@@ -46,6 +47,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-lig
 
 
 TRUNCATE_MARKER_METADATA_KEY = "overflow_truncated_marker"
+TRUNCATE_MARKER_ORIGINAL_CONTENT_KEY = "overflow_truncated_original_content"
 DEFAULT_CONTEXT_LIMIT_FALLBACK = 200_000
 _CHARS_PER_TOKEN_FALLBACK = 4
 _MIN_PLAUSIBLE_CONTEXT_LIMIT = 1024
@@ -66,6 +68,11 @@ class OverflowTruncationResult:
     archive_memory_id: str = ""
     limit_source: str = ""
     resolved_window_tokens: int = 0
+    # Internal hand-off for the async archive step in ``recover_phase_b``.
+    # Kept out of repr/logs: the archives themselves are best-effort data.
+    dropped_message_list: Tuple[BaseMessage, ...] = field(default=(), repr=False)
+    prefix_messages: Tuple[BaseMessage, ...] = field(default=(), repr=False)
+    original_messages: Tuple[BaseMessage, ...] = field(default=(), repr=False)
 
 
 # Ordered from most to least specific. Every pattern captures the provider's
@@ -192,8 +199,14 @@ def truncate_overflowed_context(
         logger.warning("PTL fallback skipped: cannot read context messages: %s", exc)
         return OverflowTruncationResult(changed=False)
 
-    # Marker messages from an earlier attempt are replaced, never stacked.
-    cleaned = [message for message in stored_messages if not _is_truncate_marker(message)]
+    # Markers from an earlier attempt are replaced, never stacked. A marker
+    # merged into an existing message is stripped back to the original content
+    # so the real question survives repeated attempts.
+    cleaned: List[BaseMessage] = []
+    for message in stored_messages:
+        restored = _strip_truncate_marker(message)
+        if restored is not None:
+            cleaned.append(restored)
     prefix, body = _split_leading_system_messages(cleaned)
 
     payload_tokens = estimator.messages(messages) if messages is not None else estimator.messages(cleaned)
@@ -273,11 +286,14 @@ def truncate_overflowed_context(
         retained = body[cut:]
         dropped_rounds = rounds_to_drop
 
-    # Single-round special case: when whole-round dropping cannot fit the
-    # budget, remove the oldest complete tool exchange inside the retained
-    # text. An exchange is an assistant ``tool_calls`` message plus every
-    # matching ``tool`` result, so pairing stays intact.
-    while (
+    # Single-round special case: when the whole conversation is one round and
+    # whole-round dropping cannot fit the budget, remove the oldest complete
+    # tool exchange inside the retained text. An exchange is an assistant
+    # ``tool_calls`` message plus every matching ``tool`` result, so pairing
+    # stays intact. With more than one round the protected ``keep_last_rounds``
+    # window must never be split; return without further truncation instead.
+    single_round_only = len(rounds) <= 1
+    while single_round_only and (
         _estimate(estimator, prefix, retained, marker_template, dropped_rounds, _dropped_token_hint(dropped), overhead)
         > target_tokens
     ):
@@ -301,9 +317,14 @@ def truncate_overflowed_context(
             resolved_window_tokens=resolved_window_tokens,
         )
 
-    marker = _build_marker(marker_template, dropped_rounds or dropped_tool_exchanges, tokens_before - target_tokens)
+    marker_text = _format_marker(
+        marker_template,
+        dropped_rounds or dropped_tool_exchanges,
+        tokens_before - target_tokens,
+    )
     marker_index = min(max(marker_index, 0), len(retained))
-    new_messages = prefix + retained[:marker_index] + [marker] + retained[marker_index:]
+    retained_with_marker = _attach_marker(retained, marker_index, marker_text)
+    new_messages = prefix + retained_with_marker
     tokens_after = overhead + estimator.messages(new_messages)
 
     archive_memory_id = ""
@@ -335,6 +356,9 @@ def truncate_overflowed_context(
         archive_memory_id=archive_memory_id,
         limit_source=limit_source,
         resolved_window_tokens=resolved_window_tokens,
+        dropped_message_list=tuple(dropped),
+        prefix_messages=tuple(prefix),
+        original_messages=tuple(stored_messages),
     )
 
 
@@ -375,7 +399,9 @@ async def recover_phase_b(
             attempt=attempt,
             target_ratio=config.truncate_target_ratio,
             keep_last_rounds=config.keep_last_rounds,
-            archive_dropped_rounds=config.archive_dropped_rounds,
+            # Archive below, off the event loop. Building the truncation plan
+            # itself is pure in-memory work, so it must not do file I/O.
+            archive_dropped_rounds=False,
             marker_template=config.marker_template,
             messages=messages,
             tools=tools,
@@ -394,6 +420,19 @@ async def recover_phase_b(
         )
         return False
 
+    archive_memory_id = ""
+    if config.archive_dropped_rounds and result.dropped_message_list:
+        # ``archive_compression_messages`` writes files and builds a BM25 index;
+        # run it in the thread pool like the other compressor call sites so a
+        # PTL rescue never stalls the event loop for other sessions.
+        archive_memory_id = await asyncio.to_thread(
+            _archive_dropped,
+            target_context,
+            result.prefix_messages,
+            result.dropped_message_list,
+            result.original_messages,
+        )
+
     await _persist_truncation(engine, session, target_context)
 
     logger.info(
@@ -409,7 +448,7 @@ async def recover_phase_b(
         result.limit_source,
         result.target_tokens,
         result.resolved_window_tokens,
-        result.archive_memory_id,
+        archive_memory_id,
     )
     return True
 
@@ -523,12 +562,101 @@ def _is_truncate_marker(message: BaseMessage) -> bool:
     return isinstance(metadata, dict) and bool(metadata.get(TRUNCATE_MARKER_METADATA_KEY))
 
 
-def _build_marker(template: str, rounds: int, tokens: int) -> UserMessage:
+def _strip_truncate_marker(message: BaseMessage) -> Optional[BaseMessage]:
+    """Return the message without an injected marker, or ``None`` to drop it.
+
+    A standalone marker message is dropped. A marker merged into an existing
+    message is restored to its original content so the real question is not
+    lost across repeated truncation attempts.
+    """
+    metadata = getattr(message, "metadata", None)
+    if not isinstance(metadata, dict) or not metadata.get(TRUNCATE_MARKER_METADATA_KEY):
+        return message
+
+    original = metadata.get(TRUNCATE_MARKER_ORIGINAL_CONTENT_KEY)
+    if isinstance(original, str):
+        restored_metadata = dict(metadata)
+        restored_metadata.pop(TRUNCATE_MARKER_METADATA_KEY, None)
+        restored_metadata.pop(TRUNCATE_MARKER_ORIGINAL_CONTENT_KEY, None)
+        return message.model_copy(update={"content": original, "metadata": restored_metadata})
+    return None
+
+
+def _format_marker(template: str, rounds: int, tokens: int) -> str:
     try:
-        content = template.format(rounds=max(int(rounds), 0), tokens=max(int(tokens), 0))
+        return template.format(rounds=max(int(rounds), 0), tokens=max(int(tokens), 0))
     except (KeyError, IndexError, ValueError):
-        content = DEFAULT_OVERFLOW_TRUNCATE_MARKER.format(rounds=max(int(rounds), 0), tokens=max(int(tokens), 0))
-    return UserMessage(content=content, metadata={TRUNCATE_MARKER_METADATA_KEY: True})
+        return DEFAULT_OVERFLOW_TRUNCATE_MARKER.format(
+            rounds=max(int(rounds), 0),
+            tokens=max(int(tokens), 0),
+        )
+
+
+def _build_marker(template: str, rounds: int, tokens: int) -> UserMessage:
+    return UserMessage(
+        content=_format_marker(template, rounds, tokens),
+        metadata={TRUNCATE_MARKER_METADATA_KEY: True},
+    )
+
+
+def _merge_marker_into_message(
+    message: BaseMessage,
+    marker_text: str,
+    *,
+    at_end: bool,
+) -> Optional[BaseMessage]:
+    """Merge the marker into an existing message's text content.
+
+    Some providers (notably Anthropic) reject two consecutive ``user``
+    messages. Inserting a standalone ``UserMessage`` marker at a round boundary
+    therefore turns a PTL rescue into a fresh, non-PTL 400. Merging keeps the
+    original one-message-per-role shape; the original content is stored in
+    metadata so a later attempt can restore it instead of stacking markers.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, str):
+        # Multimodal content (list of blocks) is left alone; the caller then
+        # skips the marker rather than risk breaking role alternation.
+        return None
+    merged = f"{content}\n\n{marker_text}" if at_end else f"{marker_text}\n\n{content}"
+    metadata = dict(getattr(message, "metadata", None) or {})
+    metadata[TRUNCATE_MARKER_METADATA_KEY] = True
+    metadata[TRUNCATE_MARKER_ORIGINAL_CONTENT_KEY] = content
+    return message.model_copy(update={"content": merged, "metadata": metadata})
+
+
+def _attach_marker(
+    messages: Sequence[BaseMessage],
+    index: int,
+    marker_text: str,
+) -> List[BaseMessage]:
+    """Attach the marker without introducing consecutive same-role messages.
+
+    Prefer the first assistant message at or after the cut: the user's question
+    stays byte-identical, which matters because it is the request that must
+    survive truncation. Fall back to an adjacent user message only when the
+    retained window has no assistant text to annotate.
+    """
+    capped_index = min(max(int(index), 0), len(messages))
+    for position in range(capped_index, len(messages)):
+        if isinstance(messages[position], AssistantMessage):
+            merged = _merge_marker_into_message(messages[position], marker_text, at_end=True)
+            if merged is not None:
+                return list(messages[:position]) + [merged] + list(messages[position + 1 :])
+
+    if capped_index > 0 and isinstance(messages[capped_index - 1], UserMessage):
+        merged = _merge_marker_into_message(messages[capped_index - 1], marker_text, at_end=True)
+        if merged is not None:
+            return list(messages[: capped_index - 1]) + [merged] + list(messages[capped_index:])
+    if capped_index < len(messages) and isinstance(messages[capped_index], UserMessage):
+        merged = _merge_marker_into_message(messages[capped_index], marker_text, at_end=False)
+        if merged is not None:
+            return list(messages[:capped_index]) + [merged] + list(messages[capped_index + 1 :])
+
+    # No safe message to annotate: drop the diagnostic marker instead of
+    # emitting a message that strict providers reject.
+    logger.debug("PTL fallback skipped truncation marker: no safe adjacent message")
+    return list(messages)
 
 
 def _resolve_limit(context: "ModelContext", error_texts: Sequence[str]) -> Tuple[int, str]:

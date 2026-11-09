@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import copy
 import functools
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
@@ -549,15 +550,30 @@ class ContextEngine:
         if not phase_a_done:
             if phase_b_enabled and attempted is not None:
                 attempted.append("phase_a_compress")
-            compressed = await self._recover_with_compressors(
-                context_id=context_id,
-                session=session,
-                timeout_s=getattr(ptl_config, "phase_a_timeout_s", 0.0) if phase_b_enabled else 0.0,
-                swallow_errors=phase_b_enabled,
-                kwargs=kwargs,
-            )
+            recovery_context = context
+            snapshot: Optional[List[BaseMessage]] = None
+            if phase_b_enabled:
+                # Phase A runs processors sequentially and each successful
+                # processor mutates the context immediately. A failure or
+                # timeout in a later processor therefore leaves a partially
+                # compressed context. Snapshot first so Phase B (and its
+                # persistence step) always starts from a consistent state.
+                recovery_context = context or self._resolve_recovery_context(context_id, session)
+                snapshot = self._snapshot_recovery_context(recovery_context)
+            try:
+                compressed = await self._recover_with_compressors(
+                    context_id=context_id,
+                    session=session,
+                    timeout_s=getattr(ptl_config, "phase_a_timeout_s", 0.0) if phase_b_enabled else 0.0,
+                    swallow_errors=phase_b_enabled,
+                    kwargs=kwargs,
+                )
+            except asyncio.CancelledError:
+                self._restore_recovery_snapshot(recovery_context, snapshot)
+                raise
             if compressed:
                 return True
+            self._restore_recovery_snapshot(recovery_context, snapshot)
 
         if not phase_b_enabled:
             return False
@@ -653,6 +669,41 @@ class ContextEngine:
 
         context_engine_logger.info("model context recovery compressed context")
         return True
+
+    def _resolve_recovery_context(self, context_id: str, session: Session) -> Optional[ModelContext]:
+        resolved_session_id = session.get_session_id() if session else "default_session_id"
+        return self.get_context(context_id=context_id, session_id=resolved_session_id)
+
+    @staticmethod
+    def _snapshot_recovery_context(context: Optional[ModelContext]) -> Optional[List[BaseMessage]]:
+        if context is None:
+            return None
+        try:
+            return copy.deepcopy(context.get_messages())
+        except Exception:  # noqa: BLE001 - a missing snapshot must not block recovery
+            context_engine_logger.warning(
+                "failed to snapshot context before Phase A compression",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _restore_recovery_snapshot(
+        context: Optional[ModelContext],
+        snapshot: Optional[List[BaseMessage]],
+    ) -> None:
+        if context is None or snapshot is None:
+            return
+        try:
+            if context.get_messages() == snapshot:
+                return
+            context.set_messages(snapshot)
+            context_engine_logger.warning("restored context after incomplete Phase A compression before Phase B")
+        except Exception:  # noqa: BLE001 - restore is best-effort; Phase B still runs
+            context_engine_logger.warning(
+                "failed to restore context after incomplete Phase A compression",
+                exc_info=True,
+            )
 
     @classmethod
     def is_context_overflow_error(cls, exception: Exception) -> bool:

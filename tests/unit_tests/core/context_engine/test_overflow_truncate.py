@@ -3,6 +3,8 @@
 """Pure-code prompt-too-long fallback: truncation and engine orchestration."""
 
 import asyncio
+import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -157,7 +159,13 @@ class TestOverflowTruncate:
 
         assert result.changed is True
         assert result.dropped_rounds == 1
-        assert [message.content for message in context.get_messages()[-4:]] == newest_two
+        remaining = context.get_messages()[-4:]
+        # Newest two rounds are retained; the truncation marker is merged into
+        # the first retained assistant message, so user questions stay intact.
+        assert remaining[0].content == newest_two[0]
+        assert remaining[1].content.startswith(newest_two[1])
+        assert remaining[2].content == newest_two[2]
+        assert remaining[3].content == newest_two[3]
 
     @pytest.mark.asyncio
     async def test_dropped_round_keeps_tool_pairing(self, engine, session):
@@ -199,8 +207,11 @@ class TestOverflowTruncate:
         assert result.dropped_rounds == 0
         assert result.dropped_tool_exchanges == 1
         remaining = context.get_messages()
-        assert [message.role for message in remaining] == ["user", "user"]
-        assert remaining[0].content == "please search"
+        # Exactly one user message remains: the marker is merged into it and
+        # never emitted as a second consecutive user message.
+        assert [message.role for message in remaining] == ["user"]
+        assert remaining[0].content.startswith("please search")
+        assert remaining[0].metadata.get(TRUNCATE_MARKER_METADATA_KEY) is True
         assert not any(isinstance(message, ToolMessage) for message in remaining)
 
     @pytest.mark.asyncio
@@ -284,6 +295,78 @@ class TestOverflowTruncate:
         assert first.changed is True
         assert second.changed is True
         assert len(_marker_messages(context)) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_exchange_in_protected_round_is_never_dropped(self, engine, session):
+        # Only round 1 is droppable; round 2 is the protected newest round and
+        # carries a huge tool result. Whole-round dropping cannot fit the
+        # budget, but the protected round's tool exchange must survive.
+        messages = _plain_round(1) + [
+            UserMessage(content="question-2"),
+            AssistantMessage(content="", tool_calls=[_tool_call("tc-2")]),
+            ToolMessage(content="r" * 30000, tool_call_id="tc-2"),
+            AssistantMessage(content="answer-2"),
+        ]
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+
+        result = truncate_overflowed_context(
+            context,
+            error_texts=["maximum context length is 3000 tokens"],
+            keep_last_rounds=1,
+            archive_dropped_rounds=False,
+        )
+
+        assert result.changed is True
+        assert result.dropped_tool_exchanges == 0
+        remaining = context.get_messages()
+        assert any(isinstance(message, ToolMessage) and message.tool_call_id == "tc-2" for message in remaining)
+        assert any(message.content == "question-2" for message in remaining)
+
+    @pytest.mark.asyncio
+    async def test_marker_merge_keeps_role_alternation(self, engine, session):
+        messages = _plain_round(1) + _plain_round(2)
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+
+        result = truncate_overflowed_context(
+            context,
+            error_texts=["maximum context length is 3000 tokens"],
+            keep_last_rounds=1,
+            archive_dropped_rounds=False,
+        )
+
+        assert result.changed is True
+        roles = [message.role for message in context.get_messages()]
+        assert roles == ["user", "assistant"]
+        assert all(left != right for left, right in zip(roles, roles[1:]))
+
+    @pytest.mark.asyncio
+    async def test_embedded_marker_is_restored_not_stacked(self, engine, session):
+        messages = _plain_round(1) + _plain_round(2) + _plain_round(3)
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+
+        first = truncate_overflowed_context(
+            context,
+            error_texts=["maximum context length is 12000 tokens"],
+            attempt=1,
+            keep_last_rounds=1,
+            archive_dropped_rounds=False,
+        )
+        first_marker_count = sum(str(message.content).count("CONTEXT_TRUNCATED") for message in context.get_messages())
+
+        second = truncate_overflowed_context(
+            context,
+            error_texts=["maximum context length is 12000 tokens"],
+            attempt=2,
+            keep_last_rounds=1,
+            archive_dropped_rounds=False,
+        )
+        second_marker_count = sum(str(message.content).count("CONTEXT_TRUNCATED") for message in context.get_messages())
+
+        assert first.changed is True
+        assert second.changed is True
+        assert first_marker_count == 1
+        assert second_marker_count == 1
+        assert any(str(message.content).startswith("question-3") for message in context.get_messages())
 
     @pytest.mark.asyncio
     async def test_repeated_attempts_shrink_the_target(self, engine, session):
@@ -760,6 +843,70 @@ class TestRecoverFromModelExceptionFallback:
 
         assert recovered is True
         assert len(context.get_messages()) < len(messages)
+
+    @pytest.mark.asyncio
+    async def test_phase_a_timeout_restores_context_before_phase_b(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                ptl_fallback_config=PtlFallbackConfig(
+                    enable_pure_code_truncate=True,
+                    phase_a_timeout_s=0.05,
+                    archive_dropped_rounds=False,
+                )
+            )
+        )
+        messages = [UserMessage(content="q"), AssistantMessage(content="a")]
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=messages)
+        original = [message.content for message in context.get_messages()]
+
+        async def partial_then_hang(**_kwargs):
+            # Simulate a processor that mutated the context before a later
+            # processor (or the persistence step) was cancelled by the timeout.
+            context.set_messages([UserMessage(content="half-compressed")])
+            await asyncio.sleep(5)
+            return "compressed"
+
+        engine.compress_context = partial_then_hang
+
+        recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
+            exception=RuntimeError("maximum context length is 6000 tokens"),
+        )
+
+        assert recovered is False
+        assert [message.content for message in context.get_messages()] == original
+
+    @pytest.mark.asyncio
+    async def test_archive_runs_off_the_event_loop(self):
+        context = _FakeContext(_plain_round(1) + _plain_round(2), workspace_dir="unused")
+        archive_threads = []
+
+        def fake_archive(**_kwargs):
+            archive_threads.append(threading.current_thread())
+            return SimpleNamespace(memory_id="mem-1")
+
+        config = PtlFallbackConfig(enable_pure_code_truncate=True, archive_dropped_rounds=True)
+        with patch(
+            "openjiuwen.core.context_engine.processor.forked.compressor.recall.archive.archive_compression_messages",
+            side_effect=fake_archive,
+        ):
+            recovered = await recover_phase_b(
+                object(),
+                context_id="c1",
+                session=None,
+                context=context,
+                error_texts=["maximum context length is 3000 tokens"],
+                messages=None,
+                tools=None,
+                attempt=1,
+                config=config,
+            )
+
+        assert recovered is True
+        assert archive_threads, "archive should run"
+        assert archive_threads[0] is not threading.main_thread()
 
     def test_ptl_fallback_state_and_budget(self):
         absent = ContextEngine(ContextEngineConfig())
