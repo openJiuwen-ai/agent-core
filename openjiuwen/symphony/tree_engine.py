@@ -7,7 +7,7 @@ import inspect
 import threading
 from concurrent.futures import TimeoutError as FutureTimeout
 
-from openjiuwen.symphony.config import DiscoveryConfig, RetrievalConfig
+from openjiuwen.symphony.config import RetrievalConfig
 from openjiuwen.symphony.discovery import InstalledSkillsDirectoryToolkit, SkillFS
 from openjiuwen.symphony.inventory import DirectoryInventory
 from openjiuwen.symphony.runtime_storage import RuntimeStorage
@@ -209,9 +209,9 @@ class TreeEngine:
 
     def create_session(self, *, session_scope="default", capability_directories=None,
                        visible_capability_ids=None, disabled_capability_ids=None, source_by_id=None,
-                       config: DiscoveryConfig | None = None, pin_index_revision=False, **snapshot):
+                       config: RetrievalConfig | None = None, pin_index_revision=False, **snapshot):
         self._check()
-        settings = (config or self.config).for_session()
+        settings = (config or self.config).model_copy(deep=True)
         records = lambda: self._records(capability_directories, disabled_capability_ids, source_by_id)
         environment = SkillFS(
             records, settings=settings, visible_skill_names=visible_capability_ids,

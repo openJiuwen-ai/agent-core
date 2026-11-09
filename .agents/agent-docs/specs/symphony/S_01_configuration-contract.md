@@ -87,7 +87,7 @@ retrieval 和 orchestration 可独立禁用，同时关闭合法；禁用节点�
 
 TreeRequestConfig、TreeStructureConfig、IndexTreeStructureConfig、TreeBuildConfig、IndexTreeBuildConfig、TreeManagerConfig、TreePromptConfig、IndexBuildConfig、IndexArtifactConfig、TreeBuildOptions 等同义目标包装不恢复。树策略直接由 RetrievalBuildConfig 的子节点组合；DiscoveryPromptConfig 直接维护预算和优先对象。
 
-PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig、OneShotTreeBuildConfig 和会话策略 DiscoveryConfig，CONFIG_MODELS 合计 33 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
+PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONFIG_MODELS 登记 FingerprintProtocolConfig 和 OneShotTreeBuildConfig，CONFIG_MODELS 合计 32 个。JsonValue 是根分类数据的 JSON 类型，不计入模型。
 
 `config.__all__` 只提供 CapabilityType 和 9 个核心模型：SymphonyConfig、CapabilityConfig、StorageConfig、RetrievalConfig、RetrievalBuildConfig、OrchestrationConfig、OrchestrationBuildConfig、OrchestrationPlanConfig、FlowConfig。登记表、基类和其余子模型不进入便利导出，但可显式访问模块属性。
 
@@ -126,7 +126,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 30 个具体模型。INTERNAL_CONF
 
 - 构造固定能力根、产物根和根分类文件相对路径，复制嵌套配置。构造不做扫描、模型调用、目录创建或后台工作。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
-- `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。`for_session()` 从 RetrievalConfig 提取独立的 prompt、output 和 use_existing_index 供会话使用。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
+- `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
 - 检索、编排和 Flow 开关独立。禁用状态可查询，执行入口拒绝；model=None 允许只读和确定性发现、按任务策略回退构树，构图和规划拒绝缺模型。
 - skill 读取器已实现；expert/connector/mcp 读取器明确报不支持。相同目录只绑定一种对象集合。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。

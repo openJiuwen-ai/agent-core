@@ -58,7 +58,7 @@ async def test_independent_disabled_capabilities_are_queryable_but_reject_execut
     with pytest.raises(RuntimeError, match="disabled"):
         runtime.retrieval.read()
     with pytest.raises(RuntimeError, match="disabled"):
-        runtime.retrieval.create_session()
+        runtime.retrieval.create_session(config=runtime.config.retrieval.model_copy(update={"enabled": True}))
     with pytest.raises(RuntimeError, match="disabled"):
         await runtime.flow.start()
     await runtime.aclose()
@@ -82,7 +82,8 @@ async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_pat
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"prompt": {"context_window_tokens": 4000}, "output": {"max_results": 2}}))
     session = runtime.retrieval.create_session(session_scope="test")
     settings = session.environment.settings
-    assert set(settings.model_dump()) == {"prompt", "output", "use_existing_index"}
+    assert settings == runtime.config.retrieval
+    assert settings is not runtime.config.retrieval
     runtime.config.retrieval.prompt.preferred_capability_ids.append("runtime-mutation")
     assert "runtime-mutation" not in settings.prompt.preferred_capability_ids
     assert [r.worker_id for r in session.records()] == ["alpha"]

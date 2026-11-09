@@ -228,7 +228,8 @@ def test_legacy_mirrors_and_resolved_snapshots_are_not_target_configuration():
         "TreeRequestConfig", "TreeStructureConfig", "IndexTreeStructureConfig", "TreeBuildConfig",
         "IndexTreeBuildConfig", "TreeManagerConfig", "TreePromptConfig", "IndexBuildConfig", "IndexArtifactConfig",
         "TreeBuildOptions", "ProgressiveRetrieverConfig", "RetrieverConfig", "DisclosureConfig",
-        "DiscoveryBudgetConfig", "RetrievalGenerationConfig", "DynamicTreeConfig", "TreeExpansionConfig",
+        "DiscoveryConfig", "DiscoveryBudgetConfig", "RetrievalGenerationConfig",
+        "DynamicTreeConfig", "TreeExpansionConfig",
     }
     assert not removed & set(vars(target))
     assert not removed & {model.__name__ for model in target.CONFIG_MODELS}
@@ -275,7 +276,7 @@ def test_runtime_dependencies_are_not_configuration_fields():
 def test_public_groups_preserve_existing_module_defaults():
     config = target.SymphonyConfig.model_validate(MINIMAL)
     assert config.capability.scan == target.DirectoryScanConfig()
-    assert config.retrieval.for_session() == target.DiscoveryConfig()
+    assert config.retrieval == target.RetrievalConfig()
     assert config.flow == target.FlowConfig()
     assert config.orchestration.build.matching.model_dump() == {
         "batch_size": 12, "require_consensus": True, "max_candidates_per_capability_relation": 32,
@@ -586,10 +587,10 @@ def test_retired_capabilities_are_rejected_without_compatibility_aliases(payload
 
 def test_registry_contains_only_retained_capabilities():
     assert len(target.PUBLIC_CONFIG_MODELS) == 30
-    assert len(target.INTERNAL_CONFIG_MODELS) == 3
-    assert len(target.CONFIG_MODELS) == 33
+    assert len(target.INTERNAL_CONFIG_MODELS) == 2
+    assert len(target.CONFIG_MODELS) == 32
     assert {m.__name__ for m in target.INTERNAL_CONFIG_MODELS} == {
-        "FingerprintProtocolConfig", "OneShotTreeBuildConfig", "DiscoveryConfig",
+        "FingerprintProtocolConfig", "OneShotTreeBuildConfig",
     }
     for name in (
         "_DEFAULT_COMPACT_CODES", "LLMClientConfig", "RetrievalSearchConfig", "AgenticRetrievalConfig",

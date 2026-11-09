@@ -19,7 +19,7 @@ from openjiuwen.symphony.retrieval.common.models import RetrieverItem, Retriever
 from openjiuwen.symphony.retrieval.search.artifacts import CatalogRecord, build_tree_root, load_retriever_index
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
-from openjiuwen.symphony.config import DiscoveryConfig
+from openjiuwen.symphony.config import RetrievalConfig
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
 
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
@@ -396,7 +396,7 @@ class SkillFS:
         self,
         records_provider: SkillRecordsProvider,
         *,
-        settings: DiscoveryConfig,
+        settings: RetrievalConfig,
         visible_skill_names: VisibleSkillNames = None,
         artifact_root: Path | str,
         index_root: Path | str | None = None,
@@ -441,7 +441,7 @@ class SkillFS:
         return self._artifact
 
     @property
-    def settings(self) -> DiscoveryConfig:
+    def settings(self) -> RetrievalConfig:
         return self._settings
 
     @property

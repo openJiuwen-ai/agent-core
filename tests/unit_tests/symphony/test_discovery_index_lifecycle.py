@@ -1,5 +1,5 @@
 from __future__ import annotations
-from openjiuwen.symphony.config import DiscoveryConfig, RetrievalBuildConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig, RetrievalConfig
 """Verify the shared build/Discovery boundary after legacy retrieval retirement."""
 
 import hashlib
@@ -62,7 +62,7 @@ def built_index(tmp_path):
 async def test_one_shot_build_feeds_discovery_search_visibility_and_pagination(built_index):
     builder, inventory, _ = built_index
     environment = SkillFS(
-        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True),
+        lambda: inventory, settings=RetrievalConfig(use_existing_index=True),
         artifact_root=builder.index_root, visible_skill_names={"alpha", "beta"},
         pin_index_revision=True,
     )
@@ -99,7 +99,7 @@ def test_discovery_recovers_committed_backup_after_interrupted_publish(built_ind
     builder.index_dir.replace(backup)
 
     environment = SkillFS(
-        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True),
+        lambda: inventory, settings=RetrievalConfig(use_existing_index=True),
         artifact_root=builder.index_root,
     )
     assert environment.artifact.layout == "tree"
@@ -117,7 +117,7 @@ def test_failed_rebuild_preserves_committed_files_and_discovery(built_index):
     assert result["data"]["previous_index_preserved"]
     assert {path.name: path.read_bytes() for path in builder.index_dir.iterdir() if path.is_file()} == previous
     environment = SkillFS(
-        lambda: inventory, settings=DiscoveryConfig(use_existing_index=True), artifact_root=builder.index_root,
+        lambda: inventory, settings=RetrievalConfig(use_existing_index=True), artifact_root=builder.index_root,
     )
     assert environment.artifact.index_state == "fresh"
     assert environment.search_content(inventory, "invoice", case_insensitive=True, fixed_strings=True) == (
@@ -131,7 +131,7 @@ async def test_missing_index_keeps_live_inventory_search_and_prompt(tmp_path):
     path.write_text("Invoice document processing", encoding="utf-8")
     record = DiscoveryRecord("invoice", "Invoice", "Process invoices", str(path), content_hash="fixture")
     environment = SkillFS(
-        lambda: [record], settings=DiscoveryConfig(use_existing_index=True), artifact_root=tmp_path / "missing",
+        lambda: [record], settings=RetrievalConfig(use_existing_index=True), artifact_root=tmp_path / "missing",
     )
     assert environment.artifact.layout == "flat" and environment.artifact.index_state == "missing"
     assert environment.prompt_snapshot().entries[0].worker_id == "invoice"

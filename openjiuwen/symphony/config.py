@@ -236,22 +236,6 @@ class DiscoveryPromptConfig(SymphonyConfigModel):
         return max(1, int(self.context_window_tokens * self.candidate_budget_ratio))
 
 
-class DiscoveryConfig(SymphonyConfigModel):
-    """Discovery 会话使用的提示、输出和索引读取策略。"""
-
-    prompt: DiscoveryPromptConfig = Field(
-        default_factory=DiscoveryPromptConfig, title="提示策略", description="候选提示的上下文容量、预算比例和优先对象设置。",
-    )
-    output: DiscoveryOutputConfig = Field(
-        default_factory=DiscoveryOutputConfig, title="输出预算", description="发现结果、列表和增量提示的限制。",
-    )
-    use_existing_index: bool = Field(False, title="使用已有索引", description="是否使用已经构建的检索索引辅助发现。")
-
-    def for_session(self) -> DiscoveryConfig:
-        """复制会话策略，构建配置与功能开关由 Runtime 管理。"""
-        return DiscoveryConfig.model_validate(self.model_dump(include=set(DiscoveryConfig.model_fields)))
-
-
 # 树构建：保留底层树、索引工作流、agent toolkit 三个入口各自的默认值。
 class TreePostprocessConfig(SymphonyConfigModel):
     """分类树构建后的处理策略。"""
@@ -438,9 +422,16 @@ class RetrievalBuildConfig(SymphonyConfigModel):
     )
 
 
-class RetrievalConfig(DiscoveryConfig):
+class RetrievalConfig(SymphonyConfigModel):
     """公共检索配置；组合分类树构建和对象发现，启用不会自动构建索引。"""
 
+    prompt: DiscoveryPromptConfig = Field(
+        default_factory=DiscoveryPromptConfig, title="提示策略", description="候选提示的上下文容量、预算比例和优先对象设置。",
+    )
+    output: DiscoveryOutputConfig = Field(
+        default_factory=DiscoveryOutputConfig, title="输出预算", description="发现结果、列表和增量提示的限制。",
+    )
+    use_existing_index: bool = Field(False, title="使用已有索引", description="是否使用已经构建的检索索引辅助发现。")
     enabled: bool = Field(True, title="启用检索", description="允许构建和读取分类树、创建发现会话；独立于编排开关。")
     index_build: RetrievalBuildConfig = Field(
         default_factory=RetrievalBuildConfig, title="索引构建", description="显式构建分类树时使用的策略。",
@@ -503,7 +494,7 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
 )
 
 INTERNAL_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
-    FingerprintProtocolConfig, OneShotTreeBuildConfig, DiscoveryConfig,
+    FingerprintProtocolConfig, OneShotTreeBuildConfig,
 )
 
 CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = PUBLIC_CONFIG_MODELS + INTERNAL_CONFIG_MODELS

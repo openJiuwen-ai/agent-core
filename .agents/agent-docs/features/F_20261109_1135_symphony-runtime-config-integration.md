@@ -43,3 +43,9 @@ Runtime改为二参数构造，统一retrieval/orchestration/flow入口。扫描
 以 e180606ce 为基线，落实 D-20261031-1614-symphony-config-contract 第 15 节。RetrievalConfig 直接承载构树和会话策略，DiscoveryConfig 从根树移到内部登记，供会话保存独立的三字段快照。Core 严格拒绝旧 build/discovery 子节点。Runtime 构树从 index_build 取原构树子模型，沿用分类树签名与版本。
 
 Core Symphony 单测通过 890 项。另有 1 项受沙箱回环端口限制，允许本机回环后单独通过。配置默认值通过历史快照重排验证。用基线 Core 和 Swarm 生成分类树及 v2 快照，切换到本次工作树后，读取与构建复用相同索引版本和签名，旧会话恢复原预算及索引版本。锁定 Core 安装后的验收结果记录在 Swarm。
+
+## 2026-11-09 检索配置模型收敛
+
+以 89fcdab29 为基线，落实 D-20261031-1614-symphony-config-contract 第 16 节。会话和构树共用 RetrievalConfig 定义，移除 DiscoveryConfig 与会话投影方法。会话深复制配置并消费自身策略，v2 三字段投影移至 Swarm 快照边界。
+
+Core Symphony 测试通过 889 项，包含单独运行的 1 项本机 HTTP 回环用例。与 89fcdab29 安装版对比，公共 JSON Schema、默认值和重新导出的配置树一致。源码跨版本验证复用了旧分类树和 v2 会话快照，索引签名、发布版本与冻结预算一致。

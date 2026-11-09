@@ -188,3 +188,9 @@ SymphonyConfig
 `retrieval.enabled` 继续控制构树、读树和会话创建。Runtime 保留 `runtime.retrieval` 入口。会话提取独立策略，v2 快照沿用原有的三字段结构。默认值、校验约束和构树签名输入沿用现行契约。
 
 验收覆盖重排后的历史默认值、新旧路径校验、配置树、禁用入口、分类树复用和旧 v2 会话恢复。Swarm 通过固定 Core 提交安装后验证 YAML、设置保存、构树和会话发现。
+
+## 16. 2026-11-09 删除重复检索配置模型
+
+用户确认将会话与构树配置统一到 `RetrievalConfig`，删除 `DiscoveryConfig` 和 `for_session()`。本节替代第 15 节的会话配置提取方式。`create_session(config=...)` 深复制统一配置，会话读取提示、输出和索引策略，Runtime 持有启用开关及构树策略。
+
+Swarm 删除重复的配置入口和退役面板文案。在 v2 快照边界投影和严格校验 `prompt`、`output` 和 `use_existing_index`。验收覆盖公共 Schema 与默认值、会话隔离、旧索引复用，以及固定 Core 安装包对旧 v2 快照的恢复。
