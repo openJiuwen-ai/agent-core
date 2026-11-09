@@ -596,6 +596,30 @@ def test_scanner_respects_max_depth(tmp_path: Path) -> None:
     assert [item.capability_id for item in result] == ["one", "root-skill"]
 
 
+@pytest.mark.parametrize("max_depth", [1, None])
+def test_scanner_ignores_hidden_skill_versions_and_assets(tmp_path: Path, max_depth: int | None) -> None:
+    root = tmp_path / ".skills"
+    skill = root / "alpha"
+    _write_skill(skill, "capability_id: alpha\nname: Current")
+    _write_skill(root / ".archieve", "capability_id: alpha\nname: Old copy")
+    archived = _write_skill(
+        skill / ".archive" / "versions" / "content" / "old",
+        "capability_id: alpha\nname: Old version",
+    )
+    hidden_asset = skill / ".notes.md"
+    hidden_asset.write_text("draft", encoding="utf-8")
+    (skill / "guide.md").write_text("guide", encoding="utf-8")
+    scanner = SkillFolderScanner(root, max_depth=max_depth)
+
+    result = scanner.scan()
+
+    assert [item.capability_id for item in result] == ["alpha"]
+    assert result[0].metadata["asset_paths"] == ["guide.md", "SKILL.md"]
+    archived.write_text("new archive content", encoding="utf-8")
+    hidden_asset.write_text("updated draft", encoding="utf-8")
+    assert scanner.scan().source_snapshot == result.source_snapshot
+
+
 def test_invalid_root_uses_symphony_status_code(tmp_path: Path) -> None:
     with pytest.raises(BaseError) as caught:
         SkillFolderScanner(tmp_path / "missing").scan()

@@ -42,16 +42,6 @@ _DEFAULT_MAX_SCAN_ASSET_FILES = 100_000
 _DEFAULT_MAX_SCAN_ASSET_BYTES = 2 * 1024 * 1024 * 1024
 _EXCLUDED_DIRECTORY_NAMES = frozenset(
     {
-        ".cache",
-        ".git",
-        ".hg",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".svn",
-        ".tox",
-        ".venv",
-        ".ssh",
         "__pycache__",
         "cache",
         "caches",
@@ -95,9 +85,6 @@ _KEY_MATERIAL_SUFFIXES = frozenset(
 )
 _SENSITIVE_EXACT_FILENAMES = frozenset(
     {
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
         "authorized_keys",
         "id_dsa",
         "id_ecdsa",
@@ -180,7 +167,7 @@ class ScanResult(Sequence[CapabilityDescriptor]):
 
 
 class SkillFolderScanner:
-    """Discover ``SKILL.md`` files only below an explicitly supplied root."""
+    """Discover ``SKILL.md`` files below a supplied root, skipping dot-prefixed entries."""
 
     def __init__(
         self,
@@ -435,9 +422,11 @@ def _read_directory_entries(
     budget.directories += 1
     entries: list[_SafeDirectoryEntry] = []
     with os.scandir(directory) as iterator:
-        for entry in iterator:
-            if len(entries) >= max_entries:
+        for entry_count, entry in enumerate(iterator, start=1):
+            if entry_count > max_entries:
                 _raise_inventory_error("a scanned directory exceeds the configured entry limit")
+            if entry.name.startswith("."):
+                continue
             try:
                 entry_stat = entry.stat(follow_symlinks=False)
                 mode = entry_stat.st_mode
@@ -800,8 +789,6 @@ def _diagnostic_sort_key(diagnostic: ScanDiagnostic) -> tuple[str, str, str]:
 
 def _exclude_directory(name: str) -> bool:
     lowered = name.casefold()
-    if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
-        return True
     if lowered in _EXCLUDED_DIRECTORY_NAMES or lowered.endswith(".cache"):
         return True
     normalized = normalize_sensitive_name(name)
@@ -826,9 +813,7 @@ def _exclude_directory(name: str) -> bool:
 
 def _exclude_file(name: str) -> bool:
     lowered = name.casefold()
-    if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
-        return True
-    if lowered in {".git", "__pycache__", "cache"}:
+    if lowered in {"__pycache__", "cache"}:
         return True
     if lowered in _SENSITIVE_EXACT_FILENAMES or Path(lowered).suffix in _KEY_MATERIAL_SUFFIXES:
         return True
