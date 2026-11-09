@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Non-interactive run mode.
 
 Supports three output formats:
@@ -93,10 +94,7 @@ async def _output_json(
         "chunks": chunk_count,
         "model": cfg.model,
     }
-    _write_terminal(
-        json.dumps(output, ensure_ascii=False, indent=2)
-    )
-    _write_terminal("\n")
+    _write_terminal(json.dumps(output, ensure_ascii=False, indent=2) + "\n", utf8_redirect=True)
     return 0
 
 
@@ -115,8 +113,7 @@ async def _output_stream_json(
                 else str(payload)
             ),
         }
-        _write_terminal(json.dumps(line, ensure_ascii=False))
-        _write_terminal("\n")
+        _write_terminal(json.dumps(line, ensure_ascii=False) + "\n", utf8_redirect=True)
     return 0
 
 

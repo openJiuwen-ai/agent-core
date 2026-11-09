@@ -6,7 +6,10 @@ loop was tested before this optimizer moved here from jiuwenswarm's Symphony lay
 """
 
 import asyncio
+from pathlib import Path
+from unittest.mock import Mock
 
+from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.dev_tools.tune.optimizer.prompt_search.drift import NullDriftJudge
 from openjiuwen.dev_tools.tune.optimizer.prompt_search.environment import CallableEnvironment
 from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import JsonlPromptMemory
@@ -53,6 +56,17 @@ def _make_optimizer(tmp_path, **overrides):
     )
     kwargs.update(overrides)
     return PromptSearchOptimizer(**kwargs)
+
+
+def test_constructor_snapshots_objectives_for_bound_parameters(tmp_path: Path) -> None:
+    call = Mock()
+    call.get_system_prompt.return_value = PromptTemplate(content="original prompt")
+    optimizer = _make_optimizer(tmp_path, parameters={"first": call})
+
+    call.get_system_prompt.return_value = PromptTemplate(content="updated prompt")
+    optimizer.bind_parameter({"second": call})
+
+    assert optimizer._objectives == {"first": "original prompt", "second": "updated prompt"}
 
 
 def test_reward_improves_and_converges(tmp_path):
