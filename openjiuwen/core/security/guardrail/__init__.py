@@ -60,6 +60,7 @@ from openjiuwen.core.security.guardrail.enums import (
 from openjiuwen.core.security.guardrail.models import (
     GuardrailResult,
     RiskAssessment,
+    to_guardrail_result,
 )
 
 # Context and Parsers
@@ -144,6 +145,7 @@ __all__ = [
     # Data Models
     "GuardrailResult",
     "RiskAssessment",
+    "to_guardrail_result",
     # Context and Parsers
     "GuardrailContext",
     "ModelOutputParser",

@@ -2688,7 +2688,6 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
     assert work_config["restrict_to_sandbox"] is True
     assert work_config["sandbox_root"] == [str(sandbox.resolve())]
     assert work_config["shell_allowlist"] == []
-    assert work_config["dangerous_patterns"] == []
 
 
 @pytest.mark.asyncio

@@ -401,35 +401,6 @@ class ShellOperation(BaseShellOperation):
          "Interactive TUI program will hang without TTY", None),
     ]
 
-    _DANGEROUS_PATTERNS: List[Tuple[re.Pattern, str]] = [
-        (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "rm -rf"),
-        (re.compile(r"\bdel\s+/[a-z]*[fsq][a-z]*\b", re.IGNORECASE), "del /f /s /q"),
-        (re.compile(r"\brd\s+/s\s+/q\b", re.IGNORECASE), "rd /s /q"),
-        (re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE), "format drive"),
-        (re.compile(r"\bshutdown\b", re.IGNORECASE), "shutdown"),
-        (re.compile(r"\breboot\b", re.IGNORECASE), "reboot"),
-        (re.compile(r"\bdiskpart\b", re.IGNORECASE), "diskpart"),
-        (re.compile(r"\bmkfs\b", re.IGNORECASE), "mkfs"),
-        (re.compile(r"\breg\s+delete\b", re.IGNORECASE), "reg delete"),
-        (re.compile(r"\bremove-item\b[^\n\r]*-recurse[^\n\r]*-force", re.IGNORECASE), "Remove-Item -Recurse -Force"),
-        (
-            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
-            "pkill targeting jiuwenswarm backend",
-        ),
-        (
-            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
-            "killall targeting jiuwenswarm backend",
-        ),
-        (
-            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
-            "pkill targeting jiuwenclaw backend",
-        ),
-        (
-            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
-            "killall targeting jiuwenclaw backend",
-        ),
-    ]
-
     _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
         "windows": lambda cmd: cmd,
         "linux": lambda cmd: f"stdbuf -oL -eL /bin/sh -c {shlex.quote(cmd)}",
@@ -632,10 +603,6 @@ class ShellOperation(BaseShellOperation):
         try:
             # Resolve CWD
             actual_cwd = self._resolve_cwd(cwd)
-            blocked = self._check_command_safety(command)
-            if blocked:
-                return _create_exec_cmd_err(error_msg=f"command rejected for safety: {blocked}",
-                                            data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
             if not self._check_allowlist(command):
                 return _create_exec_cmd_err(error_msg="command not allowed by allowlist",
                                             data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
@@ -774,12 +741,6 @@ class ShellOperation(BaseShellOperation):
 
         try:
             actual_cwd = self._resolve_cwd(cwd)
-            blocked = self._check_command_safety(command)
-            if blocked:
-                yield _create_exec_cmd_stream_err(
-                    error_msg=f"command rejected for safety: {blocked}",
-                    data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
-                return
             if not self._check_allowlist(command):
                 yield _create_exec_cmd_stream_err(
                     error_msg="command not allowed by allowlist",
@@ -958,11 +919,6 @@ class ShellOperation(BaseShellOperation):
         actual_cwd = None
         try:
             actual_cwd = self._resolve_cwd(cwd)
-            blocked = self._check_command_safety(command)
-            if blocked:
-                return _create_exec_cmd_background_err(
-                    error_msg=f"command rejected for safety: {blocked}",
-                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
             if not self._check_allowlist(command):
                 return _create_exec_cmd_background_err(
                     error_msg="command not allowed by allowlist",
@@ -1023,19 +979,6 @@ class ShellOperation(BaseShellOperation):
             return _create_exec_cmd_background_err(
                 error_msg=f"unexpected error: {str(e)}",
                 data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)) if actual_cwd else None)
-
-    def _check_command_safety(self, command: str) -> Optional[str]:
-        """Check command against dangerous patterns. Returns matched label/pattern or None if safe."""
-        custom_patterns = getattr(self._run_config, 'dangerous_patterns', None)
-        if custom_patterns is not None:
-            for raw_pattern in custom_patterns:
-                if re.search(raw_pattern, command, re.IGNORECASE):
-                    return raw_pattern
-            return None
-        for pattern, label in self._DANGEROUS_PATTERNS:
-            if pattern.search(command):
-                return label
-        return None
 
     def _check_allowlist(self, command: str) -> bool:
         """Check if command is in allowlist."""

@@ -28,7 +28,6 @@ from openjiuwen.core.foundation.tool.name_sanitize import (
     sanitize_llm_tool_name,
 )
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -1533,11 +1532,19 @@ class AbilityManager:
             if ctx.inputs.tool_args is not None:
                 tool_call.arguments = ctx.inputs.tool_args
 
-        result, tool_msg = await self._execute_single_tool_call(
-            tool_call=tool_call,
-            session=session,
-            tag=tag,
+        from openjiuwen.core.common.security.outbound import (
+            OUTBOUND_PERMISSION_KEY,
+            bind_outbound_permission_key,
         )
+
+        # This scope encloses execution itself: after-tool callbacks are skipped
+        # on cancellation/retry, so they cannot own ContextVar cleanup.
+        with bind_outbound_permission_key(ctx.extra.get(OUTBOUND_PERMISSION_KEY)):
+            result, tool_msg = await self._execute_single_tool_call(
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+            )
 
         if isinstance(ctx.inputs, ToolCallInputs):
             ctx.inputs.tool_call = tool_call

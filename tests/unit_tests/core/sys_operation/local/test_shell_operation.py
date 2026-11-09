@@ -435,7 +435,6 @@ class _FakeRunConfig:
         self.restrict_to_sandbox = restrict
         self.sandbox_root = roots
         self.shell_allowlist = None
-        self.dangerous_patterns = None
 
 
 def _make_shell_op(restrict: bool, roots: list[str] | None = None) -> ShellOperation:

@@ -17,9 +17,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
-from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
-    GENERATE_RECORDS_LLM_POLICY,
-)
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 
 CONSULT_RETRIEVE_MODES = ("hybrid", "embed", "bm25")
@@ -47,10 +44,10 @@ class TTSEConfig:
             ``dream_llm_cluster_enabled`` is True. FACT/TIP are disclosed
             via ``ttse_consult``, not dumped into the system prompt.
             Semantic dedup / consult recall scan the in-memory bank in O(n)
-            (n <= max_facts or max_tips, default 400). After the process-local
+            (unlimited by default). After the process-local
             embedding cache is warm this is CPU cosine only; a cold bank is
             filled with batched ``embed_documents`` (not one RPC per row).
-            Dedup/dream still scan the in-memory bank at this n. ``ttse_consult``
+            Dedup/dream still scan the in-memory bank. ``ttse_consult``
             ranks from persisted BM25 sidecars plus Chroma HNSW when embeddings
             exist. The same provider is reused for BM25+embedding hybrid recall;
             missing/failed embedding degrades to BM25. Callers typically construct
@@ -62,8 +59,8 @@ class TTSEConfig:
             matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Only used when ``embedding`` is set.
-        max_facts / max_tips: Hard caps on bank size (highest-count kept).
-            Also the O(n) bound for semantic dedup / consult embedding scans.
+        max_facts / max_tips: Optional caps on bank size (highest-count kept).
+            Default ``None`` means unlimited; ``0`` keeps no records.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
             ``None`` or ``<= 0`` means no truncation. When set, overflow keeps
             the tail (actions/observations), not the USER head.
@@ -78,6 +75,8 @@ class TTSEConfig:
             Empty falls back to env ``TTSE_TRAJECTORY_EXPORT_PATH``.
         success_threshold: Score >= this counts as success (Slice 3 gating).
         induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
+            Default attempt timeout and total budget are both 10 minutes.
+            A fast failure can still retry while budget remains.
         batch_size: Cost-amortization knob. When > 1, per-task observations are
             buffered and induced together via ONE ``induce_batch`` LLM call every
             ``batch_size`` tasks (blame/retire still run per failed task). 1 =
@@ -106,7 +105,8 @@ class TTSEConfig:
             reply-delivery detect runs (not session-cumulative).
         detect_max_output_paths: Cap on extracted write paths fed to the Judge.
         detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
-        detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
+        detect_llm_policy: Reply-delivery Judge policy (60s per attempt,
+            up to 2 attempts; timeouts retry within the total budget).
         dream_enabled: Run periodic Auto-dream bank hygiene.
         dream_interval: Non-follow-up task iterations between dream attempts.
         dream_min_hours: Min hours since last successful dream.
@@ -142,15 +142,21 @@ class TTSEConfig:
     embedding: Optional[EmbeddingProvider] = None
     embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
-    max_facts: int = 400
-    max_tips: int = 400
+    max_facts: Optional[int] = None
+    max_tips: Optional[int] = None
     traj_char_budget: Optional[int] = None
     inject_enabled: bool = True
     evolve_enabled: bool = True
     trajectory_export_enabled: bool = False
     trajectory_export_path: str = ""
     success_threshold: float = 0.999
-    induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
+    induce_llm_policy: LLMInvokePolicy = field(
+        default_factory=lambda: LLMInvokePolicy(
+            attempt_timeout_secs=600.0,
+            total_budget_secs=600.0,
+            max_attempts=2,
+        )
+    )
     batch_size: int = 1
     batch_traj_budget: Optional[int] = None
     consult_max_chars: int = 8000
@@ -165,9 +171,9 @@ class TTSEConfig:
     detect_final_reply_chars: int = 1500
     detect_llm_policy: LLMInvokePolicy = field(
         default_factory=lambda: LLMInvokePolicy(
-            attempt_timeout_secs=30.0,
-            total_budget_secs=35.0,
-            max_attempts=1,
+            attempt_timeout_secs=60.0,
+            total_budget_secs=130.0,
+            max_attempts=2,
         )
     )
     # Auto-dream (bank hygiene)
