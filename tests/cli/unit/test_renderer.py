@@ -88,6 +88,20 @@ def test_windows_terminal_write_respects_replaced_stdout(monkeypatch: pytest.Mon
     assert stdout.getvalue() == "中文🙂"
 
 
+def test_windows_legacy_console_escapes_unencodable_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ConsoleStream(io.TextIOWrapper):
+        def isatty(self) -> bool:
+            return True
+
+    buffer = io.BytesIO()
+    with ConsoleStream(buffer, encoding="cp1252", errors="strict") as stdout:
+        monkeypatch.setattr(renderer, "sys", SimpleNamespace(platform="win32", stdout=stdout))
+
+        renderer._write_terminal("café 🙂")
+
+        assert buffer.getvalue().decode("cp1252") == "café \\U0001f642"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream_json", [False, True])
 async def test_run_formats_write_redirected_utf8(

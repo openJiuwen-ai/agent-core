@@ -57,7 +57,14 @@ def _write_terminal(text: str, *, utf8_redirect: bool = False) -> None:
         stdout.buffer.write(text.encode("utf-8", errors=stdout.errors or "strict"))
         stdout.buffer.flush()
         return
-    stdout.write(text)
+    try:
+        stdout.write(text)
+    except UnicodeEncodeError:
+        if sys.platform != "win32" or not isinstance(stdout, io.TextIOWrapper) or not stdout.isatty():
+            raise
+        # A legacy console can only display characters in its active encoding.
+        encoding = stdout.encoding
+        stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
     stdout.flush()
 
 # Chunk type constants (aligned with SDK OutputSchema.type)
