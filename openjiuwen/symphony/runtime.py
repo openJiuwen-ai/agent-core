@@ -86,6 +86,7 @@ class SymphonyRuntime:
         fingerprints = FingerprintService(
             inventory, artifact_root / "cache" / "fingerprints", llm=model,
             config=policy, protocol=protocol, model_response_observer=observer,
+            allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
         )
         policy_hash = hashlib.sha256(policy.model_dump_json().encode()).hexdigest()
         service = OrchestrationService(
@@ -96,7 +97,7 @@ class SymphonyRuntime:
             fingerprint_service=fingerprints,
         )
         self.orchestration = SymphonyGraphEngine(service, storage=self._storage, inventory=inventory)
-        self.retrieval = TreeEngine(model, self.config.retrieval, self._storage, inventory)
+        self.retrieval = TreeEngine(model, self.config.retrieval, self._storage, inventory, fingerprints)
         self.flow = RuntimeFlow(model, self.config.orchestration, self._storage)
         self._graph_scope_id = self._storage.scope_id
 

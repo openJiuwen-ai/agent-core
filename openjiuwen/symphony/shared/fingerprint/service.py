@@ -39,6 +39,7 @@ from openjiuwen.symphony.models import (
     SourceSnapshot,
 )
 from openjiuwen.symphony.models._message_trace import message_references_fingerprint
+from openjiuwen.symphony.orchestration.model import model_identity
 from openjiuwen.symphony.shared.fingerprint.artifact import FingerprintArtifactStore
 from openjiuwen.symphony.shared.fingerprint.cache import FingerprintCache
 from openjiuwen.symphony.shared.fingerprint.extractor import (
@@ -90,11 +91,18 @@ class FingerprintService:
         protocol: FingerprintProtocolConfig | None = None,
         evaluation_suite: QualityEvaluationSuite | None = None,
         model_response_observer: ModelResponseObserver | None = None,
+        allow_metadata_fallback: bool = False,
     ) -> None:
         self._provider = capability_provider
         self._llm = llm
-        self._settings = config or FingerprintPolicyConfig()
-        self._protocol = protocol or FingerprintProtocolConfig()
+        settings = config or FingerprintPolicyConfig()
+        if allow_metadata_fallback and llm is None:
+            settings = settings.model_copy(update={
+                "extraction": settings.extraction.model_copy(update={"llm_enabled": False}),
+                "evaluation": settings.evaluation.model_copy(update={"llm_enabled": False}),
+            })
+        self._settings = settings
+        self._protocol = protocol or FingerprintProtocolConfig(configuration_signature=_model_signature(llm))
         self._store = FingerprintArtifactStore(artifact_root)
         self._cache = FingerprintCache(self._store.root)
         self._extractor = CapabilityFingerprintExtractor(
@@ -468,6 +476,13 @@ class FingerprintService:
                 StatusCode.COMPONENT_SYMPHONY_BUILD_INTERRUPTED,
                 reason="fingerprint build was cancelled before publication",
             )
+
+
+def _model_signature(model: SymphonyLLM | None) -> str:
+    if model is None or (getattr(model, "model_config", None) is None
+                         and getattr(model, "model_client_config", None) is None):
+        return ""
+    return hashlib.sha256(json.dumps(model_identity(model), sort_keys=True).encode()).hexdigest()
 
 
 def _snapshot_stability_payload(snapshot: SourceSnapshot) -> dict[str, Any]:

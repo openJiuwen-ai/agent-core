@@ -20,6 +20,9 @@ from openjiuwen.symphony.retrieval.search.artifacts import CatalogRecord, build_
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
 from openjiuwen.symphony.config import RetrievalConfig
+from openjiuwen.symphony.shared.fingerprint import FingerprintService
+
+from .capability_search import fingerprint_text, read_fingerprints
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
 
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
@@ -402,6 +405,8 @@ class SkillFS:
         index_root: Path | str | None = None,
         pin_index_revision: bool = False,
         pinned_index_snapshot: SkillIndexSnapshot | Mapping[str, Any] | None | object = _PINNED_INDEX_SNAPSHOT_UNSET,
+        fingerprint_service: FingerprintService | None = None,
+        fingerprint_source_root: str = "",
         **_: Any,
     ) -> None:
         if not callable(records_provider):
@@ -409,6 +414,8 @@ class SkillFS:
         self._records_provider = records_provider
         self._settings = settings
         self._visible_skill_names = visible_skill_names
+        self._fingerprint_service = fingerprint_service
+        self._fingerprint_source_root = fingerprint_source_root
         self._artifact_root = Path(artifact_root).expanduser().resolve()
         self._index_root = Path(index_root).expanduser().resolve() if index_root is not None else self._artifact_root
         snapshot_provided = pinned_index_snapshot is not _PINNED_INDEX_SNAPSHOT_UNSET
@@ -563,7 +570,7 @@ class SkillFS:
                             LexicalDocument(
                                 item.worker_id,
                                 item.name,
-                                item.description,
+                                self._search_descriptions.get(item.worker_id, item.description),
                                 self.read_body(item),
                                 item.aliases,
                                 self._view.category_text(item.worker_id),
@@ -609,6 +616,20 @@ class SkillFS:
         visible = self._visible_skill_names() if callable(self._visible_skill_names) else self._visible_skill_names
         visible_set = None if visible is None else {str(item) for item in visible}
         items = tuple(item for item in inventory.items if visible_set is None or item.worker_id in visible_set)
+        scoped = tuple(item for item in items if item.source_root == self._fingerprint_source_root)
+        fingerprints = read_fingerprints(self._fingerprint_service) if scoped else {}
+        descriptions = {}
+        for item in scoped:
+            summary, text = fingerprint_text(
+                fingerprints.get(("skill", item.worker_id)), item.content_hash, item.description,
+            )
+            if summary != item.description or text != item.description:
+                descriptions[item.worker_id] = (sanitize_model_text(summary), text)
+        self._search_descriptions = {key: text for key, (_, text) in descriptions.items()}
+        items = tuple(
+            replace(item, description=descriptions[item.worker_id][0])
+            if item.worker_id in descriptions else item for item in items
+        )
         snapshot = self._index_snapshot
         if self._settings.use_existing_index and not self._pin_index_revision:
             snapshot = capture_index_snapshot(self._index_root)
@@ -625,6 +646,8 @@ class SkillFS:
             "taxonomy": snapshot.taxonomy_fingerprint if snapshot is not None else "",
             "state": index_state,
         }
+        if descriptions:
+            fingerprint_payload["descriptions"] = descriptions
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()

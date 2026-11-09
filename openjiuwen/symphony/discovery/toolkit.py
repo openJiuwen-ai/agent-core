@@ -117,11 +117,13 @@ def clear_incremental_skill_notice_states() -> None:
 class IncrementalNoticeSession:
     """Append one pending notice only after it fits the delivered result."""
 
-    def __init__(self, session_scope: str, raw_cards: Mapping[str, Mapping[str, str]], *, max_chars: int) -> None:
+    def __init__(self, session_scope: str, raw_cards: Mapping[str, Mapping[str, str]], *, max_chars: int,
+                 tool_name: str = SKILL_INDEX_TOOL_NAME) -> None:
         if max_chars <= 0:
             raise ValueError("incremental_notice_max_chars must be positive")
         self._max_chars = max_chars
-        self._state = _notice_state(_tool_id(session_scope, SKILL_INDEX_TOOL_NAME), _normalize_cards(raw_cards))
+        self._tool_name = tool_name
+        self._state = _notice_state(_tool_id(session_scope, tool_name), _normalize_cards(raw_cards))
 
     def append(
         self,
@@ -132,7 +134,7 @@ class IncrementalNoticeSession:
     ) -> tuple[str, str | None]:
         current = _normalize_cards(raw_cards)
         with self._state.prepare(current) as prepared:
-            reminder = _render_reminder(prepared.added, max_chars=self._max_chars, tool_name=SKILL_INDEX_TOOL_NAME)
+            reminder = _render_reminder(prepared.added, max_chars=self._max_chars, tool_name=self._tool_name)
             if not reminder:
                 return output, None
             combined = f"{output}\n\n{reminder}" if output else reminder

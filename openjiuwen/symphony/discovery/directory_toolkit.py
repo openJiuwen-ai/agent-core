@@ -1,4 +1,4 @@
-"""Structured ``skill_index`` adapter over Symphony's retriever tree."""
+"""Structured capability discovery over Symphony's live directories."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -25,6 +26,8 @@ _MAX_LINES = 5_000
 _SKILL_DESCRIPTION_CHARS = 180
 _MAX_CURSORS = 32
 _CURSOR_FOOTER_CHARS = 96
+_CAPABILITY_SEARCH_TOOL_NAME = "capability_search"
+_CAPABILITY_TYPES = ("skill", "expert", "connector", "mcp")
 _OPERATIONS = ("list", "search", "read")
 _MODEL_OPERATIONS = ("list", "search")
 _LIST_VIEWS = ("names", "details", "tree")
@@ -34,7 +37,7 @@ _READ_MODES = ("full", "head", "range")
 _PIPELINE_OPERATIONS = ("limit", "slice", "filter", "count")
 _OUTPUT_MODES = ("entries", "count")
 _TOOL_ID_DOMAIN = b"openjiuwen.skill-index-tool.v1\0"
-_SHORTENED = "[skill_index output shortened to fit output budget]"
+_SHORTENED = "[Output shortened to fit output budget]"
 _SKILL_INDEX_DEFAULTS: dict[str, Any] = {
     "view": "names",
     "recursive": False,
@@ -147,6 +150,8 @@ class _DirectoryFunction(LocalFunction):
         if isinstance(inputs, dict):
             unexpected = inputs.keys() - self.card.input_params["properties"].keys()
             if unexpected:
+                if self.card.name == _CAPABILITY_SEARCH_TOOL_NAME:
+                    raise ValueError(f"Unknown capability_search arguments: {', '.join(sorted(unexpected))}")
                 raise ValueError(
                     f"Unknown skill_index arguments: {', '.join(sorted(unexpected))}. "
                     "Only operation, category, query, cursor are accepted. "
@@ -160,9 +165,10 @@ class _DirectoryFunction(LocalFunction):
             if isinstance(category, str) and not category.strip():
                 inputs.pop("category")
             query = inputs.get("query")
-            if inputs.get("operation") == "search" and isinstance(query, str):
+            operation = inputs.get("operation", "search" if self.card.name == _CAPABILITY_SEARCH_TOOL_NAME else None)
+            if operation == "search" and isinstance(query, str):
                 inputs["query"] = [query]
-            elif inputs.get("operation") == "list" and query == []:
+            elif operation == "list" and query == []:
                 inputs.pop("query")
         return await super().invoke(inputs, **kwargs)
 
@@ -176,6 +182,7 @@ class InstalledSkillsDirectoryToolkit:
         *,
         session_scope: str,
         incremental_notice_max_chars: int = 4_000,
+        search_catalog: Callable[[str, str, int], Awaitable[dict[str, Any]]] | None = None,
         **_: Any,
     ) -> None:
         if not isinstance(environment, SkillFS):
@@ -189,10 +196,12 @@ class InstalledSkillsDirectoryToolkit:
             raise ValueError("session_scope must be non-empty")
         digest = hashlib.sha256(_TOOL_ID_DOMAIN + scope.encode()).hexdigest()
         self._tool_id = f"{SKILL_INDEX_TOOL_NAME}__{digest}"
+        self._search_catalog = search_catalog
         self._notice = IncrementalNoticeSession(
             scope,
             environment.selection_cards(refresh=False),
             max_chars=incremental_notice_max_chars,
+            tool_name=_CAPABILITY_SEARCH_TOOL_NAME if search_catalog is not None else SKILL_INDEX_TOOL_NAME,
         )
         self._observed_meta_paths: dict[str, str] = {}
         self._cursors: dict[str, _CursorState] = {}
@@ -252,12 +261,56 @@ class InstalledSkillsDirectoryToolkit:
                 raise RuntimeError("skill_index toolkit is closed")
             return await asyncio.to_thread(self._execute, arguments)
 
-    def get_tools(self) -> list[Tool]:
-        tool = _DirectoryFunction(
-            card=_tool_card(self._tool_id),
-            func=self.skill_index,
+    async def capability_search(
+        self,
+        query: str | list[str] | None = None,
+        type: str = "skill",
+        operation: str = "search",
+        category: str | None = None,
+        cursor: str | None = None,
+        top_k: int | None = None,
+    ) -> SkillDCICommandResult | dict[str, Any]:
+        """Select the Skill directory or one of the host's live capability catalogs."""
+        kind = _enum(type, _CAPABILITY_TYPES, "type")
+        operation = _enum(operation, _MODEL_OPERATIONS, "operation")
+        limit = _positive(top_k, "top_k", optional=True)
+        if limit is not None and limit > 50:
+            raise ValueError("top_k must not exceed 50")
+        if kind == "skill":
+            if limit is not None:
+                limit = min(limit, self._environment.settings.output.max_results)
+            return await self.skill_index(operation, category=category, query=query, cursor=cursor, limit=limit)
+        if operation != "search" or category is not None or cursor is not None:
+            raise ValueError("list, category, and cursor apply only to type=skill")
+        terms = _queries(query, None)
+        if len(terms) != 1:
+            raise ValueError("Search one query at a time for expert, connector, or mcp")
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("capability_search toolkit is closed")
+            if self._search_catalog is None:
+                return {"matches": []}
+            return await self._search_catalog(kind, terms[0], limit or 10)
+
+    def get_tools(self, *, unified: bool = False) -> list[Tool]:
+        card = _tool_card(self._tool_id)
+        if not unified:
+            return [_DirectoryFunction(card=card, func=self.skill_index)]
+        card.name = _CAPABILITY_SEARCH_TOOL_NAME
+        card.id = f"{_CAPABILITY_SEARCH_TOOL_NAME}__{self._tool_id.split('__', 1)[1]}"
+        card.description = (
+            "Read-only search for capabilities available in this session. Select type=skill, expert, "
+            "connector, or mcp. For Skills, list categories or search names, descriptions and SKILL.md, "
+            "and copy [next] to continue. Other types accept one search query. Use Skill IDs with skill_tool, "
+            "expert references with spawn_expert, and tool_search to inspect deferred tools."
         )
-        return [tool]
+        card.input_params["required"] = []
+        card.input_params["properties"]["operation"]["default"] = "search"
+        card.input_params["properties"].update({
+            "type": {"type": "string", "enum": list(_CAPABILITY_TYPES), "default": "skill"},
+            "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+        })
+        return [_DirectoryFunction(card=card, func=self.capability_search)]
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -281,7 +334,7 @@ class InstalledSkillsDirectoryToolkit:
             raise ValueError("cursor must not exceed 128 characters")
         state = self._cursors.get(token)
         if state is None:
-            raise ValueError("Unknown or expired skill_index cursor")
+            raise ValueError("Unknown or expired Skill catalog cursor")
         if operation != state.operation:
             raise ValueError(f"cursor belongs to operation={state.operation}")
         if category is not None and category != state.category:

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 from uuid import uuid4
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.symphony.models import CapabilityFingerprint, SourceSnapshot
+from openjiuwen.symphony.models import CapabilityFingerprint, FingerprintArtifact, SourceSnapshot
 from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
@@ -71,7 +71,9 @@ from openjiuwen.symphony.orchestration.mutations import (
 )
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
-from openjiuwen.symphony.shared.fingerprint import Fingerprint, FingerprintService, coerce_fingerprint
+from openjiuwen.symphony.shared.fingerprint import (
+    Fingerprint, FingerprintArtifactStore, FingerprintService, coerce_fingerprint,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.symphony.interfaces.capability import CapabilityProvider
@@ -163,7 +165,7 @@ class OrchestrationService:
                     details = {key: value for key, value in event.items() if key != "event"}
                     progress_dispatcher.enqueue(str(event.get("event") or "fingerprint.progress"), **details)
 
-                capabilities, provider_snapshot, _canonical = await self._load_inventory(
+                capabilities, provider_snapshot, fingerprint_artifact = await self._load_inventory(
                     force_fingerprint=force, progress=fingerprint_progress,
                 )
                 matcher = self._create_matcher(capabilities, force=force)
@@ -200,6 +202,9 @@ class OrchestrationService:
                 version = _version_id(str(payload["generated_at"]), snapshot)
                 payload["build_id"] = build_id
                 staged = await run_artifact_io(self._store.stage, payload, version=version)
+                if fingerprint_artifact is not None:
+                    fingerprint_store = FingerprintArtifactStore(staged.graph_path.parent)
+                    await run_artifact_io(fingerprint_store.publish, fingerprint_artifact)
                 artifact_hook = prepare_artifact if prepare_artifact is not None else self.prepare_artifact
                 await _run_prepare_artifact(artifact_hook, staged.graph_path.parent)
                 await self._verify_inventory(provider_snapshot)
@@ -242,7 +247,7 @@ class OrchestrationService:
             journal=self._mutation_journal,
             write_lock=self._write_lock,
             model_available=self.model is not None,
-            inventory_loader=lambda: self._load_inventory(require_atomic=True),
+            inventory_loader=self._load_mutation_inventory,
             matcher_factory=self._create_matcher,
             snapshot_factory=self._source_snapshot,
             graph_builder=self._construct_graph_payload,
@@ -420,20 +425,30 @@ class OrchestrationService:
         require_atomic: bool = False,
         force_fingerprint: bool = False,
         progress: ProgressCallback | None = None,
-    ) -> tuple[list[Fingerprint], SourceSnapshot | None, list[CapabilityFingerprint] | None]:
+    ) -> tuple[list[Fingerprint], SourceSnapshot | None, FingerprintArtifact | None]:
         if self.fingerprint_service is not None:
             artifact = await self.fingerprint_service.build(force=force_fingerprint, progress_callback=progress)
-            fingerprints = list(artifact.fingerprints)
             return (
-                [coerce_fingerprint(item) for item in fingerprints],
+                [coerce_fingerprint(item) for item in artifact.fingerprints],
                 artifact.source_snapshot,
-                fingerprints,
+                artifact,
             )
-        return await load_inventory(
+        capabilities, snapshot, _ = await load_inventory(
             self.capability_provider,
             require_atomic=require_atomic,
             current_version=self._store.current_version(),
         )
+        return capabilities, snapshot, None
+
+    async def _load_mutation_inventory(
+        self,
+    ) -> tuple[list[Fingerprint], SourceSnapshot | None, list[CapabilityFingerprint] | None]:
+        if self.fingerprint_service is None:
+            return await load_inventory(
+                self.capability_provider, require_atomic=True, current_version=self._store.current_version(),
+            )
+        capabilities, snapshot, artifact = await self._load_inventory(require_atomic=True)
+        return capabilities, snapshot, list(artifact.fingerprints) if artifact is not None else None
 
     async def _verify_inventory(self, expected: SourceSnapshot | None) -> None:
         if expected is None:

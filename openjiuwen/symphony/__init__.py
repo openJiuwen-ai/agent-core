@@ -71,12 +71,14 @@ from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec,
 from openjiuwen.symphony.shared.fingerprint import (
     FINGERPRINT_ARTIFACT_FILENAME,
     FINGERPRINT_SCHEMA_VERSION,
+    FingerprintArtifactStore,
     FingerprintService,
     IONameVocabulary,
     ScanDiagnostic,
     ScanResult,
     SkillFolderScanner,
     SkillManifestParser,
+    capability_content_hash,
 )
 
 if TYPE_CHECKING:
@@ -124,6 +126,7 @@ __all__ = [
     "FailureDomain",
     "Fingerprint",
     "FingerprintArtifact",
+    "FingerprintArtifactStore",
     "FingerprintService",
     "GraphArtifactStatus",
     "GraphArtifactStore",
@@ -163,6 +166,7 @@ __all__ = [
     "TaskOutcome",
     "TaskOutcomeLabel",
     "TraceEvidence",
+    "capability_content_hash",
     "agent",
     "discovery",
     "flow",
