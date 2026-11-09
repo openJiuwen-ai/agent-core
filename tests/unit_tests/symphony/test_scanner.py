@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,7 +294,7 @@ def test_scanner_skips_reparse_point_directories(tmp_path: Path, monkeypatch) ->
     _write_skill(hidden, "name: hidden")
     _write_skill(root / "visible", "name: visible")
     original_scandir = scanner_module.os.scandir
-    reparse_flag = 0x0400
+    junction_tag = 0xA0000003
 
     class FakeDirectoryEntry:
         def __init__(self, path: Path, *, is_reparse_point: bool = False) -> None:
@@ -306,11 +307,12 @@ def test_scanner_skips_reparse_point_directories(tmp_path: Path, monkeypatch) ->
             path_stat = self._path.lstat()
             return SimpleNamespace(
                 st_mode=path_stat.st_mode,
-                st_file_attributes=reparse_flag if self._is_reparse_point else 0,
+                st_reparse_tag=junction_tag if self._is_reparse_point else None,
             )
 
     def fake_scandir(path):
-        if Path(path) == root:
+        is_root = os.fstat(path).st_ino == root.stat().st_ino if isinstance(path, int) else Path(path) == root
+        if is_root:
             entries = [
                 FakeDirectoryEntry(root / "junction", is_reparse_point=True),
                 FakeDirectoryEntry(root / "visible"),
@@ -318,13 +320,35 @@ def test_scanner_skips_reparse_point_directories(tmp_path: Path, monkeypatch) ->
             return nullcontext(iter(entries))
         return original_scandir(path)
 
-    monkeypatch.setattr(scanner_module.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_flag, raising=False)
+    monkeypatch.setattr(scanner_module.stat, "IO_REPARSE_TAG_MOUNT_POINT", junction_tag, raising=False)
     monkeypatch.setattr(scanner_module.os, "scandir", fake_scandir)
 
     result = SkillFolderScanner(root).scan()
 
     assert [item.capability_id for item in result] == ["visible"]
     assert any(item.code == "symlink_skipped" and item.path == "junction" for item in result.diagnostics)
+
+
+def test_scanner_allows_non_link_reparse_points() -> None:
+    placeholder_tag = 0x9000001A
+    path_stat = SimpleNamespace(st_mode=stat.S_IFREG, st_reparse_tag=placeholder_tag)
+
+    assert not scanner_module._is_link_stat(path_stat)
+
+
+def test_windows_fallback_rejects_symlinked_ancestor(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "skills"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("secret", encoding="utf-8")
+    try:
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Windows symlink privilege is unavailable")
+    monkeypatch.setattr(safe_filesystem_module, "supports_anchored_open", lambda: False)
+
+    assert safe_filesystem_module.open_regular_file_no_follow(root / "linked" / "SKILL.md", root=root) is None
 
 
 def test_scanner_rejects_manifest_changed_between_parse_and_asset_hash(tmp_path: Path, monkeypatch) -> None:
@@ -355,7 +379,8 @@ def test_scanner_rejects_root_that_becomes_unreadable_after_validation(tmp_path:
     original_scandir = scanner_module.os.scandir
 
     def fail_root_scan(path):
-        if Path(path) == scan_root:
+        is_root = os.fstat(path).st_ino == scan_root.stat().st_ino if isinstance(path, int) else Path(path) == scan_root
+        if is_root:
             raise PermissionError("unreadable")
         return original_scandir(path)
 

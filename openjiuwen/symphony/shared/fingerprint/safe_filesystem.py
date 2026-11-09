@@ -20,7 +20,11 @@ def open_regular_file_no_follow(path: Path, *, root: Path | None = None) -> int 
             return _open_regular_file_beneath(root, path)
         if not _is_beneath(root, path):
             return None
-    return _open_regular_file(path)
+    descriptor = _open_regular_file(path)
+    if descriptor is not None and root is not None and not _is_beneath(root, path):
+        os.close(descriptor)
+        return None
+    return descriptor
 
 
 def supports_anchored_open() -> bool:
@@ -102,7 +106,22 @@ def _is_beneath(root: Path, path: Path) -> bool:
         relative = path_absolute.relative_to(root_absolute)
     except ValueError:
         return False
-    return bool(relative.parts)
+    if not relative.parts:
+        return False
+    try:
+        resolved_root = root_absolute.resolve(strict=True)
+        resolved_path = path_absolute.resolve(strict=True)
+        resolved_path.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for ancestor in relative.parts[:-1]:
+        root_absolute /= ancestor
+        try:
+            if not stat.S_ISDIR(root_absolute.lstat().st_mode):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _open_regular_file(path: Path) -> int | None:

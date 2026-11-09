@@ -456,12 +456,14 @@ def _read_directory_entries(
 
 
 def _is_link_stat(path_stat: object) -> bool:
-    """Return whether a stat result represents a symlink or Windows reparse point."""
+    """Return whether a stat result represents a symlink or junction."""
 
     mode = getattr(path_stat, "st_mode", 0)
-    file_attributes = getattr(path_stat, "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    return stat.S_ISLNK(mode) or bool(file_attributes & reparse_flag)
+    reparse_tag = getattr(path_stat, "st_reparse_tag", None)
+    return stat.S_ISLNK(mode) or reparse_tag in (
+        getattr(stat, "IO_REPARSE_TAG_SYMLINK", None),
+        getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None),
+    ) and reparse_tag is not None
 
 
 def _discover_entrypoints(
