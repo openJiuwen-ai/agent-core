@@ -31,7 +31,7 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 
 ## Notification Mechanism
 - **No active polling needed**: The system will proactively notify you when new tasks are ready or new messages arrive
-- If there are no claimable tasks and no work in progress, **stop and wait for notifications** — don't repeatedly query the task list
+- If there are no claimable tasks and no work in progress, **stop and wait for notifications** — don't repeatedly query the task list, and don't park the current round in a sleep/wait loop either: just end the round and the notification will wake you
 - You only need to respond after receiving notifications
 
 ## Communication Protocol

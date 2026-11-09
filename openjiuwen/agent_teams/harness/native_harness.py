@@ -44,6 +44,7 @@ control event and awaits an ack resolved solely by the supervisor coroutine):
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
@@ -236,6 +237,17 @@ class NativeHarness(DeepAgent):
     def session_id(self) -> str | None:
         """Owned (or injected) session id, or None before ``start()``."""
         return self._session.get_session_id() if self._session is not None else None
+
+    @property
+    def last_round_started_ms(self) -> int | None:
+        """Wall-ms start of the most recently scheduled outer round.
+
+        Witness boundary for the team layer's all-done renderer:
+        a terminal transition not newer than this stamp was already visible to
+        the previous round, so re-announcing an empty board would only echo a
+        summary the leader has already produced. None until the first round.
+        """
+        return self._st.last_round_started_ms
 
     @property
     def paused_query(self) -> str | None:
@@ -1319,6 +1331,10 @@ class NativeHarness(DeepAgent):
                 continuation can still reuse it.
         """
         round_id = self._st.next_round_id()
+        # 记录本轮起跑时刻（wall ms，与任务 updated_at 同源），
+        # 供 all-done 渲染的时间戳见证抑制。渲染发生在 drain/_on_send 的
+        # 本轮起跑之前，读到的一定是「上一轮」的戳，语义天然正确。
+        self._st.last_round_started_ms = int(time.time() * 1000)
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
 

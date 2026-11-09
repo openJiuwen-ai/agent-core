@@ -81,6 +81,35 @@ async def test_deferred_send_render_error_drops_without_crashing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_round_start_records_last_round_started_ms() -> None:
+    """每轮起跑记录 wall-ms 时间戳（all-done 见证抑制的基准），
+    首轮前为 None，后续轮单调不减。"""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        await start_harness(harness, answer_output="hi")
+        assert harness.last_round_started_ms is None
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("hello")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            first = harness.last_round_started_ms
+            assert first is not None and first > 0
+
+            await harness.send("again")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            second = harness.last_round_started_ms
+            assert second is not None and second >= first
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_completion_timeout_only_logs_slow_round(caplog: pytest.LogCaptureFixture) -> None:
     """NativeHarness completion_timeout logs slow rounds without cancelling them."""
     await Runner.start()
