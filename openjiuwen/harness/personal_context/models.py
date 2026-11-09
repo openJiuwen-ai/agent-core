@@ -38,6 +38,22 @@ _FETCH_RUN_PROGRESS_FIELDS = {
 _FETCH_RUN_RESULT_FIELDS = {"created_node_count", "updated_node_count", "no_new_content"}
 
 
+def _validate_capacity_maintenance(value: object) -> None:
+    if not isinstance(value, dict) or value.get("status") not in {"succeeded", "failed", "over_limit"}:
+        raise ValueError("invalid capacity maintenance status")
+    counts = {"limit_bytes", "before_bytes", "after_bytes", "removed_count", "oversized_count"}
+    expected = {"status", "reason"} if value["status"] == "failed" else {"status"} | counts
+    if value["status"] == "over_limit":
+        expected.add("reason")
+    if set(value) != expected:
+        raise ValueError("invalid capacity maintenance fields")
+    if "reason" in value and (not isinstance(value["reason"], str) or not 0 < len(value["reason"]) <= 128):
+        raise ValueError("invalid capacity maintenance reason")
+    for key in counts & value.keys():
+        if type(value[key]) is not int or value[key] < 0:
+            raise ValueError("invalid capacity maintenance count")
+
+
 def _json_size(value: object, *, field_name: str, max_bytes: int | None = None) -> None:
     """Validate that a value is JSON encodable and optionally bounded."""
     try:
@@ -110,11 +126,13 @@ class PersonalContextStatus(BaseModel):
         value: dict[str, dict[str, object]],
     ) -> dict[str, dict[str, object]]:
         for service_id, progress in value.items():
-            if not service_id or set(progress) not in (
+            if not service_id or set(progress) - {"capacity_maintenance"} not in (
                 _FETCH_RUN_PROGRESS_FIELDS,
                 _FETCH_RUN_PROGRESS_FIELDS | _FETCH_RUN_RESULT_FIELDS,
             ):
                 raise ValueError("fetch run progress has an invalid shape")
+            if "capacity_maintenance" in progress:
+                _validate_capacity_maintenance(progress["capacity_maintenance"])
             if progress["service_id"] != service_id:
                 raise ValueError("fetch run progress service_id does not match its key")
             run_state = progress["run_state"]

@@ -3,7 +3,8 @@
 ``PersonalContext`` owns the small amount of orchestration needed by the first embedded
 version: one in-memory pipeline queue, one consumer, one scheduler coroutine
 per enabled provider, and an atomic JSON cursor per provider.  There is no
-database, transport, child process, or additional runtime class here.
+database, transport, or additional runtime class here. Capacity maintenance may
+use a disposable file-commit worker so optional deletion has a short lifetime.
 """
 
 from __future__ import annotations
@@ -71,6 +72,8 @@ _T = TypeVar("_T")
 _QUEUE_CAPACITY = 8
 _PIPELINE_CANCEL_GRACE_SECONDS = 5.0
 _STOP_FINALIZE_TIMEOUT_SECONDS = 60.0
+_CAPACITY_MAX_SECONDS = 3.0
+_CONTROL_LOCK_TIMEOUT_SECONDS = 0.5
 _CURSOR_SCHEMA_VERSION = 1
 _MAX_CURSOR_BYTES = 512 * 1024
 _AUTHORIZATION_FAILED = "Feishu authorization failed"
@@ -79,6 +82,26 @@ _CONFIG_INIT_STEP = "config_init"
 _DEVICE_AUTHORIZATION_STEP = "device_authorization"
 _AUTHORIZATION_STEPS = {_CONFIG_INIT_STEP, _DEVICE_AUTHORIZATION_STEP}
 _CONFIG_INIT_TIMEOUT_SECONDS = 30.0 * 60.0
+
+
+@contextlib.asynccontextmanager
+async def _control_lock(lock: asyncio.Lock):
+    """Bound contention without adding a task switch to uncontended state access."""
+    try:
+        async with asyncio.timeout(_CONTROL_LOCK_TIMEOUT_SECONDS):
+            await lock.acquire()
+    except asyncio.TimeoutError as exc:
+        raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "PersonalContext control is busy") from exc
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _consume_authorization_task(task: asyncio.Task[object]) -> None:
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.exception()
+
 
 _PROVIDER_TYPES: dict[str, type[ContextFetchService]] = {
     "local_files": LocalFilesFetchService,
@@ -414,6 +437,7 @@ class PersonalContext:
         self._state_lock = asyncio.Lock()
         self._activation_task: asyncio.Task[None] | None = None
         self._authorization_lock = asyncio.Lock()
+        self._authorization_start_task: asyncio.Task[dict[str, object]] | None = None
         self._authorization_task: asyncio.Task[None] | None = None
         self._authorization_challenge: dict[str, object] | None = None
         self._authorization_error: str | None = None
@@ -427,6 +451,7 @@ class PersonalContext:
         self._pipeline_service: ContextPipelineService | None = None
 
         self._fetch_lock = asyncio.Lock()
+        self._history_write_tasks: dict[str, asyncio.Task[None]] = {}
         self._fetch_tasks: dict[str, asyncio.Task[None]] = {}
         self._fetch_stop_events: dict[str, asyncio.Event] = {}
         self._fetch_providers: dict[str, ContextFetchService] = {}
@@ -466,24 +491,39 @@ class PersonalContext:
         self._embedding_config = candidate
 
     async def set_configuration(self, config: PersonalContextConfig) -> None:
-        """Set or replace the complete configuration while PersonalContext is stopped."""
+        """Replace stopped configuration, or hot-update only the knowledge byte limit."""
         if not isinstance(config, PersonalContext.Config):
             raise _error(StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID, "config must be PersonalContext.Config")
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
+            if self._config is not None and self._state in {"CONFIGURED", "RUNNING", "STOPPED"}:
+                capacity_update = self._config.model_copy(update={"max_context_size_mb": config.max_context_size_mb})
+                # Host model resolution generates a new client ID even when the
+                # actual model settings are unchanged. Keep the live client.
+                excluded = {"model_client": {"client_id"}}
+                if capacity_update.model_dump(exclude=excluded) == config.model_dump(exclude=excluded):
+                    self._config = capacity_update
+                    if self._pipeline_service is not None:
+                        self._pipeline_service.replace_configuration(capacity_update)
+                    return
             if self._state in {"STARTING", "RUNNING", "STOPPING", "FAILED"}:
                 raise _state_error("PersonalContext must be stopped before configuration changes")
             if self._config == config:
                 if self._state == "CREATED":
                     self._state = "CONFIGURED"
                 return
-            history = {
-                service.service_id: await self._run_query(self._read_run_history, service.service_id)
-                for service in config.fetch_services
-            }
-            cursors = {
-                service.service_id: await self._run_query(self._read_cursor_for_config, service)
-                for service in config.fetch_services
-            }
+            previous_config = self._config
+        # Slow history reads and authorization cleanup do not own the state lock.
+        history = {
+            service.service_id: await self._run_query(self._read_run_history, service.service_id)
+            for service in config.fetch_services
+        }
+        cursors = {
+            service.service_id: await self._run_query(self._read_cursor_for_config, service)
+            for service in config.fetch_services
+        }
+        async with _control_lock(self._state_lock):
+            if self._config is not previous_config or self._state in {"STARTING", "RUNNING", "STOPPING", "FAILED"}:
+                raise _state_error("PersonalContext configuration changed while loading")
             await self._cancel_authorization(clear_error=True)
             self._fetch_run_history = history
             self._fetch_run_identity = {}
@@ -523,7 +563,7 @@ class PersonalContext:
     async def start_collection(self) -> None:
         """Enable collection and start its Pipeline and service schedulers."""
 
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -536,7 +576,7 @@ class PersonalContext:
 
         if timeout_seconds <= 0:
             raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -551,7 +591,7 @@ class PersonalContext:
     async def start_agent_use(self) -> None:
         """Enable Agent use without starting collection work."""
 
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -561,7 +601,7 @@ class PersonalContext:
     async def stop_agent_use(self) -> None:
         """Disable Agent use without stopping collection work."""
 
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -596,9 +636,9 @@ class PersonalContext:
     ) -> tuple[tuple[str, ...], dict[str, object]]:
         """Read current authorization metadata without waiting for external CLI I/O."""
 
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             required_scopes = await self._required_authorization_scopes(provider)
-            async with self._authorization_lock:
+            async with _control_lock(self._authorization_lock):
                 task = self._authorization_task
                 challenge = self._authorization_challenge
                 authorization_error = self._authorization_error
@@ -634,138 +674,182 @@ class PersonalContext:
 
         if not isinstance(reauthorize, bool):
             raise _state_error("reauthorize must be a boolean")
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             required_scopes = await self._required_authorization_scopes(provider)
-            now = asyncio.get_running_loop().time()
-            async with self._authorization_lock:
-                task = self._authorization_task
-                challenge = self._authorization_challenge
-                if task is not None and not task.done():
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=set(),
-                        task=task,
-                        challenge=challenge,
-                        error=self._authorization_error,
-                        error_step=self._authorization_error_step,
-                    )
-                if task is not None:
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        task.exception()
-                    self._authorization_task = None
-                    self._authorization_challenge = None
-                    task = None
-                    challenge = None
-                try:
-                    _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
-                except Exception as exc:
-                    self._authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
-                    self._authorization_error_step = None
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=set(),
-                        task=None,
-                        challenge=None,
-                        error=self._authorization_error,
-                        error_step=self._authorization_error_step,
-                    )
-                if not configured:
-                    # First use on this machine: lark-cli has no app configuration yet.
-                    # Spawn `config init --new` and hand its verification URL to the
-                    # frontend through the same challenge channel as the device flow;
-                    # after the user finishes, the state falls back to not_authorized
-                    # and the next click runs the regular device-flow login.
-                    try:
-                        init_process, init_url = await _lark_cli_begin_config_init()
-                    except Exception as exc:
-                        self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
-                        self._authorization_error_step = _CONFIG_INIT_STEP
-                        return _authorization_result(
-                            required_scopes=required_scopes,
-                            granted_scopes=set(),
-                            task=None,
-                            challenge=None,
-                            error=self._authorization_error,
-                            error_step=self._authorization_error_step,
-                        )
-                    init_expires_at = (
-                        (datetime.now(UTC) + timedelta(seconds=_CONFIG_INIT_TIMEOUT_SECONDS))
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                    )
-                    init_task = asyncio.create_task(
-                        self._finish_config_init(init_process, timeout_seconds=_CONFIG_INIT_TIMEOUT_SECONDS),
-                        name="personal-context-feishu-config-init",
-                    )
-                    self._authorization_task = init_task
-                    self._authorization_challenge = {
-                        "authorization_step": _CONFIG_INIT_STEP,
-                        "verification_url": init_url,
-                        "expires_at": init_expires_at,
-                        "expires_monotonic": now + _CONFIG_INIT_TIMEOUT_SECONDS,
-                    }
-                    self._authorization_error = None
-                    self._authorization_error_step = None
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=set(),
-                        task=init_task,
-                        challenge=self._authorization_challenge,
-                        error=None,
-                    )
-                if not reauthorize and set(required_scopes).issubset(granted_scopes):
-                    self._authorization_error = None
-                    self._authorization_error_step = None
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=granted_scopes,
-                        task=None,
-                        challenge=None,
-                        error=None,
-                        configured=True,
-                    )
-                try:
-                    device_code, verification_url, expires_at = await _lark_cli_begin_authorization(required_scopes)
-                except Exception as exc:
-                    self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
-                    self._authorization_error_step = _DEVICE_AUTHORIZATION_STEP
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=granted_scopes,
-                        task=None,
-                        challenge=None,
-                        error=self._authorization_error,
-                        configured=True,
-                        error_step=self._authorization_error_step,
-                    )
-                expires_monotonic = _authorization_expiry_monotonic(expires_at, now=now)
-                timeout_seconds = max(1.0, min(30.0 * 60.0, expires_monotonic - now))
-                task = asyncio.create_task(
-                    self._finish_authorization(device_code, timeout_seconds=timeout_seconds),
-                    name="personal-context-feishu-authorization",
+            authorization_config = self._config
+        ready = asyncio.Event()
+        async with _control_lock(self._authorization_lock):
+            if self._config is not authorization_config:
+                raise _state_error("PersonalContext configuration changed before authorization")
+            starter = self._authorization_start_task
+            if starter is None or starter.done():
+                starter = asyncio.create_task(
+                    self._begin_authorization(required_scopes, reauthorize=reauthorize, ready=ready),
+                    name="personal-context-authorization-start",
                 )
-                self._authorization_task = task
-                self._authorization_challenge = {
-                    "authorization_step": _DEVICE_AUTHORIZATION_STEP,
-                    "verification_url": verification_url,
-                    "expires_at": expires_at,
-                    "expires_monotonic": expires_monotonic,
-                }
-                self._authorization_error = None
-                self._authorization_error_step = None
+                self._authorization_start_task = starter
+        try:
+            return await asyncio.shield(starter)
+        finally:
+            ready.set()
+            if starter.done() and self._authorization_start_task is starter:
+                self._authorization_start_task = None
+
+    async def _begin_authorization(
+        self, required_scopes: tuple[str, ...], *, reauthorize: bool, ready: asyncio.Event,
+    ) -> dict[str, object]:
+        """Run CLI handshakes without holding any runtime control lock."""
+        current = asyncio.current_task()
+
+        def ensure_current() -> None:
+            if self._authorization_start_task is not current:
+                raise asyncio.CancelledError
+
+        ensure_current()
+        now = asyncio.get_running_loop().time()
+        task = self._authorization_task
+        challenge = self._authorization_challenge
+        if task is not None and not task.done():
+            return _authorization_result(
+                required_scopes=required_scopes,
+                granted_scopes=set(),
+                task=task,
+                challenge=challenge,
+                error=self._authorization_error,
+                error_step=self._authorization_error_step,
+            )
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                task.exception()
+            self._authorization_task = None
+            self._authorization_challenge = None
+            task = None
+            challenge = None
+        try:
+            _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
+            ensure_current()
+        except Exception as exc:
+            ensure_current()
+            self._authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
+            self._authorization_error_step = None
+            return _authorization_result(
+                required_scopes=required_scopes,
+                granted_scopes=set(),
+                task=None,
+                challenge=None,
+                error=self._authorization_error,
+                error_step=self._authorization_error_step,
+            )
+        if not configured:
+            # First use on this machine: lark-cli has no app configuration yet.
+            # Spawn `config init --new` and hand its verification URL to the
+            # frontend through the same challenge channel as the device flow;
+            # after the user finishes, the state falls back to not_authorized
+            # and the next click runs the regular device-flow login.
+            try:
+                init_process, init_url = await _lark_cli_begin_config_init()
+                try:
+                    ensure_current()
+                except asyncio.CancelledError:
+                    with contextlib.suppress(Exception):
+                        init_process.kill()
+                    raise
+            except Exception as exc:
+                ensure_current()
+                self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+                self._authorization_error_step = _CONFIG_INIT_STEP
                 return _authorization_result(
                     required_scopes=required_scopes,
-                    granted_scopes=granted_scopes,
-                    task=task,
-                    challenge=self._authorization_challenge,
-                    error=None,
+                    granted_scopes=set(),
+                    task=None,
+                    challenge=None,
+                    error=self._authorization_error,
+                    error_step=self._authorization_error_step,
                 )
+            init_expires_at = (
+                (datetime.now(UTC) + timedelta(seconds=_CONFIG_INIT_TIMEOUT_SECONDS))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            init_task = asyncio.create_task(
+                self._finish_config_init(init_process, timeout_seconds=_CONFIG_INIT_TIMEOUT_SECONDS, ready=ready),
+                name="personal-context-feishu-config-init",
+            )
+            self._authorization_task = init_task
+            self._authorization_challenge = {
+                "authorization_step": _CONFIG_INIT_STEP,
+                "verification_url": init_url,
+                "expires_at": init_expires_at,
+                "expires_monotonic": now + _CONFIG_INIT_TIMEOUT_SECONDS,
+            }
+            self._authorization_error = None
+            self._authorization_error_step = None
+            return _authorization_result(
+                required_scopes=required_scopes,
+                granted_scopes=set(),
+                task=init_task,
+                challenge=self._authorization_challenge,
+                error=None,
+            )
+        if not reauthorize and set(required_scopes).issubset(granted_scopes):
+            self._authorization_error = None
+            self._authorization_error_step = None
+            return _authorization_result(
+                required_scopes=required_scopes,
+                granted_scopes=granted_scopes,
+                task=None,
+                challenge=None,
+                error=None,
+                configured=True,
+            )
+        try:
+            device_code, verification_url, expires_at = await _lark_cli_begin_authorization(required_scopes)
+            ensure_current()
+        except Exception as exc:
+            ensure_current()
+            self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+            self._authorization_error_step = _DEVICE_AUTHORIZATION_STEP
+            return _authorization_result(
+                required_scopes=required_scopes,
+                granted_scopes=granted_scopes,
+                task=None,
+                challenge=None,
+                error=self._authorization_error,
+                configured=True,
+                error_step=self._authorization_error_step,
+            )
+        expires_monotonic = _authorization_expiry_monotonic(expires_at, now=now)
+        timeout_seconds = max(1.0, min(30.0 * 60.0, expires_monotonic - now))
+        task = asyncio.create_task(
+            self._finish_authorization(device_code, timeout_seconds=timeout_seconds, ready=ready),
+            name="personal-context-feishu-authorization",
+        )
+        self._authorization_task = task
+        self._authorization_challenge = {
+            "authorization_step": _DEVICE_AUTHORIZATION_STEP,
+            "verification_url": verification_url,
+            "expires_at": expires_at,
+            "expires_monotonic": expires_monotonic,
+        }
+        self._authorization_error = None
+        self._authorization_error_step = None
+        return _authorization_result(
+            required_scopes=required_scopes,
+            granted_scopes=granted_scopes,
+            task=task,
+            challenge=self._authorization_challenge,
+            error=None,
+        )
 
-    async def _finish_authorization(self, device_code: str, *, timeout_seconds: float) -> None:
+    async def _finish_authorization(
+        self, device_code: str, *, timeout_seconds: float, ready: asyncio.Event | None = None,
+    ) -> None:
         current_task = asyncio.current_task()
         update_error = False
         authorization_error: str | None = None
         try:
+            if ready is not None:
+                await ready.wait()
             await _lark_cli_finish_authorization(device_code, timeout_seconds=timeout_seconds)
         except Exception as exc:
             update_error = True
@@ -773,7 +857,7 @@ class PersonalContext:
         else:
             update_error = True
         finally:
-            async with self._authorization_lock:
+            async with _control_lock(self._authorization_lock):
                 if self._authorization_task is current_task:
                     self._authorization_task = None
                     self._authorization_challenge = None
@@ -783,21 +867,29 @@ class PersonalContext:
                             _DEVICE_AUTHORIZATION_STEP if authorization_error is not None else None
                         )
 
-    async def _finish_config_init(self, process: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
+    async def _finish_config_init(
+        self, process: asyncio.subprocess.Process, *, timeout_seconds: float, ready: asyncio.Event | None = None,
+    ) -> None:
         """Settle the one-time lark-cli ``config init`` handshake like an authorization round."""
 
         current_task = asyncio.current_task()
         update_error = False
         authorization_error: str | None = None
         try:
+            if ready is not None:
+                await ready.wait()
             await _lark_cli_finish_config_init(process, timeout_seconds=timeout_seconds)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                process.kill()
+            raise
         except Exception as exc:
             update_error = True
             authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
         else:
             update_error = True
         finally:
-            async with self._authorization_lock:
+            async with _control_lock(self._authorization_lock):
                 if self._authorization_task is current_task:
                     self._authorization_task = None
                     self._authorization_challenge = None
@@ -845,7 +937,7 @@ class PersonalContext:
 
     async def activate_runtime(self) -> None:
         """Start the one Pipeline and all enabled provider scheduler tasks."""
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             if self._config is None:
                 raise _state_error("PersonalContext has not been configured")
             if not self._config.collection_enabled:
@@ -865,7 +957,7 @@ class PersonalContext:
         try:
             await asyncio.shield(task)
         finally:
-            async with self._state_lock:
+            async with _control_lock(self._state_lock):
                 if self._activation_task is task and task.done():
                     self._activation_task = None
 
@@ -907,7 +999,7 @@ class PersonalContext:
         def report_pipeline_result(service_id: str, run_id: str, result: dict[str, object]) -> None:
             identity = self._fetch_run_identity.get(service_id)
             if identity is not None and identity.get("run_id") == run_id:
-                self._fetch_run_results[service_id] = dict(result)
+                self._fetch_run_results.setdefault(service_id, {}).update(result)
 
         try:
             # A stopped runtime never reuses its old queue.  The previous
@@ -930,19 +1022,19 @@ class PersonalContext:
                 for service in config.fetch_services:
                     if service.enabled:
                         await self.start_fetch_service(service.service_id)
-            async with self._state_lock:
+            async with _control_lock(self._state_lock):
                 if self._state != "STARTING":
                     raise _state_error("PersonalContext activation was superseded")
                 self._state = "RUNNING"
         except asyncio.CancelledError:
             await self._cancel_runtime_after_activation_failure(pipeline)
-            async with self._state_lock:
+            async with _control_lock(self._state_lock):
                 self._state = "FAILED"
             raise
         except BaseError as exc:
             await self._cancel_runtime_after_activation_failure(pipeline)
             self._set_last_error(exc, operation="activate_runtime")
-            async with self._state_lock:
+            async with _control_lock(self._state_lock):
                 self._state = "FAILED"
             raise
         except Exception as exc:
@@ -950,12 +1042,12 @@ class PersonalContext:
             wrapped.__cause__ = exc
             await self._cancel_runtime_after_activation_failure(pipeline)
             self._set_last_error(wrapped, operation="activate_runtime")
-            async with self._state_lock:
+            async with _control_lock(self._state_lock):
                 self._state = "FAILED"
             raise wrapped from exc
 
     async def _cancel_runtime_after_activation_failure(self, pipeline: ContextPipelineService | None) -> None:
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             tasks = list(self._fetch_tasks.values())
             for event in self._fetch_stop_events.values():
                 event.set()
@@ -963,7 +1055,7 @@ class PersonalContext:
                 if not task.done():
                     task.cancel()
         await asyncio.sleep(0)
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             for service_id, task in list(self._fetch_tasks.items()):
                 if task.done():
                     self._fetch_tasks.pop(service_id, None)
@@ -984,7 +1076,7 @@ class PersonalContext:
     async def start_fetch_service(self, service_id: str) -> None:
         """Start one enabled provider scheduler without fetching immediately."""
         safe_id = _safe_service_id(service_id)
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1028,7 +1120,7 @@ class PersonalContext:
         if not isinstance(enabled, bool):
             raise _state_error("enabled must be a boolean")
         safe_id = _safe_service_id(service_id)
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1043,7 +1135,7 @@ class PersonalContext:
             if collection_running:
                 await self.start_fetch_service(safe_id)
             return
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             event = self._fetch_stop_events.get(safe_id)
             if event is not None:
                 event.set()
@@ -1062,7 +1154,7 @@ class PersonalContext:
         history = await self._run_query(self._read_run_history, safe_id)
         cursor = await self._run_query(self._read_cursor_for_config, service)
         quarantined_items, item_errors = quarantined_candidate_diagnostics(cursor)
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1103,7 +1195,7 @@ class PersonalContext:
         if len(replacement_by_id) != len(replacements):
             raise _state_error("replacement service IDs must be unique")
 
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1125,7 +1217,7 @@ class PersonalContext:
                     )
                 }
             )
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 pipeline = self._pipeline_service
                 if pipeline is not None:
                     pipeline.replace_configuration(updated)
@@ -1140,7 +1232,7 @@ class PersonalContext:
         safe_id = _safe_service_id(service_id)
         if safe_id in self._fetch_tasks or safe_id in self._manual_fetch_tasks:
             await self.stop_fetch_service(safe_id)
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1167,7 +1259,7 @@ class PersonalContext:
         if not isinstance(service, PersonalContextFetchServiceConfig):
             raise _state_error("service must be PersonalContextFetchServiceConfig")
         safe_id = _safe_service_id(service.service_id)
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1196,7 +1288,7 @@ class PersonalContext:
             services[index] = service
             updated = config.model_copy(update={"fetch_services": tuple(services)})
             new_provider = self._create_fetch_provider(service) if source_changed else None
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 pipeline = self._pipeline_service
                 if pipeline is not None:
                     pipeline.replace_configuration(updated)
@@ -1220,7 +1312,7 @@ class PersonalContext:
         service_id: str | None = None,
     ) -> dict[str, object]:
         """Start managed manual fetch rounds and return after acceptance."""
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
@@ -1228,7 +1320,7 @@ class PersonalContext:
                 raise _state_error("PersonalContext is disabled")
         if self._state != "RUNNING":
             await self.activate_runtime()
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             pipeline = self._pipeline_service
             if config is None:
@@ -1244,7 +1336,7 @@ class PersonalContext:
             if not pipeline_running:
                 raise _state_error("PersonalContext pipeline is not running")
 
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 services = {item.service_id: item for item in config.fetch_services}
                 if service_id is None:
                     target_ids = sorted(item.service_id for item in config.fetch_services if item.enabled)
@@ -1310,7 +1402,7 @@ class PersonalContext:
         safe_id = _safe_service_id(service_id)
         first_stop_request = False
         run_id: str | None = None
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             if self._config is None or safe_id not in {item.service_id for item in self._config.fetch_services}:
                 raise _state_error("unknown fetch service")
             task = self._active_fetch_run_tasks.get(safe_id)
@@ -1373,7 +1465,7 @@ class PersonalContext:
                 self._invalidated_fetch_runs.add((safe_id, run_id))
                 if self._pipeline_service is not None:
                     self._pipeline_service.invalidate_run(safe_id, run_id)
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 progress = self._fetch_run_progress.get(safe_id, {})
                 self._fetch_run_progress[safe_id] = _fetch_run_status(
                     safe_id,
@@ -1401,14 +1493,14 @@ class PersonalContext:
                 raise
         except BaseException as exc:
             task_error = exc
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 self._fetch_states[safe_id] = "FAILED"
                 self._fetch_errors[safe_id] = _redact_text(exc)
         finally:
-            async with self._fetch_lock:
-                task_settled = task.done()
-                if task_settled:
-                    await self._retain_fetch_run(safe_id)
+            task_settled = task.done()
+            if task_settled:
+                await self._retain_fetch_run(safe_id)
+            async with _control_lock(self._fetch_lock):
                 if task_settled and self._active_fetch_run_tasks.get(safe_id) is task:
                     self._active_fetch_run_tasks.pop(safe_id, None)
                     self._active_fetch_run_stop_events.pop(safe_id, None)
@@ -1441,7 +1533,7 @@ class PersonalContext:
         if timeout_seconds <= 0:
             raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
         safe_id = _safe_service_id(service_id)
-        async with self._fetch_lock:
+        async with _control_lock(self._fetch_lock):
             if self._config is None or safe_id not in {item.service_id for item in self._config.fetch_services}:
                 raise _state_error("unknown fetch service")
             scheduled = self._fetch_tasks.get(safe_id)
@@ -1496,7 +1588,7 @@ class PersonalContext:
                 await asyncio.sleep(0)
                 raise
         finally:
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 if scheduled is not None and scheduled.done() and self._fetch_tasks.get(safe_id) is scheduled:
                     self._fetch_tasks.pop(safe_id, None)
                     self._fetch_stop_events.pop(safe_id, None)
@@ -1522,7 +1614,7 @@ class PersonalContext:
 
     async def snapshot(self) -> PersonalContextStatus:
         """Return a bounded, credential-free runtime snapshot."""
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             config = self._config
             state = self._state
             last_error = dict(self._last_error) if self._last_error is not None else None
@@ -1584,7 +1676,7 @@ class PersonalContext:
         if timeout_seconds <= 0:
             raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
         deadline = asyncio.get_running_loop().time() + timeout_seconds
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             if self._state == "CREATED":
                 return
             if cancel_authorization:
@@ -1593,7 +1685,7 @@ class PersonalContext:
             activation = self._activation_task
         stop_error: BaseError | None = None
         if cancel_fetch_runs:
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 active_runs: list[tuple[str, str]] = []
                 for service_id, task in self._active_fetch_run_tasks.items():
                     if task.done():
@@ -1730,7 +1822,7 @@ class PersonalContext:
             active_tasks.append(matched_task)
         remaining_tasks = active_tasks
         runtime_still_running = bool(remaining_tasks) or pipeline_running or activation_running
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             self._state = "FAILED" if stop_error is not None or runtime_still_running else "STOPPED"
             if stop_error is not None:
                 self._set_last_error(stop_error, operation="deactivate_runtime")
@@ -1742,18 +1834,23 @@ class PersonalContext:
             raise stop_error
 
     async def _cancel_authorization(self, *, clear_error: bool = False) -> None:
-        async with self._authorization_lock:
-            task = self._authorization_task
+        async with _control_lock(self._authorization_lock):
+            tasks = [task for task in (self._authorization_start_task, self._authorization_task) if task is not None]
+            self._authorization_start_task = None
             self._authorization_task = None
             self._authorization_challenge = None
             if clear_error:
                 self._authorization_error = None
                 self._authorization_error_step = None
-            if task is not None and not task.done():
-                task.cancel()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=_CONTROL_LOCK_TIMEOUT_SECONDS)
+            for task in done:
+                _consume_authorization_task(task)
+            for task in pending:
+                task.add_done_callback(_consume_authorization_task)
 
     def _create_fetch_provider(self, config: PersonalContextFetchServiceConfig) -> ContextFetchService:
         provider_type = _PROVIDER_TYPES.get(config.provider)
@@ -1799,7 +1896,7 @@ class PersonalContext:
         return task
 
     async def _discard_fetch_run_task(self, service_id: str, task: asyncio.Task[None]) -> None:
-        """Forget a settled round while the caller holds ``_fetch_lock``."""
+        """Retain history without holding the scheduling lock, then forget the task."""
 
         if task.done():
             await self._retain_fetch_run(service_id)
@@ -1819,7 +1916,7 @@ class PersonalContext:
                     pass
                 if stop_event.is_set():
                     return
-                async with self._fetch_lock:
+                async with _control_lock(self._fetch_lock):
                     if service_id in self._fetch_running:
                         continue
                     provider = self._fetch_providers[service_id]
@@ -1834,22 +1931,22 @@ class PersonalContext:
                     if current is not None and current.cancelling():
                         raise
                 except Exception as exc:
-                    async with self._fetch_lock:
+                    async with _control_lock(self._fetch_lock):
                         if self._fetch_states.get(service_id) != "STOPPING":
                             self._fetch_states[service_id] = "FAILED"
                         self._fetch_errors[service_id] = _redact_text(exc)
                 else:
-                    async with self._fetch_lock:
+                    async with _control_lock(self._fetch_lock):
                         if self._fetch_states.get(service_id) != "STOPPING":
                             self._fetch_states[service_id] = "RUNNING"
                             self._fetch_errors.pop(service_id, None)
                 finally:
-                    async with self._fetch_lock:
-                        await self._discard_fetch_run_task(service_id, run_task)
+                    await self._discard_fetch_run_task(service_id, run_task)
+                    async with _control_lock(self._fetch_lock):
                         self._fetch_running.discard(service_id)
         finally:
             current = asyncio.current_task()
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 if self._fetch_tasks.get(service_id) is current:
                     self._fetch_tasks.pop(service_id, None)
                     self._fetch_stop_events.pop(service_id, None)
@@ -1869,12 +1966,12 @@ class PersonalContext:
             if current is not None and current.cancelling():
                 raise
         except Exception as exc:
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 if self._fetch_states.get(service_id) != "STOPPING":
                     self._fetch_states[service_id] = "FAILED"
                 self._fetch_errors[service_id] = _redact_text(exc)
         else:
-            async with self._fetch_lock:
+            async with _control_lock(self._fetch_lock):
                 if self._fetch_states.get(service_id) != "STOPPING":
                     scheduler = self._fetch_tasks.get(service_id)
                     self._fetch_states[service_id] = (
@@ -1882,11 +1979,11 @@ class PersonalContext:
                     )
                     self._fetch_errors.pop(service_id, None)
         finally:
-            async with self._fetch_lock:
+            await self._discard_fetch_run_task(service_id, run_task)
+            async with _control_lock(self._fetch_lock):
                 current = asyncio.current_task()
                 if self._manual_fetch_tasks.get(service_id) is current:
                     self._manual_fetch_tasks.pop(service_id, None)
-                await self._discard_fetch_run_task(service_id, run_task)
                 self._fetch_running.discard(service_id)
 
     async def get_fetch_run_status(
@@ -1899,7 +1996,7 @@ class PersonalContext:
         if run_id is not None:
             if service_id is None or not isinstance(run_id, str) or not run_id.strip():
                 raise _state_error("run_id requires service_id and a non-empty string")
-        async with self._state_lock:
+        async with _control_lock(self._state_lock):
             ids = [service.service_id for service in self._config.fetch_services] if self._config else []
             if service_id is not None:
                 service_id = _safe_service_id(service_id)
@@ -1937,7 +2034,7 @@ class PersonalContext:
             if (
                 not isinstance(data, dict)
                 or set(data) != {"schema_version", "runs"}
-                or data["schema_version"] not in {1, 2, 3}
+                or data["schema_version"] not in {1, 2, 3, 4}
             ):
                 raise ValueError("invalid history schema")
             schema_version = data["schema_version"]
@@ -1954,7 +2051,7 @@ class PersonalContext:
                     record.setdefault("item_errors", [])
                     record.setdefault("omitted_item_errors", 0)
                 result_fields = {"created_node_count", "updated_node_count", "no_new_content"}
-                if not isinstance(record, dict) or set(record) not in (
+                if not isinstance(record, dict) or set(record) - {"capacity_maintenance"} not in (
                     required_fields,
                     required_fields | {"actual_profile"},
                     required_fields | result_fields,
@@ -1968,8 +2065,11 @@ class PersonalContext:
                     "deterministic",
                 }:
                     raise ValueError("invalid history profile")
+                record_progress_fields = progress_fields | (
+                    (result_fields | {"capacity_maintenance"}) & record.keys()
+                )
                 PersonalContextStatus.validate_fetch_run_progress(
-                    {service_id: {key: record[key] for key in progress_fields | (result_fields & record.keys())}}
+                    {service_id: {key: record[key] for key in record_progress_fields}}
                 )
                 if record["run_state"] not in {"succeeded", "partial_succeeded", "failed", "cancelled"}:
                     raise ValueError("history must be terminal")
@@ -1994,7 +2094,7 @@ class PersonalContext:
         temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps({"schema_version": 3, "runs": records}, ensure_ascii=False).encode("utf-8")
+            encoded = json.dumps({"schema_version": 4, "runs": records}, ensure_ascii=False).encode("utf-8")
             if len(encoded) > 128 * 1024:
                 raise ValueError("history exceeds size limit")
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
@@ -2090,6 +2190,24 @@ class PersonalContext:
                 self._invalidated_fetch_runs.discard((service_id, run_id))
 
     async def _retain_fetch_run(self, service_id: str) -> None:
+        # Stop and scheduler cleanup can observe the same settled run. Share its
+        # write instead of holding the global scheduling lock across disk I/O.
+        task = self._history_write_tasks.get(service_id)
+        if task is None:
+            if self._fetch_run_identity.get(service_id) is None:
+                return
+            task = asyncio.create_task(self._retain_fetch_run_impl(service_id))
+            self._history_write_tasks[service_id] = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+        finally:
+            if task.done() and self._history_write_tasks.get(service_id) is task:
+                self._history_write_tasks.pop(service_id, None)
+
+    async def _retain_fetch_run_impl(self, service_id: str) -> None:
         identity = self._fetch_run_identity.get(service_id)
         if identity is None:
             return
@@ -2147,6 +2265,7 @@ class PersonalContext:
         run_id: str,
         retry_quarantined: bool = False,
     ) -> None:
+        normal_started = asyncio.get_running_loop().time()
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
         run_started_at = datetime.now(UTC)
@@ -2206,10 +2325,47 @@ class PersonalContext:
             return normalized_cursor
 
         async def commit_provider_and_cursor(committed_cursor: dict[str, object]) -> dict[str, object]:
+            nonlocal commit_completed
+
             ensure_run_active()
             await provider.commit_run(run_id=run_id)
             ensure_run_active()
             self._write_cursor(service_id, committed_cursor)
+            commit_completed = True
+            # Maintenance follows the durable source checkpoint, including no-change
+            # and retained partial rounds. A maintenance failure never rolls it back.
+
+            def maintenance_cancelled() -> bool:
+                return (
+                    (stop_event is not None and stop_event.is_set())
+                    or (service_id, run_id) in self._invalidated_fetch_runs
+                )
+
+            if maintenance_cancelled():
+                return committed_cursor
+            try:
+                from openjiuwen.harness.personal_context.context_capacity import run_capacity_maintenance
+
+                # Optional maintenance gets at most 20% of this run's useful work,
+                # leaving headroom below the 30% whole-collection latency budget.
+                budget = min(_CAPACITY_MAX_SECONDS, (asyncio.get_running_loop().time() - normal_started) * 0.2)
+                maintenance = await run_capacity_maintenance(
+                    self._home, limit_bytes=self._config.max_context_size_mb * 1_000_000,
+                    timeout=budget, cancelled=maintenance_cancelled,
+                )
+                if not maintenance_cancelled():
+                    self._fetch_run_results.setdefault(service_id, {}).update(capacity_maintenance=maintenance)
+            except asyncio.CancelledError:
+                if not maintenance_cancelled():
+                    self._fetch_run_results.setdefault(service_id, {}).update(
+                        capacity_maintenance={"status": "failed", "reason": "CancelledError"},
+                    )
+            except Exception as exc:
+                logger.warning("PersonalContext post-commit maintenance failed (%s)", type(exc).__name__)
+                if not maintenance_cancelled():
+                    self._fetch_run_results.setdefault(service_id, {}).update(
+                        capacity_maintenance={"status": "failed", "reason": type(exc).__name__},
+                    )
             return committed_cursor
 
         async def wait_for_commit_point(committed_cursor: dict[str, object]) -> tuple[bool, dict[str, object]]:
@@ -2342,6 +2498,8 @@ class PersonalContext:
             )
             cancelled_at_commit, committed_cursor = await wait_for_commit_point(committed_cursor)
             commit_completed = True
+            if (service_id, run_id) in self._invalidated_fetch_runs:
+                return
             quarantined_items, item_errors = quarantined_candidate_diagnostics(committed_cursor)
             if cancelled_at_commit:
                 self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
