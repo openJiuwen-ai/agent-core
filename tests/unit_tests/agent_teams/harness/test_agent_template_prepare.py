@@ -125,8 +125,8 @@ async def test_prepare_initializes_then_loads_template_once(
         _load_agent_template_spec,
     )
 
-    await harness._prepare()
-    await harness._prepare()
+    await harness.prepare()
+    await harness.prepare()
 
     assert calls == [
         ("initialize", None),
@@ -150,6 +150,6 @@ async def test_prepare_without_template_preserves_existing_behavior(
     monkeypatch.setattr(harness, "ensure_initialized", _ensure_initialized)
     monkeypatch.setattr(harness, "load_agent_template_spec", _unexpected_load)
 
-    await harness._prepare()
+    await harness.prepare()
 
     assert calls == ["initialize"]

@@ -18,8 +18,30 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-28 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_06_opt-in-stream-task-lifecycle.md` |
+
+## Host 管理的对话归属
+
+`set_conversation_guard(Callable[[str | None], None])` 安装同步 host admission 检查。
+`check_conversation_admission(request_id=None)` 在输入接纳及执行边界调用；异常拒绝新输入，
+不自动暂停或取消工具。未安装 guard 时原行为不变。
+
+`conversation_is_idle()` 要求无活动调用/交互轮次、事件队列工作及 session_spawn。
+该条件仅表示本地执行状态；任务、goal、人机交互及团队状态需由 host 额外确认。
+`commit_conversation(session)` 只对受管理 Agent 保存原生 ContextEngine 状态并 commit，
+在交互轮次及 invoke/stream 正常完成时执行。产品 Session 的实际 owner 和交接 journal 由 host
+管理，Core 不读取 UI mode、应用 history 或 metadata 文件。
+交互式 `run_one_round` 在结果已输出、状态已保存后隔离 conversation commit 的普通异常：
+记录持久化失败堆栈，保留成功的 RoundOutcome、next_work 及 proposal 完成状态，
+不改写为 `round_execution_error`。该成功只表示执行完成，不保证此次 checkpoint 成功；
+取消继续传播，真正的轮次执行异常仍返回 `round_execution_error`。
+直接 `invoke` / `stream` 在状态保存后同样隔离受管理对话的普通提交异常，记录堆栈后
+返回或发送外层 rail 最终确定的答案，并以成功结果结束 proposal。DeepAgent 自建 Session
+仍执行 post_run 关闭输出流；受管理 Session 的收尾普通异常也记录并隔离，不因该异常
+重复收尾。若收尾被取消，finally 仍完成清理并传播取消。实际执行异常继续传播；未安装 conversation guard 的 Session
+收尾保留原异常传播语义。以上执行成功均不保证 checkpoint 已持久化。
+相关决策见 [F_32_conversation-ownership.md](../../features/F_32_conversation-ownership.md)。
 
 ## 范围 / 边界
 

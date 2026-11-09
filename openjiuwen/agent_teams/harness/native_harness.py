@@ -283,6 +283,14 @@ class NativeHarness(DeepAgent):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def prepare(self) -> None:
+        """Initialize rails and the template before starting execution.
+
+        Idempotent. Hosts may prepare the model context after this returns,
+        before ``start`` binds a session and launches the supervisor.
+        """
+        await self._prepare()
+
     async def _prepare(self) -> None:
         """Initialize base rails, then apply the serialized AgentTemplate.
 
@@ -564,6 +572,41 @@ class NativeHarness(DeepAgent):
     # External API: send / abort / pause
     # ------------------------------------------------------------------
 
+    def conversation_is_idle(self) -> bool:
+        """Include queued commands and background tools in the idle boundary."""
+        return (
+            self._st.phase is HarnessState.IDLE
+            and self._st.active is None
+            and not self._st.pending_queue
+            and self._control.empty()
+            and not (self._async_tool_runtime and self._async_tool_runtime.has_pending_tasks())
+            and not self._has_pending_session_spawn()
+        )
+
+    async def conversation_peers_are_idle(self, *, session_id: str) -> bool:
+        """Check team work and unread input before replacing Leader history."""
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.rails.team_context import get_team_backend
+        from openjiuwen.agent_teams.schema.status import MEMBER_QUIESCENT_STATUSES, MemberStatus
+        from openjiuwen.agent_teams.tools.database.graph import TASK_TERMINAL_STATUSES
+
+        backend = get_team_backend(self._build_context)
+        if backend is None:
+            return True
+        token = set_session_id(session_id)
+        try:
+            members = await backend.db.member.get_team_members(backend.team_name)
+            if any(member.member_name != backend.member_name
+                   and (member.status not in MEMBER_QUIESCENT_STATUSES or member.status == MemberStatus.PAUSED)
+                   for member in members):
+                return False
+            tasks = await backend.task_manager.list_tasks()
+            if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
+                return False
+            return not await backend.message_manager.has_unread_messages(include_broadcast=True)
+        finally:
+            reset_session_id(token)
+
     async def send(
         self,
         content: "str | InteractiveInput",
@@ -596,7 +639,11 @@ class NativeHarness(DeepAgent):
         Returns:
             The monotonic sequence id of this message.
         """
+        self.check_conversation_admission()
         self._require_alive()
+        # A background send must not acknowledge an unrelated user query.
+        if run_context is not None:
+            self.check_conversation_admission(run_context.extra.get("conversation_request_id"))
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(
             seq=0,
@@ -825,6 +872,13 @@ class NativeHarness(DeepAgent):
 
     async def _dispatch(self, cmd: Any) -> None:
         """Route a non-Stop control event to its handler."""
+        if isinstance(cmd, (_CmdSend, _CmdResume)):
+            try:
+                self.check_conversation_admission()
+            except Exception as exc:
+                if not cmd.ack.done():
+                    cmd.ack.set_exception(exc)
+                return
         if isinstance(cmd, _CmdSend):
             await self._on_send(cmd)
         elif isinstance(cmd, _CmdAbort):
@@ -1178,6 +1232,15 @@ class NativeHarness(DeepAgent):
         st = self.load_state(session)
         st.stop_condition_state = coordinator.get_state()
         self.save_state(session, st)
+        try:
+            await self.commit_conversation(session)
+        except Exception:
+            # A checkpoint failure must not terminate the supervisor or discard
+            # queued input after the round's result has already been emitted.
+            logger.exception(
+                "[NativeHarness] round_id=%s conversation commit failed",
+                cmd.round_id,
+            )
 
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
