@@ -1276,6 +1276,14 @@ class TeamBackend:
         auto_confirm: bool = False,
     ) -> bool:
         """Approve or reject one interrupted teammate tool call."""
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(approved, bool):
+            return False
+        if feedback is None:
+            feedback = ""
+        if auto_confirm is None:
+            auto_confirm = False
+        if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
+            return False
         member_data = await self.db.member.get_member(member_name, self.team_name)
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
@@ -1293,11 +1301,14 @@ class TeamBackend:
                 "auto_confirm": auto_confirm,
             }
         )
-        await self.message_manager.send_message(
+        message_id = await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
             protocol="json",
         )
+        if not message_id:
+            team_logger.error("Failed to persist tool approval for {} / {}", member_name, tool_call_id)
+            return False
 
         try:
             await self.messager.publish(
