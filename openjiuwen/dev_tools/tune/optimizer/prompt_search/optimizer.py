@@ -132,6 +132,8 @@ class PromptSearchOptimizer(BaseOptimizer):
         tests, or a caller supplying its own policy/environment/reward/drift)
         never needs to construct an LLM client at all.
         """
+        # The base constructor binds parameters through this class's override.
+        self._objectives: dict[str, str] = {}
         super().__init__(parameters)
 
         self._model_config = model_config
@@ -184,7 +186,6 @@ class PromptSearchOptimizer(BaseOptimizer):
         self._compressor = history_compressor or HistoryCompressor(self._policy_model())
         self._log = run_logger or NullRunLogger()
 
-        self._objectives: Dict[str, str] = {}
         self._last_results: Dict[str, OptimizationResult] = {}
 
     def _policy_model(self) -> Optional[Model]:
