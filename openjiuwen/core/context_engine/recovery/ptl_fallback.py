@@ -642,16 +642,20 @@ def _attach_marker(
         if isinstance(messages[position], AssistantMessage):
             merged = _merge_marker_into_message(messages[position], marker_text, at_end=True)
             if merged is not None:
-                return list(messages[:position]) + [merged] + list(messages[position + 1 :])
+                next_position = position + 1
+                return list(messages[:position]) + [merged] + list(messages[next_position:])
 
-    if capped_index > 0 and isinstance(messages[capped_index - 1], UserMessage):
-        merged = _merge_marker_into_message(messages[capped_index - 1], marker_text, at_end=True)
-        if merged is not None:
-            return list(messages[: capped_index - 1]) + [merged] + list(messages[capped_index:])
+    if capped_index > 0:
+        previous_index = capped_index - 1
+        if isinstance(messages[previous_index], UserMessage):
+            merged = _merge_marker_into_message(messages[previous_index], marker_text, at_end=True)
+            if merged is not None:
+                return list(messages[:previous_index]) + [merged] + list(messages[capped_index:])
     if capped_index < len(messages) and isinstance(messages[capped_index], UserMessage):
         merged = _merge_marker_into_message(messages[capped_index], marker_text, at_end=False)
         if merged is not None:
-            return list(messages[:capped_index]) + [merged] + list(messages[capped_index + 1 :])
+            next_index = capped_index + 1
+            return list(messages[:capped_index]) + [merged] + list(messages[next_index:])
 
     # No safe message to annotate: drop the diagnostic marker instead of
     # emitting a message that strict providers reject.
@@ -710,7 +714,9 @@ def _generic_context_limits(text: str) -> List[int]:
         value = _to_int(match.group())
         if value is None or value < _MIN_PLAUSIBLE_CONTEXT_LIMIT:
             continue
-        window = text[max(0, match.start() - 32) : match.end() + 32]
+        window_start = max(0, match.start() - 32)
+        window_end = match.end() + 32
+        window = text[window_start:window_end]
         if _OUTPUT_HINT_RE.search(window):
             continue
         if not _CONTEXT_HINT_RE.search(window):
