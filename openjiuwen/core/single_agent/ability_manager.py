@@ -118,6 +118,17 @@ MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
     os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
 )
 
+#: 工具消息文本中内联多模态载荷(data URL)的占位符。结果对象 ``data.multimodal``
+#: 里的像素由 react_agent 提升为 user 消息的 image 块送达模型;消息文本里字符串化
+#: 出现的同一份 base64 是冗余副本(按文本 token 计量可达百万级),统一替换为占位符。
+_MULTIMODAL_PAYLOAD_PLACEHOLDER = "<multimodal payload omitted>"
+
+#: 仅匹配 ``data:<mime>;base64,<payload>`` 数据 URL 形态(多模态载荷的传输编码);
+#: 裸 base64 文本(无 data: 前缀)不匹配,不受消毒影响。
+_MULTIMODAL_DATA_URL_RE = re.compile(
+    r"data:[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+"
+)
+
 #: 未知工具名错误附加给 LLM 的自纠提示,仅改错误文案、不改执行行为.
 _UNKNOWN_TOOL_NAME_HINT = (
     " The tool name does not match any registered ability. Check the tools "
@@ -284,7 +295,18 @@ class AbilityManager:
                 return f"Tool succeeded but returned empty content.{suffix}"
             return ""
 
-        return str(result)
+        fallback = str(result)
+        if "base64," in fallback:
+            # 无顶层 ``content`` 键的结果（多文件 read_file 的 ``{'files': [...]}`` 等）
+            # 走到这里时整个 ToolOutput 会被字符串化——``multimodal`` 里的 base64 会
+            # 以纯文本进入上下文并随请求原样上线，按文本 token 计量可达百万级
+            # （2026-11-07 事故：5 张图 5.4MB 文本触发端点 input token limit 拒收）。
+            # 像素的正规通道是结果对象 ``data.multimodal`` → 提升出的 user 消息
+            # image 块（react_agent 处理），消息文本里的 base64 属于冗余的那份，
+            # 在此替换为占位符。仅命中 ``data:<mime>;base64,`` 数据 URL 形态，
+            # 纯文本结果不受影响。
+            return _MULTIMODAL_DATA_URL_RE.sub(_MULTIMODAL_PAYLOAD_PLACEHOLDER, fallback)
+        return fallback
 
     def set_context_engine(self, context_engine) -> None:
         self._context_engine = context_engine

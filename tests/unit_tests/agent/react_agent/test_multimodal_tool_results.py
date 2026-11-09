@@ -25,6 +25,90 @@ def test_tool_message_content_omits_multimodal_payload() -> None:
     assert AbilityManager._build_tool_message_content(result) == "Image file read: /tmp/a.png"
 
 
+def test_tool_message_content_sanitizes_multimodal_payload_in_fallback() -> None:
+    """多文件 read_file 结果没有顶层 ``content`` 键,兜底 ``str(result)`` 会把
+    ``multimodal`` 里的 base64 以纯文本带进上下文/请求(2026-11-07 事故:5 张图
+    5.4MB 文本触发端点 input token limit 拒收)。兜底分支必须把数据 URL 载荷
+    替换为占位符,同时保留其余结构(路径、逐文件文本)供模型与下游解析使用。"""
+
+    big_payload = "A" * 1000
+    result = ToolOutput(
+        success=True,
+        data={
+            "files": [
+                {
+                    "file_path": "/tmp/a.png",
+                    "content": "Image file read: /tmp/a.png",
+                    "type": "image",
+                    "multimodal": [
+                        {
+                            "type": "image",
+                            "source": "read_file",
+                            "source_path": "/tmp/a.png",
+                            "mime_type": "image/png",
+                            "data_url": f"data:image/png;base64,{big_payload}",
+                        }
+                    ],
+                },
+                {
+                    "file_path": "/tmp/b.jpg",
+                    "content": "Image file read: /tmp/b.jpg",
+                    "type": "image",
+                    "multimodal": [
+                        {
+                            "type": "image",
+                            "data_url": f"data:image/jpeg;base64,{big_payload}",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+
+    content = AbilityManager._build_tool_message_content(result)
+
+    # base64 载荷绝不以文本身份出现在消息里
+    assert "base64," not in content
+    assert big_payload not in content
+    # 占位符替换了载荷
+    assert content.count("<multimodal payload omitted>") == 2
+    # 其余结构保留:路径与逐文件文本仍可见
+    assert "/tmp/a.png" in content
+    assert "/tmp/b.jpg" in content
+    assert "Image file read: /tmp/a.png" in content
+    # 体量必须显著小于原始字符串化(载荷被替换,结构保留)
+    assert len(content) < len(str(result))
+
+
+def test_tool_message_content_fallback_without_payload_is_unchanged() -> None:
+    """无 data URL 载荷的结果走兜底时必须与原 ``str(result)`` 逐字节一致——
+    消毒只允许影响带 base64 的形态,纯文本结果零变化。"""
+
+    result = ToolOutput(
+        success=True,
+        data={"files": ["a.txt", "b.txt"], "count": 2},
+    )
+
+    assert AbilityManager._build_tool_message_content(result) == str(result)
+
+
+def test_tool_message_content_fallback_sanitizes_bare_text_data_urls() -> None:
+    """文本结果里字面混入 data URL 形态的载荷同样替换——该形态本身就是
+    同款 token 炸弹;裸 base64(无 data: 前缀)不匹配,保持原样。"""
+
+    result = ToolOutput(success=True, data={"note": "data:image/png;base64,XYZ=="})
+
+    content = AbilityManager._build_tool_message_content(result)
+    # 整个数据 URL(前缀+载荷)被替换为占位符
+    assert "<multimodal payload omitted>" in content
+    assert "base64," not in content
+    assert "XYZ" not in content
+    assert "'note'" in content
+
+    bare = ToolOutput(success=True, data={"note": "XYZ=="})
+    assert AbilityManager._build_tool_message_content(bare) == str(bare)
+
+
 def test_react_agent_builds_multimodal_user_message_from_tool_result() -> None:
     result = ToolOutput(
         success=True,
