@@ -78,6 +78,23 @@ class LocalFunction(Tool):
             self._func = func
 
     @property
+    def name(self) -> str:
+        """The tool's name, as registered and sent to the model.
+
+        Same value as ``card.name``, so callers do not have to reach through the
+        card for the one field they almost always want.
+
+        Declared here rather than on ``Tool`` on purpose: ``Tool`` is a public
+        base class and subclasses legitimately assign ``self.name = ...`` in
+        their own constructors (``tests/unit_tests/core/session/tracer/``
+        ``test_decorator.py``'s ``MockTool`` does). A read-only property up there
+        turns that assignment into ``AttributeError``, and one with a setter
+        would write through to ``card.name``, silently changing the name the
+        tracer reports.
+        """
+        return self._card.name
+
+    @property
     def func(self) -> Callable:
         """The decorated function, unchanged.
 
