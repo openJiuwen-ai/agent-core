@@ -77,17 +77,19 @@ def test_default_document_contains_only_public_configuration(exporter):
     assert "fingerprint → FingerprintPolicyConfig" in public
     assert "discovery → DiscoveryConfig" in public
     assert "flow → FlowConfig" in public
-    assert "dynamic → DynamicTreeConfig" in public
-    assert "expansion → TreeExpansionConfig" in public
-    assert "rebalance_interval # 默认=50" in public
     assert "allow_fallback_tree # 默认=true" in public
     assert "strict_failure #" not in public
-    for name, value in (
-        ("max_capabilities_per_node", 1.5), ("expand_threshold", 0.7), ("early_stop", 1.7),
-        ("lazy_split", 1.3), ("classification_batch", 6.0), ("structure_sample", 12.0),
+    structure = public.split("structure → RetrievalTreeStructureConfig", 1)[1].split("request → IndexRequestConfig", 1)[0]
+    assert "max_capabilities_per_node_multiplier # 默认=1.5" in structure
+    assert "叶节点容量阈值" in structure
+    assert public.count("max_capabilities_per_node_multiplier #") == 1
+    for name in (
+        "dynamic", "expansion", "rebalance_interval", "caching", "max_capabilities_per_node",
+        "expand_threshold_multiplier", "early_stop_multiplier", "lazy_split_multiplier",
+        "classification_batch_multiplier", "structure_sample_multiplier",
     ):
-        assert f"{name}_multiplier # 默认={value}" in public
         assert f"── {name} #" not in public
+        assert f"── {name} →" not in public
     assert "capability_cluster_num #" not in public
     assert "cache_metrics_enabled # 默认=true" in public
     assert "prompt → DiscoveryPromptConfig" in public
@@ -127,7 +129,7 @@ def test_optional_reference_covers_all_remaining_internal_fields(exporter):
         "TreeRequestConfig", "TreeStructureConfig", "IndexTreeStructureConfig", "TreeBuildConfig",
         "IndexTreeBuildConfig", "TreeManagerConfig", "TreePromptConfig", "IndexBuildConfig", "IndexArtifactConfig",
         "TreeBuildOptions", "ProgressiveRetrieverConfig", "RetrieverConfig", "DisclosureConfig",
-        "DiscoveryBudgetConfig", "RetrievalGenerationConfig",
+        "DiscoveryBudgetConfig", "RetrievalGenerationConfig", "DynamicTreeConfig", "TreeExpansionConfig",
     ):
         assert "\n" + name + " # " not in document
         assert "→ " + name + " # " not in document

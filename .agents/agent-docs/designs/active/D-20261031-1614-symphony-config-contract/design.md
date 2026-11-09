@@ -9,7 +9,7 @@ author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 reviewers: []
 created: 2026-10-31
-updated: 2026-11-03
+updated: 2026-11-06
 approved-date: 2026-10-31
 domain: core
 modules: [symphony]
@@ -29,7 +29,7 @@ scope: 分层纯配置模型、树形文档导出和配置验证；运行链路�
 
 ## 2. 目标配置
 
-在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。初始公共配置按以下结构组合；挂载范围、路径和组合约束由第 8、10、11、12 节的用户确认方案更新：
+在 `openjiuwen/symphony/config.py` 集中定义全部纯配置，采用 Pydantic v2。文件注明“目标配置，尚未接入运行链路”。初始公共配置按以下结构组合；挂载范围、路径和组合约束由后续各节的用户确认方案更新：
 
 ```text
 SymphonyConfig
@@ -167,3 +167,16 @@ SymphonyConfig
 ## 13. 2026-11-03 能力退役的后继决定
 
 用户批准连代码与配置一起删除旧模型检索、分支浏览和独立经验库，方案由 [D-20261103-1438-symphony-capability-retirement](../D-20261103-1438-symphony-capability-retirement/design.md) 承接。此前有关这些能力保留的选择被局部替代；嵌套结构、中文元数据、保留默认值和目标配置尚未接入 Runtime 等约定继续有效。此前章节保留其当时语境。
+
+
+## 14. 2026-11-06 无效目标配置清理确认
+
+用户确认实施“Symphony config.py 无效配置清理计划”，本节局部替代第 10、11 节的动态树调整分组及六倍率保留决定，以及第 12 节将 request.caching 描述为缓存策略开关的决定。配置先行边界继续有效，本轮只修改目标配置、配置测试与相关文档；业务定义、Runtime、引擎、Swarm 和现有缓存签名留待后续。
+
+- 删除 retrieval.build.dynamic.rebalance_interval 及 expansion 中的 expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier。这六项对应的业务定义或派生属性没有实际消费者，不再作为目标用户策略。
+- 删除 retrieval.build.request.caching。业务对应字段仅透传并参与现有索引签名，没有控制缓存的分支；本轮保留这些业务定义及其签名作用。
+- 唯一仍有构树消费者的 max_capabilities_per_node_multiplier 从 dynamic.expansion 迁至 retrieval.build.structure，保留 1.5 和严格正有限数约束。中文说明明确叶节点容量阈值为分支数乘倍率后取整数部分，目标配置不执行计算。
+- 删除目标 DynamicTreeConfig、TreeExpansionConfig、RetrievalBuildConfig.dynamic 及登记项，不提供别名；预期公共模型 31 个、内部 3 个、合计 34 个。所有保留字段的默认值、约束不变，便利导出与包根导出不扩大。
+- 保留缓存指标、指纹缓存、动态观测开关、Discovery、Flow、一次性构树和三个内部模型。缓存指标只表示观测，不作为缓存开关；冻结策略不再保留已删除 dynamic 节点的可变例外。
+
+验收：按上述删除项和唯一迁移路径核对修改前后的默认值与 Schema 约束；旧 dynamic 节点和 request.caching 在字典/JSON 输入中按未知字段拒绝，新路径支持深层覆盖和完整错误定位。保留配置往返、独立容器、中文元数据及导出覆盖，自动生成 config.tree.txt 并同步现行规约、示例和文档索引。仅运行配置和导出测试，不运行格式化、静态检查或业务集成测试；实际实施与验证结果续写 F_20261031_1614_symphony-config-contract，历史验证事实不改写。

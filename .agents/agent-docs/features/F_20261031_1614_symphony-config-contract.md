@@ -5,7 +5,7 @@ type: F
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-10-31
-updated: 2026-11-02
+updated: 2026-11-06
 modules: [symphony]
 files: [openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
 designs: [D-20261031-1614-symphony-config-contract]
@@ -358,3 +358,37 @@ python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symph
 ## 2026-11-03 后继能力退役
 
 旧检索与独立经验库的保留决定由 [F_20261103_1458_symphony-capability-retirement](F_20261103_1458_symphony-capability-retirement.md) 局部替代，当前模型登记和运行边界以 S_01_configuration-contract 为准。上文模型数量和测试结果保留为各次候选的历史事实。
+
+
+## 2026-11-06 无效目标配置清理
+
+本节续写同一配置契约特性，实施用户明确确认的清理计划，对应 D-20261031-1614-symphony-config-contract 第 14 节。比较基线为 `9c5b6ee4f7965553d955905c975693aa319a7ade`，候选为 `feature/symphony-config-contract` 工作区的本轮配置、配置测试和文档差异；此前章节的模型数量、默认路径和测试结果保留为当时事实，当前契约以 S_01_configuration-contract 为准。
+
+### 实施与决定
+
+- 删除目标 retrieval.build.dynamic.rebalance_interval，以及 expansion 中的 expand_threshold_multiplier、early_stop_multiplier、lazy_split_multiplier、classification_batch_multiplier、structure_sample_multiplier。业务树配置中只有定义或派生属性，没有构建流程消费者，因此不再提供这些目标用户选项；业务 schema.py 的闲置定义本轮保留。
+- 删除目标 retrieval.build.request.caching。当前链路为 toolkit 配置 → BuildConfig.tree_caching → ResolvedBuildConfig → TreeBuildConfig.caching，模型请求没有使用该值。旧 toolkit 配置仍通过 asdict 进入 `_index_fingerprint`，因此本轮保留全部业务定义和签名逻辑，只修正目标配置及文档中的缓存开关承诺。
+- max_capabilities_per_node_multiplier 仍对应 expansion.py 中 `_should_force_leaf` 使用的节点容量阈值，迁至 retrieval.build.structure，保留 1.5、严格正数和有限值约束。中文说明补齐以分支数为基数、乘积取整数部分、对象数不超过阈值时可停止细分的语义；不新增运行计算或配置适配代码。
+- 删除目标 DynamicTreeConfig、TreeExpansionConfig 和 dynamic 节点，不保留别名，公共登记从 33 到 31，内部仍为 3，合计从 36 到 34。移除动态树赋值校验的例外，保留模型的冻结策略不变，列表/字典仍不声称深层冻结。
+- 缓存指标继续归 output.cache_metrics_enabled，指纹缓存继续归 capability.fingerprint.cache.enabled；保留动态图观测、Discovery、Flow、一次性构树及三个内部模型。目标包的便利导出、Symphony 包根导出和运行链路均未调整。
+
+没有超出确认计划的实现偏差。删除和层级调整仅收紧目标配置的可接受输入；旧 dynamic 节点以及 request.caching 的 True/False 均按未知字段拒绝，不静默忽略。README、模块约定和当前 S 已同步，历史设计通过第 14 节追加后继决定。
+
+### 验证证据
+
+环境：macOS，Python 3.11.15、Pydantic 2.12.5、pytest 9.0.2；复用主仓虚拟环境及已有 `/tmp/symphony-retirement-deps`，本轮不安装依赖。
+
+```bash
+source /Users/xiaoyulin/Documents/Huawei/code/agent-core/.venv/bin/activate
+export PYTHONPATH=.:/tmp/symphony-retirement-deps:${PYTHONPATH:-}
+python scripts/export_symphony_config.py
+python -m pytest tests/unit_tests/symphony/test_config.py tests/unit_tests/symphony/test_config_export.py -q
+```
+
+结果：**190 passed，2 个既有 Pydantic 弃用警告，0.91 秒**。警告来自 connector_pool.py 和 http_client.py 的旧 class Config 声明。覆盖新结构路径的默认值、深层覆盖、正数/严格类型/有限值校验、字典和 JSON 完整错误路径、退役节点拒绝、冻结语义、独立容器、往返、中文元数据、模型登记及独立导出。配置树保留“全量配置”标题并覆盖 31 个公共模型，导出脚本未修改。
+
+实施前保存了基线配置的默认序列化值、所有模型 Schema、model_config、登记顺序和便利导出列表。对照时只允许七项删除、容量倍率的明确迁移及中文标题/说明变化；结果为其余默认值一致，34 个保留模型的 Schema 约束和 model_config 一致，3 个内部模型的完整 Schema 一致，登记顺序仅删除两个模型，便利导出不变。该对比在配置文件独立加载入口完成，不启动 Runtime。
+
+文档同步工具的原入口因受保护目录写入失败，核对发现它还会改写 9 篇无关历史文档的元数据。本轮改在临时副本执行同一同步逻辑，仅带回本次设计更新对应的生成索引差异，并保留索引原作者；其余源文档和无关索引漂移不纳入本次修改。
+
+未运行格式化、静态检查或业务集成测试；配置测试通过不构成 Runtime 接入或缓存行为迁移的证据。本轮不提交或推送。后续若修改配置、导出器或相关消费者，应按实际影响重新验证；仅文档与索引收尾不重复运行配置测试。

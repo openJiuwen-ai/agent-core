@@ -2,7 +2,7 @@
 # 目标配置，尚未接入运行链路；当前运行行为仍以原有模块配置为准。
 # 注释标明默认值或必填；→ 表示子模型类型，用户可调子模型在根树完整展开。
 # 不列只读派生属性；长列表展示数量，完整默认内容保留在 config.py。
-# 用户配置树覆盖 33 个模型。
+# 用户配置树覆盖 31 个模型。
 
 # 全量配置
 SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime 接收。
@@ -42,22 +42,13 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 ├── retrieval → RetrievalConfig # 默认=RetrievalConfig()；分类树构建与对象发现的默认配置。
 │   ├── enabled # 默认=true；允许使用检索入口；独立于编排开关。
 │   ├── build → RetrievalBuildConfig # 默认=RetrievalBuildConfig()；显式构建分类树时使用的策略。
-│   │   ├── structure → RetrievalTreeStructureConfig # 默认=RetrievalTreeStructureConfig()；分类树深度、分支和根分类输入。
+│   │   ├── structure → RetrievalTreeStructureConfig # 默认=RetrievalTreeStructureConfig()；分类树深度、分支、根分类输入和叶节点容量倍率。
 │   │   │   ├── branching_factor # 默认=128；每个分类节点的最大分支数；公共入口至少允许两个分支。
 │   │   │   ├── max_depth # 默认=6；索引分类树的最大深度。
-│   │   │   └── root_categories # 默认=None；根分类列表或配置文件路径文本；模型本身不读取路径。
-│   │   ├── dynamic → DynamicTreeConfig # 默认=DynamicTreeConfig()；重平衡间隔和扩展倍率；共用 structure 的树结构，不执行派生阈值计算。
-│   │   │   ├── rebalance_interval # 默认=50；触发结构重平衡的操作计数间隔。
-│   │   │   └── expansion → TreeExpansionConfig # 默认=TreeExpansionConfig()；容量、扩展和采样阈值的倍率。
-│   │   │       ├── max_capabilities_per_node_multiplier # 默认=1.5；节点容量相对分支数的倍率。
-│   │   │       ├── expand_threshold_multiplier # 默认=0.7；节点扩展阈值相对分支数的倍率。
-│   │   │       ├── early_stop_multiplier # 默认=1.7；提前停止对象数相对分支数的倍率。
-│   │   │       ├── lazy_split_multiplier # 默认=1.3；延迟拆分阈值相对节点容量的倍率。
-│   │   │       ├── classification_batch_multiplier # 默认=6.0；分类批量相对分支数的倍率；区别于 request.classification_batch_limit 的绝对上限。
-│   │   │       └── structure_sample_multiplier # 默认=12.0；结构采样数量相对分支数的倍率。
+│   │   │   ├── root_categories # 默认=None；根分类列表或配置文件路径文本；模型本身不读取路径。
+│   │   │   └── max_capabilities_per_node_multiplier # 默认=1.5；递归构树时，叶节点容量阈值相对 branching_factor 的倍率；对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由后续运行层计算。
 │   │   ├── request → IndexRequestConfig # 默认=IndexRequestConfig()；模型请求的并发、超时、重试和分类批量。
 │   │   │   ├── max_concurrency # 默认=2；索引构建模型请求的并发上限。
-│   │   │   ├── caching # 默认=false；是否启用底层树构建缓存。
 │   │   │   ├── max_retries # 默认=2；模型请求失败后的最多重试次数。
 │   │   │   ├── timeout_seconds # 默认=420.0；单次索引构建模型请求超时，单位秒。
 │   │   │   ├── context_window_tokens # 默认=0；上下文 token 预算；0 表示未显式指定。
@@ -95,7 +86,7 @@ SymphonyConfig # Symphony 目标公共配置；尚未被现有 SymphonyRuntime �
 │   │       ├── verbose # 默认=false；是否显示现有构建过程的详细信息。
 │   │       ├── show_tree # 默认=true；是否显示构建后的分类树；区别于生成 HTML 预览文件。
 │   │       ├── display_capability_root # 默认=None；输出展示使用的对象目录文本；不影响扫描根目录。
-│   │       └── cache_metrics_enabled # 默认=true；是否记录并展示树构建模型请求的缓存命中和提示指纹统计；独立于 request.caching 的缓存策略开关。
+│   │       └── cache_metrics_enabled # 默认=true；是否记录并展示树构建模型请求的缓存命中和提示指纹统计；不控制缓存是否启用。
 │   └── discovery → DiscoveryConfig # 默认=DiscoveryConfig()；对象发现的候选、输出和提示预算。
 │       ├── prompt → DiscoveryPromptConfig # 默认=DiscoveryPromptConfig()；候选提示的上下文容量、预算比例和优先对象设置。
 │       │   ├── candidate_budget_ratio # 默认=0.01；候选提示可占用的上下文比例，范围大于 0 且不超过 1。

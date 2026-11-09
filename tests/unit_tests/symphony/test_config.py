@@ -53,7 +53,6 @@ INDEX_MAPPING = {
     "request_timeout_seconds": "build.request.timeout_seconds",
     "total_timeout_seconds": "task.total_timeout_seconds",
     "classification_batch_limit": "build.request.classification_batch_limit",
-    "caching": "build.request.caching",
     "context_window": "build.request.context_window_tokens",
     "max_output_tokens": "build.request.max_output_tokens",
     "discovery_seed": "build.prompt.discovery_seed",
@@ -89,6 +88,7 @@ def test_minimal_config_has_independent_enabled_features_and_expected_defaults()
     assert config.retrieval.enabled and config.orchestration.enabled
     assert config.retrieval.build.structure.max_depth == 6
     assert config.retrieval.build.structure.branching_factor == 128
+    assert config.retrieval.build.structure.max_capabilities_per_node_multiplier == 1.5
     assert config.retrieval.build.request.max_concurrency == 2
     assert config.retrieval.build.request.timeout_seconds == 420.0
     assert config.retrieval.build.request.classification_batch_limit == 32
@@ -250,6 +250,9 @@ def test_schema_preserves_bounds_enum_and_examples():
     assert schema["required"] == ["capability", "storage"]
     output = schema["$defs"]["DiscoveryOutputConfig"]["properties"]["max_results"]
     assert output["default"] == 10 and output["exclusiveMinimum"] == 0
+    capacity = schema["$defs"]["RetrievalTreeStructureConfig"]["properties"]["max_capabilities_per_node_multiplier"]
+    assert capacity["default"] == 1.5 and capacity["exclusiveMinimum"] == 0
+    assert capacity["type"] == "number"
     assert schema["$defs"]["CapabilityConfig"]["properties"]["root"]["examples"] == ["./capabilities"]
     assert schema["$defs"]["CapabilityConfig"]["properties"]["type"]["enum"] == [
         "skill", "expert", "connector", "mcp",
@@ -280,10 +283,11 @@ def test_legacy_mirrors_and_resolved_snapshots_are_not_target_configuration():
         "TreeRequestConfig", "TreeStructureConfig", "IndexTreeStructureConfig", "TreeBuildConfig",
         "IndexTreeBuildConfig", "TreeManagerConfig", "TreePromptConfig", "IndexBuildConfig", "IndexArtifactConfig",
         "TreeBuildOptions", "ProgressiveRetrieverConfig", "RetrieverConfig", "DisclosureConfig",
-        "DiscoveryBudgetConfig", "RetrievalGenerationConfig",
+        "DiscoveryBudgetConfig", "RetrievalGenerationConfig", "DynamicTreeConfig", "TreeExpansionConfig",
     }
     assert not removed & set(vars(target))
     assert not removed & {model.__name__ for model in target.CONFIG_MODELS}
+    assert not removed & set(target.SymphonyConfig.model_json_schema()["$defs"])
 
 
 def test_public_exports_are_limited_to_the_runtime_configuration_tree():
@@ -310,11 +314,10 @@ def test_default_containers_are_not_shared_and_public_assignment_is_frozen():
     with pytest.raises(ValidationError) as error:
         target.SymphonyConfig.model_validate(MINIMAL).retrieval.discovery.output.max_results = 2
     assert error.value.errors()[0]["type"] == "frozen_instance"
-    mutable = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build.dynamic
-    mutable.rebalance_interval = 80
-    assert mutable.rebalance_interval == 80
-    with pytest.raises(ValidationError):
-        mutable.rebalance_interval = 0
+    structure = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build.structure
+    with pytest.raises(ValidationError) as error:
+        structure.max_capabilities_per_node_multiplier = 2.0
+    assert error.value.errors()[0]["type"] == "frozen_instance"
 
 
 def test_runtime_dependencies_are_not_configuration_fields():
@@ -330,8 +333,9 @@ def test_public_build_preserves_every_configurable_toolkit_default():
     }
     _assert_defaults(
         CurrentIndexBuildConfig(), config.retrieval.build, mapping,
-        excluded=("prompt_fingerprint_version", "strict_failure"),
+        excluded=("prompt_fingerprint_version", "strict_failure", "caching"),
     )
+    # caching 只在旧业务配置中透传并参与签名，没有缓存控制逻辑；目标配置不再镜像。
     # 旧 strict_failure 反向映射到唯一回退策略，不再保留第二个可写开关。
     assert config.retrieval.build.task.allow_fallback_tree is not CurrentIndexBuildConfig().strict_failure
 
@@ -361,8 +365,8 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
         },
         "retrieval": {
             "build": {
-                "structure": {"branching_factor": 16, "root_categories": ["analysis", {"name": "write", "rank": 2}]},
-                "dynamic": {"rebalance_interval": 80, "expansion": {"early_stop_multiplier": 2.0}},
+                "structure": {"branching_factor": 16, "max_capabilities_per_node_multiplier": 2.0,
+                              "root_categories": ["analysis", {"name": "write", "rank": 2}]},
                 "request": {"max_concurrency": 3, "timeout_seconds": 60.0, "context_window_tokens": 32768},
                 "postprocess": {"enabled": False}, "equivalence": {"enabled": True},
                 "profiles": {"enabled": True, "max_description_chars": 160, "max_rule_chars": 200},
@@ -386,9 +390,8 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     assert config.capability.fingerprint.evaluation.max_evidence_chars == 256
     assert config.capability.fingerprint.evaluation.llm_enabled and not config.capability.fingerprint.cache.enabled
     assert config.retrieval.build.structure.root_categories == ["analysis", {"name": "write", "rank": 2}]
-    assert config.retrieval.build.dynamic.rebalance_interval == 80
-    assert config.retrieval.build.dynamic.expansion.early_stop_multiplier == 2.0
-    assert config.retrieval.build.dynamic.expansion.classification_batch_multiplier == 6.0
+    assert config.retrieval.build.structure.max_capabilities_per_node_multiplier == 2.0
+    assert config.retrieval.build.structure.max_depth == 6
     assert config.retrieval.build.request.max_concurrency == 3 and config.retrieval.build.request.max_retries == 2
     assert config.retrieval.build.request.context_window_tokens == 32768
     assert not config.retrieval.build.postprocess.enabled and config.retrieval.build.equivalence.enabled
@@ -422,18 +425,10 @@ def test_partial_overrides_reach_all_public_groups_and_round_trip():
     ("retrieval.build.prompt.fingerprint_version", "v2"),
     ("retrieval.build.manager", {}),
     ("retrieval.build.build", {}),
-    ("retrieval.build.dynamic.structure", {"branching_factor": 8}),
-    ("retrieval.build.dynamic.max_capabilities_per_node", 12),
     ("retrieval.build.artifacts", {"allow_fallback_tree": False}),
     ("retrieval.build.model", {"model": "example"}),
     ("retrieval.build.method", 4),
     ("retrieval.build.task.strict_failure", False),
-    ("retrieval.build.dynamic.expansion.max_capabilities_per_node", 1.5),
-    ("retrieval.build.dynamic.expansion.expand_threshold", 0.7),
-    ("retrieval.build.dynamic.expansion.early_stop", 1.7),
-    ("retrieval.build.dynamic.expansion.lazy_split", 1.3),
-    ("retrieval.build.dynamic.expansion.classification_batch", 6.0),
-    ("retrieval.build.dynamic.expansion.structure_sample", 12.0),
     ("capability.fingerprint.extraction.body_limit", 16000),
     ("capability.fingerprint.extraction.max_tokens", 2048),
     ("capability.fingerprint.evaluation.evidence_text_limit", 512),
@@ -466,10 +461,8 @@ def test_duplicate_or_internal_input_paths_are_rejected(path, value):
     ({"retrieval": {"build": {"structure": {"branching_factor": 1}}}}, ("retrieval", "build", "structure", "branching_factor")),
     ({"flow": {"enabled": False, "acceptance": {"min_pack_success_rate": -0.1}}},
      ("flow", "acceptance", "min_pack_success_rate")),
-    ({"retrieval": {"build": {"dynamic": {"rebalance_interval": 0}}}},
-     ("retrieval", "build", "dynamic", "rebalance_interval")),
-    ({"retrieval": {"build": {"dynamic": {"expansion": {"lazy_split_multiplier": 0}}}}},
-     ("retrieval", "build", "dynamic", "expansion", "lazy_split_multiplier")),
+    ({"retrieval": {"build": {"structure": {"max_capabilities_per_node_multiplier": 0}}}},
+     ("retrieval", "build", "structure", "max_capabilities_per_node_multiplier")),
     ({"retrieval": {"build": {"task": {"allow_fallback_tree": "false"}}}},
      ("retrieval", "build", "task", "allow_fallback_tree")),
     ({"retrieval": {"build": {"output": {"display_capability_root": " "}}}},
@@ -485,11 +478,17 @@ def test_nested_public_defaults_are_independent_between_instances():
     first = target.SymphonyConfig.model_validate(MINIMAL)
     second = target.SymphonyConfig.model_validate(MINIMAL)
     first.retrieval.discovery.prompt.preferred_capability_ids.append("expert-extra")
-    first.retrieval.build.dynamic.rebalance_interval = 80
-    first.retrieval.build.dynamic.expansion = target.TreeExpansionConfig(early_stop_multiplier=2.0)
     assert "expert-extra" not in second.retrieval.discovery.prompt.preferred_capability_ids
-    assert second.retrieval.build.dynamic.rebalance_interval == 50
-    assert second.retrieval.build.dynamic.expansion.early_stop_multiplier == 1.7
+    assert first.retrieval.build.structure is not second.retrieval.build.structure
+    assert first.retrieval.build.request is not second.retrieval.build.request
+    assert second.retrieval.build.structure.max_capabilities_per_node_multiplier == 1.5
+
+    payload = {**MINIMAL, "retrieval": {"build": {"structure": {"root_categories": [{"name": "analysis"}]}}}}
+    first = target.SymphonyConfig.model_validate(payload)
+    second = target.SymphonyConfig.model_validate(payload)
+    first.retrieval.build.structure.root_categories[0]["name"] = "changed"
+    assert second.retrieval.build.structure.root_categories == [{"name": "analysis"}]
+    assert payload["retrieval"]["build"]["structure"]["root_categories"] == [{"name": "analysis"}]
 
 
 def test_index_task_policy_and_output_have_separate_serialized_paths():
@@ -538,7 +537,7 @@ def test_index_failure_policy_rejects_the_previous_output_path(field):
 
 def test_public_build_matches_existing_workflow_and_shared_tree_defaults():
     tree_mapping = {
-        "max_workers": "request.max_concurrency", "caching": "request.caching",
+        "max_workers": "request.max_concurrency",
         "num_retries": "request.max_retries", "timeout": "request.timeout_seconds",
         "context_window": "request.context_window_tokens", "max_output_tokens": "request.max_output_tokens",
         "classify_batch_cap": "request.classification_batch_limit",
@@ -555,8 +554,8 @@ def test_public_build_matches_existing_workflow_and_shared_tree_defaults():
         "skill_profile_rule_limit": "profiles.max_rule_chars",
     }
     config = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build
-    # 底层入口的并发 1、超时 180、批量 20 留在业务模块；提示版本是协议身份。
-    excluded_tree_fields = ("max_workers", "timeout", "classify_batch_cap", "prompt_fingerprint_version")
+    # 底层入口的并发 1、超时 180、批量 20 留在业务模块；提示版本是协议身份，caching 没有功能消费者。
+    excluded_tree_fields = ("max_workers", "timeout", "classify_batch_cap", "prompt_fingerprint_version", "caching")
     _assert_defaults(current_tree.TreeBuildConfig(), config, {
         name: path for name, path in tree_mapping.items() if name not in excluded_tree_fields
     }, excluded=excluded_tree_fields)
@@ -570,7 +569,7 @@ def test_public_build_matches_existing_workflow_and_shared_tree_defaults():
     })
     _assert_defaults(CurrentWorkflowConfig(), config, workflow_mapping, excluded=(
         "llm_openai_client", "llm_model", "llm_api_key", "llm_base_url", "llm_seed",
-        "tree_prompt_fingerprint_version",
+        "tree_prompt_fingerprint_version", "tree_caching",
     ))
 
 
@@ -608,16 +607,22 @@ def test_planning_defaults_preserve_the_current_contract():
     })
 
 
-@pytest.mark.parametrize("caching", [True, False])
+@pytest.mark.parametrize("fingerprint_cache_enabled", [True, False])
 @pytest.mark.parametrize("cache_metrics_enabled", [True, False])
-def test_cache_metrics_remain_independent_of_the_build_cache_policy(caching, cache_metrics_enabled):
-    config = target.RetrievalBuildConfig.model_validate({
-        "request": {"caching": caching}, "output": {"cache_metrics_enabled": cache_metrics_enabled},
+def test_cache_metrics_and_fingerprint_cache_keep_independent_configuration(
+    fingerprint_cache_enabled, cache_metrics_enabled,
+):
+    config = target.SymphonyConfig.model_validate({
+        **MINIMAL,
+        "capability": {**MINIMAL["capability"], "fingerprint": {"cache": {"enabled": fingerprint_cache_enabled}}},
+        "retrieval": {"build": {"output": {"cache_metrics_enabled": cache_metrics_enabled}}},
     })
-    assert config.request.caching is caching
-    assert config.output.cache_metrics_enabled is cache_metrics_enabled
-    assert "cache_observability" not in config.prompt.model_dump()
-    assert target.RetrievalBuildConfig.model_validate_json(config.model_dump_json()) == config
+    assert config.capability.fingerprint.cache.enabled is fingerprint_cache_enabled
+    assert config.retrieval.build.output.cache_metrics_enabled is cache_metrics_enabled
+    assert "cache_observability" not in config.retrieval.build.prompt.model_dump()
+    assert "caching" not in config.retrieval.build.request.model_dump()
+    assert "caching" not in target.IndexRequestConfig.model_json_schema()["properties"]
+    assert target.SymphonyConfig.model_validate_json(config.model_dump_json()) == config
 
 
 @pytest.mark.parametrize("ratio, context_tokens, expected", [(0.02, 50000, 1000), (0.333, 10, 3), (0.0001, 1, 1)])
@@ -645,38 +650,34 @@ def test_discovery_budget_errors_are_located_under_prompt(field, value):
     assert error.value.errors()[0]["loc"] == ("retrieval", "discovery", "prompt", field)
 
 
-def test_public_dynamic_and_output_defaults_preserve_source_values_without_runtime_settings():
+def test_public_structure_and_output_defaults_preserve_source_values_without_runtime_settings():
     config = target.SymphonyConfig.model_validate(MINIMAL).retrieval.build
-    assert config.dynamic.rebalance_interval == current_tree.DynamicTreeConfig().rebalance_interval
-    assert config.dynamic.expansion.model_dump() == {
+    assert config.structure.model_dump() == {
+        "branching_factor": CurrentIndexBuildConfig().branching_factor,
+        "max_depth": CurrentIndexBuildConfig().max_depth,
+        "root_categories": CurrentIndexBuildConfig().root_categories,
         "max_capabilities_per_node_multiplier": current_tree.MAX_SKILLS_PER_NODE_MULTIPLIER,
-        "expand_threshold_multiplier": current_tree.EXPAND_THRESHOLD_MULTIPLIER,
-        "early_stop_multiplier": current_tree.EARLY_STOP_MULTIPLIER,
-        "lazy_split_multiplier": current_tree.LAZY_SPLIT_MULTIPLIER,
-        "classification_batch_multiplier": current_tree.CLASSIFICATION_BATCH_MULTIPLIER,
-        "structure_sample_multiplier": current_tree.STRUCTURE_SAMPLE_MULTIPLIER,
     }
     assert config.output.model_dump() == {
         "generate_tree_html": False, "verbose": False, "show_tree": True, "display_capability_root": None,
         "cache_metrics_enabled": True,
     }
-    assert not any(hasattr(config.dynamic, name) for name in (
-        "structure", "max_capabilities_per_node", "expand_threshold", "early_stop_capability_count",
-        "lazy_split_threshold", "classification_batch_size", "structure_sample_size",
-    ))
+    assert "dynamic" not in config.model_dump()
+    assert "dynamic" not in target.RetrievalBuildConfig.model_json_schema()["properties"]
     assert not hasattr(target, "TreeBuildMethod") and not hasattr(target, "_strict_integer")
 
 
-@pytest.mark.parametrize("field", [
-    "max_capabilities_per_node_multiplier", "expand_threshold_multiplier", "early_stop_multiplier",
-    "lazy_split_multiplier", "classification_batch_multiplier", "structure_sample_multiplier",
-])
 @pytest.mark.parametrize("value", [0, -0.1, True, "1.5", float("nan"), float("inf")])
-def test_expansion_multipliers_preserve_positive_numeric_constraints(field, value):
-    payload = {**MINIMAL, "retrieval": {"build": {"dynamic": {"expansion": {field: value}}}}}
-    with pytest.raises(ValidationError) as error:
-        target.SymphonyConfig.model_validate(payload)
-    assert error.value.errors()[0]["loc"] == ("retrieval", "build", "dynamic", "expansion", field)
+def test_node_capacity_multiplier_preserves_positive_numeric_constraints(value):
+    field = "max_capabilities_per_node_multiplier"
+    payload = {**MINIMAL, "retrieval": {"build": {"structure": {field: value}}}}
+    for validate, data in (
+        (target.SymphonyConfig.model_validate, payload),
+        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
+    ):
+        with pytest.raises(ValidationError) as error:
+            validate(data)
+        assert error.value.errors()[0]["loc"] == ("retrieval", "build", "structure", field)
 
 
 def test_independent_derived_configuration_values_and_explicit_overrides():
@@ -695,17 +696,31 @@ def test_existing_package_exports_continue_to_use_the_existing_configuration():
     ({"retrieval": {"search": {}}}, ("retrieval", "search")),
     ({"retrieval": {"toolkit": {}}}, ("retrieval", "toolkit")),
     ({"experience": {}}, ("experience",)),
+    ({"retrieval": {"build": {"dynamic": {}}}}, ("retrieval", "build", "dynamic")),
+    ({"retrieval": {"build": {"dynamic": {"rebalance_interval": 50, "expansion": {
+        "max_capabilities_per_node_multiplier": 1.5, "expand_threshold_multiplier": 0.7,
+        "early_stop_multiplier": 1.7, "lazy_split_multiplier": 1.3,
+        "classification_batch_multiplier": 6.0, "structure_sample_multiplier": 12.0,
+    }}}}}, ("retrieval", "build", "dynamic")),
+    ({"retrieval": {"build": {"request": {"caching": False}}}}, ("retrieval", "build", "request", "caching")),
+    ({"retrieval": {"build": {"request": {"caching": True}}}}, ("retrieval", "build", "request", "caching")),
 ])
 def test_retired_capabilities_are_rejected_without_compatibility_aliases(payload, location):
-    with pytest.raises(ValidationError) as error:
-        target.SymphonyConfig.model_validate({**MINIMAL, **payload})
-    assert error.value.errors()[0]["loc"] == location
-    assert error.value.errors()[0]["type"] == "extra_forbidden"
+    payload = {**MINIMAL, **payload}
+    for validate, data in (
+        (target.SymphonyConfig.model_validate, payload),
+        (target.SymphonyConfig.model_validate_json, json.dumps(payload)),
+    ):
+        with pytest.raises(ValidationError) as error:
+            validate(data)
+        assert error.value.errors()[0]["loc"] == location
+        assert error.value.errors()[0]["type"] == "extra_forbidden"
 
 
 def test_registry_contains_only_retained_capabilities():
-    assert len(target.PUBLIC_CONFIG_MODELS) == 33
+    assert len(target.PUBLIC_CONFIG_MODELS) == 31
     assert len(target.INTERNAL_CONFIG_MODELS) == 3
+    assert len(target.CONFIG_MODELS) == 34
     assert {m.__name__ for m in target.INTERNAL_CONFIG_MODELS} == {
         "FingerprintProtocolConfig", "OneShotTreeBuildConfig", "RetrievalModelConfig",
     }

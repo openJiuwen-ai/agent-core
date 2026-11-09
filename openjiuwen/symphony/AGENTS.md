@@ -9,8 +9,11 @@
   目标 config.py 不再为旧入口的不同默认值声明同义镜像或包装，也不为测试恢复已退役模型。
   新配置尚未接入运行链路。
 - 公共构建使用索引入口默认值和约束，旧底层入口的不同默认值继续由原业务模块维护。
-  动态树只配置重平衡和扩展倍率，结构统一来自 retrieval.build.structure；派生阈值留给后续运行层计算。
+  树结构和 max_capabilities_per_node_multiplier 统一来自 retrieval.build.structure；叶节点容量阈值留给后续运行层计算。
+  不恢复无消费者的重平衡间隔、五个扩展倍率或 retrieval.build.dynamic 包装。
   回退树策略归 retrieval.build.task，构建展示归 retrieval.build.output，不增加第二个可写路径。
+  request.caching 不进入目标配置；现有业务字段仅透传并参与签名，不控制缓存，后续清理须单独核对签名影响。
+  缓存指标与指纹缓存继续分别由 output.cache_metrics_enabled 和 capability.fingerprint.cache.enabled 配置。
 - `PUBLIC_CONFIG_MODELS` 覆盖根 Schema 可达的子模型，`INTERNAL_CONFIG_MODELS` 登记其余模型。
   模型登记不等于 `__all__` 便利导出范围，新增子节点不自动增加独立导出。
 

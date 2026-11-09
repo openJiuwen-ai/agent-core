@@ -43,7 +43,6 @@ class SymphonyConfigModel(BaseModel):
     """纯配置模型基类：严格类型、拒绝未知字段、校验默认值并禁止属性重新赋值。
 
     嵌套列表和字典仍可修改，各实例使用独立的默认值；frozen 不代表深层容器冻结。
-    需要保留既有可变配置行为的模型显式覆盖 frozen，并开启赋值校验。
     """
 
     model_config = ConfigDict(
@@ -309,41 +308,11 @@ class IndexRequestConfig(SymphonyConfigModel):
     """统一索引构建请求策略，默认并发 2、超时 420 秒、分类批量 32。"""
 
     max_concurrency: PositiveInt = Field(2, title="索引构建并发", description="索引构建模型请求的并发上限。")
-    caching: bool = Field(False, title="树构建缓存", description="是否启用底层树构建缓存。")
     max_retries: NonNegativeInt = Field(2, title="最大重试次数", description="模型请求失败后的最多重试次数。")
     timeout_seconds: PositiveFloat = Field(420.0, title="索引请求超时", description="单次索引构建模型请求超时，单位秒。")
     context_window_tokens: NonNegativeInt = Field(0, title="构建上下文窗口", description="上下文 token 预算；0 表示未显式指定。")
     max_output_tokens: NonNegativeInt = Field(0, title="构建输出预算", description="模型输出 token 上限；0 表示未显式指定。")
     classification_batch_limit: PositiveInt = Field(32, title="索引分类批量", description="索引分类请求处理的最多对象数。")
-
-
-class TreeExpansionConfig(SymphonyConfigModel):
-    """动态树派生阈值的倍率，沿用 schema.py 中的现有常量。"""
-
-    max_capabilities_per_node_multiplier: PositiveFloat = Field(
-        1.5, title="节点容量倍率", description="节点容量相对分支数的倍率。",
-    )
-    expand_threshold_multiplier: PositiveFloat = Field(
-        0.7, title="扩展阈值倍率", description="节点扩展阈值相对分支数的倍率。",
-    )
-    early_stop_multiplier: PositiveFloat = Field(1.7, title="提前停止倍率", description="提前停止对象数相对分支数的倍率。")
-    lazy_split_multiplier: PositiveFloat = Field(1.3, title="延迟拆分倍率", description="延迟拆分阈值相对节点容量的倍率。")
-    classification_batch_multiplier: PositiveFloat = Field(
-        6.0, title="分类批量倍率", description="分类批量相对分支数的倍率；区别于 request.classification_batch_limit 的绝对上限。",
-    )
-    structure_sample_multiplier: PositiveFloat = Field(
-        12.0, title="结构采样倍率", description="结构采样数量相对分支数的倍率。",
-    )
-
-
-class DynamicTreeConfig(SymphonyConfigModel):
-    """动态树调整策略；结构统一由 retrieval.build.structure 提供，派生阈值留给运行层计算。"""
-
-    model_config = ConfigDict(frozen=False, validate_assignment=True)
-    rebalance_interval: PositiveInt = Field(50, title="重平衡间隔", description="触发结构重平衡的操作计数间隔。")
-    expansion: TreeExpansionConfig = Field(
-        default_factory=TreeExpansionConfig, title="派生阈值", description="容量、扩展和采样阈值的倍率。",
-    )
 
 
 class IndexTaskConfig(SymphonyConfigModel):
@@ -373,7 +342,7 @@ class IndexOutputConfig(SymphonyConfigModel):
     )
     cache_metrics_enabled: bool = Field(
         True, title="缓存指标观测",
-        description="是否记录并展示树构建模型请求的缓存命中和提示指纹统计；独立于 request.caching 的缓存策略开关。",
+        description="是否记录并展示树构建模型请求的缓存命中和提示指纹统计；不控制缓存是否启用。",
     )
 
 
@@ -436,17 +405,18 @@ class RetrievalTreeStructureConfig(SymphonyConfigModel):
     root_categories: RootCategoryInput = Field(
         None, title="根分类输入", description="根分类列表或配置文件路径文本；模型本身不读取路径。",
     )
+    max_capabilities_per_node_multiplier: PositiveFloat = Field(
+        1.5, title="节点容量倍率",
+        description="递归构树时，叶节点容量阈值相对 branching_factor 的倍率；"
+        "对象数不超过该阈值时可停止细分。阈值取乘积的整数部分，由后续运行层计算。",
+    )
 
 
 class RetrievalBuildConfig(SymphonyConfigModel):
     """公共分类树构建策略；直接组合各子策略，默认值沿用索引 toolkit 入口。"""
 
     structure: RetrievalTreeStructureConfig = Field(
-        default_factory=RetrievalTreeStructureConfig, title="树结构", description="分类树深度、分支和根分类输入。",
-    )
-    dynamic: DynamicTreeConfig = Field(
-        default_factory=DynamicTreeConfig, title="动态树调整",
-        description="重平衡间隔和扩展倍率；共用 structure 的树结构，不执行派生阈值计算。",
+        default_factory=RetrievalTreeStructureConfig, title="树结构", description="分类树深度、分支、根分类输入和叶节点容量倍率。",
     )
     request: IndexRequestConfig = Field(
         default_factory=IndexRequestConfig, title="构建请求", description="模型请求的并发、超时、重试和分类批量。",
@@ -534,7 +504,6 @@ PUBLIC_CONFIG_MODELS: tuple[type[SymphonyConfigModel], ...] = (
     SymphonyConfig, CapabilityConfig, DirectoryScanConfig, ScanLimitsConfig, ManifestParseConfig,
     FingerprintPolicyConfig, FingerprintExtractionConfig, FingerprintEvaluationConfig, FingerprintCacheConfig,
     StorageConfig, RetrievalConfig, RetrievalBuildConfig, RetrievalTreeStructureConfig, IndexRequestConfig,
-    DynamicTreeConfig, TreeExpansionConfig,
     TreePostprocessConfig, TreeEquivalenceConfig, CapabilityProfilesConfig, TreePromptPolicyConfig,
     TreeIncrementalConfig, IndexTaskConfig, IndexOutputConfig,
     DiscoveryConfig, DiscoveryOutputConfig, DiscoveryPromptConfig,

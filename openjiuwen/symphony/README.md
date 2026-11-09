@@ -82,7 +82,7 @@ config = SymphonyConfig.model_validate({
     "retrieval": {
         "build": {
             "request": {"max_concurrency": 4},
-            "dynamic": {"rebalance_interval": 80, "expansion": {"early_stop_multiplier": 2.0}},
+            "structure": {"max_capabilities_per_node_multiplier": 2.0},
             "task": {"allow_fallback_tree": False},
             "output": {"show_tree": False, "cache_metrics_enabled": True},
         },
@@ -92,13 +92,16 @@ config = SymphonyConfig.model_validate({
 })
 ```
 
-树深度和分支数位于 `retrieval.build.structure`，构建请求预算位于 `retrieval.build.request`；
-动态树的重平衡和扩展倍率位于 `retrieval.build.dynamic`，共用上述树结构，派生阈值由后续运行层计算。
-六个倍率字段统一以 `_multiplier` 结尾；`lazy_split_multiplier` 相对节点容量，其余相对分支数。
+树深度、分支数、根分类和节点容量倍率位于 `retrieval.build.structure`，构建请求预算位于 `retrieval.build.request`。
+`max_capabilities_per_node_multiplier=1.5` 对应递归构树的叶节点容量阈值：对象数不超过
+`int(branching_factor * max_capabilities_per_node_multiplier)` 时可停止细分，阈值留给后续运行层计算。
+原 `retrieval.build.dynamic` 节点已删除；其中重平衡间隔和另外五个倍率没有实际功能消费者，节点容量倍率迁至上述结构节点。
 回退决策仅使用 `retrieval.build.task.allow_fallback_tree`，默认 `True`；原 `strict_failure` 目标字段已删除。
 设置为 `False` 时，后续运行接入须执行缺模型配置时提前失败及禁止回退的策略；存在可用旧索引且启用保留策略时，仍须保护旧索引。
 详细输出、分类树展示、HTML 预览和缓存指标观测位于 `retrieval.build.output`。
-`cache_metrics_enabled=True` 独立控制缓存指标，`retrieval.build.request.caching=False` 继续控制缓存策略。
+`cache_metrics_enabled=True` 控制缓存命中和提示指纹统计，不控制缓存是否启用；指纹缓存仍由
+`capability.fingerprint.cache.enabled` 配置。目标 `retrieval.build.request.caching` 已删除，因为对应业务字段
+仅透传并参与索引签名，没有缓存控制逻辑；本轮保留业务定义及签名输入。旧目标路径按未知字段拒绝。
 Discovery 的上下文容量、候选预算比例和优先对象列表统一位于 `retrieval.discovery.prompt`；
 只读 `candidate_budget_tokens` 仍按比例派生，不写入输入配置。原 `discovery.budget` 节点已删除。
 公共字符上限统一使用 `max_body_chars`、`max_evidence_chars`、`max_description_chars`、`max_rule_chars`；
