@@ -26,7 +26,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-10-25 |
+| 最近一次修订日期 | 2026-11-09 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`）、`F_119_scheduled-completion-handoff-via-note.md`（任务行 `summary` 列与改派 / 重置清空）、`F_128_scheduled-member-subtasks.md`（任务行 `parent_task_id` / `created_by` 列、`IN_PROGRESS → BLOCKED` 挂起、`max_subtask_depth`）。其余条目见 `docs/features/`、`F_129_task-revision-and-staleness.md`（任务行 `revision` / `observed_revision` / `parent_revision` / `change_notes`、`TaskUpdatedEvent.revision`、版本快照） |
 
 ## 范围 / 边界
@@ -992,6 +992,33 @@ state["teams"][team_name] = {
 
 `TeamLifecycle` 进 spec → 跨进程序列化；`RuntimeState` 留在 pool entry，进程内
 in-memory，不写 spec。
+
+## Meeting publication identifiers
+
+The host decides which outbound messages enter the meeting queue and enqueues
+them before sending. A meeting lease governs explicitly queued requests.
+Ordinary Team sends follow their existing delivery contract, and the host
+supplies the speech text and acknowledges playback.
+
+`SpeechRequest` in `schema/meeting.py` distinguishes reserved publication IDs
+from published source references:
+
+- `publication_message_ids: tuple[str, ...]` is derived from the existing request
+  identity and route for requests containing text. It is available on enqueue,
+  claim, inspection, and reconstruction. Multicast IDs follow recipient order;
+  direct, broadcast, and group-chat routes each reserve one ID.
+- Reserving an ID creates no Team message. The host supplies the reserved IDs to
+  the normal Team message sender and then records the resulting messages through
+  `MeetingCoordinator.finish_publication()`.
+- `source_message_ids` stays empty until publication is recorded. A reserved ID
+  alone cannot finish publication or acknowledge playback of unpublished text.
+- Speech-only requests expose no publication IDs. The member-facing speaker view
+  redacts reserved IDs together with source references and text.
+- The field is appended with an empty-tuple default to preserve existing
+  positional construction. It is a derived projection, not a database column.
+
+Usage: [Meeting audio queue](../../../../docs/dev/meeting_audio_queue.md).
+Implementation and validation: [F_20261106_1222_meeting-audio-queue](../../features/F_20261106_1222_meeting-audio-queue.md).
 
 ## 与其它 spec 的关系
 
