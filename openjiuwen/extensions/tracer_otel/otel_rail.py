@@ -283,19 +283,25 @@ class OtelRail(AgentRail):
     def _resolve_model_display_name(agent: Any, model_config: Any) -> str:
         """Optional human-readable model display name, when the caller set one.
 
-        Optional carriers, first hit wins:
-        - ``model_display_name`` on the resolved request config, then on the
-          agent config's ``model_config_obj`` — an ``extra="allow"`` field on
+        Optional carriers, first hit wins — client config before request
+        configs, the same precedence the decorator-side ``_model_display_name``
+        probe uses, so both producers agree on one name:
+        - ``model_client_config`` on the live ``Model`` — gateway callers
+          stamp the display name on the client config (``extra="allow"``);
+          the foundation ``Model`` keeps it at ``model_client_config`` and
+          does NOT forward unknown attributes, so it must be read explicitly;
+        - the resolved request config, then the agent config's
+          ``model_config_obj`` — an ``extra="allow"`` field on
           ``ModelRequestConfig``, the same ride-through ``top_k`` uses in
           ``_extract_request_params``;
-        - ``agent._llm.model_display_name`` — the foundation ``Model``
-          forwards unknown attributes to its ``model_client_config``, so a
-          display name set on the client config surfaces here.
+        - ``agent._llm.model_display_name`` — a display name set directly on
+          the llm object by wiring code.
         Empty when none carries one — the span then keeps the plain
         ``model_name`` exactly as before (gateway service ids included).
         """
+        llm = getattr(agent, "_llm", None)
         config_obj = getattr(getattr(agent, "config", None), "model_config_obj", None)
-        for source in (model_config, config_obj, getattr(agent, "_llm", None)):
+        for source in (getattr(llm, "model_client_config", None), model_config, config_obj, llm):
             display = getattr(source, "model_display_name", None)
             if display:
                 return str(display)
