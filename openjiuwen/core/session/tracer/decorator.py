@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import inspect
 import time
 from typing import Any
 
@@ -274,6 +275,12 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
     async def _as_async_gen(*args, **kwargs):
         """Normalize func to async generator so create_wrap_decorator takes the generator path."""
         result = func(*args, **kwargs)
+        if inspect.iscoroutine(result):
+            # Plain ``async def`` streaming entry (returns an async iterator,
+            # or raises before any chunk): await it first, otherwise the
+            # coroutine is dropped un-awaited and the decorated stream
+            # silently runs empty.
+            result = await result
         if hasattr(result, "__aiter__") or hasattr(result, "__anext__"):
             async for item in result:
                 yield item

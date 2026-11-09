@@ -36,6 +36,9 @@ class _RecordingAgentHandler(TraceExtAgentHandler):
     async def on_plugin_end(self, span, outputs, **kwargs):
         self.events.append(("on_plugin_end", span, outputs))
 
+    async def on_plugin_error(self, span, error, **kwargs):
+        self.events.append(("on_plugin_error", span, error))
+
 
 # Only the plugin pair is observed here; Tracer.trigger dispatches by
 # ``hasattr(handler, event_name)``, so the untouched abstract surface is
@@ -60,6 +63,23 @@ class MockNodeTool(Tool):
 
     def get_tool_info(self) -> ToolInfo:
         return ToolInfo(name=self.card.name, description=self.card.description)
+
+
+async def _two_chunk_stream():
+    yield {"chunk": 1}
+    yield {"chunk": 2}
+
+
+class _CoroutineAstreamTool(MockNodeTool):
+    # Plain ``async def`` streaming entry: calling it returns a coroutine,
+    # not an async generator (no yield in the body).
+    async def astream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        return _two_chunk_stream()
+
+
+class _RaisingCoroutineAstreamTool(MockNodeTool):
+    async def astream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        raise ValueError("stream setup failed")
 
 
 def _make_node_session(tracer: Tracer = None) -> Session:
@@ -127,7 +147,9 @@ async def test_tool_astream_decorated_fires_plugin_events(recording_handler):
     wrapped = decorate_tool_with_trace(raw_tool, session)
     assert wrapped is not raw_tool
 
-    chunks = [chunk async for chunk in wrapped.astream({"query": "hello"})]
+    chunks = []
+    async for chunk in wrapped.astream({"query": "hello"}):
+        chunks.append(chunk)
     assert chunks == [{"chunk": 1}, {"chunk": 2}]
 
     assert [e[0] for e in recording_handler.events] == ["on_plugin_start", "on_plugin_end"]
@@ -153,3 +175,45 @@ async def test_tool_without_astream_keeps_invoke_only_decoration(recording_handl
     wrapped = decorate_tool_with_trace(raw_tool, session)
     # 未造 astream 包装：proxy.__getattr__ 透传到工具的 None 属性
     assert getattr(wrapped, "astream", "unset") is None
+
+
+async def test_tool_astream_coroutine_shape_streams_and_fires_events(recording_handler):
+    """Plain ``async def astream`` returning an async iterator still streams.
+
+    The normalization in ``async_trace_stream`` awaits the coroutine shape
+    before iterating; without it the decorated stream would silently run
+    empty with the coroutine dropped un-awaited.
+    """
+    tracer = Tracer()
+    tracer.init()
+    session = _make_node_session(tracer)
+
+    raw_tool = _CoroutineAstreamTool(card=ToolCard(name="doc_generate", description="doc tool"))
+    wrapped = decorate_tool_with_trace(raw_tool, session)
+
+    chunks = []
+    async for chunk in wrapped.astream({"query": "hello"}):
+        chunks.append(chunk)
+    assert chunks == [{"chunk": 1}, {"chunk": 2}]
+    assert [e[0] for e in recording_handler.events] == ["on_plugin_start", "on_plugin_end"]
+
+
+async def test_tool_astream_coroutine_raise_surfaces_as_error_event(recording_handler):
+    """Plain ``async def astream`` raising before any chunk reports on_plugin_error.
+
+    Awaiting the coroutine makes the exception propagate through the wrapper;
+    swallowing it would report a successful empty stream instead.
+    """
+    tracer = Tracer()
+    tracer.init()
+    session = _make_node_session(tracer)
+
+    raw_tool = _RaisingCoroutineAstreamTool(card=ToolCard(name="doc_generate", description="doc tool"))
+    wrapped = decorate_tool_with_trace(raw_tool, session)
+
+    chunks = []
+    with pytest.raises(ValueError):
+        async for chunk in wrapped.astream({"query": "hello"}):
+            chunks.append(chunk)
+    assert chunks == []
+    assert [e[0] for e in recording_handler.events] == ["on_plugin_start", "on_plugin_error"]
