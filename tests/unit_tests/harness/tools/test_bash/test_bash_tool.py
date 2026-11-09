@@ -66,6 +66,17 @@ async def test_echo(sys_op) -> None:
 
 
 @pytest.mark.asyncio
+async def test_result_does_not_echo_command(sys_op) -> None:
+    # The model's tool call already holds the command; the result carries only the outcome.
+    tool = BashTool(sys_op)
+    res = await tool.invoke({"command": "echo marker_out # marker_cmd_only"})
+    assert res.success is True
+    assert res.data["content"].startswith("Stdout: marker_out")
+    assert "marker_cmd_only" not in res.data["content"]
+    assert "Command:" not in res.data["content"]
+
+
+@pytest.mark.asyncio
 async def test_exit_1_is_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo fail && exit 1"})
@@ -80,7 +91,7 @@ async def test_grep_no_match_is_not_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello | grep nonexistent_pattern_xyz"})
     # grep exits 1 on no match: treated as success, with an explicit rendered
-    # command/result envelope and an empty stdout section.
+    # result envelope and an empty stdout section.
     assert res.success is True
     assert "Stdout: (empty)" in res.data["content"]
     assert "Exit Code: 1" in res.data["content"]
