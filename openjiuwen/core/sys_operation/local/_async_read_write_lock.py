@@ -127,9 +127,11 @@ class HybridAsyncReadWriteLock:
         finally:
             async with self._condition:
                 self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+                try:
+                    if self._readers == 0:
+                        await self._release_file()
+                finally:
+                    self._condition.notify_all()
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -147,14 +149,21 @@ class HybridAsyncReadWriteLock:
             yield
         finally:
             async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+                try:
+                    await self._release_file()
+                finally:
+                    self._writer = False
+                    self._condition.notify_all()
 
     async def close(self) -> None:
         async with self._condition:
             if self._readers or self._writer:
-                raise RuntimeError("Cannot close an active file lock")
+                # A leaked guard must not poison this lock forever: force-reset
+                # the in-process state, then still close the cross-process lock
+                # below so later readers/writers are not blocked until timeout.
+                self._readers = 0
+                self._writer = False
+                self._condition.notify_all()
             if self._closed:
                 return
             self._closed = True

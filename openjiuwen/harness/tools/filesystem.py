@@ -1313,6 +1313,39 @@ class WriteFileTool(Tool):
             encoding=encoding,
         )
         if res.code != StatusCode.SUCCESS.code:
+            # The write can physically land on disk even when the call reports
+            # failure (e.g. the file lock could not be closed on Windows). Trust
+            # the on-disk state: if the file now holds exactly the content we
+            # tried to write, treat it as written and update the read registry so
+            # a follow-up write does not fail with "File has not been read yet".
+            if not is_unc:
+                try:
+                    if os.path.isfile(path):
+                        raw_disk = pathlib.Path(path).read_bytes()
+                        disk_text = raw_disk.decode(
+                            self._detect_encoding(raw_disk), errors="replace"
+                        )
+                        if disk_text.replace("\r\n", "\n") == content.replace("\r\n", "\n"):
+                            stat_after = os.stat(path)
+                            _FILE_READ_REGISTRY[path] = _FileReadState(
+                                mtime_ns=stat_after.st_mtime_ns,
+                                size_bytes=stat_after.st_size,
+                                is_partial=False,
+                                content=content.replace("\r\n", "\n"),
+                            )
+                            return ToolOutput(
+                                success=True,
+                                data={
+                                    "file_path": path,
+                                    "bytes_written": len(content.encode(encoding, errors="replace")),
+                                    "type": operation_type,
+                                    "created": operation_type == "create",
+                                    "original_file": old_content,
+                                    "reconciled_after_error": res.message,
+                                },
+                            )
+                except OSError:
+                    pass
             return ToolOutput(success=False, error=res.message)
 
         if not is_unc:
