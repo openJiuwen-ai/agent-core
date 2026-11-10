@@ -69,6 +69,7 @@ from openjiuwen.agent_teams.team_context import (
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.context_engine.processor.compressor.util import holds_team_policy
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -164,6 +165,9 @@ class TeamPolicyRail(DeepAgentRail):
         # framework read-only loader (unit tests /
         # no backend). No second fallback here — the factory owns the wiring.
         self._loader = loader
+        self._team_backend = team_backend
+        self._recovered_bootstrap: PromptSection | None = None
+        self._continued_policy: bool | None = None
 
         # All team sections are static and built once. The HITT contract is
         # gated on the (sync) HITT capability flag rather than the live human
@@ -378,13 +382,55 @@ class TeamPolicyRail(DeepAgentRail):
         )
         parts[:] = kept
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Re-evaluate continuation on the first model call of each invocation."""
+        self._continued_policy = None
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Allow rebuilding after this invocation explicitly disbands its team."""
+        if ctx.inputs.tool_name == "clean_team":
+            self._continued_policy = None
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
                 self.system_prompt_builder.add_section(section)
+            if self._continued_policy is None:
+                self._continued_policy = await self._continues_with_policy(ctx)
+            if self._continued_policy:
+                # Same section name, so this replaces the routing to build_team.
+                self.system_prompt_builder.add_section(self._recovered_bootstrap_section())
 
         await self._announce_unattached_state(ctx)
+
+    async def _continues_with_policy(self, ctx: AgentCallbackContext) -> bool:
+        """Whether this leader must not be routed to ``build_team``.
+
+        Applies to any run continuing the same session, cold recovered or
+        resumed from pause. The switch happens at a run boundary, so the prompt
+        prefix stays stable within a run. The transcript is checked, not just
+        the flag: a history without the policy clears the flag so ``build_team``
+        can still deliver it. Getting this wrong costs at most one round.
+        """
+        backend = self._team_backend
+        if self._role != TeamRole.LEADER or backend is None or not backend.history_restored():
+            return False
+        messages = ctx.context.get_messages() if ctx.context is not None else []
+        if not holds_team_policy(messages):
+            backend.clear_history_restored()
+            return False
+        return await backend.rejects_rebuild()
+
+    def _recovered_bootstrap_section(self) -> PromptSection:
+        if self._recovered_bootstrap is None:
+            self._recovered_bootstrap = build_leader_bootstrap_section(
+                swarmflow_enabled=False,
+                language=self._language,
+                loader=self._loader,
+                recovered=True,
+            )
+        return self._recovered_bootstrap
 
     async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
         """Register this member's team state as one dynamic attachment section.

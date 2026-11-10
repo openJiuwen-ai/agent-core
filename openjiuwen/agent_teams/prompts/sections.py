@@ -153,6 +153,7 @@ def build_leader_bootstrap_section(
     swarmflow_enabled: bool,
     language: str = "cn",
     loader: TemplateLoader = load_template,
+    recovered: bool = False,
 ) -> PromptSection:
     """Build the leader's only system-prompt team section (F_76).
 
@@ -172,14 +173,20 @@ def build_leader_bootstrap_section(
     Args:
         swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool.
         language: Prompt language ('cn' or 'en').
+        recovered: The leader continues a session whose history already holds the policy, so
+            ``build_team`` would be refused. Uses the variant that says so
+            instead of routing the leader into that refusal.
 
     Returns:
         PromptSection carrying the leader bootstrap body.
     """
     mechanism = ""
-    if swarmflow_enabled:
-        mechanism = "\n" + loader("leader_swarmflow", language).content.strip() + "\n"
-    body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
+    if recovered:
+        body = loader("leader_bootstrap_recovered", language).content.strip()
+    else:
+        if swarmflow_enabled:
+            mechanism = "\n" + loader("leader_swarmflow", language).content.strip() + "\n"
+        body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
     return PromptSection(
         name=TeamSectionName.BOOTSTRAP,
         content={language: f"{body}\n"},
