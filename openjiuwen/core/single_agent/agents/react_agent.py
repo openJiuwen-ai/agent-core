@@ -49,6 +49,7 @@ from openjiuwen.core.foundation.kv_cache import (
 )
 from openjiuwen.core.foundation.llm import (
     OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
     OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     AssistantMessage,
@@ -2434,7 +2435,16 @@ class ReActAgent(BaseAgent):
             ]
             content.insert(0, {"type": "text", "text": "\n".join(summary_lines)})
 
-        return UserMessage(content=content)
+        # The bridge stays a user-role multimodal message on the wire, but the
+        # origin markers let the compressors treat it as harness-internal
+        # input instead of a new genuine user turn.
+        return UserMessage(
+            content=content,
+            metadata={
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "tool_media",
+            },
+        )
 
     @staticmethod
     def _iter_multimodal_image_items(tool_result: Any) -> List[dict[str, Any]]:

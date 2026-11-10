@@ -31,6 +31,8 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     resolve_ratio_token_threshold,
 )
 from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
     AssistantMessage,
     BaseMessage,
     Model,
@@ -127,6 +129,16 @@ def find_last_real_user_message_index(messages: list[BaseMessage]) -> int:
 
 def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(message, UserMessage):
+        return False
+    metadata = getattr(message, "metadata", None)
+    if (
+        isinstance(metadata, dict)
+        and metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA) == OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL
+    ):
+        # Harness-injected user messages (e.g. the multimodal tool-image
+        # bridge) are not genuine user turns. The explicit origin marker
+        # outranks the role/content heuristics below; unmarked legacy
+        # messages keep the original behavior.
         return False
     content = getattr(message, "content", "")
     if not isinstance(content, str):
