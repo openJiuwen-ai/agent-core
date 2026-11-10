@@ -183,6 +183,10 @@ class AsyncToolRuntime:
     _tasks: "dict[str, asyncio.Task]" = field(default_factory=dict)
     _events: "dict[str, asyncio.Event]" = field(default_factory=dict)
 
+    def has_pending_tasks(self) -> bool:
+        """Return whether background work or completion injection is unfinished."""
+        return any(not task.done() for task in self._tasks.values())
+
     def has_running(self, tool_name: str) -> bool:
         """Return whether a task for ``tool_name`` is currently running."""
         return any(

@@ -877,6 +877,73 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["execution", "save_contexts", "commit", "cancel"])
+async def test_run_one_round_separates_commit_failure_from_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent.set_conversation_guard(lambda _request_id: None)
+    work = RoundWorkItem.user(request_id="request-1", inputs={"query": "start"})
+    next_work = RoundWorkItem.user(request_id="request-1", inputs={"query": "continue"})
+    session = MagicMock()
+    session.get_session_id.return_value = "commit-failure-session"
+    session.commit = AsyncMock(side_effect=(
+        OSError("checkpoint failed") if failure_stage == "commit" else
+        asyncio.CancelledError() if failure_stage == "cancel" else None
+    ))
+    result = {"result_type": "answer", "output": "completed"}
+    controller = MagicMock()
+    controller.submit_round = AsyncMock()
+    controller.wait_round_completion = AsyncMock(
+        return_value=result,
+        side_effect=OSError("execution failed") if failure_stage == "execution" else None,
+    )
+    react_agent = MagicMock()
+    react_agent.context_engine.save_contexts = AsyncMock(
+        side_effect=OSError("checkpoint failed") if failure_stage == "save_contexts" else None,
+    )
+    agent.set_react_agent(react_agent, initialized=True)
+    owner = MagicMock()
+    monkeypatch.setattr(agent, "_proposal_owner", lambda: owner)
+    monkeypatch.setattr(agent, "prepare_interaction_task_loop", AsyncMock(return_value=(MagicMock(), controller)))
+    monkeypatch.setattr(agent, "_build_interaction_next_work", MagicMock(return_value=next_work))
+    write_result = AsyncMock()
+    monkeypatch.setattr(agent, "_write_round_result_to_stream", write_result)
+    monkeypatch.setattr(agent, "load_state", MagicMock())
+    monkeypatch.setattr(agent, "save_state", MagicMock())
+    monkeypatch.setattr(agent, "clear_state", MagicMock())
+    caplog.set_level("ERROR")
+
+    if failure_stage == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await agent.run_one_round(work, "task-1", session)
+        assert "conversation commit failed" not in caplog.text
+    else:
+        outcome = await agent.run_one_round(work, "task-1", session)
+        if failure_stage == "execution":
+            assert outcome.error_code == "round_execution_error"
+            assert outcome.next_work is None
+            write_result.assert_not_awaited()
+            react_agent.context_engine.save_contexts.assert_not_awaited()
+            session.commit.assert_not_awaited()
+        else:
+            assert outcome.error_code is None
+            assert outcome.next_work is next_work
+            write_result.assert_awaited_once_with(result, session)
+            assert "conversation commit failed" in caplog.text
+            assert "checkpoint failed" in caplog.text
+            assert "interaction round execution failed" not in caplog.text
+    assert owner.finish_work.call_args.kwargs["succeeded"] is (failure_stage in {"save_contexts", "commit"})
+    if failure_stage in {"save_contexts", "commit"}:
+        assert owner.finish_work.call_args.kwargs["result"] is result
+        assert owner.finish_work.call_args.kwargs["continuing"] is True
+    owner.reset.assert_called_once()
+    assert agent._invoke_active is False
+
+
+@pytest.mark.asyncio
 async def test_cancel_active_round_does_not_block_on_slow_cancel_task() -> None:
     """abort first; cancel_task wait is bounded so overwrite is not stuck."""
     import asyncio
@@ -924,6 +991,52 @@ async def test_cancel_active_round_does_not_block_on_slow_cancel_task() -> None:
     agent.abort.assert_awaited_once()
     assert elapsed < 1.0
     assert agent._interaction_round_task.cancelled() or agent._interaction_round_task.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["save_contexts", "commit"])
+async def test_interaction_commit_failure_keeps_answer_and_accepts_next_input(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+) -> None:
+    await Runner.start()
+    agent = DeepAgent(AgentCard(name="commit-integration", description="test"))
+    agent.configure(DeepAgentConfig(enable_task_loop=True))
+    fake = FakeReactAgent(agent.card)
+    agent.set_react_agent(fake, initialized=True)
+
+    async def collect(stream):
+        return [chunk async for chunk in stream]
+
+    try:
+        await agent.start()
+        agent.set_conversation_guard(lambda _request_id: None)
+        save_contexts = AsyncMock(side_effect=[OSError("checkpoint failed"), None]
+                                  if failure_stage == "save_contexts" else None)
+        monkeypatch.setattr(fake.context_engine, "save_contexts", save_contexts, raising=False)
+        commit = AsyncMock(side_effect=[OSError("checkpoint failed"), None]
+                           if failure_stage == "commit" else None)
+        monkeypatch.setattr(agent._interaction_session, "commit", commit)
+        caplog.set_level("ERROR")
+
+        for query in ("first", "next"):
+            stream = await agent.attach_output()
+            assert stream is not None
+            await agent.send_input(SendInputRequest(request_id=query, inputs={"query": query}))
+            chunks = await asyncio.wait_for(collect(stream), timeout=3)
+            answers = [chunk.payload["output"] for chunk in chunks if getattr(chunk, "type", None) == "answer"]
+            assert answers == [f"echo:{query}"]
+            assert not any(getattr(chunk, "type", None) == "execution.error" for chunk in chunks)
+            assert agent.phase is InteractionPhase.IDLE
+
+        assert [item["query"] for item in fake.invocations] == ["first", "next"]
+        assert save_contexts.await_count == 2
+        assert "conversation commit failed" in caplog.text
+        assert "interaction round execution failed" not in caplog.text
+    finally:
+        await agent.stop()
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

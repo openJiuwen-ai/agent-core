@@ -18,7 +18,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `harness/async_tools.py`、`harness/native_harness.py`、`id_generator.py`、`tools/tool_async.py`、`tools/tool_factory.py`、`tools/tool_permissions.py`、`paths.py`、`rails/team_tool_rail.py`、`workflow/tool_swarmflow.py`、`workflow/observer.py` |
-| 最近一次修订日期 | 2026-10-29 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md`、`F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -104,6 +104,8 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
   `asyncio.wait_for(event.wait(), timeout)`（秒），超时返回 running record（**不 raise**）。
 - `has_running(tool_name)`：registry 中是否有该工具的 running 记录（观测 / 管控工具用；
   **不作** swarmflow L1 门禁，见 `S_21` / `F_47`）。
+- `has_pending_tasks()`：是否仍有未结束的后台 Task，包含记录已转为 completed/error 但
+  结果仍在注入的阶段；供会话空闲边界使用，调用方不读取运行时的受保护任务容器。
 - `cancel_all()`：teardown 取消 `_tasks` 全部未完成。
 
 ## 管控工具（`tools/tool_async.py`）

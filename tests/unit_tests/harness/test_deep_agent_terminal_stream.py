@@ -144,6 +144,148 @@ async def test_invoke_honors_replaced_rail_result():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["invoke", "stream"])
+@pytest.mark.parametrize("owns_session", [False, True])
+@pytest.mark.parametrize("failure_stage", ["save_contexts", "commit"])
+async def test_managed_checkpoint_failure_preserves_final_answer(
+    monkeypatch, caplog, mode, owns_session, failure_stage,
+):
+    inner = AnswerInner()
+    inner.context_engine = SimpleNamespace(save_contexts=AsyncMock(
+        side_effect=OSError("checkpoint unavailable") if failure_stage == "save_contexts" else None,
+    ))
+    agent = make_agent(inner)
+    agent.add_rail(FinalizingRail())
+    agent.set_conversation_guard(lambda _request_id: None)
+    owner = MagicMock()
+    monkeypatch.setattr(agent, "_proposal_owner", lambda: owner)
+    commit = AsyncMock(side_effect=OSError("checkpoint unavailable") if failure_stage == "commit" else None)
+    monkeypatch.setattr(Session, "commit", commit)
+    finalizations = []
+    original_post_run = Session.post_run
+
+    async def post_run(session):
+        finalizations.append(session)
+        return await original_post_run(session)
+
+    monkeypatch.setattr(Session, "post_run", post_run)
+    session = None if owns_session else Session(session_id="explicit-checkpoint")
+    inputs = {"query": "read", "conversation_id": "owned-checkpoint"}
+    caplog.set_level("ERROR")
+    if mode == "invoke":
+        result = await agent.invoke(inputs, session)
+    else:
+        chunks = [chunk async for chunk in agent.stream(inputs, session)]
+        assert [chunk.type for chunk in chunks] == ["llm_output", "answer"]
+        result = chunks[-1].payload
+    assert result == {"output": "finalized", "result_type": "answer", "rail_field": "kept"}
+    assert inner.session.get_state("terminal_marker") == "finalized"
+    inner.context_engine.save_contexts.assert_awaited_once_with(inner.session)
+    owner.finish_work.assert_called_once()
+    assert owner.finish_work.call_args.kwargs["succeeded"] is True
+    assert owner.finish_work.call_args.kwargs["result"] == result
+    owner.reset.assert_called_once()
+    assert agent.is_invoke_active is False
+    assert f"{mode} conversation commit failed" in caplog.text
+    assert "checkpoint unavailable" in caplog.text
+    assert finalizations == ([inner.session] if owns_session else [])
+    if owns_session:
+        # Cleanup still closes the real output emitter when its commit fails.
+        async def drain_session():
+            return [chunk async for chunk in inner.session.stream_iterator()]
+
+        await asyncio.wait_for(drain_session(), timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["invoke", "stream"])
+@pytest.mark.parametrize("failure_stage", ["execution", "cancel"])
+async def test_managed_execution_failure_and_checkpoint_cancellation_propagate(
+    monkeypatch, caplog, mode, failure_stage,
+):
+    class FailingInner(AnswerInner):
+        async def invoke(self, *args, **kwargs):
+            raise RuntimeError("execution failed")
+
+        async def stream(self, *args, **kwargs):
+            raise RuntimeError("execution failed")
+            yield  # Keep the asynchronous iterator interface.
+
+    inner = FailingInner() if failure_stage == "execution" else AnswerInner()
+    inner.context_engine = SimpleNamespace(save_contexts=AsyncMock())
+    agent = make_agent(inner)
+    agent.set_conversation_guard(lambda _request_id: None)
+    owner = MagicMock()
+    monkeypatch.setattr(agent, "_proposal_owner", lambda: owner)
+    session = Session(session_id="negative-checkpoint")
+    commit = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr(session, "commit", commit)
+    error_type = RuntimeError if failure_stage == "execution" else asyncio.CancelledError
+    chunks = []
+    with pytest.raises(error_type):
+        if mode == "invoke":
+            await agent.invoke({"query": "read"}, session)
+        else:
+            async for chunk in agent.stream({"query": "read"}, session):
+                chunks.append(chunk)
+    assert not any(chunk.type == "answer" for chunk in chunks)
+    assert owner.finish_work.call_args.kwargs["succeeded"] is False
+    assert agent.is_invoke_active is False
+    assert "conversation commit failed" not in caplog.text
+    if failure_stage == "execution":
+        inner.context_engine.save_contexts.assert_not_awaited()
+        commit.assert_not_awaited()
+    else:
+        commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_managed_owned_stream_cancellation_finishes_session_cleanup(monkeypatch):
+    inner = AnswerInner()
+    inner.context_engine = SimpleNamespace(save_contexts=AsyncMock())
+    agent = make_agent(inner)
+    agent.set_conversation_guard(lambda _request_id: None)
+    entered = asyncio.Event()
+    finalizations = []
+    original_post_run = Session.post_run
+
+    async def post_run(session):
+        finalizations.append(session)
+        if len(finalizations) == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        return await original_post_run(session)
+
+    monkeypatch.setattr(Session, "post_run", post_run)
+    stream = agent.stream({"query": "read", "conversation_id": "cancel-owned-cleanup"})
+    assert (await anext(stream)).type == "llm_output"
+    pending = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+    finally:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await stream.aclose()
+    assert finalizations == [inner.session, inner.session]
+    assert inner.session._post_run_done
+    assert agent.is_invoke_active is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["invoke", "stream"])
+async def test_unmanaged_owned_session_checkpoint_failure_still_propagates(monkeypatch, mode):
+    agent = make_agent(AnswerInner())
+    monkeypatch.setattr(Session, "commit", AsyncMock(side_effect=OSError("checkpoint unavailable")))
+    with pytest.raises(OSError, match="checkpoint unavailable"):
+        if mode == "invoke":
+            await agent.invoke({"query": "read", "conversation_id": "unmanaged"})
+        else:
+            async for _chunk in agent.stream({"query": "read", "conversation_id": "unmanaged"}):
+                pass
+
+
+@pytest.mark.asyncio
 async def test_text_only_stream_gets_one_finalized_answer():
     agent = make_agent(AnswerInner(answer=False))
     agent.add_rail(FinalizingRail())

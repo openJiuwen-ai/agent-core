@@ -12,7 +12,7 @@ author_email: chengshuo5@huawei.com
 
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-10-10
+最近一次修订日期：2026-11-10
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -20,6 +20,36 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 `add_rail` 委派见 [[F_39_swarmflow-e2e-hardening]]；pause / abort / resume 的 inner-iteration
 级语义与原地续跑见 [[F_60_native-harness-pause-abort-resume]]；跨 stop/start 的冷恢复续跑见
 [[F_61_cold-resume-across-stop-start]]。
+
+## Host 对话归属扩展
+
+`openjiuwen.agent_teams.harness.bind_leader_preparation(callback)` 作用于当前异步上下文。Leader 的
+`TeamHarness.start` 在 child Session 完成 pre_run、模板/rail 初始化后、NativeHarness.start 前执行
+`await callback(native, child_session, team_session)`。此时 supervisor、自动恢复及新输入尚未启动；
+callback 失败则不启动 NativeHarness。普通成员不执行这个 callback。
+模板/rail 准备通过幂等的 `NativeHarness.prepare()` 公开入口完成，不启动 supervisor。
+
+NativeHarness 继承 DeepAgent 的同步 admission guard。send 入队及 `_CmdSend` / `_CmdResume`
+派发均需通过检查；派发拒绝只失败对应 ack。显式用户输入可通过
+`RunContext.extra["conversation_request_id"]` 向 guard 传递接纳 ID，后台输入不得伪造此 ID。
+
+NativeHarness 在轮次结果发出、协调器状态保存后提交受管理对话。此处的 context 保存或
+Session commit 普通异常记录异常堆栈和 round_id，继续既有后续输入调度及 IDLE 转换，
+不能使 supervisor 终止或关闭输出流。失败不代表已持久化；进程恢复仍以成功 checkpoint 为准。
+
+`conversation_is_idle()` 覆盖本机轮次、控制队列、后续输入和后台工具；
+后台工具通过运行时的 `has_pending_tasks()` 查询，完成结果仍在注入时也不视为空闲。
+`conversation_peers_are_idle(session_id=...)` 检查本 Session 团队的成员、任务和未读消息。
+冷团队由 `openjiuwen.agent_teams.harness` 公开导出的
+`persisted_team_conversation_is_idle(team_session)` 按已持久化的运行上下文检查。
+暂停成员或 pending resume 均不视为可交接。检查与修改之间的冻结和互斥由 host 负责，
+检查本身不是跨进程锁。背景消息被拒绝时保留其既有重试/未读语义。
+
+消息替换使用 `core.context_engine.export_conversation` / `replace_conversation`：只包含 messages
+和内存 offload，保留实际 agent checkpoint 身份；目标 context、session context 和 receipt 一起提交。
+提交异常恢复内存，持久化结果未知时由 host 读取 receipt 决定归属。不可携带的文件 offload
+及未闭合工具调用明确失败。目标的 `team_prompt_context` 可由 host 在替换时重置。
+见 [F_146_host-conversation-handoff.md](../../features/F_146_host-conversation-handoff.md)。
 
 ## 两层契约
 
@@ -130,7 +160,8 @@ StreamController 经 `subscribe(on_state=_map_state, on_round=_map_round)` 一�
   task_plan / session_spawn），单协程 supervisor 接管 outer round 驱动。能力与
   DeepAgent 完全一致。构造即配置：`__init__` 末尾同步跑 `_prepare_config()`（forward
   construction：resolve_parts + apply_deep_agent_parts），异步初始化在
-  `_prepare()`（ensure_initialized）+ `start(session)`，二者均私有/内部，外部不再可见。
+  `prepare()`（委托内部 `_prepare()` 完成 rails/template 加载）+ `start(session)`；
+  prepare 不启动 supervisor，可供宿主在创建上下文前显式调用。
 - **TeamHarness**：组合单个 `NativeHarness`（per-cycle）。build 时只构造 native——native
   在构造函数内已同步配好（configurator 可立即读 workspace / sys_operation）；
   `start(team_session)` 建 child agent_session（复用 team session_id，

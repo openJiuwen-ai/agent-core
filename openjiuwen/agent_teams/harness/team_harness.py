@@ -151,6 +151,13 @@ class TeamHarness:
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
+        if getattr(self._role, "value", self._role) == "leader":
+            from openjiuwen.agent_teams.harness.conversation import prepare_leader_conversation
+
+            # Resolve template/rail configuration before the host creates the
+            # model context, while the supervisor is still stopped.
+            await self._native.prepare()
+            await prepare_leader_conversation(self._native, child, team_session)
         await self._native.start(session=child)
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child

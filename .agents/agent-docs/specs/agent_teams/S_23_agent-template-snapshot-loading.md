@@ -18,7 +18,7 @@ author_email: cla@openjiuwen.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/schema/deep_agent_spec.py`、`openjiuwen/harness/deep_agent.py`、`openjiuwen/agent_teams/harness/native_harness.py` |
-| 最近一次修订日期 | 2026-08-19 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_81_agent-template-snapshot-loading.md` |
 
 ## 范围 / 边界
@@ -30,6 +30,7 @@ author_email: cla@openjiuwen.com
 1. `DeepAgentSpec.agent_template_spec` 只保存 JSON 可序列化的普通映射，默认 `None`。
 2. 快照由平台在 TeamSpec 组装时生成；`NativeHarness` 不读取磁盘 manifest。
 3. `NativeHarness._prepare()` 先初始化基础 rails，再调用 `load_agent_template_spec()`。模板 Skill 必须绑定到已存在的 `SkillUseRail`，但整个 `_prepare()` 完成前不得发生模型调用。
+   跨对象调用使用公开的 `NativeHarness.prepare()`，该幂等入口委托 `_prepare()`，不会启动 supervisor。
 4. 同一 `NativeHarness` 只应用快照一次；新的 `NativeHarness` 从其持有的 `DeepAgentSpec` 再应用一次。
 5. 模板加载失败时，沿用 extension binder 的批次回滚语义，成员不得进入可运行状态。
 6. `agent_template_spec=None` 时行为与此前完全一致。
