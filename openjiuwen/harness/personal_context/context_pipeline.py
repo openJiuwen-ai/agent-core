@@ -8836,7 +8836,8 @@ class ContextPipelineService:
             if _PROFILE_RANK[candidate] <= _PROFILE_RANK[requested]
         ]
         materialized_path = (
-            _materialize_candidate_source(
+            await _cancel_safe_to_thread(
+                _materialize_candidate_source,
                 batch.materialized_source_path,
                 sandbox=sandbox,
                 home=self._home,
