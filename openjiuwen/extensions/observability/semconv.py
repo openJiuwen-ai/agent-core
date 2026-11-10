@@ -21,7 +21,7 @@ project mirror is written, so no reader ever needs a fallback chain:
 * tool call identity → ``gen_ai.tool.call.id`` / ``gen_ai.tool.name``
 
 ``openjiuwen.gen_ai.*`` is the additive extension namespace for facts the
-standard does not model at all (cost, TPOT, logprobs, provider payloads).
+standard does not model at all (TPOT, logprobs, provider payloads).
 
 Keeping project-owned attribute keys here avoids typo drift between handlers.
 """
@@ -96,9 +96,6 @@ OJ_EXECUTION_SUBJECT_PARENT_ID = "openjiuwen.execution.subject.parent_id"
 OJ_EXECUTION_SUBJECT_SESSION_ID = "openjiuwen.execution.subject.session_id"
 OJ_EXECUTION_SUBJECT_REQUEST_NUMBER = "openjiuwen.execution.subject.request.number"
 
-OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
-OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
-OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
 OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
 OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS = "openjiuwen.gen_ai.response.completion_token_ids"
 OJ_GEN_AI_RESPONSE_LOGPROBS = "openjiuwen.gen_ai.response.logprobs"

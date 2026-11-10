@@ -83,11 +83,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
-    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
@@ -326,9 +323,6 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     cache_write = usage.get("cache_write_tokens") or usage.get("cache_creation_input_tokens")
     otel_span.set_attribute(GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, int(cache_write or 0))
     otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
     # Streaming / reasoning latency. TTFT comes from the semantically explicit
     # `ttft_seconds` field; `first_token_time` is kept as a **legacy fallback**
     # only — by contract it is a "first token instant" (timestamp string, same
@@ -345,10 +339,15 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
             otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
         except (TypeError, ValueError):
             pass
-    inter_token = usage.get("inter_token_latency_ms")
+    # TPOT payload keys: tpot_ms is canonical; inter_token_latency_ms is the
+    # legacy producer key (agent-studio usage payload) — still accepted so
+    # every studio release keeps flowing, written once under the single key.
+    inter_token = usage.get("tpot_ms")
+    if inter_token is None:
+        inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
         try:
-            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
+            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_TPOT_MS, float(inter_token))
         except (TypeError, ValueError):
             pass
     reasoning_duration = usage.get("reasoning_duration_ms")

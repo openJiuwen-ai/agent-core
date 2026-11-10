@@ -70,11 +70,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
     OJ_GEN_AI_REASONING_DURATION_MS,
-    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_TRACE_NAME,
-    OJ_GEN_AI_USAGE_INPUT_COST,
-    OJ_GEN_AI_USAGE_OUTPUT_COST,
-    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
@@ -1514,7 +1511,7 @@ class TestGenAiSemconvAttrs:
         assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
         assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
 
-    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+    async def test_llm_end_extracts_response_usage_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1550,9 +1547,11 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 7
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+        # Usage cost values stay business data only — never span attributes.
+        for key in ("openjiuwen.gen_ai.usage.total_cost",
+                    "openjiuwen.gen_ai.usage.input_cost",
+                    "openjiuwen.gen_ai.usage.output_cost"):
+            assert key not in s.attributes
 
     async def test_llm_end_unwraps_outputs_container_into_content(self):
         """The {"outputs": AssistantMessage} wrapper must not swallow content."""
@@ -1770,9 +1769,6 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
         assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
-        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
-        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
 
     async def test_llm_end_sets_streaming_and_reasoning_latency(self):
         """first_token_time parses to time_to_first_chunk; the *_ms latency
@@ -1795,7 +1791,7 @@ class TestGenAiSemconvAttrs:
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
         # Declared schema has no producer for these yet — absent, not zero.
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
 
         # Raw-dict callers (and future UsageMetadata fields) flow through.
@@ -1807,6 +1803,8 @@ class TestGenAiSemconvAttrs:
         raw = {
             "outputs": {
                 "usage_metadata": {
+                    # Legacy producer key (agent-studio usage payload) — the
+                    # attribute is the converged tpot_ms either way.
                     "inter_token_latency_ms": 12.5,
                     "reasoning_duration_ms": 300.0,
                 }
@@ -1815,8 +1813,20 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span2, outputs=raw)
 
         s2 = _EXPORTER.get_finished_spans()[0]
-        assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s2.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(12.5)
         assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
+
+        # Canonical payload key writes the same single attribute.
+        _EXPORTER.clear()
+        agent_span3 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span3, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw3 = {"outputs": {"usage_metadata": {"tpot_ms": 7.5}}}
+        await handler.on_llm_end(span=agent_span3, outputs=raw3)
+
+        s3 = _EXPORTER.get_finished_spans()[0]
+        assert s3.attributes[OJ_GEN_AI_RESPONSE_TPOT_MS] == pytest.approx(7.5)
 
     async def test_llm_end_malformed_latency_skips_attrs_not_finalization(self):
         """A malformed latency value (str / list off a raw-dict caller) must
@@ -1844,7 +1854,7 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_end(span=agent_span, outputs=raw)
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_RESPONSE_TPOT_MS not in s.attributes
         assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
         # Finalization survived: end attrs set, span closed, manager drained.
         assert OJ_END_TIME in s.attributes
