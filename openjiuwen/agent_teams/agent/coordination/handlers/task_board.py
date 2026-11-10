@@ -473,6 +473,34 @@ class TaskBoardHandler(BaseCoordinationHandler):
             team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
             if self._blueprint.role == TeamRole.LEADER:
                 if not incomplete:
+                    if not all_tasks:
+                        # 零任务空板（新团首巡 / 任务行被删光）：无成果可汇总。
+                        return None
+                    # 时间戳见证：最新终态迁移不新于上一轮起跑 →
+                    # 上一轮已掌握全部完成事实（leader_policy 要求当场自足总结），
+                    # 再渲染 all-done 只会得到回声总结并抢结果槽。
+                    # last_round_started_ms=None（本运行时零轮次：pause/resume
+                    # 或 recover 恢复）→ 板上终态全是上个生命周期的旧事，同样抑制
+                    # ——未送达的成果汇报由邮箱首扫兜底。
+                    terminal_ms = [
+                        tk.updated_at for tk in all_tasks if tk.updated_at is not None
+                    ]
+                    last_started = self._round.last_round_started_ms()
+                    if last_started is None or (
+                            terminal_ms and max(terminal_ms) <= last_started):
+                        team_logger.info(
+                            "[{}] all-done suppressed: no terminal transition newer "
+                            "than last round start (last_started={})",
+                            member_name,
+                            last_started,
+                        )
+                        return None
+                    if not terminal_ms:
+                        # 有任务行但全缺 updated_at（异常数据）——保守放行，维持旧行为。
+                        team_logger.warning(
+                            "[{}] all-done witness skipped: tasks missing updated_at",
+                            member_name,
+                        )
                     lifecycle = self._blueprint.lifecycle
                     if lifecycle == "persistent":
                         prompt = t("dispatcher.all_done_persistent")

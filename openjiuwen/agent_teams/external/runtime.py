@@ -476,6 +476,11 @@ class CliRuntimeBase(ABC):
         """No rails on a CLI-backed runtime."""
         return []
 
+    @property
+    def last_round_started_ms(self) -> Optional[int]:
+        """CLI runtimes do not track round starts for the all-done witness."""
+        return None
+
     async def register_rail(self, rail: Any) -> None:
         """No-op: CLI-backed runtime has no rail stack."""
         return None

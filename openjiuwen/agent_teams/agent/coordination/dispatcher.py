@@ -82,6 +82,14 @@ class AgentRoundController(Protocol):
         """
         ...
 
+    def last_round_started_ms(self) -> int | None:
+        """Wall-ms start of the most recent round, None before the first.
+
+        Witness boundary for renderers that must know whether the previous
+        round could already have seen a fact.
+        """
+        ...
+
     def has_in_flight_round(self) -> bool:
         """Return whether an agent round is scheduled and not yet finalized."""
         ...
