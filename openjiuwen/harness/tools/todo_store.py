@@ -390,14 +390,9 @@ async def transact(
                 )
                 try:
                     response = await publication
-                except asyncio.CancelledError as exc:
-                    # 请求已交给后端，取消/异常不证明零写入；保持原控制流。
-                    exc.tool_commit_state = "unknown"
-                    exc.tool_item_counts = {**tx.counts, "applied_count": None}
-                    raise
-                except BaseError as exc:
-                    # 保留领域错误码及控制类型，模型可见文本仍必须说明不能盲重试。
-                    if _UNKNOWN_PUBLICATION_HINT not in exc.message:
+                except (asyncio.CancelledError, BaseError) as exc:
+                    # 保留异常类型；请求发出后，取消或报错都不代表未写入。
+                    if isinstance(exc, BaseError) and _UNKNOWN_PUBLICATION_HINT not in exc.message:
                         exc.message = f"{exc.message}. {_UNKNOWN_PUBLICATION_HINT}"
                     exc.tool_commit_state = "unknown"
                     exc.tool_item_counts = {**tx.counts, "applied_count": None}

@@ -141,9 +141,9 @@ class HybridAsyncReadWriteLock:
                 await asyncio.shield(task)
                 return
             except asyncio.CancelledError:
-                async def settle_acquisition():
+                async def settle_acquisition(acquisition=task) -> None:
                     try:
-                        await task
+                        await acquisition
                     except FileLockTimeout:
                         return
                     await self._file.release()
@@ -157,7 +157,7 @@ class HybridAsyncReadWriteLock:
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
     async def _finish_cleanup(self, operation) -> None:
-        """取消不能中断实际释放、内存状态更新或等待者通知。"""
+        """清理完成后再传播取消。"""
         task = asyncio.create_task(operation)
         cancelled = False
         while not task.done():
@@ -173,7 +173,7 @@ class HybridAsyncReadWriteLock:
         async with self._condition:
             if mode == "write" or self._readers == 1:
                 await self._file.release()
-            # 只有实际释放确认完成才清状态；释放失败仍保持占用，不能放行写者。
+            # 释放失败时保留占用标记，避免写者误入。
             if mode == "write":
                 self._writer = False
             else:
