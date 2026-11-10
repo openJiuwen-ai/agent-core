@@ -5,7 +5,7 @@ type: F
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-11-09
-updated: 2026-11-09
+updated: 2026-11-10
 modules: [symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony]
 files: [openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py]
 designs: [D-20261109-1745-shared-capability-fingerprints]
@@ -21,7 +21,7 @@ Swarm 从本地目录读取专家与连接器元数据、从已配置服务读�
 
 ## 接口合并
 
-首版曾并列注册 `skill_index` 和 `capability_search`，并在后者为 Skill 构造第二套候选。根据用户后续要求，模型只注册 `capability_search`，使用单个 `type` 路由。SkillFS 直接读取指纹并复用原目录搜索、分类和游标。宿主回调仅处理专家、连接器和 MCP，沿用会话实时权限。Core SDK 的 `skill_index()` 继续服务现有调用方。
+首版曾并列注册 `skill_index` 和 `capability_search`，并在后者为 Skill 构造第二套候选。根据用户后续要求，模型只注册 `capability_search`，使用单个 `type` 路由。SkillFS 直接读取指纹并复用原目录搜索、分类和游标。宿主回调仅处理专家、连接器和 MCP，沿用会话实时权限。合并阶段曾保留 Core SDK 的 `skill_index()`。
 
 ## 首版验证
 
@@ -36,6 +36,14 @@ Swarm 从本地目录读取专家与连接器元数据、从已配置服务读�
 - Swarm 使用固定的旧 Core 提交运行兼容用例，180 项通过。覆盖原有 Runtime、无模型构建和只读权限。另验证适配器只注册 `skill_index` 并能找到会话可见 Skill。
 - Web 的时间线回归 2 项通过。Node 行为检查覆盖新旧工具名、默认搜索和分类浏览的展示。
 
+## 退役旧入口
+
+2026-11-10，用户确认 Core 与 Swarm 的版本绑定。模型、SDK 和管理端统一使用 `capability_search`，移除旧 SDK 方法、双工具注册、旧 Core 探测以及旧入口独有的路径查询、读取和输出 pipeline。Skill 分类、批量检索、游标和输出预算由同一个会话管理。Swarm 的调用切换和 Core 固定版本在同一个提交交付。
+
+- Core 回归 986 项通过，覆盖旧 SDK 入口移除、共享指纹、分类浏览、批量搜索和游标。
+- Swarm 对接本地 Core 候选的回归 810 项通过，覆盖四类检索、管理端、权限、提示和事件。
+- Web 时间线回归 2 项通过，另通过 Node 验证新工具的搜索词和分类浏览展示。
+
 ## 交付边界
 
-跨仓验证使用本地 Core 候选。Swarm 安装包要启用新增工具，依赖须指向含本次改动的 Core 版本。真实外部模型和 MCP 服务的连接、授权及调用仍需联调。
+跨仓回归使用配套 Core 候选。Swarm 的依赖声明、锁文件和容器参数绑定到包含检索接口的 Core 提交。真实外部模型和 MCP 服务的连接、授权及调用仍需联调。

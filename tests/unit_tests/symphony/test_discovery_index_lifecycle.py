@@ -74,24 +74,19 @@ async def test_one_shot_build_feeds_discovery_search_visibility_and_pagination(b
 
     toolkit = InstalledSkillsDirectoryToolkit(environment, session_scope="retirement-regression")
     try:
-        assert len(toolkit.get_tools()) == 1
-        first = await toolkit.skill_index("list", category="documents", limit=1)
+        tool, = toolkit.get_tools()
+        assert tool.card.name == "capability_search"
+        assert not hasattr(toolkit, "skill_index")
+        first = await tool.invoke({"type": "skill", "operation": "list", "category": "documents", "top_k": 1})
         assert first.detailed_output["ok"]
         assert not first.detailed_output["result_complete"]
         cursor = first.detailed_output["next_cursor"]
-        second = await toolkit.skill_index("list", cursor=cursor)
+        second = await toolkit.capability_search(operation="list", cursor=cursor)
         assert second.detailed_output["result_complete"]
         shown = set(first.detailed_output["observed_skill_ids"]) | set(second.detailed_output["observed_skill_ids"])
         assert shown == {"alpha", "beta"}
 
-        tool, = toolkit.get_tools(unified=True)
-        assert tool.card.name == "capability_search"
-        page = await tool.invoke({"type": "skill", "operation": "list", "category": "documents", "top_k": 1})
-        next_page = await tool.invoke({"operation": "list", "cursor": page.detailed_output["next_cursor"]})
-        assert next_page.detailed_output["result_complete"]
-        assert set(page.detailed_output["observed_skill_ids"]) | set(next_page.detailed_output["observed_skill_ids"]) == shown
-
-        result = await toolkit.skill_index("search", query="invoice")
+        result = await tool.invoke({"query": "invoice"})
         assert set(result.detailed_output["observed_skill_ids"]) == {"alpha", "beta"}
         assert "invoice" in result.data["content"]
         assert "hidden" not in result.data["content"]
@@ -144,7 +139,7 @@ async def test_missing_index_keeps_live_inventory_search_and_prompt(tmp_path):
     assert environment.prompt_snapshot().entries[0].worker_id == "invoice"
     toolkit = InstalledSkillsDirectoryToolkit(environment, session_scope="missing-index")
     try:
-        result = await toolkit.skill_index("search", query="Invoice")
+        result = await toolkit.capability_search(query="Invoice")
         assert result.detailed_output["observed_skill_ids"] == ["invoice"]
         assert "Process invoices" in result.data["content"]
     finally:

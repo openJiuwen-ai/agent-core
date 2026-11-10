@@ -82,7 +82,7 @@ finally:
 
 `runtime.retrieval.build()` 与构图使用同一个 Skill 集合指纹服务和缓存。构图版本随附本次使用的 `fingerprint.json`。Skill 目录按会话可见范围读取记录，并按来源及内容哈希匹配指纹。有效指纹的摘要、场景和关键词参与检索，缺失或过期时使用当前目录描述。
 
-`session.get_tools(unified=True)` 提供单个 `capability_search` 工具。`type` 默认为 `skill`，支持分类、批量关键词和游标。宿主可向 `create_session(search_catalog=...)` 提供当前会话中 `expert`、`connector` 和 `mcp` 的查询实现，并用 `openjiuwen.symphony.discovery.search_capabilities()` 对授权候选排序。原 `session.skill_index()` 继续服务 SDK 调用。
+`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`，支持分类、批量关键词和游标。宿主可向 `create_session(search_catalog=...)` 提供当前会话中 `expert`、`connector` 和 `mcp` 的查询实现，并用 `openjiuwen.symphony.discovery.search_capabilities()` 对授权候选排序。
 
 ## 产物与版本
 

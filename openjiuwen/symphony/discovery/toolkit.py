@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import textwrap
 import threading
 from collections import OrderedDict
@@ -12,10 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 
-SKILL_INDEX_TOOL_NAME = "skill_index"
+CAPABILITY_SEARCH_TOOL_NAME = "capability_search"
 _MAX_DESCRIPTION_CHARS = 300
 _MAX_SESSION_STATES = 1_024
-_TOOL_ID_DOMAIN = b"openjiuwen.skill-index.v1\0"
 
 
 class SkillDCICommandResult(str):
@@ -80,12 +78,10 @@ _STATES: OrderedDict[str, _NoticeState] = OrderedDict()
 def initialize_incremental_skill_notice_state(
     session_scope: str,
     raw_cards: Mapping[str, Mapping[str, str]],
-    *,
-    discovery_tool_name: str = SKILL_INDEX_TOOL_NAME,
 ) -> None:
     """Initialize a session baseline without consuming a delta."""
 
-    _notice_state(_tool_id(session_scope, discovery_tool_name), _normalize_cards(raw_cards))
+    _notice_state(session_scope, _normalize_cards(raw_cards))
 
 
 def consume_incremental_skill_reminder(
@@ -93,16 +89,15 @@ def consume_incremental_skill_reminder(
     raw_cards: Mapping[str, Mapping[str, str]],
     *,
     max_chars: int = 4_000,
-    discovery_tool_name: str = SKILL_INDEX_TOOL_NAME,
 ) -> str | None:
     """Consume a one-shot notice for Skills added since the session baseline."""
 
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
     current = _normalize_cards(raw_cards)
-    state = _notice_state(_tool_id(session_scope, discovery_tool_name), current)
+    state = _notice_state(session_scope, current)
     with state.prepare(current) as prepared:
-        reminder = _render_reminder(prepared.added, max_chars=max_chars, tool_name=discovery_tool_name)
+        reminder = _render_reminder(prepared.added, max_chars=max_chars)
         prepared.acknowledge()
         return reminder
 
@@ -117,50 +112,42 @@ def clear_incremental_skill_notice_states() -> None:
 class IncrementalNoticeSession:
     """Append one pending notice only after it fits the delivered result."""
 
-    def __init__(self, session_scope: str, raw_cards: Mapping[str, Mapping[str, str]], *, max_chars: int,
-                 tool_name: str = SKILL_INDEX_TOOL_NAME) -> None:
+    def __init__(self, session_scope: str, raw_cards: Mapping[str, Mapping[str, str]], *, max_chars: int) -> None:
         if max_chars <= 0:
             raise ValueError("incremental_notice_max_chars must be positive")
         self._max_chars = max_chars
-        self._tool_name = tool_name
-        self._state = _notice_state(_tool_id(session_scope, tool_name), _normalize_cards(raw_cards))
+        self._state = _notice_state(session_scope, _normalize_cards(raw_cards))
 
     def append(
         self,
         output: str,
         raw_cards: Mapping[str, Mapping[str, str]],
         *,
-        output_budget: int | None,
-    ) -> tuple[str, str | None]:
+        output_budget: int,
+    ) -> str:
         current = _normalize_cards(raw_cards)
         with self._state.prepare(current) as prepared:
-            reminder = _render_reminder(prepared.added, max_chars=self._max_chars, tool_name=self._tool_name)
+            reminder = _render_reminder(prepared.added, max_chars=self._max_chars)
             if not reminder:
-                return output, None
+                return output
             combined = f"{output}\n\n{reminder}" if output else reminder
-            if output_budget is not None and len(combined) > output_budget:
-                return output, None
+            if len(combined) > output_budget:
+                return output
             prepared.acknowledge()
-            return combined, reminder
+            return combined
 
 
-def _tool_id(session_scope: str, tool_name: str) -> str:
+def _notice_state(session_scope: str, snapshot: dict[str, tuple[str, str]]) -> _NoticeState:
     scope = str(session_scope or "").strip()
-    name = str(tool_name or "").strip()
-    if not scope or not name:
-        raise ValueError("session_scope and discovery_tool_name must be non-empty")
-    digest = hashlib.sha256(_TOOL_ID_DOMAIN + name.encode() + b"\0" + scope.encode()).hexdigest()
-    return f"{name}__{digest}"
-
-
-def _notice_state(tool_id: str, snapshot: dict[str, tuple[str, str]] | None) -> _NoticeState:
+    if not scope:
+        raise ValueError("session_scope must be non-empty")
     with _STATES_LOCK:
-        state = _STATES.get(tool_id)
+        state = _STATES.get(scope)
         if state is None:
             state = _NoticeState(snapshot)
-            _STATES[tool_id] = state
+            _STATES[scope] = state
         else:
-            _STATES.move_to_end(tool_id)
+            _STATES.move_to_end(scope)
         while len(_STATES) > _MAX_SESSION_STATES:
             _STATES.popitem(last=False)
         return state
@@ -188,7 +175,7 @@ def _safe_text(value: Any) -> str:
     return " ".join(str(value or "").split()).replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _render_reminder(added: list[tuple[str, str]], *, max_chars: int, tool_name: str) -> str | None:
+def _render_reminder(added: list[tuple[str, str]], *, max_chars: int) -> str | None:
     if not added:
         return None
     rows = "\n".join(
@@ -204,14 +191,14 @@ def _render_reminder(added: list[tuple[str, str]], *, max_chars: int, tool_name:
         return full
     return (
         "<system-reminder>\n"
-        f"{len(added)} new skills are available. Use `{tool_name}` to search the current catalog.\n"
+        f"{len(added)} new skills are available. Use `{CAPABILITY_SEARCH_TOOL_NAME}` to search the current catalog.\n"
         "</system-reminder>"
     )
 
 
 __all__ = [
+    "CAPABILITY_SEARCH_TOOL_NAME",
     "IncrementalNoticeSession",
-    "SKILL_INDEX_TOOL_NAME",
     "SkillDCICommandResult",
     "clear_incremental_skill_notice_states",
     "consume_incremental_skill_reminder",

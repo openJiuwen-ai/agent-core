@@ -7,7 +7,7 @@ stage: active
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-11-09
-updated: 2026-11-09
+updated: 2026-11-10
 approved-date: 2026-11-09
 domain: core
 type: D
@@ -34,10 +34,12 @@ related: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-co
 - 禁用编排时可由检索构建生成指纹，重新开启编排后在同内容、同策略下复用提取结果。
 - 指纹里的场景词能参与召回。修改能力定义使旧指纹失效并回退到当前目录，下一次构建更新描述。指纹构建失败保留上一份已发布产物。
 - 同名跨类型能力可区分。禁用 Skill、MCP 断开或撤权后，下一次查询剔除相关候选。
-- 正常模型工具注册只暴露一个检索入口。Skill 分类浏览和翻页复用现有状态，SDK 的 `skill_index` 调用继续可用。
+- 模型、SDK 和管理端统一用 `capability_search`。Skill 分类浏览和翻页共用现有会话状态，Core 和 Swarm 绑定发布。
 
 ## 确认记录
 
 2026-11-09，用户在会话中确认按此方案实现，选择仅检索会话可用能力，由检索构建增量生成指纹，并让检索和编排按来源集合共用产物。
 
 同日，用户要求合并 Skill 与其他能力的检索入口，用单个 `type` 选择类型。该选择替代最初并列的模型工具与 `types` 多类型输入。
+
+2026-11-10，用户确认 Core 和 Swarm 固定版本绑定，删除 `skill_index` 及旧版回退。管理端搜索也使用 `type=skill`。

@@ -5,10 +5,10 @@ type: S
 author: lin-xiaoyu
 author_email: xiaoyu.lin.work@outlook.com
 created: 2026-10-31
-updated: 2026-11-09
+updated: 2026-11-10
 modules: [openjiuwen/symphony]
 files: [openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
-designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement, D-20261109-1603-symphony-orchestration-experience]
+designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement, D-20261109-1603-symphony-orchestration-experience, D-20261109-1745-shared-capability-fingerprints]
 ---
 
 # Symphony 运行配置与 Runtime 契约
@@ -131,7 +131,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 - model=None 允许只读和确定性发现，并可按任务策略回退构树。构图和规划需要模型。
 - 检索构建与构图共用已配置 Skill 集合的 `FingerprintService`、指纹产物和缓存。允许回退构树且宿主缺少模型时，以元数据生成指纹。构图发布与本次使用的指纹快照绑定。
 - `DiscoverySession.capability_search(query, type, operation, category, cursor, top_k)` 按单个 `type` 选择目录。`type=skill` 为默认值，复用现有目录的 `list`、`search`、分类和游标。SkillFS 只为会话可见且启用的记录使用来源和内容哈希一致的指纹。摘要、场景和关键词参与召回，指纹缺失或过期时使用当前目录描述。
-- 宿主通过 `create_session(search_catalog=...)` 处理 `expert`、`connector`、`mcp` 的单次查询，按会话授权筛选候选后可用 `discovery.search_capabilities()` 排序。`get_tools(unified=True)` 仅提供 `capability_search`，`skill_index()` 和默认工具工厂保留 SDK 兼容契约。
+- 宿主通过 `create_session(search_catalog=...)` 处理 `expert`、`connector`、`mcp` 的单次查询，按会话授权筛选候选后可用 `discovery.search_capabilities()` 排序。`get_tools()` 返回单个 `capability_search` 工具，和 SDK 直接调用共用同一会话目录和游标。
 - skill 读取器已实现。expert/connector/mcp 在读取时明确报不支持。多来源及混合类型构建由独立的运行方案定义。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
 - 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。规划读取已有动态观测与经验写入独立，Rail 的新观测提交受经验开关控制。

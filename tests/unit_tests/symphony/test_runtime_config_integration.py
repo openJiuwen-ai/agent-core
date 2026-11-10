@@ -119,7 +119,7 @@ async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_pat
     assert "runtime-mutation" not in settings.prompt.preferred_capability_ids
     assert [r.worker_id for r in session.records()] == ["alpha"]
     assert settings.prompt.candidate_budget_tokens == 40
-    result = await session.skill_index(operation="search", query="invoice")
+    result = await session.capability_search(query="invoice")
     assert "alpha" in str(result)
     built = await runtime.retrieval.build()
     assert built["success"], built
@@ -282,12 +282,10 @@ async def test_retrieval_build_and_graph_share_fingerprint_extraction(tmp_path):
         assert (await runtime.retrieval.build())["success"]
         assert model.extractions == 1
         session = runtime.retrieval.create_session(disabled_capability_ids=lambda: disabled)
-        tool = session.get_tools(unified=True)[0]
+        tool, = session.get_tools()
         result = await tool.invoke({"type": "skill", "query": "escrowreconciliation"})
         assert result.detailed_output["observed_skill_ids"] == ["alpha"]
         assert "Invoice helper" in result
-        legacy = await session.skill_index("search", query="escrowreconciliation")
-        assert legacy.detailed_output["observed_skill_ids"] == ["alpha"]
         assert model.extractions == 1
     finally:
         await runtime.aclose()
@@ -450,10 +448,13 @@ async def test_discovery_limits_and_source_ids_apply_through_session(tmp_path):
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"output": {"max_results": 2, "max_list_entries": 1}}))
     session = runtime.retrieval.create_session(source_by_id={"object-0": "session"})
     assert next(item for item in session.records() if item.worker_id == "object-0").source == "session"
-    listed = await session.skill_index(operation="list")
-    searched = await session.skill_index(operation="search", query=["invoice", "documents"])
+    listed = await session.capability_search(operation="list")
+    searched = await session.capability_search(query=["invoice", "documents"])
     assert listed.detailed_output["shown_count"] <= 1
     assert searched.detailed_output["shown_count"] <= 2
+    next_page = await session.capability_search(cursor=searched.detailed_output["next_cursor"])
+    assert next_page.detailed_output["observed_skill_ids"]
+    assert set(searched.detailed_output["observed_skill_ids"]).isdisjoint(next_page.detailed_output["observed_skill_ids"])
     await runtime.aclose()
 
 
