@@ -1,47 +1,35 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Leader-side swarmflow wiring: WorkflowHandler narration + SwarmflowTool launch.
+"""Swarmflow wiring: WorkflowHandler narration (launcher-routed) + SwarmflowTool launch.
 
 No real LLM / team: a fake round captures ``deliver_input`` and a fake harness
 captures ``launch_async_tool``, so the progress-event → narration path and the
 tool → background-launch path are verified deterministically. Completion is fed
-back by the async-tool framework (not narrated by the handler), so the handler
-only narrates mid-run milestones (started / phase).
+back by the async-tool framework (not narrated by the handler); pause/resume
+are not narrated either (the run card flips from the raw events), so the
+handler narrates the mid-run milestones only (started / phase / human turns).
 """
 from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import fields
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from openjiuwen.agent_teams.agent.coordination.handlers.workflow import WorkflowHandler
+from openjiuwen.agent_teams.i18n import set_language
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
-    TeamEvent,
     WorkflowProgressTeamEvent,
 )
-from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.i18n import get_language, set_language
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor, ConcurrencyLimits
+from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
-
-
-@pytest.fixture(autouse=True)
-def _restore_i18n_language():
-    """set_language mutates process-global state; restore it after each test.
-
-    Without this, the last loop iteration of the per-language test leaves the
-    worker at "en" and later tests (e.g. the team-context roster note) render
-    in the wrong language — the CI failure in test_team_policy_rail.
-    """
-    previous = get_language()
-    yield
-    set_language(previous)
 
 
 class _FakeRound:
@@ -55,8 +43,9 @@ class _FakeRound:
 
 
 class _FakeBlueprint:
-    def __init__(self, role: TeamRole) -> None:
+    def __init__(self, role: TeamRole, member_name: str | None = None) -> None:
         self.role = role
+        self.member_name = member_name
 
 
 class _FakeRuntime:
@@ -75,7 +64,11 @@ class _FakeHarness:
     def __init__(self) -> None:
         self.model = None
         self.launched: list[tuple] = []
+        # (format_completed, format_failed) parallel to ``launched`` — lets a
+        # test render the completion injection the harness would receive.
+        self.launch_formatters: list[tuple] = []
         self._runtime = _FakeRuntime()
+        self.build_context = None
 
     @property
     def async_tool_runtime(self) -> _FakeRuntime:
@@ -92,6 +85,7 @@ class _FakeHarness:
         format_failed=None,
     ) -> None:
         self.launched.append((task_id, tool_name, description))
+        self.launch_formatters.append((format_completed, format_failed))
 
 
 class _FailingLaunchHarness(_FakeHarness):
@@ -99,10 +93,57 @@ class _FailingLaunchHarness(_FakeHarness):
         raise RuntimeError("launch failed")
 
 
-def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
+def _handler(role: TeamRole, member_name: str | None = None) -> tuple[WorkflowHandler, _FakeRound]:
     host = _FakeRound()
-    handler = WorkflowHandler(host, _FakeBlueprint(role), infra=None, poll_ctrl=None)
+    handler = WorkflowHandler(host, _FakeBlueprint(role, member_name), infra=None, poll_ctrl=None)
     return handler, host
+
+
+def test_progress_model_fallback_is_native_started_only():
+    """The base-spec model fallback applies to a native agent_started with no
+    hint and nothing else.
+
+    A third-party node with no hint runs on the CLI's own default model: naming
+    the leader's model there showed a model the CLI never ran until the real
+    report arrived. Terminal events never fall back, or a model-less
+    completion would overwrite what the node already shows.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.workflow.tool_swarmflow import resolve_progress_model
+
+    def ev(kind, model=None, agent_type=None):
+        return SimpleNamespace(kind=kind, model=model, agent_type=agent_type)
+
+    assert resolve_progress_model(ev("agent_started"), "deepseek-flash") == "deepseek-flash"
+    assert resolve_progress_model(ev("agent_started", agent_type="claude"), "deepseek-flash") is None
+    assert resolve_progress_model(ev("agent_started", model="glm-5", agent_type="claude"), "deepseek-flash") == "glm-5"
+    assert resolve_progress_model(ev("agent_completed"), "deepseek-flash") is None
+    assert resolve_progress_model(ev("agent_completed", model="GLM-5.3"), "deepseek-flash") == "GLM-5.3"
+
+
+def test_team_event_schema_carries_activity_fields():
+    """AGENT_ACTIVITY's four structured fields must survive the engine -> team-event hop.
+
+    The builder threads them by name; a schema gap here silently degrades every
+    activity row to an id-less, name-less 'tool_call' default on the consumer
+    side (the pairing and the member-call-list mirror both collapse).
+    """
+    from openjiuwen.agent_teams.schema.events import WorkflowProgressTeamEvent
+    from openjiuwen.agent_teams.workflow.engine.progress import WorkflowProgressEvent
+
+    for field in ("activity_type", "tool_call_id", "tool_name", "content"):
+        assert field in {f.name for f in fields(WorkflowProgressEvent)}
+        assert field in WorkflowProgressTeamEvent.model_fields
+    ev = WorkflowProgressTeamEvent(
+        team_name="t", kind="agent_activity", activity_type="tool_result",
+        tool_call_id="tc_1", tool_name="bash", content="ls -la",
+    )
+    dumped = ev.model_dump()
+    assert dumped["activity_type"] == "tool_result"
+    assert dumped["tool_call_id"] == "tc_1"
+    assert dumped["tool_name"] == "bash"
+    assert dumped["content"] == "ls -la"
 
 
 def _event(kind: str, *, phase: str | None = None, name: str | None = None,
@@ -110,12 +151,14 @@ def _event(kind: str, *, phase: str | None = None, name: str | None = None,
            model: str | None = None,
            phases: list[PhasePlan] | None = None, label: str | None = None,
            outcome: str | None = None, text: str | None = None,
-           correlation_id: str | None = None) -> EventMessage:
+           correlation_id: str | None = None,
+           executor: str | None = None) -> EventMessage:
     return EventMessage.from_event(
         WorkflowProgressTeamEvent(
             team_name="t", kind=kind, phase=phase, workflow_name=name,
             run_id=run_id, prompt=prompt, model=model, phases=phases, label=label,
             outcome=outcome, text=text, correlation_id=correlation_id,
+            executor=executor,
         )
     )
 
@@ -179,11 +222,57 @@ def test_leader_narrates_human_prompt_with_correlation_id():
     assert "approve rollout?" in line and "oncall" in line and "c-42" in line
 
 
-def test_non_leader_never_narrates():
-    """Only the leader is the spectator; a teammate ignores progress events."""
-    handler, host = _handler(TeamRole.TEAMMATE)
-    asyncio.run(handler.on_workflow_progress(_event("phase", phase="Search")))
-    assert host.delivered == []
+def test_narration_follows_the_executor():
+    """Whoever hosts the run gets its milestones; everyone else stays out.
+
+    A teammate-hosted run's progress reaches that teammate only — the leader
+    and unrelated members are not spectators. Leader-hosted runs name the
+    leader (``executor="leader"``), and events without team context
+    (``executor=None``, legacy included) fall back to the leader loop.
+    """
+    tm_handler, tm_host = _handler(TeamRole.TEAMMATE, member_name="teammate-a")
+    asyncio.run(tm_handler.on_workflow_progress(_event("phase", phase="Search", executor="teammate-a")))
+    assert len(tm_host.delivered) == 1
+    assert "Search" in tm_host.delivered[0]
+
+    lead_handler, lead_host = _handler(TeamRole.LEADER, member_name="leader")
+    asyncio.run(lead_handler.on_workflow_progress(_event("phase", phase="Search", executor="teammate-a")))
+    assert lead_host.delivered == []
+
+    other_handler, other_host = _handler(TeamRole.TEAMMATE, member_name="teammate-b")
+    asyncio.run(other_handler.on_workflow_progress(_event("phase", phase="Search", executor="teammate-a")))
+    assert other_host.delivered == []
+
+    # Leader-hosted runs name the leader as executor and narrate there.
+    asyncio.run(lead_handler.on_workflow_progress(_event("phase", phase="Search", executor="leader")))
+    assert len(lead_host.delivered) == 1
+
+    # Events without team context (executor=None, legacy included) fall back
+    # to the leader loop; a teammate loop stays quiet.
+    asyncio.run(lead_handler.on_workflow_progress(_event("phase", phase="Search")))
+    assert len(lead_host.delivered) == 2
+
+    asyncio.run(tm_handler.on_workflow_progress(_event("phase", phase="Search")))
+    assert len(tm_host.delivered) == 1
+
+
+def test_pause_and_resume_are_not_narrated():
+    """Pause does NOT reach any loop as narration — a parked run waits
+    silently for the user's decision (narration woke the launcher and invited
+    spontaneous resumes). The run card still flips: a resume relaunch
+    re-enters the engine, so WORKFLOW_STARTED (kept-tree semantics for
+    relaunch_kind="resume") plus the replayed milestones flip the paused
+    cards; workflow_state consumes those events directly. The replayed
+    started narration is the known L2 replay-narration leftover.
+    """
+    tm_handler, tm_host = _handler(TeamRole.TEAMMATE, member_name="teammate-a")
+    asyncio.run(tm_handler.on_workflow_progress(_event("workflow_paused", executor="teammate-a")))
+    assert tm_host.delivered == []
+
+    lead_handler, lead_host = _handler(TeamRole.LEADER, member_name="leader")
+    asyncio.run(lead_handler.on_workflow_progress(_event("workflow_paused", executor="teammate-a")))
+    asyncio.run(lead_handler.on_workflow_progress(_event("workflow_paused")))
+    assert lead_host.delivered == []
 
 
 def test_swarmflow_tool_launches_and_returns_immediately():
@@ -197,7 +286,7 @@ def test_swarmflow_tool_launches_and_returns_immediately():
     assert out.data["run_id"].startswith("wf_")
     assert len(harness.launched) == 1
     assert harness.launched[0][1] == "swarmflow"
-    mapped = tool.map_result(out)
+    mapped = tool.render_for_llm(out)
     assert out.data["run_id"] in mapped
     assert out.data["task_id"] in mapped
 
@@ -246,6 +335,112 @@ def test_format_completed_uses_per_run_completion_ctx():
     assert "2 phases, 2 agents" not in out_b
 
 
+def _overrun_observer(events: list[Any]) -> Any:
+    """Fake observer: folds nothing, just replays raw events + a stub run."""
+    from openjiuwen.agent_teams.workflow.schema import WorkflowRun
+
+    class _Obs:
+        def __init__(self) -> None:
+            self.events = events
+            self.run = WorkflowRun(name="wf", status="completed")
+
+    return _Obs()
+
+
+def test_format_completed_appends_overrun_block_when_run_finished_past_ceiling():
+    """A completed run whose ledger blew the per-run ceiling gets redesign feedback."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=120_000,
+            budget={"total": None, "spent": 120_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 120_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="draft",
+            label="b",
+            tokens=195_000,
+            budget={"total": None, "spent": 315_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 315_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_overrun1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 完成]" in out
+    assert "[Swarmflow 超预算完成]" in out
+    assert "spent=315000/90000" in out
+    # Phase ranking is cost-ordered: draft(195000) beats research(120000).
+    assert "draft(195000), research(120000)" in out
+    assert "重新设计工作流" in out
+    assert "wf_overrun1" in out
+
+
+def test_format_completed_no_overrun_block_when_within_ceiling():
+    """A completed run inside its ceiling reports plain success, no overrun text."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=40_000,
+            budget={"total": None, "spent": 40_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 40_000, "remaining": 50_000, "exhausted": False},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_within1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 完成]" in out
+    assert "超预算" not in out
+
+
+def test_format_completed_overrun_block_reports_session_scope_with_run_contrast():
+    """Session-scope overrun wins the report and carries the per-run contrast."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=500_000,
+            budget={"total": 400_000, "spent": 500_000, "remaining": 0, "exhausted": True},
+            workflow_budget={"total": 90_000, "spent": 500_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_session1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 超预算完成]" in out
+    assert "session（会话总额）" in out
+    assert "spent=500000/400000" in out
+    assert "Run 级对照：spent=500000/90000" in out
+    assert "请求上调预算" in out
+
+
 def test_swarmflow_tool_requires_a_script_source():
     """No script source at all fails fast at the tool boundary."""
     tool = _tool(_FakeHarness(), language="en")
@@ -255,12 +450,16 @@ def test_swarmflow_tool_requires_a_script_source():
 
 
 def test_swarmflow_tool_rejects_unsupported_sources():
-    """name / resume_id are on the surface but not wired to execution yet."""
+    """name is on the surface but not wired to execution yet.
+
+    (resume_id alone is no longer "not supported yet": resume_id+action is the
+    control entry, and resume_id without action fails with its own message —
+    covered in test_swarmflow_invoke_control.py.)
+    """
     tool = _tool(_FakeHarness())
-    for src in ("name", "resume_id"):
-        out = asyncio.run(tool.invoke({src: "x"}))
-        assert out.success is False
-        assert "not supported yet" in (out.error or ""), (src, out.error)
+    out = asyncio.run(tool.invoke({"name": "x"}))
+    assert out.success is False
+    assert "not supported yet" in (out.error or "")
 
 
 def test_swarmflow_tool_launches_inline_script(tmp_path):
@@ -274,14 +473,143 @@ def test_swarmflow_tool_launches_inline_script(tmp_path):
         out = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"}))
         assert out.success is True
         assert out.data["status"] == "launched"
-        assert out.data["run_id"].startswith("wf_")
-        # inline source is written to disk; the receipt carries the absolute path
+        run_id = out.data["run_id"]
+        assert run_id.startswith("wf_")
+        # inline source is written to a per-run file; the receipt carries the path
         script_path = out.data["script_path"]
-        assert script_path.endswith(os.path.join("workflows", "x", "script.py"))
+        assert script_path.endswith(os.path.join("workflows", "x", f"script-{run_id}.py"))
         assert os.path.isfile(script_path)
         assert len(harness.launched) == 1
         assert harness.launched[0][2] == f"swarmflow: {script_path}"
-        assert script_path in tool.map_result(out)
+        assert script_path in tool.render_for_llm(out)
+    finally:
+        paths.reset_openjiuwen_home()
+
+
+def test_swarmflow_tool_inline_scripts_with_same_name_do_not_overwrite(tmp_path):
+    """Two inline runs sharing META.name get separate script files.
+
+    A shared script.py let the second run's materialisation overwrite the
+    first one's source; resuming the first then loaded the second's script.
+    With per-run names each run keeps its own snapshot.
+    """
+    from openjiuwen.agent_teams import paths
+
+    paths.configure_openjiuwen_home(tmp_path)
+    try:
+        harness = _FakeHarness()
+        tool = _tool(harness)
+        first = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"}))
+        second = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 2\n"}))
+        assert first.success is True and second.success is True
+        path_a, path_b = first.data["script_path"], second.data["script_path"]
+        assert path_a != path_b
+        with open(path_a, encoding="utf-8") as f:
+            assert "return 1" in f.read()
+        with open(path_b, encoding="utf-8") as f:
+            assert "return 2" in f.read()
+        assert os.path.isfile(path_a) and os.path.isfile(path_b)
+    finally:
+        paths.reset_openjiuwen_home()
+
+
+def test_swarmflow_tool_inline_script_relaunch_reuses_resume_id_path(tmp_path):
+    """A resume_id relaunch reuses the run_id (same per-run script file path)."""
+    from openjiuwen.agent_teams import paths
+
+    paths.configure_openjiuwen_home(tmp_path)
+    try:
+        harness = _FakeHarness()
+        tool = _tool(harness)
+        source = "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"
+        first = asyncio.run(tool.invoke({"script": source, "resume_id": "wf_abc123"}))
+        assert first.success is True
+        assert first.data["run_id"] == "wf_abc123"
+        script_path = first.data["script_path"]
+        assert script_path.endswith(os.path.join("workflows", "x", "script-wf_abc123.py"))
+        # a relaunch under the same resume_id rewrites the same file
+        relaunch = asyncio.run(tool.invoke({"script": source, "resume_id": "wf_abc123"}))
+        assert relaunch.success is True
+        assert relaunch.data["script_path"] == script_path
+    finally:
+        paths.reset_openjiuwen_home()
+
+
+def test_cold_start_relaunch_hosts_completion_injection_on_the_recoverer(tmp_path):
+    """A cold-start recovery relaunch is the leader's own tool round: the
+    leader, reading the resume advisory, calls swarmflow with
+    resume_id + script_path from ITS harness — so the background task (and
+    its terminal completion injection) lands on the recoverer's runtime,
+    never routed back to the departed member.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams import paths
+
+    paths.configure_openjiuwen_home(tmp_path)
+    try:
+        source = "META = {'name': 'recover'}\nasync def run(args):\n    return 7\n"
+        member = _FakeHarness()
+        member.build_context = SimpleNamespace(role="teammate", member_name="alice")
+        member_tool = _tool(member)
+        first = asyncio.run(
+            member_tool.invoke({"script": source, "resume_id": "wf_recover1"})
+        )
+        assert first.success is True
+        assert first.data["run_id"] == "wf_recover1"
+        script_path = first.data["script_path"]
+        assert len(member.launched) == 1
+
+        # Cold start: a fresh process holds no controller tickets, so the
+        # recovery goes through the leader's own tool invocation.
+        recoverer = _FakeHarness()
+        recoverer.build_context = SimpleNamespace(role="leader", member_name=None)
+        recoverer_tool = _tool(recoverer)
+        out = asyncio.run(
+            recoverer_tool.invoke({"resume_id": "wf_recover1", "script_path": script_path})
+        )
+        assert out.success is True
+        assert out.data["run_id"] == "wf_recover1"
+
+        # the recoverer hosts the relaunch; the member's runtime is untouched
+        assert len(recoverer.launched) == 1
+        assert len(member.launched) == 1
+
+        # the completion injection the recoverer will receive names the run
+        format_completed, _format_failed = recoverer.launch_formatters[0]
+        assert format_completed is not None
+        assert "wf_recover1" in format_completed("done")
+    finally:
+        paths.reset_openjiuwen_home()
+
+
+def test_resume_relaunch_registers_terminal_formatters(tmp_path):
+    """The controller-plane relaunch registers the same terminal formatters as
+    a fresh invoke, so the resumed run's completion injection names the run:
+    whoever hosts the relaunch (the member when alive, the leader fallback when
+    it is gone) learns WHICH run finished instead of the generic
+    async-tool text."""
+    from openjiuwen.agent_teams import paths
+
+    paths.configure_openjiuwen_home(tmp_path)
+    try:
+        harness = _FakeHarness()
+        tool = _tool(harness)
+        inputs = {
+            "_run_id": "wf_resumefmt",
+            "_workflow_ticket": None,
+            "_agent_gate": None,
+            "_completion_ctx": {},
+            "script_path": "/tmp/flow.py",
+        }
+        tool.relaunch(inputs, "sess-1")
+
+        assert len(harness.launched) == 1
+        format_completed, format_failed = harness.launch_formatters[0]
+        assert format_completed is not None
+        assert "wf_resumefmt" in format_completed("done")
+        assert format_failed is not None
+        assert "wf_resumefmt" in format_failed("boom")
     finally:
         paths.reset_openjiuwen_home()
 
@@ -499,3 +827,14 @@ def test_agent_failed_not_narrated_by_handler():
     handler, host = _handler(TeamRole.LEADER)
     asyncio.run(handler.on_workflow_progress(_event("agent_failed", phase="Search", label="agent-1", text="failed")))
     assert host.delivered == []
+
+
+def test_agent_started_payload_carries_agent_type():
+    """agent_type rides the cross-process team event; absent means native."""
+    ext = EventMessage.from_event(
+        WorkflowProgressTeamEvent(team_name="t", kind="agent_started", label="ext", agent_type="codex")
+    ).get_payload()
+    native = _event("agent_started", label="native").get_payload()
+    assert ext.agent_type == "codex"
+    assert native.agent_type is None
+

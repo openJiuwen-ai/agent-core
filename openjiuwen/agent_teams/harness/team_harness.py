@@ -209,10 +209,29 @@ class TeamHarness:
         (idempotent) and drops its ``sys_operation`` so a discarded
         member/session does not leak it. No-op when no native was ever built.
         """
+        await self._stop_owned_swarmflow_runs(include_paused=True)
         if self._active_agent_session is not None:
             await self._active_agent_session.commit()
         if self._native is not None:
             await self._native.dispose()
+
+    async def _stop_owned_swarmflow_runs(self, *, include_paused: bool = False) -> None:
+        """Gracefully stop this member's swarmflow runs before harness teardown.
+
+        Best-effort: a controller failure only logs — teardown must proceed.
+        No controller attached or no member name: no-op.
+        """
+        controller = self._bg_controller
+        if controller is None or not self._member_name:
+            return
+        try:
+            await controller.stop_by_owner(self._member_name, include_paused=include_paused)
+        except Exception:
+            logger.warning(
+                "[TeamHarness] stop_by_owner failed for member %s; continuing teardown",
+                self._member_name,
+                exc_info=True,
+            )
 
     @staticmethod
     def _session_id_of(team_session: Optional[Any]) -> Optional[str]:
@@ -490,6 +509,14 @@ class TeamHarness:
         """Inject loaded memory into the agent's system prompt."""
         if self._native is not None:
             await memory_manager.load_and_inject(self._native, query=query)
+
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the session-level background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller`.
+        """
+        return self._bg_controller
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller (pause/resume surface).

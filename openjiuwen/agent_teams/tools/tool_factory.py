@@ -233,7 +233,10 @@ def create_team_tools(
                 else {}
             ),
         ),
-        # Swarmflow orchestration (leader-only, gated by swarmflow_model_resolver).
+        # Swarmflow orchestration. The name is in SHARED_TOOLS; the tool is
+        # wired only when the caller supplied a worker-model resolver (the
+        # leader that constructed the handles, or an in-process teammate that
+        # received them). Both roles share the same description.
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,
             messager=messager,
@@ -245,6 +248,7 @@ def create_team_tools(
             budget=swarmflow_budget,
             t=t,
             language=lang,
+            team_backend=agent_team,
         ),
         # Async-tool control tools (list / output / cancel background tasks).
         # Leader-only (in LEADER_ONLY_TOOLS); always wired — harmless when the
@@ -289,8 +293,8 @@ def create_team_tools(
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
     # Swarmflow is wired only when the host supplied a worker-model resolver
-    # (leader + enable_swarmflow). Same idempotent-subtraction gate as the
-    # spawn tools.
+    # (leader + enable_swarmflow, or an in-process teammate that received the
+    # shared SwarmflowInfra). Same idempotent-subtraction gate as the spawn tools.
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
     if exclude_tools:
