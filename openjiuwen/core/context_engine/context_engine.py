@@ -740,6 +740,17 @@ class ContextEngine:
                 StatusCode.CONTEXT_EXECUTION_ERROR,
                 error_msg=f"cannot find processor type '{processor_type}'"
             )
+        # Configs are not built from dicts, and a dict in ReActAgentConfig.context_processors
+        # is validated into a bare BaseModel with no fields; either way every setting is lost.
+        if isinstance(config, dict) or type(config) is BaseModel:
+            got = "a dict" if isinstance(config, dict) else "a bare BaseModel (a dict converted by pydantic)"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=(
+                    f"config for processor type '{processor_type}' must be an instance of its config class, "
+                    f"got {got}"
+                ),
+            )
 
         try:
             processor = processor_class(config)
