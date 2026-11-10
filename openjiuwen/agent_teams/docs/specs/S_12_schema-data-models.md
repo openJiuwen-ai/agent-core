@@ -13,9 +13,9 @@ does not.
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）。其余条目见 `docs/features/` |
+| 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/runtime_capabilities.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
+| 最近一次修订日期 | 2026-11-10 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_84_apply-runtime-capabilities.md`（tip→mounted 的 model / skills / pool overlay）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -28,17 +28,23 @@ does not.
    `SubAgentSpec` / `RailSpec` / `BuiltinToolSpec` / `WorkspaceSpec` /
    `SysOperationSpec` / `VisionModelSpec` / `AudioModelSpec` /
    `ProgressiveToolSpec` / `TeamModelConfig`。
-3. **团队声明与运行时上下文**（`team.py`）：`TeamSpec` / `TeamRole` /
+3. **运行时能力 overlay**（`runtime_capabilities.py`）：
+   `apply_runtime_capabilities` / `apply_runtime_capabilities_inplace` ——
+   把 tip 上的 `model` / `skills` / 团队级 pool·router 字段合并进 mounted
+   或 checkpoint 反序列化出的 `TeamAgentSpec`，不改动 identity / layout。
+   cold recover 还会刷新 `TeamRuntimeContext.member_model`；resume overlay
+   同步 mounted/allocator 元数据，但不等于 live harness 热重绑。
+4. **团队声明与运行时上下文**（`team.py`）：`TeamSpec` / `TeamRole` /
    `TeamLifecycle` / `TeamRuntimeContext` / `TeamMemberSpec` /
    `MemberOpResult`。
-4. **跨进程事件**（`events.py`）：`TeamTopic` / `TeamEvent` /
+5. **跨进程事件**（`events.py`）：`TeamTopic` / `TeamEvent` /
    `BaseEventMessage` 子类家族 / `EventMessage` 包装。
-5. **状态机枚举**（`status.py`）：`MemberStatus` / `ExecutionStatus` /
+6. **状态机枚举**（`status.py`）：`MemberStatus` / `ExecutionStatus` /
    `TaskStatus` / `MemberMode`，以及对应的合法转移表与
    `is_valid_transition`。
-6. **Team 流式输出扩展**（`stream.py`）：`TeamOutputSchema` —— `OutputSchema`
+7. **Team 流式输出扩展**（`stream.py`）：`TeamOutputSchema` —— `OutputSchema`
    子类，扩 `source_member` / `role`，不污染 core 层。
-7. **任务返回模型与写路径结果包装**（`task.py`）：`TaskSummary` /
+8. **任务返回模型与写路径结果包装**（`task.py`）：`TaskSummary` /
    `TaskDetail` / `TaskListResult` / `NewTaskSpec` 以及 `TaskOpResult` /
    `TaskCreateResult` / `GraphMutationResult`。
 
