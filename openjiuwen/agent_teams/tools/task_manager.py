@@ -909,9 +909,10 @@ class TeamTaskManager:
         """Snapshot the current-round vote tally of one IN_REVIEW task.
 
         Groups reviewers by type: verifier and challenger form the binary
-        (pass/fail) pool; inspector votes are scored floats (0~1). Latest
-        vote per reviewer wins; votes from members no longer on the task's
-        reviewer list are ignored.
+        (pass/fail) pool; inspector votes are scored floats (0~1) that carry
+        their feedback bodies alongside the scores. Latest vote per reviewer
+        wins; votes from members no longer on the task's reviewer list are
+        ignored.
         """
         votes = await self.db.task.get_review_votes(task.task_id, task.review_round)
         reviewers = task.reviewers()
@@ -939,6 +940,7 @@ class TeamTaskManager:
 
         # Inspector pool: scored votes
         inspector_scores: dict[str, float] = {}
+        inspector_feedback: dict[str, str] = {}
         inspector_count = 0
         inspector_voted = 0
 
@@ -952,6 +954,9 @@ class TeamTaskManager:
                         inspector_scores[name] = float(latest_decision[name])
                     except (ValueError, TypeError):
                         pass
+                    feedback = latest_feedback[name]
+                    if feedback:
+                        inspector_feedback[name] = feedback
             else:
                 # verifier or challenger
                 verdict_total += 1
@@ -989,6 +994,7 @@ class TeamTaskManager:
             "inspector_count": inspector_count,
             "inspector_voted": inspector_voted,
             "inspector_scores": inspector_scores,
+            "inspector_feedback": inspector_feedback,
             "inspector_avg": inspector_avg,
         }
 

@@ -390,6 +390,49 @@ async def test_review_fail_settles_rework_with_feedback(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_inspector_report_rides_the_rework_message(db, bus):
+    """A below-threshold inspector puts its full report into the rework
+    message, with or without binary-pool fail feedback."""
+    reviewers = ({"type": "verifier", "reviewer_id": "rev-1"}, {"type": "inspector", "reviewer_id": "rev-2"})
+    scheduler, _host, mm, tm = _build_scheduler(db, bus, default_max_review_rounds=3)
+
+    # Binary pool passes: the inspector score is the only failure reason.
+    await _seed_review(db, bus, scheduler, tm, task_id="r1", reviewers=reviewers)
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r1", "pass")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r1", "0.81", "加权总分 0.81：接口设计弱")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    # Binary pool fails too: the report must not be crowded out by it. The
+    # second task goes to dev-2 — dev-1 still holds the in-progress rework of
+    # r1, and one member keeps at most one active task.
+    await tm.add_graph(
+        [TaskGraphSpec(title="deliver", content="c", task_id="r2", assignee="dev-2", reviewer=reviewers)]
+    )
+    await scheduler.activate()
+    assert (await _reviewer_mgr(db, bus, "dev-2").complete("r2")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r2", "fail", "broken build")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r2", "0.81", "加权总分 0.81：接口设计弱")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    rework = {
+        meta["refs"]["task"]: meta["params"]["feedback"]
+        for to, meta in _dm_targets(mm)
+        if meta["template"] == "scheduler_rework"
+    }
+    assert set(rework) == {"r1", "r2"}
+    for feedback in rework.values():
+        # Average line plus the attributed full report.
+        assert "0.81" in feedback
+        assert "rev-2" in feedback
+        assert "加权总分 0.81：接口设计弱" in feedback
+    assert "broken build" in rework["r2"]
+    assert "broken build" not in rework["r1"]
+    for task_id in ("r1", "r2"):
+        assert (await tm.get(task_id)).status == TaskStatus.IN_PROGRESS.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_review_fail_dispatches_aggregated_feedback_to_mounted_rail(db, bus):
     rail = SimpleNamespace(
         review_feedback_evolution_enabled=True,
