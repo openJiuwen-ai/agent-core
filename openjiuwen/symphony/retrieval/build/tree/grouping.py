@@ -5,6 +5,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Optional
 
+from openjiuwen.symphony.model_bridge import _BuildInterrupted
 from openjiuwen.symphony.shared.rich_compat import Console, Panel
 
 from .prompts import GROUP_DISCOVERY_PROMPT, GROUP_MERGE_PROMPT, SKILL_ASSIGNMENT_PROMPT
@@ -90,8 +91,8 @@ class TreeGroupingEngine:
 
     def classify_skills(self, skills: list[dict], groups: dict, verbose: bool = False) -> dict:
         ordered = self.sorted_skills(skills)
-        build_config = self._builder.settings.manager_config.build
-        cfg_cap = int(getattr(build_config, "classify_batch_cap", 20) or 20)
+        build_config = self._builder.settings.config.request
+        cfg_cap = build_config.classification_batch_limit
         batch_size = min(self._builder.llm_runtime.auto_batch_size(), max(1, cfg_cap))
         if len(ordered) <= batch_size:
             return self.classify_skills_single(ordered, groups, verbose=verbose)
@@ -152,6 +153,8 @@ class TreeGroupingEngine:
                 try:
                     assignments.update(future.result())
                 except Exception as exc:
+                    if isinstance(exc, _BuildInterrupted) or not self._builder.settings.config.task.allow_fallback_tree:
+                        raise
                     console.print(f"[red]Classification batch failed: {exc}[/red]")
         return assignments
 
@@ -325,6 +328,8 @@ class TreeGroupingEngine:
                 try:
                     payload = future.result()
                 except Exception as exc:
+                    if isinstance(exc, _BuildInterrupted) or not self._builder.settings.config.task.allow_fallback_tree:
+                        raise
                     console.print(f"[red]Discovery batch failed: {exc}[/red]")
                     continue
                 if payload:

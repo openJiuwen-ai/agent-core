@@ -311,13 +311,13 @@ def _missing_member_error(name: str, location: PackageLocation, card: AgentGroup
 
 def _is_spawnable(member: AgentGroupMemberCard, declared_cli_kinds: frozenset[str]) -> bool:
     """Whether ``spawn_expert`` can run this member: native, or an external runtime the team declared."""
+    return not member.is_leader and _can_run_card(member.card, declared_cli_kinds)
+
+
+def _can_run_card(card: AgentTemplateCard, declared_cli_kinds: frozenset[str]) -> bool:
     from openjiuwen.agent_teams.external.manifest import cli_agent_for_provider
 
-    if member.is_leader:
-        return False
-    if member.card.runtime == "native":
-        return True
-    return cli_agent_for_provider(member.card.runtime_provider) in declared_cli_kinds
+    return card.runtime == "native" or cli_agent_for_provider(card.runtime_provider) in declared_cli_kinds
 
 
 class ViewExpertsTool(TeamTool):
@@ -384,6 +384,25 @@ class ViewExpertsTool(TeamTool):
         if group == STANDALONE_EXPERTS:
             return None
         return group or self._default_group
+
+    async def discoverable_cards(self) -> tuple[tuple[ExpertRef, AgentTemplateCard], ...]:
+        """Return spawnable expert cards within this tool's current default scope."""
+        return tuple((ref, card) for ref, card, _ in await self.discoverable_entries())
+
+    async def discoverable_entries(self) -> tuple[tuple[ExpertRef, AgentTemplateCard, Path | None], ...]:
+        """Include the package manifest path for standalone experts."""
+        group = self._scope(None)
+        if group is None:
+            cards = await _read_cards(await self._catalog.list_expert_packages(), _expert_card, kind="expert")
+            return tuple(
+                (ExpertRef(location.name), card, location.path / _MANIFEST) for location, card in cards
+                if _can_run_card(card, self._declared_cli_kinds)
+            )
+        location, card = await _read_installed_group(self._catalog, group)
+        return tuple(
+            (ExpertRef(member.name, location.name), member.card, None) for member in card.members
+            if _is_spawnable(member, self._declared_cli_kinds)
+        )
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         action = inputs.get("action") or "list"

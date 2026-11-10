@@ -1,0 +1,151 @@
+{
+  "capability": {
+    "root": "./capabilities",
+    "type": "skill",
+    "scan": {
+      "max_depth": null,
+      "limits": {
+        "max_asset_files": 10000,
+        "max_asset_file_bytes": 268435456,
+        "max_total_asset_bytes": 536870912,
+        "max_scan_directories": 50000,
+        "max_directory_entries": 20000,
+        "max_entrypoints": 10000,
+        "max_scan_asset_files": 100000,
+        "max_scan_asset_bytes": 2147483648
+      },
+      "manifest": {
+        "max_manifest_bytes": 4194304,
+        "max_frontmatter_depth": 32,
+        "max_frontmatter_items": 10000
+      }
+    },
+    "fingerprint": {
+      "extraction": {
+        "llm_enabled": false,
+        "batch_size": 16,
+        "max_concurrency": 4,
+        "max_body_chars": 16000,
+        "max_output_tokens": 2048,
+        "timeout_seconds": null
+      },
+      "evaluation": {
+        "llm_enabled": false,
+        "max_evidence_chars": 512
+      },
+      "cache": {
+        "enabled": true
+      }
+    }
+  },
+  "storage": {
+    "artifact_root": "./.symphony"
+  },
+  "retrieval": {
+    "enabled": true,
+    "build": {
+      "structure": {
+        "branching_factor": 128,
+        "max_depth": 6,
+        "root_categories": null,
+        "max_capabilities_per_node_multiplier": 1.5
+      },
+      "request": {
+        "max_concurrency": 2,
+        "max_retries": 2,
+        "timeout_seconds": 420.0,
+        "context_window_tokens": 0,
+        "max_output_tokens": 0,
+        "classification_batch_limit": 32
+      },
+      "postprocess": {
+        "enabled": true,
+        "max_passes": 1,
+        "min_capabilities": 6
+      },
+      "equivalence": {
+        "enabled": false,
+        "max_groups_per_parent": 6,
+        "allow_singleton_groups": true,
+        "min_lexical_similarity": 0.0
+      },
+      "profiles": {
+        "enabled": false,
+        "select_rules_enabled": true,
+        "batch_size": 48,
+        "max_description_chars": 140,
+        "max_rule_chars": 120
+      },
+      "prompt": {
+        "deterministic": true,
+        "discovery_seed": 42
+      },
+      "incremental": {
+        "max_change_ratio": 0.25,
+        "min_add_confidence": 0.18,
+        "min_add_confidence_margin": 0.04,
+        "branch_imbalance_ratio": 3.0
+      },
+      "task": {
+        "total_timeout_seconds": 0.0,
+        "preserve_previous_index_on_failure": true,
+        "allow_fallback_tree": true
+      },
+      "output": {
+        "generate_tree_html": false,
+        "verbose": false,
+        "show_tree": true,
+        "display_capability_root": null,
+        "cache_metrics_enabled": true
+      }
+    },
+    "discovery": {
+      "prompt": {
+        "candidate_budget_ratio": 0.01,
+        "context_window_tokens": 200000,
+        "preferred_capability_ids": [
+          "skill-creator",
+          "swarmskill-creator",
+          "symphony-assistant"
+        ]
+      },
+      "output": {
+        "max_chars": 12000,
+        "max_results": 10,
+        "max_list_entries": 40,
+        "incremental_notice_max_chars": 4000
+      },
+      "use_existing_index": false
+    }
+  },
+  "orchestration": {
+    "enabled": true,
+    "min_edge_confidence": 0.7,
+    "build": {
+      "max_concurrency": 1,
+      "matching": {
+        "batch_size": 12,
+        "require_consensus": true,
+        "max_candidates_per_capability_relation": 32,
+        "max_port_mappings_per_candidate": 12,
+        "max_exact_io_pair_fanout": 64
+      }
+    },
+    "plan": {
+      "mode": "fast",
+      "top_k": 3,
+      "max_depth": 4,
+      "dynamic_graph_enabled": false
+    }
+  },
+  "flow": {
+    "enabled": true,
+    "acceptance": {
+      "min_successes": 1,
+      "min_pack_success_rate": 0.8
+    },
+    "narrative": {
+      "max_examples": 5
+    }
+  }
+}

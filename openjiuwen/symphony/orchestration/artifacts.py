@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from filelock import FileLock
@@ -17,7 +17,7 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.symphony.orchestration.contracts import GraphArtifactStatus, GraphBuildResult
 
 SCHEMA_VERSION = "1.0"
-SUPPORTED_SCHEMA_MAJOR = 1
+MIXED_GRAPH_SCHEMA_VERSION = "2.0"
 MUTATION_REQUESTS_SCHEMA = "Symphony-graph-mutation-requests-v1"
 
 
@@ -61,6 +61,7 @@ class GraphArtifactStore:
             generated_at=str(payload.get("generated_at") or "") or None,
             schema_version=str(payload.get("schema_version") or "") or None,
             building=building,
+            build_id=str(payload.get("build_id", "")),
         )
 
     def read(self, version: str | None = None) -> dict[str, Any]:
@@ -276,8 +277,72 @@ class GraphArtifactStore:
         return current
 
 
-def load_graph_artifacts(root: str | Path, version: str | None = None) -> GraphArtifacts:
-    payload = GraphArtifactStore(root).read(version)
+def is_mixed_graph(payload: Mapping[str, Any]) -> bool:
+    return str(payload.get("schema_version", "")).split(".", 1)[0] == "2"
+
+
+def merge_graph_layers(skill: dict[str, Any], expert: dict[str, Any]) -> dict[str, Any]:
+    """Publish both independently matched layers in a single typed artifact."""
+    nodes = []
+    edges = []
+    for kind, layer in (("skill", skill), ("expert", expert)):
+        refs = {node["id"]: f"{kind}:{node['properties']['capability_id']}" for node in layer["nodes"]}
+        nodes.extend({**node, "id": refs[node["id"]]} for node in layer["nodes"])
+        edges.extend(
+            {**edge, "source": refs[edge["source"]], "target": refs[edge["target"]]}
+            for edge in layer["edges"]
+        )
+    return {
+        **skill,
+        "schema_version": MIXED_GRAPH_SCHEMA_VERSION,
+        "capabilities": [*skill["capabilities"], *expert["capabilities"]],
+        "nodes": nodes,
+        "edges": edges,
+        "lookup": {"skill": skill["lookup"], "expert": expert["lookup"]},
+        "diagnostics": [
+            {**item, "layer": kind}
+            for kind, layer in (("skill", skill), ("expert", expert)) for item in layer["diagnostics"]
+        ],
+        "capability_hashes": {**skill["capability_hashes"], **expert["capability_hashes"]},
+        "graph_identity_hashes": {**skill["graph_identity_hashes"], **expert["graph_identity_hashes"]},
+        "config": {**skill["config"], "expert": expert["config"]},
+    }
+
+
+def project_graph_layer(payload: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    """Adapt one layer to the existing bare-ID indexes and planner contracts."""
+    mixed = is_mixed_graph(payload)
+    if not mixed and kind == "skill":
+        return dict(payload)
+
+    prefix = f"{kind}:"
+    nodes = [node for node in payload.get("nodes", ()) if mixed and str(node.get("id", "")).startswith(prefix)]
+    refs = {node["id"]: f"capability:{node['id'][len(prefix):]}" for node in nodes}
+    return {
+        **payload,
+        "capabilities": [
+            item for item in payload.get("capabilities", ())
+            if mixed and (item.get("capability_type", item.get("type")) == "expert") == (kind == "expert")
+        ],
+        "nodes": [{**node, "id": refs[node["id"]]} for node in nodes],
+        "edges": [
+            {**edge, "source": refs[edge["source"]], "target": refs[edge["target"]]}
+            for edge in payload.get("edges", ()) if edge.get("source") in refs and edge.get("target") in refs
+        ],
+        "lookup": (payload.get("lookup") or {}).get(kind, {}) if mixed else {},
+        "diagnostics": [item for item in payload.get("diagnostics", ()) if item.get("layer") == kind],
+        "capability_hashes": _layer_hashes(payload.get("capability_hashes") or {}, kind) if mixed else {},
+        "graph_identity_hashes": _layer_hashes(payload.get("graph_identity_hashes") or {}, kind) if mixed else {},
+        "config": (payload.get("config") or {}).get("expert", {}) if kind == "expert" else payload.get("config", {}),
+    }
+
+
+def _layer_hashes(hashes: Mapping[str, str], kind: str) -> dict[str, str]:
+    return {key: value for key, value in hashes.items() if key.startswith("expert:") == (kind == "expert")}
+
+
+def load_graph_artifacts(root: str | Path, version: str | None = None, *, kind: str = "skill") -> GraphArtifacts:
+    payload = project_graph_layer(GraphArtifactStore(root).read(version), kind)
     capabilities = []
     for item in payload.get("capabilities", []):
         capability = dict(item)
@@ -296,14 +361,17 @@ def load_graph_artifacts(root: str | Path, version: str | None = None) -> GraphA
 def filter_disabled_graph_artifacts(
     artifacts: GraphArtifacts,
     disabled_capability_names: Sequence[str] | None,
+    *,
+    visible_capability_ids: set[str] | None = None,
 ) -> GraphArtifacts:
     disabled = {_normalize_ref(item) for item in disabled_capability_names or [] if _normalize_ref(item)}
-    if not disabled:
+    if not disabled and visible_capability_ids is None:
         return artifacts
     disabled_ids = {
         str(item.get("id") or "")
         for item in artifacts.skills
         if _normalize_ref(item.get("id")) in disabled or _normalize_ref(item.get("name")) in disabled
+        or (visible_capability_ids is not None and item.get("id") not in visible_capability_ids)
     }
     skills = [item for item in artifacts.skills if str(item.get("id") or "") not in disabled_ids]
     edges = [
@@ -346,8 +414,15 @@ def _validate_schema(payload: dict[str, Any]) -> None:
         major = int(version.split(".", 1)[0])
     except ValueError as exc:
         raise ValueError(f"Invalid Symphony graph schema_version: {version!r}") from exc
-    if major != SUPPORTED_SCHEMA_MAJOR:
+    if major not in {1, 2}:
         raise ValueError(f"Unsupported Symphony graph schema major version: {major}")
+    if major == 2 and not (
+        isinstance(payload.get("source_snapshot"), dict)
+        and isinstance(payload["source_snapshot"].get("expert_layer"), dict)
+        and isinstance(payload.get("lookup"), dict)
+        and all(isinstance(payload["lookup"].get(kind), dict) for kind in ("skill", "expert"))
+    ):
+        raise ValueError("Unsupported Symphony graph schema: mixed graph is missing layer metadata")
 
 
 def _read_json(path: Path) -> dict[str, Any]:

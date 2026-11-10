@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import suppress
 from typing import TYPE_CHECKING, Optional
 
+from openjiuwen.core.foundation.llm import ReasoningConfig
+from openjiuwen.symphony.model_bridge import _BuildInterrupted, _is_authentication_error, _is_transient_model_error, _response_content, _response_finish_reason, _response_usage
 from openjiuwen.symphony.shared.rich_compat import Console, Panel
 
 from .schema import parse_json_from_response
 
 if TYPE_CHECKING:
-    from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError
-
     from .builder import TreeBuilder
-else:
-    try:
-        from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError
-    except ModuleNotFoundError:
-        APIConnectionError = APIError = APITimeoutError = AuthenticationError = None
 
 
 console = Console()
@@ -45,42 +39,31 @@ class TreeLLMRuntime:
         if state.max_output_tokens_cache is not None:
             return state.max_output_tokens_cache
         _, max_out = self.model_limits()
-        build_config = builder.settings.manager_config.build
-        max_output_override = int(getattr(build_config, "max_output_tokens", 0) or 0)
+        build_config = builder.settings.config.request
+        max_output_override = build_config.max_output_tokens
         if max_output_override > 0:
             state.max_output_tokens_cache = max_output_override
         else:
             state.max_output_tokens_cache = min(int(max_out), 4096)
         return state.max_output_tokens_cache
 
-    def merged_extra_body(self) -> dict:
-        merged = {
-            "thinking": {"type": "disabled"},
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0.0,
-            "top_p": 1.0,
-        }
-        llm_seed = self._builder.settings.llm_seed
-        if llm_seed is not None:
-            with suppress(Exception):
-                merged["seed"] = int(llm_seed)
-        return merged
-
     def model_limits(self) -> tuple[int, int]:
         builder = self._builder
-        build_config = builder.settings.manager_config.build
-        ctx_cfg = int(getattr(build_config, "context_window", 0) or 0)
-        out_cfg = int(getattr(build_config, "max_output_tokens", 0) or 0)
+        build_config = builder.settings.config.request
+        ctx_cfg = build_config.context_window_tokens
+        out_cfg = build_config.max_output_tokens
         if ctx_cfg > 0 and out_cfg > 0:
             return ctx_cfg, out_cfg
 
         model_name = (builder.model or "").lower()
         large_context_markers = ("gpt-4.1", "gpt-4o", "claude", "doubao")
         if any(marker in model_name for marker in large_context_markers):
-            return 128000, 32768
+            return ctx_cfg or 128000, out_cfg or 32768
         if "gpt-5" in model_name:
-            return 200000, 65536
-        return builder.DEFAULT_CONTEXT_WINDOW, builder.DEFAULT_MAX_OUTPUT_TOKENS
+            defaults = (200000, 65536)
+        else:
+            defaults = (builder.DEFAULT_CONTEXT_WINDOW, builder.DEFAULT_MAX_OUTPUT_TOKENS)
+        return ctx_cfg or defaults[0], out_cfg or defaults[1]
 
     @staticmethod
     def normalize_prompt_for_fingerprint(prompt: str) -> str:
@@ -92,7 +75,7 @@ class TreeLLMRuntime:
     def prompt_fingerprint(self, prompt: str) -> str:
         builder = self._builder
         pieces = [
-            builder.settings.prompt_fingerprint_version,
+            "symphony-tree-prompt.v2",
             builder.model or "",
             self.normalize_prompt_for_fingerprint(prompt),
         ]
@@ -188,11 +171,11 @@ class TreeLLMRuntime:
         builder = self._builder
         settings = builder.settings
         state = builder.state
-        if state.client is None:
-            raise RuntimeError("openai is required to build the tree. Please install the openai package first.")
-        manager_config = settings.manager_config
+        if state.model is None:
+            raise RuntimeError("Tree construction requires an injected model")
+        request_config = settings.config.request
         if retry_left is None:
-            retry_left = int(manager_config.build.num_retries)
+            retry_left = request_config.max_retries
         max_tokens = self.get_max_output_tokens()
         prompt_fingerprint = self.prompt_fingerprint(prompt)
         with state.counter_lock:
@@ -205,14 +188,15 @@ class TreeLLMRuntime:
                 state.progress.update(state.progress_task, llm=state.llm_calls)
         try:
             with state.llm_semaphore:
-                response = state.client.chat.completions.create(
-                    model=builder.model,
+                response = state.model.invoke(
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max_tokens,
-                    timeout=manager_config.build.timeout,
-                    extra_body=self.merged_extra_body(),
+                    timeout=request_config.timeout_seconds,
+                    temperature=0.0,
+                    top_p=1.0,
+                    reasoning=ReasoningConfig(mode="disabled"),
                 )
-            finish_reason = response.choices[0].finish_reason
+            finish_reason = _response_finish_reason(response)
             if finish_reason == "length":
                 state.thread_local.truncated = True
                 console.print(
@@ -225,15 +209,24 @@ class TreeLLMRuntime:
                         border_style="red",
                     )
                 )
+                if not settings.config.task.allow_fallback_tree:
+                    raise RuntimeError("model output was truncated")
             else:
                 state.thread_local.truncated = False
             with state.counter_lock:
                 state.consecutive_failures = 0
+                input_tokens, output_tokens, total_tokens = _response_usage(response)
+                state.input_tokens += input_tokens
+                state.output_tokens += output_tokens
+                state.total_tokens += total_tokens
                 if settings.cache_observability:
-                    self.record_cache_observation(None)
-            return response.choices[0].message.content or "{}"
+                    self.record_cache_observation(self.extract_cache_hit(response))
+            return _response_content(response) or "{}"
         except Exception as e:
-            if AuthenticationError is not None and isinstance(e, AuthenticationError):
+            # Cooperative cancellation/total timeout must reach the publishing owner.
+            if isinstance(e, _BuildInterrupted):
+                raise
+            if _is_authentication_error(e):
                 console.print("[red]Authentication failed - check API key[/red]")
                 raise
             err_text = str(e).lower()
@@ -247,32 +240,27 @@ class TreeLLMRuntime:
                     console.print(f"[yellow]Reduced batch size to {state.batch_size_cache}[/yellow]")
                 self._record_failure(e)
                 return "{}"
-            is_transient = self._is_transient_error(e, err_text)
+            is_transient = _is_transient_model_error(e)
             if is_transient and retry_left > 0:
                 return self.call_llm(prompt, is_retry=True, retry_left=retry_left - 1)
             console.print(f"[red]LLM call failed: {e}[/red]")
             self._record_failure(e)
             return "{}"
 
-    @staticmethod
-    def _is_transient_error(error: Exception, error_text: str) -> bool:
-        api_error_types = (APITimeoutError, APIConnectionError, APIError)
-        matches_api_error = any(
-            error_type is not None and isinstance(error, error_type) for error_type in api_error_types
-        )
-        return matches_api_error or any(marker in error_text for marker in ("timed out", "timeout"))
-
     def _record_failure(self, error: Exception) -> None:
         builder = self._builder
+        if not builder.settings.config.task.allow_fallback_tree:
+            raise error
         state = builder.state
         with state.counter_lock:
             state.consecutive_failures += 1
             if state.consecutive_failures >= builder.settings.max_consecutive_failures:
                 raise RuntimeError(f"Circuit breaker: {state.consecutive_failures} consecutive LLM failures") from error
 
-    def call_llm_json(self, prompt: str, max_retries: int = 3, is_retry: bool = False) -> dict:
+    def call_llm_json(self, prompt: str, max_retries: int | None = None, is_retry: bool = False) -> dict:
         builder = self._builder
         state = builder.state
+        max_retries = (builder.settings.config.request.max_retries + 1) if max_retries is None else max_retries
         attempts_remaining = max_retries
         attempt_index = 0
         while attempts_remaining > 0:

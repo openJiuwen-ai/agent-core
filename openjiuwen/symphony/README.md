@@ -1,735 +1,135 @@
-# openjiuwen.symphony
+# Symphony
 
-`openjiuwen.symphony` 是 openJiuwen 的能力资产发现、指纹、评估、检索、编排和经验沉淀领域模块，
-用于组织 Agent 运行时可用的 `skill`、`agent` 及其他可扩展能力类型。
+Symphony 从一个能力目录构建分类树与关系图，提供会话发现、在线编排和执行观测 / Flow。统一入口为 `SymphonyRuntime(model, config)`；扫描、指纹和服务组装由 Core 管理。
 
-Symphony 的最终设计围绕 Agent 能力资产提供以下核心能力：
-
-- **能力指纹**：从能力资产中提取语义画像、输入输出语义和能力标签，形成供检索、编排和评估共享的标准化能力指纹。
-- **能力检索**：将能力资产组织成可逐层浏览和检索的树结构，帮助 Agent 找到候选能力。
-- **能力编排**：将能力视图组织成关系图，并基于候选能力生成可解释的执行路线。
-- **经验沉淀**：从会话轨迹中提取能力使用模式，构建可检索的经验知识库。
-- **能力评估**：评估智能体能力、技能质量和能力组合效果，为分发、推荐和持续优化提供依据。
-- **Agent Toolkit**：向 Agent 提供组合检索和编排的统一调用入口。
-
-## 实施状态
-
-本文档同时描述最终设计和当前实现。“当前可运行接口”描述当前可直接导入的能力；
-“最终 Runtime 与统一接口蓝图”中明确标注为目标形态的代码示例不代表当前已有对应 facade。
-
-| 能力域 | 当前状态 | 说明 |
-| --- | --- | --- |
-| 能力指纹 | 已实现 | 已提供普通能力清单、显式 Skill 扫描、语义画像、IO 归一化、增量 cache 和带 schema 版本的 `fingerprint.json`。 |
-| 能力检索 | 待迁入 | 最终提供能力树构建、浏览和自然语言检索。 |
-| 能力编排 | 已实现 | 已提供关系图构建、版本化产物、Fast/Beam Planner 和执行图。 |
-| 经验沉淀 | 部分实现 | 独立模块已提供轨迹解析、评估、经验库构建和检索；尚未接入 `SymphonyRuntime`。 |
-| 能力评估 | 已实现 | 已提供可注册的静态与轨迹指标，并保留 reason、evidence、failure 和 suggestion。 |
-| Agent Toolkit | 待迁入 | 最终组合检索和编排，供 Agent 调用。 |
-| 公共 `models` | 已实现 | 提供 capability、fingerprint、evaluation 和 normalization 的不可变公开模型。 |
-
-## 功能边界
-
-Symphony 处理能力资产的发现、检索、关系建模、编排、经验沉淀和评估。使用方负责提供配置和能力资产，通过 Adapter 将运行时信息转换为 Symphony 可消费的普通对象，并负责能力安装或注册、模型账号、会话状态、权限控制、能力调用入口和 UI 展示。
-
-| 核心功能 | 说明 | 典型输出 |
-| --- | --- | --- |
-| 能力指纹 | 提取并归一化能力资产的语义画像、输入输出和标签。 | 能力清单、能力指纹、归一化标签 |
-| 能力检索 | 建立树索引，支持按任务逐层探索候选能力。 | 分支摘要、候选能力、能力 ID 列表 |
-| 能力编排 | 根据候选能力及其关系图生成执行路线。 | 编排计划、执行图、缺失输入说明 |
-| 经验沉淀 | 从执行轨迹提炼可复用的能力使用模式。 | 经验条目、候选能力 ID 列表 |
-| 能力评估 | 评估智能体能力、技能质量和能力组合效果。 | 评估结果、指标汇总、改进建议 |
-
-使用方通过 Adapter 接入 Symphony：
-
-```text
-使用方配置 / 能力资产目录 / LLM 配置
-  ↓
-Adapter
-  ↓
-openjiuwen.symphony
-```
-
-Symphony 不隐式猜测或扫描应用目录、不读取应用配置、不注册或执行使用方的能力，也不依赖具体使用方代码。
-`SkillFolderScanner` 只扫描调用方显式传入的根目录。以 JiuwenSwarm 为例，应用 Adapter 负责把内部能力标识
-转换为公共领域的 `capability_id`，并把应用侧配置、默认模型、禁用项和动态关系映射为 Symphony 输入。
-
-### SkillPack 沉淀
-
-宿主把 `SkillPackAdapter()` 传给 `SymphonyFlowEngine` 时，执行证据中的每个成员必须同时具有
-`metadata.capability_type: skill` 和由宿主根据本地文件确认的 `metadata.skill_type: skill`。
-第二个字段用于区分普通单 Agent Skill、SwarmSkill 和嵌套 SkillPack；不能由模型填写或从能力名称推断。
-类型随证据、配方和评审材料保留，缺少类型的历史记录不进入 SkillPack 候选。
-
-根文档保留适用条件、禁用条件、输入、权限与副作用、成员执行顺序、失败处理和最终产物等稳定段落。
-如果配方名称与成员重名，渲染的根名称追加 `-pack`，避免成员目录覆盖或自引用。
-Core 只评审和生成临时产物，用户确认、实时成员状态重验及安装由宿主完成。
-
-## 架构总览
-
-Symphony 的核心结构是“检索用树，编排用图”。能力指纹作为检索和编排共享的语义视图：
-
-```text
-capability_assets_root
-  ↓
-inventory
-  ↓
-shared/fingerprint
-  ├── retrieval tree
-  │     ↓
-  │   AgenticSymphonyToolkit.retrieval
-  │     ↓
-  │   candidate capability_id
-  │
-  └── orchestration/graph
-        ↓
-      graph.json
-        ↓
-      orchestration planner
-        ↓
-      planned_graph
-```
-
-- `shared/fingerprint` 扫描或消费能力清单，抽取语义画像，归一化 IO，并原子发布带 schema 版本的能力指纹。
-- `retrieval` 构建并读取能力树索引，向 Agent 渐进披露分支和候选能力。
-- `orchestration/graph` 生成关系候选、进行 IO/语义匹配、判断关系并构建能力图。
-- `orchestration` 管理图产物，并根据候选能力和任务目标生成执行路线。
-- `experience` 评估会话轨迹、沉淀能力使用经验，并支持经验检索。
-- `evaluation` 提供可注册的静态质量和调用方轨迹评估，不固化业务准入阈值。
-- `interfaces` 定义使用方需要实现或传入的协议。
-- `agent` 提供 Agent-facing toolkit；使用方负责将 toolkit 方法接入自己的调用体系。
-
-能力图是编排领域的内部组成，不是一个独立的 Runtime 服务；公共运行时通过
-`SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService`、`EvaluationSuite` 和
-experience 领域能力已可独立使用，但尚未组合进 `SymphonyRuntime`。
-
-### 检索树中的 Skill 等价群
-
-显式开启等价群后，检索树构建会先在同一分类分支内召回候选 Skill，再逐对判断核心能力是否相同或相近，并用
-确定性合并生成等价群节点。平台、供应商、API/CLI、输入形式等实现差异可以归为一组；宽能力包含窄
-能力时，只要共享能力是双方的主要能力，也可以归为一组。仅有关键词重合、附带功能重合或属于互补
-步骤的 Skill 仍保持分开；任意一对明确不相似的 Skill 不会被传递关系合并到同一群。
-
-该能力由 `SkillIndexBuildConfig.equivalence_enabled`（离线构建对应
-`BuildConfig.tree_equiv_grouping_enabled`）控制，默认关闭，需要时显式开启。词面相似度二次拆分默认关闭；需要更保守的
-确定性拆分时，可显式设置 `equivalence_min_lexical_similarity`（离线构建对应
-`tree_equiv_min_lexical_similarity`）为大于 `0` 的值。
-
-`AgenticSkillRetrievalToolkit.build_index()` 自动执行增量构建时，成功结果的
-`data.capability_category_paths` 会返回本批新增或更新 Skill 的最终分类路径，例如
-`[{"capability_id": "weather", "category_path": ["Information", "Weather"]}]`。`category_path` 按层级
-保存分类节点 ID，长度与实际能力树一致，不包含 Skill 叶子节点；删除、复用已有索引、首次构建和显式
-强制全量构建时返回空列表。异步构建启动结果仍只返回 `build_id`，完成后可通过现有
-`check_build_status(build_id)` 的同名字段取得结果。
-
-## 最终目录蓝图
-
-Symphony 作为 agent-core 的原生模块，源码直接位于 `openjiuwen/symphony`，不增加重复的包目录层级：
-
-```text
-agent-core
-├── openjiuwen
-│   └── symphony
-│       ├── README.md
-│       ├── __init__.py
-│       ├── runtime.py
-│       ├── interfaces
-│       ├── agent                         # 待迁入
-│       ├── retrieval                     # 待迁入
-│       ├── orchestration
-│       │   ├── graph
-│       │   │   ├── candidates
-│       │   │   └── matcher              # 内部实现，不作为公共 API
-│       │   └── planning
-│       ├── experience                    # 独立模块已实现，Runtime 接入待完成
-│       ├── evaluation
-│       ├── models
-│       └── shared
-│           └── fingerprint
-├── tests
-│   └── unit_tests
-│       └── symphony
-├── examples
-│   └── symphony
-└── docs
-```
-
-- Python 源码进入 `openjiuwen/symphony/`。
-- 图构建模型和内部关系匹配实现属于编排领域，保留在 `orchestration/graph/`。
-- 指纹与评估公共模型位于 `models/`；graph 内部模型仍保留在 `orchestration/graph/`。
-- 单元测试进入 `tests/unit_tests/symphony/`，示例进入 `examples/symphony/`。
-- 完整的中英文使用指南进入 agent-core 的 `docs` 文档体系。
-- 依赖、构建和发布配置由 agent-core 根目录的 `pyproject.toml` 统一管理。
-
-## 当前可运行接口
-
-当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。`openjiuwen.symphony.experience` 已提供可单独导入的领域能力，但尚未组合到 Runtime。
+## 配置与调用
 
 ```python
-from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-from openjiuwen.symphony import (
-    CapabilityFingerprint,
-    CapabilityIO,
-    OrchestrationConfig,
-    SymphonyRuntime,
-)
+from openjiuwen.symphony import SymphonyConfig, SymphonyRuntime
 
-
-model = Model(
-    model_client_config=ModelClientConfig(
-        client_provider="OpenAI",
-        api_base="https://example.com/v1",
-        api_key="...",
-    ),
-    model_config=ModelRequestConfig(model="example-model", temperature=0),
-)
-
-
-async def on_progress(event):
-    pass
-
-
-def list_capabilities():
-    return [
-        CapabilityFingerprint(
-            capability_id="extract-text",
-            capability_type="skill",
-            name="Extract text",
-            description="Extract text from a document",
-            version="1.0.0",
-            outputs=(CapabilityIO(name="text", type="text"),),
-        ),
-        CapabilityFingerprint(
-            capability_id="summarize",
-            capability_type="agent",
-            name="Summarize",
-            description="Summarize text",
-            version="1.0.0",
-            inputs=(CapabilityIO(name="text", type="text"),),
-        ),
-    ]
-
-
-symphony = SymphonyRuntime(
-    graph_artifact_root=".artifacts/symphony-graph",
-    capability_provider=list_capabilities,
-    model=model,
-    orchestration_config=OrchestrationConfig(mode="fast"),
-)
-
-build_result = await symphony.orchestration.build(
-    force=False,
-    progress=on_progress,
-)
-graph = symphony.orchestration.read()
-plan = await symphony.orchestration.plan(
-    query="Extract and summarize this document",
-    candidate_ids=["extract-text", "summarize"],
-    language="en",
-    progress=on_progress,
-)
-```
-
-也可以直接构造 `OrchestrationService`：
-
-```python
-from openjiuwen.symphony import OrchestrationService
-
-service = OrchestrationService(
-    graph_artifact_root=".artifacts/symphony-graph",
-    capability_provider=list_capabilities,
-    model=model,
-)
-```
-
-`capability_provider` 可以直接传入能力序列，也可以是返回能力序列的同步或异步函数。
-构造器还可以通过 `model_response_observer` 观测模型响应，通过 `source_snapshot` 补充使用方的构建身份，并通过 `prepare_artifact` 在原子发布前准备版本目录中的附加产物。
-
-### FingerprintService
-
-指纹构建使用带稳定快照的异步 `CapabilityProvider`。推荐通过 `inventory_snapshot()` 原子返回快照与能力集合；
-未实现该扩展时，pipeline 会在读取能力前后分别检查 `source_snapshot()`，并拒绝构建期间发生变化的 inventory。
-
-```python
-from pathlib import Path
-
-from openjiuwen.symphony import CapabilityDescriptor, FingerprintService, SourceSnapshot
-
-
-class FingerprintCapabilityProvider:
-    async def inventory_snapshot(self):
-        capabilities = await self.capabilities()
-        snapshot = SourceSnapshot(
-            snapshot_id="inventory-1",
-            capability_count=len(capabilities),
-        )
-        return snapshot, capabilities
-
-    async def capabilities(self):
-        return [
-            CapabilityDescriptor(
-                capability_id="document-summary",
-                capability_type="skill",
-                name="Document summary",
-                description="Summarize a supplied document.",
-                source="example-adapter",
-            ),
-        ]
-
-    async def source_snapshot(self):
-        return SourceSnapshot(snapshot_id="inventory-1", capability_count=1)
-
-
-fingerprints = FingerprintService(
-    capability_provider=FingerprintCapabilityProvider(),
-    artifact_root=Path(".artifacts/symphony-fingerprint"),
-)
-artifact = await fingerprints.build()
-loaded = fingerprints.read()
-```
-
-`SkillFolderScanner("./skills")` 是显式根目录的扫描便利实现。它只将 `SKILL.md` 作为语义输入，完整资产只
-用于安全 hash；调用方提供的扫描根目录被视为可信本地目录，所有平台都使用普通路径 I/O。扫描不主动遍历
-symlink、junction 或其他 reparse point，并排除凭据、版本控制和缓存目录。目录、文件、字节数及 manifest
-深度都有显式上限。
-
-额外模型调用默认关闭。打开 `FingerprintSettings.enable_llm_extraction` 或
-`enable_llm_evaluation` 时，调用方必须显式注入实现 `SymphonyLLM.invoke(...)` 的对象；缺少模型时返回
-明确配置错误，不会默认判定通过。
-
-`FingerprintSettings.llm_max_tokens` 默认是 `2048`，允许设置正整数或 `None`；`None` 表示提取调用
-不传 `max_tokens`，沿用注入模型的配置。`FingerprintService` 和 `CapabilityFingerprintExtractor` 可传入
-`model_response_observer`。同步或异步 observer 在模型调用结束、请求的 thinking 兼容作用域恢复后接收
-`observer(response, "fingerprint_extraction", "capability_extraction")`；与编排一致，三个参数按位置传入，
-不要求回调形参使用特定名称；observer 异常只记日志。
-若响应的 `finish_reason` 为 `length`，会先通知 observer，再以 `MODEL_CALL_FAILED` 中止构建，
-不会解析或修复截断内容，也不会替换已有指纹、提取缓存或关联构图产物。默认提取协议为
-`symphony-capability-extraction-v3`，旧协议的提取缓存会重新计算。
-
-### 能力评估
-
-`EvaluationSuite` 支持注册同步或异步 evaluator。内置静态指标包括结构规范性、描述质量和分类一致性；
-轨迹指标包括成功率、时延、准确性、完整性、能力选择和组合效果。调用轨迹由使用方以
-`EvaluationCase` / `CapabilityCall` 显式传入，Symphony 不执行真实能力。
-
-每个 metric 保留 `status`、可选 `[0, 1]` score、reason、脱敏 evidence、failure 和 suggestion。
-默认不生成跨指标 composite score，也不固化准入阈值；没有目标值的时延只输出 raw observation。
-同一窗口内部分 evaluator 或 LLM 解析异常时，`EvaluationSuite` 只使用 `score is not None` 的可用评分样本
-计算均值和 pass/fail，异常样本不进入分母，但 `error_count` 与对应诊断仍会保留；只有所有样本都无法评分且
-存在异常时，聚合结果才为 `error`。没有评分且没有异常时，仍按原有 `observed`/`not_applicable` 规则返回。
-
-LLM judge 接受裸 JSON，或完整包裹整个响应的 Markdown 三反引号代码块；代码块语言标签可以省略或使用
-`json`、`arduino` 等任意标签，但块内仍须为标准 JSON 对象。外围说明文字、多个代码块、JSON5、单引号、
-尾逗号和不完整 JSON 不会被本地启发式修复。JSON 解析或 `score`/`reason` 字段校验失败时，evaluator 会将
-安全的具体校验原因与脱敏、限长的原始坏输出回传给同一个 LLM，并固定重做一次；重试成功后按正常评分返回，
-重试仍失败才返回 `error`。首次调用的网络、超时、限流或鉴权异常不会在 Evaluation 层再次重试，以免与模型
-传输层重试叠加。原始坏输出和完整异常文本不会写入最终评估结果。
-
-### 指纹产物生命周期
-
-```text
-fingerprint_artifact_root/
-├── fingerprint.json
-├── .fingerprint-cache.json
-└── .fingerprint.lock
-```
-
-`fingerprint.json` 顶层包含 schema 版本、UTC 生成时间、source snapshot 和 fingerprints。每个公开指纹使用
-`capability_id` / `capability_type`，包含语义画像、归一化 IO、分类、标签、内容 hash、质量结果、失败原因、
-脱敏证据引用和改进建议。构建采用原子发布，失败或取消不会覆盖最近成功版本。
-
-### 复用 agent-core Model
-
-Symphony 直接使用上例中 agent-core 的 `Model`，复用统一的 provider、连接池和回调，不增加额外 LLM 包装层。Symphony 内部统一将编排请求转换为 `Model.invoke()`，并处理 timeout、请求覆盖、错误上下文和 JSON 修复；模型账号及默认模型的选择仍由使用方显式注入。
-
-### SymphonyGraphEngine
-
-`SymphonyGraphEngine` 是统一的公开图谱入口。当前静态图生命周期由其内部的 `OrchestrationService`
-实现，使用 `SymphonyRuntime` 时通过 `runtime.graph_engine` 访问：
-
-```python
-engine = runtime.graph_engine
-status = engine.status(expected_snapshot=None)
-build_result = await engine.build(
-    force=False,
-    progress=on_progress,
-    prepare_artifact=None,
-)
-cancel_status = await engine.cancel_build()
-graph = engine.read(version=None)
-plan = await engine.plan(
-    query,
-    candidate_ids,
-    language="cn",
-    progress=on_progress,
-    disabled_capability_ids=None,
-    graph_scope_id="default",
-    merged_revision=None,
-    task_cluster_id=None,
-    mode=None,
-)
-```
-
-- `status()` 返回 `GraphArtifactStatus`。同步 provider 会参与 source snapshot 新鲜度判断；异步 provider 可通过 `expected_snapshot=...` 查询新鲜度。
-- `build()` 返回 `GraphBuildResult`，完成暂存后才原子切换 `current.json`。
-- `cancel_build()` 请求取消当前构建，并返回取消请求后的图产物状态。
-- `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
-- `plan()` 返回映射兼容的 `OrchestrationPlan`，且仅包含 `planned_graph`。该字段是最小 JGF v2
-  单图：`graph.id` 为本次计划 ID，`graph.type` 为 `planned_graph`，节点使用 capability ID Map，边只保留
-  选中方案明确给出的 `can_feed` 关系。例如：
-
-  ```json
-  {
-    "planned_graph": {
-      "graph": {
-        "id": "plan-id",
-        "type": "planned_graph",
-        "directed": true,
-        "metadata": {"status": "ready"},
-        "nodes": {
-          "extract-text": {"label": "Extract text", "metadata": {"type": "skill"}}
-        },
-        "edges": []
-      }
-    }
-  }
-  ```
-
-  `metadata.reason` 和 `metadata.missing_inputs` 仅在非空时出现；`needs_input` 与 `no_plan` 也会返回这个合法图结构，节点和边可为空。通过 `SymphonyGraphEngine.plan()` 规划时，`planned_graph.graph_snapshot` 还会固定本次任务使用的静态图与 observation revision；Fast 和 Beam 读取同一 merged snapshot，传入 `merged_revision` 可让重试继续使用原快照。
-- `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
-- `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
-- `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
-
-Skill 安装、卸载或审核通过的自演进提交可以使用三个批量接口同步静态图谱。调用方先持久化整批 Skill
-变更，然后只提交变更 ID、幂等请求 ID 和持久化结果的 revision：
-
-```python
-result = await engine.add_skills(
-    ["ocr_invoice", "verify_invoice"],
-    request_id="install-batch-42",
-    source_revision="skill-inventory-v18",
-)
-```
-
-| 接口 | 适用场景 | 图谱处理 |
-|---|---|---|
-| `add_skills()` | 一批新 Skill 已持久化 | 新增节点，计算存量与新增、新增与新增之间的关系 |
-| `update_skills()` | 一批现有 Skill 内容已变化 | 替换节点，失效旧入边和出边，按新 fingerprint 重算受影响关系 |
-| `delete_skills()` | 一批 Skill 已从目标 inventory 删除 | 删除节点、关联边以及 neighbor、I/O 和文本 lookup 引用 |
-
-`add_skills()`、`update_skills()` 和 `delete_skills()` 均以整批为事务，只发布一个不可变图版本。
-一次调用只能包含一种操作；Skill 身份变化应显式执行 delete 后再 add，不使用 update 隐式改 ID。
-`source_revision` 必须标识持久化后的不可变 Skill inventory。服务内部通过 `FingerprintService` 或
-`AtomicCapabilityProvider` 读取目标 `SourceSnapshot` 和完整 fingerprint，并自行读取当前图版本与旧
-content hash；`request_id` 支持响应丢失后的幂等重试。服务会核对 provider 的真实变更集，复用未变化
-关系的 matcher 缓存，并以与全量构建相同的 registry、候选生成、图物化和 lookup 流程生成目标版本；
-任一校验、matcher 或发布步骤失败时，`current.json` 仍指向完整旧版本。自演进模块只依赖
-`SkillGraphUpdater` 协议，无需读取图谱目录、预先生成 fingerprint 或了解 matcher 实现。运行时的具体
-对象是 `SymphonyGraphEngine`；它作为统一图谱入口把当前静态图操作委托给内部
-`OrchestrationService`。`runtime.orchestration` 仅兼容 PR 之前已有的 `status()`、`read()`、
-`build()`、`cancel_build()` 和 `plan()` 调用；新增的三个批量 mutation 接口只从
-`runtime.graph_engine` 暴露，不形成第二套公共入口。
-
-### 图产物生命周期
-
-图产物目录结构为：
-
-```text
-graph_artifact_root/
-├── cache/
-│   └── relation_matches.json
-├── current.json
-├── mutation_requests.json
-├── .publish.lock
-├── versions/
-│   └── <version>/
-│       └── graph.json
-└── .build_runs/
-```
-
-- `graph.json` 包含 `schema_version`、能力快照、节点、边、lookup、诊断信息和构建配置。
-- 每次成功构建先在 `.build_runs/` 写入临时目录，再原子移动到不可变版本目录，最后原子发布 `current.json`。
-- 读取时校验 schema 主版本；不支持的版本会被拒绝。
-- 构建失败或取消不会切换当前指针，最后一次成功发布的版本保持可读。
-- `force=False` 且 source snapshot 未变化时复用当前产物；能力清单变化后状态会标记为不新鲜。
-- `force=False` 时可复用 `cache/relation_matches.json` 中身份匹配的关系判断；`force=True` 完全绕过该缓存。缓存不属于已发布的版本化图产物。
-- 同一服务实例的构建互斥，避免并发发布互相覆盖。
-- 全量构建和批量变更在发布时共享进程锁与版本 CAS；批量请求的幂等结果保存在
-  `mutation_requests.json`，每个已发布 `graph.json` 也保留对应 mutation 摘要以支持中断恢复。
-
-### 图构建配置
-
-构造服务或 Runtime 时可通过 `graph_config` 控制内部关系匹配和候选生成器：
-
-```python
-service = OrchestrationService(
-    graph_artifact_root=".artifacts/symphony-graph",
-    capability_provider=list_capabilities,
-    model=model,
-    graph_config={
-        "batch_size": 8,
-        "workers": 4,
-        "require_consensus": True,
-        "max_candidates_per_skill_relation": 24,
-        "max_port_mappings_per_candidate": 12,
-        "max_exact_io_pair_fanout": 64,
+config = SymphonyConfig.model_validate({
+    "capability": {"sources": [{"type": "skill", "root": "./capabilities"}]},
+    "storage": {"artifact_root": "./.symphony/runtime"},
+    "retrieval": {
+        "index_build": {"request": {"max_concurrency": 2}},
+        "use_existing_index": True,
     },
-)
+    "orchestration": {
+        "min_edge_confidence": 0.7,
+        "plan": {"mode": "fast"},
+        "experience": {"enabled": True},
+    },
+})
+
+# model 是宿主已创建的 openjiuwen.core.foundation.llm.Model。
+runtime = SymphonyRuntime(model=model, config=config)
+try:
+    await runtime.retrieval.build(force=False, progress=on_progress)
+    await runtime.orchestration.build(force=False, progress=on_progress)
+    session = runtime.retrieval.create_session(
+        session_scope="conversation-1",
+        visible_capability_ids=lambda: {"extract", "summarize"},
+        disabled_capability_ids=lambda: disabled_ids,
+        source_by_id={"extract": "installed"},
+        pin_index_revision=True,
+    )
+    candidates = await session.capability_search(type="skill", query="summarize documents")
+    plan = await runtime.orchestration.plan(
+        "Summarize the document", type="skill", candidate_ids=["extract", "summarize"],
+        disabled_capability_ids=disabled_ids,
+    )
+finally:
+    await runtime.aclose()
 ```
 
-`max_workers` 是 `workers` 的等价显式名称，并在两者同时出现时优先。上述配置会写入产物，也实际驱动关系候选生成和内部匹配行为。调用方只需注入 agent-core `Model`；Runtime 会在构建时创建内部关系匹配器，并在非强制构建中复用 `cache/relation_matches.json`。
+`on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
 
-### Fast、Beam 与运行时过滤
+`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。编排以一个 Skill 目录为基础，可纳入多个专家目录。Flow 消费 Skill 执行证据。
 
-`OrchestrationConfig(mode="fast")` 使用一次性 LLM 规划；`mode="beam"` 使用双向 beam search。两种模式读取同一版本化能力图，并支持：
+公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
-- 通过 `candidate_ids` 限定候选能力；
-- 通过 `disabled_capability_ids` 过滤禁用能力；
-- 选择中英文摘要；
-- 分析缺失输入并生成稳定的计划图；
-- 通过进度回调报告构建、关系匹配和规划阶段事件。
+## 三个入口
 
-动态 observation 默认关闭。启用 `OrchestrationConfig(dynamic_graph_enabled=True)` 后，
-`SymphonyGraphEngine` 自动把当前 merged snapshot 交给 Fast 或 Beam，不要求业务调用方读取或传递
-overlay 文件。运行证据只生成独立 observation revision，不改写静态 `graph.json`。
+| 入口 | 能力 |
+|---|---|
+| `runtime.retrieval` | `status()` / `read()` / `await build()` / `await cancel_build()` / `create_session()` |
+| `runtime.orchestration` | `status()` / `read()` / `await build()` / `await cancel_build()` / `await plan()` |
+| `runtime.flow` | 惰性默认 Flow；`status()`、`await start()`、提交和候选操作，以及 `create_scope(store=...)` |
 
-上游 Trace 适配层需要将 canonical `Trajectory` 和 evaluator/业务终态转换成
-`GraphEvolutionInput`，再调用 `engine.submit_observation(...)`。GraphEngine 不解析 Session JSON，
-也不会在缺少边级证据时猜测失败边。只有强验证成功，或带明确 evidence reference 且归因于
-`orchestration` 的边级失败，才更新权重；弱证据、外部服务错误、权限错误、网络错误和截断轨迹仅留作审计。
+树构建返回含 `success/result/data` 的字典，并携带 `build_id`、`version`、变化 / 复用计数和诊断。图构建返回 `GraphBuildResult`；图状态和图内容提供 `to_dict()`。构建 ID 表示本次尝试，版本表示最后发布产物；复用会取得新构建 ID 并保留版本。整图复用的 `graph_reused_count=1`，本次关系匹配调用计数为零。
 
-```python
-receipt = engine.submit_observation(graph_evolution_input)
-engine.flush_observations(timeout=30)
-snapshot = engine.get_snapshot(graph_scope_id="default")
-plan = await engine.plan(
-    query,
-    candidate_ids,
-    graph_scope_id="default",
-    merged_revision=snapshot.merged_revision,
-    task_cluster_id=task_cluster_id,
-)
-```
+两个构建入口的 `prepare_artifact(version_dir)` 回调可写入宿主附属产物，完成后才发布。构建取消或发布前集合变化均保留之前的可用版本。关闭 Runtime 会等待自己的构建、图增量、规划、Flow 和会话任务收尾；取消某个关闭等待者不会取消内部关闭任务。注入的宿主模型始终由宿主关闭。
 
-请求线程只完成 evidence append；单 worker 在后台增量聚合并原子发布不可变 observation/merged
-revision，通常由下一次规划读取。`flush_observations()` 只用于测试、管理命令或要求 read-after-write
-的流程，不应放在普通在线规划热路径。
+三个开关独立。禁用能力可查询状态，执行入口拒绝操作。`model=None` 支持状态、产物读取和确定性发现；构图与规划会报告缺少模型。构树按 `task.allow_fallback_tree` 处理；启用旧索引保护时，不用失败后的回退树替换已有可用分类树。
 
-## 最终 Runtime 与统一接口蓝图（部分尚未接入）
+## 构建与模型
 
-以下接口展示 Symphony 多能力域统一接入 Runtime 后的目标形态。当前版本尚不存在 `runtime.retrieval`、
-`runtime.experience`、`runtime.evaluation` 或 `runtime.agent_toolkit(...)`；指纹、评估和经验能力当前通过各自的
-公开服务或领域包独立使用。
+分类树保留一次性生成、递归细分、后处理、等价分组和增量更新算法，直接消费 `retrieval.index_build` 的子模型。同步算法由 Runtime 在工作线程调度，模型请求桥接至宿主事件循环。未绑定事件循环的原生 `Model` 不支持直接同步构建；异步 Runtime 和 CLI 会完成绑定。
 
-### Adapter 协议
+请求超时、任务超时和取消均传播到模型请求。鉴权和参数等永久 HTTP 错误不会重试；瞬态错误按请求策略重试，前一次调用完成清理后才允许下一次调用。取消清理超界时终止整个构建，不重试、不回退、不发布。截断结果会被拒绝，模型用量由宿主响应观察器计量。
 
-最终设计仍由使用方提供 Adapter，Symphony 不直接耦合使用方的配置系统和资产目录。以下是目标协议的概念示例，具体类型将在对应模块迁入时确定：
+指纹语义提取、质量评估和缓存分别消费 `capability.fingerprint.extraction/evaluation/cache`。构图提取并发为提取上限与 `orchestration.build.max_concurrency` 的较小值；批量上限仍限制每批对象数。`max_output_tokens=None` 沿用宿主模型配置。
 
-```python
-# 最终目标示例；当前不可运行。
-from pathlib import Path
-from typing import Protocol, Sequence
+构图和 fast / beam 规划共用 `orchestration.min_edge_confidence`。`candidate_ids=None` 表示未限制候选；显式空列表或全部无效 ID 返回空计划，不扩大到全量。`dynamic_graph_enabled` 只决定规划是否使用已收集的观测，不关闭观测写入。
 
-from openjiuwen.core.foundation.llm import Model
-from openjiuwen.symphony import CapabilityFingerprint
+## Discovery 会话
 
+`create_session` 的会话标识、目录范围、可见对象、禁用对象、来源和索引快照属于调用上下文，不放进配置，也没有 Source 构造层。来源以对象 ID 为键。返回的 `DiscoverySession` 同时服务工具和提示 Rail；动态禁用实时生效，冻结的预算和索引版本不随后续配置修改漂移。
 
-class CapabilityInventoryProvider(Protocol):
-    def assets_root(self) -> Path: ...
+可通过 `create_session(config=...)` 传入 `RetrievalConfig` 来覆盖单个会话的提示、输出和索引读取策略。Runtime 持有统一的检索开关与构树策略。
 
-    def list_capabilities(self) -> Sequence[CapabilityFingerprint]: ...
+`retrieval.use_existing_index=True` 在已有索引时读取分类树。尚无索引时使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `retrieval.output.max_results` 限制，列表同时受 `max_list_entries` 限制。续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
 
+单 Skill 目录的检索构建与构图共用指纹服务和缓存。共用分类树的指纹按类型发布在所属集合下。Skill 和专家目录按会话可见范围读取记录，并按类型、来源和内容哈希匹配指纹。指纹缺失或过期时使用当前目录描述。
 
-class ModelProvider(Protocol):
-    def model(self) -> Model: ...
+`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`。Skill 与专家都支持 `operation=list`、按 `category` 搜索和 `cursor` 续页。搜索接受 `query` 数组中的 1–8 条独立查询，按各查询排名轮流合并并去重。专家结果的 `matches` 带分类，列表的 `categories` 带可见项计数。续页沿用原 `type`、`operation` 和查询范围。
 
+独立 SDK 会话直接读配置的专家目录。宿主可向 `create_session(expert_candidates=...)` 提供返回检索候选的异步回调。配置了专家来源时，Core 按候选的 `manifest_path` 与配置目录实际读到的包取交集。省略专家来源时使用宿主候选。现有 `search_catalog` 回调继续服务连接器和 MCP 的单条查询。旧版会话同时省略专家来源和候选回调时，也可用 `search_catalog` 检索专家。Core 逐条调用并合并命中。
 
-class ArtifactPathProvider(Protocol):
-    def tree_artifact_root(self) -> Path: ...
+会话检索使用扫描中通过校验的能力。跨类型可有相同 ID，同类型的重复 ID 会被排除。若扫描返回错误，`runtime.retrieval.status()` 报告诊断并将索引标为过期，构建保留上一发布版本。
 
-    def graph_artifact_root(self) -> Path: ...
+## 产物与版本
 
-    def experience_artifact_root(self) -> Path: ...
-```
-
-能力清单使用 `capability_id` 作为统一标识，并通过 `capability_type` 区分不同资产类型。
-
-### 能力指纹
-
-当前 `FingerprintService` 已提供显式资产扫描、语义画像、IO 归一化和版本化产物。最终 Runtime 将组合该
-服务，并把同一份标准化指纹交给检索、编排和评估；使用方仍可显式提供普通对象或
-`CapabilityFingerprint`，无需让 Symphony 读取应用内部注册表。
-
-### 能力检索
-
-最终检索服务将已注册能力组织成树索引，并向 Agent 按需披露分支和候选能力：
-
-```python
-# 最终目标示例；当前不可运行。
-status = symphony.retrieval.status()
-if not status.exists or not status.fresh:
-    await symphony.retrieval.build(force=False)
-
-result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in result.capabilities
-]
-```
-
-目标服务包括索引状态查询、构建与取消、树摘要读取、分支探索及自然语言检索；检索结果包含候选能力、命中分支、排序信息和产物版本。
-
-### 多服务 Runtime
-
-最终 `SymphonyRuntime` 将组合检索、编排、经验和评估子服务：
-
-```python
-# 最终目标示例；当前不可运行。
-from openjiuwen.symphony import SymphonyRuntime
-
-symphony = SymphonyRuntime(
-    inventory_provider=adapter.capability_inventory_provider(),
-    tree_artifact_root=adapter.tree_artifact_root(),
-    graph_artifact_root=adapter.graph_artifact_root(),
-    experience_artifact_root=adapter.experience_artifact_root(),
-    retrieval_settings=adapter.retrieval_settings(),
-    orchestration_settings=adapter.orchestration_settings(),
-    model=adapter.model(),
-)
-
-retrieval_result = await symphony.retrieval.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await symphony.orchestration.plan(
-    query="读取 PDF 内容并生成摘要",
-    candidate_ids=candidate_ids,
-)
-```
-
-### 经验沉淀
-
-当前独立的 [`openjiuwen.symphony.experience`](experience/API.md) 包已提供轨迹解析、评估、经验库构建和检索。下例展示未来统一 Runtime facade 的目标形态，当前不可运行：
-
-```python
-# 最终目标示例；当前不可运行。
-records = await symphony.experience.evaluate(traces)
-await symphony.experience.build(records)
-experience_result = await symphony.experience.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = experience_result.candidate_ids
-```
-
-现有领域对象包括轨迹记录、轨迹评估器、经验库、经验库构建器和经验检索器；统一 Runtime 接口将在集成时以现有实现和测试为准。
-
-### 能力评估
-
-当前 `EvaluationSuite` 已支持独立的静态和轨迹评估。以下示例是未来 Runtime facade 面向单项能力、Agent
-能力和能力组合的目标形态：
-
-```python
-# 最终目标示例；当前不可运行。
-evaluation = await symphony.evaluation.evaluate_capabilities(
-    capability_ids=candidate_ids,
-    traces=traces,
-)
-```
-
-### Agent Toolkit
-
-最终 `AgenticSymphonyToolkit` 组合检索和编排能力，使用方可以将其方法接入自己的 Agent 调用体系：
-
-```python
-# 最终目标示例；当前不可运行。
-toolkit = symphony.agent_toolkit(language="cn")
-
-retrieval_result = await toolkit.retrieval.search(
-    "读取 PDF 内容，总结后发送邮件",
-)
-candidate_ids = [
-    capability.capability_id
-    for capability in retrieval_result.capabilities
-]
-plan = await toolkit.orchestration.plan(
-    query="读取 PDF 内容，总结后发送邮件",
-    candidate_ids=candidate_ids,
-)
-```
-
-- `toolkit.retrieval` 最终提供根分类渲染、分支预览、分支展开和自然语言检索。
-- `toolkit.orchestration` 最终提供关系图读取、刷新和在线计划生成。
-- Toolkit 只提供 Agent-facing 领域方法；工具注册、权限、进度展示和 UI 由使用方负责。
-
-## 最终运行时产物
-
-指纹、检索、编排和当前独立的经验模块使用调用方指定的产物目录：
+单 Skill 目录继续使用以下布局。多目录及专家集合的分类树位于 `taxonomy_collections/<scope_id>/tree`，集合身份由排序去重的绝对来源路径和类型确定，来源重排复用同一棵树。添加专家来源可直接在原产物根下构建新树。
 
 ```text
-fingerprint_artifact_root/
-├── fingerprint.json
-├── .fingerprint-cache.json
-└── .fingerprint.lock
-
-tree_artifact_root/
-├── current.json
-└── versions/<version>/tree.json
-
-graph_artifact_root/
-├── cache/relation_matches.json
-├── current.json
-├── versions/<version>/graph.json
-├── .build_runs/
-└── evolution/
-    ├── evidence.sqlite3
-    └── scopes/<scope-hash>/
-        ├── current.json
-        ├── observations/<observation-revision>/overlay.json
-        └── merged/<merged-revision>/manifest.json
-
-experience_kb/
-├── meta.json
-├── scalar/metadata.jsonl
-└── vector/
-    ├── faiss_index.bin
-    └── embeddings.npy
-
+storage.artifact_root/
+├── runtime.json       # 布局版本与集合身份
+├── inventory/         # Core 生成的集合快照
+├── cache/             # 指纹等缓存
+├── tree/              # 当前分类树及构建状态
+├── graph/             # 原子发布图版本、关系缓存和观测
+└── flow/              # 默认 Flow 证据与候选
 ```
 
-- `fingerprint.json` 当前保存标准化能力指纹、质量结果、诊断和 source snapshot。
-- `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
-- `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
-- `evolution/evidence.sqlite3` 是 append-only 规范证据日志；`observations` 与 `merged` 保存不可变派生版本。
-- `experience_kb` 是当前独立经验库的调用方指定目录；canonical Trajectory 的归档仍由 Harness 管理，
-  GraphEngine 只持久化脱敏后的规范边证据。
-- 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
+目录按固定能力根和类型绑定，其他集合不能共用。新签名包含对象内容、相关构建策略、协议和模型身份；规划参数、Flow 阈值和展示开关不参与树内容签名。无模型状态查询保留产物模型身份，同时继续检查内容和构建策略，并明确未核验模型身份。
 
-## 开发与验证
+首次构图可以复用已有共用分类树和宿主目录指纹的产物根。宿主指纹按类型存于 `cache/fingerprints/{expert,connector,mcp}/`，与 Core 的 Skill 指纹独立。Finder 生成的普通 `.DS_Store` 文件可以保留。
 
-Symphony 使用 agent-core 的统一开发环境和质量检查入口：
+不兼容旧 Runtime 构造参数、配置别名、旧缓存签名及旧布局。历史目录不自动迁移或删除，请为新配置选择独立产物目录并重新构建。
 
-```bash
-uv sync
-make test TESTFLAGS="tests/unit_tests/symphony"
-make check COMMITS=1
-make type-check COMMITS=1
-```
+## 分层编排
 
-- `pyproject.toml` 是 Python、依赖和工具配置的唯一事实来源。
-- `Makefile` 定义常用测试和检查入口。
-- `COMMITS=1` 选择最近一个提交中变更的 Python 文件；不传时默认检查已暂存的 Python 文件。
-- 可选依赖由 agent-core 的依赖体系统一管理。
+`runtime.orchestration.build()` 分别匹配 Skill 和专家的输入输出，每个版本发布一份图。混合图采用 `2.0` 格式，节点 ID 为 `skill:<id>` 或 `expert:<id>`。只有同类节点之间可以形成 `can_feed` 边。专家复用分类树的指纹缓存，输入输出从包描述中提取。描述缺少交接依据时，专家可以作为独立节点出现在图中。只有 Skill 的产物继续使用 `1.0` 格式，历史图版本可通过 `read(version)` 读取。
 
-## 模块约定
+`runtime.orchestration.plan(query, type="expert", candidate_ids=[...])` 使用指定层。旧调用省略 `type` 时使用 Skill。宿主可用 `expert_manifest_paths` 传入实时允许的专家 manifest 路径，SDK 直接调用时默认使用配置内的专家。专家计划的 `fast` 和 `beam` 都使用已发布的交接边，并在 `planned_graph` 节点的 `metadata.type` 中标明 `expert`。专家计划用于描述交接，任务派发由宿主负责。
 
-- 公开导入路径以 `openjiuwen.symphony` 开头。
-- 公共 capability、fingerprint 和 evaluation 模型位于 `models/`；编排 graph 的构建模型属于内部实现。
-- 编排公共领域模型及 Symphony 最终统一契约使用 `capability_id`、`capability_type` 和 `candidate_ids`。当前独立 experience API 中的 `skills` 和 `skill_ids` 是待 Runtime 集成时统一的过渡命名。
-- 运行时资源随 `openjiuwen.symphony` 一同打包。
-- Symphony 保持使用方无关，不包含使用方专属的 gateway、Web/TUI、卡片类型或 prompt rail。
-- 使用方负责将 Symphony 服务或最终 Toolkit 接入自己的调用体系，并将内部标识映射为公共能力标识。
-- 初版模块以新的公开路径为准，不提供其他导入路径的兼容层。
+Skill 增量变更沿用 Skill 来源版本校验，并携带同一份已发布的专家子图。专家来源发生变化时调用 `build()` 刷新图。构建和增量变更均在切换当前版本前复核来源。
+
+`runtime.orchestration.plan_expert_tasks(query, candidate_ids=[...])` 为一个任务规划已安装专家和内联角色。它读取已发布的专家层，可用候选为空时仍可规划内联角色。宿主用 `expert_manifest_paths` 限定实时安装范围，并可沿用会话的规划模式。
+
+结果仍是 `planned_graph`，通过 `graph.metadata.plan_kind=expert_tasks` 标识。节点 ID 对应任务实例，`metadata.type` 区分 `expert` 和 `inline`。节点保存任务指令及输入输出，专家节点记录 `expert_id`，内联节点记录 `role`。每条 `can_feed` 边引用本轮任务声明的 `source_output` 和 `target_input`。专家指纹端口和已发布的交接边供规划参考，专家可声明本轮需要的端口和交接。任务图须无环，纯内联角色之间的交接须通过端口类型检查。任务图用于返回分工和依赖计划，内联角色规格留给后续执行消费。
+
+## 编排经验与宿主职责
+
+`orchestration.experience.enabled` 默认关闭。与 `orchestration.enabled` 同时开启时，Runtime 接收 Skill 图观测，并将合格的成功子图送给 Flow 沉淀组合能力包。`orchestration.plan.dynamic_graph_enabled` 独立控制 Skill 规划是否采用已有动态图。
+
+`orchestration.experience.acceptance` 默认要求至少 3 次成功及 0.8 成功率，`narrative.max_examples` 默认保留最多 5 个示例。`runtime.flow.create_scope(store=user_store)` 用宿主受限存储创建隔离视图，共用默认服务的打包和审核组件。用户证据范围、候选确认和安装授权由宿主决定。
+
+`capture_graph_snapshot()` 和 `submit_evolution()` 保留供现有 Rail 使用。旧模型检索服务、分支浏览工具、紧凑码表和独立 Experience 包已退役，不恢复旧入口。
+
+## 配置文档与验证
+
+修改配置后运行 `python scripts/export_symphony_config.py` 自动更新配置树。`--include-internal` 额外输出内部配置参考。
+
+相关行为测试位于 `tests/unit_tests/symphony/`。配置默认值与基线快照比较；运行测试覆盖真实目录、模型替身、HTTP 连接复用、取消、原子发布、会话可见性、观测和 Flow。此流程不运行格式化或静态检查。

@@ -11,12 +11,12 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class SkillGraphUpdater(Protocol):
+class CapabilityGraphUpdater(Protocol):
     """Narrow dependency used after an approved Skill asset change."""
 
-    async def add_skills(
+    async def add_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,
@@ -25,9 +25,9 @@ class SkillGraphUpdater(Protocol):
 
         raise NotImplementedError
 
-    async def update_skills(
+    async def update_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,
@@ -36,9 +36,9 @@ class SkillGraphUpdater(Protocol):
 
         raise NotImplementedError
 
-    async def delete_skills(
+    async def delete_capabilities(
         self,
-        changed_skill_ids: Sequence[str],
+        changed_capability_ids: Sequence[str],
         *,
         request_id: str,
         source_revision: str,

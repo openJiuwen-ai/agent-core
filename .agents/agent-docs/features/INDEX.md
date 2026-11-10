@@ -1,7 +1,7 @@
 ---
 title: 实施与决策 F索引
-author: xinyang_bali
-author_email: 835397263@qq.com
+author: lin-xiaoyu
+author_email: xiaoyu.lin.work@outlook.com
 generated: true
 ---
 
@@ -17,9 +17,16 @@ generated: true
 |---|
 | [agent_evolving/ttse](#module-1) |
 | [agent_teams](#module-2) |
-| [harness](#module-3) |
-| [harness/subagents](#module-4) |
-| [harness/tools/browser_move](#module-5) |
+| [agent_teams/tools](#module-3) |
+| [core/foundation/llm](#module-4) |
+| [core/single_agent](#module-5) |
+| [extensions/observability](#module-6) |
+| [harness](#module-7) |
+| [harness/rails/evolution](#module-8) |
+| [harness/subagents](#module-9) |
+| [harness/tools/browser_move](#module-10) |
+| [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-11) |
+| [symphony](#module-12) |
 
 <a id="module-1"></a>
 
@@ -91,6 +98,7 @@ generated: true
 | [F_19_monitor-hide-dm-switch](agent_teams/F_19_monitor-hide-dm-switch.md) | F | Monitor `hide_dm` Switch | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_20261022_2319_inline-member-worktree-isolation](F_20261022_2319_inline-member-worktree-isolation.md) | F | 调度模式内联成员支持 worktree 隔离 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/tools/tool_task.py, openjiuwen/agent_teams/tools/locales/cn.py, openjiuwen/agent_teams/tools/locales/en.py, openjiuwen/agent_teams/tools/locales/descs/cn/fragments/create_task_inline_member.md, openjiuwen/agent_teams/tools/locales/descs/en/fragments/create_task_inline_member.md | 无独立 D：对 F_118 内联成员参数遗漏的小范围补齐，复用既有 `isolation` 契约，无独立设计 |
 | [F_20261030_2012_teammate-swarmflow-orchestration](agent_teams/F_20261030_2012_teammate-swarmflow-orchestration.md) | F | 集群模式teammate支持swarmflow工具（agent-core 侧实现） | @xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/swarmflow_infra.py, openjiuwen/agent_teams/workflow/tool_swarmflow.py | [SDD-0031](../designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) |
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20_human-agent-mailbox-unread-flip](agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_external-agent-access](agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_team-completion-auto-pause](agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
@@ -188,6 +196,39 @@ generated: true
 
 <a id="module-3"></a>
 
+## agent_teams/tools
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+| [F_20261110_1614_symphony-mixed-taxonomy](F_20261110_1614_symphony-mixed-taxonomy.md) | F | Symphony 共用分类树与独立专家读取 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/agent_teams/tools | openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/expert_manifest.py, openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/agent_teams/tools/tool_expert.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | [D-20261110-1614-symphony-mixed-taxonomy](../designs/active/D-20261110-1614-symphony-mixed-taxonomy/design.md) |
+
+<a id="module-4"></a>
+
+## core/foundation/llm
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+
+<a id="module-5"></a>
+
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+
+<a id="module-6"></a>
+
+## extensions/observability
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+
+<a id="module-7"></a>
+
 ## harness
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -202,7 +243,9 @@ generated: true
 | [F_05_browser-task-integrity](harness/F_05_browser-task-integrity.md) | F | F_05 Browser Task Integrity | m056838700 | openjiuwen/harness | — | 待核实 |
 | [F_05_claude-turn-boundary-from-delivery-receipts](harness/F_05_claude-turn-boundary-from-delivery-receipts.md) | F | F_05 Claude Turn Boundaries from Delivery Receipts | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_06_browser-execution-and-completion](harness/F_06_browser-execution-and-completion.md) | F | Browser Execution and Completion Boundaries | m056838700 | openjiuwen/harness | — | 待核实 |
+| [F_06_opt-in-stream-task-lifecycle](harness/F_06_opt-in-stream-task-lifecycle.md) | F | F_06 可选流式后台任务生命周期 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_browser-jev-policy](harness/F_07_browser-jev-policy.md) | F | Browser Jev Policy with LLM Fallback | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_07_session-checkpointer-injection](harness/F_07_session-checkpointer-injection.md) | F | F_07 Session 级 checkpointer 注入 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_third-party-harness-provider-packages](harness/F_07_third-party-harness-provider-packages.md) | F | 第三方 Harness Provider 包：entry point 发现与生成 skill | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_08_browser-jev-handover](harness/F_08_browser-jev-handover.md) | F | Browser Jev Segmented Handover | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_08_provider-owned-model-config](harness/F_08_provider-owned-model-config.md) | F | Provider 自有的模型映射：`ModelChoice` + `model_config` | alan_cheng | openjiuwen/harness | — | 待核实 |
@@ -220,6 +263,7 @@ generated: true
 | [F_18_browser-receipts-and-local-continuity](harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20261027_1810_ttse-plugin-runtime](F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
+| [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
@@ -236,7 +280,15 @@ generated: true
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | openjiuwen/harness | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/policy_page_action.py, tests/unit_tests/harness/tools/browser_move/test_browser_contract_compatibility.py | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 
-<a id="module-4"></a>
+<a id="module-8"></a>
+
+## harness/rails/evolution
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261110_1938_symphony-expert-orchestration](F_20261110_1938_symphony-expert-orchestration.md) | F | Symphony 专家分层编排 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/harness/rails/evolution | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/artifacts.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/orchestration/mutation_service.py, openjiuwen/symphony/orchestration/planning/expert_tasks.py, openjiuwen/symphony/orchestration/planning/fast.py, openjiuwen/symphony/orchestration/planning/beam.py, openjiuwen/symphony/orchestration/graph/matcher/protocol.py, openjiuwen/harness/rails/evolution/symphony_graph_evolution_rail.py, tests/unit_tests/symphony/test_mixed_taxonomy.py, tests/unit_tests/symphony/test_expert_task_planning.py | 无独立 D：依据对话中确认的一张图和两层独立规划方案。 |
+
+<a id="module-9"></a>
 
 ## harness/subagents
 
@@ -244,10 +296,33 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-5"></a>
+<a id="module-10"></a>
 
 ## harness/tools/browser_move
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-11"></a>
+
+## jiuwenswarm/jiuwenswarm/runtime/symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+
+<a id="module-12"></a>
+
+## symphony
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261031_1614_symphony-config-contract](F_20261031_1614_symphony-config-contract.md) | F | Symphony 多层 Pydantic 配置契约 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | [D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
+| [F_20261103_1458_symphony-capability-retirement](F_20261103_1458_symphony-capability-retirement.md) | F | Symphony 旧检索与独立经验库退役实施 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/agent/retrieval_toolkit.py, openjiuwen/symphony/retrieval, openjiuwen/symphony/experience, tests/unit_tests/symphony, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/README.md | [D-20261103-1438-symphony-capability-retirement](../designs/active/D-20261103-1438-symphony-capability-retirement/design.md) |
+| [F_20261109_1135_symphony-runtime-config-integration](F_20261109_1135_symphony-runtime-config-integration.md) | F | SymphonyConfig 接入 Core Runtime 与模型调用 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/runtime.py, openjiuwen/symphony/config.py, openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/runtime_flow.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/model_bridge.py, openjiuwen/symphony/orchestration, openjiuwen/symphony/retrieval/build, openjiuwen/symphony/discovery, tests/unit_tests/symphony, examples/symphony/runtime.py | [D-20261029-1619-skill-directory-graph-api](../designs/active/D-20261029-1619-skill-directory-graph-api/design.md)<br>[D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
+| [F_20261109_1618_symphony-orchestration-experience](F_20261109_1618_symphony-orchestration-experience.md) | F | Symphony 编排经验配置与写入门控 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_flow.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/flow/engine.py, tests/unit_tests/symphony | [D-20261109-1603-symphony-orchestration-experience](../designs/active/D-20261109-1603-symphony-orchestration-experience/design.md) |
+| [F_20261109_1631_symphony-capability-sources](F_20261109_1631_symphony-capability-sources.md) | F | Symphony 多类型来源配置 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/config.tree.txt | [D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
+| [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+| [F_20261110_1614_symphony-mixed-taxonomy](F_20261110_1614_symphony-mixed-taxonomy.md) | F | Symphony 共用分类树与独立专家读取 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/agent_teams/tools | openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/expert_manifest.py, openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/agent_teams/tools/tool_expert.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | [D-20261110-1614-symphony-mixed-taxonomy](../designs/active/D-20261110-1614-symphony-mixed-taxonomy/design.md) |
+| [F_20261110_1938_symphony-expert-orchestration](F_20261110_1938_symphony-expert-orchestration.md) | F | Symphony 专家分层编排 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/harness/rails/evolution | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/artifacts.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/orchestration/mutation_service.py, openjiuwen/symphony/orchestration/planning/expert_tasks.py, openjiuwen/symphony/orchestration/planning/fast.py, openjiuwen/symphony/orchestration/planning/beam.py, openjiuwen/symphony/orchestration/graph/matcher/protocol.py, openjiuwen/harness/rails/evolution/symphony_graph_evolution_rail.py, tests/unit_tests/symphony/test_mixed_taxonomy.py, tests/unit_tests/symphony/test_expert_task_planning.py | 无独立 D：依据对话中确认的一张图和两层独立规划方案。 |

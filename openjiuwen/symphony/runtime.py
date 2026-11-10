@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,9 +28,14 @@ from openjiuwen.symphony.observation import (
     TaskOutcomeLabel,
     TraceEvidence,
 )
-from openjiuwen.symphony.orchestration import OrchestrationConfig, OrchestrationService, PrepareArtifactHook
-from openjiuwen.symphony.orchestration.model import ModelResponseObserver
-from openjiuwen.symphony.shared.fingerprint import Fingerprint, FingerprintService
+from openjiuwen.symphony.config import SymphonyConfig, FingerprintProtocolConfig
+from openjiuwen.symphony.orchestration import OrchestrationService
+from openjiuwen.symphony.orchestration.model import model_identity
+from openjiuwen.symphony.shared.fingerprint import FingerprintService
+from openjiuwen.symphony.inventory import DirectoryInventory
+from openjiuwen.symphony.runtime_storage import RuntimeStorage, LAYOUT_SCHEMA
+from openjiuwen.symphony.runtime_flow import RuntimeFlow
+from openjiuwen.symphony.tree_engine import TreeEngine
 
 CaptureMode: TypeAlias = Literal["agent", "team"]
 
@@ -43,39 +51,90 @@ class EvolutionSubmitResult:
 class SymphonyRuntime:
     """Compose explicitly injected Symphony services for an application runtime."""
 
-    def __init__(
-        self,
-        *,
-        graph_artifact_root: str | Path,
-        capability_provider: Sequence[Any] | Callable[[], Sequence[Any] | Awaitable[Sequence[Any]]],
-        model: Model | None,
-        model_response_observer: ModelResponseObserver | None = None,
-        orchestration_config: OrchestrationConfig | None = None,
-        source_snapshot: dict[str, Any] | Callable[[Sequence[Fingerprint]], dict[str, Any]] | None = None,
-        graph_config: dict[str, Any] | None = None,
-        prepare_artifact: PrepareArtifactHook | None = None,
-        fingerprint_service: FingerprintService | None = None,
-        flow_engine: SymphonyFlowEngine | None = None,
-        graph_scope_id: str = "default",
-    ) -> None:
-        orchestration_service = OrchestrationService(
-            graph_artifact_root=graph_artifact_root,
-            capability_provider=capability_provider,
-            model=model,
-            model_response_observer=model_response_observer,
-            config=orchestration_config,
-            source_snapshot=source_snapshot,
-            graph_config=graph_config,
-            prepare_artifact=prepare_artifact,
-            fingerprint_service=fingerprint_service,
+    def __init__(self, model: Model | None, config: SymphonyConfig) -> None:
+        if not isinstance(config, SymphonyConfig):
+            raise TypeError("config must be a SymphonyConfig")
+        values = config.model_dump(mode="python")
+        artifact_root = Path(config.storage.artifact_root).expanduser().resolve()
+        normalized = set()
+        for index, source in enumerate(config.capability.sources):
+            capability_root = Path(source.root).expanduser().resolve()
+            if capability_root == artifact_root or capability_root.is_relative_to(artifact_root):
+                raise ValueError(f"artifact_root must not equal or contain capability.sources.{index}.root")
+            normalized.add((source.type, str(capability_root)))
+        values["capability"]["sources"] = [{"type": kind, "root": root} for kind, root in sorted(normalized)]
+        values["storage"]["artifact_root"] = str(artifact_root)
+        structure = values["retrieval"]["index_build"]["structure"]
+        categories = structure["root_categories"]
+        if isinstance(categories, str):
+            structure["root_categories"] = str(Path(categories).expanduser().resolve())
+        self.config = SymphonyConfig.model_validate(values)
+        self.model = model
+        self._closed = False
+        self._close_task: asyncio.Task | None = None
+        self._storage = RuntimeStorage(self.config)
+        inventory = DirectoryInventory(self.config.capability, self._storage)
+        policy = self.config.capability.fingerprint.model_copy(deep=True)
+        extraction = policy.extraction.model_copy(update={
+            "max_concurrency": min(policy.extraction.max_concurrency, self.config.orchestration.build.max_concurrency),
+        })
+        policy = policy.model_copy(update={"extraction": extraction})
+        identity = model_identity(model) if model is not None and (
+            getattr(model, "model_config", None) is not None or getattr(model, "model_client_config", None) is not None
+        ) else {}
+        identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() if identity else ""
+        protocol = FingerprintProtocolConfig(configuration_signature=identity_hash)
+        observer = getattr(model, "symphony_response_observer", None)
+        def fingerprint_service(provider, root, *, wait_for_lock=False):
+            return FingerprintService(
+                provider, root, llm=model, config=policy, protocol=protocol, model_response_observer=observer,
+                allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
+                wait_for_lock=wait_for_lock,
+            )
+
+        inventories = {
+            kind: DirectoryInventory(self.config.capability, self._storage, kind=kind) if self._storage.scoped else inventory
+            for kind in ("skill", "expert") if inventory.sources(kind)
+        }
+        fingerprints = {
+            kind: fingerprint_service(
+                provider,
+                self._storage.root / "cache" / "fingerprints" / kind if self._storage.scoped
+                else self._storage.root / "cache" / "fingerprints",
+                wait_for_lock=kind == "expert",
+            )
+            for kind, provider in inventories.items()
+        }
+        skill_sources = inventory.sources("skill")
+        graph_storage = None
+        graph_inventory = None
+        graph_fingerprints = None
+        graph_unavailable = None
+        if len(skill_sources) == 1:
+            graph_storage = RuntimeStorage(self.config, skill_source=skill_sources[0]) if self._storage.scoped else self._storage
+            graph_inventory = DirectoryInventory(self.config.capability, graph_storage, kind="skill") if self._storage.scoped else inventory
+            graph_fingerprints = (
+                fingerprint_service(graph_inventory, artifact_root / "cache" / "fingerprints")
+                if self._storage.scoped else fingerprints["skill"]
+            )
+        else:
+            graph_unavailable = "Symphony orchestration requires exactly one skill capability source"
+        policy_hash = hashlib.sha256(policy.model_dump_json().encode()).hexdigest()
+        service = OrchestrationService(
+            graph_artifact_root=artifact_root / "graph", capability_provider=graph_inventory or inventory,
+            model=model, model_response_observer=observer, config=self.config.orchestration,
+            source_snapshot={"runtime_schema": LAYOUT_SCHEMA, "fingerprint_policy_sha256": policy_hash,
+                             "fingerprint_model_sha256": identity_hash},
+            fingerprint_service=graph_fingerprints,
+            expert_inventory=inventories.get("expert") if graph_storage is not None else None,
+            expert_fingerprint_service=fingerprints.get("expert") if graph_storage is not None else None,
         )
-        self.graph_engine = SymphonyGraphEngine(orchestration_service)
-        self.flow_engine = flow_engine
-        self.graph_scope_id = str(graph_scope_id).strip()
-        if not self.graph_scope_id:
-            raise ValueError("graph_scope_id must be non-empty")
-        # Preserve the pre-engine lifecycle/planning entry point only.
-        self.orchestration = orchestration_service
+        self.orchestration = SymphonyGraphEngine(
+            service, storage=graph_storage, inventory=graph_inventory, unavailable_reason=graph_unavailable,
+        )
+        self.retrieval = TreeEngine(model, self.config.retrieval, self._storage, inventory, fingerprints)
+        self.flow = RuntimeFlow(model, self.config.orchestration, graph_storage, unavailable_reason=graph_unavailable)
+        self._graph_scope_id = graph_storage.scope_id if graph_storage is not None else self._storage.scope_id
 
     async def submit_evolution(
         self,
@@ -87,25 +146,25 @@ class SymphonyRuntime:
     ) -> EvolutionSubmitResult:
         """Submit a complete execution graph, then project successful edges to Flow."""
 
+        if self._closed:
+            raise RuntimeError("Symphony runtime is closed")
+        if not self.config.orchestration.experience_enabled:
+            return EvolutionSubmitResult(None)
         try:
             observation = await self._build_graph_evolution_input(
-                planned_graph,
-                execution_graph,
-                session_id=session_id,
-                capture_mode=capture_mode,
+                planned_graph, execution_graph, session_id=session_id, capture_mode=capture_mode,
             )
-            receipt = self.graph_engine.submit_observation(observation)
+            receipt = self.orchestration.submit_observation(observation)
         except Exception as exc:
             logging.getLogger(__name__).warning(
-                "Symphony graph evolution submission failed (%s)",
-                type(exc).__name__,
+                "Symphony graph evolution submission failed (%s)", type(exc).__name__,
             )
             return EvolutionSubmitResult(None)
         projected = _successful_execution_graph(execution_graph)
-        if self.flow_engine is None or projected is None:
+        if projected is None:
             return EvolutionSubmitResult(receipt)
         try:
-            candidates = await self.flow_engine.submit(projected)
+            candidates = await self.flow.submit(projected)
         except Exception as exc:
             logging.getLogger(__name__).warning(
                 "Symphony flow evolution submission failed (%s)",
@@ -144,7 +203,7 @@ class SymphonyRuntime:
             node.metadata.pop("skill_type", None)
         return GraphEvolutionInput(
             evidence_id=evidence_id,
-            graph_scope_id=self.graph_scope_id,
+            graph_scope_id=self._graph_scope_id,
             observed_at=datetime.now(timezone.utc),
             graph_snapshot=snapshot,
             trace=TraceEvidence(
@@ -166,38 +225,27 @@ class SymphonyRuntime:
     def capture_graph_snapshot(self) -> dict[str, str | None]:
         """Capture a public graph snapshot for Rail invoke-start injection."""
 
-        current = self.graph_engine.get_snapshot(self.graph_scope_id)
+        current = self.orchestration.get_snapshot(self._graph_scope_id)
         return GraphSnapshotRef(
             static_revision=current.static_revision,
             observation_revision=current.observation_revision,
             merged_revision=current.merged_revision,
         ).model_dump(mode="json")
 
-    def close(self) -> None:
-        """Drain background graph-observation work owned by this runtime."""
-
-        if self.flow_engine is not None:
-            raise RuntimeError("SymphonyRuntime with Flow configured must be closed with await aclose()")
-        self.graph_engine.close()
-
     async def aclose(self) -> None:
-        """Drain graph and optional flow workers."""
+        """Drain owned workers and sessions without closing the injected model."""
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close_owned(), name="symphony-runtime-close")
+        await asyncio.shield(self._close_task)
 
-        if self.flow_engine is not None:
-            try:
-                await self.flow_engine.close()
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Symphony flow runtime close failed (%s)",
-                    type(exc).__name__,
-                )
-        try:
-            self.graph_engine.close()
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Symphony graph runtime close failed (%s)",
-                type(exc).__name__,
-            )
+    async def _close_owned(self) -> None:
+        names = ("retrieval", "flow", "orchestration")
+        results = await asyncio.gather(self.retrieval.aclose(), self.flow.close(), self.orchestration.aclose(),
+                                       return_exceptions=True)
+        for name, result in zip(names, results):
+            if isinstance(result, BaseException):
+                logging.getLogger(__name__).warning("Symphony %s close failed (%s)", name, type(result).__name__)
 
 
 def _snapshot_from_plan(planned_graph: dict[str, Any] | None) -> GraphSnapshotRef | None:

@@ -39,6 +39,7 @@ from openjiuwen.symphony.models import (
     SourceSnapshot,
 )
 from openjiuwen.symphony.models._message_trace import message_references_fingerprint
+from openjiuwen.symphony.orchestration.model import model_identity
 from openjiuwen.symphony.shared.fingerprint.artifact import FingerprintArtifactStore
 from openjiuwen.symphony.shared.fingerprint.cache import FingerprintCache
 from openjiuwen.symphony.shared.fingerprint.extractor import (
@@ -51,7 +52,7 @@ from openjiuwen.symphony.shared.fingerprint.normalization import (
     build_io_name_vocabulary,
     normalize_capability_type,
 )
-from openjiuwen.symphony.shared.fingerprint.settings import FingerprintSettings
+from openjiuwen.symphony.config import FingerprintPolicyConfig, FingerprintProtocolConfig
 
 
 class QualityEvaluationSuite(Protocol):
@@ -86,13 +87,23 @@ class FingerprintService:
         artifact_root: str | Path,
         *,
         llm: SymphonyLLM | None = None,
-        settings: FingerprintSettings | None = None,
+        config: FingerprintPolicyConfig | None = None,
+        protocol: FingerprintProtocolConfig | None = None,
         evaluation_suite: QualityEvaluationSuite | None = None,
         model_response_observer: ModelResponseObserver | None = None,
+        allow_metadata_fallback: bool = False,
+        wait_for_lock: bool = False,
     ) -> None:
         self._provider = capability_provider
         self._llm = llm
-        self._settings = settings or FingerprintSettings()
+        settings = config or FingerprintPolicyConfig()
+        if allow_metadata_fallback and llm is None:
+            settings = settings.model_copy(update={
+                "extraction": settings.extraction.model_copy(update={"llm_enabled": False}),
+                "evaluation": settings.evaluation.model_copy(update={"llm_enabled": False}),
+            })
+        self._settings = settings
+        self._protocol = protocol or FingerprintProtocolConfig(configuration_signature=_model_signature(llm))
         self._store = FingerprintArtifactStore(artifact_root)
         self._cache = FingerprintCache(self._store.root)
         self._extractor = CapabilityFingerprintExtractor(
@@ -100,12 +111,14 @@ class FingerprintService:
         )
         self._evaluation = evaluation_suite or EvaluationSuite.default(
             llm=llm,
-            enable_llm=self._settings.enable_llm_evaluation,
-            evidence_text_limit=self._settings.evidence_text_limit,
+            enable_llm=self._settings.evaluation.llm_enabled,
+            evidence_text_limit=self._settings.evaluation.max_evidence_chars,
         )
         self._build_lock = asyncio.Lock()
         self._process_lock = FileLock(str(self._store.root / ".fingerprint.lock"))
+        self._wait_for_lock = wait_for_lock
         self._cancel_requested = False
+        self.last_build_counts: dict[str, int] = {}
 
     @property
     def is_building(self) -> bool:
@@ -123,7 +136,7 @@ class FingerprintService:
         """Build and publish ``fingerprint.json`` from the provider snapshot."""
 
         self._validate_configuration()
-        if self._build_lock.locked():
+        if self._build_lock.locked() and not self._wait_for_lock:
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
                 reason="a fingerprint build is already running in this service",
@@ -135,15 +148,8 @@ class FingerprintService:
             lock_acquired = False
             try:
                 self._store.root.mkdir(parents=True, exist_ok=True)
-                try:
-                    self._process_lock.acquire(timeout=0)
-                    lock_acquired = True
-                except FileLockTimeout as exc:
-                    raise_error(
-                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
-                        cause=exc,
-                        reason="another fingerprint builder owns the artifact root",
-                    )
+                await self._acquire_process_lock()
+                lock_acquired = True
 
                 snapshot, descriptors = await self._load_inventory()
                 cases = _validate_cases(traces)
@@ -151,7 +157,7 @@ class FingerprintService:
                 base_signature = self._cache_base_signature()
                 restored_vocabulary = IONameVocabulary.empty()
                 cached: dict[str, dict[str, Any]] = {}
-                if self._settings.cache_enabled and base_signature is not None:
+                if self._settings.cache.enabled and base_signature is not None:
                     cache_snapshot = self._cache.load(base_signature)
                     restored_vocabulary = cache_snapshot.io_name_vocabulary
                     if not force:
@@ -176,7 +182,7 @@ class FingerprintService:
                     self._raise_if_cancelled()
                     capability_cases = tuple(case for case in cases if _case_references(case, fingerprint))
                     evaluation_signature = _evaluation_cache_signature(
-                        protocol=self._settings.evaluation_protocol_version,
+                        protocol=self._protocol.evaluation_version,
                         suite_signature=suite_signature,
                         fingerprint=fingerprint,
                         cases=capability_cases,
@@ -235,7 +241,7 @@ class FingerprintService:
                             "outputs": extraction.normalization_outputs,
                         },
                     }
-                if self._settings.cache_enabled and base_signature is not None:
+                if self._settings.cache.enabled and base_signature is not None:
                     try:
                         await _run_noninterruptible_thread(
                             self._cache.publish,
@@ -261,6 +267,12 @@ class FingerprintService:
                     skipped_count,
                     elapsed_ms,
                 )
+                self.last_build_counts = {
+                    "capability_count": len(artifact.fingerprints),
+                    "reused_count": reused_count,
+                    "extracted_count": len(artifact.fingerprints) - reused_count,
+                    "diagnostics_count": failure_count,
+                }
                 return artifact
             except OSError as exc:
                 raise build_error(
@@ -271,6 +283,21 @@ class FingerprintService:
             finally:
                 if lock_acquired:
                     self._process_lock.release()
+
+    async def _acquire_process_lock(self) -> None:
+        while True:
+            self._raise_if_cancelled()
+            try:
+                self._process_lock.acquire(timeout=0)
+                return
+            except FileLockTimeout as exc:
+                if not self._wait_for_lock:
+                    raise_error(
+                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                        cause=exc,
+                        reason="another fingerprint builder owns the artifact root",
+                    )
+                await asyncio.sleep(0.05)
 
     def read(self) -> FingerprintArtifact:
         """Read and validate the most recently published artifact."""
@@ -418,71 +445,28 @@ class FingerprintService:
         )
 
     def _validate_configuration(self) -> None:
-        settings = self._settings
-        boolean_values = (
-            settings.enable_llm_extraction,
-            settings.enable_llm_evaluation,
-            settings.cache_enabled,
-        )
-        if any(not isinstance(value, bool) for value in boolean_values):
+        if (self._settings.extraction.llm_enabled or self._settings.evaluation.llm_enabled) and self._llm is None:
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="LLM and cache feature flags must be booleans",
+                reason="an LLM is required by the enabled fingerprint configuration",
             )
-        positive_integers = (
-            settings.batch_size,
-            settings.max_concurrency,
-            settings.evidence_text_limit,
-        )
-        if any(not _is_positive_integer(value) for value in positive_integers):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="batch, concurrency, and evidence limits must be positive integers",
-            )
-        if settings.llm_max_tokens is not None and not _is_positive_integer(settings.llm_max_tokens):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="llm_max_tokens must be a positive integer or None",
-            )
-        if not _is_nonnegative_integer(settings.body_limit):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="body_limit must be a non-negative integer",
-            )
-        timeout = settings.llm_timeout
-        if timeout is not None and not _is_positive_finite_number(timeout):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="llm_timeout must be a positive finite number when configured",
-            )
-        if (settings.enable_llm_extraction or settings.enable_llm_evaluation) and self._llm is None:
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="an LLM is required by the enabled fingerprint settings",
-            )
-        protocol_values = (
-            settings.extraction_protocol_version,
-            settings.evaluation_protocol_version,
-        )
-        if any(not isinstance(value, str) or not value.strip() for value in protocol_values):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="extraction and evaluation protocol versions must be non-empty strings",
-            )
-        if not isinstance(settings.configuration_signature, str):
-            raise_error(
-                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="configuration_signature must be a string",
-            )
+
+    def _settings_signature(self) -> str:
+        payload = {
+            "schema": "symphony-fingerprint-config-v2",
+            "policy": self._settings.model_dump(mode="json"),
+            "protocol": self._protocol.model_dump(mode="json"),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def _quality_suite_signature(self) -> str | None:
         return _extension_signature(self._evaluation)
 
     def _cache_base_signature(self) -> str | None:
-        settings_signature = self._settings.signature()
+        settings_signature = self._settings_signature()
         llm_signature = "disabled"
-        if self._settings.enable_llm_extraction:
-            llm_signature = self._settings.configuration_signature.strip() or _extension_signature(self._llm) or ""
+        if self._settings.extraction.llm_enabled:
+            llm_signature = self._protocol.configuration_signature.strip() or _extension_signature(self._llm) or ""
             if not llm_signature:
                 return None
         canonical = json.dumps(
@@ -502,6 +486,13 @@ class FingerprintService:
                 StatusCode.COMPONENT_SYMPHONY_BUILD_INTERRUPTED,
                 reason="fingerprint build was cancelled before publication",
             )
+
+
+def _model_signature(model: SymphonyLLM | None) -> str:
+    if model is None or (getattr(model, "model_config", None) is None
+                         and getattr(model, "model_client_config", None) is None):
+        return ""
+    return hashlib.sha256(json.dumps(model_identity(model), sort_keys=True).encode()).hexdigest()
 
 
 def _snapshot_stability_payload(snapshot: SourceSnapshot) -> dict[str, Any]:

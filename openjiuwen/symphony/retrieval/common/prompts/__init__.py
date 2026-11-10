@@ -19,8 +19,6 @@ _BUILTIN_PROMPT_DIR = Path(__file__).resolve().parent
 
 # Canonical filenames — all consumers reference these instead of hardcoding.
 INDEXING_YAML = "indexing.yaml"
-RETRIEVAL_DISCLOSURE_YAML = "retrieval_disclosure.yaml"
-AGENTIC_RETRIEVAL_YAML = "agentic_retrieval.yaml"
 
 
 def _prompt_override_dir() -> str:

@@ -7,12 +7,12 @@ import pytest
 
 from openjiuwen.symphony.agent import (
     AgenticSkillRetrievalToolkit,
-    SkillIndexBuildConfig,
     SkillRecord,
     scan_skill_records,
 )
-from openjiuwen.symphony.agent.retrieval_toolkit import _load_capability_category_paths, _record_hashes
+from openjiuwen.symphony.agent.retrieval_toolkit import _build_policy_fingerprint, _build_settings_fingerprint, _load_capability_category_paths, _record_hashes
 from openjiuwen.symphony.retrieval.search.artifacts.loading import CatalogRecord
+from openjiuwen.symphony.config import RetrievalBuildConfig
 
 
 def _write_index_artifacts(index_dir: Path, *, catalog: list[dict[str, object]] | None = None) -> None:
@@ -24,8 +24,8 @@ def _write_index_artifacts(index_dir: Path, *, catalog: list[dict[str, object]] 
 
 
 def test_toolkit_disables_equivalence_grouping_by_default() -> None:
-    assert not SkillIndexBuildConfig().equivalence_enabled
-    assert SkillIndexBuildConfig().equivalence_min_lexical_similarity == 0.0
+    assert not RetrievalBuildConfig().equivalence.enabled
+    assert RetrievalBuildConfig().equivalence.min_lexical_similarity == 0.0
 
 
 def test_scan_skill_records_reads_skill_frontmatter(tmp_path: Path) -> None:
@@ -53,7 +53,7 @@ def test_scan_skill_records_reads_skill_frontmatter(tmp_path: Path) -> None:
 
 
 def test_toolkit_reports_missing_index(tmp_path: Path) -> None:
-    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path)
+    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, config=RetrievalBuildConfig())
 
     status = toolkit.load_index_status()
 
@@ -72,10 +72,12 @@ def test_build_plan_tracks_added_and_updated_capability_ids(tmp_path: Path) -> N
         SkillRecord(name="Changed", worker_id="changed", content="new"),
         SkillRecord(name="Added", worker_id="added"),
     ]
-    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, skills=current)
+    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, config=RetrievalBuildConfig(), skills=current)
     _write_index_artifacts(tmp_path / "index")
     (tmp_path / "state.json").write_text(
-        json.dumps({"record_hashes": _record_hashes(previous)}),
+        json.dumps({"record_hashes": _record_hashes(previous),
+                    "build_settings_fingerprint": _build_settings_fingerprint(RetrievalBuildConfig()),
+                    "build_policy_fingerprint": _build_policy_fingerprint(RetrievalBuildConfig())}),
         encoding="utf-8",
     )
 
@@ -172,10 +174,12 @@ def test_category_path_loader_rejects_invalid_final_catalog(
 def test_incremental_build_returns_and_persists_final_category_path(tmp_path: Path) -> None:
     previous = [SkillRecord(name="Existing", worker_id="existing")]
     current = [*previous, SkillRecord(name="New", worker_id="new")]
-    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, skills=current)
+    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, config=RetrievalBuildConfig(), skills=current)
     _write_index_artifacts(tmp_path / "index")
     (tmp_path / "state.json").write_text(
-        json.dumps({"record_hashes": _record_hashes(previous)}),
+        json.dumps({"record_hashes": _record_hashes(previous),
+                    "build_settings_fingerprint": _build_settings_fingerprint(RetrievalBuildConfig()),
+                    "build_policy_fingerprint": _build_policy_fingerprint(RetrievalBuildConfig())}),
         encoding="utf-8",
     )
 
@@ -216,7 +220,7 @@ def test_incremental_build_returns_and_persists_final_category_path(tmp_path: Pa
 def test_missing_incremental_category_path_preserves_previous_index(tmp_path: Path) -> None:
     previous = [SkillRecord(name="Existing", worker_id="existing")]
     current = [*previous, SkillRecord(name="New", worker_id="new")]
-    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, skills=current)
+    toolkit = AgenticSkillRetrievalToolkit(index_root=tmp_path, config=RetrievalBuildConfig(), skills=current)
     index_dir = tmp_path / "index"
     _write_index_artifacts(index_dir)
     (index_dir / "tree_index.yaml").write_text("old-tree\n", encoding="utf-8")
@@ -224,6 +228,8 @@ def test_missing_incremental_category_path_preserves_previous_index(tmp_path: Pa
         json.dumps(
             {
                 "record_hashes": _record_hashes(previous),
+                "build_policy_fingerprint": _build_policy_fingerprint(RetrievalBuildConfig()),
+                "build_settings_fingerprint": _build_settings_fingerprint(RetrievalBuildConfig()),
                 "fingerprint": "previous",
                 "indexed_count": 1,
             }

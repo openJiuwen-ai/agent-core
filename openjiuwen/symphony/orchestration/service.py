@@ -7,21 +7,26 @@ import hashlib
 import inspect
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from uuid import uuid4
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.symphony.models import CapabilityFingerprint, SourceSnapshot
+from openjiuwen.symphony.models import CapabilityFingerprint, FingerprintArtifact, SourceSnapshot
+from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
     GraphArtifactStore,
+    GraphArtifacts,
     filter_disabled_graph_artifacts,
+    is_mixed_graph,
     load_graph_artifacts,
+    merge_graph_layers,
+    project_graph_layer,
 )
-from openjiuwen.symphony.orchestration.config import OrchestrationConfig
+from openjiuwen.symphony.config import OrchestrationConfig
 from openjiuwen.symphony.orchestration.contracts import (
     CapabilityGraph,
     GraphArtifactStatus,
@@ -40,6 +45,7 @@ from openjiuwen.symphony.orchestration.graph.matcher.cache import (
 )
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import (
     DEFAULT_PROMPT_VERSION,
+    EXPERT_PROMPT_VERSION,
     MATCH_SCHEMA_VERSION,
     MATCHER_VERSION,
     OntologyMatcher,
@@ -52,6 +58,7 @@ from openjiuwen.symphony.orchestration.mutations import (
     MutationOperation,
     load_inventory,
     load_sync_inventory,
+    raise_mutation_error,
 )
 from openjiuwen.symphony.orchestration.mutations import (
     build_protocol_hash as _build_protocol_hash,
@@ -69,11 +76,15 @@ from openjiuwen.symphony.orchestration.mutations import (
     stable_sha256 as _stable_sha256,
 )
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
+from openjiuwen.symphony.orchestration.planning.expert_tasks import build_expert_task_plan
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
-from openjiuwen.symphony.shared.fingerprint import Fingerprint, FingerprintService, coerce_fingerprint
+from openjiuwen.symphony.shared.fingerprint import (
+    Fingerprint, FingerprintArtifactStore, FingerprintService, coerce_fingerprint,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.symphony.interfaces.capability import CapabilityProvider
+    from openjiuwen.symphony.inventory import DirectoryInventory
 
 ProgressCallback = Callable[[OrchestrationProgress], Any]
 PrepareArtifactHook = Callable[[Path], Any]
@@ -94,9 +105,10 @@ class OrchestrationService:
         model_response_observer: ModelResponseObserver | None = None,
         config: OrchestrationConfig | None = None,
         source_snapshot: dict[str, Any] | Callable[[Sequence[Fingerprint]], dict[str, Any]] | None = None,
-        graph_config: dict[str, Any] | None = None,
         prepare_artifact: PrepareArtifactHook | None = None,
         fingerprint_service: FingerprintService | None = None,
+        expert_inventory: DirectoryInventory | None = None,
+        expert_fingerprint_service: FingerprintService | None = None,
     ) -> None:
         self.graph_artifact_root = Path(graph_artifact_root)
         self.capability_provider = capability_provider
@@ -104,12 +116,25 @@ class OrchestrationService:
         self.model_response_observer = model_response_observer
         self.config = config or OrchestrationConfig()
         self.source_snapshot = source_snapshot
-        self.graph_config = dict(graph_config or {})
+        matching = self.config.build.matching
+        self.graph_config = {
+            "workers": self.config.build.max_concurrency,
+            "batch_size": matching.batch_size,
+            "require_consensus": matching.require_consensus,
+            "max_candidates_per_skill_relation": matching.max_candidates_per_capability_relation,
+            "max_port_mappings_per_candidate": matching.max_port_mappings_per_candidate,
+            "max_exact_io_pair_fanout": matching.max_exact_io_pair_fanout,
+        }
         self.prepare_artifact = prepare_artifact
         self.fingerprint_service = fingerprint_service
+        if (expert_inventory is None) != (expert_fingerprint_service is None):
+            raise ValueError("Expert graph inventory and fingerprint service must be configured together")
+        self.expert_inventory = expert_inventory
+        self.expert_fingerprint_service = expert_fingerprint_service
         self._store = GraphArtifactStore(self.graph_artifact_root)
         self._mutation_journal = MutationJournal(self._store)
         self._build_task: asyncio.Task[Any] | None = None
+        self._build_id = ""
         self._write_lock = asyncio.Lock()
 
     def status(self, *, expected_snapshot: dict[str, Any] | None = None) -> GraphArtifactStatus:
@@ -118,10 +143,11 @@ class OrchestrationService:
             snapshot = self._source_snapshot(capabilities, self._matcher_identity())
         else:
             snapshot = self._merge_build_identity(expected_snapshot, self._matcher_identity())
-        return self._store.status(
+        status = self._store.status(
             expected_snapshot=snapshot,
             building=self._build_task is not None and not self._build_task.done(),
         )
+        return replace(status, build_id=self._build_id or status.build_id)
 
     def read(self, version: str | None = None) -> CapabilityGraph:
         return CapabilityGraph(self._store.read(version))
@@ -140,32 +166,57 @@ class OrchestrationService:
         if self._build_task is not None and not self._build_task.done() and self._build_task is not current:
             raise RuntimeError("A Symphony graph build is already running.")
         self._build_task = current
+        build_id = uuid4().hex
+        self._build_id = build_id
         try:
             async with self._write_lock:
                 if self.model is None:
                     raise ValueError("Graph build requires a model for internal ontology matching.")
                 expected_version = self._store.current_version()
-                capabilities, provider_snapshot, _canonical = await self._load_inventory(force_fingerprint=force)
+                progress_dispatcher.start()
+
+                def fingerprint_progress(event, *, layer="skill"):
+                    details = {key: value for key, value in event.items() if key != "event"}
+                    if layer == "expert":
+                        details["layer"] = layer
+                    progress_dispatcher.enqueue(str(event.get("event") or "fingerprint.progress"), **details)
+
+                capabilities, provider_snapshot, fingerprint_artifact = await self._load_inventory(
+                    force_fingerprint=force, progress=fingerprint_progress,
+                )
                 matcher = self._create_matcher(capabilities, force=force)
                 snapshot = self._source_snapshot(
                     capabilities,
                     matcher.identity_metadata(),
                     provider_snapshot=provider_snapshot,
                 )
+                expert_artifact = None
+                expert_service = self.expert_fingerprint_service
+                if expert_service is not None:
+                    await run_artifact_io(self.expert_inventory.storage.check, write=True)
+                    expert_artifact = await expert_service.build(
+                        force=force, progress_callback=lambda event: fingerprint_progress(event, layer="expert"),
+                    )
+                    snapshot["expert_layer"] = self.expert_layer_snapshot(expert_artifact.source_snapshot)
                 if not force:
                     try:
                         existing = self._store.read()
                         if existing.get("source_snapshot") == snapshot:
                             status = self._store.status()
+                            await progress_dispatcher.emit("build_reused", version=status.version)
+                            await progress_dispatcher.close()
                             return GraphBuildResult(
                                 version=str(status.version),
                                 graph_path=self.graph_artifact_root / "versions" / str(status.version) / "graph.json",
                                 generated_at=str(status.generated_at),
+                                build_id=build_id,
+                                counts={"graph_reused_count": 1, "relation_reused_count": 0, "relation_resolved_count": 0},
                             )
                     except FileNotFoundError:
                         pass
                 progress_dispatcher.start()
-                await progress_dispatcher.emit("build_started", capability_count=len(capabilities))
+                expert_count = len(expert_artifact.fingerprints) if expert_artifact is not None else 0
+                await progress_dispatcher.emit("build_started", capability_count=len(capabilities) + expert_count)
                 payload, _diagnostics = await self._construct_graph_payload(
                     capabilities,
                     matcher=matcher,
@@ -173,20 +224,47 @@ class OrchestrationService:
                     provider_snapshot=provider_snapshot,
                     progress_dispatcher=progress_dispatcher,
                 )
+                if expert_artifact is not None:
+                    expert_capabilities = [coerce_fingerprint(item) for item in expert_artifact.fingerprints]
+                    expert_payload, _ = await self._construct_graph_payload(
+                        expert_capabilities,
+                        matcher=self._create_matcher(expert_capabilities, force=force, layer="expert"),
+                        snapshot=snapshot,
+                        provider_snapshot=expert_artifact.source_snapshot,
+                        progress_dispatcher=progress_dispatcher,
+                        layer="expert",
+                    )
+                    payload = merge_graph_layers(payload, expert_payload)
+                    if fingerprint_artifact is not None:
+                        fingerprints = (*fingerprint_artifact.fingerprints, *expert_artifact.fingerprints)
+                        digest = _stable_sha256(snapshot)
+                        fingerprint_artifact = FingerprintArtifact(
+                            source_snapshot=SourceSnapshot(
+                                snapshot_id=digest, content_hash=digest, source="symphony-graph",
+                                capability_count=len(fingerprints),
+                            ),
+                            fingerprints=fingerprints,
+                        )
                 version = _version_id(str(payload["generated_at"]), snapshot)
-                staged = await asyncio.to_thread(self._store.stage, payload, version=version)
+                payload["build_id"] = build_id
+                staged = await run_artifact_io(self._store.stage, payload, version=version)
+                if fingerprint_artifact is not None:
+                    fingerprint_store = FingerprintArtifactStore(staged.graph_path.parent)
+                    await run_artifact_io(fingerprint_store.publish, fingerprint_artifact)
                 artifact_hook = prepare_artifact if prepare_artifact is not None else self.prepare_artifact
                 await _run_prepare_artifact(artifact_hook, staged.graph_path.parent)
+                await self._verify_inventory(provider_snapshot)
+                await self._verify_expert_layer(snapshot.get("expert_layer"))
                 await asyncio.sleep(0)
+                if current is not None and current.cancelling():
+                    raise asyncio.CancelledError
                 published = self._store.activate_if_current(staged, expected_version=expected_version)
-                if self._build_task is current:
-                    self._build_task = None
                 try:
                     await progress_dispatcher.emit("build_published", version=version)
                     await progress_dispatcher.close()
                 except asyncio.CancelledError:
                     await progress_dispatcher.close()
-                return published
+                return replace(published, build_id=build_id)
         except asyncio.CancelledError:
             await progress_dispatcher.cancel()
             await progress_dispatcher.deliver("build_cancelled")
@@ -216,11 +294,13 @@ class OrchestrationService:
             journal=self._mutation_journal,
             write_lock=self._write_lock,
             model_available=self.model is not None,
-            inventory_loader=lambda: self._load_inventory(require_atomic=True),
+            inventory_loader=self._load_mutation_inventory,
             matcher_factory=self._create_matcher,
             snapshot_factory=self._source_snapshot,
-            graph_builder=self._construct_graph_payload,
+            graph_builder=self._construct_mutation_payload,
             prepare_artifact=self.prepare_artifact,
+            snapshot_validator=self._verify_inventory,
+            expert_layer_validator=self._verify_mutation_expert_layer,
         )
         return await coordinator.mutate(
             operation,
@@ -240,6 +320,8 @@ class OrchestrationService:
         query: str,
         candidate_ids: Sequence[str] | None = None,
         *,
+        type: Literal["skill", "expert"] = "skill",
+        expert_manifest_paths: Sequence[Path] | None = None,
         language: str = "cn",
         progress: ProgressCallback | None = None,
         disabled_capability_ids: Sequence[str] | None = None,
@@ -251,19 +333,38 @@ class OrchestrationService:
         mode: str | None = None,
     ) -> OrchestrationPlan:
         callback = _resolve_progress_callback(progress, progress_callback)
+        if type not in {"skill", "expert"}:
+            raise ValueError(f"Unsupported orchestration type: {type}")
         if self.model is None:
             raise ValueError("Symphony planning requires a model.")
         await _emit(callback, "plan_started", query=query)
+        if type == "expert" and self.expert_inventory is None:
+            artifacts = GraphArtifacts(self.graph_artifact_root, {}, [], {}, {})
+        else:
+            artifacts = load_graph_artifacts(self.graph_artifact_root, graph_revision, kind=type)
+        visible_ids = None
+        if type == "expert" and self.expert_inventory is not None:
+            visible_ids = await asyncio.to_thread(self._visible_expert_ids, artifacts, expert_manifest_paths)
         artifacts = filter_disabled_graph_artifacts(
-            load_graph_artifacts(self.graph_artifact_root, graph_revision),
+            artifacts,
             disabled_capability_ids,
+            visible_capability_ids=visible_ids,
         )
-        planning_mode = mode or self.config.mode
+        planning_mode = mode or self.config.plan.mode
         if planning_mode not in {"fast", "beam"}:
             raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
         normalized_language = resolve_orchestration_language(language)
         selected, _summary = _input_candidate_summary(candidate_ids, artifacts.skills)
-        effective_overlay = dynamic_overlay if self.config.dynamic_graph_enabled and dynamic_overlay else {}
+        if (candidate_ids is not None and not selected) or (type == "expert" and not artifacts.skills):
+            plan_id = str(uuid4())
+            planned_graph = build_planned_graph(
+                {"plan_id": plan_id, "status": "no_plan", "plans": []}, artifacts, layer=type,
+            )
+            if graph_snapshot is not None:
+                planned_graph["graph_snapshot"] = dict(graph_snapshot)
+            await _emit(callback, "plan_completed", plan_id=plan_id)
+            return OrchestrationPlan({"planned_graph": planned_graph})
+        effective_overlay = dynamic_overlay if type == "skill" and self.config.plan.dynamic_graph_enabled else {}
         planner: Any
         if planning_mode == "beam":
             planner = BidirectionalBeamPlanner(
@@ -271,13 +372,14 @@ class OrchestrationService:
                 model=self.model,
                 model_response_observer=self.model_response_observer,
                 min_edge_confidence=self.config.min_edge_confidence,
-                top_k=self.config.top_k,
-                max_depth=self.config.max_depth,
+                top_k=self.config.plan.top_k,
+                max_depth=self.config.plan.max_depth,
                 candidate_skill_ids=selected,
                 progress_callback=_planner_progress_callback(callback),
                 language=normalized_language,
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
+                layer=type,
             )
         else:
             planner = FastOneShotPlanner(
@@ -285,23 +387,81 @@ class OrchestrationService:
                 model=self.model,
                 model_response_observer=self.model_response_observer,
                 min_edge_confidence=self.config.min_edge_confidence,
-                max_depth=self.config.max_depth,
+                max_depth=self.config.plan.max_depth,
                 candidate_skill_ids=selected,
                 language=normalized_language,
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
+                layer=type,
             )
         result = await planner.plan(query)
         if result.get("success") is False:
             detail = str(result.get("detail") or "Symphony planner failed to produce a valid plan.").strip()
             raise ValueError(f"Symphony planning failed: {detail}")
         result["plan_id"] = str(uuid4())
-        planned_graph = build_planned_graph(result, artifacts)
+        planned_graph = build_planned_graph(result, artifacts, layer=type)
         if graph_snapshot is not None:
             planned_graph["graph_snapshot"] = dict(graph_snapshot)
         public_result = OrchestrationPlan({"planned_graph": planned_graph})
         await _emit(callback, "plan_completed", plan_id=result["plan_id"])
         return public_result
+
+    async def plan_expert_tasks(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        expert_manifest_paths: Sequence[Path] | None = None,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        mode: str | None = None,
+    ) -> OrchestrationPlan:
+        """Plan task instances for visible installed experts and inline roles."""
+        if not query.strip():
+            raise ValueError("query is required")
+        if self.model is None:
+            raise ValueError("Symphony planning requires a model.")
+        planning_mode = mode or self.config.plan.mode
+        if planning_mode not in {"fast", "beam"}:
+            raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
+        await _emit(progress, "plan_started", query=query)
+        artifacts = await asyncio.to_thread(self._load_expert_task_artifacts, expert_manifest_paths)
+        planned_graph = await build_expert_task_plan(
+            query,
+            artifacts,
+            model=self.model,
+            config=self.config,
+            mode=planning_mode,
+            language=resolve_orchestration_language(language),
+            candidate_ids=candidate_ids,
+            model_response_observer=self.model_response_observer,
+        )
+        await _emit(progress, "plan_completed", plan_id=planned_graph["graph"]["id"])
+        return OrchestrationPlan({"planned_graph": planned_graph})
+
+    def _load_expert_task_artifacts(self, manifest_paths: Sequence[Path] | None) -> GraphArtifacts:
+        if self.expert_inventory is not None:
+            try:
+                artifacts = load_graph_artifacts(self.graph_artifact_root, kind="expert")
+            except FileNotFoundError:
+                pass
+            else:
+                return filter_disabled_graph_artifacts(
+                    artifacts, None, visible_capability_ids=self._visible_expert_ids(artifacts, manifest_paths),
+                )
+        return GraphArtifacts(self.graph_artifact_root, {}, [], {}, {})
+
+    def _visible_expert_ids(self, artifacts: GraphArtifacts, manifest_paths: Sequence[Path] | None) -> set[str]:
+        paths = None
+        if manifest_paths is not None:
+            paths = set()
+            for path in manifest_paths:
+                try:
+                    paths.add(Path(path).resolve(strict=True))
+                except (OSError, RuntimeError):
+                    continue
+        live = self.expert_inventory.experts(allow_partial=True, manifest_paths=paths).content_hashes
+        return {item["id"] for item in artifacts.skills if item["id"] in live and live[item["id"]] == item.get("content_hash")}
 
     async def _construct_graph_payload(
         self,
@@ -311,9 +471,12 @@ class OrchestrationService:
         snapshot: dict[str, Any],
         provider_snapshot: SourceSnapshot | None,
         progress_dispatcher: _BuildProgressDispatcher | None = None,
+        layer: str = "skill",
     ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
         def graph_progress(stage: str, **details: Any) -> None:
             if progress_dispatcher is not None:
+                if layer == "expert":
+                    details["layer"] = layer
                 progress_dispatcher.enqueue(stage, **details)
 
         def matcher_progress(event: str, current: int, total: int, details: dict[str, Any]) -> None:
@@ -343,6 +506,7 @@ class OrchestrationService:
         build_result = await GraphBuildPipeline(
             resolver=matcher,
             candidate_generator=candidate_generator,
+            layer=layer,
         ).build(
             capabilities,
             progress=graph_progress,
@@ -369,7 +533,7 @@ class OrchestrationService:
             },
             "build_protocol_hash": _build_protocol_hash(snapshot),
             "config": {
-                "orchestration": self.config.to_dict(),
+                "orchestration": self.config.model_dump(mode="json"),
                 "graph": matcher.graph_config,
                 "thresholds": build_result.manifest.thresholds,
                 "candidate_generation": build_result.manifest.candidate_generation,
@@ -380,25 +544,97 @@ class OrchestrationService:
             payload["provider_source_snapshot"] = provider_snapshot.model_dump(mode="json", exclude_none=True)
         return payload, diagnostics
 
+    async def _construct_mutation_payload(
+        self,
+        capabilities: Sequence[Fingerprint],
+        *,
+        matcher: OntologyMatcher,
+        snapshot: dict[str, Any],
+        provider_snapshot: SourceSnapshot,
+        current_payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+        payload, diagnostics = await self._construct_graph_payload(
+            capabilities, matcher=matcher, snapshot=snapshot, provider_snapshot=provider_snapshot,
+        )
+        if is_mixed_graph(current_payload):
+            payload["source_snapshot"]["expert_layer"] = current_payload["source_snapshot"]["expert_layer"]
+            payload = merge_graph_layers(payload, project_graph_layer(current_payload, "expert"))
+        return payload, diagnostics
+
+    def expert_layer_snapshot(self, snapshot: SourceSnapshot) -> dict[str, Any]:
+        return {
+            "protocol": "expert-graph-v1",
+            "match_prompt": EXPERT_PROMPT_VERSION,
+            "roots": [str(source.root) for source in self.expert_inventory.sources("expert")],
+            "inventory": snapshot.model_dump(mode="json", exclude_none=True),
+        }
+
+    async def _verify_expert_layer(self, expected: dict[str, Any] | None) -> None:
+        latest = None
+        if self.expert_inventory is not None:
+            scan = await run_artifact_io(self.expert_inventory.scan)
+            latest = self.expert_layer_snapshot(scan.source_snapshot)
+        if latest != expected:
+            raise RuntimeError("Expert inventory changed; previous graph version preserved")
+
+    async def _verify_mutation_expert_layer(self, expected: dict[str, Any] | None) -> None:
+        try:
+            await self._verify_expert_layer(expected)
+        except (ValueError, RuntimeError) as exc:
+            raise_mutation_error(
+                "full_rebuild_required", "Expert inventory changed; refresh the graph before applying Skill mutations",
+                cause=exc,
+            )
+
     async def _load_inventory(
         self,
         *,
         require_atomic: bool = False,
         force_fingerprint: bool = False,
-    ) -> tuple[list[Fingerprint], SourceSnapshot | None, list[CapabilityFingerprint] | None]:
+        progress: ProgressCallback | None = None,
+    ) -> tuple[list[Fingerprint], SourceSnapshot | None, FingerprintArtifact | None]:
         if self.fingerprint_service is not None:
-            artifact = await self.fingerprint_service.build(force=force_fingerprint)
-            fingerprints = list(artifact.fingerprints)
+            artifact = await self.fingerprint_service.build(force=force_fingerprint, progress_callback=progress)
             return (
-                [coerce_fingerprint(item) for item in fingerprints],
+                [coerce_fingerprint(item) for item in artifact.fingerprints],
                 artifact.source_snapshot,
-                fingerprints,
+                artifact,
             )
-        return await load_inventory(
+        capabilities, snapshot, _ = await load_inventory(
             self.capability_provider,
             require_atomic=require_atomic,
             current_version=self._store.current_version(),
         )
+        return capabilities, snapshot, None
+
+    async def _load_mutation_inventory(
+        self,
+    ) -> tuple[list[Fingerprint], SourceSnapshot | None, list[CapabilityFingerprint] | None]:
+        if self.fingerprint_service is None:
+            return await load_inventory(
+                self.capability_provider, require_atomic=True, current_version=self._store.current_version(),
+            )
+        capabilities, snapshot, artifact = await self._load_inventory(require_atomic=True)
+        return capabilities, snapshot, list(artifact.fingerprints) if artifact is not None else None
+
+    async def _verify_inventory(self, expected: SourceSnapshot | None) -> None:
+        if expected is None:
+            return
+        atomic_reader = getattr(self.capability_provider, "inventory_snapshot", None)
+        snapshot_reader = getattr(self.capability_provider, "source_snapshot", None)
+        if callable(atomic_reader):
+            result = atomic_reader()
+            if inspect.isawaitable(result):
+                result = await result
+            latest = result[0]
+        elif callable(snapshot_reader):
+            latest = snapshot_reader()
+            if inspect.isawaitable(latest):
+                latest = await latest
+        else:
+            return
+        if latest != expected:
+            raise RuntimeError("Capability inventory changed during the graph build; previous version preserved")
 
     def _sync_capabilities(self) -> list[Fingerprint]:
         return load_sync_inventory(self.capability_provider)
@@ -487,20 +723,24 @@ class OrchestrationService:
             return identity
         return self._create_matcher([], force=True).identity_metadata()
 
-    def _create_matcher(self, capabilities: Sequence[Fingerprint], *, force: bool) -> OntologyMatcher:
+    def _create_matcher(
+        self, capabilities: Sequence[Fingerprint], *, force: bool, layer: str = "skill",
+    ) -> OntologyMatcher:
         if self.model is None:
             raise ValueError("Graph build requires a model for internal ontology matching.")
         normalized_graph_config = _normalized_graph_config(self.graph_config)
+        cache_name = "expert_relation_matches.json" if layer == "expert" else "relation_matches.json"
         return OntologyMatcher(
             self.model,
             model_response_observer=self.model_response_observer,
             fingerprints=capabilities,
-            cache_path=None if force else self.graph_artifact_root / "cache" / "relation_matches.json",
+            cache_path=None if force else self.graph_artifact_root / "cache" / cache_name,
             batch_size=normalized_graph_config["batch_size"],
             max_workers=normalized_graph_config["max_workers"],
             require_consensus=normalized_graph_config["require_consensus"],
             graph_config=normalized_graph_config,
             thresholds={"can_feed": self.config.min_edge_confidence},
+            layer=layer,
         )
 
 
@@ -528,7 +768,7 @@ def _input_candidate_summary(
         fallback_reason = "candidate_ids is empty"
     elif not selected:
         fallback_reason = "candidate_ids did not match current graph"
-    return tuple(selected) or None, {
+    return (None if values is None else tuple(selected)), {
         "source": "input",
         "used": bool(selected),
         "candidate_ids": selected,

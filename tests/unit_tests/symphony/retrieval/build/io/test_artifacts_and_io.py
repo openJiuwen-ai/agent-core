@@ -4,7 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, cast
+from types import SimpleNamespace
+
+from pydantic import ValidationError
+from openjiuwen.symphony.config import RetrievalBuildConfig
 
 from openjiuwen.symphony.retrieval.build.io.items_jsonl import parse_jsonl_scanned_items
 from openjiuwen.symphony.retrieval.build.io.manifest import load_manifest, write_manifest
@@ -15,8 +18,6 @@ from openjiuwen.symphony.retrieval.build.io.tree import (
     write_tree_preset,
 )
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import (
-    BuildConfig,
-    BuildMethod,
     build_catalog_records_from_nodes,
     build_fallback_tree_nodes,
     build_retrieval_text,
@@ -28,37 +29,29 @@ from openjiuwen.symphony.retrieval.build.workflows.artifacts import (
 
 
 class ArtifactsAndIoTests(unittest.TestCase):
-    def test_resolve_build_config_clamps_and_rejects_conflicts(self) -> None:
-        config = BuildConfig(
-            method=BuildMethod.TREE,
-            llm_model="tree-model",
-            llm_api_key="tree-key",
-            tree_branching_factor=0,
-            tree_max_depth=0,
-            tree_max_workers=0,
-            tree_equiv_min_lexical_similarity=5.0,
-            generate_tree_html=True,
+    def test_resolve_build_config_snapshots_policy_and_rejects_invalid_inputs(self) -> None:
+        config = RetrievalBuildConfig(
+            structure={"branching_factor": 3, "max_depth": 2},
+            output={"generate_tree_html": True},
         )
-
         resolved = resolve_build_config(config=config)
+        self.assertEqual(resolved.structure.branching_factor, 3)
+        self.assertEqual(resolved.structure.max_depth, 2)
+        self.assertEqual(resolved.request.max_concurrency, 2)
+        self.assertTrue(resolved.output.generate_tree_html)
+        resolved = resolved.model_copy(update={"structure": resolved.structure.model_copy(update={"max_depth": 4})})
+        self.assertEqual(config.structure.max_depth, 2)
+        with self.assertRaisesRegex(TypeError, "runtime_config"):
+            resolve_build_config(config=config, runtime_config=config)
+        with self.assertRaises(ValidationError):
+            RetrievalBuildConfig(method=4)
+        with self.assertRaises(ValidationError):
+            RetrievalBuildConfig(structure={"branching_factor": 0})
 
-        self.assertEqual(resolved.method, BuildMethod.TREE)
-        self.assertEqual(resolved.llm_model, "tree-model")
-        self.assertEqual(resolved.tree_llm_api_key, "tree-key")
-        self.assertEqual(resolved.tree_branching_factor, 8)
-        self.assertEqual(resolved.tree_max_depth, 6)
-        self.assertEqual(resolved.tree_max_workers, 1)
-        self.assertEqual(resolved.tree_equiv_min_lexical_similarity, 1.0)
-        self.assertTrue(resolved.generate_tree_html)
-        with self.assertRaisesRegex(ValueError, "Specify either config or runtime_config"):
-            resolve_build_config(config=BuildConfig(), runtime_config=BuildConfig())
-        with self.assertRaisesRegex(ValueError, "Unsupported build method"):
-            resolve_build_config(config=BuildConfig(method=BuildMethod(8)))
-
-    def test_llm_capability_detection_accepts_client_or_key(self) -> None:
-        self.assertFalse(can_build_tree_with_llm(BuildConfig()))
-        self.assertTrue(can_build_tree_with_llm(BuildConfig(llm_model="model", llm_openai_client=cast(Any, object()))))
-        self.assertTrue(can_build_tree_with_llm(BuildConfig(llm_model="model", llm_api_key="key")))
+    def test_llm_capability_detection_requires_injected_invoke_model(self) -> None:
+        self.assertFalse(can_build_tree_with_llm())
+        self.assertFalse(can_build_tree_with_llm(object()))
+        self.assertTrue(can_build_tree_with_llm(SimpleNamespace(invoke=lambda **kwargs: None)))
 
     def test_catalog_records_prefer_tree_profiles_when_present(self) -> None:
         records = build_catalog_records_from_nodes(

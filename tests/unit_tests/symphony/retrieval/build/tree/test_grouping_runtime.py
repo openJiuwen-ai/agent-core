@@ -7,16 +7,17 @@ from types import SimpleNamespace
 from openjiuwen.symphony.retrieval.build.tree.context import TreeBuildState
 from openjiuwen.symphony.retrieval.build.tree.grouping import TreeGroupingEngine
 from openjiuwen.symphony.retrieval.build.tree.llm_runtime import TreeLLMRuntime
-from openjiuwen.symphony.retrieval.build.tree.schema import DynamicTreeConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.retrieval.build.tree.schema import ResolvedTreeStructure
 
 
 class _FakeGroupingBuilder:
     def __init__(self) -> None:
-        self.config = DynamicTreeConfig(branching_factor=3)
+        self.config = ResolvedTreeStructure(branching_factor=3, max_depth=6, root_categories=None, max_skills_per_node=4)
         self.settings = SimpleNamespace(
             deterministic_prompts=True,
             discovery_seed=123,
-            manager_config=SimpleNamespace(build=SimpleNamespace(classify_batch_cap=2)),
+            config=RetrievalBuildConfig(request={"classification_batch_limit": 2}),
         )
         self.max_workers = 4
         self.llm_runtime = self
@@ -171,7 +172,8 @@ class _FakeChoice:
 
 class _FakeResponse:
     def __init__(self, content: str, *, finish_reason: str = "stop", metadata: dict | None = None) -> None:
-        self.choices = [_FakeChoice(content, finish_reason=finish_reason)]
+        self.content = content
+        self.finish_reason = finish_reason
         self._hidden_params = metadata or {}
 
     @staticmethod
@@ -195,24 +197,16 @@ class _FakeCompletions:
 class _FakeClient:
     def __init__(self, results: list[object]) -> None:
         self.completions = _FakeCompletions(results)
-        self.chat = SimpleNamespace(completions=self.completions)
+        self.invoke = self.completions.create
 
 
 def _runtime_builder(client=None, *, model: str = "gpt-5-mini"):
-    build_config = SimpleNamespace(
-        context_window=0,
-        max_output_tokens=0,
-        timeout=30,
-        num_retries=1,
-    )
     settings = SimpleNamespace(
-        manager_config=SimpleNamespace(build=build_config),
-        llm_seed=7,
-        prompt_fingerprint_version="v1",
+        config=RetrievalBuildConfig(request={"timeout_seconds": 30.0, "max_retries": 1}),
         cache_observability=True,
         max_consecutive_failures=3,
     )
-    state = TreeBuildState(client=client, max_workers=1)
+    state = TreeBuildState(model=client, max_workers=1)
     return SimpleNamespace(
         PROMPT_OVERHEAD_TOKENS=3000,
         OUTPUT_RESERVE_TOKENS=4000,
@@ -233,13 +227,12 @@ class TreeLLMRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.model_limits(), (128000, 32768))
         self.assertEqual(runtime.auto_batch_size(), 1000)
         self.assertEqual(runtime.get_max_output_tokens(), 4096)
-        self.assertEqual(runtime.merged_extra_body()["seed"], 7)
         self.assertEqual(runtime.normalize_prompt_for_fingerprint(" a \r\nb  "), "a\nb")
         self.assertEqual(len(runtime.prompt_fingerprint("prompt")), 16)
 
-        build_config = builder.settings.manager_config.build
-        build_config.context_window = 4096
-        build_config.max_output_tokens = 512
+        builder.settings.config = RetrievalBuildConfig(request={
+            "context_window_tokens": 4096, "max_output_tokens": 512,
+        })
         builder.state.batch_size_cache = None
         builder.state.max_output_tokens_cache = None
         self.assertEqual(runtime.model_limits(), (4096, 512))
@@ -285,11 +278,11 @@ class TreeLLMRuntimeTests(unittest.TestCase):
         self.assertTrue(builder.state.thread_local.truncated)
         self.assertEqual(builder.state.llm_calls, 3)
         self.assertEqual(builder.state.retry_calls, 1)
-        self.assertEqual(client.completions.calls[0]["extra_body"]["seed"], 7)
+        self.assertEqual(client.completions.calls[0]["reasoning"].mode, "disabled")
 
     def test_call_llm_handles_missing_client_context_and_timeout_retry(self) -> None:
         missing_client_builder = _runtime_builder(client=None)
-        with self.assertRaisesRegex(RuntimeError, "openai is required"):
+        with self.assertRaisesRegex(RuntimeError, "injected model"):
             TreeLLMRuntime(missing_client_builder).call_llm("prompt")
 
         context_builder = _runtime_builder(client=_FakeClient([ValueError("maximum context length exceeded")]))

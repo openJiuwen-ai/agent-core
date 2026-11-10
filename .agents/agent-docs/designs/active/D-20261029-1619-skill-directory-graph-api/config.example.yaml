@@ -1,0 +1,19 @@
+# Symphony Runtime 示例；通过 SymphonyConfig.model_validate 读取。
+capability:
+  root: ./capabilities
+  type: skill
+storage:
+  artifact_root: ./.symphony/runtime
+retrieval:
+  enabled: true
+  discovery:
+    use_existing_index: true
+orchestration:
+  enabled: true
+  min_edge_confidence: 0.7
+  plan:
+    mode: fast
+flow:
+  enabled: true
+  acceptance:
+    min_successes: 3

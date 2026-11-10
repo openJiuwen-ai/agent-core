@@ -10,12 +10,16 @@ from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 def build_planned_graph(
     planning_result: dict[str, Any],
     artifacts: GraphArtifacts,
+    *,
+    layer: str = "skill",
 ) -> dict[str, Any]:
     """Project the selected internal plan into one minimal JGF v2 graph."""
 
     primary_plan = select_primary_plan(planning_result)
     status = _plan_status(primary_plan, planning_result)
     metadata: dict[str, Any] = {"status": status}
+    if layer == "expert":
+        metadata["capability_type"] = layer
     reason = _plan_text(primary_plan, planning_result, "reason")
     if reason:
         metadata["reason"] = reason

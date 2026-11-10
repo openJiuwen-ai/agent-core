@@ -60,15 +60,18 @@ class TreePresetWriter:
     def tree_to_dict(self, tree: TreeNode) -> dict:
         return self.node_to_dict(tree)
 
-    def tree_to_orchestrator_preset(self, tree_dict: dict) -> dict:
-        nodes = self.flatten_capability_tree(tree_dict)
-        nodes = self.rename_leaf_nodes(nodes)
+    def tree_to_orchestrator_preset(self, tree_dict: dict, *, preserve_ids: bool = False) -> dict:
+        nodes = self.flatten_capability_tree(tree_dict, preserve_ids=preserve_ids)
+        if not preserve_ids:
+            nodes = self.rename_leaf_nodes(nodes)
         return {
             "tree_sketch": self.build_tree_sketch(nodes),
             "nodes": nodes,
         }
 
-    def flatten_capability_tree(self, tree: dict) -> list[dict]:
+    def flatten_capability_tree(self, tree: dict, *, preserve_ids: bool = False) -> list[dict]:
+        from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term
+
         nodes: list[dict] = []
         used_cids: set[str] = set()
 
@@ -78,7 +81,8 @@ class TreePresetWriter:
             branch_description = str(node.get("description") or branch_name)
             branch_select_when = str(node.get("select_when") or "").strip()
             branch_dont_select_when = str(node.get("dont_select_when") or "").strip()
-            branch_cid = self.unique_child_cid(parent_cid, self.cid_term(branch_id, fallback="Category"), used_cids)
+            branch_segment = branch_id if preserve_ids else self.cid_term(branch_id, fallback="Category")
+            branch_cid = self.unique_child_cid(parent_cid, branch_segment, used_cids)
 
             nodes.append(
                 {
@@ -108,7 +112,8 @@ class TreePresetWriter:
                 skill_description = str(skill.get("description") or skill_name).strip()
                 leaf_cid = self.unique_child_cid(
                     branch_cid,
-                    self.cid_term(skill_id or skill_name, fallback="Skill"),
+                    (slug_term(skill_id or skill_name, fallback="skill") if preserve_ids
+                     else self.cid_term(skill_id or skill_name, fallback="Skill")),
                     used_cids,
                 )
                 nodes.append(
@@ -124,6 +129,8 @@ class TreePresetWriter:
                         "examples": [],
                     }
                 )
+                if preserve_ids and skill.get("skill_path"):
+                    nodes[-1]["skill_path"] = skill["skill_path"]
 
         root_children = tree.get("children", []) if str(tree.get("id", "")).strip().lower() == "root" else [tree]
         root_children = sorted(

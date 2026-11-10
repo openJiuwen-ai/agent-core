@@ -1,3 +1,5 @@
+
+from openjiuwen.symphony.config import OrchestrationConfig
 import asyncio
 import importlib
 import json
@@ -14,9 +16,10 @@ from openjiuwen.symphony import (
     OrchestrationConfig,
     OrchestrationService,
     ParameterSpec,
-    SkillGraphUpdater,
+    CapabilityGraphUpdater,
     SymphonyGraphEngine,
     SymphonyRuntime,
+    SymphonyConfig,
 )
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
@@ -133,19 +136,16 @@ def _inventory() -> list[Fingerprint]:
 
 
 def test_runtime_wires_internal_fingerprint_service(tmp_path: Path) -> None:
-    fingerprint_service = cast(FingerprintService, SimpleNamespace())
-
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
-        model=None,
-        fingerprint_service=fingerprint_service,
-    )
-
-    assert isinstance(runtime.graph_engine, SymphonyGraphEngine)
-    assert isinstance(runtime.graph_engine, SkillGraphUpdater)
-    assert not isinstance(runtime.orchestration, SkillGraphUpdater)
-    assert runtime.orchestration.fingerprint_service is fingerprint_service
+    runtime = SymphonyRuntime(None, SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": str(tmp_path / "capabilities")}]},
+        storage={"artifact_root": str(tmp_path / "runtime")},
+    ))
+    assert isinstance(runtime.orchestration, SymphonyGraphEngine)
+    assert isinstance(runtime.orchestration, CapabilityGraphUpdater)
+    assert isinstance(runtime.orchestration._orchestration_service.fingerprint_service, FingerprintService)
+    assert not hasattr(runtime, "graph_engine")
+    assert not hasattr(runtime, "flow_engine")
+    assert not (tmp_path / "runtime").exists()
 
 
 def test_exact_io_candidate_and_graph_materialization() -> None:
@@ -177,7 +177,7 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=_FakeLLM(),
-        config=OrchestrationConfig(mode=mode, max_depth=2),
+        config=OrchestrationConfig(plan={'mode': mode, 'max_depth': 2}),
     )
     graph_engine = SymphonyGraphEngine(service)
 
@@ -214,7 +214,7 @@ async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
         model=llm,
-        config=OrchestrationConfig(mode="fast"),
+        config=OrchestrationConfig(plan={'mode': 'fast'}),
     )
     await service.build()
 
@@ -322,14 +322,13 @@ async def test_read_rejects_unsupported_schema_major(tmp_path: Path) -> None:
 def test_runtime_exposes_orchestration_and_package_has_no_jiuwenswarm_dependency(
     tmp_path: Path,
 ) -> None:
-    runtime = SymphonyRuntime(
-        graph_artifact_root=tmp_path,
-        capability_provider=_inventory,
-        model=_FakeLLM(),
-    )
-    assert isinstance(runtime.graph_engine, SymphonyGraphEngine)
-    assert not isinstance(runtime.orchestration, SkillGraphUpdater)
-    assert runtime.orchestration.graph_artifact_root == tmp_path
+    runtime = SymphonyRuntime(_FakeLLM(), SymphonyConfig(
+        capability={"sources": [{"type": "skill", "root": str(tmp_path / "capabilities")}]},
+        storage={"artifact_root": str(tmp_path / "runtime")},
+    ))
+    assert isinstance(runtime.orchestration, SymphonyGraphEngine)
+    assert isinstance(runtime.orchestration, CapabilityGraphUpdater)
+    assert runtime.orchestration._orchestration_service.graph_artifact_root == tmp_path / "runtime" / "graph"
 
     package_root = Path(importlib.import_module("openjiuwen.symphony").__file__).parent
     for source in package_root.rglob("*.py"):

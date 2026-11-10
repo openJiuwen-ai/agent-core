@@ -7,6 +7,7 @@ from importlib import import_module
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+from openjiuwen.symphony.config import SymphonyConfig, OrchestrationConfig
 from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, EvaluationWindow, Evaluator
 from openjiuwen.symphony.flow import LLMPackageReviewAgent
 from openjiuwen.symphony.flow.models import CombinationCandidate
@@ -14,7 +15,7 @@ from openjiuwen.symphony.graph_engine import SymphonyGraphEngine
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
     CapabilityProvider,
-    SkillGraphUpdater,
+    CapabilityGraphUpdater,
     SymphonyLLM,
 )
 from openjiuwen.symphony.models import (
@@ -59,7 +60,6 @@ from openjiuwen.symphony.orchestration import (
     GraphBuildResult,
     GraphMutationDelta,
     GraphMutationResult,
-    OrchestrationConfig,
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
@@ -71,13 +71,14 @@ from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec,
 from openjiuwen.symphony.shared.fingerprint import (
     FINGERPRINT_ARTIFACT_FILENAME,
     FINGERPRINT_SCHEMA_VERSION,
+    FingerprintArtifactStore,
     FingerprintService,
-    FingerprintSettings,
     IONameVocabulary,
     ScanDiagnostic,
     ScanResult,
     SkillFolderScanner,
     SkillManifestParser,
+    capability_content_hash,
 )
 
 if TYPE_CHECKING:
@@ -89,9 +90,11 @@ if TYPE_CHECKING:
 
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
+from openjiuwen.symphony.tree_engine import DiscoverySession
 _LAZY_MODULES = frozenset({"agent", "discovery", "flow", "retrieval", "shared"})
 
 __all__ = [
+    "DiscoverySession",
     "FINGERPRINT_ARTIFACT_FILENAME",
     "FINGERPRINT_SCHEMA_VERSION",
     "GRAPH_EVOLUTION_INPUT_SCHEMA",
@@ -123,8 +126,8 @@ __all__ = [
     "FailureDomain",
     "Fingerprint",
     "FingerprintArtifact",
+    "FingerprintArtifactStore",
     "FingerprintService",
-    "FingerprintSettings",
     "GraphArtifactStatus",
     "GraphArtifactStore",
     "GraphBuildResult",
@@ -151,17 +154,19 @@ __all__ = [
     "ScanResult",
     "SemanticProfile",
     "SkillFolderScanner",
-    "SkillGraphUpdater",
+    "CapabilityGraphUpdater",
     "SkillManifestParser",
     "SourceSnapshot",
     "SuggestionPriority",
     "SymphonyLLM",
     "SymphonyGraphEngine",
     "SymphonyRuntime",
+    "SymphonyConfig",
     "TaskEvidence",
     "TaskOutcome",
     "TaskOutcomeLabel",
     "TraceEvidence",
+    "capability_content_hash",
     "agent",
     "discovery",
     "flow",

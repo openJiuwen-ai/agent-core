@@ -1,7 +1,8 @@
-"""Structured live Skill discovery built on Symphony's retriever tree."""
+"""Structured live capability discovery and Skill directory browsing."""
 
-from .config import DiscoverySettings, load_discovery_settings
-from .directory_toolkit import InstalledSkillsDirectoryToolkit, SKILL_INDEX_TOOL_NAME
+from .capability_search import CapabilityAction, CapabilityCandidate, read_fingerprints, search_capabilities
+
+from .directory_toolkit import InstalledSkillsDirectoryToolkit
 from .models import SkillInventory, SkillRecord, inventory_from_records, scan_skill_directories
 from .skillfs import (
     SkillFS,
@@ -14,6 +15,7 @@ from .skillfs import (
     capture_index_snapshot,
 )
 from .toolkit import (
+    CAPABILITY_SEARCH_TOOL_NAME,
     SkillDCICommandResult,
     clear_incremental_skill_notice_states,
     consume_incremental_skill_reminder,
@@ -21,9 +23,10 @@ from .toolkit import (
 )
 
 __all__ = [
-    "DiscoverySettings",
+    "CAPABILITY_SEARCH_TOOL_NAME",
+    "CapabilityAction",
+    "CapabilityCandidate",
     "InstalledSkillsDirectoryToolkit",
-    "SKILL_INDEX_TOOL_NAME",
     "SkillDCICommandResult",
     "SkillFS",
     "SkillFSArtifact",
@@ -39,6 +42,7 @@ __all__ = [
     "consume_incremental_skill_reminder",
     "initialize_incremental_skill_notice_state",
     "inventory_from_records",
-    "load_discovery_settings",
+    "read_fingerprints",
     "scan_skill_directories",
+    "search_capabilities",
 ]

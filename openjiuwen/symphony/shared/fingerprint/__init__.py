@@ -50,7 +50,6 @@ from openjiuwen.symphony.shared.fingerprint.settings import (
     EVALUATION_PROTOCOL_VERSION,
     EXTRACTION_PROTOCOL_VERSION,
     FINGERPRINT_SCHEMA_VERSION,
-    FingerprintSettings,
 )
 
 __all__ = [
@@ -68,7 +67,6 @@ __all__ = [
     "Fingerprint",
     "FingerprintLike",
     "FingerprintService",
-    "FingerprintSettings",
     "IONameResolution",
     "IONameTerm",
     "IONameVocabulary",

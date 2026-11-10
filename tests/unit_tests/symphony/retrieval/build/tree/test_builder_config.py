@@ -5,60 +5,43 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from openjiuwen.symphony.retrieval.build.tree import TreeBuildConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder, build_tree
 from openjiuwen.symphony.retrieval.build.tree.expansion import TreeExpansionEngine
 from openjiuwen.symphony.retrieval.build.tree.grouping import TreeGroupingEngine
-from openjiuwen.symphony.retrieval.build.tree.schema import DynamicTreeConfig, TreeNode, normalize_root_categories
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig, resolve_build_config
+from openjiuwen.symphony.retrieval.build.tree.schema import ResolvedTreeStructure, TreeNode, normalize_root_categories
+from openjiuwen.symphony.retrieval.build.workflows.artifacts import resolve_build_config
 
 
 class TreeBuilderConfigTests(unittest.TestCase):
-    def test_skill_profiles_are_disabled_by_default(self) -> None:
-        self.assertFalse(TreeBuildConfig().skill_profiles_enabled)
-        self.assertFalse(BuildConfig().tree_skill_profiles_enabled)
-        self.assertFalse(resolve_build_config().tree_skill_profiles_enabled)
+    def test_policy_defaults_are_shared_with_index_workflow(self) -> None:
+        config = RetrievalBuildConfig()
+        resolved = resolve_build_config(config=config)
+        self.assertFalse(config.profiles.enabled)
+        self.assertFalse(config.equivalence.enabled)
+        self.assertEqual(resolved, config)
 
-    def test_equivalence_grouping_is_disabled_by_default(self) -> None:
-        self.assertFalse(TreeBuildConfig().equiv_grouping_enabled)
-        self.assertFalse(BuildConfig().tree_equiv_grouping_enabled)
-        self.assertFalse(resolve_build_config().tree_equiv_grouping_enabled)
-        self.assertEqual(TreeBuildConfig().equiv_min_lexical_similarity, 0.0)
-        self.assertEqual(BuildConfig().tree_equiv_min_lexical_similarity, 0.0)
-        self.assertEqual(resolve_build_config().tree_equiv_min_lexical_similarity, 0.0)
-
-    def test_dynamic_tree_config_derives_thresholds_from_branching_factor(self) -> None:
-        config = DynamicTreeConfig(branching_factor=10, max_depth=4)
-
-        self.assertEqual(config.max_skills_per_node, 15)
-        self.assertEqual(config.expand_threshold, 7)
-        self.assertEqual(config.early_stop_skill_count, 17)
-        self.assertEqual(config.lazy_split_threshold, 19)
-        self.assertEqual(config.classification_batch_size, 60)
-        self.assertEqual(config.structure_sample_size, 120)
+    def test_tree_structure_uses_configured_capacity_multiplier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            builder = TreeBuilder(
+                tmpdir, config=RetrievalBuildConfig(structure={
+                    "branching_factor": 10, "max_depth": 4,
+                    "max_capabilities_per_node_multiplier": 2.5,
+                }), model=SimpleNamespace(invoke=lambda **kwargs: None),
+            )
+            self.assertEqual(builder.config.max_skills_per_node, 25)
+            self.assertEqual(builder.max_workers, 2)
+            engine = TreeExpansionEngine(builder)
+            self.assertTrue(engine._should_force_leaf(depth=1, skill_count=25))
+            self.assertFalse(engine._should_force_leaf(depth=1, skill_count=26))
 
     def test_build_tree_keeps_output_path_as_second_positional_argument(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             skills_dir = root / "skills"
             skills_dir.mkdir()
-            output_path = root / "tree.yaml"
-
-            result = build_tree(skills_dir, output_path, client=object(), model="fake-tree-model")
-
+            result = build_tree(skills_dir, root / "tree.yaml", model=SimpleNamespace(invoke=lambda **kwargs: None))
             self.assertEqual(result, {})
-
-    def test_tree_builder_keeps_config_as_third_positional_argument(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            skills_dir = root / "skills"
-            skills_dir.mkdir()
-            output_path = root / "tree.yaml"
-            config = DynamicTreeConfig(branching_factor=3, max_depth=2)
-
-            builder = TreeBuilder(skills_dir, output_path, config, client=object(), model="fake-tree-model")
-
-            self.assertEqual(builder.config.branching_factor, 3)
 
     def test_normalize_root_categories_accepts_string_dict_and_nested_children(self) -> None:
         categories = normalize_root_categories(
@@ -93,8 +76,9 @@ class TreeBuilderConfigTests(unittest.TestCase):
 
 class _FakeTreeBuilder:
     def __init__(self) -> None:
-        self.config = DynamicTreeConfig(
-            branching_factor=0,
+        self.config = ResolvedTreeStructure(
+            branching_factor=2,
+            max_skills_per_node=0,
             max_depth=4,
             root_categories={
                 "development": {

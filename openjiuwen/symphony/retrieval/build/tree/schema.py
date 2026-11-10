@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional, TypedDict, Unpack
 
 from .json_parser import parse_json_from_response as _parse_json_from_response
 from .root_categories import FIXED_ROOT_CATEGORIES as _FIXED_ROOT_CATEGORIES
-from .search_models import MultiLevelSearchResult as _MultiLevelSearchResult
-from .search_models import SearchStep as _SearchStep
 
 parse_json_from_response = _parse_json_from_response
 FIXED_ROOT_CATEGORIES = _FIXED_ROOT_CATEGORIES
-MultiLevelSearchResult = _MultiLevelSearchResult
-SearchStep = _SearchStep
 
 _Identifier = TypedDict("_Identifier", {"id": str})
 
@@ -38,34 +34,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = PROJECT_ROOT / "data" / "skills"
 DEFAULT_TREE_OUTPUT_PATH = PROJECT_ROOT / "data" / "capability_trees" / "tree.yaml"
 
-BRANCHING_FACTOR = 8
-MAX_DEPTH = 6
-
-TREE_BUILD_MAX_WORKERS = 1
-TREE_BUILD_CACHING = False
-TREE_BUILD_NUM_RETRIES = 2
-TREE_BUILD_TIMEOUT = 180.0
-TREE_BUILD_CONTEXT_WINDOW = 0
-TREE_BUILD_MAX_OUTPUT_TOKENS = 0
-TREE_BUILD_POSTPROCESS_ENABLED = True
-TREE_BUILD_POSTPROCESS_MAX_PASSES = 1
-TREE_BUILD_POSTPROCESS_MIN_SKILLS = 6
-TREE_BUILD_EQUIV_GROUPING_ENABLED = False
-TREE_BUILD_EQUIV_MAX_GROUPS_PER_PARENT = 6
-TREE_BUILD_EQUIV_ALLOW_SINGLETON_GROUPS = True
-TREE_BUILD_EQUIV_MIN_LEXICAL_SIMILARITY = 0.0
-TREE_BUILD_SKILL_PROFILES_ENABLED = False
-TREE_BUILD_SKILL_PROFILE_SELECT_RULES_ENABLED = True
-TREE_BUILD_SKILL_PROFILE_BATCH_SIZE = 48
-TREE_BUILD_SKILL_PROFILE_DESCRIPTION_LIMIT = 140
-TREE_BUILD_SKILL_PROFILE_RULE_LIMIT = 120
-
-MAX_SKILLS_PER_NODE_MULTIPLIER = 1.5
-EXPAND_THRESHOLD_MULTIPLIER = 0.7
-EARLY_STOP_MULTIPLIER = 1.7
-LAZY_SPLIT_MULTIPLIER = 1.3
-CLASSIFICATION_BATCH_MULTIPLIER = 6
-STRUCTURE_SAMPLE_MULTIPLIER = 12
 FALLBACK_CATEGORY_ID_HASH_LENGTH = 12
 
 
@@ -148,89 +116,13 @@ def normalize_root_categories(raw_categories) -> Optional[dict]:
 
 
 @dataclass(frozen=True)
-class TreeBuildConfig:
-    max_workers: int = TREE_BUILD_MAX_WORKERS
-    caching: bool = TREE_BUILD_CACHING
-    num_retries: int = TREE_BUILD_NUM_RETRIES
-    timeout: float = TREE_BUILD_TIMEOUT
-    context_window: int = TREE_BUILD_CONTEXT_WINDOW
-    max_output_tokens: int = TREE_BUILD_MAX_OUTPUT_TOKENS
-    postprocess_enabled: bool = TREE_BUILD_POSTPROCESS_ENABLED
-    postprocess_max_passes: int = TREE_BUILD_POSTPROCESS_MAX_PASSES
-    postprocess_min_skills: int = TREE_BUILD_POSTPROCESS_MIN_SKILLS
-    equiv_grouping_enabled: bool = TREE_BUILD_EQUIV_GROUPING_ENABLED
-    equiv_max_groups_per_parent: int = TREE_BUILD_EQUIV_MAX_GROUPS_PER_PARENT
-    equiv_allow_singleton_groups: bool = TREE_BUILD_EQUIV_ALLOW_SINGLETON_GROUPS
-    equiv_min_lexical_similarity: float = TREE_BUILD_EQUIV_MIN_LEXICAL_SIMILARITY
-    deterministic_prompts: bool = True
-    discovery_seed: int = 42
-    prompt_fingerprint_version: str = "v1"
-    cache_observability: bool = True
-    skill_profiles_enabled: bool = TREE_BUILD_SKILL_PROFILES_ENABLED
-    skill_profile_select_rules_enabled: bool = TREE_BUILD_SKILL_PROFILE_SELECT_RULES_ENABLED
-    skill_profile_batch_size: int = TREE_BUILD_SKILL_PROFILE_BATCH_SIZE
-    skill_profile_description_limit: int = TREE_BUILD_SKILL_PROFILE_DESCRIPTION_LIMIT
-    skill_profile_rule_limit: int = TREE_BUILD_SKILL_PROFILE_RULE_LIMIT
-    classify_batch_cap: int = 20
+class ResolvedTreeStructure:
+    """Execution-only normalized structure; policy defaults live in config.py."""
 
-
-@dataclass(frozen=True)
-class TreeManagerConfig:
-    branching_factor: int = BRANCHING_FACTOR
-    max_depth: int = MAX_DEPTH
-    root_categories: Optional[dict] = None
-    build: TreeBuildConfig = field(default_factory=TreeBuildConfig)
-
-
-@dataclass
-class DynamicTreeConfig:
-    branching_factor: int = BRANCHING_FACTOR
-    max_depth: int = MAX_DEPTH
-    root_categories: Optional[dict] = None
-    rebalance_interval: int = 50
-
-    def _scaled(self, multiplier: float, seed: Optional[int] = None) -> int:
-        anchor = self.branching_factor if seed is None else seed
-        return int(anchor * multiplier)
-
-    def _derived_value(self, key: str) -> int:
-        if key == "max_skills_per_node":
-            return self._scaled(MAX_SKILLS_PER_NODE_MULTIPLIER)
-        if key == "expand_threshold":
-            return self._scaled(EXPAND_THRESHOLD_MULTIPLIER)
-        if key == "early_stop_skill_count":
-            return self._scaled(EARLY_STOP_MULTIPLIER)
-        if key == "lazy_split_threshold":
-            return self._scaled(LAZY_SPLIT_MULTIPLIER, self.max_skills_per_node)
-        if key == "classification_batch_size":
-            return self._scaled(CLASSIFICATION_BATCH_MULTIPLIER)
-        if key == "structure_sample_size":
-            return self._scaled(STRUCTURE_SAMPLE_MULTIPLIER)
-        raise KeyError(key)
-
-    @property
-    def max_skills_per_node(self) -> int:
-        return self._derived_value("max_skills_per_node")
-
-    @property
-    def expand_threshold(self) -> int:
-        return self._derived_value("expand_threshold")
-
-    @property
-    def early_stop_skill_count(self) -> int:
-        return self._derived_value("early_stop_skill_count")
-
-    @property
-    def lazy_split_threshold(self) -> int:
-        return self._derived_value("lazy_split_threshold")
-
-    @property
-    def classification_batch_size(self) -> int:
-        return self._derived_value("classification_batch_size")
-
-    @property
-    def structure_sample_size(self) -> int:
-        return self._derived_value("structure_sample_size")
+    branching_factor: int
+    max_depth: int
+    root_categories: Optional[dict]
+    max_skills_per_node: int
 
 
 class Skill:

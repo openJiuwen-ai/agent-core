@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from openjiuwen.symphony.config import OrchestrationConfig
+
 import asyncio
 import hashlib
 import json
@@ -21,7 +23,7 @@ from openjiuwen.symphony import (
     FingerprintService,
     GraphMutationResult,
     OrchestrationService,
-    SkillGraphUpdater,
+    CapabilityGraphUpdater,
     SourceSnapshot,
     SymphonyGraphEngine,
 )
@@ -112,7 +114,7 @@ class _InternalFingerprintService:
         self.provider = provider
         self.calls = 0
 
-    async def build(self, *, force: bool = False) -> FingerprintArtifact:
+    async def build(self, *, force: bool = False, progress_callback=None) -> FingerprintArtifact:
         del force
         self.calls += 1
         snapshot, fingerprints = await self.provider.inventory_snapshot()
@@ -130,7 +132,7 @@ def _service(
         graph_artifact_root=tmp_path,
         capability_provider=provider,
         model=model,
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
         fingerprint_service=fingerprint_service,
     )
 
@@ -146,7 +148,7 @@ def _mutation_code(exc_info: pytest.ExceptionInfo[BaseError]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_add_skills_publishes_one_version_and_replay_is_idempotent(tmp_path: Path) -> None:
+async def test_add_capabilities_publishes_one_version_and_replay_is_idempotent(tmp_path: Path) -> None:
     text_output = CapabilityIO(name="text", type="text")
     text_input = CapabilityIO(name="text", type="text", required=True)
     extract = _fingerprint("extract", "extract-v1", outputs=(text_output,))
@@ -158,19 +160,19 @@ async def test_add_skills_publishes_one_version_and_replay_is_idempotent(tmp_pat
     initial = await service.build()
     target_snapshot = provider.replace("snapshot-2", (extract, summarize))
 
-    result = await graph_engine.add_skills(
+    result = await graph_engine.add_capabilities(
         ["summarize"],
         request_id="add-summarize",
         source_revision=target_snapshot.snapshot_id,
     )
-    replay = await graph_engine.add_skills(
+    replay = await graph_engine.add_capabilities(
         ["summarize"],
         request_id="add-summarize",
         source_revision=target_snapshot.snapshot_id,
     )
 
-    assert isinstance(graph_engine, SkillGraphUpdater)
-    assert not isinstance(service, SkillGraphUpdater)
+    assert isinstance(graph_engine, CapabilityGraphUpdater)
+    assert not isinstance(service, CapabilityGraphUpdater)
     assert result == replay
     assert result.status == "published"
     assert result.previous_version == initial.version
@@ -183,7 +185,7 @@ async def test_add_skills_publishes_one_version_and_replay_is_idempotent(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_add_skills_builds_old_to_new_and_new_to_new_edges_in_one_version(tmp_path: Path) -> None:
+async def test_add_capabilities_builds_old_to_new_and_new_to_new_edges_in_one_version(tmp_path: Path) -> None:
     raw = _fingerprint(
         "raw",
         "raw-v1",
@@ -205,7 +207,7 @@ async def test_add_skills_builds_old_to_new_and_new_to_new_edges_in_one_version(
     await service.build()
     target_snapshot = provider.replace("snapshot-2", (raw, translate, publish))
 
-    result = await _engine(service).add_skills(
+    result = await _engine(service).add_capabilities(
         ["translate", "publish"],
         request_id="add-translation-pipeline",
         source_revision=target_snapshot.snapshot_id,
@@ -221,7 +223,7 @@ async def test_add_skills_builds_old_to_new_and_new_to_new_edges_in_one_version(
 
 
 @pytest.mark.asyncio
-async def test_update_skills_recomputes_incident_edges_and_preserves_other_cache(tmp_path: Path) -> None:
+async def test_update_capabilities_recomputes_incident_edges_and_preserves_other_cache(tmp_path: Path) -> None:
     text_output = CapabilityIO(name="text", type="text")
     text_input = CapabilityIO(name="text", type="text", required=True)
     extract = _fingerprint("extract", "extract-v1", outputs=(text_output,))
@@ -238,7 +240,7 @@ async def test_update_skills_recomputes_incident_edges_and_preserves_other_cache
         outputs=(CapabilityIO(name="image", type="image"),),
     )
     target_snapshot = provider.replace("snapshot-2", (changed, summarize))
-    result = await _engine(service).update_skills(
+    result = await _engine(service).update_capabilities(
         ["extract"],
         request_id="update-extract",
         source_revision=target_snapshot.snapshot_id,
@@ -269,7 +271,7 @@ async def test_non_graph_fingerprint_update_reuses_relation_cache(tmp_path: Path
     )
     target_snapshot = provider.replace("snapshot-2", (changed, summarize))
 
-    result = await _engine(service).update_skills(
+    result = await _engine(service).update_capabilities(
         ["extract"],
         request_id="quality-only-update",
         source_revision=target_snapshot.snapshot_id,
@@ -282,7 +284,7 @@ async def test_non_graph_fingerprint_update_reuses_relation_cache(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_delete_skills_removes_node_edges_and_lookup_references(tmp_path: Path) -> None:
+async def test_delete_capabilities_removes_node_edges_and_lookup_references(tmp_path: Path) -> None:
     text_output = CapabilityIO(name="text", type="text")
     text_input = CapabilityIO(name="text", type="text", required=True)
     extract = _fingerprint("extract", "extract-v1", outputs=(text_output,))
@@ -292,7 +294,7 @@ async def test_delete_skills_removes_node_edges_and_lookup_references(tmp_path: 
     await service.build()
     target_snapshot = provider.replace("snapshot-2", (extract,))
 
-    result = await _engine(service).delete_skills(
+    result = await _engine(service).delete_capabilities(
         ["summarize"],
         request_id="delete-summarize",
         source_revision=target_snapshot.snapshot_id,
@@ -312,7 +314,7 @@ async def test_update_noop_does_not_create_a_graph_version(tmp_path: Path) -> No
     service = _service(tmp_path, provider, _MatcherLLM())
     initial = await service.build()
 
-    result = await _engine(service).update_skills(
+    result = await _engine(service).update_capabilities(
         ["extract"],
         request_id="noop-extract",
         source_revision=provider.snapshot.snapshot_id,
@@ -336,7 +338,7 @@ async def test_unrelated_provider_change_rejects_whole_batch(tmp_path: Path) -> 
     target_snapshot = provider.replace("snapshot-2", (first, second, third))
 
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second"],
             request_id="incomplete-add",
             source_revision=target_snapshot.snapshot_id,
@@ -354,7 +356,7 @@ async def test_operation_preconditions_are_derived_from_internal_graph_state(tmp
     await service.build()
 
     with pytest.raises(BaseError) as already_exists:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["first"],
             request_id="add-existing",
             source_revision=provider.snapshot.snapshot_id,
@@ -362,7 +364,7 @@ async def test_operation_preconditions_are_derived_from_internal_graph_state(tmp
     assert _mutation_code(already_exists) == "already_exists"
 
     with pytest.raises(BaseError) as not_found:
-        await _engine(service).update_skills(
+        await _engine(service).update_capabilities(
             ["missing"],
             request_id="update-missing",
             source_revision=provider.snapshot.snapshot_id,
@@ -385,7 +387,7 @@ async def test_matcher_failure_leaves_active_graph_unchanged(tmp_path: Path) -> 
     model.failure = RuntimeError("matcher unavailable")
 
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["summarize"],
             request_id="matcher-failure",
             source_revision=target_snapshot.snapshot_id,
@@ -412,7 +414,7 @@ async def test_framework_matcher_failure_preserves_original_error(tmp_path: Path
     model.failure = error
 
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["summarize"],
             request_id="framework-matcher-failure",
             source_revision=target_snapshot.snapshot_id,
@@ -432,14 +434,14 @@ async def test_request_id_cannot_be_reused_for_a_different_mutation(tmp_path: Pa
     service = _service(tmp_path, provider, _MatcherLLM())
     await service.build()
     target_snapshot = provider.replace("snapshot-2", (first, second))
-    await _engine(service).add_skills(
+    await _engine(service).add_capabilities(
         ["second"],
         request_id="shared-request-id",
         source_revision=target_snapshot.snapshot_id,
     )
 
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["different"],
             request_id="shared-request-id",
             source_revision=target_snapshot.snapshot_id,
@@ -456,7 +458,7 @@ async def test_idempotent_replay_survives_service_restart(tmp_path: Path) -> Non
     first_service = _service(tmp_path, provider, _MatcherLLM())
     await first_service.build()
     target_snapshot = provider.replace("snapshot-2", (first, second))
-    published = await _engine(first_service).add_skills(
+    published = await _engine(first_service).add_capabilities(
         ["second"],
         request_id="restart-safe-request",
         source_revision=target_snapshot.snapshot_id,
@@ -464,7 +466,7 @@ async def test_idempotent_replay_survives_service_restart(tmp_path: Path) -> Non
 
     restarted_model = _MatcherLLM()
     restarted_service = _service(tmp_path, provider, restarted_model)
-    replay = await _engine(restarted_service).add_skills(
+    replay = await _engine(restarted_service).add_capabilities(
         ["second"],
         request_id="restart-safe-request",
         source_revision=target_snapshot.snapshot_id,
@@ -483,7 +485,7 @@ async def test_invalid_batches_are_rejected_before_inventory_mutation(tmp_path: 
     inventory_calls_after_build = provider.inventory_calls
 
     with pytest.raises(BaseError) as empty_batch:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             [],
             request_id="empty-batch",
             source_revision=provider.snapshot.snapshot_id,
@@ -491,7 +493,7 @@ async def test_invalid_batches_are_rejected_before_inventory_mutation(tmp_path: 
     assert _mutation_code(empty_batch) == "empty_batch"
 
     with pytest.raises(BaseError) as duplicate:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second", "second"],
             request_id="duplicate-batch",
             source_revision=provider.snapshot.snapshot_id,
@@ -499,7 +501,7 @@ async def test_invalid_batches_are_rejected_before_inventory_mutation(tmp_path: 
     assert _mutation_code(duplicate) == "duplicate_capability"
 
     with pytest.raises(BaseError) as scalar_ids:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             "second",  # type: ignore[arg-type]
             request_id="scalar-ids",
             source_revision=provider.snapshot.snapshot_id,
@@ -507,7 +509,7 @@ async def test_invalid_batches_are_rejected_before_inventory_mutation(tmp_path: 
     assert _mutation_code(scalar_ids) == "invalid_request"
 
     with pytest.raises(BaseError) as blank_revision:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second"],
             request_id="blank-revision",
             source_revision=" ",
@@ -525,7 +527,7 @@ async def test_source_snapshot_mismatch_keeps_active_version(tmp_path: Path) -> 
     initial = await service.build()
     provider.replace("snapshot-2", (first, second))
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second"],
             request_id="snapshot-mismatch",
             source_revision="different-snapshot",
@@ -543,13 +545,13 @@ async def test_legacy_provider_requires_full_rebuild_for_mutations(tmp_path: Pat
         graph_artifact_root=tmp_path,
         capability_provider=[first],
         model=_MatcherLLM(),
-        graph_config={"require_consensus": False},
+        config=OrchestrationConfig(build={'matching': {'require_consensus': False}}),
     )
     await service.build()
     service.capability_provider = [first, second]
 
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second"],
             request_id="legacy-provider-add",
             source_revision="snapshot-2",
@@ -573,7 +575,7 @@ async def test_service_resolves_target_fingerprints_internally(tmp_path: Path) -
     await service.build()
     target_snapshot = provider.replace("snapshot-2", (first, second))
 
-    result = await _engine(service).add_skills(
+    result = await _engine(service).add_capabilities(
         ["second"],
         request_id="internal-fingerprint-build",
         source_revision=target_snapshot.snapshot_id,
@@ -581,7 +583,8 @@ async def test_service_resolves_target_fingerprints_internally(tmp_path: Path) -
 
     assert result.status == "published"
     assert fingerprint_service.calls == 2
-    assert provider.inventory_calls == 2
+    # Build and mutation each read their input and recheck it before publication.
+    assert provider.inventory_calls == 4
 
 
 @pytest.mark.asyncio
@@ -599,7 +602,7 @@ async def test_publish_failure_keeps_active_graph_unchanged(tmp_path: Path) -> N
 
     service.prepare_artifact = fail_before_activate
     with pytest.raises(BaseError) as exc_info:
-        await _engine(service).add_skills(
+        await _engine(service).add_capabilities(
             ["second"],
             request_id="publish-failure",
             source_revision=target_snapshot.snapshot_id,
@@ -635,12 +638,12 @@ async def test_concurrent_services_publish_at_most_one_mutation(tmp_path: Path) 
     first_service.prepare_artifact = wait_for_competing_publish
     second_service.prepare_artifact = wait_for_competing_publish
     outcomes = await asyncio.gather(
-        _engine(first_service).add_skills(
+        _engine(first_service).add_capabilities(
             ["second"],
             request_id="concurrent-add-1",
             source_revision=target_snapshot.snapshot_id,
         ),
-        _engine(second_service).add_skills(
+        _engine(second_service).add_capabilities(
             ["second"],
             request_id="concurrent-add-2",
             source_revision=target_snapshot.snapshot_id,
