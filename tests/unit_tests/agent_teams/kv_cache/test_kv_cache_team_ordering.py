@@ -350,7 +350,10 @@ async def test_resume_from_pause_keeps_baseline_gate_reset_without_kvc_action(
 ) -> None:
     events: list[str] = []
     manager = TeamRuntimeManager()
-    agent = SimpleNamespace()
+    capability_calls: list[object] = []
+    agent = SimpleNamespace(
+        apply_runtime_capabilities=lambda runtime_spec: capability_calls.append(runtime_spec)
+    )
     entry = ActiveTeam("team-a", agent, "sess-a", RuntimeState.PAUSED, _Gate(events))
     await manager.pool.add(entry)
 
@@ -359,9 +362,10 @@ async def test_resume_from_pause_keeps_baseline_gate_reset_without_kvc_action(
 
     monkeypatch.setattr(TeamRuntimeManager, "_pre_run_with_inputs", staticmethod(_pre_run))
 
+    tip = SimpleNamespace(team_name="team-a")
     activation = await manager._apply_action(
         RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
-        spec=SimpleNamespace(team_name="team-a"),
+        spec=tip,
         team_session=SimpleNamespace(get_session_id=lambda: "sess-a"),
         pool_entry=entry,
         inputs={"query": "hello"},
@@ -370,6 +374,7 @@ async def test_resume_from_pause_keeps_baseline_gate_reset_without_kvc_action(
 
     assert activation.agent is agent
     assert entry.state is RuntimeState.RUNNING
+    assert capability_calls == [tip]
     assert events == ["gate reset", "first inference"]
 
 
@@ -380,7 +385,8 @@ async def test_resume_without_actionable_record_skips_prefetch_and_resets_gate(
     events: list[str] = []
     manager = TeamRuntimeManager()
     agent = SimpleNamespace(
-        resources=SimpleNamespace(team_kv_cache_registry=_ActionableRegistry(events, actionable=False))
+        resources=SimpleNamespace(team_kv_cache_registry=_ActionableRegistry(events, actionable=False)),
+        apply_runtime_capabilities=lambda _runtime_spec: None,
     )
     entry = ActiveTeam("team-a", agent, "sess-a", RuntimeState.PAUSED, _Gate(events))
     await manager.pool.add(entry)

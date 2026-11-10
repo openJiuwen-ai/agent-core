@@ -159,6 +159,11 @@ class FakeTeamAgent:
         self.invoke_calls = 0
         self.stream_calls = 0
         self.stream_inputs: list[Any] = []
+        self.apply_runtime_capabilities_calls: list[Any] = []
+
+    def apply_runtime_capabilities(self, runtime_spec) -> None:
+        """No-op stub for RESUME_FROM_PAUSE tip→live capability overlay."""
+        self.apply_runtime_capabilities_calls.append(runtime_spec)
 
     def persist_session_manifest(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
@@ -824,6 +829,7 @@ async def test_runner_same_session_after_pause_resumes_paused_runtime(
     assert agent.pause_calls == 1
     assert agent.stream_calls == 2
     assert agent.invoke_calls == 2
+    assert agent.apply_runtime_capabilities_calls == [spec]
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -1121,6 +1127,118 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
     handle = agent._state.team_member
     assert handle is not None
     assert handle.member_name == "leader"
+
+
+def test_team_agent_recover_from_session_refreshes_stale_member_model_from_tip():
+    """Tip pool credential rotation must reach the recovered leader.
+
+    ``configure`` prefers ``ctx.member_model`` over ``agents['leader'].model``.
+    Without refreshing that field after tip pool sync, leader would keep the
+    checkpoint api_key while teammates resolve against the tip pool.
+    """
+    from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, TeamModelConfig
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+
+    session_id = f"recover_model_{uuid.uuid4().hex}"
+    session = create_agent_team_session(session_id=session_id, team_id="model_team")
+    write_team_namespace(
+        session,
+        "model_team",
+        {
+            "spec": {
+                "team_name": "model_team",
+                "agents": {
+                    "leader": {
+                        "model": {
+                            "model_client_config": {
+                                "client_provider": "OpenAI",
+                                "api_key": "checkpoint-leader-key",
+                                "api_base": "http://old-leader",
+                                "model_name": "shared-model",
+                                "verify_ssl": False,
+                            }
+                        }
+                    },
+                },
+                "model_pool": [
+                    {
+                        "model_name": "shared-model",
+                        "api_key": "old-pool-key",
+                        "api_base_url": "http://old-pool",
+                        "api_provider": "OpenAI",
+                    }
+                ],
+                "model_pool_strategy": "by_model_name",
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": "model_team",
+                    "display_name": "model_team",
+                    "leader_member_name": "leader",
+                    "model_pool": [
+                        {
+                            "model_name": "shared-model",
+                            "api_key": "old-pool-key",
+                            "api_base_url": "http://old-pool",
+                            "api_provider": "OpenAI",
+                        }
+                    ],
+                    "model_pool_strategy": "by_model_name",
+                },
+                "member_model": {
+                    "model_client_config": {
+                        "client_provider": "OpenAI",
+                        "api_key": "old-pool-key",
+                        "api_base": "http://old-pool",
+                        "model_name": "shared-model",
+                        "verify_ssl": False,
+                    }
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+    tip = TeamAgentSpec(
+        team_name="model_team",
+        agents={
+            "leader": DeepAgentSpec(
+                model=TeamModelConfig(
+                    model_client_config=ModelClientConfig(
+                        client_provider="OpenAI",
+                        api_key="tip-leader-key",
+                        api_base="http://tip-leader",
+                        model_name="shared-model",
+                        verify_ssl=False,
+                    )
+                )
+            )
+        },
+        model_pool=[
+            ModelPoolEntry(
+                model_name="shared-model",
+                api_key="new-pool-key",
+                api_base_url="http://new-pool",
+                api_provider="OpenAI",
+            )
+        ],
+        model_pool_strategy="by_model_name",
+    )
+
+    agent = TeamAgent.recover_from_session(session, "model_team", runtime_spec=tip)
+
+    ctx = agent.runtime_context
+    assert ctx is not None
+    assert ctx.member_model is not None
+    assert ctx.member_model.model_client_config.api_key == "new-pool-key"
+    assert ctx.member_model.model_client_config.api_base == "http://new-pool"
+    assert [entry.api_key for entry in ctx.team_spec.model_pool] == ["new-pool-key"]
 
 
 
