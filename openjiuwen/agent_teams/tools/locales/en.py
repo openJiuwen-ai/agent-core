@@ -386,6 +386,11 @@ STRINGS: dict[str, str] = {
     "send_message.error_leader_to_user": (
         "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
     ),
+    "send_message.error_member_shutdown": (
+        "Member {to} is shut down. Shutdown is irreversible — the member will not be "
+        "restarted and cannot receive any message. Reassign its leftover work to other "
+        "roster members (create_task with a different assignee / send_message to them)."
+    ),
     "send_message.error_content_too_long": (
         "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
         "artifact, not a message. Write it to a file under the shared team workspace "

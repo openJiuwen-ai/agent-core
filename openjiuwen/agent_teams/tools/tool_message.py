@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -149,6 +150,14 @@ class _SendMessageBase(TeamTool, ABC):
         if self._team and to != USER_PSEUDO_MEMBER_NAME:
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
+            # SHUTDOWN 成员不可达也不可经消息拉起（spawn-on-delivery
+            # 的 CAS 只认 UNSTARTED→STARTING）——照写邮箱只会让 leader 拿到
+            # delivered 假成功、消息成死信。显式拒绝并引导改派。
+            if await self._team.get_member_status(to) == MemberStatus.SHUTDOWN.value:
+                return ToolOutput(
+                    success=False,
+                    error=self.t("send_message", "error_member_shutdown", to=to),
+                )
         await self._auto_start_members([to])
         msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
         if not msg_id:
@@ -220,6 +229,13 @@ class _SendMessageBase(TeamTool, ABC):
             if self._team:
                 if not await self._team.member_exists(name):
                     failed.append({"to": name, "reason": f"Member '{name}' not found"})
+                    continue
+                # 同 _send——SHUTDOWN 成员显式拒收，不进 delivered 假成功。
+                if await self._team.get_member_status(name) == MemberStatus.SHUTDOWN.value:
+                    failed.append({
+                        "to": name,
+                        "reason": self.t("send_message", "error_member_shutdown", to=name),
+                    })
                     continue
             valid.append(name)
 
