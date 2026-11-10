@@ -116,7 +116,7 @@ async def test_missing_expert_graph_allows_inline_plan(mode, tmp_path, monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("evidence_format", ["mapping", "fields"])
-async def test_expert_task_plan_uses_published_ports(tmp_path, monkeypatch, expert_artifacts, evidence_format):
+async def test_expert_task_plan_exposes_published_handoff_hints(tmp_path, monkeypatch, expert_artifacts, evidence_format):
     support = expert_artifacts.graph["edges"][0]["evidence"]["supporting_fields"]
     if evidence_format == "mapping":
         support["port_mappings"][0:0] = [
@@ -134,10 +134,17 @@ async def test_expert_task_plan_uses_published_ports(tmp_path, monkeypatch, expe
         ],
         "handoffs": [_handoff("research", "report")],
     }
-    service, _ = _service(tmp_path, draft, monkeypatch, expert_artifacts)
+    service, model = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
     graph = (await service.plan_expert_tasks("Research and report"))["planned_graph"]["graph"]
 
+    assert model.request["published_expert_handoffs"] == [{
+        "source_id": "research",
+        "target_id": "report",
+        "port_mappings": support.get("port_mappings", []),
+        "source_outputs": support.get("source_outputs", []),
+        "target_inputs": support.get("target_inputs", []),
+    }]
     assert graph["metadata"]["status"] == "ready"
     assert graph["edges"] == [{
         "source": "task-1", "target": "task-2", "relation": "can_feed",
@@ -146,27 +153,61 @@ async def test_expert_task_plan_uses_published_ports(tmp_path, monkeypatch, expe
 
 
 @pytest.mark.asyncio
+async def test_expert_task_plan_uses_task_local_ports_for_expert_without_published_ports(tmp_path, monkeypatch):
+    expert_id = "bilibili-content-strategist"
+    artifacts = GraphArtifacts(
+        tmp_path, {}, [{"id": expert_id, "name": "Bilibili content strategist", "inputs": [], "outputs": []}], {}, {},
+    )
+    checklist = _port("platform_rules_checklist", "json")
+    script = _port("bilibili_shooting_script", "markdown")
+    draft = {
+        "status": "ready",
+        "tasks": [
+            _task("research-rules", outputs=[checklist]),
+            _task("write-script", expert_id=expert_id, inputs=[checklist], outputs=[script]),
+            _task("independent-review", inputs=[script]),
+        ],
+        "handoffs": [
+            _handoff("research-rules", "write-script", checklist["name"], checklist["name"]),
+            _handoff("write-script", "independent-review", script["name"], script["name"]),
+        ],
+    }
+    service, _ = _service(tmp_path, draft, monkeypatch, artifacts)
+
+    result = await service.plan_expert_tasks("Check platform rules, write the script, and review it", [expert_id])
+    graph = result["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["nodes"]["task-2"]["metadata"]["expert_id"] == expert_id
+    assert graph["nodes"]["task-3"]["metadata"]["type"] == "inline"
+    assert graph["edges"] == [
+        {
+            "source": "task-1", "target": "task-2", "relation": "can_feed",
+            "source_output": "platform_rules_checklist", "target_input": "platform_rules_checklist",
+        },
+        {
+            "source": "task-2", "target": "task-3", "relation": "can_feed",
+            "source_output": "bilibili_shooting_script", "target_input": "bilibili_shooting_script",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("tasks", "handoffs", "reason"), [
     (
         [_task("first", expert_id="research", outputs=[_port()]),
-         _task("second", expert_id="research", inputs=[_port()])],
-        [_handoff("first", "second")],
-        "no matching port",
-    ),
-    (
-        [_task("first", expert_id="research", outputs=[_port("fabricated")]),
          _task("second", inputs=[_port()])],
-        [_handoff("first", "second", output="fabricated")],
-        "no matching port",
+        [_handoff("first", "second", output="undeclared")],
+        "unknown task or port",
     ),
     (
-        [_task("first", expert_id="research", outputs=[_port()]),
+        [_task("first", outputs=[_port()]),
          _task("second", inputs=[_port(port_type="image")])],
         [_handoff("first", "second")],
         "incompatible types",
     ),
     (
-        [_task("first", inputs=[_port()], outputs=[_port()]),
+        [_task("first", expert_id="research", inputs=[_port()], outputs=[_port()]),
          _task("second", inputs=[_port()], outputs=[_port()])],
         [_handoff("first", "second"), _handoff("second", "first")],
         "cycle",
@@ -195,7 +236,7 @@ async def test_expert_task_plan_rejects_invalid_assignments(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep_edge", [False, True])
-async def test_expert_task_plan_rejects_unpublished_expert_handoff(tmp_path, monkeypatch, expert_artifacts, keep_edge):
+async def test_expert_task_plan_accepts_unpublished_expert_handoff(tmp_path, monkeypatch, expert_artifacts, keep_edge):
     if keep_edge:
         expert_artifacts.graph["edges"][0]["evidence"]["supporting_fields"] = {}
     else:
@@ -211,9 +252,13 @@ async def test_expert_task_plan_rejects_unpublished_expert_handoff(tmp_path, mon
     service, _ = _service(tmp_path, draft, monkeypatch, expert_artifacts)
 
     result = await service.plan_expert_tasks("Research and report", candidate_ids=["research", "report"])
+    graph = result["planned_graph"]["graph"]
 
-    assert result["planned_graph"]["graph"]["metadata"]["status"] == "no_plan"
-    assert "No published expert handoff" in result["planned_graph"]["graph"]["metadata"]["reason"]
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["edges"] == [{
+        "source": "task-1", "target": "task-2", "relation": "can_feed",
+        "source_output": "evidence", "target_input": "evidence",
+    }]
 
 
 @pytest.mark.asyncio

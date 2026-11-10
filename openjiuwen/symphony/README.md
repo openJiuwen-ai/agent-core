@@ -118,7 +118,7 @@ Skill 增量变更沿用 Skill 来源版本校验，并携带同一份已发布�
 
 `runtime.orchestration.plan_expert_tasks(query, candidate_ids=[...])` 为一个任务规划已安装专家和内联角色。它读取已发布的专家层，可用候选为空时仍可规划内联角色。宿主用 `expert_manifest_paths` 限定实时安装范围，并可沿用会话的规划模式。
 
-结果仍是 `planned_graph`，通过 `graph.metadata.plan_kind=expert_tasks` 标识。节点 ID 对应任务实例，`metadata.type` 区分 `expert` 和 `inline`。节点保存任务指令及输入输出，专家节点记录 `expert_id`，内联节点记录 `role`。每条 `can_feed` 边记录 `source_output` 和 `target_input`。专家间依赖需要已发布的交接证据。任务图用于返回分工和依赖计划，内联角色规格留给后续执行消费。
+结果仍是 `planned_graph`，通过 `graph.metadata.plan_kind=expert_tasks` 标识。节点 ID 对应任务实例，`metadata.type` 区分 `expert` 和 `inline`。节点保存任务指令及输入输出，专家节点记录 `expert_id`，内联节点记录 `role`。每条 `can_feed` 边引用本轮任务声明的 `source_output` 和 `target_input`。专家指纹端口和已发布的交接边供规划参考，专家可声明本轮需要的端口和交接。任务图须无环，纯内联角色之间的交接须通过端口类型检查。任务图用于返回分工和依赖计划，内联角色规格留给后续执行消费。
 
 ## 编排经验与宿主职责
 
