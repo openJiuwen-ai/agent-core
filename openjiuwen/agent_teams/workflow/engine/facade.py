@@ -36,10 +36,11 @@ from .seam import (
 # Harness re-exports (engine internals exposed under the public name). These are
 # eager because importing this module already imports the engine package.
 from .backends import AgentBackend, AgentResult, MockBackend
-from .errors import LintError, MetaError, SchemaError, WorkflowError
+from .errors import EngineError, LintError, MetaError, SchemaError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
-from .primitives import AgentSession, HumanSession
+from .primitives import AgentSession, HumanSession, verify
+from .verify import Reviewer, VerifyResult, VerifyVote
 from .runner import run_workflow
 from .runtime import Runtime
 
@@ -141,6 +142,10 @@ def log(message: Any) -> None:
 async def workflow(name_or_path: str, args: Any = None) -> Any:
     """Run another workflow inline (one level). Delegates to the current provider."""
     return await current_provider().workflow(name_or_path, args)
+
+
+# ``verify`` is re-exported directly (not a provider seam): it composes
+# ``agent()``, which already routes through the provider — so no Provider.verify.
 
 
 def agent_session(
@@ -247,8 +252,10 @@ def flatten_filter(xs: Sequence) -> list:
     return out
 
 
-__all__ = [
-    # script-facing primitives (the contract)
+#: Script-facing primitives (the contract). Besides ``from swarmflow import ...``,
+#: the loader pre-binds these into every workflow module's namespace, so a script
+#: that forgets the import still runs instead of dying on a ``NameError``.
+SCRIPT_PRIMITIVES: tuple[str, ...] = (
     "agent",
     "agent_session",
     "human_session",
@@ -262,9 +269,18 @@ __all__ = [
     "phase",
     "log",
     "workflow",
+    "verify",
+    "Reviewer",
+    "VerifyResult",
+    "VerifyVote",
     "budget",
     "compact",
     "flatten_filter",
+)
+
+__all__ = [
+    # script-facing primitives (the contract)
+    *SCRIPT_PRIMITIVES,
     # provider seam (custom engines / tests)
     "Provider",
     "BudgetView",
@@ -280,7 +296,7 @@ __all__ = [
     "AgentBackend",
     "AgentResult",
     "MockBackend",
-    "WorkflowError",
+    "EngineError",
     "MetaError",
     "LintError",
     "SchemaError",

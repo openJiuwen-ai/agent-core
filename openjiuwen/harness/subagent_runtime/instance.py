@@ -27,6 +27,37 @@ from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusRece
 from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 
+async def _plant_fork_seed(agent: Any, session: Any) -> None:
+    """Insert the fork seed ahead of the first user query, once."""
+    find_rails = getattr(agent, "find_rails_by_type", None)
+    if not callable(find_rails):
+        return
+    update_state = getattr(session, "update_state", None)
+    if not callable(update_state):
+        logger.warning(
+            "[SubagentInstance] fork seed not planted: session has no update_state",
+        )
+        return
+    from openjiuwen.harness.subagent_runtime.fork_rail import ForkInstructionRail
+
+    for rail in find_rails((ForkInstructionRail,)):
+        pending = list(getattr(rail, "pending_seed", None) or [])
+        if not pending:
+            continue
+        try:
+            result = update_state({"background_messages": pending})
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "[SubagentInstance] fork seed not planted: %s",
+                exc,
+            )
+            return
+        rail.pending_seed = []
+        return
+
+
 async def _close_session_quietly(session: Any) -> None:
     close_stream = getattr(session, "close_stream", None)
     if not callable(close_stream):
@@ -297,6 +328,7 @@ class SubagentInstance:
                         await self._on_turn_start(session)
                     if self._on_turn_stream_start is not None:
                         await self._on_turn_stream_start(op)
+                    await _plant_fork_seed(self._agent, session)
                     inputs = self._build_stream_inputs(op)
                     gen = self._agent.stream(inputs, session=session)
                     async with contextlib.aclosing(gen):
@@ -387,10 +419,36 @@ class SubagentInstance:
             raise asyncio.CancelledError()
 
     async def _finalize_turn_inner(self, session: Any, *, succeeded: bool) -> None:
+        await self._persist_child_context(session)
         await cleanup_subagent_task_resources(self._agent)
         await _close_session_quietly(session)
         if self._on_turn_finished is not None:
             await self._on_turn_finished(session, succeeded)
+
+    async def _persist_child_context(self, session: Any) -> None:
+        """Write the child conversation into the checkpointer before the worker drops it.
+
+        Resume reads this session. The stream path does not save contexts when the
+        caller already owns the session, so the seed and the fork's own turns would
+        otherwise stay only in memory.
+        """
+        react = getattr(self._agent, "_react_agent", None)
+        engine = getattr(react, "context_engine", None)
+        if engine is None or session is None:
+            return
+        try:
+            await engine.save_contexts(session)
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                result = commit()
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception as exc:
+            logger.warning(
+                "[SubagentInstance] failed to persist child context: subagent_id=%s error=%s",
+                self.subagent_id,
+                exc,
+            )
 
     async def _handle_shutdown(self, reason: str) -> None:
         if self._closed:

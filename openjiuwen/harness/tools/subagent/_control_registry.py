@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent import Session
+from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 
 if TYPE_CHECKING:
@@ -31,7 +32,13 @@ def get_subagent_control(parent_agent: "DeepAgent", session: Any) -> SubagentCon
         setattr(parent_agent, _CONTROL_ATTR, controls)
     control = controls.get(parent_session_id)
     if control is None:
-        control = SubagentControl(parent_agent, parent_session_id, parent_session=session)
+        config = getattr(parent_agent, "subagent_runtime_config", None)
+        control = SubagentControl(
+            parent_agent,
+            parent_session_id,
+            config=config if isinstance(config, SubagentRuntimeConfig) else None,
+            parent_session=session,
+        )
         control.hydrate()
         controls[parent_session_id] = control
     else:
