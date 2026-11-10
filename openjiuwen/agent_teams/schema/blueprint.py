@@ -44,6 +44,7 @@ from openjiuwen.agent_teams.schema.team import (
     ExternalCliMemberSpec,
     MemberSpecBase,
     TeamLifecycle,
+    TeamGoalSpec,
     TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
@@ -181,6 +182,15 @@ class LeaderSpec(MemberSpecBase):
     ``"codex"``) can drive a leader: its team tools need the leader's own
     backend, so they must be mounted in process. ``None`` (default) keeps the
     DeepAgent leader built from ``agents["leader"]``.
+    """
+    goal: Optional[TeamGoalSpec] = None
+    """Goal mode for the leader. ``None`` (default) keeps it off.
+
+    When set, the user's request becomes the leader's goal: the team is not
+    declared complete while that goal is still open, and once every member has
+    gone quiet the leader is driven to check the task board against the
+    request — adding work, or reporting it done for assessment. Not available
+    to a leader on a third-party harness (``cli_agent``).
     """
 
 
@@ -401,6 +411,16 @@ class TeamAgentSpec(BaseModel):
     nest (a leader task is depth 0, its subtasks depth 1, ...). Static
     configuration, no ``build_team`` override; ignored under
     ``dispatch_mode="autonomous"``. See F_128.
+    """
+    member_goal: Optional[TeamGoalSpec] = None
+    """Goal mode for the team's members. ``None`` (default) keeps it off.
+
+    When set, a member's goal is the task it started (claimed, started by the
+    scheduler, or plan-approved): it keeps working on it instead of going idle,
+    and its submission is assessed before the task leaves ``in_progress``.
+    Applies to locally run teammates; a member opts out with
+    ``TeamMemberSpec.goal=False`` or ``spawn_teammate(goal=false)``. Members on
+    a third-party harness, human members and bridge members are unaffected.
     """
     bootstrap_mode: Literal["leader", "framework"] = "leader"
     """Who materializes the team row, and how the leader receives its policy.
@@ -780,6 +800,8 @@ class TeamAgentSpec(BaseModel):
             )
         if self.enable_fork:
             raise ValueError(f"leader.cli_agent={cli_agent!r} does not support: enable_fork")
+        if self.leader.goal is not None:
+            raise ValueError(f"leader.cli_agent={cli_agent!r} does not support: leader.goal")
         return self
 
     @model_validator(mode="after")

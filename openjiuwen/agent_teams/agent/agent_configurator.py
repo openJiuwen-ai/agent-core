@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.goal import resolve_goal_spec, to_stop_config
 from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.messager import (
@@ -714,6 +715,7 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
+            TEAM_GOAL,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
@@ -806,6 +808,13 @@ class AgentConfigurator:
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
+
+        # Goal mode: a member's goal follows the task it started, so only
+        # members carry the task-tool rail; the leader's goal is the user's
+        # request and needs no tool hook.
+        goal_spec = resolve_goal_spec(spec, ctx)
+        if goal_spec is not None and ctx.role != TeamRole.LEADER and self.team_backend:
+            team_rail_specs.append(RailSpec(type=TEAM_GOAL, params={}))
 
         reliability_cfg = spec.reliability
         reliability_components = None
@@ -1006,6 +1015,7 @@ class AgentConfigurator:
             initial_plan_mode=is_team_plan_leader,
             build_context=member_build_context,
             task_event_tracker=self._resources.task_event_tracker,
+            goal=to_stop_config(goal_spec) if goal_spec is not None else None,
         )
 
         # A member's own model calls (decision / tool use / script generation)
@@ -1231,6 +1241,7 @@ class AgentConfigurator:
             enable_member_messaging=spec.enable_member_messaging,
             max_subtask_depth=spec.max_subtask_depth,
             enable_fork=spec.enable_fork,
+            enable_member_goal=spec.member_goal is not None,
             evolution_enabled=spec.evolution_enabled,
             member_workspace_prefix=spec.member_workspace_prefix,
             external_cli_agents=spec.external_cli_agents,

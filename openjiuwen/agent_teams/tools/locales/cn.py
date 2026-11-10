@@ -88,6 +88,10 @@ STRINGS: dict[str, str] = {
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
         "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
     ),
+    "spawn_teammate.goal": (
+        "该 teammate 是否以目标模式工作：开工的任务未提交前不会停下，提交前会被评估是否真的完成。"
+        "省略即跟随团队默认（开启）；仅在该成员只做答疑、待命等无需坚持到底的工作时传 false。"
+    ),
     "spawn_teammate.fork": (
         "从已有成员继承上下文，跳过重复的文件读取和搜索。"
         "true：继承调用者当前全部上下文。"

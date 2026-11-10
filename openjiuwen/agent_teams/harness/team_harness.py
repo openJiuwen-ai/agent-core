@@ -27,6 +27,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Optional,
 )
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TaskRevisionTracker
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.goal.schema import GoalStopConfig
     from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
@@ -68,8 +70,14 @@ class TeamHarness:
         member_name: Optional[str],
         initial_plan_mode: bool = False,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
     ) -> None:
         self._agent_spec = agent_spec
+        # Goal mode, applied to every native this harness builds (a stopped
+        # native is terminal, so each run cycle gets a fresh one).
+        self._goal = goal
+        self._goal_ready: Callable[[], Awaitable[bool]] | None = None
+        self._on_goal: Callable[..., Any] | None = None
         self._build_context = build_context
         self._native: Optional[NativeHarness] = native
         self._role = role
@@ -100,6 +108,7 @@ class TeamHarness:
         initial_plan_mode: bool = False,
         build_context: "BuildContext | None" = None,
         task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
     ) -> "TeamHarness":
         """Construct the native via forward construction and configure it.
 
@@ -120,6 +129,7 @@ class TeamHarness:
             member_name=member_name,
             initial_plan_mode=initial_plan_mode,
             task_event_tracker=task_event_tracker,
+            goal=goal,
         )
 
     # ------------------------------------------------------------------
@@ -146,12 +156,16 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
+        if self._goal is not None:
+            self._native.enable_goal(self._goal, ready=self._goal_ready)
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
+        if self._on_goal is not None:
+            await self._native.subscribe(on_goal=self._on_goal)
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child
         self._seed_initial_plan_mode(child)
@@ -424,6 +438,48 @@ class TeamHarness:
         """Register phase/round callbacks on the native (no-op before start)."""
         if self._native is not None:
             await self._native.subscribe(on_state=on_state, on_round=on_round)
+
+    # ------------------------------------------------------------------
+    # Goal mode
+    # ------------------------------------------------------------------
+
+    @property
+    def goal_enabled(self) -> bool:
+        """Whether this harness was built with goal mode on."""
+        return self._goal is not None
+
+    @property
+    def goal_manager(self) -> Any | None:
+        """The running native's goal manager; None when goal mode is off or not started."""
+        return self._native.goal_manager if self._native is not None else None
+
+    @property
+    def goal_session(self) -> Any | None:
+        """The session the running native keeps its goal on; None before start."""
+        return self._native.session if self._native is not None else None
+
+    def set_goal_hooks(
+        self,
+        *,
+        ready: Callable[[], Awaitable[bool]] | None = None,
+        on_goal: Callable[..., Any] | None = None,
+    ) -> None:
+        """Install the team's goal hooks; they apply from the next ``start``.
+
+        Args:
+            ready: Precondition a goal attempt waits for (the leader waits for
+                the team to go quiet). None lets an attempt start whenever
+                the member would otherwise go idle.
+            on_goal: Called with ``goal`` (the record as a dict, or None once
+                cleared) whenever the goal record changes.
+        """
+        self._goal_ready = ready
+        self._on_goal = on_goal
+
+    def nudge_goal(self) -> None:
+        """Ask the native to re-check whether a goal attempt should start."""
+        if self._native is not None and self._native.state is not HarnessState.TERMINATED:
+            self._native.nudge_goal()
 
     # ------------------------------------------------------------------
     # Interrupt-resume helpers
