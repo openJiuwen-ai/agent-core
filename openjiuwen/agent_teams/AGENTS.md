@@ -280,8 +280,9 @@ provider session/Turn 协议合并。
   `OPENJIUWEN_TEAM_JOIN`），`TeamAgent._setup_agent` 随后调 `bind_external_leader` 绑定
   `TeamContextTracker` 与 startup hook。leader 工具集、系统提示词、轨迹 recorder 都在每次
   `start(team_session)` 以当前 session 重建，工具由 leader 自己的 `TeamBackend` 构造并走进程内通道。
-  外部 Leader 没有 swarmflow / `async_task*` / fork / 团队记忆；`enable_swarmflow` / `enable_fork` 与它同开时
-  spec 校验拒绝。见 `S_27` 不变量 16–19 与 `F_20261110_1851_leader-external-harness`。
+  `enable_swarmflow` 的团队里 Leader 的 `swarmflow` / `async_task*` 由 `ExternalSwarmflowHost` 托管（宿主跨
+  run cycle 复用）。外部 Leader 没有 fork / 团队记忆；`enable_fork` 与它同开时 spec 校验拒绝。见 `S_27`
+  不变量 16–19 与 `F_20261110_1851_leader-external-harness`。
 - `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
   `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经
   `ClaudeCodeHarness(transport_factory=...)` 注入）、`options.py`（team 命名的 session id 助手）。

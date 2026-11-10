@@ -30,8 +30,9 @@ design_note: null
 - spec：`specs/agent_teams/S_27_external-harness-member-runtime.md` 不变量 16–19 与接口契约。
 - 日期：2026-11-10。
 - 实际实施范围：Leader 可经 `LeaderSpec.cli_agent` 跑在 claude / codex SDK harness 上，拥有 leader 团队
-  工具集与 leader 提示词，支持同 session 续接。未落地：外部 Leader 的 swarmflow、`async_task*`、fork、
-  团队记忆、失败可靠性通道；三方 provider 与子进程适配器充当 Leader。
+  工具集与 leader 提示词，支持同 session 续接，`enable_swarmflow` 的团队里持有 `swarmflow` 与 `async_task*`
+  （见文末 2026-11-10 修订）。未落地：外部 Leader 的 fork、团队记忆、失败可靠性通道；三方 provider 与
+  子进程适配器充当 Leader。
 
 ## 决策归属与关系
 
@@ -114,10 +115,42 @@ pause 降级为 no-op"的表述针对子进程适配器 runtime，未改。
 
 | 遗留项 | 性质 | 影响与现有处置 | 后续入口 |
 | --- | --- | --- | --- |
-| 外部 Leader 无 swarmflow / `async_task*` | 有意取舍 | spec 校验拒绝同开 | 复用 `ExternalSwarmflowHost`，并让外部 runtime 持有 session 级后台任务控制器 |
+| 外部 Leader 无 swarmflow / `async_task*` | 已解决（2026-11-10） | 见文末修订 | — |
+| 外部 Leader 的 swarmflow 未跑过真实 worker | 未验证 | 只验证了不调用 `agent()` 的脚本 | 配好 worker 模型后跑一个带 `agent()` 的脚本 |
 | 外部 Leader 无 fork / checkpoint 工具 | 有意取舍 | spec 校验拒绝 `enable_fork` | 复用外部会话 fork（F_115） |
 | CLI 压缩上下文可能丢失 `build_team` 披露的准则 | 未验证 | 仅 `bootstrap_mode="leader"` 受影响 | 实测后决定是否改走 tracker 投递 |
 | Leader 失败无可靠性通道 | 未实现 | 失败只经输出流到用户 | 需要时为 Leader 设计独立的上报面 |
 | 暂停的轮次不自动续跑 | 有意取舍 | 需要新输入唤起 | — |
 | Leader 的 CLI skills 不做 project_dir 额外安装 | 未实现 | 只按 harness 配置装到 cwd | 与 teammate 的安装步骤对齐 |
 | 真实 claude / codex 端到端 | 未验证 | — | 本地有 CLI 时联调 |
+
+## 实施演进与修订
+
+### 2026-11-10 外部 Leader 接入 swarmflow（设计 D-02 修订）
+
+首版按设计拒绝 `enable_swarmflow` 与 `leader.cli_agent` 同开。同日用户要求接上，设计 D-02 随之修订。
+
+实际做法：
+
+- `_validate_leader_cli_agent` 只保留对 `enable_fork` 的拒绝。
+- `setup_agent` 的外部分支在 LEADER 且 `enable_swarmflow` 时调用 `build_swarmflow_infra`，与原生 Leader 是同一个
+  单点构造；外部 teammate 的宿主本来就从 leader 的 `infra.swarmflow` 读取，因此不需要再改。
+- `bind_external_leader` 建一个 `ExternalSwarmflowHost` 并交给 `_bind_protocol_member_team_tools`
+  （新增 `swarmflow_host` 参数，不传则沿用原来的每次新建）。Leader 的 runtime 跨 run cycle 复用，宿主如果每个
+  周期新建，上个周期启动的 run 就不在 `async_tasks_list` 里了。
+- `ExternalHarnessMemberRuntime` 保存后台任务控制器（原为空操作），`dispose` 先 `stop_by_owner`。Runner 在每次
+  run 的 stream 开始前挂接控制器，早于 harness start，所以 startup hook 读到的总是当次的控制器。
+- `build_leader_system_prompt` 增加 `swarmflow_enabled`；`async_task*` 的排除改为"没有宿主时才排除"。
+
+验证（2026-11-10，工作区未提交，假 Codex harness）：
+
+- 新增用例 `test_swarmflow_team_leader_holds_the_swarmflow_and_async_task_tools`、
+  `test_dispose_stops_the_leaders_background_runs_first`；`test_external_leader.py` 与 `test_member_runtime.py`
+  共 52 通过。
+- `pytest tests/unit_tests/agent_teams tests/unit_tests/harness_providers`：4707 通过、40 跳过、2 xfail、
+  1 失败（同前，本机缺 `intelli_router`）。
+- 经 `Runner.run_agent_team_streaming(background_task_controller=...)` 的临时脚本：Leader 调 `swarmflow` 启动一个
+  不含 `agent()` 的内联脚本，收到启动回执；`workflow started` 播报与 `[Swarmflow completed]` 结果先后作为新输入
+  送达 harness；`async_tasks_list` 列出该任务为 completed。脚本未入库。
+
+未验证：带 `agent()` 的脚本（需要 worker 模型）、pause / resume 一个外部 Leader 名下的 run、真实 CLI。

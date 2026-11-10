@@ -11,6 +11,10 @@ cycle of the team. So its runtime is built here without touching the session,
 and everything that depends on the session -- the start context, the team
 tools, the trajectory recorder -- is bound each time the runtime starts.
 
+A team with swarmflow enabled gives the leader the same ``swarmflow`` tool an
+external CLI member gets, hosted the same way: the leader has no local harness
+to run background work on, so an ``ExternalSwarmflowHost`` stands in for it.
+
 The leader's team tools are built over its own ``TeamBackend`` and mounted in
 process (Claude's SDK MCP server, Codex's dynamic tools). Spawning members,
 allocating models and building the team all go through callbacks that only
@@ -31,6 +35,7 @@ from openjiuwen.agent_teams.spawn.external_cli_spawn import (
     _bind_protocol_member_team_tools,
     _bind_trajectory_recorder,
     _build_team_context_tracker,
+    _external_swarmflow_host,
     _external_cli_config_for_member,
     _resolve_external_paths,
     _resolve_member_models,
@@ -47,18 +52,12 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
-# Leader tools that run on the local harness the leader no longer has: the
-# async-task tools reach its async tool runtime, the checkpoint tools snapshot
-# its conversation.
-_LOCAL_HARNESS_TOOLS = frozenset(
-    {
-        "async_tasks_list",
-        "async_task_output",
-        "async_task_cancel",
-        "checkpoint",
-        "list_checkpoints",
-    }
-)
+# The checkpoint tools snapshot the conversation of the local harness the
+# leader no longer has.
+_CHECKPOINT_TOOLS = frozenset({"checkpoint", "list_checkpoints"})
+# The async-task tools query an async tool runtime. A leader has one only
+# while a swarmflow host stands in for the local harness.
+_ASYNC_TASK_TOOLS = frozenset({"async_tasks_list", "async_task_output", "async_task_cancel"})
 # Predefined teams pin their roster, so the leader gets no spawn tool.
 _SPAWN_TOOLS = frozenset({"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent"})
 
@@ -148,6 +147,8 @@ def build_external_leader_runtime(
         recovered = team_backend.history_restored() and await team_backend.rejects_rebuild()
         system_prompt = build_leader_system_prompt(
             bootstrap_mode=spec.bootstrap_mode,
+            # Same signal the tool factory gates the ``swarmflow`` tool on.
+            swarmflow_enabled=spec.enable_swarmflow,
             recovered=recovered,
             bound_group_name=_bound_group_name(spec),
             base_prompt=base_prompt,
@@ -223,7 +224,12 @@ def _leader_policy_text(spec: "TeamAgentSpec", ctx: "TeamRuntimeContext", team_b
     return render_team_policy(body=body, tools=server, note=note)
 
 
-def _leader_tool_options(spec: "TeamAgentSpec", team_backend: "TeamBackend") -> dict[str, Any]:
+def _leader_tool_options(
+    spec: "TeamAgentSpec",
+    team_backend: "TeamBackend",
+    *,
+    hosts_async_tools: bool,
+) -> dict[str, Any]:
     """What a leader's tool set needs on top of what every member's does.
 
     The same mode axes the leader's prompt is rendered against, so the tools
@@ -232,7 +238,11 @@ def _leader_tool_options(spec: "TeamAgentSpec", team_backend: "TeamBackend") -> 
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
 
     team_mode = _resolve_team_mode(spec)
-    exclude = _LOCAL_HARNESS_TOOLS | _SPAWN_TOOLS if team_mode == "predefined" else _LOCAL_HARNESS_TOOLS
+    exclude = _CHECKPOINT_TOOLS
+    if not hosts_async_tools:
+        exclude = exclude | _ASYNC_TASK_TOOLS
+    if team_mode == "predefined":
+        exclude = exclude | _SPAWN_TOOLS
     expert_catalog, expert_binding = _expert_handles(spec)
     return {
         "model_config_allocator": team_backend.allocate_model,
@@ -276,6 +286,10 @@ def bind_external_leader(
         ),
     )
 
+    # One host for the runtime's whole life: a background run outlives the
+    # run cycle that launched it, and must still be listed and delivered after.
+    swarmflow_host = _external_swarmflow_host(agent, spec, ctx, team_name, ctx.member_name, "", runtime)
+
     async def bind_session_services(team_session: Any | None) -> None:
         if team_session is None:
             return
@@ -285,6 +299,9 @@ def bind_external_leader(
         # the policy is gone and build_team must stay callable.
         if team_backend.history_restored() and not runtime.has_stored_checkpoint():
             team_backend.clear_history_restored()
+        if swarmflow_host is not None:
+            # The embedder attaches its controller after configure, per run.
+            swarmflow_host.background_task_controller = agent.background_task_controller
         runtime.reset_tool_bindings()
         _bind_protocol_member_team_tools(
             runtime,
@@ -295,7 +312,12 @@ def bind_external_leader(
             ctx=ctx,
             team_name=team_name,
             session_id=session_id,
-            role_tool_options=_leader_tool_options(spec, team_backend),
+            role_tool_options=_leader_tool_options(
+                spec,
+                team_backend,
+                hosts_async_tools=swarmflow_host is not None,
+            ),
+            swarmflow_host=swarmflow_host,
         )
         _bind_trajectory_recorder(runtime, teammate=agent, session_id=session_id, team_name=team_name)
 

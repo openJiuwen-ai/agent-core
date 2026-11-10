@@ -435,27 +435,30 @@ def _bind_protocol_member_team_tools(
     team_name: str,
     session_id: str,
     role_tool_options: dict[str, Any] | None = None,
+    swarmflow_host: Any = None,
 ) -> None:
     """Bind local team tools through the protocol provider's native channel.
 
     ``role_tool_options`` carries what only a leader's tool set needs (model
     allocator, team / bootstrap mode, expert catalog, extra exclusions); a
-    teammate passes nothing and gets the builders' defaults.
+    teammate passes nothing and gets the builders' defaults. ``swarmflow_host``
+    is the host to reuse instead of building one: a leader's runtime serves
+    every run cycle, and its background runs must outlive the cycle that
+    launched them.
 
     A team with shared swarmflow infrastructure additionally hosts the native
     ``swarmflow`` tool for this CLI member (see ``_external_swarmflow_host``):
     the tool keeps its one launch-and-inject contract, only the host under it
     differs from an in-process member's NativeHarness. The shared infra and
-    session controller live on the leader (the member's runtime controller is
-    a no-op), so the host reads them off ``leader``, not ``teammate``.
+    session controller live on the leader (a teammate's runtime is handed no
+    controller), so the host reads them off ``leader``, not ``teammate``.
     """
     if not runtime.inject_mcp:
         return
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
-    swarmflow_host = _external_swarmflow_host(
-        leader, spec, ctx, team_name, ctx.member_name, session_id, runtime
-    )
+    if swarmflow_host is None:
+        swarmflow_host = _external_swarmflow_host(leader, spec, ctx, team_name, ctx.member_name, session_id, runtime)
     swarmflow_handles: dict[str, Any] = {}
     if swarmflow_host is not None:
         infra = leader.infra.swarmflow

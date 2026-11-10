@@ -565,6 +565,13 @@ class AgentConfigurator:
                 agent_id=self._card.id,
                 team_backend=self.team_backend,
             )
+            if spec.enable_swarmflow and self.swarmflow is None:
+                # Same single construction point as the DeepAgent leader's:
+                # the team-level container every member's runs draw on.
+                from openjiuwen.agent_teams.rails.elements import observability_rail_specs
+                from openjiuwen.agent_teams.workflow.swarmflow_infra import build_swarmflow_infra
+
+                self.swarmflow = build_swarmflow_infra(spec, ctx, observability_rail_specs())
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None

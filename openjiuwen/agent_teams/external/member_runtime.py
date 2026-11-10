@@ -300,6 +300,8 @@ class ExternalHarnessMemberRuntime:
             stop_on_unsupported_force_abort=stop_on_unsupported_force_abort,
             provider_interaction_handler=self._on_provider_interaction,
         )
+        # A context factory names the member only once it is resolved.
+        self._member_name_known = isinstance(context, HarnessContext)
         if isinstance(context, HarnessContext):
             self._member_name = context.agent_name
             self._member_agent_id: str | None = context.agent_id
@@ -318,6 +320,7 @@ class ExternalHarnessMemberRuntime:
         self._promote_fallback_model: PromoteFallbackModel | None = None
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._startup_hooks: list[Callable[[Any], Awaitable[None]]] = []
+        self._background_task_controller: Any = None
         self._round_seq = 0
         self._current_round_id: int | None = None
         self._reported_model: str | None = None
@@ -516,6 +519,7 @@ class ExternalHarnessMemberRuntime:
                 await hook(team_session)
             context = await self._resolve_context(team_session)
             self._member_name = context.agent_name
+            self._member_name_known = True
             self._member_agent_id = context.agent_id
             await self._ensure_member_session(team_session)
         except BaseException:
@@ -633,6 +637,22 @@ class ExternalHarnessMemberRuntime:
                 await self._finalize_member_session()
 
     async def dispose(self) -> None:
+        """Stop for good: this member's background runs first, then the provider.
+
+        Stopping the runs through the session controller unwinds each one
+        properly (terminal event, journal record); a bare teardown would leave
+        them reported as running. Best-effort -- teardown proceeds regardless.
+        """
+        controller = self._background_task_controller
+        if controller is not None and self._member_name_known:
+            try:
+                await controller.stop_by_owner(self._member_name, include_paused=True)
+            except Exception:
+                team_logger.warning(
+                    "[external-cli] stopping background runs of member {} failed; continuing teardown",
+                    self._member_name,
+                    exc_info=True,
+                )
         await self.stop()
 
     def outputs(self) -> AsyncIterator[Any]:
@@ -1100,14 +1120,18 @@ class ExternalHarnessMemberRuntime:
     async def inject_member_memory(self, memory_manager: Any, query: str) -> None:
         _ = memory_manager, query
 
-    @staticmethod
-    def set_background_task_controller(controller: Any) -> None:
-        _ = controller
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Keep the embedder's session-level background task controller.
+
+        Only a leader is handed one. Its swarmflow host registers runs there,
+        and the spawn path reads it back to give every member the same one.
+        """
+        self._background_task_controller = controller
 
     @property
     def background_task_controller(self) -> Optional[Any]:
-        """None: external harness members hold no controller of their own."""
-        return None
+        """The attached controller, or None for a member that was handed none."""
+        return self._background_task_controller
 
     @property
     def workspace(self) -> Optional[Any]:

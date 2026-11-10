@@ -62,7 +62,7 @@ files: []
 - 本次包含：`LeaderSpec.cli_agent` 按名引用、Leader runtime 的同步构建与 start 期绑定、leader 工具集
   注入（claude 进程内 MCP / codex Dynamic Tools）、leader 提示词、pause 降级、历史恢复标记收紧、
   spec 校验、单测、spec / feature 文档。
-- 本次不包含：外部 Leader 的 `swarmflow` 与 `async_task*`、fork / checkpoint 工具、团队记忆注入、
+- 本次不包含：外部 Leader 的 fork / checkpoint 工具、团队记忆注入、
   Leader 失败的可靠性上报通道、子进程适配器（gemini / openclaw / hermes）与三方 provider 充当 Leader、
   Leader 自身的工具审批外露（沿用成员默认的自动放行）。
 
@@ -109,14 +109,19 @@ flowchart LR
   `ctx.cli_agent`。
 - 确认依据：用户 2026-11-10 评审结论。
 
-#### D-02 外部 Leader 不带 swarmflow / async 工具 / fork
+#### D-02 外部 Leader 经 `ExternalSwarmflowHost` 持有 swarmflow，不带 fork
 
-- 选择与依据：`enable_swarmflow` 或 `enable_fork` 与 `leader.cli_agent` 同开时 spec 校验拒绝；leader
-  工具集排除 `async_tasks_list` / `async_task_output` / `async_task_cancel` / `checkpoint` /
-  `list_checkpoints`。这些能力绑在 NativeHarness 的异步工具运行时与 DeepAgent 快照上。
-- 代价：外部 Leader 的团队暂时用不了 swarmflow。上游已有 `ExternalSwarmflowHost`（为外部成员托管
-  swarmflow），后续接入成本低，但 session 级后台任务控制器目前在外部 runtime 上是空操作，需要一并处理。
-- 确认依据：用户 2026-11-10 评审结论。
+- 选择与依据：外部 Leader 的 `swarmflow` 与 `async_task*` 复用上游为外部成员准备的
+  `ExternalSwarmflowHost`（每成员一个异步工具运行时，完成结果经 `runtime.send(immediate=False)` 回灌）。
+  Leader 的 `setup_agent` 外部分支照常构建团队级 `SwarmflowInfra`；宿主在绑定时建一次、跨 run cycle 复用，
+  每次 start 只刷新 session 级后台任务控制器。`ExternalHarnessMemberRuntime` 因此要真正保存控制器
+  （原为空操作），并在 `dispose` 时先经控制器停掉自己名下的 run。
+- 仍不支持：`enable_fork` 与 `leader.cli_agent` 同开时 spec 校验拒绝，leader 工具集排除 `checkpoint` /
+  `list_checkpoints`——它们要对本地 DeepAgent 的对话做快照。未启用 swarmflow 的团队没有宿主，
+  `async_task*` 同样排除。
+- 代价：worker 模型解析拿不到 Leader 自己的模型（它在 CLI 子进程里），回落到 worker base spec 与 pool
+  hint，与外部成员相同。
+- 确认依据：用户 2026-11-10 首次评审选择暂不支持；同日在首版落地后要求接上，见第 10 节。
 
 #### D-03 pause 降级为 graceful abort
 
@@ -195,7 +200,7 @@ flowchart LR
 
 - `LeaderSpec.cli_agent: str | None = None`。
 - `TeamAgentSpec` 校验（`AGENT_TEAM_CONFIG_INVALID` 语义的 `ValueError`，与同层校验一致）：
-  名字未在 `external_cli_agents` 声明；backend 不是 SDK kind；与 `enable_swarmflow` / `enable_fork` 同开。
+  名字未在 `external_cli_agents` 声明；backend 不是 SDK kind；与 `enable_fork` 同开。
 - 模型优先级沿用成员规则：pool 分配（按 provider 兼容性转换）优先，其次该 kind 的 `external_model_config`。
 
 ### 5.8 异常、中断与重试处理
@@ -240,7 +245,8 @@ flowchart LR
 | 验证 ID | 场景 | 入口 | 通过条件 | 层级 |
 | --- | --- | --- | --- | --- |
 | V-01 | 外部 Leader 构建 | `TeamAgentSpec.build()`，fake SDK harness | leader 的 `resources.harness` 是 `ExternalHarnessMemberRuntime`，未建 DeepAgent | 单测 |
-| V-02 | leader 工具集 | start 后读取绑定的工具 | 含 `build_team` / `spawn_teammate` / `create_task` / `send_message`，不含 `async_task*` / `checkpoint` / `swarmflow` | 单测 |
+| V-02 | leader 工具集 | start 后读取绑定的工具 | 含 `build_team` / `spawn_teammate` / `create_task` / `send_message`，不含 `checkpoint`；未启用 swarmflow 时不含 `swarmflow` / `async_task*` | 单测 |
+| V-07 | 外部 Leader 的 swarmflow | `enable_swarmflow=True` 构建并 start | 工具集含 `swarmflow` 与 `async_task*`；宿主跨周期为同一实例且持有 Runner 挂接的控制器 | 单测 |
 | V-03 | pause 降级 | 无 `PAUSE_RESUME` 的 fake harness 处于 RUNNING 时 `pause()` | 调用了 graceful abort，不抛异常 | 单测 |
 | V-04 | 历史标记 | 标记已置、child session 无 checkpoint 时 start | `history_restored()` 变为 False；有 checkpoint 时保持 True | 单测 |
 | V-05 | spec 校验 | 各非法组合 | 逐条拒绝并给出原因 | 单测 |
@@ -251,7 +257,7 @@ flowchart LR
 ## 9. 设计风险与已知限制
 
 - CLI 侧上下文压缩可能丢失 `build_team` 披露的准则（D-04）。
-- 外部 Leader 没有团队记忆注入、swarmflow、fork、失败可靠性通道（见 2.3）。
+- 外部 Leader 没有团队记忆注入、fork、失败可靠性通道（见 2.3）。
 - 暂停的轮次不会自动续跑（D-03）。
 
 ## 10. 按日期记录的评审与设计修订
@@ -260,6 +266,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | 2026-11-10 | alan_cheng | 方案与四个取舍点 | 批准；取舍 1 改为按名引用，其余按推荐 | 会话内评审确认，对应 D-01 至 D-04 |
 | 2026-11-10 | — | 基线复核 | 方案按 `codex/upstream-develop` 重新核对 | 上游新增 `bootstrap_mode` 与外部成员 swarmflow 宿主；D-04 覆盖两种 bootstrap，D-05 收紧为仅 SDK backend，D-06 保留 teammate 原绑定时机（R-01） |
+| 2026-11-10 | alan_cheng | D-02 修订：接入 swarmflow | 批准 | 首版落地后用户要求接上；改为复用 `ExternalSwarmflowHost`，fork 仍不支持，新增 V-07 |
 
 ## 11. 参考与交接
 

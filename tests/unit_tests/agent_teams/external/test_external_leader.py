@@ -65,6 +65,12 @@ async def _started_leader(spec: TeamAgentSpec, session: _TeamSession) -> tuple[A
     return agent, runtime
 
 
+def _swarmflow_host(runtime: ExternalHarnessMemberRuntime) -> Any:
+    """The async-tool host behind the leader's bound ``swarmflow`` tool."""
+    gateway = runtime.harness.start_contexts[-1].tools
+    return gateway._tools["swarmflow"]._parent_agent
+
+
 async def _tool_names(runtime: ExternalHarnessMemberRuntime) -> set[str]:
     context = runtime.harness.start_contexts[-1]
     return {definition.name for definition in await context.tools.definitions()}
@@ -160,6 +166,56 @@ async def test_framework_built_team_leader_is_told_the_policy_and_has_no_build_t
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_swarmflow_team_leader_holds_the_swarmflow_and_async_task_tools() -> None:
+    spec = _spec("ext_leader_swarmflow", enable_swarmflow=True)
+    agent = spec.build()
+    await agent.team_backend.db.initialize()
+    runtime = agent.resources.harness
+    controller = object()
+    agent.set_background_task_controller(controller)
+    session = _TeamSession()
+
+    await runtime.start(team_session=session)
+    names = await _tool_names(runtime)
+    first_host = _swarmflow_host(runtime)
+    await runtime.stop()
+    await runtime.start(team_session=session)
+    try:
+        assert {"swarmflow", "async_tasks_list", "async_task_output", "async_task_cancel"} <= names
+        assert "checkpoint" not in names
+        assert agent.infra.swarmflow is not None
+        assert agent.background_task_controller is controller
+        # One host across run cycles: a background run outlives the cycle that launched it.
+        assert _swarmflow_host(runtime) is first_host
+        assert first_host.background_task_controller is controller
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_dispose_stops_the_leaders_background_runs_first() -> None:
+    stopped: list[tuple[str, bool]] = []
+
+    class _Controller:
+        async def stop_by_owner(self, member_name: str, *, include_paused: bool = False) -> bool:
+            stopped.append((member_name, include_paused))
+            return True
+
+    agent = _spec("ext_leader_dispose", enable_swarmflow=True).build()
+    await agent.team_backend.db.initialize()
+    runtime = agent.resources.harness
+    agent.set_background_task_controller(_Controller())
+    await runtime.start(team_session=_TeamSession())
+
+    await runtime.dispose()
+
+    assert stopped == [("team_leader", True)]
+    assert runtime.harness.stop_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_restored_history_without_a_provider_checkpoint_is_not_trusted() -> None:
     agent = _spec("ext_leader_lost").build()
     backend = agent.team_backend
@@ -219,7 +275,6 @@ async def test_restored_history_with_a_provider_checkpoint_is_kept() -> None:
             },
             "cannot drive a leader",
         ),
-        ({"enable_swarmflow": True}, "enable_swarmflow"),
         ({"enable_fork": True}, "enable_fork"),
     ],
 )

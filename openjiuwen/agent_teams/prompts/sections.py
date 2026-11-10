@@ -1044,6 +1044,7 @@ def build_team_member_system_prompt(
 def build_leader_system_prompt(
     *,
     bootstrap_mode: str = "leader",
+    swarmflow_enabled: bool = False,
     recovered: bool = False,
     bound_group_name: str | None = None,
     base_prompt: str | None = None,
@@ -1058,8 +1059,7 @@ def build_leader_system_prompt(
     in-process leader gets from its policy rail (see
     :func:`build_leader_static_sections`); the rest of the collaboration
     policy reaches it the same way too -- in the ``build_team`` result, or as
-    a ``<team-policy>`` block for a framework-built team. Such a leader holds
-    no ``swarmflow`` tool, so the bootstrap never describes it.
+    a ``<team-policy>`` block for a framework-built team.
 
     Args:
         mcp_server_name: The MCP server providing the team's tools, when the
@@ -1072,7 +1072,7 @@ def build_leader_system_prompt(
     """
     sections = build_leader_static_sections(
         bootstrap_mode=bootstrap_mode,
-        swarmflow_enabled=False,
+        swarmflow_enabled=swarmflow_enabled,
         recovered=recovered,
         bound_group_name=bound_group_name,
         base_prompt=base_prompt,

@@ -758,8 +758,8 @@ class TeamAgentSpec(BaseModel):
         """Reject a third-party leader harness the team cannot host.
 
         The leader's team tools are built over its own backend and mounted in
-        process, which only the SDK backends offer. Swarmflow and context
-        fork both run on the local harness the leader no longer has.
+        process, which only the SDK backends offer. Context fork snapshots
+        the conversation of the local harness the leader no longer has.
         """
         cli_agent = self.leader.cli_agent
         if cli_agent is None:
@@ -778,12 +778,8 @@ class TeamAgentSpec(BaseModel):
                 f"leader.cli_agent={cli_agent!r} cannot drive a leader; only SDK backends "
                 f"('claude' / 'codex') mount the leader's team tools in process",
             )
-        unsupported = {"enable_swarmflow": self.enable_swarmflow, "enable_fork": self.enable_fork}
-        enabled = sorted(name for name, value in unsupported.items() if value)
-        if enabled:
-            raise ValueError(
-                f"leader.cli_agent={cli_agent!r} does not support: {', '.join(enabled)}",
-            )
+        if self.enable_fork:
+            raise ValueError(f"leader.cli_agent={cli_agent!r} does not support: enable_fork")
         return self
 
     @model_validator(mode="after")
