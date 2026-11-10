@@ -274,6 +274,14 @@ provider session/Turn 协议合并。
   MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
   `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
   `ClaudeSdkRuntime` / `CodexSdkRuntime`。详见 [[F_96_protocol-harness-providers-and-member-migration]]。
+- `spawn/external_leader.py`：**Leader 跑在三方 Harness 上**的入口。`LeaderSpec.cli_agent` 按名引用
+  `external_cli_agents` 的一项（仅 SDK backend：claude / codex），`AgentConfigurator.setup_agent` 在 LEADER
+  且 `ctx.cli_agent` 非空时调同步的 `build_external_leader_runtime` 建 runtime（不碰 session、不注入
+  `OPENJIUWEN_TEAM_JOIN`），`TeamAgent._setup_agent` 随后调 `bind_external_leader` 绑定
+  `TeamContextTracker` 与 startup hook。leader 工具集、系统提示词、轨迹 recorder 都在每次
+  `start(team_session)` 以当前 session 重建，工具由 leader 自己的 `TeamBackend` 构造并走进程内通道。
+  外部 Leader 没有 swarmflow / `async_task*` / fork / 团队记忆；`enable_swarmflow` / `enable_fork` 与它同开时
+  spec 校验拒绝。见 `S_27` 不变量 16–19 与 `F_20261110_1851_leader-external-harness`。
 - `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
   `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经
   `ClaudeCodeHarness(transport_factory=...)` 注入）、`options.py`（team 命名的 session id 助手）。
