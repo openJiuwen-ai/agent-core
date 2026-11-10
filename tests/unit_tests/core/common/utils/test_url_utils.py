@@ -59,3 +59,27 @@ class TestRedactUrlPassword:
         result = redact_url_password(url)
         assert "secret" not in result
         assert "ssl=true" in result
+
+    def test_invalid_port_does_not_leak_password(self):
+        url = "redis://:secret@host:abc/0"
+        result = redact_url_password(url)
+        assert result == "redis://:***@host:abc/0"
+        assert "secret" not in result
+
+    def test_out_of_range_port_does_not_leak_password(self):
+        url = "redis://user:secret@host:99999999/db"
+        result = redact_url_password(url)
+        assert result == "redis://user:***@host:99999999/db"
+        assert "secret" not in result
+
+    def test_ipv6_host_keeps_brackets(self):
+        url = "postgresql://u:secret@[::1]:5432/db"
+        result = redact_url_password(url)
+        assert result == "postgresql://u:***@[::1]:5432/db"
+        assert "secret" not in result
+
+    def test_password_with_at_sign(self):
+        url = "redis://user:p@ss@host:6379/0"
+        result = redact_url_password(url)
+        assert "p@ss" not in result
+
