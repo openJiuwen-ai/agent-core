@@ -1409,3 +1409,38 @@ async def test_reset_tool_bindings_drops_what_the_previous_cycle_bound() -> None
     await runtime.stop()
 
     assert harness.start_contexts[0].tools is None
+
+
+async def _failed_turn_outputs(*, surface_turn_failures: bool) -> list[Any]:
+    from openjiuwen.harness_protocol import TurnError
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=_context(),
+        surface_turn_failures=surface_turn_failures,
+    )
+    await runtime.start()
+    result = TurnResult(
+        status=TurnStatus.FAILED,
+        error=TurnError(message="model is not supported", code="other", category="sdk_error"),
+    )
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.FAILED, result=result), turn_id="turn-1")
+    await runtime.stop()
+    return await _all_outputs(runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_turn_is_put_on_the_stream_when_nobody_else_is_told() -> None:
+    chunks = await _failed_turn_outputs(surface_turn_failures=True)
+
+    assert len(chunks) == 1
+    assert chunks[0].payload.type == "task_failed"
+    assert chunks[0].payload.data[0].text == "model is not supported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_turn_stays_off_the_stream_by_default() -> None:
+    assert await _failed_turn_outputs(surface_turn_failures=False) == []

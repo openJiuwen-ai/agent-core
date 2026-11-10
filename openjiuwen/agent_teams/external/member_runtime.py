@@ -260,6 +260,10 @@ class ExternalHarnessMemberRuntime:
             factory. Knowing it up front lets ``start`` open the member's own
             session before the factory and the startup hooks run, so both can
             read what that session holds. A ready ``context`` carries its own.
+        surface_turn_failures: Put a failed turn on the output stream as a
+            ``task_failed`` frame. A teammate reports its failures to the
+            leader's mailbox (``bind_reliability_context``); a leader has
+            nobody above it, so its stream is the only place left.
         inject_mcp: Whether the spawn path should mount the team MCP server.
         mcp_server_name: Logical name of the team MCP server.
     """
@@ -279,6 +283,7 @@ class ExternalHarnessMemberRuntime:
         inject_mcp: bool = False,
         mcp_server_name: str = TEAM_MCP_SERVER_NAME,
         member_agent_id: str | None = None,
+        surface_turn_failures: bool = False,
     ) -> None:
         self._harness = harness
         self._context_source = context
@@ -296,6 +301,7 @@ class ExternalHarnessMemberRuntime:
         self._adapter = HarnessIOAdapter(
             harness,
             event_observer=self._on_event,
+            emit_turn_failure=surface_turn_failures,
             auto_approve_tools=True,
             stop_on_unsupported_force_abort=stop_on_unsupported_force_abort,
             provider_interaction_handler=self._on_provider_interaction,

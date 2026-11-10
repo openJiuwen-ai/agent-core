@@ -229,6 +229,7 @@ def build_sdk_member_runtime(
     resume_external_backend: bool = False,
     member_agent_id: str | None = None,
     team_context_tracker: Any = None,
+    surface_turn_failures: bool = False,
 ) -> ExternalHarnessMemberRuntime:
     """Build the runtime of a member driven by the Claude or Codex SDK.
 
@@ -242,6 +243,8 @@ def build_sdk_member_runtime(
         ctx: Member runtime context; ``ctx.cli_agent`` is ``"claude"`` or ``"codex"``.
         context: The provider start context, or a factory resolved at ``start``.
         join_env: Team-join variables merged into the CLI process environment.
+        surface_turn_failures: Report a failed turn on the member's own output
+            stream; for a leader, which has no one to report it to.
 
     The remaining arguments mirror :func:`build_cli_runtime`.
     """
@@ -287,6 +290,7 @@ def build_sdk_member_runtime(
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
+            surface_turn_failures=surface_turn_failures,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
@@ -341,6 +345,7 @@ def build_sdk_member_runtime(
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
+            surface_turn_failures=surface_turn_failures,
         )
     raise_error(
         StatusCode.AGENT_TEAM_CONFIG_INVALID,
@@ -845,6 +850,7 @@ def _build_claude_member_runtime(
     resume_external_backend: bool,
     member_agent_id: str | None,
     team_context_tracker: Any,
+    surface_turn_failures: bool,
 ) -> ExternalHarnessMemberRuntime:
     """Build a Claude Code member runtime on the protocol harness."""
     if max_buffer_size is None:
@@ -897,6 +903,7 @@ def _build_claude_member_runtime(
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
         member_agent_id=member_agent_id,
+        surface_turn_failures=surface_turn_failures,
     )
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime
@@ -930,6 +937,7 @@ def _build_codex_member_runtime(
     resume_external_backend: bool,
     member_agent_id: str,
     team_context_tracker: Any,
+    surface_turn_failures: bool,
 ) -> ExternalHarnessMemberRuntime:
     """Build a Codex member runtime on the protocol harness."""
     member_name = ctx.member_name or ""
@@ -975,6 +983,7 @@ def _build_codex_member_runtime(
         cli_path=codex_bin,
         inject_mcp=inject_mcp,
         member_agent_id=member_agent_id,
+        surface_turn_failures=surface_turn_failures,
     )
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime

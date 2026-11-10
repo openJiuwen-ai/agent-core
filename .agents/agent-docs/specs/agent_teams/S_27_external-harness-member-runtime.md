@@ -143,14 +143,19 @@ runtime 何时构建、session 相关的绑定何时发生。
     `leader.cli_agent` 的 `backend_for(...).kind` 必须是 `sdk`（claude / codex），由 spec 校验保证。工具集与
     leader 提示词按同一组模式轴解析（`dispatch_mode` / `team_mode` / `bootstrap_mode` / `lifecycle` /
     `teammate_mode`），并排除要对本地 DeepAgent 对话做快照的 `checkpoint` / `list_checkpoints`；
-    `enable_fork` 与 `leader.cli_agent` 同开时 spec 校验拒绝。Leader 不绑定可靠性上下文与认证 fallback 持久化。
+    `enable_fork` 与 `leader.cli_agent` 同开时 spec 校验拒绝。Leader 不绑定可靠性上下文与认证 fallback 持久化；
+    它没有上级可报，所以构建时打开 `surface_turn_failures`：FAILED turn 由
+    `HarnessIOAdapter(emit_turn_failure=True)` 投影成 DeepAgent 的 `task_failed` 帧进入 Leader 的输出流。
+    teammate 默认关闭，失败仍走 leader 邮箱。
     **swarmflow 由 `ExternalSwarmflowHost` 托管**：`enable_swarmflow` 的团队里，`setup_agent` 的外部分支照常
     构建团队级 `SwarmflowInfra`，`bind_external_leader` 建一个宿主并跨 run cycle 复用（后台 run 比启动它的
     周期活得久），startup hook 每次只把 Runner 挂接的 session 级控制器刷进宿主；此时工具集含 `swarmflow` 与
     `async_tasks_list` / `async_task_output` / `async_task_cancel`，bootstrap 提示词带协作机制选择。没有宿主
     （未启用 swarmflow）时三个 `async_task*` 工具被排除。为此 `ExternalHarnessMemberRuntime` 保存
     `set_background_task_controller` 传入的控制器（只有 Leader 会被传入），`dispose` 先经它
-    `stop_by_owner(<成员名>, include_paused=True)` 再停 provider。
+    `stop_by_owner(<成员名>, include_paused=True)` 再停 provider。宿主的 `build_context` 永不为空：团队没有
+    平台 build context 时用普通 `BuildContext` 兜底，三方 worker 白名单与专家表才有处可挂（对外部 teammate
+    的宿主同样成立）。
 18. **"历史已恢复"只在 provider 会话真的续上时成立**。Leader 的 startup hook 在 member session 打开后
     检查 `has_stored_checkpoint()`：没有本 backend 的 checkpoint 就 `clear_history_restored()`，使
     `build_team` 仍可调用以重新披露协同准则；有 checkpoint 时系统提示词用 `leader_bootstrap_recovered`

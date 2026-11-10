@@ -189,6 +189,8 @@ def build_external_leader_runtime(
         extra_env=cli_cfg.env or None,
         ssh_transport=cli_cfg.ssh_transport,
         member_agent_id=agent_id,
+        # Nobody is above the leader to be told: its failures go to the user.
+        surface_turn_failures=True,
     )
 
 

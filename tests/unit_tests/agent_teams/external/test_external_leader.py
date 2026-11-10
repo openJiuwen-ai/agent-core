@@ -86,6 +86,8 @@ def test_leader_with_cli_agent_is_built_on_the_external_runtime() -> None:
     assert agent.resources.memory_manager is None
     # No team-join environment: the leader's tools never leave this process.
     assert "OPENJIUWEN_TEAM_JOIN" not in runtime.harness.config.env
+    # Nobody is above the leader: a failed turn has to reach the user's stream.
+    assert runtime._adapter._emit_turn_failure is True
 
 
 @pytest.mark.asyncio
@@ -188,6 +190,13 @@ async def test_swarmflow_team_leader_holds_the_swarmflow_and_async_task_tools() 
         # One host across run cycles: a background run outlives the cycle that launched it.
         assert _swarmflow_host(runtime) is first_host
         assert first_host.background_task_controller is controller
+        # No platform build context on this spec: the host still carries the
+        # allowlist a script's agent(agent_type=...) is checked against.
+        from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+
+        allowlist = first_host.build_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS]
+        assert [entry.cli_agent for entry in allowlist] == ["codex"]
+        assert first_host.build_context.member_name == "team_leader"
     finally:
         await runtime.stop()
 

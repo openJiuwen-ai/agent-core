@@ -116,13 +116,13 @@ pause 降级为 no-op"的表述针对子进程适配器 runtime，未改。
 | 遗留项 | 性质 | 影响与现有处置 | 后续入口 |
 | --- | --- | --- | --- |
 | 外部 Leader 无 swarmflow / `async_task*` | 已解决（2026-11-10） | 见文末修订 | — |
-| 外部 Leader 的 swarmflow 未跑过真实 worker | 未验证 | 只验证了不调用 `agent()` 的脚本 | 配好 worker 模型后跑一个带 `agent()` 的脚本 |
+| 外部 Leader 的 swarmflow 未跑过真实 worker | 已验证（2026-11-10） | 见文末真实 CLI 验证 | — |
 | 外部 Leader 无 fork / checkpoint 工具 | 有意取舍 | spec 校验拒绝 `enable_fork` | 复用外部会话 fork（F_115） |
 | CLI 压缩上下文可能丢失 `build_team` 披露的准则 | 未验证 | 仅 `bootstrap_mode="leader"` 受影响 | 实测后决定是否改走 tracker 投递 |
-| Leader 失败无可靠性通道 | 未实现 | 失败只经输出流到用户 | 需要时为 Leader 设计独立的上报面 |
+| Leader 失败无可靠性通道 | 部分解决（2026-11-10） | 失败 turn 以 `task_failed` 帧上流；没有重试与状态置 ERROR | 需要时为 Leader 设计独立的上报面 |
 | 暂停的轮次不自动续跑 | 有意取舍 | 需要新输入唤起 | — |
 | Leader 的 CLI skills 不做 project_dir 额外安装 | 未实现 | 只按 harness 配置装到 cwd | 与 teammate 的安装步骤对齐 |
-| 真实 claude / codex 端到端 | 未验证 | — | 本地有 CLI 时联调 |
+| 真实 claude / codex 端到端 | 已验证主路径（2026-11-10） | 见文末真实 CLI 验证 | 冷恢复续接、pause、`AskUserQuestion` 仍未用真实 CLI 验证 |
 
 ## 实施演进与修订
 
@@ -154,3 +154,58 @@ pause 降级为 no-op"的表述针对子进程适配器 runtime，未改。
   送达 harness；`async_tasks_list` 列出该任务为 completed。脚本未入库。
 
 未验证：带 `agent()` 的脚本（需要 worker 模型）、pause / resume 一个外部 Leader 名下的 run、真实 CLI。
+
+### 2026-11-10 真实 CLI 验证与两处修复
+
+环境：本机 Claude Code 2.1.305、codex-cli 0.162.1，各自的账号登录；内存 DB、inprocess 传输；经
+`Runner.run_agent_team_streaming` 驱动的临时脚本（未入库）。
+
+| 场景 | 结果 |
+| --- | --- |
+| Claude Leader：`build_team` + `create_task`，回复 DONE | 通过。工具经 `mcp__openjiuwen-team__*` 调用，任务落库 |
+| Codex Leader（`external_model_config.model="gpt-5.6-luna"`）：同上 | 通过。团队行存在，任务为 pending |
+| Codex Leader，本机默认模型 `gpt-6.1-sol` | provider 返回 400 `model_not_found`；修复前流上无任何输出，修复后出现 `task_failed` 帧 |
+| Claude Leader + Claude teammate：`spawn_teammate(cli_agent="claude")`、指派任务 | teammate 认领、给 Leader 发消息、完成任务；Leader 收到消息并继续等待。未截到最终 DONE 与终态 |
+| Claude Leader 的 swarmflow，脚本含 `agent(..., options={"agent_type": "claude"})` | 修复后通过：worker 返回 `pong`，完成结果回灌，Leader 回复 `FINAL=pong` |
+
+验证中发现并修复的两处缺陷：
+
+1. **Leader 的 turn 失败是静默的**。设计里"失败经输出流到达用户"的假设不成立：`HarnessIOAdapter` 默认不投影
+   turn 终态，teammate 靠可靠性上下文把失败投到 leader 邮箱，Leader 两条都没有。修复：
+   `HarnessIOAdapter(emit_turn_failure=...)` 把 FAILED turn 投影成 DeepAgent 的 `task_failed` 帧，
+   `ExternalHarnessMemberRuntime(surface_turn_failures=...)` 透传，Leader 构建时打开。选 `task_failed` 是因为
+   宿主已经会渲染原生 Leader 的这种帧，不需要认识新形状。teammate 默认关闭，行为不变。
+2. **没有平台 build context 的团队，swarmflow 宿主丢了三方 worker 白名单**。`_external_swarmflow_host` 只在
+   `spec.build_context` 非空时才派生成员上下文并写入白名单，否则宿主的 `build_context` 是 `None`，脚本里的
+   `agent_type` 一律被判为"未声明"。这是外部 teammate 托管 swarmflow 时就存在的问题，外部 Leader 继承了它。
+   修复：没有平台上下文时建一个普通 `BuildContext`，与进程内成员的 configurator 做法一致。
+
+修复后的回归：`pytest tests/unit_tests/agent_teams tests/unit_tests/harness_providers tests/unit_tests/harness_protocol`
+4744 通过、40 跳过、2 xfail、1 失败（同前，本机缺 `intelli_router`）。新增用例 3 个。
+
+上面 `gpt-6.1-sol` 的 400 当时被归因为"账号不支持该模型"，这个判断是错的，见下一节。
+
+### 2026-11-10 升级 codex CLI 后的复验
+
+`brew upgrade --cask codex` 把 PATH 上的 codex 从 0.162.1 升到 0.167.0。直接重跑仍然是同一个 400，原因是
+**Codex provider 默认不用 PATH 上的 CLI**：`CodexHarnessConfig.codex_bin` 为空时，Python SDK 用它自带的
+`openai-codex-cli-bin`（本仓虚拟环境里是 0.144.4）。本机默认模型 `gpt-6.1-sol` 需要更新的 CLI，旧的捆绑
+二进制请求它就被拒绝。所以前一节的失败不是账号问题，而是捆绑二进制过旧。
+
+在 `external_cli_agents` 的 codex 条目上设 `cli_path="/opt/homebrew/bin/codex"` 后，用默认模型复验：
+
+| 场景 | 结果 |
+| --- | --- |
+| Codex Leader：`build_team` + `create_task`，回复 DONE | 通过，团队行存在，任务为 pending |
+| Codex Leader 的 swarmflow，脚本含 `agent(..., options={"agent_type": "codex"})` | 通过：worker 返回 `pong`，Leader 回复 `FINAL=pong` |
+| Codex Leader + Codex teammate：`spawn_teammate(cli_agent="codex")`、指派任务 | 通过：teammate 认领、发消息、完成任务；Leader 收到后回复 ALLDONE，随后 `shutdown_member` 与 `clean_team`；任务终态 completed |
+
+本轮没有改代码。观察到但未处理的两点：
+
+- 协作场景里有 6 条 `Invalid state transition for member dev: idle -> running / completing / completed` 的
+  ERROR 日志，对象是外部 Codex **teammate** 的执行状态，不影响任务完成。它在 teammate 既有路径上，是否为
+  已知问题没有核实。
+- Leader 调了两次 `clean_team`，结束后团队行仍在。没有查看这两次调用的返回值，不确定是工具拒绝还是其它原因。
+
+捆绑二进制过旧这一点对所有走 Codex 的成员都成立，不只是 Leader：虚拟环境里的 `openai-codex` 不升级时，
+需要靠 `cli_path` / `codex_bin` 指向较新的 CLI。

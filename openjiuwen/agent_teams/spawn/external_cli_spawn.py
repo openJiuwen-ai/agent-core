@@ -395,27 +395,37 @@ def _external_swarmflow_host(
         return None
     from openjiuwen.agent_teams.workflow.external_swarmflow_host import ExternalSwarmflowHost
 
+    from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+
     base_context = spec.build_context
+    member_card_id = f"{team_name}_{member_name}" if member_name else None
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     if base_context is not None:
         member_context = base_context.derive(
             member_name=member_name,
             role=ctx.role.value,
-            member_card_id=f"{team_name}_{member_name}" if member_name else None,
-            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
+            member_card_id=member_card_id,
+            language=language,
         )
         member_context.extras = dict(member_context.extras)
     else:
-        member_context = None
+        # A team assembled without a platform context still needs one here,
+        # the way an in-process member gets a plain one from its configurator:
+        # the handles below have nowhere else to ride.
+        member_context = BuildContext(
+            language=language,
+            member_name=member_name,
+            role=ctx.role.value,
+            member_card_id=member_card_id,
+        )
     # SwarmflowTool reads the external-CLI allowlist and expert table from its
     # parent_agent.build_context.extras (the same keys the leader's
     # inject_team_handles writes). Re-host both from the shared infra here, or
     # the member's inner agent(agent_type=...) / agent_template nodes resolve
     # against an empty allowlist and are rejected as "not declared".
-    if member_context is not None:
-        from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
-
-        member_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = infra.external_cli_agents
-        member_context.extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = infra.expert_specs
+    member_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = infra.external_cli_agents
+    member_context.extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = infra.expert_specs
     host = ExternalSwarmflowHost(
         build_context=member_context,
         background_task_controller=team_agent.background_task_controller,
