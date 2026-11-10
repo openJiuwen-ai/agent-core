@@ -60,7 +60,22 @@ _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
 ]
 
 
+_SPAWN_TOOLS = (
+    "spawn_teammate",
+    "spawn_human_agent",
+    "spawn_bridge_agent",
+    "spawn_external_cli",
+)
+
+
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
+    """Resolve effective team_mode for spawn gating.
+
+    - Explicit ``spec.team_mode`` wins.
+    - Otherwise: non-avatar predefined members ⇒ ``hybrid`` (spawn kept);
+      empty / avatar-only roster ⇒ ``default`` (spawn kept).
+    - ``predefined`` must be set explicitly; it strips every spawn_* tool.
+    """
     if spec.team_mode is not None:
         return spec.team_mode
     # HUMAN_AGENT predefined members are HITT roster declarations, and
@@ -72,6 +87,17 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
+
+
+def _spawn_tools_excluded_for_mode(team_mode: str) -> list[str]:
+    """Return spawn tool names stripped from the leader for ``team_mode``.
+
+    ``default`` / ``hybrid`` keep spawn (dynamic / seed+增援). Only
+    ``predefined`` locks the roster and excludes every spawn_* tool.
+    """
+    if team_mode == "predefined":
+        return list(_SPAWN_TOOLS)
+    return []
 
 
 def _apply_team_worktree_shell_guard(rails: list[Any], *, enabled: bool) -> list[Any]:
@@ -439,11 +465,11 @@ class AgentConfigurator:
             )
 
         # cwd is a separate layer from the workspace. The workspace stays the
-        # member's private artifact directory (memory, skills view, .team
-        # mount); cwd is where shell runs and relative paths resolve. Team
+        # member's private artifact directory (memory, Skill visibility
+        # declaration); cwd is where shell runs and relative paths resolve. Team
         # isolation moves cwd into the worktree without dragging the workspace
-        # along -- otherwise the member's artifacts and skills view would live
-        # inside an ephemeral checkout and vanish with it.
+        # along -- otherwise the member's artifacts and its Skill grants would
+        # live inside an ephemeral checkout and vanish with it.
         member_cwd = ctx.worktree_path or agent_spec.cwd or None
         member_project_root = agent_spec.project_root or agent_spec.cwd or None
 
@@ -470,6 +496,11 @@ class AgentConfigurator:
         enable_read_image_multimodal = agent_spec.enable_read_image_multimodal
         if enable_read_image_multimodal is None:
             enable_read_image_multimodal = False
+        # Keep ``skills`` / ``enable_skill_discovery`` for now. Clearing them
+        # is deferred until ``core.team.skill_use`` is confirmed mounted
+        # (see below): otherwise a gated-out team Skill rail would leave the
+        # member with neither the generic SkillUseRail nor the team rail.
+        # ``agent_spec.skills`` still seeds the team rail's bootstrap allow-list.
         build_spec = agent_spec.model_copy(
             update={
                 "card": self._card,
@@ -479,7 +510,6 @@ class AgentConfigurator:
                 "project_root": member_project_root,
                 "sys_operation": sys_operation_spec,
                 "tools": list(agent_spec.tools or []),
-                "enable_skill_discovery": True,
                 "enable_task_loop": True,
                 "enable_read_image_multimodal": enable_read_image_multimodal,
             }
@@ -530,12 +560,8 @@ class AgentConfigurator:
         ]
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
-        # (one per role_type) from the leader's tool set.
-        exclude = (
-            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
-            if _resolve_team_mode(spec) == "predefined"
-            else []
-        )
+        # (one per role_type) from the leader's tool set. default/hybrid keep spawn.
+        exclude = _spawn_tools_excluded_for_mode(_resolve_team_mode(spec))
 
         team_rail_specs: list[RailSpec] = [
             RailSpec(
@@ -822,9 +848,47 @@ class AgentConfigurator:
                 "Team-managed worktree shell guard was not applied for member {} because core.sys_operation is absent",
                 member_name,
             )
-        build_spec = build_spec.model_copy(
-            update={"rails": base_rails + team_rail_specs},
+        # Declared last, once base_rails is final: complete any bare
+        # ``core.team.skill_use`` from the blueprint, then auto-declare one when
+        # the blueprint did not. ``agent_spec.skills`` seeds the allow-list.
+        from openjiuwen.agent_teams.skill.rail_spec import (
+            build_team_skill_rail_spec,
+            complete_declared_team_skill_rails,
         )
+
+        member_workspace_path = ws_spec.root_path if ws_spec is not None else None
+        base_rails = complete_declared_team_skill_rails(
+            base_rails,
+            team_name=resolved_team_name,
+            member_name=member_name,
+            config_skills=agent_spec.skills,
+            team_workspace_path=team_workspace_path,
+            member_workspace_path=member_workspace_path,
+        )
+        skill_rail_spec = build_team_skill_rail_spec(
+            team_name=resolved_team_name,
+            member_name=member_name,
+            config_skills=agent_spec.skills,
+            declared_rails=base_rails + team_rail_specs,
+            team_workspace_path=team_workspace_path,
+            member_workspace_path=member_workspace_path,
+        )
+        if skill_rail_spec is not None:
+            team_rail_specs.append(skill_rail_spec)
+
+        from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
+
+        merged_rails = base_rails + team_rail_specs
+        has_team_skill_rail = any(
+            getattr(rail, "type", None) == TEAM_SKILL_USE for rail in merged_rails
+        )
+        # Only suppress the factory SkillUseRail when the team Skill rail will
+        # actually be present; otherwise keep agents.<role>.skills / discovery.
+        rail_update: dict[str, Any] = {"rails": merged_rails}
+        if has_team_skill_rail:
+            rail_update["skills"] = []
+            rail_update["enable_skill_discovery"] = False
+        build_spec = build_spec.model_copy(update=rail_update)
 
         self.harness = TeamHarness.build(
             agent_spec=build_spec,

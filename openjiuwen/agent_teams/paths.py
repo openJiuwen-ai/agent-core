@@ -18,6 +18,11 @@ import re
 from pathlib import Path
 
 _configured_openjiuwen_home: Path | None = None
+_configured_global_skills_dir: Path | None = None
+
+# Per-workspace Skill visibility declaration. Skills live in one physical
+# library (``global_skills_dir()``); members/teams only declare what they see.
+SKILL_VISIBILITY_FILENAME = "skills-visibility.json"
 
 
 def configure_openjiuwen_home(path: str | Path) -> None:
@@ -44,12 +49,64 @@ def get_agent_teams_home() -> Path:
     return get_openjiuwen_home() / ".agent_teams"
 
 
+def configure_global_skills_dir(path: str | Path) -> None:
+    """Point the single Skill library at a host-owned directory.
+
+    Embedders that already own a Skill library (e.g. jiuwenswarm) call this
+    once at startup so every team member resolves the same physical directory.
+    """
+    global _configured_global_skills_dir
+    _configured_global_skills_dir = Path(path)
+
+
+def reset_global_skills_dir() -> None:
+    """Clear the Skill library override and restore the default layout."""
+    global _configured_global_skills_dir
+    _configured_global_skills_dir = None
+
+
+def global_skills_dir() -> Path:
+    """Return the one physical Skill library shared by every team member.
+
+    Layout (standalone): ``{get_openjiuwen_home()}/workspace/skills``.
+    """
+    if _configured_global_skills_dir is not None:
+        return _configured_global_skills_dir
+    return get_openjiuwen_home() / "workspace" / "skills"
+
+
+def team_workspace_dir(team_name: str) -> Path:
+    """Return the shared team workspace root: ``{team_home}/team-workspace/``."""
+    return team_home(team_name) / "team-workspace"
+
+
+def team_member_workspace_dir(team_name: str, member_name: str) -> Path:
+    """Return the stable workspace root of one team member.
+
+    ``member_name`` is sanitized so a path-like id cannot escape ``workspaces/``.
+    """
+    safe_member = _safe_segment(member_name, fallback="member")
+    return team_home(team_name) / "workspaces" / f"{safe_member}_workspace"
+
+
+def member_skill_visibility_path(team_name: str, member_name: str) -> Path:
+    """Return the member Skill visibility declaration path."""
+    return team_member_workspace_dir(team_name, member_name) / SKILL_VISIBILITY_FILENAME
+
+
+def team_skill_visibility_path(team_name: str) -> Path:
+    """Return the team-wide Skill visibility declaration path."""
+    return team_workspace_dir(team_name) / SKILL_VISIBILITY_FILENAME
+
+
 def __getattr__(name: str) -> Path:
     """Preserve backward-compatible module attributes for path constants."""
     if name == "OPENJIUWEN_HOME":
         return get_openjiuwen_home()
     if name == "AGENT_TEAMS_HOME":
         return get_agent_teams_home()
+    if name == "GLOBAL_SKILLS_DIR":
+        return global_skills_dir()
     raise AttributeError(name)
 
 
@@ -66,12 +123,12 @@ def team_home(team_name: str) -> Path:
             team.db                 # default sqlite db
 
     Args:
-        team_name: Team identifier.
+        team_name: Team identifier (sanitized into one path segment).
 
     Returns:
         Absolute path to the team-named parent directory.
     """
-    return get_agent_teams_home() / team_name
+    return get_agent_teams_home() / _safe_segment(team_name, fallback="team")
 
 
 def independent_member_workspace(member_name: str) -> Path:
@@ -82,12 +139,13 @@ def independent_member_workspace(member_name: str) -> Path:
     joining and leaving teams.
 
     Args:
-        member_name: Member identifier.
+        member_name: Member identifier (sanitized into one path segment).
 
     Returns:
         Absolute path to the independent workspace directory.
     """
-    return get_openjiuwen_home() / f"{member_name}_workspace"
+    safe_member = _safe_segment(member_name, fallback="member")
+    return get_openjiuwen_home() / f"{safe_member}_workspace"
 
 
 def team_memory_dir(team_name: str) -> Path:
