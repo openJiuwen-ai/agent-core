@@ -16,16 +16,17 @@ generated: true
 | 模块 |
 |---|
 | [agent_teams](#module-1) |
-| [core/context_engine](#module-3) |
-| [core/controller](#module-4) |
+| [core/context_engine](#module-2) |
+| [core/controller](#module-3) |
+| [core/foundation/llm](#module-4) |
 | [core/runner/drunner/dmessage_queue](#module-5) |
 | [core/session](#module-6) |
 | [extensions/a2a](#module-7) |
-| [harness](#module-9) |
-| [harness/subagents](#module-10) |
-| [harness/tools/browser_move/decision](#module-11) |
-| [harness/tools/subagent](#module-12) |
-| [symphony/shared/fingerprint](#module-13) |
+| [harness](#module-8) |
+| [harness/subagents](#module-9) |
+| [harness/tools/browser_move/decision](#module-10) |
+| [harness/tools/subagent](#module-11) |
+| [symphony/shared/fingerprint](#module-12) |
 
 <a id="module-1"></a>
 
@@ -50,7 +51,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | openjiuwen/agent_teams | openjiuwen/agent_teams/external/member_runtime.py, openjiuwen/agent_teams/spawn/external_cli_spawn.py, openjiuwen/agent_teams/workflow/backends/team_worker_backend.py, openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, tests/unit_tests/agent_teams/external/test_member_runtime.py, tests/unit_tests/agent_teams/workflow/test_worker_backend.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
 
-<a id="module-3"></a>
+<a id="module-2"></a>
 
 ## core/context_engine
 
@@ -59,13 +60,21 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 
-<a id="module-4"></a>
+<a id="module-3"></a>
 
 ## core/controller
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+
+<a id="module-4"></a>
+
+## core/foundation/llm
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261110_2112_anthropic-disabled-thinking-fallback](core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/model_clients/_disabled_thinking.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, tests/unit_tests/core/foundation/llm/test_anthropic_model_client.py | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
 
 <a id="module-5"></a>
 
@@ -91,7 +100,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-9"></a>
+<a id="module-8"></a>
 
 ## harness
 
@@ -99,7 +108,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 
-<a id="module-10"></a>
+<a id="module-9"></a>
 
 ## harness/subagents
 
@@ -107,7 +116,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-11"></a>
+<a id="module-10"></a>
 
 ## harness/tools/browser_move/decision
 
@@ -115,7 +124,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-12"></a>
+<a id="module-11"></a>
 
 ## harness/tools/subagent
 
@@ -123,7 +132,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-13"></a>
+<a id="module-12"></a>
 
 ## symphony/shared/fingerprint
 

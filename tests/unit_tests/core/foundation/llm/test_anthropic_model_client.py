@@ -3,13 +3,14 @@
 
 """Unit tests for AnthropicModelClient pure converters and helpers.
 
-Scope: schema converters, cache-control breakpoint placement, base_url
-normalization, and usage extraction. Network/SDK paths (invoke/stream)
-are covered separately and require the optional ``anthropic`` SDK.
+Scope: schema converters, cache-control, base_url normalization, usage
+extraction, and offline request compatibility with the optional ``anthropic`` SDK.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -21,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
     _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY,
@@ -651,6 +653,62 @@ def _make_client() -> AnthropicModelClient:
     )
     request_config = ModelRequestConfig(model_name="claude-opus-4")
     return AnthropicModelClient(request_config, client_config)
+
+
+@pytest.mark.asyncio
+async def test_invoke_retries_disabled_thinking_within_compatibility_scope(monkeypatch) -> None:
+    anthropic = pytest.importorskip("anthropic")
+    requests = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("thinking", {}).get("type") == "disabled" or body.get("enable_thinking") is False:
+            return httpx.Response(400, json={"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": "K3.1 Pro does not support disabled thinking mode.",
+            }})
+        return httpx.Response(200, json={
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "model": body["model"],
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        })
+
+    client = _make_client()
+    overrides = {
+        "model": "k3.1-pro",
+        "max_tokens": 16,
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "routing": "keep",
+        },
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        sdk = anthropic.AsyncAnthropic(
+            base_url="https://mock.example.invalid", api_key="mock-key",
+            http_client=http_client, max_retries=0,
+        )
+        monkeypatch.setattr(client, "_create_async_anthropic_client", lambda **_: sdk)
+        with disabled_thinking_fallback_scope():
+            result = await client.invoke("probe", **overrides)
+            cached = await client.invoke("probe", **overrides)
+        with pytest.raises(BaseError, match="does not support disabled thinking"):
+            await client.invoke("probe", **overrides)
+
+    assert result.content == cached.content == "ok"
+    first, retry, cache_hit, ordinary_call = requests
+    assert first["thinking"] == {"type": "disabled"}
+    assert first["enable_thinking"] is False
+    assert first["routing"] == "keep"
+    assert retry == {key: value for key, value in first.items() if key not in {"thinking", "enable_thinking"}}
+    assert cache_hit == retry
+    assert ordinary_call == first
 
 
 @pytest.mark.asyncio
