@@ -1371,6 +1371,13 @@ class MemberSubtaskUpdateTool(TeamTool):
         return f"Subtask #{d['task_id']} confirmed as still valid against its parent."
 
 
+
+def _assignee_label(task: dict) -> str:
+    """Render a task's owner as ``name`` or ``name[member status]``."""
+    status = task.get("assignee_status")
+    return f"{task['assignee']}[{status}]" if status else task["assignee"]
+
+
 class ViewTaskToolV2(TeamTool):
     """Unified task viewing tool (V2).
 
@@ -1480,7 +1487,7 @@ class ViewTaskToolV2(TeamTool):
                 f"Content: {d['content']}",
             ]
             if d.get("assignee"):
-                lines.append(f"Assignee: {d['assignee']}")
+                lines.append(f"Assignee: {_assignee_label(d)}")
             if d.get("reviewer"):
                 lines.append(f"Reviewers: {', '.join(d['reviewer'])}")
             if d.get("summary"):
@@ -1513,7 +1520,7 @@ class ViewTaskToolV2(TeamTool):
         for task in tasks:
             parts = [f"#{task['task_id']} [{task['status']}] {task['title']}"]
             if task.get("assignee"):
-                parts.append(f"({task['assignee']})")
+                parts.append(f"assignee={_assignee_label(task)}")
             if task.get("updated_at") is not None:
                 parts.append(f"({format_time_context(task['updated_at'], now_ms)})")
             if task.get("blocked_by"):

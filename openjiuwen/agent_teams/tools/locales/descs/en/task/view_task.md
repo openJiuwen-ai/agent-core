@@ -29,15 +29,20 @@ Summary per task: task_id, title, status, assignee, blocked_by.
 Does not include content — use action=get for single-task detail.
 
 ### get
-Full single-task detail: includes content, summary / note (completion summary and detail), blocked_by (upstream dependencies), blocks (downstream dependencies).
+Full single-task detail: includes content, assignee, summary / note (completion summary and detail), blocked_by (upstream dependencies), blocks (downstream dependencies).
 
 ### note
 A task's completion summary (`summary`) and full completion detail (`note`), untruncated.
+
+### assignee
+Both views name the owner of an assigned task as `member name[member status]` (the list view writes `assignee=dev-1[busy]`). The member name is the send_message recipient.
+The member status is given only while the task is unfinished and is that member's status right now: `busy` is working, `ready` / `paused` is idle, `error` has failed, `unstarted` / `starting` / `restarting` is not up yet, `stopped` / `shutdown_requested` / `shut_down` is stopped or gone.
 
 ## Tips
 
 - list omits content, keeping token cost low. Use get for detail on a specific task.
 - Tasks with non-empty blocked_by cannot be claimed — complete their prerequisites first.
+- When a task has made no progress for a long time, look at its assignee first: a `busy` member is still on it, so leave it alone; an idle or `error` member is when you send_message that member or reassign the task.
 - Prefer tasks in ID order (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones.
 
 ## Teammate Workflow
