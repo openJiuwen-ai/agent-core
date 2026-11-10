@@ -807,6 +807,26 @@ all_tools = {
 上面四步，不要走 `kwargs`、不要 monkey-patch、不要在 `TeamToolRail`
 追加除 workspace 之外的工具（workspace 有明确的子系统归属）。
 
+## Goal 模式下的任务工具
+
+团队配置 `TeamAgentSpec.member_goal` 后，本地运行的 teammate 的任务工具受 `TeamGoalRail` 约束
+（工具本身的 schema、`invoke` 与返回文本不变），见 `F_20261110_1922_team-goal-mode`：
+
+- `claim_task(status="claimed")` 成功后，被认领的任务成为该成员的 goal。失败的认领不立项。
+- `claim_task(status="completed")` 与 `member_complete_task` 在目标任务正是成员的 ACTIVE goal 时，先经
+  评估再执行。评估不通过：工具不执行、任务保持 `in_progress`，模型收到的工具结果是拒绝文案
+  （证据 + 剩余工作）；评估通过或评估器给不出结论：工具照常执行，成功后 goal 关闭。
+- `strategy="agent_report"` 下评估即采信成员的提交，等价于没有闸。
+- 提交时任务是本人名下的 `in_progress` 任务但还没有 goal（未经认领而开工：调度器 `start_task`、计划批准，
+  且在同一轮内做完），闸先为它立项再评估——本人名下进行中任务的提交一律过闸。
+- 提交的任务不是本人名下的进行中任务、或其 goal 已被评估为完成时不评估。
+- 经 MCP 调用同一批工具的外部 CLI 成员没有这条 rail，行为不变。
+
+`spawn_teammate` 多一个属性级门控的可选布尔参数 `goal`（gate `TeamBackend.member_goal_enabled()`，
+即 `member_goal` 已配置）：省略为跟随团队默认（开），`false` 让该成员不进 goal 模式，值写入
+`TeamMember.options.goal`。门控关闭时该属性不在 schema 中，传入即在建成员行之前报错；与 `cli_agent`
+同时传入也报错。
+
 ## 与其它 spec 的关系
 
 - **`prompts/` 子系统**：分层契约——工具描述写"操作过程 / 调用顺序 /

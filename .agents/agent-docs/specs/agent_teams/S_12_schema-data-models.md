@@ -994,6 +994,29 @@ state["teams"][team_name] = {
 `TeamLifecycle` 进 spec → 跨进程序列化；`RuntimeState` 留在 pool entry，进程内
 in-memory，不写 spec。
 
+## Goal 模式配置
+
+```python
+class TeamGoalSpec(BaseModel):
+    strategy: Literal["agent_report", "transcript", "hybrid"] = "hybrid"
+    max_attempts: int | None = 10     # ge=1；None = 不限
+    token_budget: int | None = None   # ge=1
+
+LeaderSpec.goal: TeamGoalSpec | None = None
+TeamAgentSpec.member_goal: TeamGoalSpec | None = None
+TeamMemberSpec.goal: bool | None = None          # 预定义成员；None = 跟随 member_goal
+TeamMemberOptions.goal: bool | None = None       # 落库的成员级开关
+TeamRuntimeContext.goal_enabled: bool | None     # 由 options.goal 带入成员装配
+```
+
+- 全部默认关闭。生效规则由 `agent_teams/goal.py::resolve_goal_spec` 唯一定义：leader 取
+  `leader.goal`；角色为 `TEAMMATE` 且 `goal_enabled is not False` 的成员取 `member_goal`；其余角色、
+  以及任何带 `cli_agent` 的成员一律无 goal。
+- `leader.goal` 与 `leader.cli_agent` 同时配置在 spec 校验期被拒。
+- `TeamMemberOptions` 是 JSON blob，新增 `goal` 键不需要 DB 迁移。
+- goal 自身的状态不在 team DB：`GoalRecord` 与成员 goal 绑定的任务 id（键 `team.goal.task_id`）都在
+  成员自己的 session state。
+
 ## 与其它 spec 的关系
 
 - **`S_01_public-api-and-spec-flow.md`**：本规约钉死 schema 形状，S_01 描述
