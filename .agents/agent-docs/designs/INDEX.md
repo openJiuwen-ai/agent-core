@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-10T09:59+08:00 -->
+<!-- generated-at: 2026-11-10T16:23+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -18,13 +18,14 @@ generated: true
 |---|
 | [agent_evolving](#module-1) |
 | [agent_teams](#module-2) |
-| [agent_teams/workflow](#module-3) |
-| [extensions/observability](#module-4) |
-| [harness](#module-5) |
-| [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-6) |
-| [jiuwenswarm/runtime/symphony](#module-7) |
-| [symphony](#module-8) |
-| [未分类](#module-9) |
+| [agent_teams/tools](#module-3) |
+| [agent_teams/workflow](#module-4) |
+| [extensions/observability](#module-5) |
+| [harness](#module-6) |
+| [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-7) |
+| [jiuwenswarm/runtime/symphony](#module-8) |
+| [symphony](#module-9) |
+| [未分类](#module-10) |
 
 <a id="module-1"></a>
 
@@ -60,6 +61,16 @@ generated: true
 
 <a id="module-3"></a>
 
+## agent_teams/tools
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261110-1614-symphony-mixed-taxonomy](active/D-20261110-1614-symphony-mixed-taxonomy/design.md) | Symphony 混合来源与共用分类树 | in-development | lin-xiaoyu | core | 2026-11-10 |
+
+<a id="module-4"></a>
+
 ## agent_teams/workflow
 
 ### 开发前 (proposals)
@@ -93,7 +104,7 @@ generated: true
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 | [SDD-0027](archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | shipped | @xiajing | core | 2026-09-16 |
 
-<a id="module-4"></a>
+<a id="module-5"></a>
 
 ## extensions/observability
 
@@ -104,7 +115,7 @@ generated: true
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0023](proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | draft | @alan_cheng | observability | 2026-09-15 |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## harness
 
@@ -121,7 +132,7 @@ generated: true
 |---|---|---|---|---|---|
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## jiuwenswarm/jiuwenswarm/runtime/symphony
 
@@ -132,7 +143,7 @@ generated: true
 | [D-20261029-1619-skill-directory-graph-api](active/D-20261029-1619-skill-directory-graph-api/design.md) | Symphony Runtime 统一配置与检索编排接口收敛 | in-development | lin-xiaoyu | core | 2026-11-09 |
 | [D-20261109-1745-shared-capability-fingerprints](active/D-20261109-1745-shared-capability-fingerprints/design.md) | Symphony 检索与编排共用能力指纹 | in-development | lin-xiaoyu | core | 2026-11-10 |
 
-<a id="module-7"></a>
+<a id="module-8"></a>
 
 ## jiuwenswarm/runtime/symphony
 
@@ -141,8 +152,9 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261109-1603-symphony-orchestration-experience](active/D-20261109-1603-symphony-orchestration-experience/design.md) | Symphony 编排经验配置收敛 | in-development | lin-xiaoyu | core | 2026-11-09 |
+| [D-20261110-1614-symphony-mixed-taxonomy](active/D-20261110-1614-symphony-mixed-taxonomy/design.md) | Symphony 混合来源与共用分类树 | in-development | lin-xiaoyu | core | 2026-11-10 |
 
-<a id="module-8"></a>
+<a id="module-9"></a>
 
 ## symphony
 
@@ -155,8 +167,9 @@ generated: true
 | [D-20261103-1438-symphony-capability-retirement](active/D-20261103-1438-symphony-capability-retirement/design.md) | Symphony 旧检索与独立经验库退役 | in-development | lin-xiaoyu | core | 2026-11-03 |
 | [D-20261109-1603-symphony-orchestration-experience](active/D-20261109-1603-symphony-orchestration-experience/design.md) | Symphony 编排经验配置收敛 | in-development | lin-xiaoyu | core | 2026-11-09 |
 | [D-20261109-1745-shared-capability-fingerprints](active/D-20261109-1745-shared-capability-fingerprints/design.md) | Symphony 检索与编排共用能力指纹 | in-development | lin-xiaoyu | core | 2026-11-10 |
+| [D-20261110-1614-symphony-mixed-taxonomy](active/D-20261110-1614-symphony-mixed-taxonomy/design.md) | Symphony 混合来源与共用分类树 | in-development | lin-xiaoyu | core | 2026-11-10 |
 
-<a id="module-9"></a>
+<a id="module-10"></a>
 
 ## 未分类
 

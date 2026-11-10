@@ -8,7 +8,7 @@ created: 2026-10-31
 updated: 2026-11-10
 modules: [openjiuwen/symphony]
 files: [openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md]
-designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement, D-20261109-1603-symphony-orchestration-experience, D-20261109-1745-shared-capability-fingerprints]
+designs: [D-20261029-1619-skill-directory-graph-api, D-20261031-1614-symphony-config-contract, D-20261103-1438-symphony-capability-retirement, D-20261109-1603-symphony-orchestration-experience, D-20261109-1745-shared-capability-fingerprints, D-20261110-1614-symphony-mixed-taxonomy]
 ---
 
 # Symphony 运行配置与 Runtime 契约
@@ -98,7 +98,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 - 使用 Pydantic v2 原生校验、序列化和 Schema；未知字段、类型错误和越界值给出完整嵌套路径。
 - 整数拒绝 bool、数字字符串、浮点数；数值拒绝 NaN/Infinity。构建 method、BuildMethod 和 runtime_config 入参别名在业务工作流中也已删除，统一传 config。
 - 路径接受非空文本或 pathlib 纯路径，仅保存文本。根分类可包含 JSON 值；路径不触发读取。
-- `capability.sources[].type` 的目标格式为 skill/expert/connector/mcp。当前运行层实现 skill 读取器。
+- `capability.sources[].type` 的目标格式为 skill/expert/connector/mcp。当前目录读取器支持 skill 和 expert。连接器和 MCP 使用宿主会话目录。
 - 所有配置模型禁止属性重新赋值。嵌套容器不是深层冻结，各实例默认容器和子模型独立。
 - model_dump(mode="json") / model_validate、model_dump_json / model_validate_json 可往返；不接受客户端、线程池、回调和缓存句柄。
 - 公共构建默认深度 6、分支 128（至少 2）、并发 2、请求超时 420 秒、分类批量 32；底层构树与统一公共默认值一致，不保留旧入口默认值镜像。
@@ -122,18 +122,18 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 配置整理及无效目标字段清理的实施与验证见 F_20261031_1614_symphony-config-contract；能力退役依据为 D-20261103-1438-symphony-capability-retirement，实际验证与跨仓适配由其对应 feature 记录维护。
 
 
-## 6. Runtime 当前运行契约（2026-11-09）
+## 6. Runtime 当前运行契约（2026-11-10）
 
-- 构造先校验 `capability.sources` 恰有一项，再固定能力根、产物根和根分类文件相对路径，复制嵌套配置。多来源由配置模型验证，Runtime 在创建产物前明确拒绝。
+- Runtime 构造固定全部能力根、产物根和根分类文件路径，按类型及绝对路径排序去重。检索将 Skill 和独立专家纳入同一棵分类树。编排与 Flow 使用恰好一个 Skill 来源。其他组合仍可检索，编排入口报告来源限制。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
 - `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
-- 会话发现消费扫描器已接受的 Skill 记录。检索状态返回扫描错误诊断，并将不完整集合对应的索引标为过期。构树和指纹发布要求完整扫描，扫描错误导致构建失败并保留上次成功产物。
+- 会话发现消费扫描器已接受的 Skill 和专家记录。检索状态返回扫描错误诊断，并将不完整集合对应的索引标为过期。构树和指纹发布要求完整扫描，扫描错误导致构建失败并保留上次成功产物。
 - 检索与编排独立。编排和经验都开启才接收新执行证据及使用 Runtime Flow。禁用时 `submit_evolution()` 返回空结果，直接观测写入与 Flow 执行入口在创建存储前拒绝。
 - model=None 允许只读和确定性发现，并可按任务策略回退构树。构图和规划需要模型。
-- 检索构建与构图共用已配置 Skill 集合的 `FingerprintService`、指纹产物和缓存。允许回退构树且宿主缺少模型时，以元数据生成指纹。构图发布与本次使用的指纹快照绑定。
+- 单 Skill 检索构建与构图共用原有 Skill 指纹服务和缓存。共用分类树在自己的集合下按类型发布指纹。允许回退构树且宿主缺少模型时，以元数据生成指纹。构图发布与本次使用的指纹快照绑定。
 - `DiscoverySession.capability_search(query, type, operation, category, cursor, top_k)` 按单个 `type` 选择目录。`type=skill` 为默认值，复用现有目录的 `list`、`search`、分类和游标。SkillFS 只为会话可见且启用的记录使用来源和内容哈希一致的指纹。摘要、场景和关键词参与召回，指纹缺失或过期时使用当前目录描述。
-- 宿主通过 `create_session(search_catalog=...)` 处理 `expert`、`connector`、`mcp` 的单次查询，按会话授权筛选候选后可用 `discovery.search_capabilities()` 排序。`get_tools()` 返回单个 `capability_search` 工具，和 SDK 直接调用共用同一会话目录和游标。
-- skill 读取器已实现。expert/connector/mcp 在读取时明确报不支持。多来源及混合类型构建由独立的运行方案定义。
+- Skill 和专家从同一代树投影各自的分类视图，分类和计数只由当前可见叶子决定。专家支持按分类搜索、列表及游标。SDK 直接使用配置内专家。宿主通过 `create_session(expert_candidates=...)` 提供可调用候选，配置专家目录时按实际 manifest 路径取交集。连接器和 MCP 继续使用 `search_catalog`。工具和 SDK 共用会话目录及游标。
+- 专家扫描只读取独立专家包 manifest 的 `name`、`description` 和 `package_type: agent_template`。共用树以 `type:id` 区分叶子。跨类型同 ID 可以共存，同类型重复 ID 按诊断处理。构建遇扫描错误保留已发布树，在线发现跳过问题条目。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
 - 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。规划读取已有动态观测与经验写入独立，Rail 的新观测提交受经验开关控制。
 - Runtime 持有惰性默认 Flow，create_scope(store=...) 共享默认打包/审核组件并使用宿主受限存储；授权、确认和安装是宿主职责。
@@ -141,7 +141,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 
 | 配置路径 | 真实消费者 | 生效阶段 |
 |---|---|---|
-| capability.sources[0].root/type | DirectoryInventory、RuntimeStorage | 当前单来源入口的显式扫描和集合身份 |
+| capability.sources[].root/type | DirectoryInventory、RuntimeStorage | 显式扫描、共用树和集合身份 |
 | capability.scan.max_depth/limits/manifest | SkillFolderScanner、SkillManifestParser | 扫描及解析 |
 | capability.fingerprint.extraction | FingerprintService / Extractor | 提取批次、并发、正文、输出与超时 |
 | capability.fingerprint.evaluation/cache | EvaluationSuite、FingerprintCache | 提取后的评估和缓存复用 |
@@ -160,6 +160,6 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 | orchestration.experience.enabled | Runtime、GraphEngine、RuntimeFlow | 图观测写入和 Flow 启停 |
 | orchestration.experience.acceptance/narrative | SymphonyFlowEngine、蒸馏与叙事组件 | 接纳、叙事样例与候选生成 |
 
-新版 runtime.json 绑定绝对能力根与类型；非空无布局标记目录、错误布局版本、不同集合均拒绝，不删除历史目录。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
+单 Skill 产物继续使用原 runtime.json。共用树存放于 `taxonomy_collections/<scope_id>/tree`，绑定归一化来源列表。同一集合来源重排复用同一目录，新增专家目录时原 Skill 树和图仍可读取。错误布局和集合身份不匹配会被拒绝。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
 
 运行接入替代设计旧草案中的 Source 注入、retrieval.search 和兼容路线，历史设计与历史测试记录保留，不视作当前行为。

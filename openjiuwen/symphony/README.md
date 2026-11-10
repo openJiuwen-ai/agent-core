@@ -44,7 +44,7 @@ finally:
 
 `on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
 
-`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。配置可声明多个同类或不同类型的目录。当前 Runtime 要求单个来源，并提供 `skill` 读取器。旧的 `capability.root` 和 `capability.type` 会被校验拒绝。
+`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。关系图与 Flow 只使用 Skill，并要求恰有一个 Skill 目录。
 
 公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
@@ -80,13 +80,17 @@ finally:
 
 `retrieval.use_existing_index=True` 在已有索引时读取分类树。尚无索引时使用确定性目录发现，不创建占用 Runtime 布局的临时目录。单次返回数量受 `retrieval.output.max_results` 限制，列表同时受 `max_list_entries` 限制。续页继续使用同一会话游标。会话附加目录只改变发现视图，宿主全局构建使用稳定目录。
 
-`runtime.retrieval.build()` 与构图使用同一个 Skill 集合指纹服务和缓存。构图版本随附本次使用的 `fingerprint.json`。Skill 目录按会话可见范围读取记录，并按来源及内容哈希匹配指纹。有效指纹的摘要、场景和关键词参与检索，缺失或过期时使用当前目录描述。
+单 Skill 目录的检索构建与构图共用指纹服务和缓存。共用分类树的指纹按类型发布在所属集合下。Skill 和专家目录按会话可见范围读取记录，并按类型、来源和内容哈希匹配指纹。指纹缺失或过期时使用当前目录描述。
 
-`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`，支持分类、批量关键词和游标。宿主可向 `create_session(search_catalog=...)` 提供当前会话中 `expert`、`connector` 和 `mcp` 的查询实现，并用 `openjiuwen.symphony.discovery.search_capabilities()` 对授权候选排序。
+`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`。Skill 与专家都支持 `operation=list`、按 `category` 搜索和 `cursor` 续页。专家接受一条搜索词，结果的 `matches` 带分类，列表的 `categories` 带可见项计数。续页沿用原 `type` 和 `operation`。
 
-会话检索使用扫描中通过校验的 Skill。若扫描返回错误，`runtime.retrieval.status()` 报告诊断并将索引标为过期。修复扫描错误后可以重新构建。
+独立 SDK 会话直接读配置的专家目录。宿主可向 `create_session(expert_candidates=...)` 提供返回可调用候选的异步回调。配置了专家来源时，Core 按候选的 `manifest_path` 与配置目录实际读到的包取交集。省略专家来源时使用宿主候选。现有 `search_catalog` 回调继续服务连接器和 MCP，也可在未配置专家来源及新回调时处理旧版专家关键词搜索。
+
+会话检索使用扫描中通过校验的能力。跨类型可有相同 ID，同类型的重复 ID 会被排除。若扫描返回错误，`runtime.retrieval.status()` 报告诊断并将索引标为过期，构建保留上一发布版本。
 
 ## 产物与版本
+
+单 Skill 目录继续使用以下布局。多目录及专家集合的分类树位于 `taxonomy_collections/<scope_id>/tree`，集合身份由排序去重的绝对来源路径和类型确定，来源重排复用同一棵树。添加专家来源可直接在原产物根下构建新树。
 
 ```text
 storage.artifact_root/
