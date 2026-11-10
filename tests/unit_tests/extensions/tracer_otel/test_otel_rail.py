@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
@@ -110,8 +110,9 @@ class _StubAgent:
 class _StubLlm:
     """Minimal stand-in for the agent's Model: carries a ModelRequestConfig."""
 
-    def __init__(self, model_config):
+    def __init__(self, model_config, model_client_config=None):
         self.model_config = model_config
+        self.model_client_config = model_client_config
 
 
 def _make_ctx(agent, session, inputs, exception=None) -> AgentCallbackContext:
@@ -238,6 +239,117 @@ class TestOtelRailAgentCallbacks:
         # Empty message list still reports a (zero) count — it is a valid fact.
         assert kwargs["instance_info"]["message_count"] == 0
         assert kwargs["instance_info"]["class_name"] == "LLM"
+
+    async def test_before_model_call_display_name_wins_over_service_id(self):
+        """Gateway models put a service id in model_name; the optional
+        model_display_name extra field (same ride-through as top_k) makes
+        the span carry the human-readable name instead."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        config = _StubAgentConfig(
+            ModelRequestConfig(model="3f2b8c1e-uuid", model_display_name="Qwen-Max")
+        )
+        agent = _StubAgent(config=config)
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "Qwen-Max"
+
+    async def test_before_model_call_display_name_from_client_config(self):
+        """Gateway callers stamp the display name on the ModelClientConfig
+        (extra="allow"); the foundation Model keeps it at model_client_config
+        and does NOT forward unknown attributes, so the rail must read the
+        config explicitly — this is the production supply chain."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(ModelRequestConfig(model="3f2b8c1e-uuid")),
+            llm=_StubLlm(
+                ModelRequestConfig(model="3f2b8c1e-uuid"),
+                model_client_config=ModelClientConfig(
+                    client_provider="OpenAI", api_key="k", api_base="http://localhost:9", model_display_name="DeepSeek-V3"
+                ),
+            ),
+        )
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "DeepSeek-V3"
+
+    async def test_before_model_call_client_config_display_name_beats_request_config(self):
+        """Both carriers set: the client config wins — same precedence the
+        decorator-side probe uses, so the two producers never disagree."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(
+                ModelRequestConfig(model="3f2b8c1e-uuid", model_display_name="FromConfig")
+            ),
+            llm=_StubLlm(
+                ModelRequestConfig(model="3f2b8c1e-uuid"),
+                model_client_config=ModelClientConfig(
+                    client_provider="OpenAI", api_key="k", api_base="http://localhost:9", model_display_name="FromClientConfig"
+                ),
+            ),
+        )
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "FromClientConfig"
+
+    async def test_before_model_call_display_name_from_llm_object(self):
+        """A display name set directly on the llm object by wiring code —
+        kept as the lowest-priority carrier."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(ModelRequestConfig(model="3f2b8c1e-uuid")),
+            llm=_StubLlm(ModelRequestConfig(model="3f2b8c1e-uuid")),
+        )
+        agent._llm.model_display_name = "DeepSeek-V3"
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "DeepSeek-V3"
+
+    async def test_before_model_call_config_display_name_beats_llm_object(self):
+        """Both carriers set: the explicit config extra field wins."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(
+            config=_StubAgentConfig(
+                ModelRequestConfig(model="3f2b8c1e-uuid", model_display_name="FromConfig")
+            ),
+            llm=_StubLlm(ModelRequestConfig(model="3f2b8c1e-uuid")),
+        )
+        agent._llm.model_display_name = "FromLlm"
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "FromConfig"
+
+    async def test_before_model_call_without_display_name_keeps_service_id(self):
+        """Red line: no display name anywhere — class_name stays the plain
+        model_name, gateway service ids included."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(config=_StubAgentConfig(ModelRequestConfig(model="3f2b8c1e-uuid")))
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "3f2b8c1e-uuid"
 
 
 class TestOtelRailToolCallbacks:
