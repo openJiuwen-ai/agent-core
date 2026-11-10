@@ -1339,3 +1339,73 @@ async def test_a_failed_send_gives_the_notice_back() -> None:
     await runtime.stop()
 
     assert tracker.released == 1 and not tracker.claimed
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_ends_the_turn_gracefully_when_the_provider_cannot_pause() -> None:
+    harness = _FakeHarness(
+        capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT}),
+        state=HarnessState.RUNNING,
+    )
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    await runtime.pause()
+
+    assert harness.abort_calls == [AbortMode.GRACEFUL]
+    assert harness.pause_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_is_a_no_op_for_an_idle_provider_that_cannot_pause() -> None:
+    harness = _FakeHarness(capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT}))
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    await runtime.pause()
+
+    assert harness.abort_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_startup_hook_sees_the_member_session_before_the_context_is_resolved() -> None:
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    order: list[str] = []
+    runtime: ExternalHarnessMemberRuntime
+
+    async def context_factory(session: Any) -> HarnessContext:
+        order.append("context")
+        return _context()
+
+    async def hook(session: Any) -> None:
+        assert session is team_session
+        order.append(f"hook:checkpoint={runtime.has_stored_checkpoint()}")
+
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=context_factory,
+        member_agent_id="member-agent",
+    )
+    runtime.add_startup_hook(hook)
+
+    await runtime.start(team_session=team_session)
+    await runtime.stop()
+
+    assert order == ["hook:checkpoint=False", "context"]
+    assert team_session.created == [("member-agent", False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reset_tool_bindings_drops_what_the_previous_cycle_bound() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    runtime.bind_tools(_FakeToolGateway())
+
+    runtime.reset_tool_bindings()
+    await runtime.start()
+    await runtime.stop()
+
+    assert harness.start_contexts[0].tools is None
