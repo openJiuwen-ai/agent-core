@@ -695,9 +695,10 @@ class TeamRuntimeContext(BaseModel):
     ``TeamContextTracker`` can render a conversion notice in its identity block.
     """
     cli_agent: Optional[str] = None
-    """When set, this teammate is driven by an external agent backend (e.g.
+    """When set, this member is driven by an external agent backend (e.g.
     ``"claude"`` SDK, ``"codex"`` SDK, or a named CLI adapter) instead
-    of a local DeepAgent.
+    of a local DeepAgent. A leader takes it from ``LeaderSpec.cli_agent``
+    (SDK backends only).
 
     The spawn path launches the CLI as a subprocess and the configurator
     builds a ``CliRuntimeBase`` implementation in place of ``TeamHarness``. ``None``

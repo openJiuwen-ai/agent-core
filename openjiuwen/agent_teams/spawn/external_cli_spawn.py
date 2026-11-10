@@ -95,6 +95,67 @@ def _negotiate_provider_fallback(
     return None
 
 
+def _resolve_member_models(
+    ctx: "TeamRuntimeContext",
+    cli_cfg: "ExternalCliAgentSpec | None",
+) -> "tuple[ExternalCliModelConfig | None, ExternalCliModelConfig | None]":
+    """Pick the model an external CLI member runs on, and its authentication fallback.
+
+    In order: the built-in model chosen for the member, the pool allocation
+    (when it converts to the CLI's provider), the kind's static config.
+
+    Returns:
+        The primary model config and the fallback config, either may be None.
+    """
+    # When the pool allocator assigned a model to this member, convert it to
+    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
+    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
+    # spec config when no pool allocation or no provider match exists.
+    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
+    fallback_external_model_config = None
+    if ctx.builtin_model is not None:
+        # A built-in model runs on the CLI's own login: it replaces both the
+        # pool endpoint and the static endpoint config.
+        team_logger.info(
+            "[external-cli] member {} using built-in model: model={} effort={}",
+            ctx.member_name,
+            ctx.builtin_model.model,
+            ctx.builtin_model.effort,
+        )
+        external_model_config = ctx.builtin_model
+    elif ctx.member_model is not None:
+        pool_model_config = _team_model_config_to_external(ctx.member_model, cli_agent=ctx.cli_agent)
+        if pool_model_config is not None:
+            team_logger.info(
+                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
+                ctx.member_name,
+                pool_model_config.provider,
+                pool_model_config.model,
+                pool_model_config.api_base,
+            )
+            external_model_config = pool_model_config
+        else:
+            team_logger.info(
+                "[external-cli] member {} pool model conversion returned None; falling back to static config",
+                ctx.member_name,
+            )
+    else:
+        team_logger.info(
+            "[external-cli] member {} no pool model assigned; using static config",
+            ctx.member_name,
+        )
+    if ctx.fallback_member_model is not None:
+        fallback_external_model_config = _team_model_config_to_external(
+            ctx.fallback_member_model,
+            cli_agent=ctx.cli_agent,
+        )
+    backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
+    if backend is not None and backend.kind == "provider":
+        external_model_config = _negotiate_provider_endpoint(ctx, external_model_config)
+        fallback_external_model_config = _negotiate_provider_fallback(ctx, fallback_external_model_config)
+    return external_model_config, fallback_external_model_config
+
+
 def _external_cli_config_for_member(
     spec: "TeamAgentSpec",
     member_name: str | None,
@@ -197,6 +258,7 @@ def _build_team_context_tracker(
     ctx: "TeamRuntimeContext",
     member_name: str | None,
     team_name: str,
+    policy_text: str | None = None,
 ) -> "TeamContextTracker":
     """Build the tracker feeding team state into this CLI member's messages.
 
@@ -214,6 +276,8 @@ def _build_team_context_tracker(
         ctx: The member's runtime context (role / private prompt / language).
         member_name: The member's semantic identifier.
         team_name: The team this member belongs to.
+        policy_text: The leader's collaboration policy as a ``<team-policy>``
+            block, for a framework-built team; ``None`` for every other member.
 
     Returns:
         A tracker scoped to this member.
@@ -233,6 +297,7 @@ def _build_team_context_tracker(
         team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
+        policy_text=policy_text,
     )
 
 
@@ -369,8 +434,13 @@ def _bind_protocol_member_team_tools(
     ctx: "TeamRuntimeContext",
     team_name: str,
     session_id: str,
+    role_tool_options: dict[str, Any] | None = None,
 ) -> None:
     """Bind local team tools through the protocol provider's native channel.
+
+    ``role_tool_options`` carries what only a leader's tool set needs (model
+    allocator, team / bootstrap mode, expert catalog, extra exclusions); a
+    teammate passes nothing and gets the builders' defaults.
 
     A team with shared swarmflow infrastructure additionally hosts the native
     ``swarmflow`` tool for this CLI member (see ``_external_swarmflow_host``):
@@ -414,6 +484,7 @@ def _bind_protocol_member_team_tools(
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
             **swarmflow_handles,
+            **(role_tool_options or {}),
         )
         runtime.bind_mcp_servers(
             [
@@ -446,6 +517,7 @@ def _bind_protocol_member_team_tools(
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
             **swarmflow_handles,
+            **(role_tool_options or {}),
         )
     )
 
@@ -533,51 +605,7 @@ async def external_cli_spawn(
     # Resolve the static launch config declared on the spec for this CLI kind.
     cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent, ctx.template_external_cli)
 
-    # When the pool allocator assigned a model to this member, convert it to
-    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
-    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
-    # spec config when no pool allocation or no provider match exists.
-    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
-    fallback_external_model_config = None
-    if ctx.builtin_model is not None:
-        # A built-in model runs on the CLI's own login: it replaces both the
-        # pool endpoint and the static endpoint config.
-        team_logger.info(
-            "[external-cli] member {} using built-in model: model={} effort={}",
-            ctx.member_name,
-            ctx.builtin_model.model,
-            ctx.builtin_model.effort,
-        )
-        external_model_config = ctx.builtin_model
-    elif ctx.member_model is not None:
-        pool_model_config = _team_model_config_to_external(ctx.member_model, cli_agent=ctx.cli_agent)
-        if pool_model_config is not None:
-            team_logger.info(
-                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
-                ctx.member_name,
-                pool_model_config.provider,
-                pool_model_config.model,
-                pool_model_config.api_base,
-            )
-            external_model_config = pool_model_config
-        else:
-            team_logger.info(
-                "[external-cli] member {} pool model conversion returned None; falling back to static config",
-                ctx.member_name,
-            )
-    else:
-        team_logger.info(
-            "[external-cli] member {} no pool model assigned; using static config",
-            ctx.member_name,
-        )
-    if ctx.fallback_member_model is not None:
-        fallback_external_model_config = _team_model_config_to_external(
-            ctx.fallback_member_model,
-            cli_agent=ctx.cli_agent,
-        )
-    if backend is not None and backend.kind == "provider":
-        external_model_config = _negotiate_provider_endpoint(ctx, external_model_config)
-        fallback_external_model_config = _negotiate_provider_fallback(ctx, fallback_external_model_config)
+    external_model_config, fallback_external_model_config = _resolve_member_models(ctx, cli_cfg)
 
     async def promote_fallback_model() -> bool:
         """Persist the fallback model as this member's active model."""

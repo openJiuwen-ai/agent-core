@@ -256,6 +256,10 @@ class ExternalHarnessMemberRuntime:
             fresh session — for hosts that know the member already has history.
         agent_kind: Reliability vocabulary for this member (``claude`` /
             ``codex``); ``None`` disables the external-runtime reliability loop.
+        member_agent_id: The member's stable agent id, for a ``context``
+            factory. Knowing it up front lets ``start`` open the member's own
+            session before the factory and the startup hooks run, so both can
+            read what that session holds. A ready ``context`` carries its own.
         inject_mcp: Whether the spawn path should mount the team MCP server.
         mcp_server_name: Logical name of the team MCP server.
     """
@@ -274,6 +278,7 @@ class ExternalHarnessMemberRuntime:
         cli_path: str | None = None,
         inject_mcp: bool = False,
         mcp_server_name: str = TEAM_MCP_SERVER_NAME,
+        member_agent_id: str | None = None,
     ) -> None:
         self._harness = harness
         self._context_source = context
@@ -300,7 +305,7 @@ class ExternalHarnessMemberRuntime:
             self._member_agent_id: str | None = context.agent_id
         else:
             self._member_name = harness.card.name
-            self._member_agent_id = None
+            self._member_agent_id = member_agent_id
         self._member_session: Any = None
         self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
         self._stopped = True
@@ -312,6 +317,7 @@ class ExternalHarnessMemberRuntime:
         self._trajectory: HarnessTrajectoryRecorder | None = None
         self._promote_fallback_model: PromoteFallbackModel | None = None
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._startup_hooks: list[Callable[[Any], Awaitable[None]]] = []
         self._round_seq = 0
         self._current_round_id: int | None = None
         self._reported_model: str | None = None
@@ -429,6 +435,34 @@ class ExternalHarnessMemberRuntime:
         self._activity_sink = sink
         self._activity_identity = (agent_id, phase, label, correlation_id)
 
+    def reset_tool_bindings(self) -> None:
+        """Drop the MCP servers and native tools bound for the next ``start``.
+
+        For a runtime that outlives one run cycle and rebinds its tools on
+        every ``start``: ``bind_mcp_servers`` appends, so the previous cycle's
+        servers would otherwise be mounted a second time.
+        """
+        self._extra_mcp_servers.clear()
+        self._bound_tools = None
+
+    def add_startup_hook(self, hook: Callable[[Any], Awaitable[None]]) -> None:
+        """Run ``hook(team_session)`` on every ``start``, before the provider starts.
+
+        The counterpart of :meth:`add_teardown_hook` for a runtime built before
+        its session is known: the hook binds whatever depends on the session
+        (team tools, trajectory recorder). It runs after the member's own
+        session is open -- when the agent id was known at construction -- and
+        before the start context is resolved.
+        """
+        self._startup_hooks.append(hook)
+
+    def has_stored_checkpoint(self) -> bool:
+        """Whether the member's open session holds a checkpoint of this backend."""
+        member_session = self._member_session
+        if member_session is None:
+            return False
+        return read_member_checkpoint(member_session, backend=self._harness.card.name) is not None
+
     def add_teardown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run ``hook`` after the harness stopped (observability receivers...)."""
         self._teardown_hooks.append(hook)
@@ -475,10 +509,19 @@ class ExternalHarnessMemberRuntime:
             raise HarnessStateError("external harness member runtime is already started")
         async with self._context_delivery_lock:
             await self._finalize_member_session()
-        context = await self._resolve_context(team_session)
-        self._member_name = context.agent_name
-        self._member_agent_id = context.agent_id
-        await self._ensure_member_session(team_session)
+        try:
+            if self._member_agent_id is not None:
+                await self._ensure_member_session(team_session)
+            for hook in self._startup_hooks:
+                await hook(team_session)
+            context = await self._resolve_context(team_session)
+            self._member_name = context.agent_name
+            self._member_agent_id = context.agent_id
+            await self._ensure_member_session(team_session)
+        except BaseException:
+            async with self._context_delivery_lock:
+                await self._finalize_member_session()
+            raise
         if self._seed_checkpoint is not None and self._member_session is not None:
             await self._write_seed_checkpoint(context)
             self._seed_checkpoint = None
@@ -675,7 +718,21 @@ class ExternalHarnessMemberRuntime:
         await self._adapter.abort(immediate=immediate)
 
     async def pause(self) -> None:
-        await self._adapter.pause()
+        """Pause the in-flight turn, or end it gracefully when the provider cannot pause.
+
+        A provider without ``PAUSE_RESUME`` keeps its conversation on its own
+        side, so a graceful abort loses nothing but the turn's continuation:
+        the next input starts a new turn on the same history.
+        """
+        card = self._harness.card
+        can_abort = card.supports(HarnessCapability.GRACEFUL_ABORT) or card.supports(HarnessCapability.FORCE_ABORT)
+        if card.supports(HarnessCapability.PAUSE_RESUME) or not can_abort:
+            # Nothing to fall back on either: the adapter reports the missing capability.
+            await self._adapter.pause()
+            return
+        if self._harness.state is not HarnessState.RUNNING:
+            return
+        await self._adapter.abort(immediate=False)
 
     async def resume(self, *, query: Any | None = None) -> None:
         await self._adapter.resume(query=query)

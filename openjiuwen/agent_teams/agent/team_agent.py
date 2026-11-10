@@ -246,9 +246,16 @@ class TeamAgent(BaseAgent):
     def build_context(self):
         """Return the assembly BuildContext, or None before configure()."""
         harness = self.harness
-        if harness is not None:
-            return harness.build_context
-        return None
+        if harness is None:
+            return None
+        from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+
+        if isinstance(harness, ExternalHarnessMemberRuntime):
+            # A third-party harness assembles nothing locally; what the team
+            # was assembled with is the spec's own context.
+            blueprint = self._configurator.blueprint
+            return blueprint.spec.build_context if blueprint is not None else None
+        return harness.build_context
 
     @property
     def tiny_agent_model_resolver(self):
@@ -770,6 +777,12 @@ class TeamAgent(BaseAgent):
             ctx,
             member_runtime=member_runtime,
         )
+        if ctx.role == TeamRole.LEADER and ctx.cli_agent:
+            # The leader's third-party harness was built by the configurator;
+            # its team tools and context tracker need this agent's backend.
+            from openjiuwen.agent_teams.spawn.external_leader import bind_external_leader
+
+            bind_external_leader(self, spec, ctx)
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``

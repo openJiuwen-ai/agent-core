@@ -53,10 +53,8 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
-    build_leader_bound_group_section,
     build_leader_policy_disclosure,
-    build_leader_prebuilt_section,
-    build_team_extra_section,
+    build_leader_static_sections,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
@@ -590,40 +588,14 @@ class TeamPolicyRail(DeepAgentRail):
         bootstrap_mode: str,
         bound_group_name: str | None,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: an opening section, plus the caller's own prompt.
-
-        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
-        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
-        the policy arrives as a ``<team-policy>`` block). The extra section
-        stays here rather than moving into the policy disclosure because it is
-        not team policy: it is what the SDK caller told *this* leader to do,
-        and it has to be in force before the team exists — it may well be the
-        instruction that decides what team to build.
-        """
-        if bootstrap_mode == "framework":
-            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
-        else:
-            opening = build_leader_bootstrap_section(
-                swarmflow_enabled=swarmflow_enabled,
-                language=self._language,
-                loader=self._loader,
-            )
-        sections = [opening]
-        # Scheduled dispatch with a bound AgentGroup (F_125 decision 14): name
-        # the group so the leader looks for experts there first — the same
-        # signal that scopes ``view_experts`` to it.
-        if bound_group_name is not None:
-            sections.append(
-                build_leader_bound_group_section(
-                    group=bound_group_name,
-                    language=self._language,
-                    loader=self._loader,
-                )
-            )
-        extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
-        if extra is not None:
-            sections.append(extra)
-        return sections
-
+        """Build the leader's prefix: an opening section, plus the caller's own prompt."""
+        return build_leader_static_sections(
+            bootstrap_mode=bootstrap_mode,
+            swarmflow_enabled=swarmflow_enabled,
+            bound_group_name=bound_group_name,
+            base_prompt=base_prompt,
+            language=self._language,
+            loader=self._loader,
+        )
 
 __all__ = ["TeamPolicyRail"]

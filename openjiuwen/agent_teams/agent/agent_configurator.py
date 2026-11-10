@@ -548,10 +548,23 @@ class AgentConfigurator:
 
         The default path builds a ``TeamHarness`` over DeepAgent. When
         ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
-        external CLI member), it is adopted as-is and the DeepAgent / rail /
+        external CLI member) -- or built here for a leader whose spec names a
+        third-party harness -- it is adopted as-is and the DeepAgent / rail /
         memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
+        if member_runtime is None and ctx.role == TeamRole.LEADER and ctx.cli_agent and self.team_backend is not None:
+            # A leader on a third-party harness (``LeaderSpec.cli_agent``).
+            # Unlike a spawned member, nobody hands it a runtime: it is built
+            # here, session-free, and bound to its session on every start.
+            from openjiuwen.agent_teams.spawn.external_leader import build_external_leader_runtime
+
+            member_runtime = build_external_leader_runtime(
+                spec,
+                ctx,
+                agent_id=self._card.id,
+                team_backend=self.team_backend,
+            )
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
