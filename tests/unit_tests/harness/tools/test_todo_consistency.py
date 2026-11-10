@@ -161,8 +161,12 @@ async def test_inflight_publication_failure_does_not_claim_zero_writes(env, monk
         await published.wait()
         if cancel:
             task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancel else BaseError):
+        with pytest.raises(asyncio.CancelledError if cancel else BaseError) as caught:
             await task
+        if not cancel:
+            assert "outcome is unknown" in str(caught.value)
+            assert "Read the current Todo" in str(caught.value)
+            assert "Do not blindly retry" in str(caught.value)
     assert calls == 1
     assert json.loads(path.read_text())["todos"][0]["status"] == "completed"
     records = [call.kwargs["metadata"] for call in warning.call_args_list
@@ -170,6 +174,101 @@ async def test_inflight_publication_failure_does_not_claim_zero_writes(env, monk
     assert len(records) == 1
     assert records[0]["commit_state"] == "unknown"
     assert records[0]["item_counts"]["applied_count"] is None
+
+
+@pytest.mark.asyncio
+async def test_domain_publication_error_keeps_code_and_explains_unknown_outcome(env, monkeypatch):
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import build_error
+
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    error = build_error(StatusCode.TOOL_TODOS_SAVE_FAILED, reason="response lost")
+    calls = 0
+
+    async def lose_response(_path, content, **_kwargs):
+        nonlocal calls
+        calls += 1
+        path.write_text(content)
+        raise error
+
+    monkeypatch.setattr(modifier.fs, "write_file", lose_response)
+    with pytest.raises(BaseError) as caught:
+        await update(modifier, session, "A", status="completed")
+    assert caught.value is error
+    assert caught.value.code == 182501
+    assert "outcome is unknown" in str(caught.value)
+    assert "Read the current Todo" in str(caught.value)
+    assert "Do not blindly retry" in str(caught.value)
+    assert error.tool_commit_state == "unknown"
+    assert error.tool_item_counts["applied_count"] is None
+    assert calls == 1 and json.loads(path.read_text())["todos"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["error", "missing", "unconfirmed"])
+async def test_unconfirmed_publication_never_suggests_safe_replay(env, monkeypatch, response_kind):
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    calls = 0
+
+    async def unconfirmed(_path, content, **_kwargs):
+        nonlocal calls
+        calls += 1
+        path.write_text(content)
+        return SimpleNamespace(code=1 if response_kind == "error" else 0, message="not confirmed",
+                               data=None if response_kind == "missing" else SimpleNamespace(
+                                   conflict=False, atomic_replace=False))
+
+    monkeypatch.setattr(modifier.fs, "write_file", unconfirmed)
+    with pytest.raises(BaseError) as caught:
+        await update(modifier, session, "A", status="completed")
+    assert caught.value.code == 182501
+    assert "Read the current Todo" in str(caught.value)
+    assert "Do not blindly retry" in str(caught.value)
+    assert caught.value.details["commit_state"] == "unknown"
+    assert caught.value.tool_item_counts["applied_count"] is None
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_publication_guidance_reaches_actual_tool_message(env, monkeypatch):
+    from openjiuwen.core.foundation.llm import ToolCall
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    calls = 0
+
+    async def lose_response(_path, content, **_kwargs):
+        nonlocal calls
+        calls += 1
+        path.write_text(content)
+        raise OSError("response lost")
+
+    monkeypatch.setattr(modifier.fs, "write_file", lose_response)
+    callbacks = AgentCallbackManager("todo-batch-test")
+    manager = AbilityManager(owner_id="todo-batch-test")
+    context = AgentCallbackContext(agent=SimpleNamespace(agent_callback_manager=callbacks), session=session)
+    await Runner.start()
+    try:
+        manager.add_ability(modifier.card, modifier)
+        result = await manager.execute(context, ToolCall(
+            id="unknown-publication", type="function", name="todo_modify", arguments=json.dumps({
+                "action": "update", "todos": [{"id": "A", "status": "completed"}],
+            })), session)
+        message = result[0][1].content
+        assert "outcome is unknown" in message
+        assert "Read the current Todo" in message
+        assert "Do not blindly retry" in message
+        assert calls == 1 and json.loads(path.read_text())["todos"][0]["status"] == "completed"
+    finally:
+        manager.remove_ability("todo_modify")
+        await callbacks.clear()
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

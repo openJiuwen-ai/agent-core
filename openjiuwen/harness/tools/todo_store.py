@@ -17,6 +17,10 @@ from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.harness.schema.task import TodoItem
 
 MAX_REVISION = 2**53 - 1
+_UNKNOWN_PUBLICATION_HINT = (
+    "The save outcome is unknown; the Todo file may already have changed. "
+    "Read the current Todo list before deciding what to do next. Do not blindly retry the same write."
+)
 _UNRESOLVED = object()
 _BINDING = ContextVar("todo_plan_binding", default=None)
 _TRANSACTION = ContextVar("todo_transaction", default=None)
@@ -236,6 +240,16 @@ def _serialize_snapshot(snapshot):
     return json.dumps(snapshot.document(), ensure_ascii=False)
 
 
+def _publication_error(reason, counts, cause=None):
+    error = build_error(
+        StatusCode.TOOL_TODOS_SAVE_FAILED, reason=f"{reason}. {_UNKNOWN_PUBLICATION_HINT}", cause=cause,
+        details={"reason": "publication_unknown", "commit_state": "unknown"},
+    )
+    error.tool_commit_state = "unknown"
+    error.tool_item_counts = {**counts, "applied_count": None}
+    return error
+
+
 def _result_metadata(tx, committed, changed):
     before = {row["id"]: row for row in tx.snapshot.todos}
     after = {row["id"]: row for row in committed.todos}
@@ -376,26 +390,26 @@ async def transact(
                 )
                 try:
                     response = await publication
-                except (asyncio.CancelledError, BaseError) as exc:
+                except asyncio.CancelledError as exc:
                     # 请求已交给后端，取消/异常不证明零写入；保持原控制流。
                     exc.tool_commit_state = "unknown"
                     exc.tool_item_counts = {**tx.counts, "applied_count": None}
                     raise
+                except BaseError as exc:
+                    # 保留领域错误码及控制类型，模型可见文本仍必须说明不能盲重试。
+                    if _UNKNOWN_PUBLICATION_HINT not in exc.message:
+                        exc.message = f"{exc.message}. {_UNKNOWN_PUBLICATION_HINT}"
+                    exc.tool_commit_state = "unknown"
+                    exc.tool_item_counts = {**tx.counts, "applied_count": None}
+                    raise
                 except Exception as exc:
-                    error = build_error(StatusCode.TOOL_TODOS_SAVE_FAILED, reason=str(exc), cause=exc,
-                                        details={"reason": "publication_unknown", "commit_state": "unknown"})
-                    error.tool_item_counts = {**tx.counts, "applied_count": None}
-                    raise error from exc
+                    raise _publication_error(str(exc), tx.counts, exc) from exc
                 if response.data is not None and response.data.conflict:
                     continue
                 if response.code != 0 or response.data is None:
-                    raise build_error(StatusCode.TOOL_TODOS_SAVE_FAILED,
-                                      reason=f"Todo commit failed or outcome unknown: {response.message}",
-                                      details={"reason": "publication_unknown", "commit_state": "unknown"})
+                    raise _publication_error(f"Todo commit failed or was not confirmed: {response.message}", tx.counts)
                 if not response.data.atomic_replace:
-                    raise build_error(StatusCode.TOOL_TODOS_SAVE_FAILED,
-                                      reason="Todo backend did not confirm conditional publication",
-                                      details={"reason": "publication_unknown", "commit_state": "unknown"})
+                    raise _publication_error("Todo backend did not confirm conditional publication", tx.counts)
                 changed = True
             if tx.created:
                 tool.mark_created_in_invoke(session_id)

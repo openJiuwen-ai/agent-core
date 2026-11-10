@@ -141,12 +141,14 @@ class HybridAsyncReadWriteLock:
                 await asyncio.shield(task)
                 return
             except asyncio.CancelledError:
-                try:
-                    await task
-                except FileLockTimeout:
-                    pass
-                else:
+                async def settle_acquisition():
+                    try:
+                        await task
+                    except FileLockTimeout:
+                        return
                     await self._file.release()
+
+                await self._finish_cleanup(settle_acquisition())
                 raise
             except FileLockTimeout:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -154,13 +156,29 @@ class HybridAsyncReadWriteLock:
                     raise self._timeout() from None
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
-    async def _release_file(self) -> None:
-        task = asyncio.create_task(self._file.release())
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+    async def _finish_cleanup(self, operation) -> None:
+        """取消不能中断实际释放、内存状态更新或等待者通知。"""
+        task = asyncio.create_task(operation)
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _release_guard(self, mode: Literal["read", "write"]) -> None:
+        async with self._condition:
+            if mode == "write" or self._readers == 1:
+                await self._file.release()
+            # 只有实际释放确认完成才清状态；释放失败仍保持占用，不能放行写者。
+            if mode == "write":
+                self._writer = False
+            else:
+                self._readers -= 1
+            self._condition.notify_all()
 
     @asynccontextmanager
     async def read(self, timeout: float):
@@ -174,11 +192,7 @@ class HybridAsyncReadWriteLock:
         try:
             yield
         finally:
-            async with self._condition:
-                self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+            await self._finish_cleanup(self._release_guard("read"))
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -195,10 +209,7 @@ class HybridAsyncReadWriteLock:
         try:
             yield
         finally:
-            async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+            await self._finish_cleanup(self._release_guard("write"))
 
     async def close(self) -> None:
         async with self._condition:
