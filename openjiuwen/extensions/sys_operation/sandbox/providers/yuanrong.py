@@ -2,35 +2,34 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """YuanRong sandbox providers (shell / code / fs).
 
-Communication uses the ``yr`` actor SDK. Both executors create a
-``yr.sandbox.Sandbox`` wrapper. ``idle_timeout`` defaults to ``-1``
-(never idle-evict) and can be overridden via launcher ``extra_params``:
+Talks only to the ADX HTTP API on ``PreDeployLauncherConfig.base_url``:
 
-- ``executor=default`` → ``yr.sandbox.Sandbox(idle_timeout=...)``
-- ``executor=docker`` → ``yr.sandbox.Sandbox(sandbox_type="docker", idle_timeout=..., ...)``
+- ``POST /api/environment/v1/environments``
+- ``DELETE /api/environment/v1/environments/{environmentId}``
+- ``POST /direct/{environmentId}/invoke``
 
-FS APIs map to ``Sandbox.read_file`` / ``write_file`` / ``list_files`` /
-``search_files`` (native Python I/O inside the sandbox).
-
-``PreDeployLauncherConfig.base_url`` is required by the launcher type but unused
-by the SDK path; cluster address comes from YuanRong env (e.g. ``YR_SERVER_ADDRESS``).
-``idle_ttl_seconds`` is unused; idle timeout comes from
-``extra_params["idle_timeout"]`` or defaults to ``-1``.
+Create uses the management-plane fields: ``runtime``, ``rootfs``, ``cpu``,
+``memory``, ``idleTimeoutSeconds``, and ``extra_config.user``. Invoke uses
+``process.exec`` / ``file.read`` / ``file.write`` / ``file.list`` /
+``file.search``. ``idle_ttl_seconds`` is unused.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
-import logging
 import os
 import shlex
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, ClassVar, Dict, List, Literal, Optional, Tuple, TypeVar
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation.config import SandboxGatewayConfig
 from openjiuwen.core.sys_operation.result import (
     DownloadFileChunkData,
@@ -71,14 +70,13 @@ from openjiuwen.core.sys_operation.sandbox.providers.base_provider import (
 )
 from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegistry
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_DOCKER_CPU = 1000
 DEFAULT_DOCKER_MEMORY = 1024
-YUANRONG_IDLE_TIMEOUT = -1
 YUANRONG_RECREATE_RETRIES = 5
 YUANRONG_RECREATE_SLEEP_SECONDS = 1
-YUANRONG_RECREATE_ERROR_CODES = frozenset({1003, 1007, 1009, 1013, 2002, 3001})
+_SDK_LIST_DEPTH = 20
+_ADX_ENVIRONMENTS = "/api/environment/v1/environments"
+_ADX_INVOKE = "/direct"
 
 _T = TypeVar("_T")
 
@@ -186,28 +184,345 @@ def _sort_fs_items(items: List[FileSystemItem], sort_by: str, sort_descending: b
     return sorted(items, key=key_fn, reverse=sort_descending)
 
 
+_DIRECTORY_TYPES = frozenset({"dir", "directory"})
+_CATEGORY_TYPES = frozenset({"file", "dir", "directory"})
+
+
+class SandboxSearchLimitError(RuntimeError):
+    """``file.search`` exceeded ``max_results`` (contract HTTP 429)."""
+
+
+def _action_error_message(raw: dict[str, Any]) -> Optional[str]:
+    error = raw.get("error")
+    if not error:
+        return None
+    code = raw.get("error_code")
+    if code:
+        return f"{code}: {error}"
+    return str(error)
+
+
+def _payload_is_directory(item: dict[str, Any]) -> bool:
+    if "is_directory" in item:
+        return bool(item.get("is_directory"))
+    return str(item.get("type") or "") in _DIRECTORY_TYPES
+
+
 def _item_from_payload(item: dict[str, Any]) -> FileSystemItem:
+    raw_type = item.get("type")
+    is_directory = _payload_is_directory(item)
+    modified = item.get("modified_time")
+    if isinstance(modified, bool) or modified is None:
+        modified_time = "0"
+    else:
+        modified_time = str(modified)
+    file_type: Optional[str]
+    if is_directory or raw_type is None or raw_type in _CATEGORY_TYPES:
+        file_type = None
+    else:
+        file_type = str(raw_type)
     return FileSystemItem(
-        name=item.get("name", ""),
-        path=item.get("path", ""),
-        size=item.get("size") or 0,
-        is_directory=bool(item.get("is_directory", False)),
-        modified_time=item.get("modified_time") or "0",
-        type=item.get("type"),
+        name=str(item.get("name") or ""),
+        path=str(item.get("path") or ""),
+        size=int(item.get("size") or 0),
+        is_directory=is_directory,
+        modified_time=modified_time,
+        type=file_type,
     )
 
 
 def _normalize_list_items(raw: Any) -> List[dict[str, Any]]:
     if isinstance(raw, dict):
-        items = raw.get("items", [])
-        return items if isinstance(items, list) else []
+        message = _action_error_message(raw)
+        if message:
+            raise OSError(message)
+        items = raw.get("entries", raw.get("items", []))
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, dict)]
     return []
 
 
+def _decode_read_payload(raw: Any, *, binary: bool) -> Any:
+    """Accept ``{data, error}`` from ``file.read`` (hex when binary)."""
+    if not isinstance(raw, dict):
+        return raw
+    message = _action_error_message(raw)
+    if message:
+        if "No such file" in message:
+            raise FileNotFoundError(message)
+        if "Is a directory" in message:
+            raise IsADirectoryError(message)
+        raise OSError(message)
+    if "data" in raw:
+        data = raw.get("data")
+    elif "content" in raw:
+        data = raw.get("content")
+    else:
+        return raw
+    encoding = str(raw.get("content_encoding") or "")
+    if encoding == "base64" and isinstance(data, str):
+        return base64.b64decode(data)
+    if _is_hex_payload(data, binary=binary, encoding=encoding, raw=raw):
+        return bytes.fromhex(data)
+    return data
+
+
+def _is_hex_payload(data: Any, *, binary: bool, encoding: str, raw: dict[str, Any]) -> bool:
+    if not isinstance(data, str):
+        return False
+    if binary or encoding == "hex":
+        return True
+    return raw.get("binary") is True
+
+
+def _keep_listed_item(
+    item: dict[str, Any],
+    *,
+    include_files: bool,
+    include_dirs: bool,
+) -> bool:
+    if _payload_is_directory(item):
+        return include_dirs
+    return include_files
+
+
+def _normalize_exec_result(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "returncode": -1,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"unexpected result type: {type(result)!r}",
+        }
+    exit_code = result.get("exit_code", result.get("returncode", -1))
+    try:
+        exit_code = int(exit_code)
+    except (TypeError, ValueError):
+        exit_code = -1
+    return {
+        "returncode": exit_code,
+        "exit_code": exit_code,
+        "stdout": result.get("stdout") or "",
+        "stderr": result.get("stderr") or "",
+    }
+
+
+class AdxHttpError(RuntimeError):
+    """ADX HTTP error. ``status == 404`` means the environment is gone."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def _normalize_rootfs(extra: dict[str, Any]) -> str:
+    """Build the rootfs JSON the YuanRong create path always sent.
+
+    A string is kept. A dict aliases ``image`` to ``imageurl``. Otherwise
+    ``image`` / ``workdir`` / ``mounts`` are assembled into one document.
+    """
+    rootfs = extra.get("rootfs")
+    if isinstance(rootfs, str) and rootfs.strip():
+        return rootfs
+    if isinstance(rootfs, dict):
+        payload = dict(rootfs)
+        if "imageurl" not in payload and "image" in payload:
+            payload["imageurl"] = payload.pop("image")
+        return json.dumps(payload)
+    return json.dumps(
+        {
+            "type": "image",
+            "imageurl": extra.get("image"),
+            "workdir": extra.get("workdir"),
+            "mounts": extra.get("mounts"),
+        }
+    )
+
+
+def _normalize_executor(value: Any) -> str:
+    """Accept supervisor / docker / conch, dropping a stray wrapping quote."""
+    text = str(value or "supervisor").strip().lower()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    text = text.strip("'\"")
+    if text not in {"supervisor", "docker", "conch"}:
+        return "supervisor"
+    return text
+
+
+def _adx_create_body(extra: dict[str, Any], executor: str) -> dict[str, Any]:
+    """HTTP body for the same fields ``yr.sandbox.Sandbox`` used to receive."""
+    executor = _normalize_executor(executor)
+    body: dict[str, Any] = {
+        "rootfs": _normalize_rootfs(extra),
+        "cpu": int(extra.get("cpu", DEFAULT_DOCKER_CPU)),
+        "memory": int(extra.get("memory", DEFAULT_DOCKER_MEMORY)),
+        "idleTimeoutSeconds": _idle_timeout_seconds(extra),
+    }
+    if executor in {"supervisor", "docker", "conch"}:
+        body["runtime"] = executor
+    user = extra.get("user")
+    if isinstance(user, str) and user.strip():
+        body["extra_config"] = {"user": user.strip()}
+    return body
+
+
+def _idle_timeout_seconds(extra: dict[str, Any]) -> int:
+    """Contract field. ``0`` disables idle eviction; negatives are rejected."""
+    raw = extra.get("idleTimeoutSeconds")
+    if raw is None:
+        raw = extra.get("idle_timeout", 0)
+    if isinstance(raw, bool):
+        raise TypeError("idleTimeoutSeconds must be an integer")
+    idle_timeout = int(raw)
+    if idle_timeout < 0:
+        return 0
+    return idle_timeout
+
+
+def _exec_args(
+    command: str,
+    *,
+    cwd: Optional[str] = None,
+    timeout: Optional[int] = None,
+    environment: Optional[Dict[str, str]] = None,
+) -> dict[str, Any]:
+    """``process.exec`` args. The server already runs a string ``cmd`` with ``/bin/sh -c``."""
+    cmd = command
+    if environment:
+        env_prefix = " ".join(
+            f"{key}={_quote_shell_value(value)}" for key, value in environment.items()
+        )
+        cmd = f"export {env_prefix} && {command}"
+    args: dict[str, Any] = {"cmd": cmd}
+    if isinstance(cwd, str) and cwd and cwd != ".":
+        args["cwd"] = cwd
+    if _positive_timeout(timeout):
+        args["timeout"] = timeout
+    return args
+
+
+def _positive_timeout(timeout: Optional[int]) -> bool:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return False
+    return timeout > 0
+
+
+def _stderr_reports_timeout(stderr: str, exit_code: int) -> bool:
+    if exit_code == 0:
+        return False
+    return "timed out" in stderr.lower()
+
+
+def _http_error_message(body: Any) -> str:
+    if isinstance(body, dict):
+        message = body.get("message") or body.get("error")
+        if isinstance(message, dict):
+            return str(message.get("message") or message)
+        if message:
+            return str(message)
+    return "ADX request failed"
+
+
+def _decode_mgmt_data(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise RuntimeError("ADX management response is not an object")
+    data = body.get("data")
+    if isinstance(data, str):
+        decoded = json.loads(base64.b64decode(data))
+        if isinstance(decoded, dict):
+            return decoded
+    if isinstance(data, dict):
+        return data
+    raise RuntimeError("ADX management response has no data")
+
+
+def _log_payload(payload: Optional[dict[str, Any]]) -> str:
+    if payload is None:
+        return ""
+    text = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(text) <= 2000:
+        return text
+    return text[:2000] + "...(truncated)"
+
+
+def _adx_request(
+    method: str,
+    url: str,
+    *,
+    payload: Optional[dict[str, Any]] = None,
+    headers: Optional[dict[str, str]] = None,
+    timeout: float = 30,
+) -> tuple[int, Any]:
+    req_headers = {"Accept": "application/json"}
+    if headers:
+        req_headers.update(headers)
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        req_headers["Content-Type"] = "application/json"
+    logger.info(
+        "[yuanrong] request method=%s url=%s timeout=%s payload=%s",
+        method,
+        url,
+        timeout,
+        _log_payload(payload),
+    )
+    request = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        raw = exc.read()
+    if not raw:
+        return status, {}
+    return status, json.loads(raw.decode("utf-8"))
+
+
+def _invoke_url(base_url: str, environment_id: str) -> str:
+    quoted = urllib.parse.quote(environment_id, safe="")
+    return f"{base_url}{_ADX_INVOKE}/{quoted}/invoke"
+
+
+def _environment_url(base_url: str, environment_id: str) -> str:
+    quoted = urllib.parse.quote(environment_id, safe="")
+    return f"{base_url}{_ADX_ENVIRONMENTS}/{quoted}"
+
+
+def _unlimited_list_depth(max_depth: Optional[int]) -> bool:
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int):
+        return True
+    return max_depth <= 0
+
+
+def _list_depth(recursive: bool, max_depth: Optional[int]) -> int:
+    """Map SDK ``list_files`` depth onto ADX ``file.list`` depth.
+
+    The server calls the SDK with ``max_depth=depth-1`` and recurses only when
+    ``depth > 1``. Non-recursive listing is depth 1. Unlimited recursion keeps
+    the SDK cap of 20.
+    """
+    if not recursive:
+        return 1
+    if _unlimited_list_depth(max_depth):
+        return _SDK_LIST_DEPTH + 1
+    return min(int(max_depth) + 1, 64)
+
+
+def _write_file_data(data: Any, *, binary: bool) -> str:
+    if binary:
+        raw = data if isinstance(data, (bytes, bytearray, memoryview)) else str(data).encode("utf-8")
+        return bytes(raw).hex()
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data).decode("utf-8")
+    return str(data)
+
+
 def _coerce_bytes(value: Any) -> bytes:
-    """Normalize SDK binary payloads (bytes / bytearray / memoryview) to bytes."""
+    """Normalize bytes / bytearray / memoryview to bytes."""
     if isinstance(value, bytes):
         return value
     if isinstance(value, (bytearray, memoryview)):
@@ -239,66 +554,17 @@ def build_yuanrong_shared_scope_key(base_url: str, isolation_key: Optional[str] 
     return "|".join(parts)
 
 
-def _yr_recreate_error_code(exc: BaseException) -> Optional[int]:
-    """Return a recreate-trigger code from ``YRError`` (including ``__cause__`` chain)."""
-    from yr.err_type import ErrorCode
-    from yr.exception import YRError
-
-    current: Optional[BaseException] = exc
-    seen: set[int] = set()
-    while current is not None:
-        ident = id(current)
-        if ident in seen:
-            break
-        seen.add(ident)
-        if isinstance(current, YRError):
-            code = current.code
-            if isinstance(code, ErrorCode):
-                value = code.value
-            elif isinstance(code, int):
-                value = code
-            else:
-                return None
-            if value in YUANRONG_RECREATE_ERROR_CODES:
-                return value
-            return None
-        current = current.__cause__
-    return None
-
-
-def _build_wrapped_command(
-    command: str,
-    *,
-    cwd: Optional[str] = None,
-    timeout: Optional[int] = None,
-    environment: Optional[Dict[str, str]] = None,
-) -> str:
-    inner_parts: List[str] = []
-    if cwd and cwd != ".":
-        inner_parts.append(f"cd {_quote_shell_value(cwd)}")
-    if environment:
-        env_prefix = " ".join(f"{key}={_quote_shell_value(value)}" for key, value in environment.items())
-        inner_parts.append(f"export {env_prefix}")
-    inner_parts.append(command)
-    inner_command = " && ".join(inner_parts)
-    shell_command = f"/bin/sh -c {_quote_shell_value(inner_command)}"
-    if timeout is not None and timeout > 0:
-        shell_command = f"timeout {int(timeout)}s {shell_command}"
-    return shell_command
-
-
 class _YuanrongProviderMixin:
-    """Shared YuanRong instance lifecycle for shell/code/fs providers."""
+    """Shared ADX environment lifecycle for shell/code/fs providers."""
 
-    _yr_init_lock: ClassVar[threading.Lock] = threading.Lock()
     _shared_lock: ClassVar[threading.Lock] = threading.Lock()
     _lifecycle_locks_guard: ClassVar[threading.Lock] = threading.Lock()
     # shared_key -> RLock serializing create / invalidate / recreate for that key
     _lifecycle_locks: ClassVar[Dict[str, threading.RLock]] = {}
-    # shared_key -> (instance, executor_mode) where instance is yr.sandbox.Sandbox
-    _shared_instances: ClassVar[Dict[str, Tuple[Any, str]]] = {}
+    # shared_key -> (environment_id, runtime)
+    _shared_instances: ClassVar[Dict[str, Tuple[str, str]]] = {}
 
-    _instance: Any
+    _instance: Optional[str]
     _executor: str
     _timeout_seconds: int
 
@@ -306,10 +572,19 @@ class _YuanrongProviderMixin:
         self._instance = None
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
         extra = self._launcher_extra_params()
-        executor = str(extra.get("executor") or "default").strip().lower()
-        if executor not in {"default", "docker", "conch"}:
-            executor = "default"
-        self._executor = executor
+        self._executor = _normalize_executor(extra.get("executor"))
+
+    def _base_url(self) -> str:
+        base_url = _endpoint_value(self.endpoint, self.config, "base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("YuanRong ADX base_url is required")
+        return base_url.rstrip("/")
+
+    def _request_timeout(self, command_timeout: Optional[float] = None) -> float:
+        base = float(self._timeout_seconds or 30)
+        if isinstance(command_timeout, bool) or not isinstance(command_timeout, (int, float)):
+            return base
+        return max(base, float(command_timeout) + 5)
 
     def _launcher_extra_params(self) -> dict[str, Any]:
         launcher_config = getattr(self.config, "launcher_config", None) if self.config is not None else None
@@ -319,10 +594,9 @@ class _YuanrongProviderMixin:
         return extra_params if isinstance(extra_params, dict) else {}
 
     def _shared_scope_key(self) -> str:
-        base_url = _endpoint_value(self.endpoint, self.config, "base_url") or "yuanrong"
         isolation_key = getattr(self.endpoint, "isolation_key", None)
         return build_yuanrong_shared_scope_key(
-            str(base_url),
+            self._base_url(),
             isolation_key if isinstance(isolation_key, str) else None,
         )
 
@@ -335,85 +609,49 @@ class _YuanrongProviderMixin:
                 cls._lifecycle_locks[shared_key] = lock
             return lock
 
-    @classmethod
-    def _ensure_yr_init(cls) -> Any:
-        """Initialize YuanRong once per process, keyed off SDK ``is_initialized()``.
-
-        A local ClassVar is insufficient: other code (or a prior test) may have
-        already called ``yr.init()``, and ``yr.finalize()`` clears SDK state
-        without updating our flag. Always consult the SDK.
-        """
-        import yr
-
-        with cls._yr_init_lock:
-            if not yr.is_initialized():
-                yr.init()
-        return yr
-
-    @staticmethod
-    def _normalize_rootfs(extra: dict[str, Any]) -> str:
-        """Build the JSON rootfs string expected by ``Sandbox(rootfs=...)``.
-
-        Accepts a dict (with ``image`` aliased to ``imageurl``), a pre-serialized
-        JSON string, or falls back to ``image`` / ``workdir`` / ``mounts``.
-        """
-        rootfs = extra.get("rootfs")
-        if isinstance(rootfs, str) and rootfs.strip():
-            return rootfs
-        if isinstance(rootfs, dict):
-            payload = dict(rootfs)
-            if "imageurl" not in payload and "image" in payload:
-                payload["imageurl"] = payload.pop("image")
-            return json.dumps(payload)
-        image = extra.get("image")
-        workdir = extra.get("workdir")
-        mounts = extra.get("mounts")
-        return json.dumps(
-            {
-                "type": "image",
-                "imageurl": image,
-                "workdir": workdir,
-                "mounts": mounts,
-            }
+    def _create_instance(self) -> Tuple[str, str]:
+        body = _adx_create_body(self._launcher_extra_params(), self._executor)
+        status, response = _adx_request(
+            "POST",
+            f"{self._base_url()}{_ADX_ENVIRONMENTS}",
+            payload=body,
+            timeout=self._request_timeout(),
         )
+        if status != 200:
+            raise AdxHttpError(status, _http_error_message(response))
+        environment_id = _decode_mgmt_data(response).get("environmentId")
+        if not isinstance(environment_id, str) or not environment_id:
+            raise RuntimeError("ADX create response has no environmentId")
+        runtime = body.get("runtime")
+        executor = runtime if isinstance(runtime, str) and runtime else self._executor
+        return environment_id, executor
 
-    def _sandbox_create_kwargs(self) -> dict[str, Any]:
-        extra = self._launcher_extra_params()
-        raw_idle_timeout = extra.get("idle_timeout")
-        idle_timeout = (
-            int(raw_idle_timeout) if raw_idle_timeout is not None else YUANRONG_IDLE_TIMEOUT
-        )
-        kwargs: dict[str, Any] = {"idle_timeout": idle_timeout}
-        user = extra.get("user")
-        if isinstance(user, str) and user.strip():
-            kwargs["user"] = user.strip()
-        if self._executor == "docker":
-            kwargs["sandbox_type"] = "docker"
-        elif self._executor == "conch":
-            kwargs["sandbox_type"] = "conch"
-        else:
-            raise ValueError(f"invalid executor: {self._executor}")
-        kwargs["rootfs"] = self._normalize_rootfs(extra)
-        kwargs["cpu"] = int(extra.get("cpu", DEFAULT_DOCKER_CPU))
-        kwargs["memory"] = int(extra.get("memory", DEFAULT_DOCKER_MEMORY))
-        return kwargs
-
-    def _create_instance(self) -> Tuple[Any, str]:
-        yr = self._ensure_yr_init()
-        # Keyword-only: Sandbox.__init__ first positional arg is checkpoint_id.
-        sb = yr.sandbox.Sandbox(**self._sandbox_create_kwargs())
-        return sb, self._executor
-
-    def _bind_instance(self, instance: Any, executor: str) -> Tuple[Any, str]:
-        self._instance = instance
+    def _bind_instance(self, environment_id: str, executor: str) -> Tuple[str, str]:
+        self._instance = environment_id
         self._executor = executor
-        return instance, executor
+        return environment_id, executor
 
-    def _ensure_shared_instance(self, *, sleep_before_create: bool = False) -> Tuple[Any, str]:
-        """Return the cached instance, creating one if needed.
+    def _invoke(self, environment_id: str, action: str, args: dict[str, Any], *, timeout: float) -> Any:
+        status, body = _adx_request(
+            "POST",
+            _invoke_url(self._base_url(), environment_id),
+            payload={"action": action, "args": args},
+            timeout=timeout,
+        )
+        if status == 429:
+            message = "file search max_results exceeded; narrow the search"
+            if isinstance(body, dict) and body.get("error"):
+                message = str(body["error"])
+            raise SandboxSearchLimitError(message)
+        if status >= 400:
+            raise AdxHttpError(status, _http_error_message(body))
+        return body
+
+    def _ensure_shared_instance(self, *, sleep_before_create: bool = False) -> Tuple[str, str]:
+        """Return the cached environment id, creating one if needed.
 
         Per-key lifecycle lock serializes create for the same shared_key.
-        ``_shared_lock`` only guards dict access; create/sleep/terminate stay outside it.
+        ``_shared_lock`` only guards dict access; create/sleep/delete stay outside it.
         """
         shared_key = self._shared_scope_key()
         with self._lifecycle_lock_for(shared_key):
@@ -427,96 +665,81 @@ class _YuanrongProviderMixin:
                     cached = self._shared_instances.get(shared_key)
                     if cached is not None:
                         return self._bind_instance(cached[0], cached[1])
-            instance, executor = self._create_instance()
-            duplicate: Optional[Tuple[Any, str]] = None
+            environment_id, executor = self._create_instance()
+            duplicate: Optional[str] = None
             with self._shared_lock:
                 cached = self._shared_instances.get(shared_key)
                 if cached is not None:
-                    duplicate = (instance, executor)
-                    instance, executor = cached
+                    duplicate = environment_id
+                    environment_id, executor = cached
                 else:
-                    self._shared_instances[shared_key] = (instance, executor)
+                    self._shared_instances[shared_key] = (environment_id, executor)
                     logger.info(
-                        "[yuanrong] created sandbox executor=%s shared_key=%s",
+                        "[yuanrong] created environment executor=%s shared_key=%s",
                         executor,
                         shared_key,
                     )
             if duplicate is not None:
-                logger.info("[yuanrong] discarding duplicate sandbox shared_key=%s", shared_key)
-                _terminate_instance(duplicate[0], duplicate[1])
-            return self._bind_instance(instance, executor)
+                logger.info("[yuanrong] discarding duplicate environment shared_key=%s", shared_key)
+                _delete_environment(self._base_url(), duplicate)
+            return self._bind_instance(environment_id, executor)
 
-    def _get_instance(self) -> Tuple[Any, str]:
+    def _get_instance(self) -> Tuple[str, str]:
         return self._ensure_shared_instance(sleep_before_create=False)
 
-    def _invalidate_cached_instance(self, stale_instance: Any) -> None:
-        """Drop cache only when it still points at ``stale_instance``."""
+    def _invalidate_cached_instance(self, stale_environment_id: str) -> None:
+        """Drop cache only when it still points at ``stale_environment_id``."""
         shared_key = self._shared_scope_key()
-        to_terminate: Optional[Tuple[Any, str]] = None
+        to_delete: Optional[str] = None
         with self._lifecycle_lock_for(shared_key):
             with self._shared_lock:
                 cached = self._shared_instances.get(shared_key)
                 if cached is None:
                     self._instance = None
-                elif cached[0] is stale_instance:
-                    to_terminate = self._shared_instances.pop(shared_key, None)
+                elif cached[0] == stale_environment_id:
+                    popped = self._shared_instances.pop(shared_key, None)
+                    to_delete = popped[0] if popped is not None else None
                     self._instance = None
                 else:
                     self._bind_instance(cached[0], cached[1])
-        if to_terminate is not None:
-            _terminate_instance(to_terminate[0], to_terminate[1])
+        if to_delete is not None:
+            _delete_environment(shared_key.split("|", 1)[0], to_delete)
 
-    def _call_with_recreate(self, fn: Callable[[Any], _T]) -> _T:
+    def _call_with_recreate(self, fn: Callable[[str], _T]) -> _T:
         shared_key = self._shared_scope_key()
         last_exc: Optional[BaseException] = None
         for attempt in range(YUANRONG_RECREATE_RETRIES):
+            environment_id, _ = self._ensure_shared_instance(sleep_before_create=attempt > 0)
             try:
-                instance, _ = self._ensure_shared_instance(sleep_before_create=attempt > 0)
-            except Exception as exc:
+                return fn(environment_id)
+            except AdxHttpError as exc:
                 last_exc = exc
-                code = _yr_recreate_error_code(exc)
-                if code is None:
+                if exc.status != 404:
                     raise
                 logger.warning(
-                    "[yuanrong] recreate code=%s attempt=%d/%d phase=create shared_key=%s",
-                    code,
+                    "[yuanrong] recreate status=404 attempt=%d/%d shared_key=%s",
                     attempt + 1,
                     YUANRONG_RECREATE_RETRIES,
                     shared_key,
                 )
-                continue
-            try:
-                return fn(instance)
-            except Exception as exc:
-                last_exc = exc
-                code = _yr_recreate_error_code(exc)
-                if code is None:
-                    raise
-                logger.warning(
-                    "[yuanrong] recreate code=%s attempt=%d/%d phase=invoke shared_key=%s",
-                    code,
-                    attempt + 1,
-                    YUANRONG_RECREATE_RETRIES,
-                    shared_key,
-                )
-                self._invalidate_cached_instance(stale_instance=instance)
+                self._invalidate_cached_instance(stale_environment_id=environment_id)
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("yuanrong sandbox recreate exhausted without an error")
 
     @classmethod
-    def pop_cached_instance(cls, shared_key: str) -> Optional[Tuple[Any, str]]:
+    def pop_cached_instance(cls, shared_key: str) -> Optional[Tuple[str, str]]:
         with cls._lifecycle_lock_for(shared_key):
             with cls._shared_lock:
                 return cls._shared_instances.pop(shared_key, None)
 
     @classmethod
-    def clear_shared_for_base_url(cls, base_url: str) -> List[Tuple[str, Any, str]]:
+    def clear_shared_for_base_url(cls, base_url: str) -> List[Tuple[str, str, str]]:
         prefix = f"{str(base_url).rstrip('/')}|"
         normalized = str(base_url).rstrip("/")
         with cls._shared_lock:
             keys = [k for k in cls._shared_instances if k == normalized or k.startswith(prefix)]
-        removed: List[Tuple[str, Any, str]] = []
+        removed: List[Tuple[str, str, str]] = []
         for key in sorted(keys):
             with cls._lifecycle_lock_for(key):
                 with cls._shared_lock:
@@ -525,17 +748,23 @@ class _YuanrongProviderMixin:
                     removed.append((key, cached[0], cached[1]))
         return removed
 
-    def _exec_sync(self, command: str) -> Dict[str, Any]:
-        import yr
+    def _exec_sync(
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        timeout: Optional[int] = None,
+        environment: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        args = _exec_args(command, cwd=cwd, timeout=timeout, environment=environment)
 
-        def _do(instance: Any) -> Dict[str, Any]:
-            # Sandbox.exec already resolves ObjectRef in current SDK; tolerate both.
-            result = instance.exec(command)
-            if not isinstance(result, dict):
-                result = yr.get(result)
-            if not isinstance(result, dict):
-                return {"returncode": -1, "stdout": "", "stderr": f"unexpected result type: {type(result)!r}"}
-            return result
+        def _do(environment_id: str) -> Dict[str, Any]:
+            result = self._invoke(
+                environment_id,
+                "process.exec",
+                args,
+                timeout=self._request_timeout(timeout),
+            )
+            return _normalize_exec_result(result)
 
         return self._call_with_recreate(_do)
 
@@ -547,23 +776,37 @@ class _YuanrongProviderMixin:
         timeout: Optional[int] = None,
         environment: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        wrapped = _build_wrapped_command(
-            command,
-            cwd=cwd,
-            timeout=timeout,
-            environment=environment,
-        )
-        return await asyncio.to_thread(self._exec_sync, wrapped)
+        return await asyncio.to_thread(self._exec_sync, command, cwd, timeout, environment)
 
     def _fs_read_sync(self, path: str, *, mode: str = "rb") -> Any:
-        def _do(instance: Any) -> Any:
-            return instance.read_file(path, mode=mode)
+        binary = "b" in mode
+
+        def _do(environment_id: str) -> Any:
+            raw = self._invoke(
+                environment_id,
+                "file.read",
+                {"path": path, "binary": binary},
+                timeout=self._request_timeout(),
+            )
+            return _decode_read_payload(raw, binary=binary)
 
         return self._call_with_recreate(_do)
 
     def _fs_write_sync(self, path: str, data: Any, *, mode: str = "wb") -> None:
-        def _do(instance: Any) -> None:
-            instance.write_file(path, data, mode=mode)
+        binary = "b" in mode
+        payload = _write_file_data(data, binary=binary)
+
+        def _do(environment_id: str) -> None:
+            result = self._invoke(
+                environment_id,
+                "file.write",
+                {"path": path, "data": payload, "binary": binary, "append": "a" in mode},
+                timeout=self._request_timeout(),
+            )
+            if isinstance(result, dict):
+                message = _action_error_message(result)
+                if message:
+                    raise OSError(message)
 
         self._call_with_recreate(_do)
 
@@ -576,15 +819,20 @@ class _YuanrongProviderMixin:
         include_files: bool = True,
         include_dirs: bool = True,
     ) -> List[dict[str, Any]]:
-        def _do(instance: Any) -> List[dict[str, Any]]:
-            raw = instance.list_files(
-                path,
-                recursive=recursive,
-                max_depth=max_depth,
-                include_files=include_files,
-                include_dirs=include_dirs,
+        depth = _list_depth(recursive, max_depth)
+
+        def _do(environment_id: str) -> List[dict[str, Any]]:
+            raw = self._invoke(
+                environment_id,
+                "file.list",
+                {"path": path, "depth": depth},
+                timeout=self._request_timeout(),
             )
-            return _normalize_list_items(raw)
+            items = _normalize_list_items(raw)
+            return [
+                item for item in items
+                if _keep_listed_item(item, include_files=include_files, include_dirs=include_dirs)
+            ]
 
         return self._call_with_recreate(_do)
 
@@ -594,8 +842,19 @@ class _YuanrongProviderMixin:
         pattern: str,
         exclude_patterns: Optional[List[str]] = None,
     ) -> List[dict[str, Any]]:
-        def _do(instance: Any) -> List[dict[str, Any]]:
-            raw = instance.search_files(path, pattern, exclude_patterns=exclude_patterns)
+        args: dict[str, Any] = {"path": path}
+        if isinstance(pattern, str):
+            args["pattern"] = pattern
+        if exclude_patterns is not None:
+            args["exclude_patterns"] = exclude_patterns
+
+        def _do(environment_id: str) -> List[dict[str, Any]]:
+            raw = self._invoke(
+                environment_id,
+                "file.search",
+                args,
+                timeout=self._request_timeout(),
+            )
             return _normalize_list_items(raw)
 
         return self._call_with_recreate(_do)
@@ -615,24 +874,23 @@ class _YuanrongProviderMixin:
             raise
 
 
-def _terminate_instance(instance: Any, executor: str) -> None:
-    del executor  # retained for cache-tuple compatibility; instance is always Sandbox
+def _delete_environment(base_url: str, environment_id: str) -> None:
     try:
-        import yr
-
-        try:
-            # Sandbox.cleanup() returns an unresolved ObjectRef; must yr.get.
-            cleanup_ref = instance.cleanup()
-            if not isinstance(cleanup_ref, dict) and cleanup_ref is not None:
-                yr.get(cleanup_ref)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[yuanrong] cleanup failed: %s", exc)
-        try:
-            instance.terminate()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[yuanrong] terminate failed: %s", exc)
+        status, body = _adx_request(
+            "DELETE",
+            _environment_url(base_url, environment_id),
+            timeout=30,
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[yuanrong] terminate_instance failed: %s", exc)
+        logger.warning("[yuanrong] delete environment failed: %s", exc)
+        return
+    if status in (200, 404):
+        return
+    logger.warning(
+        "[yuanrong] delete environment status=%s message=%s",
+        status,
+        _http_error_message(body),
+    )
 
 
 async def delete_yuanrong_sandbox(
@@ -641,26 +899,29 @@ async def delete_yuanrong_sandbox(
     base_url: Optional[str] = None,
     reason: str = "teardown",
 ) -> list[str]:
-    """Delete cached YuanRong sandbox instance(s) on sysoperation teardown."""
-    entries: List[Tuple[str, Any, str]] = []
+    """Delete cached ADX environments on sysoperation teardown."""
+    entries: List[Tuple[str, str]] = []
     if shared_key:
         popped = _YuanrongProviderMixin.pop_cached_instance(shared_key)
         if popped is not None:
-            entries.append((shared_key, popped[0], popped[1]))
+            entries.append((shared_key, popped[0]))
     elif base_url:
-        entries.extend(_YuanrongProviderMixin.clear_shared_for_base_url(base_url))
+        entries.extend(
+            (key, environment_id)
+            for key, environment_id, _runtime in _YuanrongProviderMixin.clear_shared_for_base_url(base_url)
+        )
 
     deleted: list[str] = []
-    for key, instance, executor in entries:
-        await asyncio.to_thread(_terminate_instance, instance, executor)
+    for key, environment_id in entries:
+        await asyncio.to_thread(_delete_environment, key.split("|", 1)[0], environment_id)
         deleted.append(key)
-        logger.info("[yuanrong] deleted sandbox shared_key=%s reason=%s", key, reason)
+        logger.info("[yuanrong] deleted environment shared_key=%s reason=%s", key, reason)
     return deleted
 
 
 @SandboxRegistry.provider("yuanrong", "fs")
 class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
-    """YuanRong FS provider via Sandbox native file APIs."""
+    """YuanRong FS provider via ADX ``file.read`` / ``file.write`` / ``file.list`` / ``file.search``."""
 
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         super().__init__(endpoint, config)
@@ -806,7 +1067,7 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         chunk_size: int = 0,
         **kwargs,
     ) -> UploadFileResult:
-        del create_parent_dirs, preserve_permissions, chunk_size  # parents created by SDK write_file
+        del create_parent_dirs, preserve_permissions, chunk_size  # parents created by file.write
         try:
             if not overwrite:
                 exists = await asyncio.to_thread(self._fs_path_exists_sync, target_path)
@@ -1030,15 +1291,16 @@ class YuanrongShellProvider(_YuanrongProviderMixin, BaseShellProvider):
         except Exception as exc:  # noqa: BLE001
             return _build_shell_error_result("execute_cmd", str(exc), ExecuteCmdResult)
 
-        exit_code = int(result.get("returncode", -1))
+        exit_code = int(result.get("exit_code", result.get("returncode", -1)))
+        stderr = result.get("stderr") or ""
         data = ExecuteCmdData(
             command=command,
             cwd=cwd or ".",
             stdout=result.get("stdout") or "",
-            stderr=result.get("stderr") or "",
+            stderr=stderr,
             exit_code=exit_code,
         )
-        if exit_code == 124:
+        if exit_code == 124 or _stderr_reports_timeout(stderr, exit_code):
             return _build_shell_error_result(
                 "execute_cmd",
                 f"execution timeout after {timeout} seconds",
