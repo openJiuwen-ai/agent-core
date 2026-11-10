@@ -742,7 +742,7 @@ class ContextEngine:
             )
         # Configs are not built from dicts, and a dict in ReActAgentConfig.context_processors
         # is validated into a bare BaseModel with no fields; either way every setting is lost.
-        if isinstance(config, dict) or type(config) is BaseModel:
+        if isinstance(config, dict) or config.__class__ is BaseModel:
             got = "a dict" if isinstance(config, dict) else "a bare BaseModel (a dict converted by pydantic)"
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
