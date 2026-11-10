@@ -1405,12 +1405,25 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._create_workflow_span(
             invoke_id=invoke_id,
             metadata=deferred["metadata"],
-            inputs=None,
+            inputs=deferred.get("inputs"),
             source_ids=deferred["source_ids"],
             session_id=deferred["session_id"],
             parent_node_id=deferred["parent_node_id"],
             start_time=start_time,
         )
+        state = self._span_manager.get(invoke_id)
+        if state is not None:
+            # Same contract as on_pre_invoke on the live path: keep the live
+            # inputs reference so _refresh_inputs_attribute re-serializes
+            # post-transform values at on_call_done, and apply the component
+            # metadata observed mid-window.
+            if deferred.get("inputs") is not None:
+                state.inputs = deferred["inputs"]
+            if deferred.get("component_metadata") is not None:
+                self._set_workflow_attrs(state.span, deferred["component_metadata"], invoke_id)
+            outputs = deferred.get("outputs")
+            if outputs is not None and state.recorded:
+                state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
         # Replay stream chunks observed while the span was deferred so the
         # end-node span keeps its OJ_STREAM_INPUTS / OJ_STREAM_OUTPUTS
         # payload parity with the pre-deferral behavior.
@@ -1480,7 +1493,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None or not state.recorded:
+            if state is None:
+                # Deferred end node: the batch-invoke inputs event can fire
+                # inside the deferral window (the stream begin won the
+                # single-fire guard). Buffer the payload for replay at
+                # materialization; without this, mix-mode end nodes lose
+                # OJ_WORKFLOW_INPUTS versus the pre-deferral behavior.
+                deferred = self._deferred_end_starts.get(invoke_id)
+                if deferred is not None:
+                    deferred["inputs"] = inputs
+                    deferred["component_metadata"] = component_metadata
+                return
+            if not state.recorded:
                 return
             if inputs is not None:
                 # Store reference for on_invoke / on_call_done to re-serialize
@@ -1605,7 +1629,16 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None or not state.recorded:
+            if state is None:
+                # Deferred end node: outputs event inside the deferral
+                # window. trace_component_done carries no outputs, so this
+                # event is the ONLY source of OJ_WORKFLOW_OUTPUTS for end
+                # nodes — buffer it or the final-answer payload is lost.
+                deferred = self._deferred_end_starts.get(invoke_id)
+                if deferred is not None:
+                    deferred["outputs"] = outputs
+                return
+            if not state.recorded:
                 return
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
