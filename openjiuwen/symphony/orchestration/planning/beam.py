@@ -332,6 +332,7 @@ class BidirectionalBeamPlanner:
         language: str = "cn",
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
+        layer: str = "skill",
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -347,6 +348,7 @@ class BidirectionalBeamPlanner:
         )
         self.progress_callback = progress_callback
         self.language = language
+        self.layer = layer
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
         self.eligible_edges = self._sorted_eligible_edges()
@@ -486,6 +488,11 @@ class BidirectionalBeamPlanner:
             "reason": reason,
         }
 
+    def _system_prompt(self, prompt: str) -> str:
+        if self.layer == "expert":
+            prompt = prompt.replace("Skill", "expert") + "\nExisting skill_id fields identify experts in this request."
+        return f"{prompt}\n{planner_language_instruction(self.language)}"
+
     async def judge_expansions(
         self,
         query: str,
@@ -505,7 +512,7 @@ class BidirectionalBeamPlanner:
         with model_usage_context("orchestration", "bidirectional_beam_judgement"):
             raw = await invoke_json(
                 self.model,
-                system_prompt=(f"{BEAM_JUDGE_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                system_prompt=self._system_prompt(BEAM_JUDGE_SYSTEM_PROMPT),
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony bidirectional beam judgement",
                 response_observer=self.model_response_observer,
@@ -557,7 +564,7 @@ class BidirectionalBeamPlanner:
             with model_usage_context("orchestration", "beam_final_rerank"):
                 raw = await invoke_json(
                     self.model,
-                    system_prompt=(f"{BEAM_FINAL_RERANK_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                    system_prompt=self._system_prompt(BEAM_FINAL_RERANK_SYSTEM_PROMPT),
                     user_content=json.dumps(payload, ensure_ascii=False),
                     error_context="Symphony beam final rerank",
                     request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},

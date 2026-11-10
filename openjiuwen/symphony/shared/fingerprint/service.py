@@ -92,6 +92,7 @@ class FingerprintService:
         evaluation_suite: QualityEvaluationSuite | None = None,
         model_response_observer: ModelResponseObserver | None = None,
         allow_metadata_fallback: bool = False,
+        wait_for_lock: bool = False,
     ) -> None:
         self._provider = capability_provider
         self._llm = llm
@@ -115,6 +116,7 @@ class FingerprintService:
         )
         self._build_lock = asyncio.Lock()
         self._process_lock = FileLock(str(self._store.root / ".fingerprint.lock"))
+        self._wait_for_lock = wait_for_lock
         self._cancel_requested = False
         self.last_build_counts: dict[str, int] = {}
 
@@ -134,7 +136,7 @@ class FingerprintService:
         """Build and publish ``fingerprint.json`` from the provider snapshot."""
 
         self._validate_configuration()
-        if self._build_lock.locked():
+        if self._build_lock.locked() and not self._wait_for_lock:
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
                 reason="a fingerprint build is already running in this service",
@@ -146,15 +148,8 @@ class FingerprintService:
             lock_acquired = False
             try:
                 self._store.root.mkdir(parents=True, exist_ok=True)
-                try:
-                    self._process_lock.acquire(timeout=0)
-                    lock_acquired = True
-                except FileLockTimeout as exc:
-                    raise_error(
-                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
-                        cause=exc,
-                        reason="another fingerprint builder owns the artifact root",
-                    )
+                await self._acquire_process_lock()
+                lock_acquired = True
 
                 snapshot, descriptors = await self._load_inventory()
                 cases = _validate_cases(traces)
@@ -288,6 +283,21 @@ class FingerprintService:
             finally:
                 if lock_acquired:
                     self._process_lock.release()
+
+    async def _acquire_process_lock(self) -> None:
+        while True:
+            self._raise_if_cancelled()
+            try:
+                self._process_lock.acquire(timeout=0)
+                return
+            except FileLockTimeout as exc:
+                if not self._wait_for_lock:
+                    raise_error(
+                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                        cause=exc,
+                        reason="another fingerprint builder owns the artifact root",
+                    )
+                await asyncio.sleep(0.05)
 
     def read(self) -> FingerprintArtifact:
         """Read and validate the most recently published artifact."""

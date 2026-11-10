@@ -7,7 +7,8 @@ import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import wraps
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Literal
 
 from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
@@ -93,7 +94,18 @@ class SymphonyGraphEngine:
                 **dict(self._orchestration_service.source_snapshot or {}),
                 **scan.source_snapshot.model_dump(mode="json", exclude_none=True),
             }
-            current = scan.content_hashes
+            scans = [scan]
+            expert_inventory = self._orchestration_service.expert_inventory
+            if expert_inventory is not None:
+                expert_scan = expert_inventory.scan()
+                scans.append(expert_scan)
+                expected_snapshot["expert_layer"] = self._orchestration_service.expert_layer_snapshot(
+                    expert_scan.source_snapshot,
+                )
+            current = {
+                (item.capability_type, item.capability_id): item.content_hash
+                for layer_scan in scans for item in layer_scan.capabilities
+            }
             try:
                 published = self.read()
                 previous = published.get("capabilities", ())
@@ -101,7 +113,10 @@ class SymphonyGraphEngine:
                     expected_snapshot["fingerprint_model_sha256"] = published.get("source_snapshot", {}).get("fingerprint_model_sha256", "")
             except FileNotFoundError:
                 previous = ()
-            old = {str(item.get("capability_id", item.get("id", ""))): item.get("content_hash") for item in previous}
+            old = {
+                (item.get("capability_type", item.get("type", "skill")), item.get("capability_id", item.get("id"))):
+                item.get("content_hash") for item in previous
+            }
             counts = {
                 "capability_count": len(current),
                 "added_count": len(current.keys() - old.keys()),
@@ -109,7 +124,9 @@ class SymphonyGraphEngine:
                 "changed_count": sum(current[key] != old[key] for key in current.keys() & old.keys()),
                 "reused_count": sum(current[key] == old[key] for key in current.keys() & old.keys()),
             }
-            diagnostics = tuple(item.to_dict() for item in scan.diagnostics)
+            if expert_inventory is not None:
+                counts.update(skill_count=len(scan.capabilities), expert_count=len(expert_scan.capabilities))
+            diagnostics = tuple(item.to_dict() for layer_scan in scans for item in layer_scan.diagnostics)
         status = self._orchestration_service.status(expected_snapshot=expected_snapshot)
         return replace(status, counts=counts, diagnostics=diagnostics)
 
@@ -191,13 +208,19 @@ class SymphonyGraphEngine:
             prepare_artifact=prepare_artifact,
         )
         await self._reproject_observations()
-        payload = self.read()
+        payload = self.read(result.version)
         counts = dict(getattr(self._orchestration_service.fingerprint_service, "last_build_counts", {}))
+        expert_service = self._orchestration_service.expert_fingerprint_service
+        if expert_service is not None:
+            counts["skill_count"] = counts.get("capability_count", 0)
+            counts["expert_count"] = expert_service.last_build_counts.get("capability_count", 0)
+            for key, value in expert_service.last_build_counts.items():
+                counts[key] = counts.get(key, 0) + value
         counts["edge_count"] = len(payload.get("edges", ()))
-        llm = payload.get("config", {}).get("llm", {})
-        relation = llm.get("relation_cache", {})
-        counts["relation_reused_count"] = relation.get("reused_count", 0)
-        counts["relation_resolved_count"] = relation.get("resolved_count", 0)
+        config = payload.get("config", {})
+        relations = [layer.get("llm", {}).get("relation_cache", {}) for layer in (config, config.get("expert", {}))]
+        counts["relation_reused_count"] = sum(item.get("reused_count", 0) for item in relations)
+        counts["relation_resolved_count"] = sum(item.get("resolved_count", 0) for item in relations)
         counts["graph_reused_count"] = 0
         counts.update(result.counts)
         self._build_id = result.build_id
@@ -222,6 +245,8 @@ class SymphonyGraphEngine:
         query: str,
         candidate_ids: Sequence[str] | None = None,
         *,
+        type: Literal["skill", "expert"] = "skill",
+        expert_manifest_paths: Sequence[Path] | None = None,
         language: str = "cn",
         progress: ProgressCallback | None = None,
         disabled_capability_ids: Sequence[str] | None = None,
@@ -233,7 +258,7 @@ class SymphonyGraphEngine:
     ) -> OrchestrationPlan:
         self._check()
         snapshot = None
-        if self._orchestration_service.config.plan.dynamic_graph_enabled:
+        if type == "skill" and self._orchestration_service.config.plan.dynamic_graph_enabled:
             try:
                 snapshot = await asyncio.to_thread(
                     self._observations.get_snapshot,
@@ -250,6 +275,8 @@ class SymphonyGraphEngine:
         return await self._orchestration_service.plan(
             query,
             candidate_ids,
+            type=type,
+            expert_manifest_paths=expert_manifest_paths,
             language=language,
             progress=progress,
             disabled_capability_ids=disabled_capability_ids,

@@ -70,6 +70,15 @@ Schema:
 }
 """
 
+EXPERT_FAST_PLANNER_SYSTEM_PROMPT = FAST_PLANNER_SYSTEM_PROMPT.replace("Skill", "expert").replace(
+    "- Prefer provided can_feed edges. Infer a missing relationship only when needed to form\n"
+    "  the plan.\n"
+    "- Give a short reason when explicitly including an inferred edge in can_feed_edges.\n"
+    "- When can_feed_edges is omitted, Symphony infers adjacent step edges during validation.",
+    "- Use only the supplied can_feed edges. Return no_plan when the required handoff is missing.\n"
+    "- The existing JSON keys skills and skill_id refer to experts in this request.",
+)
+
 
 class FastOneShotPlanner:
     """Ask the LLM for one validated plan from a compact graph subgraph."""
@@ -86,6 +95,7 @@ class FastOneShotPlanner:
         language: str = "cn",
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
+        layer: str = "skill",
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -95,6 +105,7 @@ class FastOneShotPlanner:
         self.language = language
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
+        self.layer = layer
         self._runtime_summary: dict[str, Any] = {
             "available": bool(self._overlay_edges()),
             "applied_edges": 0,
@@ -112,10 +123,11 @@ class FastOneShotPlanner:
             "skills": subgraph["skills"],
             "can_feed_edges": subgraph["edges"],
         }
+        system_prompt = EXPERT_FAST_PLANNER_SYSTEM_PROMPT if self.layer == "expert" else FAST_PLANNER_SYSTEM_PROMPT
         with model_usage_context("orchestration", "one_shot_fast_planning"):
             raw = await invoke_json(
                 self.model,
-                system_prompt=(f"{FAST_PLANNER_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
+                system_prompt=f"{system_prompt}\n{planner_language_instruction(self.language)}",
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
                 request_overrides={
@@ -538,6 +550,11 @@ class FastOneShotPlanner:
             return {
                 "valid": False,
                 "detail": (f"Fast planner selected edges that violate step order: {backward_edges}"),
+            }
+        if self.layer == "expert" and any(edge not in candidate_edges for edge in selected_edges):
+            return {
+                "valid": True,
+                "plan": {"status": "no_plan", "steps": [], "reason": "No published expert handoff supports this plan."},
             }
 
         missing_inputs = self._normalize_missing_inputs(

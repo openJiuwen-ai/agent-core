@@ -14,6 +14,7 @@ from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.config import CapabilityConfig, CapabilitySourceConfig
 from openjiuwen.symphony.discovery.models import SkillRecord
 from openjiuwen.symphony.expert_manifest import scan_expert_manifests
+from openjiuwen.symphony.models import CapabilityDescriptor
 from openjiuwen.symphony.shared.fingerprint import ScanDiagnostic, ScanResult, SkillFolderScanner, SkillManifestParser
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
 from openjiuwen.symphony.runtime_storage import RuntimeStorage
@@ -148,8 +149,17 @@ class DirectoryInventory:
             ))
         return tuple(records), tuple(item for item in result.diagnostics if item.severity == "error")
 
-    def experts(self, *, allow_partial: bool) -> ScanResult:
-        return self._collect(self.sources("expert"), allow_partial=allow_partial, with_roots=True)
+    def experts(self, *, allow_partial: bool, manifest_paths: set[Path] | None = None) -> ScanResult:
+        result = self._collect(self.sources("expert"), allow_partial=allow_partial, with_roots=True)
+        if manifest_paths is None:
+            return result
+        return replace(result, capabilities=tuple(
+            item for item in result.capabilities if expert_manifest_path(item) in manifest_paths
+        ))
+
+
+def expert_manifest_path(descriptor: CapabilityDescriptor) -> Path:
+    return Path(descriptor.metadata["source_root"]) / descriptor.metadata["entrypoint"]
 
 
 def _id_key(identifier: str) -> str:

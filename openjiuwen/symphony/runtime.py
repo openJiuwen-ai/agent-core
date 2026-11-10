@@ -85,19 +85,25 @@ class SymphonyRuntime:
         identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() if identity else ""
         protocol = FingerprintProtocolConfig(configuration_signature=identity_hash)
         observer = getattr(model, "symphony_response_observer", None)
-        def fingerprint_service(provider, root):
+        def fingerprint_service(provider, root, *, wait_for_lock=False):
             return FingerprintService(
                 provider, root, llm=model, config=policy, protocol=protocol, model_response_observer=observer,
                 allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
+                wait_for_lock=wait_for_lock,
             )
 
+        inventories = {
+            kind: DirectoryInventory(self.config.capability, self._storage, kind=kind) if self._storage.scoped else inventory
+            for kind in ("skill", "expert") if inventory.sources(kind)
+        }
         fingerprints = {
             kind: fingerprint_service(
-                DirectoryInventory(self.config.capability, self._storage, kind=kind) if self._storage.scoped else inventory,
+                provider,
                 self._storage.root / "cache" / "fingerprints" / kind if self._storage.scoped
                 else self._storage.root / "cache" / "fingerprints",
+                wait_for_lock=kind == "expert",
             )
-            for kind in ("skill", "expert") if inventory.sources(kind)
+            for kind, provider in inventories.items()
         }
         skill_sources = inventory.sources("skill")
         graph_storage = None
@@ -120,6 +126,8 @@ class SymphonyRuntime:
             source_snapshot={"runtime_schema": LAYOUT_SCHEMA, "fingerprint_policy_sha256": policy_hash,
                              "fingerprint_model_sha256": identity_hash},
             fingerprint_service=graph_fingerprints,
+            expert_inventory=inventories.get("expert") if graph_storage is not None else None,
+            expert_fingerprint_service=fingerprints.get("expert") if graph_storage is not None else None,
         )
         self.orchestration = SymphonyGraphEngine(
             service, storage=graph_storage, inventory=graph_inventory, unavailable_reason=graph_unavailable,

@@ -13,7 +13,7 @@ from pathlib import Path
 from openjiuwen.symphony.config import RetrievalConfig
 from openjiuwen.symphony.discovery import CapabilityCandidate, InstalledSkillsDirectoryToolkit, SkillFS, read_fingerprints
 from openjiuwen.symphony.discovery.skillfs import SkillIndexSnapshot, capture_index_snapshot, project_index_snapshot
-from openjiuwen.symphony.inventory import DirectoryInventory
+from openjiuwen.symphony.inventory import DirectoryInventory, expert_manifest_path
 from openjiuwen.symphony.runtime_storage import RuntimeStorage
 from openjiuwen.symphony.shared.fingerprint import FingerprintService
 
@@ -367,13 +367,13 @@ class TreeEngine:
             except (OSError, RuntimeError):
                 continue
             allowed[path] = candidate
-        descriptors = self._inventory.experts(allow_partial=True).capabilities
+        descriptors = self._inventory.experts(
+            allow_partial=True, manifest_paths=set(allowed) if authorized is not None else None,
+        ).capabilities
         fingerprints = read_fingerprints(self._fingerprints.get("expert")) if descriptors else {}
         candidates = []
         for descriptor in descriptors:
-            path = Path(descriptor.metadata["source_root"]) / descriptor.metadata["entrypoint"]
-            if authorized is not None and path not in allowed:
-                continue
+            path = expert_manifest_path(descriptor)
             candidate = allowed.get(path, CapabilityCandidate(descriptor))
             candidates.append(replace(
                 candidate, descriptor=descriptor, manifest_path=path, aliases=(),
