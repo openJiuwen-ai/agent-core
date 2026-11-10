@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import logging
 import pathlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,8 @@ from contextlib import asynccontextmanager
 from typing import Callable, Literal
 
 from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeout
+
+logger = logging.getLogger(__name__)
 
 
 class _ManagedReadWriteLock(ReadWriteLock):
@@ -106,6 +109,11 @@ class HybridAsyncReadWriteLock:
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
     async def _release_file(self) -> None:
+        if self._closed:
+            # The lock was force-closed (e.g. after a leaked guard); the
+            # underlying cross-process lock is already closed, so a late guard
+            # exit must not try to release it again.
+            return
         task = asyncio.create_task(self._file.release())
         try:
             await asyncio.shield(task)
@@ -127,9 +135,11 @@ class HybridAsyncReadWriteLock:
         finally:
             async with self._condition:
                 self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+                try:
+                    if self._readers == 0:
+                        await self._release_file()
+                finally:
+                    self._condition.notify_all()
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -147,18 +157,44 @@ class HybridAsyncReadWriteLock:
             yield
         finally:
             async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+                try:
+                    await self._release_file()
+                finally:
+                    self._writer = False
+                    self._condition.notify_all()
 
     async def close(self) -> None:
+        force_reset = False
         async with self._condition:
             if self._readers or self._writer:
-                raise RuntimeError("Cannot close an active file lock")
+                # A leaked guard must not poison this lock forever: force-reset
+                # the in-process state, then still close the cross-process lock
+                # below so later readers/writers are not blocked until timeout.
+                force_reset = True
+                logger.warning(
+                    "Closing file lock with active users: readers=%s writer=%s lock_file=%s",
+                    self._readers,
+                    self._writer,
+                    self._lock_file,
+                )
+                self._readers = 0
+                self._writer = False
+                self._condition.notify_all()
             if self._closed:
                 return
             self._closed = True
         try:
+            if force_reset:
+                # Best effort: try to hand the cross-process lock back before
+                # closing the handle, so waiters are not blocked until timeout.
+                try:
+                    await self._file.release()
+                except Exception:
+                    logger.debug(
+                        "Best-effort release during forced close failed, lock_file=%s",
+                        self._lock_file,
+                        exc_info=True,
+                    )
             await self._file.close()
         finally:
             self._executor.shutdown(wait=False, cancel_futures=True)

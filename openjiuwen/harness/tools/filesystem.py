@@ -1321,8 +1321,30 @@ class WriteFileTool(Tool):
             create_if_not_exist=True,
             encoding=encoding,
         )
+        reconciled_after_error: Optional[str] = None
         if res.code != StatusCode.SUCCESS.code:
-            return ToolOutput(success=False, error=res.message)
+            # The write can physically land on disk even when the call reports
+            # failure (e.g. the file lock could not be closed on Windows). Trust
+            # the on-disk state, but bound the read: a size mismatch (allowing
+            # for CRLF translation) means it cannot be this write.
+            if not is_unc:
+                try:
+                    if os.path.isfile(path):
+                        expected = content.encode(encoding, errors="replace")
+                        stat = os.stat(path)
+                        max_reasonable = max(len(expected) * 2 + 65536, 1024 * 1024)
+                        if stat.st_size <= max_reasonable:
+                            raw_disk = await asyncio.to_thread(
+                                pathlib.Path(path).read_bytes
+                            )
+                            if raw_disk.replace(b"\r\n", b"\n") == expected.replace(
+                                b"\r\n", b"\n"
+                            ):
+                                reconciled_after_error = res.message
+                except (OSError, MemoryError):
+                    reconciled_after_error = None
+            if reconciled_after_error is None:
+                return ToolOutput(success=False, error=res.message)
 
         if not is_unc:
             try:
@@ -1341,15 +1363,18 @@ class WriteFileTool(Tool):
             _history_path = self._build_history_path(_session)
             await _append_op_history(_history_path, path, "write", old_content, content)
 
+        result_data = {
+            "file_path": path,
+            "bytes_written": len(content.encode(encoding, errors="replace")),
+            "type": operation_type,
+            "created": operation_type == "create",
+            "original_file": old_content,
+        }
+        if reconciled_after_error is not None:
+            result_data["reconciled_after_error"] = reconciled_after_error
         return ToolOutput(
             success=True,
-            data={
-                "file_path": path,
-                "bytes_written": len(content.encode(encoding, errors="replace")),
-                "type": operation_type,
-                "created": operation_type == "create",
-                "original_file": old_content,
-            }
+            data=result_data,
         )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:

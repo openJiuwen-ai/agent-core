@@ -4,6 +4,7 @@
 import asyncio
 import datetime
 import hashlib
+import math
 import os
 import pathlib
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -13,6 +14,7 @@ from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Ite
 from pydantic import BaseModel, field_validator
 
 import aiofiles
+from filelock import Timeout as FileLockTimeout
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -145,7 +147,24 @@ class FsOperation(BaseFsOperation):
         """
         if options and "lock_timeout" in options:
             return float(options["lock_timeout"])
-        return 300.0
+        raw = os.getenv("OPENJIUWEN_FS_LOCK_TIMEOUT")
+        if raw is None:
+            return 300.0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            sys_operation_logger.warning(
+                "Invalid OPENJIUWEN_FS_LOCK_TIMEOUT=%r; falling back to 300s", raw
+            )
+            return 300.0
+        if not math.isfinite(value) or value <= 0:
+            sys_operation_logger.warning(
+                "Invalid OPENJIUWEN_FS_LOCK_TIMEOUT=%r (must be finite and > 0); "
+                "falling back to 300s",
+                raw,
+            )
+            return 300.0
+        return value
 
     @classmethod
     @asynccontextmanager
@@ -155,8 +174,13 @@ class FsOperation(BaseFsOperation):
             mode: Literal["read", "write"],
             timeout: float,
     ):
-        async with ReadWriteLockManager.lock_guard(file_path, mode, timeout):
-            yield
+        try:
+            async with ReadWriteLockManager.lock_guard(file_path, mode, timeout):
+                yield
+        except FileLockTimeout as exc:
+            raise FileLockTimeout(
+                f"file lock acquire timeout after {timeout:g}s (mode={mode}): {file_path}"
+            ) from exc
 
     @classmethod
     @asynccontextmanager
@@ -190,13 +214,19 @@ class FsOperation(BaseFsOperation):
             key=lambda item: os.path.normcase(str(item[0])),
         )
         deadline = asyncio.get_running_loop().time() + timeout
-        async with AsyncExitStack() as stack:
-            for lock_path, lock_mode in ordered_requests:
-                remaining_timeout = max(0.0, deadline - asyncio.get_running_loop().time())
-                await stack.enter_async_context(
-                    ReadWriteLockManager.lock_guard(lock_path, lock_mode, remaining_timeout)
-                )
-            yield
+        try:
+            async with AsyncExitStack() as stack:
+                for lock_path, lock_mode in ordered_requests:
+                    remaining_timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+                    await stack.enter_async_context(
+                        ReadWriteLockManager.lock_guard(lock_path, lock_mode, remaining_timeout)
+                    )
+                yield
+        except FileLockTimeout as exc:
+            locked_paths = ", ".join(str(path) for path, _ in ordered_requests)
+            raise FileLockTimeout(
+                f"file lock acquire timeout after {timeout:g}s (copy/move): {locked_paths}"
+            ) from exc
 
     async def read_file(
             self,
