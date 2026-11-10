@@ -179,6 +179,10 @@ class FastOneShotPlanner:
             "reason": plan.get("reason", "") if plan else "",
         }
 
+    def candidate_ids_for_query(self, query: str) -> tuple[str, ...]:
+        """Collect the candidate subgraph without asking the model for a plan."""
+        return tuple(self._candidate_subgraph(query)["skill_ids"])
+
     def _candidate_subgraph(self, query: str) -> dict[str, Any]:
         if self.candidate_skill_ids:
             return self._retrieval_candidate_subgraph(query)

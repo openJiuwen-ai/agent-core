@@ -62,13 +62,13 @@ class SymphonyGraphEngine:
         self._operations: set[asyncio.Task] = set()
         self._scope_id = storage.scope_id if storage is not None else "default"
 
-    def _check(self, *, write: bool = False, require_experience: bool = False) -> None:
+    def _check(self, *, write: bool = False, require_experience: bool = False, require_graph: bool = True) -> None:
         if self._closed:
             raise RuntimeError("Symphony runtime is closed")
         config = self._orchestration_service.config
         if not config.enabled:
             raise RuntimeError("Symphony orchestration is disabled")
-        if self._unavailable_reason:
+        if require_graph and self._unavailable_reason:
             raise ValueError(self._unavailable_reason)
         if require_experience and not config.experience_enabled:
             raise RuntimeError("Symphony experience is disabled")
@@ -285,6 +285,28 @@ class SymphonyGraphEngine:
             graph_snapshot=snapshot.model_dump(exclude={"overlay"}) if snapshot is not None else None,
             task_cluster_id=task_cluster_id,
             progress_callback=progress_callback,
+            mode=mode,
+        )
+
+    @_owned_operation
+    async def plan_expert_tasks(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        expert_manifest_paths: Sequence[Path] | None = None,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        mode: str | None = None,
+    ) -> OrchestrationPlan:
+        """Plan installed expert tasks and inline roles using any published expert evidence."""
+        self._check(require_graph=False)
+        return await self._orchestration_service.plan_expert_tasks(
+            query,
+            candidate_ids,
+            expert_manifest_paths=expert_manifest_paths,
+            language=language,
+            progress=progress,
             mode=mode,
         )
 

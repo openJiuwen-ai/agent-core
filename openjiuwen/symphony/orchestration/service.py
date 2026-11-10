@@ -76,6 +76,7 @@ from openjiuwen.symphony.orchestration.mutations import (
     stable_sha256 as _stable_sha256,
 )
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
+from openjiuwen.symphony.orchestration.planning.expert_tasks import build_expert_task_plan
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
 from openjiuwen.symphony.shared.fingerprint import (
     Fingerprint, FingerprintArtifactStore, FingerprintService, coerce_fingerprint,
@@ -404,6 +405,51 @@ class OrchestrationService:
         public_result = OrchestrationPlan({"planned_graph": planned_graph})
         await _emit(callback, "plan_completed", plan_id=result["plan_id"])
         return public_result
+
+    async def plan_expert_tasks(
+        self,
+        query: str,
+        candidate_ids: Sequence[str] | None = None,
+        *,
+        expert_manifest_paths: Sequence[Path] | None = None,
+        language: str = "cn",
+        progress: ProgressCallback | None = None,
+        mode: str | None = None,
+    ) -> OrchestrationPlan:
+        """Plan task instances for visible installed experts and inline roles."""
+        if not query.strip():
+            raise ValueError("query is required")
+        if self.model is None:
+            raise ValueError("Symphony planning requires a model.")
+        planning_mode = mode or self.config.plan.mode
+        if planning_mode not in {"fast", "beam"}:
+            raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
+        await _emit(progress, "plan_started", query=query)
+        artifacts = await asyncio.to_thread(self._load_expert_task_artifacts, expert_manifest_paths)
+        planned_graph = await build_expert_task_plan(
+            query,
+            artifacts,
+            model=self.model,
+            config=self.config,
+            mode=planning_mode,
+            language=resolve_orchestration_language(language),
+            candidate_ids=candidate_ids,
+            model_response_observer=self.model_response_observer,
+        )
+        await _emit(progress, "plan_completed", plan_id=planned_graph["graph"]["id"])
+        return OrchestrationPlan({"planned_graph": planned_graph})
+
+    def _load_expert_task_artifacts(self, manifest_paths: Sequence[Path] | None) -> GraphArtifacts:
+        if self.expert_inventory is not None:
+            try:
+                artifacts = load_graph_artifacts(self.graph_artifact_root, kind="expert")
+            except FileNotFoundError:
+                pass
+            else:
+                return filter_disabled_graph_artifacts(
+                    artifacts, None, visible_capability_ids=self._visible_expert_ids(artifacts, manifest_paths),
+                )
+        return GraphArtifacts(self.graph_artifact_root, {}, [], {}, {})
 
     def _visible_expert_ids(self, artifacts: GraphArtifacts, manifest_paths: Sequence[Path] | None) -> set[str]:
         paths = None
