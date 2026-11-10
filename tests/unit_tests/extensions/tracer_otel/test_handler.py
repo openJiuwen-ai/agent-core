@@ -86,11 +86,14 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STREAM_OUTPUTS,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
+    OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ERROR_MESSAGE,
     OJ_WORKFLOW_ID,
+    OJ_WORKFLOW_INPUTS,
     OJ_WORKFLOW_INVOKE_DATA,
     OJ_WORKFLOW_NAME,
+    OJ_WORKFLOW_OUTPUTS,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
@@ -2597,6 +2600,66 @@ class TestOtelWorkflowHandlerDeferredEndNode:
         assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
         assert s.attributes[OJ_STATUS] == NodeStatus.INTERRUPTED.value
         assert ERROR_TYPE not in s.attributes
+
+    async def test_deferred_window_batch_payload_replayed(self):
+        """Batch-invoke events inside the deferral window must not be dropped.
+
+        Mix-mode end nodes fire on_pre_invoke / on_post_invoke while the span
+        is still stashed (the stream begin won the single-fire guard).
+        on_post_invoke is the only source of the end node's final outputs,
+        so both payloads are buffered and replayed at materialization.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        # Batch-side events inside the window (stream begin won the guard).
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+        await handler.on_post_invoke("end1", outputs={"answer": "final-answer"})
+        assert handler._deferred_end_starts["end1"]["inputs"] == {"question": "q1"}
+        assert handler._deferred_end_starts["end1"]["outputs"] == {"answer": "final-answer"}
+
+        await handler.on_call_finalize("end1")
+        await handler.on_call_done("end1", outputs=None)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "final-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_NAME] == "结束"
+
+    async def test_deferred_window_payload_survives_error_path(self):
+        """Payload buffered in the deferral window also lands on the error
+        span materialized by on_invoke(exception), matching the
+        pre-deferral behavior where the span already carried it."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_invoke(
+            "end1",
+            inputs={"question": "q1"},
+            component_metadata={"component_id": "end1", "component_name": "结束"},
+        )
+        await handler.on_post_invoke("end1", outputs={"answer": "partial-answer"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("boom"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert "q1" in s.attributes[OJ_WORKFLOW_INPUTS]
+        assert "partial-answer" in s.attributes[OJ_WORKFLOW_OUTPUTS]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
 
     async def test_finalize_marker_without_stash_is_ignored(self):
         config = OtelTracerConfig(redaction_enabled=False)
