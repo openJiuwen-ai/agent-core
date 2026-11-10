@@ -84,6 +84,8 @@ finally:
 
 `session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`，支持分类、批量关键词和游标。宿主可向 `create_session(search_catalog=...)` 提供当前会话中 `expert`、`connector` 和 `mcp` 的查询实现，并用 `openjiuwen.symphony.discovery.search_capabilities()` 对授权候选排序。
 
+会话检索使用扫描中通过校验的 Skill。若扫描返回错误，`runtime.retrieval.status()` 报告诊断并将索引标为过期。修复扫描错误后可以重新构建。
+
 ## 产物与版本
 
 ```text

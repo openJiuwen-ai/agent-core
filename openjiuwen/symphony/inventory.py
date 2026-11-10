@@ -8,7 +8,7 @@ from pathlib import Path
 from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.config import CapabilityConfig
 from openjiuwen.symphony.discovery.models import SkillRecord
-from openjiuwen.symphony.shared.fingerprint import ScanResult, SkillFolderScanner, SkillManifestParser
+from openjiuwen.symphony.shared.fingerprint import ScanDiagnostic, ScanResult, SkillFolderScanner, SkillManifestParser
 from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
 from openjiuwen.symphony.runtime_storage import RuntimeStorage
 
@@ -22,7 +22,7 @@ class DirectoryInventory:
         self.storage = storage
         self.last_scan: ScanResult | None = None
 
-    def scan(self, root: Path | None = None) -> ScanResult:
+    def scan(self, root: Path | None = None, *, allow_partial: bool = False) -> ScanResult:
         if self.source.type != "skill":
             raise ValueError(f"Unsupported capability reader: {self.source.type}")
         parser = SkillManifestParser(**self.config.scan.manifest.model_dump())
@@ -34,8 +34,11 @@ class DirectoryInventory:
             excluded_paths=(self.storage.root,),
         )
         result = scanner.scan()
-        if any(item.severity == "error" for item in result.diagnostics):
-            raise ValueError("Capability inventory is incomplete: " + ", ".join(item.code for item in result.diagnostics))
+        if not allow_partial:
+            error = next((item for item in result.diagnostics if item.severity == "error"), None)
+            if error is not None:
+                location = f" ({error.path})" if error.path else ""
+                raise ValueError(f"Capability inventory is incomplete: {error.code}{location}")
         self.last_scan = result
         return result
 
@@ -51,13 +54,18 @@ class DirectoryInventory:
     async def source_snapshot(self):
         return (await self.inventory_snapshot())[0]
 
-    def records(self, directories=None, *, disabled=(), sources=None) -> tuple[SkillRecord, ...]:
+    def records(
+        self, directories=None, *, disabled=(), sources=None, allow_partial: bool = False,
+    ) -> tuple[tuple[SkillRecord, ...], tuple[ScanDiagnostic, ...]]:
         records: dict[str, SkillRecord] = {}
+        errors: list[ScanDiagnostic] = []
         disabled_ids = set(disabled)
         source_labels = sources or {}
         for directory in directories if directories is not None else (self.source.root,):
             root = Path(directory).expanduser().resolve()
-            for item in self.scan(root).capabilities:
+            result = self.scan(root, allow_partial=allow_partial)
+            errors.extend(item for item in result.diagnostics if item.severity == "error")
+            for item in result.capabilities:
                 if item.capability_id in disabled_ids or not item.available:
                     continue
                 if item.capability_id in records:
@@ -75,4 +83,4 @@ class DirectoryInventory:
                     source_root=str(root),
                     aliases=tuple(metadata.get("aliases", ())),
                 )
-        return tuple(records.values())
+        return tuple(records.values()), tuple(errors)

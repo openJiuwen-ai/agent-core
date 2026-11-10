@@ -54,7 +54,9 @@ class TreeEngine:
             raise RuntimeError("Symphony retrieval is disabled")
         self._storage.check(write=write)
 
-    def _records(self, capability_directories=None, disabled_capability_ids=None, source_by_id=None):
+    def _records(
+        self, capability_directories=None, disabled_capability_ids=None, source_by_id=None, *, allow_partial=False,
+    ):
         def value(item, default):
             return item() if callable(item) else item if item is not None else default
 
@@ -62,6 +64,7 @@ class TreeEngine:
             value(capability_directories, None),
             disabled=value(disabled_capability_ids, ()),
             sources=value(source_by_id, {}),
+            allow_partial=allow_partial,
         )
 
     def _toolkit(self, *, records=(), model=None):
@@ -152,13 +155,15 @@ class TreeEngine:
                         await result
 
                 dispatch(deliver())
-            latest = self._records(capability_directories, disabled_capability_ids, source_by_id)
+            latest, _ = self._records(capability_directories, disabled_capability_ids, source_by_id)
             if latest != records:
                 raise RuntimeError("Capability inventory changed during the taxonomy build; previous version preserved")
 
         worker = None
         try:
-            records = await asyncio.to_thread(self._records, capability_directories, disabled_capability_ids, source_by_id)
+            records, _ = await asyncio.to_thread(
+                self._records, capability_directories, disabled_capability_ids, source_by_id,
+            )
             if not records:
                 raise ValueError("Cannot build a taxonomy from an empty capability inventory")
             if self._cancel.is_set():
@@ -197,8 +202,14 @@ class TreeEngine:
             return {"enabled": False, "status": "disabled", "build_id": "", "version": "",
                     "index_exists": False, "counts": {}, "diagnostics": []}
         self._check()
-        records = self._records(capability_directories, disabled_capability_ids, source_by_id)
-        return self._status(self._toolkit(records=records), build_id=build_id)
+        records, errors = self._records(
+            capability_directories, disabled_capability_ids, source_by_id, allow_partial=True,
+        )
+        status = self._status(self._toolkit(records=records), build_id=build_id)
+        if errors:
+            status["fresh"] = False
+            status["diagnostics"].extend(error.to_dict() for error in errors)
+        return status
 
     def read(self):
         self._check()
@@ -230,7 +241,13 @@ class TreeEngine:
                        **snapshot):
         self._check()
         settings = (config or self.config).model_copy(deep=True)
-        records = lambda: self._records(capability_directories, disabled_capability_ids, source_by_id)
+
+        def records():
+            visible_records, _ = self._records(
+                capability_directories, disabled_capability_ids, source_by_id, allow_partial=True,
+            )
+            return visible_records
+
         environment = SkillFS(
             records, settings=settings, visible_skill_names=visible_capability_ids,
             artifact_root=self.artifact_root, index_root=self.artifact_root,

@@ -108,6 +108,43 @@ async def test_unimplemented_reader_fails_explicitly_on_use(tmp_path, kind):
 
 
 @pytest.mark.asyncio
+async def test_discovery_skips_invalid_manifest_and_preserves_published_index(tmp_path):
+    write_capability(tmp_path)
+    write_capability(tmp_path, "broken")
+    runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"use_existing_index": True}))
+    try:
+        built = await runtime.retrieval.build()
+        assert built["success"], built
+        fingerprint = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        published_fingerprint = fingerprint.read_bytes()
+        write_capability(tmp_path, "broken", "Unquoted key: value")
+
+        session = runtime.retrieval.create_session(session_scope="malformed-skill")
+        tool, = session.get_tools()
+        assert tool.card.name == "capability_search"
+        result = await tool.invoke({"query": "invoice"})
+        assert result.detailed_output["observed_skill_ids"] == ["alpha"]
+
+        status = runtime.retrieval.status()
+        assert status["index_exists"] and status["version"] == built["version"]
+        assert not status["fresh"]
+        assert any(
+            diagnostic.get("code") == "invalid_frontmatter" and diagnostic.get("path") == "broken/SKILL.md"
+            for diagnostic in status["diagnostics"]
+        )
+        with pytest.raises(ValueError, match=r"invalid_frontmatter.*broken/SKILL\.md"):
+            await runtime.retrieval.build()
+        assert runtime.retrieval.read()["version"] == built["version"]
+        assert fingerprint.read_bytes() == published_fingerprint
+
+        write_capability(tmp_path, "broken")
+        result = await tool.invoke({"query": "invoice"})
+        assert set(result.detailed_output["observed_skill_ids"]) == {"alpha", "broken"}
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_no_model_discovery_and_fallback_build_with_real_directory(tmp_path):
     write_capability(tmp_path)
     runtime = SymphonyRuntime(None, make_config(tmp_path, retrieval={"prompt": {"context_window_tokens": 4000}, "output": {"max_results": 2}}))

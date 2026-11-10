@@ -127,6 +127,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 - 构造先校验 `capability.sources` 恰有一项，再固定能力根、产物根和根分类文件相对路径，复制嵌套配置。多来源由配置模型验证，Runtime 在创建产物前明确拒绝。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
 - `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
+- 会话发现消费扫描器已接受的 Skill 记录。检索状态返回扫描错误诊断，并将不完整集合对应的索引标为过期。构树和指纹发布要求完整扫描，扫描错误导致构建失败并保留上次成功产物。
 - 检索与编排独立。编排和经验都开启才接收新执行证据及使用 Runtime Flow。禁用时 `submit_evolution()` 返回空结果，直接观测写入与 Flow 执行入口在创建存储前拒绝。
 - model=None 允许只读和确定性发现，并可按任务策略回退构树。构图和规划需要模型。
 - 检索构建与构图共用已配置 Skill 集合的 `FingerprintService`、指纹产物和缓存。允许回退构树且宿主缺少模型时，以元数据生成指纹。构图发布与本次使用的指纹快照绑定。
