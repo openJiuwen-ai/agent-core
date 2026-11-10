@@ -247,7 +247,7 @@ class TestOtelAgentHandler:
         assert len(finished) == 2
 
         child = next(s for s in finished if s.name == "tool.ChildTool")
-        parent = next(s for s in finished if s.name == "chain.ParentChain")
+        parent = next(s for s in finished if s.name == "ParentChain")
 
         # Child's parent should point to parent's span_id
         assert child.parent.span_id == parent.context.span_id
@@ -483,6 +483,29 @@ class TestOtelAgentHandler:
         assert s.attributes[OJ_AGENT_INVOKE_TYPE] == InvokeType.CHAIN.value
         assert s.attributes[OJ_AGENT_NAME] == "TestChain"
 
+    async def test_agent_chain_span_name_uses_agent_name(self):
+        """Chain span 名用执行 agent 真实名（agent_name），无前缀；缺省回退类名。"""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "TestChain", "agent_name": "天气预测"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs="done")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "天气预测"
+        assert s.attributes[OJ_AGENT_INVOKE_TYPE] == InvokeType.CHAIN.value
+        assert s.attributes[OJ_AGENT_NAME] == "TestChain"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "天气预测"
+
     async def test_agent_plugin_fields_set_when_span_empty(self):
         """Plugin: invoke_type = "plugin" when span.invoke_type is None."""
         config = OtelTracerConfig(redaction_enabled=False)
@@ -675,7 +698,7 @@ class TestExplicitParentContext:
         await handler.on_chain_end(span=logical_parent, outputs="done")
 
         llm = next(s for s in _EXPORTER.get_finished_spans() if s.name == "llm.TestModel")
-        logical = next(s for s in _EXPORTER.get_finished_spans() if s.name == "chain.LogicalParent")
+        logical = next(s for s in _EXPORTER.get_finished_spans() if s.name == "LogicalParent")
         assert llm.parent is not None
         assert llm.parent.span_id == int(span_hex, 16)
         assert llm.parent.span_id != logical.context.span_id
