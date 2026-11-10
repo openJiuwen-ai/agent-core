@@ -1480,6 +1480,14 @@ class TeamRuntimeManager:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
             await self._pre_run_with_inputs(team_session, inputs)
+            # Reconcile tip capabilities onto the paused live agent's mounted
+            # spec / allocator before the gate opens. Pause reuse deliberately
+            # skips rebuild, so without this overlay subsequent spawn /
+            # configure would still see first-mount model / skills / pool.
+            # The already-running DeepAgent/harness is not rebuilt here — see
+            # TeamAgent.apply_runtime_capabilities and F_84.
+            if spec is not None and pool_entry.agent is not None:
+                pool_entry.agent.apply_runtime_capabilities(spec)
             await self._check_activation_entry(team_name, pool_entry)
             await pool_entry.interact_gate.reset()
             await self._check_activation_entry(team_name, pool_entry)
