@@ -554,3 +554,86 @@ async def test_transcript_assessor_uses_builder_language() -> None:
     assert "You are a Goal completion assessor." in system
     assert "你是 Goal 完成度评估器" not in system
     assert "Prioritize completing the entire objective" in user
+
+
+class _PeekManager:
+    """Goal manager stand-in exposing only the record a claim is judged against."""
+
+    def __init__(self, record: GoalRecord | None) -> None:
+        self._record = record
+
+    def peek(self) -> GoalRecord | None:
+        """Return the stored record."""
+        return self._record
+
+
+def test_set_goal_manager_takes_the_hosts_stop_policy() -> None:
+    """A host-supplied stop policy replaces the default evaluator; omitting it keeps the current one."""
+    from openjiuwen.harness.goal.schema import GoalStopConfig, GoalStopStrategy
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(object())
+    assert rail._goal_evaluator.strategy is GoalStopStrategy.HYBRID
+
+    rail.set_goal_manager(object(), stop_config=GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT))
+    assert rail._goal_evaluator.strategy is GoalStopStrategy.AGENT_REPORT
+
+    rail.set_goal_manager(object())
+    assert rail._goal_evaluator.strategy is GoalStopStrategy.AGENT_REPORT
+
+
+@pytest.mark.asyncio
+async def test_completion_claim_is_judged_by_the_assessor_without_touching_the_goal(monkeypatch) -> None:
+    """A completion claim gets the assessor's verdict and leaves the record as it was."""
+    record = GoalRecord.create(session_id="s1", objective="交付解析器")
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_PeekManager(record))
+
+    async def fake_invoke(*_args, **_kwargs):
+        return '{"status":"continue","evidence":"测试没有运行","remaining_work":"运行测试"}'
+
+    monkeypatch.setattr(rail, "_invoke_transcript_assessor", fake_invoke)
+    ctx = AgentCallbackContext(agent=object(), inputs=object())
+
+    verdict = await rail.assess_completion_claim(ctx, "已完成")
+
+    assert verdict.status is GoalAssessmentStatus.CONTINUE
+    assert verdict.remaining_work == "运行测试"
+    assert record.last_assessment is None
+    assert record.attempt_count == 0
+
+
+@pytest.mark.asyncio
+async def test_completion_claim_without_a_reliable_verdict_returns_none(monkeypatch) -> None:
+    """No active goal, or an assessor that could not answer, yields no verdict rather than a refusal."""
+    ctx = AgentCallbackContext(agent=object(), inputs=object())
+
+    without_goal = TaskCompletionRail()
+    without_goal.set_goal_manager(_PeekManager(None))
+    assert await without_goal.assess_completion_claim(ctx, "已完成") is None
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_PeekManager(GoalRecord.create(session_id="s1", objective="交付解析器")))
+
+    async def unavailable(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(rail, "_invoke_transcript_assessor", unavailable)
+    assert await rail.assess_completion_claim(ctx, "已完成") is None
+
+
+@pytest.mark.asyncio
+async def test_completion_claim_is_trusted_under_agent_report() -> None:
+    """Under AGENT_REPORT the claim is accepted without an assessor call."""
+    from openjiuwen.harness.goal.schema import GoalStopConfig, GoalStopStrategy
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(
+        _PeekManager(GoalRecord.create(session_id="s1", objective="交付解析器")),
+        stop_config=GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT),
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=object())
+
+    verdict = await rail.assess_completion_claim(ctx, "已完成")
+
+    assert verdict.status is GoalAssessmentStatus.COMPLETE
