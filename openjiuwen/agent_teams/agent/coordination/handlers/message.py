@@ -358,9 +358,9 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                    await self._round.deliver_input(text, use_steer=use_steer)
-                    delivered.append(msg)
-                    await self._observe_shown_revision(expanded)
+                    if await self._deliver_message(msg, text, expanded=expanded, use_steer=use_steer):
+                        delivered.append(msg)
+                        await self._observe_shown_revision(expanded)
             finally:
                 if delivered:
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
@@ -380,6 +380,16 @@ class MessageHandler(BaseCoordinationHandler):
             return
         task_id, revision = shown
         await task_manager.observe_revision(task_id, revision)
+
+    async def _deliver_message(self, msg: Any, text: str, *, expanded: ExpandedMessage, use_steer: bool) -> bool:
+        """Feed one rendered mailbox row to the local agent.
+
+        Returns whether the drain should mark the row read. The base handler
+        always steers (or follows up) and returns True. ``team_rules.handlers.TeamRulesMessageHandler``
+        overrides this to route the row through the team rules router (F_130).
+        """
+        await self._round.deliver_input(text, use_steer=use_steer)
+        return True
 
     def _language(self) -> str:
         """Team language for delivery-time template rendering."""

@@ -112,6 +112,7 @@ generated: true
 | [F_127_merge-spawn-external-cli-into-spawn-teammate](features/agent_teams/F_127_merge-spawn-external-cli-into-spawn-teammate.md) | F | `spawn_external_cli` 并入 `spawn_teammate` | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_128_scheduled-member-subtasks](features/agent_teams/F_128_scheduled-member-subtasks.md) | F | 调度模式：成员拆分子任务（父任务挂起 / 恢复） | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_129_task-revision-and-staleness](features/agent_teams/F_129_task-revision-and-staleness.md) | F | 任务版本与过期感知：任务被修改后，执行者一定能知道 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
+| [F_130_team-rules-delivery-routing](features/agent_teams/F_130_team-rules-delivery-routing.md) | F | Group 团队规则：Agent 干活时收到新消息，自动决定怎么投递 | zuiho | openjiuwen/agent_teams | — | 待核实 |
 | [F_12_multicast-full-roster-rejection](features/agent_teams/F_12_multicast-full-roster-rejection.md) | F | 禁止覆盖全员的组播，强制改用广播 | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_13_human-agent-send-message](features/agent_teams/F_13_human-agent-send-message.md) | F | Human Agent — User-Driven `send_message` Relay | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_14_human-agent-team-event-rendering](features/agent_teams/F_14_human-agent-team-event-rendering.md) | F | Human Agent — Role-Aware Team Event Rendering | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
