@@ -132,7 +132,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 - model=None 允许只读和确定性发现，并可按任务策略回退构树。构图和规划需要模型。
 - 单 Skill 检索构建与构图共用原有 Skill 指纹服务和缓存。共用分类树在自己的集合下按类型发布指纹。允许回退构树且宿主缺少模型时，以元数据生成指纹。构图发布与本次使用的指纹快照绑定。
 - `DiscoverySession.capability_search(query, type, operation, category, cursor, top_k)` 按单个 `type` 选择目录。`type=skill` 为默认值，复用现有目录的 `list`、`search`、分类和游标。SkillFS 只为会话可见且启用的记录使用来源和内容哈希一致的指纹。摘要、场景和关键词参与召回，指纹缺失或过期时使用当前目录描述。
-- Skill 和专家从同一代树投影各自的分类视图，分类和计数只由当前可见叶子决定。专家支持按分类搜索、列表及游标。SDK 直接使用配置内专家。宿主通过 `create_session(expert_candidates=...)` 提供可调用候选，配置专家目录时按实际 manifest 路径取交集。连接器和 MCP 继续使用 `search_catalog`。工具和 SDK 共用会话目录及游标。
+- Skill 和专家从同一代树投影各自的分类视图，分类和计数只由当前可见叶子决定。专家支持按分类搜索、列表及游标。SDK 直接使用配置内专家。宿主通过 `create_session(expert_candidates=...)` 提供检索候选，配置专家目录时按实际 manifest 路径取交集。连接器和 MCP 继续使用 `search_catalog`。工具和 SDK 共用会话目录及游标。
 - Skill 和专家的 `search` 接受 1–8 条独立查询。按每条查询的排名轮流合并并去重，分页使用合并后的结果，游标绑定原查询列表。旧版专家 `search_catalog` 回调按单条查询调用，合并后按 `top_k` 截断。连接器和 MCP 每次接受一条查询。
 - 专家扫描只读取独立专家包 manifest 的 `name`、`description` 和 `package_type: agent_template`。共用树以 `type:id` 区分叶子。跨类型同 ID 可以共存，同类型重复 ID 按诊断处理。构建遇扫描错误保留已发布树，在线发现跳过问题条目。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
