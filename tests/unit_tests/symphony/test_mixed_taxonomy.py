@@ -63,8 +63,9 @@ async def test_shared_tree_projects_typed_results_and_preserves_legacy_collectio
         else:
             assert not runtime.orchestration.status().exists
         flat, = runtime.retrieval.create_session(pin_index_revision=True).get_tools()
-        flat_hits = await flat.invoke({"type": "expert", "query": "invoices"})
-        assert {hit["id"] for hit in flat_hits["matches"]} == {"ledger", "invoice"}
+        queries = ["ledger", "invoice", "invoices"]
+        flat_hits = await flat.invoke({"type": "expert", "query": queries})
+        assert [hit["id"] for hit in flat_hits["matches"]] == ["ledger", "invoice"]
         assert {hit["category"] for hit in flat_hits["matches"]} == {"ROOT"}
 
         built = await runtime.retrieval.build()
@@ -87,6 +88,17 @@ async def test_shared_tree_projects_typed_results_and_preserves_legacy_collectio
         assert category["count"] == 2
         scoped = await search.invoke({"type": "expert", "category": category["category"], "query": "ledger"})
         assert [hit["id"] for hit in scoped["matches"]] == ["ledger"]
+        batch = await search.invoke({
+            "type": "expert", "category": category["category"], "query": queries, "top_k": 1,
+        })
+        hit, = batch["matches"]
+        assert (hit["id"], hit["category"]) == ("ledger", category["category"])
+        with pytest.raises(ValueError, match="cursor query differs"):
+            await search.invoke({"type": "expert", "query": ["invoice"], "cursor": batch["next_cursor"]})
+        continued = await search.invoke({"type": "expert", "cursor": batch["next_cursor"]})
+        hit, = continued["matches"]
+        assert (hit["id"], hit["category"]) == ("invoice", category["category"])
+        assert continued["next_cursor"] is None
         first = await search.invoke({"type": "expert", "operation": "list", "category": category["category"], "top_k": 1})
         with pytest.raises(ValueError, match="belongs to type=expert"):
             await search.invoke({"operation": "list", "cursor": first["next_cursor"]})
@@ -106,6 +118,27 @@ async def test_shared_tree_projects_typed_results_and_preserves_legacy_collectio
     finally:
         await reordered.aclose()
         await original.aclose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_expert_catalog_batches_queries_through_the_model_facing_tool(tmp_path):
+    skills = tmp_path / "skills"
+    _skill(skills, "ledger")
+    rankings = {"ledger": ("ledger", "invoice", "payment", "archive"), "receipt": ("receipt", "ledger")}
+    calls = []
+
+    async def search_catalog(kind, query, top_k):
+        calls.append((kind, query, top_k))
+        return {"matches": [{"type": kind, "id": identifier} for identifier in rankings[query][:top_k]]}
+
+    runtime = SymphonyRuntime(None, _config(tmp_path, [("skill", skills)]))
+    try:
+        tool, = runtime.retrieval.create_session(search_catalog=search_catalog).get_tools()
+        result = await tool.invoke({"type": "expert", "query": ["ledger", "receipt"], "top_k": 4})
+        assert [hit["id"] for hit in result["matches"]] == ["ledger", "receipt", "invoice", "payment"]
+        assert calls == [("expert", "ledger", 4), ("expert", "receipt", 4)]
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio

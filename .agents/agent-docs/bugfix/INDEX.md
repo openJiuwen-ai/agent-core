@@ -28,6 +28,7 @@ generated: true
 | [harness/tools/browser_move/decision](#module-11) |
 | [harness/tools/subagent](#module-12) |
 | [symphony](#module-13) |
+| [symphony/discovery](#module-14) |
 
 <a id="module-1"></a>
 
@@ -149,3 +150,11 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1507_symphony-build-method-strict-integer](symphony/B_20261102_1507_symphony-build-method-strict-integer.md) | B | Symphony 构建方式严格整数校验 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | [D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [B_20261110_1139_symphony-discovery-invalid-manifest](symphony/B_20261110_1139_symphony-discovery-invalid-manifest.md) | B | Symphony 隔离无效 Skill 清单 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/inventory.py, openjiuwen/symphony/tree_engine.py, tests/unit_tests/symphony/test_runtime_config_integration.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+
+<a id="module-14"></a>
+
+## symphony/discovery
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261110_1651_symphony-expert-batch-search](symphony/B_20261110_1651_symphony-expert-batch-search.md) | B | Symphony 专家目录支持批量查询 | lin-xiaoyu | openjiuwen/symphony/discovery | openjiuwen/symphony/discovery/directory_toolkit.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | [D-20261110-1614-symphony-mixed-taxonomy](../designs/active/D-20261110-1614-symphony-mixed-taxonomy/design.md) |

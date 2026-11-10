@@ -82,9 +82,9 @@ finally:
 
 单 Skill 目录的检索构建与构图共用指纹服务和缓存。共用分类树的指纹按类型发布在所属集合下。Skill 和专家目录按会话可见范围读取记录，并按类型、来源和内容哈希匹配指纹。指纹缺失或过期时使用当前目录描述。
 
-`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`。Skill 与专家都支持 `operation=list`、按 `category` 搜索和 `cursor` 续页。专家接受一条搜索词，结果的 `matches` 带分类，列表的 `categories` 带可见项计数。续页沿用原 `type` 和 `operation`。
+`session.get_tools()` 提供单个 `capability_search` 工具。SDK 也可直接调用 `session.capability_search()`。`type` 默认为 `skill`。Skill 与专家都支持 `operation=list`、按 `category` 搜索和 `cursor` 续页。搜索接受 `query` 数组中的 1–8 条独立查询，按各查询排名轮流合并并去重。专家结果的 `matches` 带分类，列表的 `categories` 带可见项计数。续页沿用原 `type`、`operation` 和查询范围。
 
-独立 SDK 会话直接读配置的专家目录。宿主可向 `create_session(expert_candidates=...)` 提供返回可调用候选的异步回调。配置了专家来源时，Core 按候选的 `manifest_path` 与配置目录实际读到的包取交集。省略专家来源时使用宿主候选。现有 `search_catalog` 回调继续服务连接器和 MCP，也可在未配置专家来源及新回调时处理旧版专家关键词搜索。
+独立 SDK 会话直接读配置的专家目录。宿主可向 `create_session(expert_candidates=...)` 提供返回可调用候选的异步回调。配置了专家来源时，Core 按候选的 `manifest_path` 与配置目录实际读到的包取交集。省略专家来源时使用宿主候选。现有 `search_catalog` 回调继续服务连接器和 MCP 的单条查询。旧版会话同时省略专家来源和候选回调时，也可用 `search_catalog` 检索专家。Core 逐条调用并合并命中。
 
 会话检索使用扫描中通过校验的能力。跨类型可有相同 ID，同类型的重复 ID 会被排除。若扫描返回错误，`runtime.retrieval.status()` 报告诊断并将索引标为过期，构建保留上一发布版本。
 

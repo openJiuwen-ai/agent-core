@@ -36,7 +36,8 @@ generated: true
 | [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-19) |
 | [jiuwenswarm/runtime/symphony](#module-20) |
 | [symphony](#module-21) |
-| [未分类](#module-22) |
+| [symphony/discovery](#module-22) |
+| [未分类](#module-23) |
 
 <a id="module-1"></a>
 
@@ -529,6 +530,14 @@ generated: true
 | [S_01_configuration-contract](specs/symphony/S_01_configuration-contract.md) | S | Symphony 运行配置与 Runtime 契约 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_config.py, scripts/export_symphony_config.py, tests/unit_tests/symphony/test_config_export.py, openjiuwen/symphony/config.tree.txt, openjiuwen/symphony/AGENTS.md, openjiuwen/symphony/README.md | — |
 
 <a id="module-22"></a>
+
+## symphony/discovery
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261110_1651_symphony-expert-batch-search](bugfix/symphony/B_20261110_1651_symphony-expert-batch-search.md) | B | Symphony 专家目录支持批量查询 | lin-xiaoyu | openjiuwen/symphony/discovery | openjiuwen/symphony/discovery/directory_toolkit.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | [D-20261110-1614-symphony-mixed-taxonomy](designs/active/D-20261110-1614-symphony-mixed-taxonomy/design.md) |
+
+<a id="module-23"></a>
 
 ## 未分类
 

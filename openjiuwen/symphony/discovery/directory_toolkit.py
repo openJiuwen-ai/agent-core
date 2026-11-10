@@ -7,11 +7,11 @@ import hashlib
 import json
 import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
-from itertools import zip_longest
+from itertools import islice, zip_longest
 from pathlib import PurePosixPath
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Sequence, TypeVar
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard, ToolExposure
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
@@ -30,6 +30,7 @@ _CAPABILITY_TYPES = ("skill", "expert", "connector", "mcp")
 _OPERATIONS = ("list", "search")
 _MAX_TOP_K = 50
 _TOOL_ID_DOMAIN = b"openjiuwen.skill-index-tool.v1\0"
+_Match = TypeVar("_Match")
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,8 @@ def _tool_card(tool_id: str) -> ToolCard:
         name=CAPABILITY_SEARCH_TOOL_NAME,
         description=(
             "Read-only search for capabilities available in this session. Select type=skill, expert, "
-            "connector, or mcp. Skills and experts support category browsing and pagination. "
-            "Search Skill names, descriptions and SKILL.md, or send one search query for other types. "
+            "connector, or mcp. Skills and experts support multiple search queries, category browsing, and pagination. "
+            "Search names and descriptions. Skill search also reads SKILL.md. "
             "Continue with the returned cursor and the same type and operation. Use Skill IDs with skill_tool, "
             "expert references with spawn_expert, and tool_search to inspect deferred tools."
         ),
@@ -89,9 +90,9 @@ def _tool_card(tool_id: str) -> ToolCard:
                     "maxItems": 8,
                     "description": (
                         'Search only. Array even for one query: ["PDF OCR"]. '
-                        "Keep task-specific terms; use the language of Skill descriptions (often English). "
-                        "Independent queries, interleaved and deduplicated. "
-                        "Terms need not all match; no Skill matches yields category hints."
+                        "Use task-specific terms in the language of the catalog descriptions. "
+                        "Skills and experts accept up to eight independent queries with interleaved, deduplicated results. "
+                        "Connector and MCP catalogs accept one query. Skill search can return category hints."
                     ),
                 },
                 "cursor": {
@@ -209,11 +210,19 @@ class InstalledSkillsDirectoryToolkit:
             if operation != "search" or category is not None or cursor is not None:
                 raise ValueError("list, category, and cursor require a browsable Skill or expert catalog")
             terms = _queries(query)
-            if len(terms) != 1:
-                raise ValueError("Search one query at a time for expert, connector, or mcp")
+            if kind != "expert" and len(terms) != 1:
+                raise ValueError("Search one query at a time for connector or mcp")
             if self._search_catalog is None:
                 return {"matches": []}
-            return await self._search_catalog(kind, terms[0], top_k or 10)
+            limit = top_k or 10
+            if len(terms) == 1:
+                return await self._search_catalog(kind, terms[0], limit)
+            rankings = []
+            for term in terms:
+                result = await self._search_catalog(kind, term, limit)
+                rankings.append(result.get("matches", []))
+            matches = _merge_rankings(rankings, lambda row: row["id"])
+            return {"matches": list(islice(matches, limit))}
 
     def get_tools(self) -> list[Tool]:
         return [_DirectoryFunction(card=_tool_card(self._tool_id), func=self.capability_search)]
@@ -279,8 +288,6 @@ class InstalledSkillsDirectoryToolkit:
             )
         else:
             terms = _queries(query) if operation == "search" else ()
-            if len(terms) > 1:
-                raise ValueError("Search one query at a time for expert")
             page_size = min(top_k or (10 if operation == "search" else maximum), maximum)
         candidates = await self._expert_candidates()
         rows, fingerprint = await asyncio.to_thread(
@@ -392,20 +399,14 @@ class InstalledSkillsDirectoryToolkit:
             for item in group:
                 queries_by_id.setdefault(_search_identity(item), []).append(query)
 
-        rows: dict[str, _Row] = {}
-        for rank in zip_longest(*groups):
-            for item in rank:
-                if item is None:
-                    continue
-                identity = _search_identity(item)
-                if identity in rows:
-                    continue
-                if isinstance(item, DirectoryEntry):
-                    rows[identity] = _category_row(item, view, description_limit=300)
-                else:
-                    snippet = self._environment.content_match_snippet(item, tuple(queries_by_id[identity]))
-                    rows[identity] = _search_row(item, view, _safe_match_snippet(snippet))
-        return tuple(rows.values())
+        rows = []
+        for item in _merge_rankings(groups, _search_identity):
+            if isinstance(item, DirectoryEntry):
+                rows.append(_category_row(item, view, description_limit=300))
+            else:
+                snippet = self._environment.content_match_snippet(item, tuple(queries_by_id[_search_identity(item)]))
+                rows.append(_search_row(item, view, _safe_match_snippet(snippet)))
+        return tuple(rows)
 
     @staticmethod
     def _search_categories(view: SkillDirectoryView, path: str, query: str) -> tuple[DirectoryEntry, ...]:
@@ -456,7 +457,8 @@ def _expert_rows(
                     "classification": classification,
                 }))
             scoped.append(candidate)
-        rows = rank_capabilities(scoped, terms[0])
+        rankings = (rank_capabilities(scoped, term) for term in terms)
+        rows = list(_merge_rankings(rankings, lambda row: row["id"]))
         for row in rows:
             row["category"] = _skill_category(view, row["id"])
     else:
@@ -566,6 +568,20 @@ def _search_identity(item: SkillRecord | DirectoryEntry) -> str:
     if isinstance(item, SkillRecord):
         return f"skill\0{item.worker_id}"
     return f"{item.kind}\0{item.path}"
+
+
+def _merge_rankings(
+    rankings: Iterable[Sequence[_Match]], identity: Callable[[_Match], str],
+) -> Iterator[_Match]:
+    seen: set[str] = set()
+    for peers in zip_longest(*rankings):
+        for match in peers:
+            if match is None:
+                continue
+            key = identity(match)
+            if key not in seen:
+                seen.add(key)
+                yield match
 
 
 def _fit_rows(
