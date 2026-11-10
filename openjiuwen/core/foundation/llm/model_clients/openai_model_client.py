@@ -156,6 +156,50 @@ def _openrouter_model_provider(model: Optional[str]) -> Optional[str]:
     return model.split("/", 1)[0].lstrip("~").lower()
 
 
+# OpenRouter returns reasoning as ``reasoning_details`` blocks whose
+# ``signature`` / ``data`` carry the model's full thinking. The blocks are kept
+# in message metadata and sent back unchanged on the next request.
+OPENROUTER_REASONING_DETAILS_METADATA_KEY = "openrouter_reasoning_details"
+_STREAMED_REASONING_DETAIL_FIELDS = ("text", "summary", "data")
+
+
+def _reasoning_detail_blocks(msg_or_delta: Any) -> list[dict]:
+    """Return a message's ``reasoning_details`` blocks as plain dicts."""
+    raw_blocks = getattr(msg_or_delta, "reasoning_details", None)
+    if not isinstance(raw_blocks, list):
+        return []
+    blocks = []
+    for block in raw_blocks:
+        if hasattr(block, "model_dump"):
+            block = block.model_dump(exclude_none=True)
+        if isinstance(block, MappingABC):
+            blocks.append(deepcopy(dict(block)))
+    return blocks
+
+
+def _merge_reasoning_detail_deltas(acc: dict, deltas: list[dict]) -> None:
+    """Merge streamed ``reasoning_details`` deltas into blocks.
+
+    Deltas are matched by ``index``; a delta without one continues the latest
+    block unless it starts a block of another type. Text-like fields arrive in
+    pieces and are concatenated; other fields (signature, format, id) keep
+    their latest non-empty value.
+    """
+    for delta in deltas:
+        key = delta.get("index")
+        if key is None:
+            key = next(reversed(acc), None)
+            if key is None or delta.get("type") not in (None, acc[key].get("type")):
+                key = ("unindexed", len(acc))
+        block = acc.setdefault(key, {})
+        for field, value in delta.items():
+            if field in _STREAMED_REASONING_DETAIL_FIELDS:
+                if isinstance(value, str):
+                    block[field] = (block.get(field) or "") + value
+            elif value not in (None, "") or field not in block:
+                block[field] = value
+
+
 def _normalize_openrouter_provider_set(value: Any, default: frozenset[str]) -> frozenset[str]:
     if value is None:
         return default
@@ -1043,6 +1087,8 @@ class OpenAIModelClient(BaseModelClient):
             params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()
+        if profile_name == "openrouter":
+            self._replay_openrouter_reasoning_details(build_messages, params["messages"])
         kv_mode = self._kv_cache_mode()
         if profile_name == "siliconflow" or kv_mode == "affinity":
             params["messages"] = self._sanitize_tool_calls(params["messages"])
@@ -1083,6 +1129,23 @@ class OpenAIModelClient(BaseModelClient):
         self._apply_openrouter_profile(params)
 
         return sanitize_chat_request(params)
+
+    @staticmethod
+    def _replay_openrouter_reasoning_details(
+            source_messages: Union[str, List[BaseMessage], List[dict]],
+            converted_messages: List[dict],
+    ) -> None:
+        """Send kept ``reasoning_details`` back unchanged on assistant messages."""
+        if not isinstance(source_messages, list) or len(source_messages) != len(converted_messages):
+            return
+        for source, converted in zip(source_messages, converted_messages):
+            metadata = source.get("metadata") if isinstance(source, dict) else getattr(source, "metadata", None)
+            details = (
+                metadata.get(OPENROUTER_REASONING_DETAILS_METADATA_KEY)
+                if isinstance(metadata, MappingABC) else None
+            )
+            if isinstance(details, list) and details and converted.get("role") == "assistant":
+                converted["reasoning_details"] = deepcopy(details)
 
     def _apply_openrouter_profile(self, params: dict) -> None:
         if self._endpoint_profile_name() != "openrouter":
@@ -2173,8 +2236,9 @@ class OpenAIModelClient(BaseModelClient):
                             final_message = parsed_result
                         yield parsed_result
                 else:
+                    reasoning_details = {}
                     async for chunk in response_stream:
-                        parsed_chunk = self._parse_stream_chunk(chunk)
+                        parsed_chunk = self._parse_stream_chunk(chunk, reasoning_details)
                         if parsed_chunk:
                             await trigger(
                                 LLMCallEvents.LLM_RESPONSE_RECEIVED,
@@ -2701,9 +2765,10 @@ class OpenAIModelClient(BaseModelClient):
         5. When parsing fails, parser_content is None, continue accumulating
         """
         accumulated_content = ""
+        reasoning_details = {}
 
         async for chunk_item in response_stream:
-            parsed_chunk = self._parse_stream_chunk(chunk_item)
+            parsed_chunk = self._parse_stream_chunk(chunk_item, reasoning_details)
             if parsed_chunk:
                 # Accumulate content
                 if parsed_chunk.content:
@@ -2877,12 +2942,20 @@ class OpenAIModelClient(BaseModelClient):
         finish_reason = getattr(choice, 'finish_reason', None) or None
         if not finish_reason:
             finish_reason = "tool_calls" if tool_calls else "stop"
+        reasoning_details = (
+            _reasoning_detail_blocks(message)
+            if self._endpoint_profile_name() == "openrouter" else []
+        )
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
+            metadata=(
+                {OPENROUTER_REASONING_DETAILS_METADATA_KEY: reasoning_details}
+                if reasoning_details else {}
+            ),
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
@@ -2916,12 +2989,19 @@ class OpenAIModelClient(BaseModelClient):
                 metadata[key] = value
         return metadata
 
-    def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
+    def _parse_stream_chunk(
+            self,
+            chunk: Any,
+            reasoning_details: Optional[dict] = None,
+    ) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
-        
+
         Args:
             chunk: OpenAI streaming response chunk
-            
+            reasoning_details: Per-stream accumulator for OpenRouter
+                ``reasoning_details`` deltas. The merged blocks are attached to
+                the metadata of the chunk that carries the finish reason.
+
         Returns:
             AssistantMessageChunk or None
         """
@@ -3015,8 +3095,20 @@ class OpenAIModelClient(BaseModelClient):
         )
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
 
+        metadata = {}
+        if reasoning_details is not None and self._endpoint_profile_name() == "openrouter":
+            _merge_reasoning_detail_deltas(
+                reasoning_details,
+                _reasoning_detail_blocks(delta) or _reasoning_detail_blocks(message),
+            )
+            if choice.finish_reason and reasoning_details:
+                metadata = {
+                    OPENROUTER_REASONING_DETAILS_METADATA_KEY: deepcopy(list(reasoning_details.values())),
+                }
+
         return AssistantMessageChunk(
             content=content,
+            metadata=metadata,
             reasoning_content=reasoning_content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,

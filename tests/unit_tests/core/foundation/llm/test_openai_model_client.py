@@ -1146,3 +1146,196 @@ class TestOpenAIResponsesApiKeyMode:
         ):
             with pytest.raises(BaseError):
                 await client.invoke("hello")
+
+
+_OPENROUTER_REASONING_DETAILS = [
+    {
+        "type": "reasoning.text",
+        "text": "I'm mapping the canvas.",
+        "signature": "EqQBCkYIBxgCKkB",
+        "format": "anthropic-claude-v1",
+        "index": 0,
+    },
+    {
+        "type": "reasoning.encrypted",
+        "data": "gAAAAABn",
+        "format": "anthropic-claude-v1",
+        "index": 1,
+    },
+]
+
+
+def _make_openrouter_client(endpoint_profile: str | None = "openrouter") -> OpenAIModelClient:
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile=endpoint_profile,
+        api_key="sk-test-key",
+        api_base="https://openrouter.ai/api/v1",
+        verify_ssl=False,
+    )
+    return OpenAIModelClient(ModelRequestConfig(model="anthropic/claude-opus-5"), client_config)
+
+
+@pytest.mark.asyncio
+async def test_parse_response_keeps_openrouter_reasoning_details():
+    response = _Obj(
+        id="resp-1",
+        model="anthropic/claude-opus-5",
+        usage=None,
+        choices=[
+            _Obj(
+                message=_Obj(
+                    content="Let me zoom in.",
+                    reasoning="I'm mapping the canvas.",
+                    reasoning_details=json.loads(json.dumps(_OPENROUTER_REASONING_DETAILS)),
+                ),
+                finish_reason="stop",
+            )
+        ],
+    )
+
+    message = await _make_openrouter_client()._parse_response(response, None)
+
+    assert message.reasoning_content == "I'm mapping the canvas."
+    assert message.metadata["openrouter_reasoning_details"] == _OPENROUTER_REASONING_DETAILS
+
+
+@pytest.mark.parametrize("use_parser", [False, True])
+@pytest.mark.asyncio
+async def test_stream_accumulates_openrouter_reasoning_details(use_parser):
+    def _reasoning_chunk(details, *, tool_calls=None, finish_reason=None):
+        return _Obj(
+            id="resp-1",
+            model="anthropic/claude-opus-5",
+            usage=None,
+            choices=[
+                _Obj(
+                    delta=_Obj(content="", reasoning_details=details, tool_calls=tool_calls),
+                    finish_reason=finish_reason,
+                )
+            ],
+        )
+
+    tool_call = _Obj(id="call_1", index=0, function=_Obj(name="zoom", arguments="{}"))
+    raw_chunks = [
+        _reasoning_chunk([{"type": "reasoning.text", "text": "I'm ", "format": "anthropic-claude-v1", "index": 0}]),
+        _reasoning_chunk([{"type": "reasoning.text", "text": "mapping the canvas.", "index": 0}]),
+        _reasoning_chunk([{"type": "reasoning.text", "text": "", "signature": "EqQBCkYIBxgCKkB", "index": 0}]),
+        _reasoning_chunk([{"type": "reasoning.encrypted", "data": "gAAAAABn", "format": "anthropic-claude-v1",
+                           "index": 1}]),
+        _reasoning_chunk(None, tool_calls=[tool_call], finish_reason="tool_calls"),
+        _Obj(id="resp-1", model="anthropic/claude-opus-5", choices=[],
+             usage=_Obj(prompt_tokens=3, completion_tokens=2, total_tokens=5)),
+    ]
+
+    async def _raw_stream():
+        for raw_chunk in raw_chunks:
+            yield raw_chunk
+
+    client = _make_openrouter_client()
+    sdk_client = _mock_sdk_client(_raw_stream())
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        chunks = [
+            chunk
+            async for chunk in client.stream(
+                "hello",
+                output_parser=_UpperParser() if use_parser else None,
+            )
+        ]
+
+    final = chunks[0]
+    for chunk in chunks[1:]:
+        final = final + chunk
+    assert final.reasoning_content == "I'm mapping the canvas."
+    assert final.metadata["openrouter_reasoning_details"] == _OPENROUTER_REASONING_DETAILS
+
+
+def _assistant_turn_with_reasoning_details() -> list:
+    return [
+        UserMessage(content="Draw the outline."),
+        AssistantMessage(
+            content="Let me zoom in.",
+            tool_calls=[ToolCall(id="call_1", type="function", name="zoom", arguments="{}")],
+            reasoning_content="I'm mapping the canvas.",
+            metadata={"openrouter_reasoning_details": json.loads(json.dumps(_OPENROUTER_REASONING_DETAILS))},
+        ),
+        ToolMessage(content="zoomed", tool_call_id="call_1"),
+    ]
+
+
+def _build_params(client: OpenAIModelClient, messages: list) -> dict:
+    return client._build_request_params(
+        messages=messages,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+
+def test_openrouter_replays_reasoning_details_on_assistant_messages():
+    params = _build_params(_make_openrouter_client(), _assistant_turn_with_reasoning_details())
+
+    assistant = params["messages"][1]
+    assert assistant["role"] == "assistant"
+    assert assistant["reasoning_details"] == _OPENROUTER_REASONING_DETAILS
+    assert "reasoning_details" not in params["messages"][0]
+    assert "reasoning_details" not in params["messages"][2]
+
+
+def test_non_openrouter_profile_does_not_send_reasoning_details():
+    params = _build_params(_make_openrouter_client("vllm"), _assistant_turn_with_reasoning_details())
+
+    assert "reasoning_details" not in params["messages"][1]
+
+
+def _parse_reasoning_stream(frames: list) -> dict:
+    client = _make_openrouter_client()
+    accumulator = {}
+    final = None
+    for delta, message, finish_reason in frames:
+        chunk = client._parse_stream_chunk(
+            _Obj(id="resp-1", model="anthropic/claude-opus-5", usage=None,
+                 choices=[_Obj(delta=delta, message=message, finish_reason=finish_reason)]),
+            accumulator,
+        )
+        final = chunk if final is None else final + chunk
+    return final.metadata
+
+
+def test_stream_reasoning_details_ignore_null_text():
+    metadata = _parse_reasoning_stream([
+        (_Obj(content="", reasoning_details=[{"type": "reasoning.text", "text": None, "index": 0}]), None, None),
+        (_Obj(content="", reasoning_details=[{"type": "reasoning.text", "text": "thinking", "index": 0}]), None, None),
+        (_Obj(content=""), None, "stop"),
+    ])
+
+    assert metadata["openrouter_reasoning_details"] == [
+        {"type": "reasoning.text", "text": "thinking", "index": 0},
+    ]
+
+
+def test_stream_reasoning_details_without_index_continue_the_latest_block():
+    metadata = _parse_reasoning_stream([
+        (_Obj(content="", reasoning_details=[{"type": "reasoning.text", "text": "I'm ", "index": 0}]), None, None),
+        (_Obj(content="", reasoning_details=[{"text": "mapping."}]), None, None),
+        (_Obj(content="", reasoning_details=[{"signature": "EqQBCkYIBxgCKkB"}]), None, None),
+        (_Obj(content="", reasoning_details=[{"type": "reasoning.encrypted", "data": "gAAAAABn"}]), None, None),
+        (_Obj(content=""), None, "stop"),
+    ])
+
+    assert metadata["openrouter_reasoning_details"] == [
+        {"type": "reasoning.text", "text": "I'm mapping.", "signature": "EqQBCkYIBxgCKkB", "index": 0},
+        {"type": "reasoning.encrypted", "data": "gAAAAABn"},
+    ]
+
+
+def test_stream_reasoning_details_fall_back_to_final_message():
+    metadata = _parse_reasoning_stream([
+        (_Obj(content=""), _Obj(content="", reasoning_details=_OPENROUTER_REASONING_DETAILS), "stop"),
+    ])
+
+    assert metadata["openrouter_reasoning_details"] == _OPENROUTER_REASONING_DETAILS
