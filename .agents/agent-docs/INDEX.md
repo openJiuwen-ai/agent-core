@@ -22,6 +22,7 @@ generated: true
 | [core/context_engine](#module-5) |
 | [core/controller](#module-6) |
 | [core/foundation/llm](#module-7) |
+| [core/graph](#module-18) |
 | [core/runner/drunner/dmessage_queue](#module-8) |
 | [core/session](#module-9) |
 | [extensions/a2a](#module-10) |
@@ -314,6 +315,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+
+<a id="module-18"></a>
+
+## core/graph
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261110_2011_zero-node-timeout](bugfix/core_runtime/B_20261110_2011_zero-node-timeout.md) | B | 工作流节点零超时误触发立即超时 | 羿寒 王 | openjiuwen/core/graph | openjiuwen/core/graph/vertex.py, tests/unit_tests/core/graph/test_vertex_retry.py | 无独立 D：恢复 NodeSpec 与 add_workflow_comp 已声明的非正数不设超时契约。 |
 
 <a id="module-8"></a>
 

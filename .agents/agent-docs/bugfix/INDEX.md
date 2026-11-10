@@ -18,6 +18,7 @@ generated: true
 | [agent_teams](#module-1) |
 | [core/context_engine](#module-3) |
 | [core/controller](#module-4) |
+| [core/graph](#module-13) |
 | [core/runner/drunner/dmessage_queue](#module-5) |
 | [core/session](#module-6) |
 | [extensions/a2a](#module-7) |
@@ -65,6 +66,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+
+<a id="module-13"></a>
+
+## core/graph
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261110_2011_zero-node-timeout](core_runtime/B_20261110_2011_zero-node-timeout.md) | B | 工作流节点零超时误触发立即超时 | 羿寒 王 | openjiuwen/core/graph | openjiuwen/core/graph/vertex.py, tests/unit_tests/core/graph/test_vertex_retry.py | 无独立 D：恢复 NodeSpec 与 add_workflow_comp 已声明的非正数不设超时契约。 |
 
 <a id="module-5"></a>
 
