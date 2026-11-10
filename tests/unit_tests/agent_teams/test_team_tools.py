@@ -232,6 +232,7 @@ class TestBuildTeamTool:
     @pytest.mark.level1
     async def test_invoke_failure_callback_error_does_not_mask_build_error(self, db, message_bus, t, monkeypatch):
         """A raising on_team_build_failed callback must not mask the build failure."""
+
         async def _boom(_: str) -> None:
             raise RuntimeError("callback exploded")
 
@@ -1367,7 +1368,7 @@ class TestUpdateTaskTool:
             call.kwargs["message"]
             for call in agent_team.messager.publish.call_args_list
             if call.kwargs.get("message") is not None
-            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+               and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
         ]
         assert len(revoked) == 1
         assert revoked[0].payload["member_name"] == "dev-1"
@@ -1885,10 +1886,10 @@ class TestSendMessageTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_invoke_multicast_partial_failure(
-        self,
-        agent_team,
-        t,
-        sample_agent_card,
+            self,
+            agent_team,
+            t,
+            sample_agent_card,
     ):
         """Strict success: any failure flips overall success to False, delivered still listed"""
         await agent_team.spawn_member(
@@ -1921,10 +1922,10 @@ class TestSendMessageTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_invoke_multicast_dedup_preserves_order(
-        self,
-        agent_team,
-        t,
-        sample_agent_card,
+            self,
+            agent_team,
+            t,
+            sample_agent_card,
     ):
         """Duplicate names are removed while preserving first-seen order"""
         # m3 keeps the deduped ["m1", "m2"] a strict subset of the roster.
@@ -1973,11 +1974,96 @@ class TestSendMessageTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_send_to_shutdown_member_rejected(self, agent_team, t, sample_agent_card):
+        """a direct message to a SHUTDOWN member fails loudly.
+
+        Pre-fix the write went to the mailbox and the tool reported success —
+        a dead letter nobody would ever read, while the leader planned around
+        a reply that could never come. Spawn-on-delivery cannot revive it
+        (the startup CAS only covers UNSTARTED→STARTING)."""
+        await agent_team.spawn_member(
+            member_name="m1",
+            display_name="M1",
+            agent_card=sample_agent_card,
+        )
+        # UNSTARTED→SHUTDOWN 是状态机合法迁移；断言落库钉住前置条件。
+        assert await agent_team.db.member.update_member_status(
+            "m1", agent_team.team_name, MemberStatus.SHUTDOWN.value
+        ) is True
+
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
+        result = await tool.invoke({"to": "m1", "content": "Hello"})
+
+        assert result.success is False
+        assert "SHUTDOWN" in result.error
+        # 拒绝文案引导改派而非新建（predefined 模式没有 spawn_teammate）
+        assert "改派" in result.error
+        # 死信不得落邮箱
+        unread = await agent_team.db.message.get_messages(
+            agent_team.team_name, "m1", unread_only=True
+        )
+        assert unread == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_multicast_shutdown_member_failed_others_delivered(
+            self, agent_team, t, sample_agent_card
+    ):
+        """multicast splits SHUTDOWN targets into failed, keeps the rest delivered."""
+        for name in ("m1", "m2", "m3"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
+        assert await agent_team.db.member.update_member_status(
+            "m2", agent_team.team_name, MemberStatus.SHUTDOWN.value
+        ) is True
+
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
+        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert result.data["delivered"] == ["m1"]
+        assert len(result.data["failed"]) == 1
+        assert result.data["failed"][0]["to"] == "m2"
+        assert "SHUTDOWN" in result.data["failed"][0]["reason"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_send_to_shutdown_requested_member_still_delivered(
+            self, agent_team, t, sample_agent_card
+    ):
+        """boundary: SHUTDOWN_REQUESTED (on the way out) must still be
+        deliverable — delivery stops only at terminal SHUTDOWN, or the
+        shutdown notice itself could never reach the member."""
+        await agent_team.spawn_member(
+            member_name="m1",
+            display_name="M1",
+            agent_card=sample_agent_card,
+            # UNSTARTED→SHUTDOWN_REQUESTED 不在状态机迁移表内（CAS 静默丢弃），
+            # 必须以合法前驱 READY 落行。
+            status=MemberStatus.READY,
+        )
+        assert await agent_team.db.member.update_member_status(
+            "m1", agent_team.team_name, MemberStatus.SHUTDOWN_REQUESTED.value
+        ) is True
+        # 钉住前置：本用例守护的是「请求中仍可投递」边界，前置没落库则断言恒真。
+        assert await agent_team.get_member_status("m1") == MemberStatus.SHUTDOWN_REQUESTED.value
+
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
+        result = await tool.invoke({"to": "m1", "content": "Hello"})
+
+        assert result.success is True
+        assert result.data["to"] == "m1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_multicast_single_element_does_not_degrade(
-        self,
-        agent_team,
-        t,
-        sample_agent_card,
+            self,
+            agent_team,
+            t,
+            sample_agent_card,
     ):
         """Single-element list still returns type=multicast (no auto-degrade)"""
         # m2 keeps ["m1"] a strict subset — a single-element multicast that
@@ -1999,10 +2085,10 @@ class TestSendMessageTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_invoke_multicast_skips_blank_entries(
-        self,
-        agent_team,
-        t,
-        sample_agent_card,
+            self,
+            agent_team,
+            t,
+            sample_agent_card,
     ):
         """Blank/whitespace entries are dropped before validation"""
         # m2 keeps the cleaned ["m1"] a strict subset of the roster.
@@ -2022,10 +2108,10 @@ class TestSendMessageTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_invoke_multicast_rejects_full_roster(
-        self,
-        agent_team,
-        t,
-        sample_agent_card,
+            self,
+            agent_team,
+            t,
+            sample_agent_card,
     ):
         """Multicast covering every other member is rejected — must broadcast"""
         for name in ("m1", "m2"):
