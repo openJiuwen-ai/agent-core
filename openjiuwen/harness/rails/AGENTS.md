@@ -76,7 +76,7 @@ dataclass），本包只在其上加 `DeepAgentRail` 的两个 task-loop 钩子�
     / BaseSecurityRail / VerificationRail
  85 AgentModeRail / SafetyPromptRail / ContextAssembleRail / Context*ProcessorRail / Skill*CreateRail
  80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail
- 75 ExternalMemoryRail / JiuwenMemoryRail
+ 75 ExternalMemoryRail / JiuwenMemoryRail / JiuwenMemoryCodingRail
  70 LLMRetryRail / ToolCallResilienceRail
  60 EvolutionRail / LspRail
  50 core 默认
@@ -212,3 +212,8 @@ skill 的真实名字拼出可用的那条调用。
   声明式装配，但走的是本包同一条注册路径，所以上面的路由约束、priority 语义、uninit 要求对
   它们同样成立。其设计规约在 `.agents/agent-docs/specs/agent_teams/S_09_prompts-and-rails.md`。
 - **工具**：rail 只负责注册/过滤/拦截，工具本身在 `openjiuwen/harness/tools/`。
+
+
+## Coding 文档记忆的共享状态
+
+`memory/jiuwen_memory_coding_rail.py` 只依赖 MemoryProvider，不直接构造内核。共享实例的工具、提示词、召回缓存必须按 Agent 保存，并识别内层 ReActAgent 的模型回调。最后使用者退出后排空写入再关闭；uninit 不在运行中的事件循环里同步等 Future。宿主整体替换时等待 aclose。Coding 工具注册失败撤回本 owner 的部分注册；单项清理失败不得阻断其余清理及 Provider 关闭。跨 Rail 的上下文解析使用 JiuwenMemoryRail 公共辅助入口，接口契约见 S_04。
