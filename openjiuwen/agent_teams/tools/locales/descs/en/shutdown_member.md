@@ -14,3 +14,4 @@ Notes:
 - This does not mean "the member is fully closed right now"; it initiates shutdown
 - Wait until the member actually reaches SHUTDOWN before calling clean_team or assuming the member is gone
 - force=true is a high-risk fallback for abnormal cases, not the normal path
+- Shutdown is irreversible: once a member reaches SHUTDOWN it is never restarted and send_message to it fails; reassign its leftover work to other members
