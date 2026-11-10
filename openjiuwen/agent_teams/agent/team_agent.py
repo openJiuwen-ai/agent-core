@@ -394,6 +394,11 @@ class TeamAgent(BaseAgent):
             return None
         return time.monotonic() - idle_since
 
+    def last_round_started_ms(self) -> int | None:
+        """Wall-ms start of this member's most recent round."""
+        harness = self.harness
+        return harness.last_round_started_ms if harness is not None else None
+
     def refresh_idle_baseline(self) -> None:
         """Re-base the idle clock so a pause window is not counted as idle.
 

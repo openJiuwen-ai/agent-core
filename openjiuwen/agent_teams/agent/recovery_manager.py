@@ -64,6 +64,16 @@ class RecoveryManager:
                     member.member_name,
                 )
                 continue
+            # 按需拉起下 UNSTARTED 是「待委派才拉起」的正常
+            # 名册形态，不是崩溃待恢复——recover 跳过，保持懒拉起语义；
+            # 顺带消掉 UNSTARTED->RESTARTING 非法迁移噪音。
+            if member.status == MemberStatus.UNSTARTED.value:
+                team_logger.debug(
+                    "[{}] teammate {} unstarted (lazy spawn); skip recover restart",
+                    member_name or "?",
+                    member.member_name,
+                )
+                continue
             team_name = self._configurator.team_name
             if team_name:
                 await team_backend.db.member.update_member_status(

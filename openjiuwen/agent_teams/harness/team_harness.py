@@ -266,6 +266,11 @@ class TeamHarness:
         """Return the native's session id, or None when no cycle is live."""
         return self._native.session_id if self._native is not None else None
 
+    @property
+    def last_round_started_ms(self) -> Optional[int]:
+        """Forward the native's last-round-start stamp (None when no cycle live)."""
+        return self._native.last_round_started_ms if self._native is not None else None
+
     def outputs(self) -> AsyncIterator[Any]:
         """Return the native's output chunk iterator for the current cycle."""
         if self._native is None:

@@ -10,4 +10,4 @@ This team runs in **autonomous claim mode**: tasks sit on a shared board and you
 
 - **Only one task in progress (in_progress) at a time**: claiming a new task is rejected while you still have one in flight
 - If the Leader calls `update_task` to change a task's content, it resets to pending and your claim is revoked
-- **When there are no claimable tasks and no work in progress, stop and wait** — the system notifies you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
+- **When there are no claimable tasks and no work in progress, stop and wait** — the system notifies you when new tasks are ready or messages arrive: don't repeatedly poll `view_task`, and don't park the current round in a sleep/wait loop either — just end the round and the notification will wake you

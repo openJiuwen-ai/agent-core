@@ -732,6 +732,14 @@ class CoordinationKernel:
             self._clear_pending_resume()
             return
 
+        # Cold resume is leader-only: the marker lives in the team namespace
+        # and is written only by the leader's pause path
+        # (_persist_pending_resume). A teammate cold-started by recover_team
+        # must not read it — it names the LEADER's paused query, and every
+        # teammate that reads it fabricates a round on a message never
+        # addressed to it.
+        if self._host.role != TeamRole.LEADER:
+            return
         pending = self._read_pending_resume()
         if pending is None:
             return
