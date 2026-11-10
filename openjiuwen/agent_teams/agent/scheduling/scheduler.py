@@ -607,6 +607,10 @@ class TeamScheduler:
         if inspector_avg is not None:
             status = t("scheduler.inspector_avg_pass") if inspector_avg >= 0.85 else t("scheduler.inspector_avg_fail")
             feedback += t("scheduler.inspector_avg_line", avg=inspector_avg, status=status)
+        # The inspector's full report rides along on every failed round,
+        # independent of the binary pool's verdict — the average alone does
+        # not tell the assignee what to rework.
+        feedback += render.format_fail_feedback(tally.get("inspector_feedback") or {})
         if task.review_round >= max_rounds:
             await self._escalate(task, render.render_leader_escalation_rounds(task, feedback))
             round_key = (task.task_id, task.review_round)
