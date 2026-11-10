@@ -48,11 +48,14 @@ class SymphonyGraphEngine:
     and future observation-layer operations can share revision semantics.
     """
 
-    def __init__(self, orchestration_service: OrchestrationService, *, storage=None, inventory=None) -> None:
+    def __init__(
+        self, orchestration_service: OrchestrationService, *, storage=None, inventory=None, unavailable_reason=None,
+    ) -> None:
         self._orchestration_service = orchestration_service
         self._observation_service = None
         self._storage = storage
         self._inventory = inventory
+        self._unavailable_reason = unavailable_reason
         self._closed = False
         self._build_id = ""
         self._operations: set[asyncio.Task] = set()
@@ -64,6 +67,8 @@ class SymphonyGraphEngine:
         config = self._orchestration_service.config
         if not config.enabled:
             raise RuntimeError("Symphony orchestration is disabled")
+        if self._unavailable_reason:
+            raise ValueError(self._unavailable_reason)
         if require_experience and not config.experience_enabled:
             raise RuntimeError("Symphony experience is disabled")
         if self._storage is not None:

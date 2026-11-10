@@ -279,11 +279,16 @@ class _IndexBuildWorkflow:
 
     @staticmethod
     def _fallback_tree_nodes_from_scanned(scanned_items: Dict[str, dict]) -> list[dict[str, object]]:
+        has_experts = any(
+            item.get("content_extend_param", {}).get("capability_type") == "expert"
+            for item in scanned_items.values()
+        )
         return build_fallback_tree_nodes_from_records(
             {
                 str(worker_id): str(item.get("description") or item.get("name") or worker_id)
                 for worker_id, item in scanned_items.items()
-            }
+            },
+            root_category="Capabilities" if has_experts else "Skills",
         )
 
 

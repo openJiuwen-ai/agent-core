@@ -349,7 +349,7 @@ class CapabilitySourceConfig(SymphonyConfigModel):
     """能力集合中的一个本地目录及其对象定义格式。"""
 
     type: CapabilityType = Field(
-        title="对象类型", description="对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。",
+        title="对象类型", description="目录读取支持 skill 和 expert；connector 和 mcp 由宿主提供会话目录。",
         examples=["skill", "expert"],
     )
     root: ConfigPath = Field(
@@ -362,7 +362,7 @@ class CapabilityConfig(SymphonyConfigModel):
     """一个 Runtime 的对象定义集合及共享的扫描、指纹策略。"""
 
     sources: list[CapabilitySourceConfig] = Field(
-        min_length=1, title="能力来源目录", description="按目录声明对象定义格式；同一类型可以配置多个目录。",
+        min_length=1, title="能力来源目录", description="多个技能和专家目录共用一棵分类树，编排要求恰有一个技能目录。",
     )
     scan: DirectoryScanConfig = Field(
         default_factory=DirectoryScanConfig, title="目录扫描", description="目录深度、资源预算和入口文档解析限制。",

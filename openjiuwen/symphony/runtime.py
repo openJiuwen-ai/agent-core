@@ -54,13 +54,15 @@ class SymphonyRuntime:
     def __init__(self, model: Model | None, config: SymphonyConfig) -> None:
         if not isinstance(config, SymphonyConfig):
             raise TypeError("config must be a SymphonyConfig")
-        source = config.capability.require_single_source()
         values = config.model_dump(mode="python")
-        capability_root = Path(source.root).expanduser().resolve()
         artifact_root = Path(config.storage.artifact_root).expanduser().resolve()
-        if capability_root == artifact_root or capability_root.is_relative_to(artifact_root):
-            raise ValueError("artifact_root must not equal or contain capability.sources.0.root")
-        values["capability"]["sources"][0]["root"] = str(capability_root)
+        normalized = set()
+        for index, source in enumerate(config.capability.sources):
+            capability_root = Path(source.root).expanduser().resolve()
+            if capability_root == artifact_root or capability_root.is_relative_to(artifact_root):
+                raise ValueError(f"artifact_root must not equal or contain capability.sources.{index}.root")
+            normalized.add((source.type, str(capability_root)))
+        values["capability"]["sources"] = [{"type": kind, "root": root} for kind, root in sorted(normalized)]
         values["storage"]["artifact_root"] = str(artifact_root)
         structure = values["retrieval"]["index_build"]["structure"]
         categories = structure["root_categories"]
@@ -83,23 +85,48 @@ class SymphonyRuntime:
         identity_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() if identity else ""
         protocol = FingerprintProtocolConfig(configuration_signature=identity_hash)
         observer = getattr(model, "symphony_response_observer", None)
-        fingerprints = FingerprintService(
-            inventory, artifact_root / "cache" / "fingerprints", llm=model,
-            config=policy, protocol=protocol, model_response_observer=observer,
-            allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
-        )
+        def fingerprint_service(provider, root):
+            return FingerprintService(
+                provider, root, llm=model, config=policy, protocol=protocol, model_response_observer=observer,
+                allow_metadata_fallback=self.config.retrieval.index_build.task.allow_fallback_tree,
+            )
+
+        fingerprints = {
+            kind: fingerprint_service(
+                DirectoryInventory(self.config.capability, self._storage, kind=kind) if self._storage.scoped else inventory,
+                self._storage.root / "cache" / "fingerprints" / kind if self._storage.scoped
+                else self._storage.root / "cache" / "fingerprints",
+            )
+            for kind in ("skill", "expert") if inventory.sources(kind)
+        }
+        skill_sources = inventory.sources("skill")
+        graph_storage = None
+        graph_inventory = None
+        graph_fingerprints = None
+        graph_unavailable = None
+        if len(skill_sources) == 1:
+            graph_storage = RuntimeStorage(self.config, skill_source=skill_sources[0]) if self._storage.scoped else self._storage
+            graph_inventory = DirectoryInventory(self.config.capability, graph_storage, kind="skill") if self._storage.scoped else inventory
+            graph_fingerprints = (
+                fingerprint_service(graph_inventory, artifact_root / "cache" / "fingerprints")
+                if self._storage.scoped else fingerprints["skill"]
+            )
+        else:
+            graph_unavailable = "Symphony orchestration requires exactly one skill capability source"
         policy_hash = hashlib.sha256(policy.model_dump_json().encode()).hexdigest()
         service = OrchestrationService(
-            graph_artifact_root=artifact_root / "graph", capability_provider=inventory,
+            graph_artifact_root=artifact_root / "graph", capability_provider=graph_inventory or inventory,
             model=model, model_response_observer=observer, config=self.config.orchestration,
             source_snapshot={"runtime_schema": LAYOUT_SCHEMA, "fingerprint_policy_sha256": policy_hash,
                              "fingerprint_model_sha256": identity_hash},
-            fingerprint_service=fingerprints,
+            fingerprint_service=graph_fingerprints,
         )
-        self.orchestration = SymphonyGraphEngine(service, storage=self._storage, inventory=inventory)
+        self.orchestration = SymphonyGraphEngine(
+            service, storage=graph_storage, inventory=graph_inventory, unavailable_reason=graph_unavailable,
+        )
         self.retrieval = TreeEngine(model, self.config.retrieval, self._storage, inventory, fingerprints)
-        self.flow = RuntimeFlow(model, self.config.orchestration, self._storage)
-        self._graph_scope_id = self._storage.scope_id
+        self.flow = RuntimeFlow(model, self.config.orchestration, graph_storage, unavailable_reason=graph_unavailable)
+        self._graph_scope_id = graph_storage.scope_id if graph_storage is not None else self._storage.scope_id
 
     async def submit_evolution(
         self,

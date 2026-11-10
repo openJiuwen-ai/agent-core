@@ -105,20 +105,23 @@ def build_fallback_tree_nodes(*, aggregate_dir: Path) -> List[Dict[str, object]]
 
 def build_fallback_tree_nodes_from_records(
     descriptions_by_worker_id: Mapping[str, str],
+    *,
+    root_category: str = "Skills",
 ) -> List[Dict[str, object]]:
     """Build stable fallback leaves without treating dots in IDs as hierarchy."""
 
+    label = "skill" if root_category == "Skills" else "capability"
     nodes: List[Dict[str, object]] = [
         {
-            "cid": "Skills",
+            "cid": root_category,
             "type": "branch",
-            "description": "Fallback skill index built without LLM tree generation.",
+            "description": f"Fallback {label} index built without LLM tree generation.",
         }
     ]
-    used_cids = {"Skills"}
+    used_cids = {root_category}
     for worker_id in sorted(str(value) for value in descriptions_by_worker_id):
         segment = slug_term(worker_id, fallback="skill")
-        cid = unique_child_cid(parent="Skills", segment=segment, used=used_cids)
+        cid = unique_child_cid(parent=root_category, segment=segment, used=used_cids)
         used_cids.add(cid)
         nodes.append(
             {

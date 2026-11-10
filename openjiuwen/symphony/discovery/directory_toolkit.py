@@ -8,7 +8,7 @@ import json
 import re
 import secrets
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import zip_longest
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Sequence
@@ -16,8 +16,9 @@ from typing import Any, Iterable, Sequence
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard, ToolExposure
 from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex
 
+from .capability_search import CapabilityCandidate, capability_row, rank_capabilities
 from .models import SkillRecord, sanitize_model_text
-from .skillfs import DirectoryEntry, SkillDirectoryView, SkillFS
+from .skillfs import DirectoryEntry, SkillDirectoryView, SkillFS, SkillIndexSnapshot, _build_live_tree
 from .toolkit import CAPABILITY_SEARCH_TOOL_NAME, IncrementalNoticeSession, SkillDCICommandResult
 
 _MIN_OUTPUT_CHARS = 512
@@ -45,6 +46,7 @@ class _CursorState:
     offset: int
     page_size: int
     fingerprint: str
+    kind: str = "skill"
 
 
 def _tool_card(tool_id: str) -> ToolCard:
@@ -53,8 +55,9 @@ def _tool_card(tool_id: str) -> ToolCard:
         name=CAPABILITY_SEARCH_TOOL_NAME,
         description=(
             "Read-only search for capabilities available in this session. Select type=skill, expert, "
-            "connector, or mcp. For Skills, list categories or search names, descriptions and SKILL.md, "
-            "and copy [next] to continue. Other types accept one search query. Use Skill IDs with skill_tool, "
+            "connector, or mcp. Skills and experts support category browsing and pagination. "
+            "Search Skill names, descriptions and SKILL.md, or send one search query for other types. "
+            "Continue with the returned cursor and the same type and operation. Use Skill IDs with skill_tool, "
             "expert references with spawn_expert, and tool_search to inspect deferred tools."
         ),
         input_params={
@@ -67,8 +70,8 @@ def _tool_card(tool_id: str) -> ToolCard:
                     "enum": list(_OPERATIONS),
                     "default": "search",
                     "description": (
-                        "list: direct subcategories and Skills. search: names, aliases, descriptions "
-                        "and SKILL.md including descendants; not other package files."
+                        "list: direct subcategories and entries for skill or expert. "
+                        "search: names and descriptions including descendants; Skill search also reads SKILL.md."
                     ),
                 },
                 "category": {
@@ -138,10 +141,14 @@ class InstalledSkillsDirectoryToolkit:
         session_scope: str,
         incremental_notice_max_chars: int = 4_000,
         search_catalog: Callable[[str, str, int], Awaitable[dict[str, Any]]] | None = None,
+        expert_candidates: Callable[[], Awaitable[Sequence[CapabilityCandidate]]] | None = None,
+        expert_snapshot: Callable[[], SkillIndexSnapshot | None] | None = None,
     ) -> None:
         if not isinstance(environment, SkillFS):
             raise TypeError("environment must be a SkillFS")
         self._environment = environment
+        self._expert_candidates = expert_candidates
+        self._expert_snapshot = expert_snapshot
         self._default_max_output_chars = environment.settings.output.max_chars
         if not _MIN_OUTPUT_CHARS <= self._default_max_output_chars <= _MAX_OUTPUT_CHARS:
             raise ValueError("settings.max_output_chars must be between 512 and 48000")
@@ -197,8 +204,10 @@ class InstalledSkillsDirectoryToolkit:
                     raise ValueError("query is valid only for search")
                 queries = _queries(query) if operation == "search" else ()
                 return await asyncio.to_thread(self._execute, operation, category, queries, top_k)
+            if kind == "expert" and self._expert_candidates is not None:
+                return await self._expert_page(operation, category, query, cursor, top_k)
             if operation != "search" or category is not None or cursor is not None:
-                raise ValueError("list, category, and cursor apply only to type=skill")
+                raise ValueError("list, category, and cursor require a browsable Skill or expert catalog")
             terms = _queries(query)
             if len(terms) != 1:
                 raise ValueError("Search one query at a time for expert, connector, or mcp")
@@ -225,12 +234,23 @@ class InstalledSkillsDirectoryToolkit:
         category: str | None,
         query: str | list[str] | None,
     ) -> SkillDCICommandResult:
+        state = self._resume_cursor("skill", operation, cursor, category, query)
+        return self._execute(
+            operation, state.category, state.queries, state.page_size,
+            offset=state.offset, expected_fingerprint=state.fingerprint,
+        )
+
+    def _resume_cursor(
+        self, kind: str, operation: str, cursor: str, category: str | None, query: str | list[str] | None,
+    ) -> _CursorState:
         token = _nonempty(cursor, "cursor")
         if len(token) > 128:
             raise ValueError("cursor must not exceed 128 characters")
         state = self._cursors.get(token)
         if state is None:
-            raise ValueError("Unknown or expired Skill catalog cursor")
+            raise ValueError("Unknown or expired capability catalog cursor")
+        if kind != state.kind:
+            raise ValueError(f"cursor belongs to type={state.kind}")
         if operation != state.operation:
             raise ValueError(f"cursor belongs to operation={state.operation}")
         if category is not None and category != state.category:
@@ -238,10 +258,44 @@ class InstalledSkillsDirectoryToolkit:
         if query is not None and _queries(query) != state.queries:
             raise ValueError("cursor query differs from the original request; omit cursor to start a new search")
         self._cursors.pop(token)
-        return self._execute(
-            operation, state.category, state.queries, state.page_size,
-            offset=state.offset, expected_fingerprint=state.fingerprint,
+        return state
+
+    async def _expert_page(
+        self, operation: str, category: str | None, query: str | list[str] | None,
+        cursor: str | None, top_k: int | None,
+    ) -> dict[str, Any]:
+        if operation == "list" and query is not None:
+            raise ValueError("query is valid only for search")
+        settings = self._environment.settings.output
+        maximum = min(settings.max_results, settings.max_list_entries) if operation == "list" else settings.max_results
+        offset = 0
+        expected = None
+        if cursor is not None:
+            if top_k is not None:
+                raise ValueError("cursor cannot be combined with top_k")
+            state = self._resume_cursor("expert", operation, cursor, category, query)
+            category, terms, offset, page_size, expected = (
+                state.category, state.queries, state.offset, state.page_size, state.fingerprint,
+            )
+        else:
+            terms = _queries(query) if operation == "search" else ()
+            if len(terms) > 1:
+                raise ValueError("Search one query at a time for expert")
+            page_size = min(top_k or (10 if operation == "search" else maximum), maximum)
+        candidates = await self._expert_candidates()
+        rows, fingerprint = await asyncio.to_thread(
+            _expert_rows, candidates, self._expert_snapshot, category, terms, expected,
         )
+        page = rows[offset:offset + page_size]
+        next_offset = offset + len(page)
+        result = {"matches": [row for row in page if row["type"] == "expert"], "next_cursor": None}
+        if operation == "list":
+            result["categories"] = [row for row in page if row["type"] == "category"]
+        if next_offset < len(rows):
+            result["next_cursor"] = self._save_cursor(_CursorState(
+                operation, category, terms, next_offset, page_size, fingerprint, kind="expert",
+            ))
+        return result
 
     def _execute(
         self,
@@ -367,6 +421,55 @@ class InstalledSkillsDirectoryToolkit:
             )
         )
         return tuple(entries[hit.key] for hit in index.search_terms(query))
+
+
+def _expert_rows(
+    candidates: Sequence[CapabilityCandidate], load_snapshot: Callable[[], SkillIndexSnapshot | None] | None,
+    category: str | None, terms: tuple[str, ...], expected: str | None,
+) -> tuple[list[dict[str, Any]], str]:
+    by_id = {
+        candidate.descriptor.capability_id: candidate
+        for candidate in sorted(candidates, key=lambda item: item.descriptor.capability_id)
+        if candidate.descriptor.available and candidate.descriptor.capability_type == "expert"
+    }
+    snapshot = load_snapshot() if load_snapshot is not None else None
+    fingerprint = hashlib.sha256(json.dumps([
+        snapshot.taxonomy_fingerprint if snapshot is not None else "",
+        [(identifier, candidate.descriptor.content_hash, str(candidate.manifest_path or ""),
+          capability_row(candidate), candidate.aliases) for identifier, candidate in by_id.items()],
+    ], sort_keys=True).encode()).hexdigest()
+    if expected is not None and fingerprint != expected:
+        raise ValueError("Expert catalog changed; start a new list or search request")
+
+    items = tuple(SkillRecord(identifier, candidate.descriptor.name, candidate.descriptor.description, "")
+                  for identifier, candidate in by_id.items())
+    root, catalog = _build_live_tree(items, snapshot, item_label="experts")
+    view = SkillDirectoryView(root=root, records=items, catalog_by_payload=catalog)
+    path = _category_path(view, category, label="expert")
+    if terms:
+        scoped = []
+        for record in view.scoped_records((path,)):
+            candidate = by_id[record.worker_id]
+            if snapshot is not None:
+                classification = _skill_category(view, record.worker_id)
+                candidate = replace(candidate, descriptor=candidate.descriptor.model_copy(update={
+                    "classification": classification,
+                }))
+            scoped.append(candidate)
+        rows = rank_capabilities(scoped, terms[0])
+        for row in rows:
+            row["category"] = _skill_category(view, row["id"])
+    else:
+        rows = []
+        for entry in view.children(path):
+            if entry.kind == "dir":
+                rows.append({
+                    "type": "category", "name": _inline_text(entry.label),
+                    "category": _category_from_path(view, entry.path), "count": view.skill_count(entry.path),
+                })
+            else:
+                rows.append({**capability_row(by_id[entry.worker_id]), "category": _skill_category(view, entry.worker_id)})
+    return rows, fingerprint
 
 
 def _list_row(entry: DirectoryEntry, directory: SkillDirectoryView) -> _Row:
@@ -517,7 +620,7 @@ def _queries(query: str | list[str] | None) -> tuple[str, ...]:
     return (_bounded_query(query, "query"),)
 
 
-def _category_path(directory: SkillDirectoryView, category: str | None) -> str:
+def _category_path(directory: SkillDirectoryView, category: str | None, *, label: str = "Skill") -> str:
     if category is None:
         return "/"
     value = _nonempty(category, "category")
@@ -536,9 +639,9 @@ def _category_path(directory: SkillDirectoryView, category: str | None) -> str:
             if path != "/" and str(node.label).strip().casefold() == normalized.casefold()
         ]
     if not matches:
-        raise ValueError(f"Unknown Skill category: {value}")
+        raise ValueError(f"Unknown {label} category: {value}")
     if len(matches) > 1:
-        raise ValueError(f"Ambiguous Skill category; use its full category chain: {value}")
+        raise ValueError(f"Ambiguous {label} category; use its full category chain: {value}")
     return matches[0]
 
 

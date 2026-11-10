@@ -721,14 +721,16 @@ class AgenticSkillRetrievalToolkit:
         ):
             _recover_index_directory_unlocked(self.index_dir)
             payload = load_tree_preset(self.index_dir / TREE_INDEX_FILENAME)
+            version = str(_read_json_object(self.index_dir / COMMIT_FILENAME).get("build_id") or "")
         raw_nodes = payload.get("nodes")
         nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
         outline = _render_tree_outline(nodes, max_nodes=max_nodes)
-        return _result(
+        result = _result(
             True,
             outline or "Skill index tree is empty.",
             data={"index_exists": True, "tree": _tree_payload(nodes)},
         )
+        return {**result, "version": version}
 
 
     def update_skills(

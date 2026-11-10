@@ -387,16 +387,20 @@ class ViewExpertsTool(TeamTool):
 
     async def discoverable_cards(self) -> tuple[tuple[ExpertRef, AgentTemplateCard], ...]:
         """Return spawnable expert cards within this tool's current default scope."""
+        return tuple((ref, card) for ref, card, _ in await self.discoverable_entries())
+
+    async def discoverable_entries(self) -> tuple[tuple[ExpertRef, AgentTemplateCard, Path | None], ...]:
+        """Include the package manifest path for standalone experts."""
         group = self._scope(None)
         if group is None:
             cards = await _read_cards(await self._catalog.list_expert_packages(), _expert_card, kind="expert")
             return tuple(
-                (ExpertRef(location.name), card) for location, card in cards
+                (ExpertRef(location.name), card, location.path / _MANIFEST) for location, card in cards
                 if _can_run_card(card, self._declared_cli_kinds)
             )
         location, card = await _read_installed_group(self._catalog, group)
         return tuple(
-            (ExpertRef(member.name, location.name), member.card) for member in card.members
+            (ExpertRef(member.name, location.name), member.card, None) for member in card.members
             if _is_spawnable(member, self._declared_cli_kinds)
         )
 

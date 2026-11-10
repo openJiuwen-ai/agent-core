@@ -7,8 +7,8 @@
 # 全量配置
 SymphonyConfig # SymphonyRuntime 使用的公共运行配置。
 ├── capability → CapabilityConfig # 必填；显式声明来源目录列表及共享的预处理策略。
-│   ├── sources → CapabilitySourceConfig # 必填；按目录声明对象定义格式；同一类型可以配置多个目录。
-│   │   ├── type # 必填；对象定义格式；枚举值表达目标支持范围，不表示对应读取器已经实现。 可选：skill / expert / connector / mcp。
+│   ├── sources → CapabilitySourceConfig # 必填；多个技能和专家目录共用一棵分类树，编排要求恰有一个技能目录。
+│   │   ├── type # 必填；目录读取支持 skill 和 expert；connector 和 mcp 由宿主提供会话目录。 可选：skill / expert / connector / mcp。
 │   │   └── root # 必填；静态对象定义所在的本地目录；运行层负责解析相对路径。
 │   ├── scan → DirectoryScanConfig # 默认=DirectoryScanConfig()；目录深度、资源预算和入口文档解析限制。
 │   │   ├── max_depth # 默认=None；目录递归深度；None 表示不单独限制深度，仍受扫描预算约束。

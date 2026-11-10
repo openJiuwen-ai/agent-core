@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -36,6 +37,7 @@ class CapabilityCandidate:
     fingerprint: CapabilityFingerprint | None = None
     aliases: tuple[str, ...] = ()
     actions: tuple[CapabilityAction, ...] = ()
+    manifest_path: Path | None = None
 
 
 def read_fingerprints(
@@ -62,6 +64,11 @@ def search_capabilities(
         raise ValueError("query must be non-empty")
     if type(top_k) is not int or not 1 <= top_k <= 50:
         raise ValueError("top_k must be an integer from 1 to 50")
+    return rank_capabilities(candidates, query)[:top_k]
+
+
+def rank_capabilities(candidates: Sequence[CapabilityCandidate], query: str) -> list[dict[str, Any]]:
+    """Return the complete ranking for a caller that paginates the authorized view."""
     documents: list[LexicalDocument] = []
     rows: dict[str, dict[str, Any]] = {}
     actions: dict[str, tuple[str, CapabilityAction]] = {}
@@ -77,20 +84,14 @@ def search_capabilities(
             kind, descriptor.capability_id,
         ):
             fingerprint = None
-        summary, description = fingerprint_text(fingerprint, descriptor.content_hash, descriptor.description)
+        _, description = fingerprint_text(fingerprint, descriptor.content_hash, descriptor.description)
         names = (descriptor.name, descriptor.capability_id, key, *candidate.aliases)
         documents.append(LexicalDocument(
             key, descriptor.name, "\n".join((description, *descriptor.tags)), descriptor.semantic_content,
             (descriptor.capability_id, *candidate.aliases), descriptor.classification,
         ))
-        rows[key] = {
-            "type": kind,
-            "id": descriptor.capability_id,
-            "name": sanitize_model_text(descriptor.name),
-            "description": sanitize_model_text(summary)[:512],
-            "matched_on": "name" if any(exact_query == name.casefold() for name in names) else "catalog",
-            "actions": [_action_result(action) for action in candidate.actions[:3]],
-        }
+        matched_on = "name" if any(exact_query == name.casefold() for name in names) else "catalog"
+        rows[key] = capability_row(candidate, matched_on=matched_on)
         for index, action in enumerate(candidate.actions):
             action_key = f"action:{key}:{index}"
             actions[action_key] = (key, action)
@@ -110,8 +111,26 @@ def search_capabilities(
             matches.setdefault(hit.key, rows[hit.key])
     return [
         {**row, "actions": matched_actions.get(key, row["actions"])}
-        for key, row in list(matches.items())[:top_k]
+        for key, row in matches.items()
     ]
+
+
+def capability_row(candidate: CapabilityCandidate, *, matched_on: str = "catalog") -> dict[str, Any]:
+    descriptor = candidate.descriptor
+    fingerprint = candidate.fingerprint
+    if fingerprint is not None and (fingerprint.capability_type, fingerprint.capability_id) != (
+        descriptor.capability_type, descriptor.capability_id,
+    ):
+        fingerprint = None
+    summary, _ = fingerprint_text(fingerprint, descriptor.content_hash, descriptor.description)
+    return {
+        "type": descriptor.capability_type,
+        "id": descriptor.capability_id,
+        "name": sanitize_model_text(descriptor.name),
+        "description": sanitize_model_text(summary)[:512],
+        "matched_on": matched_on,
+        "actions": [_action_result(action) for action in candidate.actions[:3]],
+    }
 
 
 def fingerprint_text(

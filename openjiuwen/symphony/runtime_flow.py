@@ -14,18 +14,19 @@ from openjiuwen.symphony.flow.review import LLMPackageReviewAgent, PackageReview
 class RuntimeFlow:
     """Create persistent Flow resources only when an enabled operation is used."""
 
-    def __init__(self, model, config: OrchestrationConfig, storage):
+    def __init__(self, model, config: OrchestrationConfig, storage, *, unavailable_reason: str | None = None):
         self.config = config.experience
         self._orchestration = config
         self._model = model
         self._storage = storage
+        self._unavailable_reason = unavailable_reason
         self._engine = None
         self._scopes = WeakSet()
         self._closed = False
 
     @property
     def enabled(self) -> bool:
-        return self._orchestration.experience_enabled
+        return self._orchestration.experience_enabled and self._unavailable_reason is None
 
     def status(self):
         return {"enabled": self.enabled, "started": self._engine is not None, "closed": self._closed}
@@ -33,6 +34,8 @@ class RuntimeFlow:
     def _get_engine(self):
         if self._closed:
             raise RuntimeError("Symphony runtime is closed")
+        if self._unavailable_reason:
+            raise ValueError(self._unavailable_reason)
         if not self.enabled:
             raise RuntimeError("Symphony Flow is disabled")
         self._storage.check(write=True)
