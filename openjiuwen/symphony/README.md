@@ -35,7 +35,7 @@ try:
     )
     candidates = await session.capability_search(type="skill", query="summarize documents")
     plan = await runtime.orchestration.plan(
-        "Summarize the document", candidate_ids=["extract", "summarize"],
+        "Summarize the document", type="skill", candidate_ids=["extract", "summarize"],
         disabled_capability_ids=disabled_ids,
     )
 finally:
@@ -44,7 +44,7 @@ finally:
 
 `on_progress` 可以是同步或异步回调。构造函数只保存独立配置快照并固定相对路径，不扫描、构建、请求模型或启动任务。配置模型使用 Pydantic v2，支持 `model_validate`、`model_dump_json`、`model_validate_json` 和中文 JSON Schema。
 
-`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。关系图与 Flow 只使用 Skill，并要求恰有一个 Skill 目录。
+`capability.sources` 是非空目录列表，每项声明 `type` 和 `root`，整组共用 `scan`、`fingerprint` 和 `storage.artifact_root`。多个 `skill` 和 `expert` 目录可共用一棵分类树。专家读取器从独立专家包的 `manifest.json` 投影 `name`（ID 和默认显示名）、`description` 及 `package_type: agent_template`。编排以一个 Skill 目录为基础，可纳入多个专家目录。Flow 消费 Skill 执行证据。
 
 公共配置树及默认值见 [config.tree.txt](config.tree.txt)。
 
@@ -106,9 +106,17 @@ storage.artifact_root/
 
 不兼容旧 Runtime 构造参数、配置别名、旧缓存签名及旧布局。历史目录不自动迁移或删除，请为新配置选择独立产物目录并重新构建。
 
+## 分层编排
+
+`runtime.orchestration.build()` 分别匹配 Skill 和专家的输入输出，每个版本发布一份图。混合图采用 `2.0` 格式，节点 ID 为 `skill:<id>` 或 `expert:<id>`。只有同类节点之间可以形成 `can_feed` 边。专家复用分类树的指纹缓存，输入输出从包描述中提取。描述缺少交接依据时，专家可以作为独立节点出现在图中。只有 Skill 的产物继续使用 `1.0` 格式，历史图版本可通过 `read(version)` 读取。
+
+`runtime.orchestration.plan(query, type="expert", candidate_ids=[...])` 使用指定层。旧调用省略 `type` 时使用 Skill。宿主可用 `expert_manifest_paths` 传入实时允许的专家 manifest 路径，SDK 直接调用时默认使用配置内的专家。专家计划的 `fast` 和 `beam` 都使用已发布的交接边，并在 `planned_graph` 节点的 `metadata.type` 中标明 `expert`。专家计划用于描述交接，任务派发由宿主负责。
+
+Skill 增量变更沿用 Skill 来源版本校验，并携带同一份已发布的专家子图。专家来源发生变化时调用 `build()` 刷新图。构建和增量变更均在切换当前版本前复核来源。
+
 ## 编排经验与宿主职责
 
-`orchestration.experience.enabled` 默认关闭。与 `orchestration.enabled` 同时开启时，Runtime 接收图观测，并将合格的成功子图送给 Flow 沉淀组合能力包。`orchestration.plan.dynamic_graph_enabled` 独立控制规划是否采用已有动态图。
+`orchestration.experience.enabled` 默认关闭。与 `orchestration.enabled` 同时开启时，Runtime 接收 Skill 图观测，并将合格的成功子图送给 Flow 沉淀组合能力包。`orchestration.plan.dynamic_graph_enabled` 独立控制 Skill 规划是否采用已有动态图。
 
 `orchestration.experience.acceptance` 默认要求至少 3 次成功及 0.8 成功率，`narrative.max_examples` 默认保留最多 5 个示例。`runtime.flow.create_scope(store=user_store)` 用宿主受限存储创建隔离视图，共用默认服务的打包和审核组件。用户证据范围、候选确认和安装授权由宿主决定。
 

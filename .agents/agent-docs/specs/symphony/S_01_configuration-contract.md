@@ -124,7 +124,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 
 ## 6. Runtime 当前运行契约（2026-11-10）
 
-- Runtime 构造固定全部能力根、产物根和根分类文件路径，按类型及绝对路径排序去重。检索将 Skill 和独立专家纳入同一棵分类树。编排与 Flow 使用恰好一个 Skill 来源。其他组合仍可检索，编排入口报告来源限制。
+- Runtime 构造固定全部能力根、产物根和根分类文件路径，按类型及绝对路径排序去重。检索将 Skill 和独立专家纳入同一棵分类树。编排使用一个 Skill 来源和已配置的专家来源，Flow 消费 Skill 层。没有或有多个 Skill 来源的组合可用于检索。
 - `retrieval/orchestration` 均提供 status/read/build/cancel_build；进度与发布前附属产物钩子是单次调用参数。图结果是公共值对象，树结果为字典；均携带构建 ID、版本、变化与复用计数、诊断。
 - `retrieval.create_session` 返回 DiscoverySession，工具与提示 Rail 共用。会话从 Runtime 或 `config=` 参数深复制 RetrievalConfig，使用 prompt、output 和 use_existing_index。检索开关和构树由 Runtime 持有的配置决定。预算和索引版本可冻结，source_by_id 以 capability_id 为键，目录、可见及禁用条件由调用方动态提供。
 - 会话发现消费扫描器已接受的 Skill 和专家记录。检索状态返回扫描错误诊断，并将不完整集合对应的索引标为过期。构树和指纹发布要求完整扫描，扫描错误导致构建失败并保留上次成功产物。
@@ -136,7 +136,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 - Skill 和专家的 `search` 接受 1–8 条独立查询。按每条查询的排名轮流合并并去重，分页使用合并后的结果，游标绑定原查询列表。旧版专家 `search_catalog` 回调按单条查询调用，合并后按 `top_k` 截断。连接器和 MCP 每次接受一条查询。
 - 专家扫描只读取独立专家包 manifest 的 `name`、`description` 和 `package_type: agent_template`。共用树以 `type:id` 区分叶子。跨类型同 ID 可以共存，同类型重复 ID 按诊断处理。构建遇扫描错误保留已发布树，在线发现跳过问题条目。
 - 原生 Model 在所属宿主循环调用；同步树算法在工作线程调度。请求超时/任务超时/取消跨桥传播，模型取消清理最多等待5秒，超界终止构建且不重试/回退。永久HTTP错误优先于错误文本判断，不重试。
-- 显式 candidate_ids=[] 或全部失效 ID 返回 no_plan，不扩大范围。规划读取已有动态观测与经验写入独立，Rail 的新观测提交受经验开关控制。
+- `plan(type=...)` 只读指定层，省略 `type` 时使用 Skill。显式 `candidate_ids=[]` 或全部失效 ID 返回 `no_plan`。专家计划在候选匹配和扩展之前应用 manifest 可见范围，只使用已发布的 `can_feed`。Skill 规划读取动态观测与经验写入独立，Rail 的新观测提交受经验开关控制。
 - Runtime 持有惰性默认 Flow，create_scope(store=...) 共享默认打包/审核组件并使用宿主受限存储；授权、确认和安装是宿主职责。
 - aclose 为单次拥有的关闭任务，等待者取消不取消清理。图构建、嵌套规划和增量任务以及文件写入线程必须完成取消/收尾；不关闭宿主模型。
 
@@ -162,5 +162,7 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 | orchestration.experience.acceptance/narrative | SymphonyFlowEngine、蒸馏与叙事组件 | 接纳、叙事样例与候选生成 |
 
 单 Skill 产物继续使用原 runtime.json。共用树存放于 `taxonomy_collections/<scope_id>/tree`，绑定归一化来源列表。同一集合来源重排复用同一目录，新增专家目录时原 Skill 树和图仍可读取。错误布局和集合身份不匹配会被拒绝。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
+
+混合图每个版本发布一份 `graph.json`，协议为 `2.0`。节点 ID 由类型和能力 ID 构成，`lookup` 按层分开，同类型节点才能形成 `can_feed`。专家构图共用分类树的专家指纹缓存。专家来源及内容进入图快照，Skill 增量更新复核专家快照后保留专家子图。Skill 经验索引只使用 Skill 图投影。
 
 运行接入替代设计旧草案中的 Source 注入、retrieval.search 和兼容路线，历史设计与历史测试记录保留，不视作当前行为。

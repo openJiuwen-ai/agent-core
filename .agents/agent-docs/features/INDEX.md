@@ -22,10 +22,11 @@ generated: true
 | [core/single_agent](#module-5) |
 | [extensions/observability](#module-6) |
 | [harness](#module-7) |
-| [harness/subagents](#module-8) |
-| [harness/tools/browser_move](#module-9) |
-| [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-10) |
-| [symphony](#module-11) |
+| [harness/rails/evolution](#module-8) |
+| [harness/subagents](#module-9) |
+| [harness/tools/browser_move](#module-10) |
+| [jiuwenswarm/jiuwenswarm/runtime/symphony](#module-11) |
+| [symphony](#module-12) |
 
 <a id="module-1"></a>
 
@@ -281,15 +282,15 @@ generated: true
 
 <a id="module-8"></a>
 
-## harness/subagents
+## harness/rails/evolution
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+| [F_20261110_1938_symphony-expert-orchestration](F_20261110_1938_symphony-expert-orchestration.md) | F | Symphony 专家分层编排 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/harness/rails/evolution | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/artifacts.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/orchestration/mutation_service.py, openjiuwen/harness/rails/evolution/symphony_graph_evolution_rail.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | 无独立 D：依据对话中确认的一张图和两层独立规划方案。 |
 
 <a id="module-9"></a>
 
-## harness/tools/browser_move
+## harness/subagents
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
@@ -297,13 +298,21 @@ generated: true
 
 <a id="module-10"></a>
 
+## harness/tools/browser_move
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+
+<a id="module-11"></a>
+
 ## jiuwenswarm/jiuwenswarm/runtime/symphony
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
 
-<a id="module-11"></a>
+<a id="module-12"></a>
 
 ## symphony
 
@@ -316,3 +325,4 @@ generated: true
 | [F_20261109_1631_symphony-capability-sources](F_20261109_1631_symphony-capability-sources.md) | F | Symphony 多类型来源配置 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/config.py, openjiuwen/symphony/inventory.py, openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/config.tree.txt | [D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [F_20261109_1752_shared-capability-fingerprints](F_20261109_1752_shared-capability-fingerprints.md) | F | Symphony 共享指纹与会话能力检索 | lin-xiaoyu | symphony, core/single_agent, agent_teams/tools, jiuwenswarm/jiuwenswarm/runtime/symphony | openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/symphony/discovery/skillfs.py, openjiuwen/symphony/discovery/capability_search.py, openjiuwen/symphony/shared/fingerprint/service.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/agent_teams/tools/tool_expert.py, jiuwenswarm/jiuwenswarm/runtime/symphony/capabilities.py, jiuwenswarm/jiuwenswarm/agents/harness/common/tools/skill_retrieval_toolkits.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
 | [F_20261110_1614_symphony-mixed-taxonomy](F_20261110_1614_symphony-mixed-taxonomy.md) | F | Symphony 共用分类树与独立专家读取 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/agent_teams/tools | openjiuwen/symphony/runtime.py, openjiuwen/symphony/runtime_storage.py, openjiuwen/symphony/expert_manifest.py, openjiuwen/symphony/tree_engine.py, openjiuwen/symphony/discovery/directory_toolkit.py, openjiuwen/agent_teams/tools/tool_expert.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | [D-20261110-1614-symphony-mixed-taxonomy](../designs/active/D-20261110-1614-symphony-mixed-taxonomy/design.md) |
+| [F_20261110_1938_symphony-expert-orchestration](F_20261110_1938_symphony-expert-orchestration.md) | F | Symphony 专家分层编排 | lin-xiaoyu | openjiuwen/symphony, openjiuwen/harness/rails/evolution | openjiuwen/symphony/runtime.py, openjiuwen/symphony/graph_engine.py, openjiuwen/symphony/orchestration/artifacts.py, openjiuwen/symphony/orchestration/service.py, openjiuwen/symphony/orchestration/mutation_service.py, openjiuwen/harness/rails/evolution/symphony_graph_evolution_rail.py, tests/unit_tests/symphony/test_mixed_taxonomy.py | 无独立 D：依据对话中确认的一张图和两层独立规划方案。 |

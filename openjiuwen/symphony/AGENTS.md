@@ -5,7 +5,7 @@
 ## 运行配置与生命周期
 
 - `SymphonyRuntime(model, config)` 是统一组装入口；子服务直接使用 `config.py` 的子模型，解析快照不另设默认值。
-- 配置接受非空的 `capability.sources` 列表。多个 Skill 和独立专家目录共用一棵分类树，编排与 Flow 要求恰有一个 Skill 目录。构造只复制配置并固定路径。扫描、模型调用和后台任务由运行入口触发。
+- 配置接受非空的 `capability.sources` 列表。多个 Skill 和独立专家目录共用一棵分类树。编排以一个 Skill 目录为基础，可同时纳入专家目录；在同一图版本内分层匹配和规划。Flow 消费 Skill 层。构造只复制配置并固定路径。扫描、模型调用和后台任务由运行入口触发。
 - `orchestration.experience.enabled` 与编排开关共同控制图观测写入和 Flow。规划使用已有动态图由 `orchestration.plan.dynamic_graph_enabled` 独立控制。
 - 构建采用宿主注入模型；同步树算法通过宿主事件循环桥接。取消必须等待模型和文件写入工作收尾，不关闭宿主模型。
 - 全量和增量发布前复核集合身份。失败或取消保留已发布版本。共用树按规范化来源集合隔离，单 Skill 产物布局保留。
