@@ -24,6 +24,7 @@ _MAX_ZIP_FILE_COUNT = 10_000
 _MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_ZIP_SINGLE_FILE_BYTES = 32 * 1024 * 1024
 _MAX_ZIP_PATH_DEPTH = 32
+_MAX_ZIP_WRAPPER_DEPTH = 2
 
 
 class OpenedSource:
@@ -347,6 +348,46 @@ class PackageManager:
                 reason="could not fully remove the managed install copy; retry uninstall",
             ) from exc
 
+    def remove_package_dir(self, package_id: str) -> None:
+        """Delete the complete managed package directory after a full uninstall.
+
+        The caller must have released the package resources and removed every
+        managed version first. The package-id directory belongs to the install
+        store, so its remaining system metadata or invalid residue must not
+        survive a successful package uninstall.
+        """
+        self._guard_mutation(package_id)
+        store = self.store.resolve()
+        original = self.store / package_id
+        package_dir = original.resolve()
+        unsafe_components = original.is_symlink() or Path(package_id).name != package_id
+        outside_store = not package_dir.is_relative_to(store)
+        is_store_root = package_dir == store
+        wrong_depth = package_dir.parent != store
+        if any((outside_store, is_store_root, wrong_depth, unsafe_components)):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="refusing to delete a package directory outside the install store",
+            )
+        if not package_dir.exists():
+            return
+        if not package_dir.is_dir():
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="managed package directory is not a directory",
+            )
+        _assert_no_symlinks(package_dir)
+        try:
+            with (self.install_report.file_operation_scope(package_id)
+                  if self.install_report is not None else nullcontext()):
+                shutil.rmtree(package_dir)
+        except OSError as exc:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                cause=exc,
+                reason="could not fully remove the managed package directory; retry uninstall",
+            ) from exc
+
     def version_dir(self, package_id: str, version: str) -> Path:
         """Return the resolved install path; deletion validates its containment."""
         return (self.store / package_id / version).resolve()
@@ -356,12 +397,14 @@ class PackageManager:
         try:
             _extract_zip(source, temp)
             _assert_no_symlinks(temp)
-            manifest = load_manifest(temp, require_domain=self.require_domain)
+            root = _zip_package_root(temp)
+            manifest = load_manifest(root, require_domain=self.require_domain)
+            _validate_zip_wrapper(root, temp, manifest)
             self.validate_manifest(manifest)
         except Exception as error:
             shutil.rmtree(temp, ignore_errors=True)
             raise error
-        return OpenedSource(manifest, temp.resolve(), source, temp.resolve())
+        return OpenedSource(manifest, root, source, temp.resolve())
 
 
 def _assert_no_symlinks(src: Path) -> None:
@@ -385,6 +428,55 @@ def _assert_no_symlinks(src: Path) -> None:
             reason=f"failed to inspect package for symlinks: {exc}",
             cause=exc,
         ) from exc
+
+
+def _zip_package_root(extracted: Path) -> Path:
+    """Locate an unambiguous package root in a freshly extracted archive.
+
+    ZIPs produced from a managed install commonly wrap the package root in a
+    version directory or a package-id/version pair. Only those one- and
+    two-level single-directory wrappers are accepted; a broader scan could
+    silently choose one package from an ambiguous archive.
+    """
+    root = extracted.resolve()
+    for depth in range(_MAX_ZIP_WRAPPER_DEPTH + 1):
+        if has_manifest(root):
+            return root
+        if depth == _MAX_ZIP_WRAPPER_DEPTH:
+            break
+        entries = [entry for entry in root.iterdir() if not _is_zip_metadata(entry)]
+        if len(entries) != 1 or not entries[0].is_dir():
+            break
+        root = entries[0].resolve()
+    raise ExtensionFailure(
+        StatusCode.EXTENSION_MANIFEST_INVALID,
+        reason=(
+            "zip must contain manifest.json at its root or below one or two "
+            "unambiguous wrapper directories"
+        ),
+    )
+
+
+def _validate_zip_wrapper(package_root: Path, extracted: Path, manifest: Manifest) -> None:
+    """Require optional ZIP wrappers to match the package's managed layout."""
+    wrapper = package_root.relative_to(extracted.resolve()).parts
+    if not wrapper:
+        return
+    expected = (
+        (manifest.version,)
+        if len(wrapper) == 1
+        else (manifest.package_id, manifest.version)
+    )
+    if wrapper != expected:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_MANIFEST_INVALID,
+            reason="zip wrapper does not match manifest package.id and package.version",
+        )
+
+
+def _is_zip_metadata(entry: Path) -> bool:
+    """Return whether an archive entry is macOS packaging metadata."""
+    return entry.name in {".DS_Store", "__MACOSX"} or entry.name.startswith("._")
 
 
 def _read_manifest_document(package_root: Path) -> dict[str, object]:

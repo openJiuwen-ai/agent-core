@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / package-loading` |
 | 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
-| 最近一次修订日期 | 2026-11-06 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)、[F_06](../features/F_06_package-enable.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
@@ -38,7 +38,7 @@
 
 | 对象 | 事实持有者 | 修改入口 |
 | --- | --- | --- |
-| 安装副本文件 | 安装目录 / Package Manager | `copy_into_store` / `remove_installed` |
+| 安装副本文件 | 安装目录 / Package Manager | `copy_into_store` / `remove_installed` / `remove_package_dir` |
 | 生效记录 | Runtime | 发布成功后的 `record_active`；允许卸载后的 `drop_active` |
 | 在途调用计数 | Runtime | `begin_calls` / `end_calls`（由事件层或发布路径配合调用） |
 | Bus 上的 Handler | EventBus | `extension.apply` 一次同步写入（见 S_02） |
@@ -53,7 +53,7 @@
 4. `extensions[].requires` 只指向同一包内其它扩展 id，不得自依赖，不得引用外包扩展。
 5. `requires.host` 可选；若存在，为空白分隔的版本条件，表示宿主版本要求，不参与包拓扑排序。
 6. 通过检查的包落在安装副本路径；来源已是该路径时就地使用。
-7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。任何安装失败清理与卸载都不删除用户来源。
+7. 解压 zip 使用新建临时目录；关闭打开结果时只删除该临时目录。ZIP 可将包根置于根目录，或经一层版本目录、两层包 ID/版本目录包装；包装链必须唯一，最多两层，`.DS_Store`、`._*` 和 `__MACOSX` 不参与包装层判定。其它多候选、夹带普通同级文件或更深包装均拒绝。任何安装失败清理与卸载都不删除用户来源。
 8. 同一 ID 可以有多个磁盘版本，但只能属于一个 domain。启动选最高合法版本；仍存活进程中的包使用实际生效版本。选中版本失败不自动降级。显式安装批次中重复 ID 仍整批拒绝。
 9. 可选的 `mcp.json` 与 `manifest.json` 同级。顶层只允许 `mcpServers`，其下每个 server 名匹配 `^[a-z][a-z0-9_-]{0,63}$`；条目允许 `client_type`、`server_path`、`params`、`auth_headers`、`auth_query_params`、`include_image_content`，未知字段或非法值使安装失败。`client_type` 默认 `sse`；`stdio` 必须提供非空 `params.command`，非 `stdio` 必须提供 `server_path`。文件缺失表示本包不使用 MCP。
 10. `enable` 是可选布尔字段，省略时按 `true` 处理。它表示安装副本是否参与当前进程的加载与 Handler 发布；`false` 的包保留在安装目录中，但不导入包模块、不登记 Handler 或 MCP 声明。非布尔值使声明非法。
@@ -67,7 +67,7 @@
 | 输入 | 行为 | 失败码 |
 | --- | --- | --- |
 | 目录 | 就地读 manifest；包树内不得含符号链接 | 声明非法：`EXTENSION_MANIFEST_INVALID`；符号链接：`EXTENSION_SOURCE_INVALID` |
-| zip | 解压到临时目录后再读 | 非法 zip、成员逃逸、符号链接成员、超限：`EXTENSION_SOURCE_INVALID` |
+| zip | 解压后从根、单层版本目录或两层包 ID/版本目录定位唯一包根，再读 manifest | 非法 zip、成员逃逸、符号链接成员、超限：`EXTENSION_SOURCE_INVALID`；包根不明确：`EXTENSION_MANIFEST_INVALID` |
 | 其它路径 | 拒绝 | `EXTENSION_SOURCE_INVALID` |
 | 复制到已存在的同版本目录 | 拒绝覆盖 | `EXTENSION_INSTALL_COPY_FAILED` |
 | 复制/路径危险 | 拒绝，保留用户来源 | `EXTENSION_INSTALL_COPY_FAILED` |
@@ -94,7 +94,7 @@
 | --- | --- | --- |
 | `load_manifest` / `parse_manifest_mapping` | `manifest` | 读并校验声明 |
 | `PackageManager.open_source` | `package_manager` | 打开目录或 zip |
-| `PackageManager.copy_into_store` / `remove_installed` / `list_installed` / `set_enabled` | `package_manager` | 安装副本读写与启用状态更新 |
+| `PackageManager.copy_into_store` / `remove_installed` / `remove_package_dir` / `list_installed` / `set_enabled` | `package_manager` | 安装副本读写、整包目录收尾与启用状态更新 |
 | `PackageManager.managed_versions` | `package_manager` | 逐版本校验并枚举可确认的受管副本；单个损坏目录不阻断其它版本 |
 | `build_startup_plan` | `selection` | 全目录选版、检查跨域依赖并稳定排序 |
 | `resolve_install_set` | `selection` | 一批安装的接受、拒绝与包序 |
@@ -170,7 +170,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 | 未生效 | `EXTENSION_PACKAGE_NOT_INSTALLED` | 无 |
 | 被其它生效包依赖 | `EXTENSION_PACKAGE_IN_USE` | 不删记录、不删目录 |
 | `inflight_count > 0` | `EXTENSION_PACKAGE_BUSY` | 立即失败，不等待 |
-| 通过 | — | 允许 `drop_active`；删安装副本由上层调用 Package Manager |
+| 通过 | — | 允许 `drop_active`；上层删除全部安装副本及受管 `<install_dir>/<package.id>` 目录 |
 
 `begin_calls` / `end_calls` 成对维护在途数；无匹配的 `end_calls` → `EXTENSION_INFLIGHT_MISMATCH`。
 
@@ -208,7 +208,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 
 ## 5. 生命周期与资源责任
 
-- 安装副本的所有权在 Package Manager；用户来源永不由本模块删除。
+- 安装副本和直接父级 `<install_dir>/<package.id>` 目录的所有权在 Package Manager；用户来源永不由本模块删除。成功卸载删除该包的所有受管版本和整个包 ID 目录；目录删除失败则卸载失败并保留可重试事实。
 - 生效记录在发布成功后写入；卸载判断通过并完成注册、资源和受管理副本清理后删除。
   清理失败保留记录供重试，具体编排见 [S_02 第 4.1 节](S_02_registry-and-bus.md#41-store-卸载清理)。
 - prepare 失败或 `abort` 只清理本次 `sys.modules` 条目。

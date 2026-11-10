@@ -1003,6 +1003,7 @@ async def _remove_package_resources(context: ManagementContext, package_id: str,
     await _release_package_resources(context, package_id, generation)
     for version in context.runtime.uninstall_versions(package_id):
         await run_file_operation(lambda: context.package_manager.remove_installed(package_id, version, missing_ok=True))
+    await run_file_operation(lambda: context.package_manager.remove_package_dir(package_id))
 
 
 async def _release_package_resources(context: ManagementContext, package_id: str, generation: int) -> None:

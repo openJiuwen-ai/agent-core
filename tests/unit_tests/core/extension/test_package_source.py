@@ -356,6 +356,68 @@ def test_zip_copy_never_deletes_the_callers_files(tmp_path: Path) -> None:
     assert marker.is_file()
 
 
+@pytest.mark.parametrize(
+    "wrappers",
+    [
+        ("1.2.0",),
+        ("demo", "1.2.0"),
+    ],
+    ids=("version", "package-id-and-version"),
+)
+def test_zip_accepts_managed_install_wrappers(
+    tmp_path: Path,
+    wrappers: tuple[str, ...],
+) -> None:
+    source = tmp_path / "source"
+    write_package(source, "demo", "1.2.0")
+    archive_path = tmp_path / "wrapped.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in source.rglob("*"):
+            archive.write(path, Path(*wrappers, path.relative_to(source)).as_posix())
+        archive.writestr(".DS_Store", "finder metadata")
+        archive.writestr("__MACOSX/._manifest.json", "finder metadata")
+
+    manager = PackageManager(tmp_path / "store")
+    with manager.open_source(archive_path) as opened:
+        assert opened.manifest.package_id == "demo"
+        assert opened.root.name == "1.2.0"
+        installed = manager.copy_into_store(opened.root, opened.manifest)
+
+    assert installed == (tmp_path / "store" / "demo" / "1.2.0").resolve()
+
+
+def test_zip_rejects_ambiguous_invalid_or_overwrapped_package_roots(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    write_package(source, "demo")
+    ambiguous = tmp_path / "ambiguous.zip"
+    with zipfile.ZipFile(ambiguous, "w") as archive:
+        for wrapper in ("first", "second"):
+            for path in source.rglob("*"):
+                archive.write(path, Path(wrapper, path.relative_to(source)).as_posix())
+
+    with pytest.raises(ExtensionFailure) as ambiguous_error:
+        PackageManager(tmp_path / "store").open_source(ambiguous)
+    assert ambiguous_error.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
+
+    invalid_wrapper = tmp_path / "invalid-wrapper.zip"
+    with zipfile.ZipFile(invalid_wrapper, "w") as archive:
+        for path in source.rglob("*"):
+            archive.write(path, Path("export", path.relative_to(source)).as_posix())
+
+    with pytest.raises(ExtensionFailure) as invalid_wrapper_error:
+        PackageManager(tmp_path / "store").open_source(invalid_wrapper)
+    assert invalid_wrapper_error.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
+
+    overwrapped = tmp_path / "overwrapped.zip"
+    with zipfile.ZipFile(overwrapped, "w") as archive:
+        for path in source.rglob("*"):
+            archive.write(path, Path("export", "demo", "1.0.0", path.relative_to(source)).as_posix())
+
+    with pytest.raises(ExtensionFailure) as overwrapped_error:
+        PackageManager(tmp_path / "store").open_source(overwrapped)
+    assert overwrapped_error.value.status == StatusCode.EXTENSION_MANIFEST_INVALID
+
+
 def test_copy_into_store_is_idempotent_for_install_copy(tmp_path: Path) -> None:
     source = tmp_path / "source"
     write_package(source, "demo")

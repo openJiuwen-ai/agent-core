@@ -61,7 +61,7 @@ flowchart LR
 
 1. 对可装包：`build_plan` → `prepare`。
 2. 发布成功后由上层调用 `record_active`（发布在 EX-04）。
-3. 重载前 `evaluate_reload` / `check_reload`；卸载前 `uninstall_decision`，通过后 `drop_active` 并由上层删安装副本。
+3. 重载前 `evaluate_reload` / `check_reload`；卸载前 `uninstall_decision`，通过后 `drop_active` 并由上层删安装副本及其受管包 ID 目录。
 
 必须保证（完整条文见 S_01）：
 
