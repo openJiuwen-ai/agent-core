@@ -49,12 +49,12 @@ async def test_constructor_is_lazy_isolated_and_does_not_close_host_model(tmp_pa
     assert not (tmp_path / "runtime").exists()
 
 
-def test_runtime_rejects_multiple_sources_before_creating_artifacts(tmp_path):
+def test_runtime_validates_every_source_before_creating_artifacts(tmp_path):
     config = make_config(tmp_path, capability={"sources": [
         {"type": "skill", "root": str(tmp_path / "skills")},
-        {"type": "expert", "root": str(tmp_path / "experts")},
+        {"type": "expert", "root": str(tmp_path / "runtime" / "experts")},
     ]})
-    with pytest.raises(ValueError, match=r"exactly one capability\.sources entry"):
+    with pytest.raises(ValueError, match=r"capability\.sources\.1\.root"):
         SymphonyRuntime(None, config)
     assert not (tmp_path / "runtime").exists()
 
@@ -96,7 +96,7 @@ async def test_disabled_experience_rejects_all_new_evidence_without_creating_sto
         await runtime.aclose()
 
 
-@pytest.mark.parametrize("kind", ["expert", "connector", "mcp"])
+@pytest.mark.parametrize("kind", ["connector", "mcp"])
 @pytest.mark.asyncio
 async def test_unimplemented_reader_fails_explicitly_on_use(tmp_path, kind):
     config = make_config(tmp_path, capability={"sources": [{"type": kind, "root": str(tmp_path / "capabilities")}]})
