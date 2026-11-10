@@ -2197,6 +2197,63 @@ class TestOtelWorkflowHandlerDeferredEndNode:
         assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
         assert "end1" not in handler._deferred_end_starts
 
+    async def test_error_path_materializes_deferred_end_node_span(self):
+        """End node failing before the finalize marker: on_invoke(exception)
+        materializes the stashed span so the error marking has a target.
+
+        On the error path core raises before both materializers (the finalize
+        marker in stream_call and on_call_done in call), so on_invoke is the
+        only remaining entry point — without it the end-node span disappears
+        and the stash leaks.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        stash = handler._deferred_end_starts["end1"]
+        begin_time = stash["begin_time"]
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(invoke_id="end1", exception=RuntimeError("end node failed"))
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Name policy differs across release lines (human-readable component
+        # name vs component id); pin the stable component-id attribute.
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+        assert s.attributes[OJ_STATUS] == NodeStatus.ERROR.value
+        assert s.attributes[OJ_START_TIME] == str(begin_time)
+        # Buffered stream chunks replayed onto the materialized span.
+        assert "chunk-1" in s.attributes[OJ_STREAM_INPUTS]
+
+    async def test_interrupt_path_materializes_deferred_end_node_span(self):
+        """GraphInterrupt on a deferred end node: span materializes and is
+        marked interrupted (control-flow signal, no OTel error status), stash
+        popped."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await self._start_deferred_end_node(handler)
+        await handler.on_pre_stream("end1", {"payload": "chunk-1"})
+
+        await handler.on_invoke(
+            invoke_id="end1",
+            exception=GraphInterrupt(Interrupt({"wait_for": "user_input"})),
+        )
+
+        assert "end1" not in handler._deferred_end_starts
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name.startswith("component.")
+        assert s.attributes[OJ_WORKFLOW_COMPONENT_ID] == "end1"
+        assert s.attributes[OJ_STATUS] == NodeStatus.INTERRUPTED.value
+        assert ERROR_TYPE not in s.attributes
+
     async def test_finalize_marker_without_stash_is_ignored(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelWorkflowHandler(_OTEL_TRACER, config)

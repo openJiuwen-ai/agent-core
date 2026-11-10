@@ -1519,6 +1519,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             if exception is not None:
+                # Deferred end node on the error path: neither materializer
+                # runs — core raises before the finalize marker (stream_call)
+                # and before on_call_done (call), so without this pop the
+                # stash leaks and the end-node span silently disappears on
+                # error/interrupt. Open the span from the stashed first-chunk
+                # timestamp (same fallback window as on_call_done) so the
+                # error marking below has a span to annotate.
+                deferred = self._deferred_end_starts.pop(invoke_id, None)
+                if deferred is not None:
+                    self._materialize_deferred_span(
+                        invoke_id, deferred, start_time=deferred["begin_time"]
+                    )
                 # Distinguish GraphInterrupt (control-flow signal) from real errors,
                 # mirroring builtin TraceWorkflowHandler.on_invoke:
                 #   - GraphInterrupt -> openjiuwen.status="interrupted", no OTel ERROR,
