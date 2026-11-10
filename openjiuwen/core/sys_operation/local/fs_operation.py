@@ -32,6 +32,8 @@ from openjiuwen.core.sys_operation.result import (
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
+from filelock import Timeout as FileLockTimeout
+
 
 class _ListItemsSpec(BaseModel):
     path: str
@@ -145,7 +147,7 @@ class FsOperation(BaseFsOperation):
         """
         if options and "lock_timeout" in options:
             return float(options["lock_timeout"])
-        return 300.0
+        return float(os.getenv("OPENJIUWEN_FS_LOCK_TIMEOUT", "300.0"))
 
     @classmethod
     @asynccontextmanager
@@ -155,8 +157,13 @@ class FsOperation(BaseFsOperation):
             mode: Literal["read", "write"],
             timeout: float,
     ):
-        async with ReadWriteLockManager.lock_guard(file_path, mode, timeout):
-            yield
+        try:
+            async with ReadWriteLockManager.lock_guard(file_path, mode, timeout):
+                yield
+        except FileLockTimeout as exc:
+            raise RuntimeError(
+                f"file lock acquire timeout after {timeout:g}s (mode={mode}): {file_path}"
+            ) from exc
 
     @classmethod
     @asynccontextmanager
