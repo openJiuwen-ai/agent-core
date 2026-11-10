@@ -14,6 +14,34 @@ from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
 LAYOUT_SCHEMA = "symphony.runtime.v1"
 _TAXONOMY_LAYOUT_SCHEMA = "symphony.taxonomy.v1"
 _TAXONOMY_COLLECTIONS = "taxonomy_collections"
+_CATALOG_FINGERPRINT_TYPES = frozenset({"expert", "connector", "mcp"})
+
+
+def _entries_without_finder_metadata(directory: Path) -> list[Path]:
+    return [
+        path for path in directory.iterdir()
+        if not (path.name == ".DS_Store" and not path.is_symlink() and path.is_file())
+    ]
+
+
+def _is_shared_root_entry(path: Path) -> bool:
+    if path.is_symlink() or not path.is_dir():
+        return False
+    if path.name == _TAXONOMY_COLLECTIONS:
+        return True
+    if path.name != "cache":
+        return False
+    entries = _entries_without_finder_metadata(path)
+    if not entries:
+        return True
+    fingerprints = path / "fingerprints"
+    if entries != [fingerprints] or fingerprints.is_symlink() or not fingerprints.is_dir():
+        return False
+    # Host catalogs have their own namespaces beside the unscoped Skill cache.
+    return all(
+        entry.name in _CATALOG_FINGERPRINT_TYPES and not entry.is_symlink() and entry.is_dir()
+        for entry in _entries_without_finder_metadata(fingerprints)
+    )
 
 
 class RuntimeStorage:
@@ -40,10 +68,8 @@ class RuntimeStorage:
 
     def _unbound_entries(self) -> list[Path]:
         return [
-            path for path in self.root.iterdir()
-            if path.name != ".runtime.lock"
-            and not (not self.scoped and path.name == _TAXONOMY_COLLECTIONS
-                     and path.is_dir() and not path.is_symlink())
+            path for path in _entries_without_finder_metadata(self.root)
+            if path.name != ".runtime.lock" and (self.scoped or not _is_shared_root_entry(path))
         ]
 
     def check(self, *, write: bool = False) -> None:

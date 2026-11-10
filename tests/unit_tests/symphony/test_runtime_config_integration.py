@@ -212,6 +212,66 @@ async def test_layout_rejects_legacy_and_different_collection_without_deleting_f
 
 
 @pytest.mark.asyncio
+async def test_graph_build_binds_root_with_catalog_fingerprints_and_finder_metadata(tmp_path):
+    write_capability(tmp_path)
+    experts = tmp_path / "experts"
+    experts.mkdir()
+    root = tmp_path / "runtime"
+    fingerprints = root / "cache" / "fingerprints"
+    catalog_files = []
+    for kind in ("expert", "connector", "mcp"):
+        cache = fingerprints / kind / "fingerprint.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("{}")
+        catalog_files.append(cache)
+    finder_files = [directory / ".DS_Store" for directory in (root, root / "cache", fingerprints)]
+    config = make_config(tmp_path, capability={"sources": [
+        {"type": "skill", "root": str(tmp_path / "capabilities")},
+        {"type": "expert", "root": str(experts)},
+    ]})
+    runtime = SymphonyRuntime(GraphModel(), config)
+    try:
+        taxonomy_root = runtime.retrieval.artifact_root.parent
+        taxonomy_root.mkdir(parents=True)
+        finder_files.append(taxonomy_root / ".DS_Store")
+        for path in finder_files:
+            path.write_bytes(b"finder metadata")
+
+        assert not runtime.orchestration.status().exists
+        assert not (root / "runtime.json").exists()
+
+        built = await runtime.orchestration.build(force=True)
+        assert runtime.orchestration.status().version == built.version
+        assert runtime.orchestration.read()["schema_version"] == "2.0"
+        assert (root / "runtime.json").is_file()
+        assert (taxonomy_root / "runtime.json").is_file()
+        assert all(path.read_text() == "{}" for path in catalog_files)
+        assert all(path.read_bytes() == b"finder metadata" for path in finder_files)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_graph_binding_rejects_unowned_skill_fingerprints_alongside_catalog_cache(tmp_path):
+    write_capability(tmp_path)
+    root = tmp_path / "runtime"
+    fingerprints = root / "cache" / "fingerprints"
+    (fingerprints / "connector").mkdir(parents=True)
+    legacy = fingerprints / "fingerprint.json"
+    legacy.write_text("historical")
+    runtime = SymphonyRuntime(GraphModel(), make_config(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="Unsupported Symphony artifact layout"):
+            runtime.orchestration.status()
+        with pytest.raises(ValueError, match="populated before collection binding"):
+            await runtime.orchestration.build()
+        assert not (root / "runtime.json").exists()
+        assert legacy.read_text() == "historical"
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_async_prepare_hook_cancel_cannot_publish_or_leak_worker(tmp_path):
     write_capability(tmp_path)
     runtime = SymphonyRuntime(None, make_config(tmp_path))

@@ -150,6 +150,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1507_symphony-build-method-strict-integer](symphony/B_20261102_1507_symphony-build-method-strict-integer.md) | B | Symphony 构建方式严格整数校验 | lin-xiaoyu | symphony | openjiuwen/symphony/config.py, tests/unit_tests/symphony/test_config.py | [D-20261031-1614-symphony-config-contract](../designs/active/D-20261031-1614-symphony-config-contract/design.md) |
 | [B_20261110_1139_symphony-discovery-invalid-manifest](symphony/B_20261110_1139_symphony-discovery-invalid-manifest.md) | B | Symphony 隔离无效 Skill 清单 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/inventory.py, openjiuwen/symphony/tree_engine.py, tests/unit_tests/symphony/test_runtime_config_integration.py | [D-20261109-1745-shared-capability-fingerprints](../designs/active/D-20261109-1745-shared-capability-fingerprints/design.md) |
+| [B_20261110_2013_symphony-catalog-cache-binding](symphony/B_20261110_2013_symphony-catalog-cache-binding.md) | B | Symphony 首次构图兼容宿主目录指纹 | lin-xiaoyu | openjiuwen/symphony | openjiuwen/symphony/runtime_storage.py, tests/unit_tests/symphony/test_runtime_config_integration.py | 无独立 D：基于现有 Runtime 产物契约修复首次绑定，无独立设计。 |
 
 <a id="module-14"></a>
 

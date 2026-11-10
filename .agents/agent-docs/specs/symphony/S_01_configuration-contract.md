@@ -164,6 +164,8 @@ PUBLIC_CONFIG_MODELS 登记公共树可达的 31 个具体模型。INTERNAL_CONF
 
 单 Skill 产物继续使用原 runtime.json。共用树存放于 `taxonomy_collections/<scope_id>/tree`，绑定归一化来源列表。同一集合来源重排复用同一目录，新增专家目录时原 Skill 树和图仍可读取。错误布局和集合身份不匹配会被拒绝。树commit签名覆盖内容、构建策略、协议、模型身份；图身份包含指纹、图策略和模型。无模型查询继续比较内容/策略，保留产物模型身份。构建后发布前重新检查集合快照，失败和取消不切换当前版本。构图复用的本次关系匹配计数为零，graph_reused_count=1；新构建ID与旧产物版本分开记录。
 
+单 Skill 根首次绑定时允许已有独立分类树集合 `taxonomy_collections/`，以及宿主在 `cache/fingerprints/{expert,connector,mcp}/` 下按类型写入的缓存。这些共享路径使用普通目录。产物根、分类树集合根及宿主缓存的两级父目录可包含普通 `.DS_Store` 文件。Core 的图、树和 Skill 指纹由所属集合绑定后写入。
+
 混合图每个版本发布一份 `graph.json`，协议为 `2.0`。节点 ID 由类型和能力 ID 构成，`lookup` 按层分开，同类型节点才能形成 `can_feed`。专家构图共用分类树的专家指纹缓存。专家来源及内容进入图快照，Skill 增量更新复核专家快照后保留专家子图。Skill 经验索引只使用 Skill 图投影。
 
 运行接入替代设计旧草案中的 Source 注入、retrieval.search 和兼容路线，历史设计与历史测试记录保留，不视作当前行为。
