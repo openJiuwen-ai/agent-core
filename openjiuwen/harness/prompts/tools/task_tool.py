@@ -26,14 +26,16 @@ GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
           "适合执行独立的复杂子任务（调研、搜代码、多步实现等）。"
           "子代理运行在独立上下文窗口中，中间工具调用结果不会污染主代理上下文。"
           "当你在搜索关键词或文件时，如果不确定前几次尝试就能找到正确匹配，"
-          "就用这个子代理来帮你搜索。",
+          "就用这个子代理来帮你搜索。"
+          "它只能再派 fork，不能再派 general-purpose 或其他子代理。",
     "en": "General-purpose subagent that inherits the parent agent's tools and "
           "capabilities (file I/O, bash, MCP, skills, etc.) for independent complex "
           "subtasks such as research, code search, and multi-step implementation. "
           "Runs in an isolated context window so intermediate tool results do not "
           "pollute the parent agent's context. When you are searching for a keyword "
           "or file and are not confident you will find the right match in the first "
-          "few tries, use this subagent to perform the search for you.",
+          "few tries, use this subagent to perform the search for you. "
+          "It can spawn only fork, not general-purpose or any other subagent.",
 }
 
 # ---------------------------------------------------------------------------

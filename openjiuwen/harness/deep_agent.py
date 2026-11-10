@@ -254,6 +254,9 @@ class DeepAgent(BaseAgent):
         self._interaction_lease_hold = False
         self._interaction_started = False
         self._agent_ras_setting: Any = None
+        self._subagent_tool_binding = None
+        # Hosts set this before the first spawn. None uses SubagentRuntimeConfig defaults.
+        self.subagent_runtime_config = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
@@ -312,6 +315,10 @@ class DeepAgent(BaseAgent):
         """Apply configuration and rebuild the internal ReActAgent."""
 
         self._filter_disabled_tools(config)
+        from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
+
+        # None outside a spawn frame clears a binding left by an earlier configure.
+        self._subagent_tool_binding = current_tool_binding()
         if self._deep_config is None:
             self._initial_configure(config)
         else:
@@ -1283,6 +1290,16 @@ class DeepAgent(BaseAgent):
         Raises:
             BaseError: If subagent spec not found.
         """
+        from openjiuwen.harness.subagent_runtime.binding import FORK_TYPE, current_spawn_frame
+        from openjiuwen.harness.subagent_runtime.fork_build import build_fork_agent
+        from openjiuwen.harness.tools.subagent.type_aliases import canonicalize_subagent_type
+
+        frame = current_spawn_frame()
+        if canonicalize_subagent_type(subagent_type) == FORK_TYPE and frame is not None:
+            return self._bind_inherited_artifact_root(
+                build_fork_agent(frame, frame.task_description),
+            )
+
         spec = self._find_subagent_spec(subagent_type)
         if spec is None:
             raise build_error(
@@ -1384,6 +1401,17 @@ class DeepAgent(BaseAgent):
             # 默认 600s 偏短，提升至 1800s（30 分钟）。
             "completion_timeout": 1800.0,
         }
+        if frame is not None and not isinstance(spec, DeepAgent):
+            from openjiuwen.harness.subagent_runtime.fork_build import nested_runtime_overrides
+
+            create_kwargs.update(
+                nested_runtime_overrides(
+                    spec,
+                    child_depth=frame.child_depth,
+                    max_spawn_depth=frame.control.config.max_spawn_depth,
+                    language=str(getattr(self._deep_config, "language", None) or "cn"),
+                )
+            )
 
         # Inherit the parent's image-modality decision only when the child
         # reuses (or derives from) the parent model. A distinct model keeps
