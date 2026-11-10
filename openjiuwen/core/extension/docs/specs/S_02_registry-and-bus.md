@@ -118,7 +118,7 @@ Runtime 发布的 Handler 自动计入 begin/end；Ops 发起的 store 调用另
 卸载依次执行：复核卸载条件、记住已验证的安装版本、unpublish 保留记录、
 清理已声明的 MCP 连接、
 `await Runtime.cleanup_package_resources(package_id, generation, reason="uninstall")`、
-删除受管理安装副本、撤销 MCP 声明、最后 drop_active。宿主资源回调先执行，Core store JSON 删除随后执行。
+删除全部受管理安装副本及其 `<install_dir>/<package.id>` 目录、撤销 MCP 声明、最后 drop_active。宿主资源回调先执行，Core store JSON 删除随后执行。
 MCP 清理失败保留声明和 store，不继续执行宿主回调或数据删除。
 任何一步失败返回 FAILED，并保留记录与未完成版本供同一条链重试；未注销 Handler 阻止新使用。
 部分副本删除后 manifest 已不存在时，`remove_installed(..., missing_ok=True)` 仍可完成既知目录的重试。

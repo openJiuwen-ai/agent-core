@@ -422,6 +422,21 @@ async def test_uninstall_stops_on_a_busy_or_required_package(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_uninstall_removes_the_package_directory_and_metadata_residue(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source", "demo")
+    store = tmp_path / "store"
+    registry, _ = await build_registry(store)
+    assert (await registry.install([source]))[0].status == "SUCCESS"
+    package_dir = store / "demo"
+    (package_dir / ".DS_Store").write_text("finder metadata", encoding="utf-8")
+
+    report = await registry.uninstall("demo")
+
+    assert report.status == "SUCCESS"
+    assert not package_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_reload_hot_switches_without_uninstalling_first(tmp_path: Path) -> None:
     source = _source(tmp_path, "source", "demo")
     store = tmp_path / "store"
