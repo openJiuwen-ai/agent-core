@@ -179,7 +179,11 @@ class ExternalTeamClient:
     async def _on_team_event(self, event: EventMessage) -> None:
         if event.event_type != TeamEvent.MEETING_STATE_CHANGED or self._backend is None:
             return
-        meeting = await self._backend.get_meeting()
+        token = set_session_id(self.session_id)
+        try:
+            meeting = await self._backend.get_meeting()
+        finally:
+            reset_session_id(token)
         if meeting is None:
             self._tools.pop("meeting_get_speaker", None)
             self._tools.pop("meeting_interrupt_speech", None)

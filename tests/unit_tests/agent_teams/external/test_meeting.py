@@ -3,20 +3,25 @@
 
 """Meeting controls through external member connections and tool calls."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
-from openjiuwen.agent_teams import MeetingRoute, MeetingStatus, SpeechRequestStatus
+from openjiuwen.agent_teams import MeetingRoute, MeetingStatus, SpeechRequestStatus, create_meeting_tools
 from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
 from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.external.tool_gateway import build_external_team_tool_gateway
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, FrameworkError
 from openjiuwen.harness_protocol import ToolInvocation
 
 
 @pytest.mark.asyncio
-async def test_external_member_observes_lifecycle_and_closed_meeting_removes_tools(team_db, make_descriptor):
+async def test_external_member_observes_lifecycle_and_closed_meeting_removes_tools(
+    team_db, make_descriptor, monkeypatch,
+):
     descriptor = make_descriptor(scope="member")
     transport = MessagerTransportConfig(backend="inprocess", team_name=descriptor.team_name, node_id="meeting-host")
     messager = create_messager(transport)
@@ -62,7 +67,19 @@ async def test_external_member_observes_lifecycle_and_closed_meeting_removes_too
             assert client.meeting_enabled
             assert (await resumed.get_speaker()).lease_token == claim.lease_token
 
-            assert await host.close_meeting(meeting_id="meeting")
+            get_meeting = client._backend.get_meeting
+
+            async def get_meeting_in_client_session():
+                assert get_session_id() == descriptor.session_id
+                return await get_meeting()
+
+            monkeypatch.setattr(client._backend, "get_meeting", get_meeting_in_client_session)
+            token = set_session_id("unrelated_callback_session")
+            try:
+                assert await host.close_meeting(meeting_id="meeting")
+                assert get_session_id() == "unrelated_callback_session"
+            finally:
+                reset_session_id(token)
             assert not client.meeting_enabled
             assert "meeting_get_speaker" not in client.tools
             assert await client.get_meeting_member() is None
@@ -73,6 +90,27 @@ async def test_external_member_observes_lifecycle_and_closed_meeting_removes_too
                 await host.enable_meeting(meeting_id="meeting")
     finally:
         await messager.stop()
+
+
+@pytest.mark.asyncio
+async def test_meeting_tool_returns_failed_output_for_framework_error(team_db, make_descriptor, monkeypatch):
+    descriptor = make_descriptor(member="leader", role="leader")
+    host = TeamBackend(descriptor.team_name, descriptor.member_name, True, team_db, None)
+    host.bind_group_session(descriptor.session_id)
+    meeting = await host.enable_meeting(meeting_id="meeting")
+    member = meeting.for_member(descriptor.member_name)
+    tools = await create_meeting_tools(member)
+    failure = FrameworkError(StatusCode.AGENT_TEAM_STATE_INVALID, reason="backend failure")
+    get_speaker = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(member, "get_speaker", get_speaker)
+    tool = tools["meeting_get_speaker"]
+
+    invalid = await tool.invoke({"unexpected": True})
+    assert invalid.error == "Only the declared meeting tool arguments are supported"
+    get_speaker.assert_not_awaited()
+    result = await tool.invoke({})
+    assert not result.success
+    assert result.error == "meeting_operation_failed"
 
 
 @pytest.mark.asyncio

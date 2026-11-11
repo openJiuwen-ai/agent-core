@@ -72,7 +72,7 @@ remain stable when the coordinator is reconstructed or the same request is
 retried. Their presence does not mean messages exist or have been delivered.
 `source_message_ids` identifies messages recorded by `finish_publication()`.
 
-For multicast, IDs follow `request.route.recipients` order. Pass them through
+For multicast, each recipient has a distinct ID in `request.route.recipients` order. Pass them through
 `multicast_message(message_ids=list(request.publication_message_ids), ...)`.
 Broadcast has one reserved ID, passed as `broadcast_message(message_id=..., ...)`.
 For the built-in group-chat sender, use the plain route protocol and pass

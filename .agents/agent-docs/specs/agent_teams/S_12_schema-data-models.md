@@ -1006,8 +1006,9 @@ from published source references:
 
 - `publication_message_ids: tuple[str, ...]` is derived from the existing request
   identity and route for requests containing text. It is available on enqueue,
-  claim, inspection, and reconstruction. Multicast IDs follow recipient order;
-  direct, broadcast, and group-chat routes each reserve one ID.
+  claim, inspection, and reconstruction. Multicast uses a distinct ID for each
+  recipient in route order. Direct, broadcast, and group-chat routes each
+  reserve one ID.
 - Reserving an ID creates no Team message. The host supplies the reserved IDs to
   the normal Team message sender and then records the resulting messages through
   `MeetingCoordinator.finish_publication()`.

@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from openjiuwen.agent_teams.meeting.member import MeetingMemberClient
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -31,7 +32,7 @@ class _MeetingTool(TeamTool):
             return ToolOutput(success=True, data=await self._run(inputs))
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
-        except (RuntimeError, OSError, SQLAlchemyError) as exc:
+        except (BaseError, RuntimeError, OSError, SQLAlchemyError) as exc:
             team_logger.warning("Meeting tool %s failed: %s", self.card.name, exc)
             return ToolOutput(success=False, error="meeting_operation_failed")
 

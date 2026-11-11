@@ -114,6 +114,14 @@ encoding failed to read its UTF-8 fixture.
 The final PR candidate on upstream `e241f796b` passed all 289 of those tests
 together with Python UTF-8 mode enabled.
 
+On 2026-11-11, the follow-up to PR #2574 bound external meeting callbacks to
+the receiving client's session, translated framework errors at the meeting
+tool boundary, and validated distinct multicast IDs before writing. Failed
+multicast batches are logged if the write and retry checks leave messages
+missing. On Windows with Python 3.12.14 and UTF-8 mode enabled, 67 focused tests
+passed across external meeting controls, the meeting queue, the message manager,
+reserved publication IDs, and concurrent publication retries.
+
 ## Current contract and remaining work
 
 The publication field contract is maintained in

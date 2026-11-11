@@ -227,6 +227,7 @@ class TeamMessageManager:
             from_member_name: Override sender id. Defaults to
                 ``self.member_name``.
             protocol: Message format (``"plain"`` / ``"json"``).
+            message_ids: Optional distinct publication IDs in recipient order.
 
         Returns:
             The created message ids in recipient order, or an empty list when
@@ -238,6 +239,8 @@ class TeamMessageManager:
 
         if message_ids is not None and len(message_ids) != len(to_member_names):
             raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="One message ID is required per recipient")
+        if message_ids is not None and len(set(message_ids)) != len(message_ids):
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Message IDs must be unique per recipient")
         pairs = list(zip(message_ids, to_member_names)) if message_ids is not None else [
             (str(uuid.uuid4()), to) for to in to_member_names
         ]
@@ -253,9 +256,13 @@ class TeamMessageManager:
         ) if missing else 0
         if created != len(missing):
             if message_ids is None:
+                team_logger.error("Multicast batch write failed for team %s", self.team_name)
                 return []
             for message_id, to in missing:
                 if not await self._publication_exists(message_id, sender, content, to, False, protocol):
+                    team_logger.error(
+                        "Multicast batch write failed for team %s: message %s missing", self.team_name, message_id,
+                    )
                     return []
 
         for message_id, to_member_name in pairs:
