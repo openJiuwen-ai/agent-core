@@ -35,9 +35,6 @@ from openjiuwen.harness.tools.shell.powershell._permission import (
     PermissionMode,
     check_permission,
 )
-from openjiuwen.harness.tools.shell.powershell._security import (
-    get_destructive_warning,
-)
 from openjiuwen.harness.tools.shell.powershell._semantics import interpret_exit_code
 
 
@@ -147,8 +144,6 @@ class PowerShellTool(Tool):
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
 
-        warning = get_destructive_warning(p.command)
-
         if p.description:
             sys_operation_logger.debug("PowerShellTool: %s - %s", p.description, p.command)
 
@@ -187,7 +182,6 @@ class PowerShellTool(Tool):
                         stdout=res.data.stdout or "",
                         stderr=res.data.stderr or "",
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
-                        warning=warning,
                         max_output_chars=p.max_output_chars,
                     ),
                     res.message,
@@ -211,7 +205,6 @@ class PowerShellTool(Tool):
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,
@@ -238,8 +231,6 @@ class PowerShellTool(Tool):
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
-
-        warning = get_destructive_warning(p.command)
 
         if p.description:
             sys_operation_logger.debug("PowerShellTool(stream): %s - %s", p.description, p.command)
@@ -302,7 +293,6 @@ class PowerShellTool(Tool):
                 stdout=accumulated_stdout,
                 stderr=accumulated_stderr,
                 exit_code=final_exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,

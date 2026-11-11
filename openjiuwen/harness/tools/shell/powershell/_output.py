@@ -98,13 +98,6 @@ def _build_persisted_message(filepath: str, original_size: int, preview: str, ha
     return msg
 
 
-def _prepend_warning(content: str, warning: str | None) -> str:
-    """Prepend a destructive-command warning to content, keeping it visible."""
-    if not warning:
-        return content
-    return f"{warning}\n{content}" if content else warning
-
-
 def _merge(first: str, second: str) -> str:
     """Join two output streams with a newline, dropping empty ones."""
     if not first:
@@ -121,7 +114,6 @@ class CommandOutput:
     stdout: str
     stderr: str
     exit_code: int
-    warning: str | None
     max_output_chars: int
 
 
@@ -133,9 +125,8 @@ def render_tool_content(
 
     Mirrors the bash_v2 post-processing without depending on the anyshell engine:
     stdout and stderr are merged (the error path surfaces the merged stream after
-    an ``Exit code N`` header), oversized output is persisted to disk and shown as
-    a ``<persisted-output>`` preview, and any destructive-command warning is
-    prepended so it stays visible to the model.
+    an ``Exit code N`` header), and oversized output is persisted to disk and shown
+    as a ``<persisted-output>`` preview.
 
     Args:
         output: Bundled command result and rendering configuration.
@@ -149,7 +140,7 @@ def render_tool_content(
         # Error path: stderr leads so the failure detail comes first.
         merged = _merge(output.stderr, output.stdout)
         parts = [f"Exit code {output.exit_code}", merged]
-        return _prepend_warning("\n".join(p for p in parts if p), output.warning), True
+        return "\n".join(p for p in parts if p), True
 
     # Data path: stdout leads.
     merged = _merge(output.stdout, output.stderr)
@@ -158,7 +149,7 @@ def render_tool_content(
         path, size = persist_large_output(output.stdout, output.stderr)
         preview, has_more = _generate_preview(processed, _PREVIEW_SIZE_BYTES)
         processed = _build_persisted_message(path, size, preview, has_more)
-    return _prepend_warning(processed, output.warning), False
+    return processed, False
 
 
 def render_partial_on_failure(

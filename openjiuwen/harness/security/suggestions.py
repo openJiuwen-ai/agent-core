@@ -1,6 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Permission suggestion builders for allow_always persistence."""
+"""Permission suggestion builders for allow_always persistence.
+
+These builders propose the configuration change implied by a user's
+"always allow" choice; ``PermissionManager`` only evaluates the config the
+caller hands it, so the proposal lives here (caller side).
+"""
 
 from __future__ import annotations
 
@@ -9,25 +14,39 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.harness.security.shell_ast import (
-    ShellAstParseResult,
-    ShellSubcommand,
-    parse_shell_for_permission,
-)
+from .shell_ast import ShellAstParseResult, parse_shell_for_permission
 
 logger = logging.getLogger(__name__)
 
 _SHELL_SUGGESTION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
-_PATH_SUGGESTION_TOOLS = frozenset({
-    "read_file", "write_file", "edit_file",
-    "read_text_file", "write_text_file",
-    "write", "read",
-    "glob_file_search", "glob", "list_dir", "list_files",
-    "grep", "search_replace",
-})
+_PATH_SUGGESTION_TOOLS = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "read_text_file",
+        "write_text_file",
+        "write",
+        "read",
+        "glob_file_search",
+        "glob",
+        "list_dir",
+        "list_files",
+        "grep",
+        "search_replace",
+    }
+)
 _PATH_SUGGESTION_KEYS = (
-    "path", "file_path", "target_file", "file", "old_path", "new_path",
-    "source_path", "dest_path", "directory", "dir",
+    "path",
+    "file_path",
+    "target_file",
+    "file",
+    "old_path",
+    "new_path",
+    "source_path",
+    "dest_path",
+    "directory",
+    "dir",
 )
 
 
@@ -42,9 +61,9 @@ class PermissionSuggestion:
 
 
 def build_permission_suggestions(
-        tool_name: str,
-        tool_args: dict[str, Any],
-        shell_ast_result: ShellAstParseResult | None = None,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    shell_ast_result: ShellAstParseResult | None = None,
 ) -> list[PermissionSuggestion]:
     if tool_name in _SHELL_SUGGESTION_TOOLS:
         command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
@@ -62,10 +81,10 @@ def build_permission_suggestions(
 
 
 def build_shell_permission_suggestions(
-        tool_name: str,
-        command: str,
-        *,
-        shell_ast_result: ShellAstParseResult | None = None,
+    tool_name: str,
+    command: str,
+    *,
+    shell_ast_result: ShellAstParseResult | None = None,
 ) -> list[PermissionSuggestion]:
     shell_ast_result = shell_ast_result or parse_shell_for_permission(command)
     flags = shell_ast_result.flags
@@ -74,7 +93,8 @@ def build_shell_permission_suggestions(
         return []
     if shell_ast_result.kind == "parse_unavailable" and flags.has_risky_structure():
         return []
-    if any((
+    if any(
+        (
             flags.has_input_redirection,
             flags.has_output_redirection,
             flags.has_command_substitution,
@@ -83,7 +103,8 @@ def build_shell_permission_suggestions(
             flags.has_subshell,
             flags.has_command_group,
             flags.has_parameter_expansion,
-    )):
+        )
+    ):
         return []
 
     if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) > 1:
@@ -103,8 +124,8 @@ def build_shell_permission_suggestions(
 
 
 def _build_single_shell_suggestion(
-        tool_name: str,
-        command: str,
+    tool_name: str,
+    command: str,
 ) -> PermissionSuggestion | None:
     text = (command or "").strip()
     if not text:
@@ -167,8 +188,8 @@ def _build_prefix_pattern(prefix: str) -> str:
 
 
 def _build_path_permission_suggestion(
-        tool_name: str,
-        tool_args: dict[str, Any],
+    tool_name: str,
+    tool_args: dict[str, Any],
 ) -> PermissionSuggestion | None:
     for key in _PATH_SUGGESTION_KEYS:
         value = tool_args.get(key)
@@ -206,7 +227,7 @@ def _value_looks_like_path(key: str, text: str) -> bool:
 
 
 def _dedupe_suggestions(
-        suggestions: list[PermissionSuggestion],
+    suggestions: list[PermissionSuggestion],
 ) -> list[PermissionSuggestion]:
     seen: set[tuple[tuple[str, ...], str, str, str]] = set()
     result: list[PermissionSuggestion] = []
@@ -222,3 +243,10 @@ def _dedupe_suggestions(
         seen.add(signature)
         result.append(suggestion)
     return result
+
+
+__all__ = [
+    "PermissionSuggestion",
+    "build_permission_suggestions",
+    "build_shell_permission_suggestions",
+]

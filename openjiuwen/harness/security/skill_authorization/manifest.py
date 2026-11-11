@@ -1,6 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Skill Manifest 生成：加载并校验 skill_permissions.json，产出 SkillManifest。"""
+"""Skill Manifest 生成：按 harness 的 Skill 目录约定读取并校验 ``skill_permissions.json``。
+
+目录结构与 ``SKILL.md`` 身份复核属于 harness 约定，因此加载逻辑留在 core；
+声明格式校验、规范化与摘要计算由本包 :mod:`.schema` 提供。
+"""
 
 from __future__ import annotations
 

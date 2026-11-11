@@ -8,11 +8,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from agent_shield.tool_permission.engine import PermissionEngine
 
-from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.approval_rules import (
+    merge_permission_allow_rule_into_permissions,
+)
 from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.patterns import merge_permission_allow_rule_into_permissions
 from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
+
+
+def _engine(cfg: dict, workspace_root: Path) -> PermissionEngine:
+    return PermissionEngine({**cfg, "runtime": {"workspace_root": str(workspace_root)}})
 
 
 def test_a_ignores_path_approval_override() -> None:
@@ -70,7 +76,7 @@ async def test_write_file_allow_path_ask_from_b_only(tmp_path: Path) -> None:
             "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
         },
     }
-    engine = PermissionEngine(cfg, workspace_root=workspace)
+    engine = _engine(cfg, workspace)
     result = await engine.check_permission(
         "write_file", {"file_path": str(target)},
     )
@@ -102,7 +108,7 @@ async def test_write_file_allow_and_file_guard_write_allow(tmp_path: Path) -> No
             ],
         },
     }
-    engine = PermissionEngine(cfg, workspace_root=workspace)
+    engine = _engine(cfg, workspace)
     result = await engine.check_permission(
         "write_file", {"file_path": str(target)},
     )

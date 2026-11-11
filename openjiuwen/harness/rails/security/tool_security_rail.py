@@ -48,6 +48,7 @@ from openjiuwen.harness.security.permission_checks import fail_closed_permission
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 _MISSING = object()
+_PERMISSION_WARNINGS_PREFIX = "_permission_warnings:"
 
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -422,6 +423,50 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         """
         return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
 
+    @staticmethod
+    def _warnings_key(tool_call: Optional[ToolCall]) -> str:
+        """Per-call key; tool callback contexts may share ``extra`` with siblings."""
+        call_id = getattr(tool_call, "id", "") or ""
+        return f"{_PERMISSION_WARNINGS_PREFIX}{call_id}"
+
+    @classmethod
+    def _remember_warnings(
+        cls,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        warnings: Iterable[str] | None,
+    ) -> None:
+        """Keep informational warnings for ``after_tool_call``; never gate a call."""
+        items = tuple(str(warning) for warning in (warnings or ()) if warning)
+        extra = getattr(ctx, "extra", None)
+        if items and isinstance(extra, dict):
+            extra[cls._warnings_key(tool_call)] = items
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Prepend permission warnings (e.g. destructive command) to tool output."""
+        try:
+            extra = getattr(ctx, "extra", None)
+            inputs = getattr(ctx, "inputs", None)
+            if not isinstance(extra, dict) or inputs is None:
+                return
+            warnings = extra.pop(
+                self._warnings_key(getattr(inputs, "tool_call", None)), None
+            )
+            text = "\n".join(str(warning) for warning in (warnings or ()) if warning)
+            if not text:
+                return
+            message = getattr(inputs, "tool_msg", None)
+            content = getattr(message, "content", None)
+            if isinstance(content, str):
+                message.content = f"{text}\n{content}" if content else text
+            data = getattr(getattr(inputs, "tool_result", None), "data", None)
+            if isinstance(data, dict) and isinstance(data.get("content"), str):
+                data["content"] = f"{text}\n{data['content']}" if data["content"] else text
+        except Exception:  # noqa: BLE001 — warnings are advisory; never fail a tool call
+            logger.debug(
+                "[PermissionEngine] permission.warnings.apply_failed", exc_info=True
+            )
+
     @fail_closed_permission_callback
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
@@ -603,6 +648,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 raise
 
+            self._remember_warnings(ctx, tool_call, result.warnings)
+
             # 无论 allow / ask / deny，先落一条对称的裁决日志（进 permissions.log）。
             decision_text = (
                 "allow"
@@ -758,21 +805,29 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 payload_schema=ConfirmPayload.to_schema(),
             ))
 
+        approved_result: PermissionResult | None = None
+        if payload.approved:
+            try:
+                approved_result = await self._check_tool_permission(
+                    normalized_name, tool_args, ctx
+                )
+            except Exception:  # noqa: BLE001 — warnings are best-effort; never block execution
+                logger.warning(
+                    "[PermissionEngine] permission.warnings.recheck_failed tool=%s",
+                    tool_name,
+                    exc_info=True,
+                )
+            else:
+                self._remember_warnings(ctx, tool_call, approved_result.warnings)
+
         persisted = False
         if payload.approved and payload.auto_confirm and payload.persist_allow:
             with self.permission_persist_context(ctx):
-                ask_accesses: list[tuple[str, str]] = []
-                try:
-                    confirm_result = await self._check_tool_permission(
-                        normalized_name, tool_args, ctx
-                    )
-                    ask_accesses = list(confirm_result.ask_accesses or ())
-                except Exception:  # noqa: BLE001 — best-effort path collection; persist the rule anyway
-                    logger.warning(
-                        "[PermissionEngine] permission.persist.ask_accesses_failed tool=%s",
-                        tool_name,
-                        exc_info=True,
-                    )
+                ask_accesses: list[tuple[str, str]] = (
+                    list(approved_result.ask_accesses or ())
+                    if approved_result is not None
+                    else []
+                )
                 persisted = self._persist_allow_always(
                     normalized_name, tool_args, ask_accesses
                 )

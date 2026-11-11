@@ -1,6 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""PowerShell command classification and exit-code semantic interpretation."""
+"""PowerShell command classification and exit-code semantic interpretation.
+
+本模块为 PowerShell 方言的 shell 语义实现（命令分类、只读/静默判断、退出码语义），
+由 core 自身维护（此前曾临时托管在安全包中）。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,39 +32,106 @@ class ExitCodeMeaning:
     message: str | None = None
 
 
-_SEARCH_COMMANDS: frozenset[str] = frozenset({
-    "select-string", "sls", "findstr", "get-command", "where-object", "where",
-})
+_SEARCH_COMMANDS: frozenset[str] = frozenset(
+    {
+        "select-string",
+        "sls",
+        "findstr",
+        "get-command",
+        "where-object",
+        "where",
+    }
+)
 
-_READ_COMMANDS: frozenset[str] = frozenset({
-    "get-content", "gc", "type", "get-item", "gi", "test-path", "resolve-path", "get-filehash",
-    "select-object", "select", "sort-object", "sort", "format-table", "ft", "format-list", "fl",
-    "format-wide", "fw", "foreach-object", "foreach", "measure-object",
-})
+_READ_COMMANDS: frozenset[str] = frozenset(
+    {
+        "get-content",
+        "gc",
+        "type",
+        "get-item",
+        "gi",
+        "test-path",
+        "resolve-path",
+        "get-filehash",
+        "select-object",
+        "select",
+        "sort-object",
+        "sort",
+        "format-table",
+        "ft",
+        "format-list",
+        "fl",
+        "format-wide",
+        "fw",
+        "foreach-object",
+        "foreach",
+        "measure-object",
+    }
+)
 
-_LIST_COMMANDS: frozenset[str] = frozenset({
-    "get-childitem", "gci", "dir", "ls",
-})
+_LIST_COMMANDS: frozenset[str] = frozenset(
+    {
+        "get-childitem",
+        "gci",
+        "dir",
+        "ls",
+    }
+)
 
-_NEUTRAL_COMMANDS: frozenset[str] = frozenset({
-    "write-output", "echo", "write-host", "out-host",
-})
+_NEUTRAL_COMMANDS: frozenset[str] = frozenset(
+    {
+        "write-output",
+        "echo",
+        "write-host",
+        "out-host",
+    }
+)
 
-_SILENT_COMMANDS: frozenset[str] = frozenset({
-    "set-location", "cd", "sl", "push-location", "pop-location",
-    "new-item", "ni", "remove-item", "ri", "rm",
-    "move-item", "mi", "mv", "copy-item", "cp", "cpi",
-    "rename-item", "rni", "set-content", "sc", "add-content", "ac",
-    "clear-content", "clc",
-})
+_SILENT_COMMANDS: frozenset[str] = frozenset(
+    {
+        "set-location",
+        "cd",
+        "sl",
+        "push-location",
+        "pop-location",
+        "new-item",
+        "ni",
+        "remove-item",
+        "ri",
+        "rm",
+        "move-item",
+        "mi",
+        "mv",
+        "copy-item",
+        "cp",
+        "cpi",
+        "rename-item",
+        "rni",
+        "set-content",
+        "sc",
+        "add-content",
+        "ac",
+        "clear-content",
+        "clc",
+    }
+)
 
-_GET_CHILD_ITEM_COMMANDS: frozenset[str] = frozenset({
-    "get-childitem", "gci", "dir", "ls",
-})
+_GET_CHILD_ITEM_COMMANDS: frozenset[str] = frozenset(
+    {
+        "get-childitem",
+        "gci",
+        "dir",
+        "ls",
+    }
+)
 
-_SEARCH_EXIT_ONE_COMMANDS: frozenset[str] = frozenset({
-    "select-string", "sls", "findstr",
-})
+_SEARCH_EXIT_ONE_COMMANDS: frozenset[str] = frozenset(
+    {
+        "select-string",
+        "sls",
+        "findstr",
+    }
+)
 
 _KIND_LOOKUP: dict[str, CommandKind] = {}
 for _cmds, _kind in (
