@@ -979,6 +979,25 @@ class TestModelContext:
         assert context.get_messages()[0].content == "h1"
 
     @pytest.mark.asyncio
+    async def test_clear_messages_clears_full_buffer_beyond_window(self):
+        # CORE-01: 底层消息数超过 max_context_message_num 时，clear_messages 必须全清
+        context = await self.create_context(max_context_message_num=5)
+        await context.add_messages([UserMessage(content=f"m-{i}") for i in range(8)])
+        await context.clear_messages(with_history=True)
+        assert len(context) == 0
+        assert context.get_messages(with_history=True) == []
+
+    @pytest.mark.asyncio
+    async def test_clear_messages_keeps_history_beyond_window(self):
+        # CORE-01: 窗口场景下 clear(False) 仍保留持久 history 前缀，本轮累积段全清
+        history = [UserMessage(content=f"h-{i}") for i in range(2)]
+        context = await self.create_context(history=history, max_context_message_num=5)
+        await context.add_messages([UserMessage(content=f"m-{i}") for i in range(8)])
+        await context.clear_messages(with_history=False)
+        remaining = context.get_messages(with_history=True)
+        assert [m.content for m in remaining] == ["h-0", "h-1"]
+
+    @pytest.mark.asyncio
     async def test_model_context_window_with_incomplete_dialogue_round(self):
         def create_tool_call_list(tcs: List[str]):
             return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in tcs]

@@ -52,6 +52,25 @@ class ContextMessageBuffer:
         self._context_messages = self._context_messages[:len(self._context_messages) - popped_size]
         return popped_messages
 
+    def clear(self, with_history: bool = True) -> List[BaseMessage]:
+        """真正清空底层缓冲，不受可见窗口约束（区别于 pop_back / pop_messages）。
+
+        Context.clear_messages 应使用此方法：原 pop_messages(len(self)) 因
+        len(self)（=size()）被 max_buffer_size 截断为可见窗口长度，无法清空窗口
+        外的底层历史消息，导致“清空”后旧消息重新成为上下文。
+
+        - with_history=True: 清空全部消息（含 history 前缀）
+        - with_history=False: 仅清空非 history 部分，保留 history 前缀
+        """
+        if with_history:
+            popped = list(self._context_messages)
+            self._context_messages = []
+            self._history_messages_size = 0
+        else:
+            popped = list(self._context_messages[self._history_messages_size:])
+            self._context_messages = self._context_messages[:self._history_messages_size]
+        return popped
+
     def set_messages(self, messages: List[BaseMessage], with_history: bool = True):
         if with_history:
             self._context_messages = messages

@@ -615,11 +615,16 @@ class SessionModelContext(ModelContext):
 
     @_fw.emit_before(ContextEvents.CONTEXT_CLEARED, pass_args=False)
     async def clear_messages(self, with_history: bool = True):
-        popped_messages = self.pop_messages(len(self), with_history=with_history)
+        # 使用 ContextMessageBuffer.clear 真正清空底层缓冲：
+        # 原先 pop_messages(len(self)) 因 len(self) 被 max_buffer_size 截断，
+        # 无法清空窗口外的历史消息。
+        popped_messages = self._message_buffer.clear(with_history=with_history)
         if popped_messages:
             # pop_messages owns the revision increment; clear only refines the
             # mutation label for the next request-local context report.
+            ContextUtils.invalidate_usage_metadata(self._message_buffer.get_back())
             self._last_message_mutation = "clear"
+            self._mark_message_changed("remove")
         self._offload_message_buffer = OffloadMessageBuffer()
         self._configure_offload_message_buffer()
         return
