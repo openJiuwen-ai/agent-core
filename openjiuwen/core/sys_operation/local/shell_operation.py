@@ -49,6 +49,7 @@ _POSIX_COMMANDS = frozenset({
     "ls", "grep", "egrep", "fgrep", "cat", "head", "tail", "find", "rm",
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
     "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir", "echo",
+    "python", "python3",
 })
 _BASH_CONTROL_FLOW_PATTERNS = (
     re.compile(
@@ -515,6 +516,11 @@ class ShellOperation(BaseShellOperation):
             timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
+            # Force Python child processes to use UTF-8 for stdin/stdout/stderr
+            # instead of the system code page (cp1252/cp936).  Without this,
+            # `python -c "print('你好世界')"` raises UnicodeEncodeError on Windows
+            # because piped stdout defaults to the system code page (Issue T4).
+            exec_env.setdefault("PYTHONUTF8", "1")
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)
             if is_tui and tui_warning:
                 sys_operation_logger.warning(
@@ -676,6 +682,11 @@ class ShellOperation(BaseShellOperation):
             timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
+            # Force Python child processes to use UTF-8 for stdin/stdout/stderr
+            # instead of the system code page (cp1252/cp936).  Without this,
+            # `python -c "print('你好世界')"` raises UnicodeEncodeError on Windows
+            # because piped stdout defaults to the system code page (Issue T4).
+            exec_env.setdefault("PYTHONUTF8", "1")
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)
             if is_tui and tui_warning:
                 sys_operation_logger.warning(
@@ -856,6 +867,7 @@ class ShellOperation(BaseShellOperation):
                 )
 
             exec_env = OperationUtils.prepare_environment(environment)
+            exec_env.setdefault("PYTHONUTF8", "1")
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
             )

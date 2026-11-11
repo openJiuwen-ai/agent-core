@@ -2840,8 +2840,28 @@ class GrepTool(Tool):
             head_limit: Optional[int],
             offset: int,
             base_path: str,
+            search_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         raw_lines = [line for line in stdout.splitlines() if line.strip()]
+        # When searching a single file, ripgrep omits the filename from output
+        # (e.g. "3:## Overview" instead of "file.py:3:## Overview").  Prepend
+        # the actual filename so _relativize_line and the result display show
+        # the correct file path instead of misinterpreting the line number.
+        if search_path and os.path.isfile(search_path):
+            fname = os.path.basename(search_path)
+            prefixed_lines = []
+            for line in raw_lines:
+                if output_mode == "files_with_matches":
+                    prefixed_lines.append(fname)
+                elif output_mode == "count":
+                    if ":" in line:
+                        prefixed_lines.append(f"{fname}:{line}")
+                    else:
+                        prefixed_lines.append(line)
+                else:
+                    # content mode: line is "linenum:content" or "linenum-content-content"
+                    prefixed_lines.append(f"{fname}:{line}")
+            raw_lines = prefixed_lines
         limited_lines, applied_limit = self._apply_head_limit(raw_lines, head_limit, offset)
         final_lines = [self._relativize_line(line, base_path, output_mode) for line in limited_lines]
         content = "\n".join(final_lines)
@@ -3007,6 +3027,7 @@ class GrepTool(Tool):
                 head_limit=head_limit,
                 offset=offset,
                 base_path=path if os.path.isdir(path) else os.path.dirname(path) or ".",
+                search_path=path,
             ),
             error=stderr if not success else None
         )
