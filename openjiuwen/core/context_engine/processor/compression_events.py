@@ -29,15 +29,26 @@ def est_tokens(chars: int) -> int:
 
 
 def content_chars(content: Any) -> int:
-    """Serialized length in characters of one message content value."""
+    """Serialized length in characters of one message content value.
+
+    Must never raise: this helper is evaluated as an argument on the success
+    path of compression (e.g. ``forked/compressor/base.py`` right after
+    ``context.set_messages``), so a serialization quirk would surface as a
+    compression failure even though the compaction already succeeded.
+    """
     if isinstance(content, str):
         return len(content)
     if content is None:
         return 0
     try:
         return len(json.dumps(content, ensure_ascii=False))
-    except TypeError:
-        return len(str(content))
+    except (TypeError, ValueError):
+        # TypeError: non-JSON types (set, bytes, arbitrary objects)
+        # ValueError: circular reference / out-of-range float
+        try:
+            return len(str(content))
+        except Exception:
+            return 0
 
 
 def messages_total_chars(messages: Iterable[Any]) -> int:

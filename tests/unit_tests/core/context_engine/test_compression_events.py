@@ -152,6 +152,27 @@ def test_content_chars_and_messages_total_chars_handle_mixed_content():
     assert messages_total_chars(messages) == 4 + content_chars({"a": 1}) + 0 + 2
 
 
+def test_content_chars_never_raises_on_unserializable_content():
+    """Sits on the compression success path, so it must degrade, not raise."""
+
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    cyclic_dict: dict = {"a": 1}
+    cyclic_dict["self"] = cyclic_dict
+    cyclic_list: list = []
+    cyclic_list.append(cyclic_list)
+
+    for value in (cyclic_dict, cyclic_list, {1, 2, 3}, object(), float("nan")):
+        measured = content_chars(value)
+        assert isinstance(measured, int) and measured >= 0
+
+    # 循环引用退化为 str()，仍能给出一个正的字符量，且不影响其它消息的统计
+    messages = [_Message("ok"), _Message(cyclic_dict), _Message(None)]
+    assert messages_total_chars(messages) == 2 + content_chars(cyclic_dict) + 0
+
+
 def test_resolve_session_id_variants():
     assert resolve_session_id(_Context("s-9")) == "s-9"
     assert resolve_session_id(_Context(None)) == "unknown_session"
