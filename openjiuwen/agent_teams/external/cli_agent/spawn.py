@@ -248,6 +248,11 @@ def build_sdk_member_runtime(
 
     The remaining arguments mirror :func:`build_cli_runtime`.
     """
+    if ctx.cli_agent not in _SDK_MEMBER_KINDS:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"'{ctx.cli_agent}' is not an SDK-backed external CLI agent",
+        )
     if ctx.cli_agent == "claude":
         if codex_bin is not None:
             raise_error(
@@ -292,64 +297,59 @@ def build_sdk_member_runtime(
             team_context_tracker=team_context_tracker,
             surface_turn_failures=surface_turn_failures,
         )
-    if ctx.cli_agent == "codex":
-        if command_override is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Codex SDK members do not support command_override; configure cli_path instead",
-            )
-        if claude_turn_idle_timeout_s is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
-            )
-        if claude_max_buffer_size is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="claude_max_buffer_size is only supported for Claude SDK members",
-            )
-        if ssh_transport is not None:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="ssh transport is not yet supported for Codex SDK members",
-            )
-        if not member_agent_id:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason=f"Codex SDK member '{ctx.member_name}' requires a stable member_agent_id",
-            )
-        if add_dirs:
-            team_logger.debug(
-                "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
-                ctx.member_name,
-                cwd,
-            )
-        return _build_codex_member_runtime(
-            ctx,
-            context=context,
-            join_env=join_env,
-            cwd=cwd,
-            codex_bin=cli_path or codex_bin,
-            inject_mcp=inject_mcp,
-            mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
-            bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
-            turn_idle_timeout_s=codex_turn_idle_timeout_s,
-            turn_idle_retries=codex_turn_idle_retries,
-            external_model_config=external_model_config,
-            fallback_external_model_config=fallback_external_model_config,
-            promote_fallback_model=promote_fallback_model,
-            system_prompt_mode=system_prompt_mode,
-            skills=skills,
-            skill_conflict=skill_conflict,
-            extra_env=extra_env,
-            resume_external_backend=resume_external_backend,
-            member_agent_id=member_agent_id,
-            team_context_tracker=team_context_tracker,
-            surface_turn_failures=surface_turn_failures,
+    if command_override is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="Codex SDK members do not support command_override; configure cli_path instead",
         )
-    raise_error(
-        StatusCode.AGENT_TEAM_CONFIG_INVALID,
-        reason=f"'{ctx.cli_agent}' is not an SDK-backed external CLI agent",
+    if claude_turn_idle_timeout_s is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
+        )
+    if claude_max_buffer_size is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_max_buffer_size is only supported for Claude SDK members",
+        )
+    if ssh_transport is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="ssh transport is not yet supported for Codex SDK members",
+        )
+    if not member_agent_id:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"Codex SDK member '{ctx.member_name}' requires a stable member_agent_id",
+        )
+    if add_dirs:
+        team_logger.debug(
+            "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
+            ctx.member_name,
+            cwd,
+        )
+    return _build_codex_member_runtime(
+        ctx,
+        context=context,
+        join_env=join_env,
+        cwd=cwd,
+        codex_bin=cli_path or codex_bin,
+        inject_mcp=inject_mcp,
+        mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
+        bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
+        turn_idle_timeout_s=codex_turn_idle_timeout_s,
+        turn_idle_retries=codex_turn_idle_retries,
+        external_model_config=external_model_config,
+        fallback_external_model_config=fallback_external_model_config,
+        promote_fallback_model=promote_fallback_model,
+        system_prompt_mode=system_prompt_mode,
+        skills=skills,
+        skill_conflict=skill_conflict,
+        extra_env=extra_env,
+        resume_external_backend=resume_external_backend,
+        member_agent_id=member_agent_id,
+        team_context_tracker=team_context_tracker,
+        surface_turn_failures=surface_turn_failures,
     )
 
 

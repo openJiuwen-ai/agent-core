@@ -554,7 +554,8 @@ class AgentConfigurator:
         memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
-        if member_runtime is None and ctx.role == TeamRole.LEADER and ctx.cli_agent and self.team_backend is not None:
+        leads_external_harness = ctx.role == TeamRole.LEADER and bool(ctx.cli_agent)
+        if member_runtime is None and leads_external_harness and self.team_backend is not None:
             # A leader on a third-party harness (``LeaderSpec.cli_agent``).
             # Unlike a spawned member, nobody hands it a runtime: it is built
             # here, session-free, and bound to its session on every start.
