@@ -862,7 +862,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             goal=goal,
         )
         fork_value = inputs.get("fork")
-        if fork_value and fork_value not in ("false", False):
+        if result.ok and fork_value and fork_value not in ("false", False):
             self.team.mark_fork_on_spawn(
                 member_name,
                 fork_value,

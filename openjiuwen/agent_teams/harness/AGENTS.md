@@ -86,6 +86,9 @@ round 在跑之前 `session.commit()` 一次，进程中途死掉也不会复用
 v2 event 再从 span 父链继承。外部 CLI 成员（`external/member_runtime.py`）每个 provider turn 开一个
 新 turn，经 `start_turn(turn=...)` 交给 claude/codex bridge 打到 turn span 及其子 span 上。
 
+团队开启进程内 fork 时，原生队友在 Turn 正常结束、进入空闲或切换到下一个 Turn 前保存 fork 快照。
+运行中、已暂停或等待交互的队友拒绝被 fork。中止和中断保留上一次正常结束的快照。
+
 ## 异步工具框架（`async_tools.py`）
 
 照搬 Claude Code 两段式范式的通用异步后台工具框架，**限定在 NativeHarness 范围、零
@@ -163,3 +166,9 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
 装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
 见 [F_97](../../../.agents/agent-docs/features/agent_teams/F_97_native-harness-protocol-adapter.md)。
+
+## 成员工具环境
+
+NativeHarness 装配绑定成员 BuildContext 的 `resolve_execution_environment`，由 AbilityManager
+在每次工具调用开始时解析。team 会话设置由 `TeamDatabase.session_settings` 保存版本，
+平台可按调用读取，因此冷恢复和跨进程成员不依赖首轮请求上下文。见 `F_20261104_1721_session-execution-settings`。

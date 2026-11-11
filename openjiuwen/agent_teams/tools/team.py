@@ -21,6 +21,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.fork import ForkContext
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -421,12 +422,13 @@ class TeamBackend:
 
         # Fork / checkpoint support. ``_enable_fork`` is the capability gate:
         # the tool factory reads it to decide whether ``checkpoint`` is wired
-        # and whether ``spawn_teammate`` exposes the fork properties at all,
+        # and whether the spawn tools expose fork properties at all,
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
         # Capability gate for the per-member goal switch on ``spawn_teammate``.
         self._enable_member_goal: bool = enable_member_goal
         self._pending_forks: dict[str, dict] = {}  # member_name → {fork, since, source}
+        self._expert_fork_capture: Callable[[str], "ForkContext"] | None = None
         self._checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
         self._store_checkpoint_fn: Callable[..., dict | None] | None = None
@@ -509,10 +511,8 @@ class TeamBackend:
         """Whether context inheritance (fork) is open for this team.
 
         Straight from ``TeamAgentSpec.enable_fork`` — no ``build_team``
-        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Single gate
-        signal for all three fork surfaces: the ``checkpoint`` tool, the
-        fork properties on ``spawn_teammate``'s schema, and the fork section
-        of its description.
+        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Gates the
+        checkpoint tools and the fork properties and prose on spawn tools.
         """
         return self._enable_fork
 
@@ -524,6 +524,21 @@ class TeamBackend:
         there is nothing for a per-member switch to switch.
         """
         return self._enable_member_goal
+
+    def set_expert_fork_capture(self, capture: Callable[[str], "ForkContext"]) -> None:
+        """Wire the in-process leader's member context capture callback."""
+        self._expert_fork_capture = capture
+
+    def expert_fork_enabled(self) -> bool:
+        """Return whether this backend can capture context for a new expert."""
+        return self.fork_enabled() and self._expert_fork_capture is not None
+
+    def capture_expert_fork(self, source: str) -> "ForkContext":
+        """Capture the source context or raise when the source cannot be forked."""
+        capture = self._expert_fork_capture
+        if not self.fork_enabled() or capture is None:
+            raise ValueError("Expert fork requires enable_fork=True and in-process member spawning")
+        return capture(source)
 
     def member_messaging_enabled(self) -> bool:
         """Whether scheduled-dispatch members may message each other directly.
@@ -616,17 +631,22 @@ class TeamBackend:
     def mark_fork_on_spawn(
         self,
         member: str,
-        fork_value,
+        fork_value: bool | str,
         *,
         fork_source: str | None = None,
         fork_mode: str = "before",
+        snapshot: "ForkContext | None" = None,
     ) -> None:
+        """Queue fork intent, optionally with a context captured at registration."""
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
             "fork_mode": fork_mode,
         }
+        if snapshot is not None:
+            self._pending_forks[member]["snapshot"] = snapshot
+            self._pending_forks[member]["session_id"] = get_session_id()
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s fork_mode=%s team_name=%s pending_keys=%s",
             member,
@@ -637,12 +657,17 @@ class TeamBackend:
             list(self._pending_forks.keys()),
         )
 
+    def pending_fork_on_spawn(self, member: str) -> dict | None:
+        """Read the fork state without losing it if startup fails and retries."""
+        return self._pending_forks.get(member)
+
     def consume_fork_on_spawn(self, member: str) -> dict | None:
+        """Remove and return a member's pending fork state."""
         result = self._pending_forks.pop(member, None)
         team_logger.debug(
-            "[fork] consume_fork_on_spawn: member=%s result=%s remaining_pending=%s team_name=%s",
+            "[fork] consume_fork_on_spawn: member=%s found=%s remaining_pending=%s team_name=%s",
             member,
-            result,
+            result is not None,
             list(self._pending_forks.keys()),
             self.team_name,
         )
@@ -1663,6 +1688,7 @@ class TeamBackend:
 
         # Delete team from database
         await self.db.team.delete_team(self.team_name)
+        self._pending_forks.clear()
 
         # Notify the hosting TeamAgent as soon as the DB row is gone so
         # the checkpoint mirrors the durable source of truth before any
@@ -2751,6 +2777,7 @@ class TeamBackend:
             return False
         # An external-CLI member also left its CLI kind mapping behind.
         self._external_cli_specs.pop(member_name, None)
+        self._pending_forks.pop(member_name, None)
         if self._spec_evolution_enabled and self.workspace_cache is not None:
             from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
 

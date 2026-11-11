@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
@@ -797,6 +798,8 @@ class TeamAgent(BaseAgent):
                 team_backend.set_store_checkpoint_fn(self.set_checkpoint)
                 team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
                 team_backend.set_member_model_fn(self._apply_member_model)
+                if spec.enable_fork and spec.spawn_mode == "inprocess":
+                    team_backend.set_expert_fork_capture(self._capture_expert_fork)
 
     def _setup_agent(
         self,
@@ -1549,16 +1552,20 @@ class TeamAgent(BaseAgent):
 
         # ── Resolve fork context ──
         fork_ctx: ForkContext | None = None
+        fork_info = None
         if self.team_backend is not None:
-            fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
+            fork_info = self.team_backend.pending_fork_on_spawn(teammate_id)
             team_logger.debug(
-                "[fork] _on_teammate_created: member=%s fork_info=%s checkpoints=%s spawned_handles=%s",
+                "[fork] _on_teammate_created: member=%s requested=%s checkpoints=%s spawned_handles=%s",
                 teammate_id,
-                fork_info,
+                bool(fork_info),
                 list(self._named_checkpoints.keys()),
                 list(self._spawn_manager.spawned_handles.keys()),
             )
-            if fork_info:
+            if fork_info and "snapshot" in fork_info:
+                if fork_info["session_id"] == self.session_id:
+                    fork_ctx = fork_info["snapshot"]
+            elif fork_info:
                 try:
                     native = self._resolve_fork_native(fork_info.get("source"))
                     team_logger.debug(
@@ -1706,22 +1713,38 @@ class TeamAgent(BaseAgent):
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
             fork_from=fork_ctx,
         )
+        if fork_info:
+            self.team_backend.consume_fork_on_spawn(teammate_id)
+
+    def _capture_expert_fork(self, source_name: str) -> ForkContext:
+        """Capture self live, or fork another native member at its completed turn."""
+        native = self._resolve_fork_native(source_name)
+        if native is None:
+            raise ValueError(f"Fork source '{source_name}' must be a running in-process native member")
+        if source_name != self._member_name():
+            try:
+                return native.capture_completed_turn_fork()
+            except ValueError as exc:
+                raise ValueError(f"Fork source '{source_name}': {exc}") from exc
+        snapshot = ForkContext.from_agent(native)
+        if snapshot.is_empty():
+            raise ValueError(f"Fork source '{source_name}' has no conversation context to inherit")
+        return snapshot
 
     def _resolve_fork_native(self, source_name: str | None):
         """Return the DeepAgent of a named member, or leader's own."""
         if source_name is None or source_name == self._member_name():
-            return self.resources.harness.get_deep_agent()
-
-        handle = self._spawn_manager.spawned_handles.get(source_name)
-        if handle and hasattr(handle, "agent_ref"):
-            agent = handle.agent_ref
-            if hasattr(agent, "resources") and agent.resources.harness:
-                return agent.resources.harness.get_deep_agent()
+            agent = self
+        else:
+            agent = self._spawn_manager.lookup_inprocess_agent(source_name)
+        if agent is not None:
+            get_deep_agent = getattr(agent.resources.harness, "get_deep_agent", None)
+            if get_deep_agent is not None:
+                return get_deep_agent()
 
         team_logger.warning(
             "[fork] fork source '%s' not found or not in-process "
-            "(leader=%s, spawned=%s); fork inheritance will be SKIPPED — "
-            "member starts without inherited context",
+            "(leader=%s, spawned=%s)",
             source_name,
             self._member_name() or "?",
             list(self._spawn_manager.spawned_handles.keys()),
@@ -2113,7 +2136,9 @@ class TeamAgent(BaseAgent):
             runtime_spec: Optional live spec from the current process. Used to
                 reinject ``build_context`` and ``memory.embedding_config``, which
                 are ``Field(exclude=True)`` and never survive the checkpoint
-                round-trip. When omitted the recovered spec is used as-is
+                round-trip. Its context seed replaces the checkpoint seed too,
+                so later process spawns reconstruct the same platform context.
+                When omitted the recovered spec is used as-is
                 (rebuilding context from its seed).
 
         Raises:
@@ -2133,12 +2158,18 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        # An explicit host setting also applies when an older team is rebuilt.
+        if runtime_spec is not None and "enable_fork" in runtime_spec.model_fields_set:
+            spec.enable_fork = runtime_spec.enable_fork
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
         # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
+            # Process-spawn payloads exclude the live context. Keep its seed in
+            # sync so recovered members do not reconstruct checkpoint-era policy.
+            spec.build_context_seed = copy.deepcopy(runtime_spec.build_context_seed)
         # embedding_config is also Field(exclude=True) — reinject from the
         # live spec so resolve_embedding_config can find it during configure.
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:

@@ -61,6 +61,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -76,6 +77,7 @@ from openjiuwen.harness.goal.store import SessionGoalStore
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.schema.interaction import InteractionEvent, InteractionEventType
 from openjiuwen.harness.schema.state import DeepAgentState
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.harness.control import (
     _CmdAbort,
     _CmdGoalWork,
@@ -105,6 +107,8 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.core.single_agent.rail.base import AgentRail
+
+_COMPLETED_TURN_FORK_KEY = "team_completed_turn_fork"
 
 # Events fired on the harness-private callback framework so a consumer (e.g. the
 # team StreamController) can map harness lifecycle onto its own status machines
@@ -203,6 +207,7 @@ class NativeHarness(DeepAgent):
             self._react_agent._usage_agent_id = self.card.id
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
+        self.track_completed_turn_fork = False
         self._owns_session: bool = False
         self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
@@ -243,6 +248,8 @@ class NativeHarness(DeepAgent):
         # Apply config + tools + spec rails directly onto this instance — no
         # throwaway template DeepAgent.
         apply_deep_agent_parts(self, parts)
+        if build_context is not None:
+            self.ability_manager.execution_environment_resolver = build_context.resolve_execution_environment
         # Transitional team-side rails not yet declared in ``agent_spec.rails``.
         # Mounted after the spec rails so init order matches the legacy path.
         for rail in self._extra_rails:
@@ -282,6 +289,20 @@ class NativeHarness(DeepAgent):
     def session_id(self) -> str | None:
         """Owned (or injected) session id, or None before ``start()``."""
         return self._session.get_session_id() if self._session is not None else None
+
+    def capture_completed_turn_fork(self) -> ForkContext:
+        """Return the last completed turn's context while this member is idle."""
+        session = self._session
+        if session is None:
+            raise ValueError("member has no active native session")
+        has_pending_work = bool(self._st.pending_queue) or not self._control.empty()
+        has_interrupt = session.get_state(INTERRUPTION_KEY) is not None
+        if self.state is not HarnessState.IDLE or has_pending_work or has_interrupt:
+            raise ValueError("member must be idle with no pending interrupt; retry after it settles")
+        messages = session.get_state(_COMPLETED_TURN_FORK_KEY)
+        if not messages:
+            raise ValueError("member has no completed turn available to fork")
+        return ForkContext(messages=messages)
 
     @property
     def paused_query(self) -> str | None:
@@ -1262,6 +1283,7 @@ class NativeHarness(DeepAgent):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
         if self._st.pending_queue:
             content, run_context = self._drain_pending_messages()
+            self._record_completed_turn_fork(session, cmd.result)
             nxt = self._start_round(
                 content,
                 _StartMode.FOLLOW_UP,
@@ -1271,6 +1293,7 @@ class NativeHarness(DeepAgent):
             return
         follow_ups = self._drain_pending_follow_ups(session)
         if follow_ups is not None:
+            self._record_completed_turn_fork(session, cmd.result)
             nxt = self._start_round(follow_ups, _StartMode.FOLLOW_UP)
             await self._emit_round("started", nxt.round_id)
             return
@@ -1280,6 +1303,7 @@ class NativeHarness(DeepAgent):
         # already-cleared interrupt). Settle to IDLE; any follow-up queued above
         # still ran first.
         if is_resume:
+            self._record_completed_turn_fork(session, cmd.result)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1289,17 +1313,20 @@ class NativeHarness(DeepAgent):
             reopen_blocked=active.run_kind is not RunKind.GOAL,
         )
         if goal_round is not None:
+            # The goal attempt is a new turn: freeze the answered one first.
+            self._record_completed_turn_fork(session, cmd.result)
             await self._emit_round("started", goal_round.round_id)
             return
 
         # A continuation round that resumed a paused InteractiveInput round has
         # no replayable query, so there is nothing to drive a task-plan
         # continuation with.
-        if self._has_remaining_tasks(session) and active.original_query:
+        if not is_resume and self._has_remaining_tasks(session) and active.original_query:
             nxt = self._start_round(active.original_query, _StartMode.CONTINUES_TURN)
             await self._emit_round("started", nxt.round_id)
             return
 
+        self._record_completed_turn_fork(session, cmd.result)
         await self._transition(HarnessState.IDLE)
 
     # ------------------------------------------------------------------
@@ -1439,6 +1466,19 @@ class NativeHarness(DeepAgent):
                 extra={"goal_id": goal_id, "revision": revision},
             ),
         )
+
+    def _record_completed_turn_fork(self, session: Session, result: dict | None) -> None:
+        """Freeze an answered turn before the next turn can modify its context."""
+        if not self.track_completed_turn_fork or not result:
+            return
+        if result.get("result_type") != "answer" or result.get("error"):
+            return
+        try:
+            snapshot = ForkContext.from_agent(self, session_id=session.get_session_id())
+            if not snapshot.is_empty():
+                session.update_state({_COMPLETED_TURN_FORK_KEY: snapshot.messages})
+        except Exception:
+            logger.warning("[NativeHarness] Could not capture the completed turn for fork", exc_info=True)
 
     def _drain_pending_messages(
         self,

@@ -391,10 +391,17 @@ def _exec_args(
     """``process.exec`` args. The server already runs a string ``cmd`` with ``/bin/sh -c``."""
     cmd = command
     if environment:
+        env_parts: List[str] = []
         env_prefix = " ".join(
-            f"{key}={_quote_shell_value(value)}" for key, value in environment.items()
+            f"{key}={_quote_shell_value(value)}" for key, value in environment.items() if value is not None
         )
-        cmd = f"export {env_prefix} && {command}"
+        if env_prefix:
+            env_parts.append(f"export {env_prefix}")
+        for key, value in environment.items():
+            if value is None:
+                env_parts.append(f"unset -- {_quote_shell_value(key)}")
+        if env_parts:
+            cmd = " && ".join([*env_parts, command])
     args: dict[str, Any] = {"cmd": cmd}
     if isinstance(cwd, str) and cwd and cwd != ".":
         args["cwd"] = cwd

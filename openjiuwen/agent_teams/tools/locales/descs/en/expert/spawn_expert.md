@@ -21,6 +21,8 @@ Spawn a teammate from an installed expert template. The new member runs with the
 2. Call `spawn_expert`; for several instances of one expert use different `member_name`s and say in `desc` what each one covers.
 3. Hand out work with `create_task` / `send_message`.
 
+{{spawn_expert_fork}}
+
 - A group's `leader` cannot be spawned as a teammate.
 - When this team was assembled from an expert group, naming that group in `group` spawns another instance of a group member from the team's own assembled template — identical to the predefined member of the same name, without re-reading the package on disk.
 - An external-runtime expert needs its CLI kind declared for this team (same as `spawn_teammate`'s `cli_agent`); model, authentication fallback and built-in model rules are also those of `spawn_teammate` with `cli_agent`, with the fallback and built-in model given inside the `external_cli` object.

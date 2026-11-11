@@ -302,6 +302,11 @@ STRINGS: dict[str, str] = {
     "view_expert_groups.member": "get only, optional: expand just this member of the group",
     # ===== spawn_expert ========================================================
     # spawn_expert._desc lives in descs/en/expert/spawn_expert.md
+    "spawn_expert.fork": "When true, select the source context at registration and inject it at first start",
+    "spawn_expert.fork_source": (
+        "Requires fork=true. Omit or name the leader for live self-context, "
+        "or name an idle native teammate for its last completed turn"
+    ),
     "spawn_expert.expert": (
         "Required. A single expert's package name; with group, a member name of that group (not leader)"
     ),
