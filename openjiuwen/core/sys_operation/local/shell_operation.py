@@ -48,7 +48,7 @@ _POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
 _POSIX_COMMANDS = frozenset({
     "ls", "grep", "egrep", "fgrep", "cat", "head", "tail", "find", "rm",
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
-    "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir",
+    "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir", "echo",
 })
 _BASH_CONTROL_FLOW_PATTERNS = (
     re.compile(
