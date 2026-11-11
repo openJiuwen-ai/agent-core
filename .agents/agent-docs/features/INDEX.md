@@ -20,8 +20,9 @@ generated: true
 | [core/foundation/llm](#module-3) |
 | [extensions/observability](#module-4) |
 | [harness](#module-5) |
-| [harness/subagents](#module-6) |
-| [harness/tools/browser_move](#module-7) |
+| [harness/rails](#module-6) |
+| [harness/subagents](#module-7) |
+| [harness/tools/browser_move](#module-8) |
 
 <a id="module-1"></a>
 
@@ -264,13 +265,21 @@ generated: true
 
 <a id="module-6"></a>
 
+## harness/rails
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | openjiuwen/harness/rails | openjiuwen/harness/rails/memory/jiuwen_memory_coding_rail.py | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及跳过旧 AutoMemory 的补充决定。 |
+
+<a id="module-7"></a>
+
 ## harness/subagents
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-7"></a>
+<a id="module-8"></a>
 
 ## harness/tools/browser_move
 

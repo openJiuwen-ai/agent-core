@@ -17,8 +17,8 @@ author_email: yangzequ1@huawei.com
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-10-27 |
+| 关联模块 | `openjiuwen/harness/rails/` |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -75,7 +75,7 @@ author_email: yangzequ1@huawei.com
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
    ContextAssembleRail / Context*ProcessorRail / MultimodalContextSummarizerRail / Skill*CreateRail` →
    `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
-   `75 ExternalMemoryRail / JiuwenMemoryRail`（外接记忆 rail，在 MemoryRail(80) 之后、
+   `75 ExternalMemoryRail / JiuwenMemoryRail / JiuwenMemoryCodingRail`（外接记忆 rail，在 MemoryRail(80) 之后、
    LLMRetry(70) 之前） →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
    `50 core 默认`（含 `tools/cua/rails.py` 的 Cua*Rail） → `10 TrajectoryRail / TaskCompletionRail`。
@@ -243,3 +243,22 @@ class BaseSecurityRail(AgentRail):
   `request_retry` / `request_force_finish`）在 `openjiuwen/core/single_agent/rail/base.py`，
   属 core 规约管辖，不在本 spec 展开。
 - 子模块本地扩展（每一个坑的展开、加 rail 清单）见 `openjiuwen/harness/rails/AGENTS.md`。
+
+
+## Coding 文档记忆
+
+`JiuwenMemoryCodingRail(provider, *, user_id="__default__", scope_id="__default__", agent_id="jiuwenswarm", session_id="")` 从 `openjiuwen.harness.rails` 导出。
+
+- init 注册 Provider 工具和静态提示词；首次 before_invoke 初始化 Provider，普通调用 prefetch(top_k=5)，后台调用传 background=True。
+- 同一轮只召回一次；before_model_call 向对应 Agent 的 PromptAttachmentManager 写入记忆来源上下文，整体召回预算 6 秒。
+- after_invoke 仅在用户及回答均非空且非 heartbeat/cron 时排队 sync_turn；同一 Provider 的写入串行，每次最多 130 秒。
+- `attached_agents` 是当前使用者快照。每个 Agent 的工具、静态/动态提示词及缓存独立；移除工具核对 card 身份。
+- `uninit(agent)` 不阻塞事件循环；`drain()` 等待写入，`wait_closed()` 等待清理，`aclose()` 卸载全部使用者并等待关闭。Provider 只在最后使用者退出后关闭。
+- Provider 初始化失败不会回退到其他 Rail；此处不决定宿主的模式选择、项目标识或数据迁移。
+
+
+### Coding 记忆异常隔离与共享辅助入口
+
+`JiuwenMemoryCodingRail.init` 跳过没有有效名称的工具 schema；工具注册或静态提示词装配异常时，撤回该 owner 的部分注册，Agent 主流程继续运行。卸载单项工具、静态提示词或动态上下文失败，不中断其余清理及最后一个 owner 的排空写入、关闭 Provider。
+
+`JiuwenMemoryRail` 提供静态辅助入口 `resolve_user_text_for_memory`、`is_background_run`、`build_memory_context_block`、`extract_assistant_output`，供同层记忆 Rail 共享上下文解析；保留原带下划线名称兼容既有调用，解析与返回语义不变。

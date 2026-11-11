@@ -686,5 +686,11 @@ class JiuwenMemoryRail(DeepAgentRail):
             "</memory-context>"
         )
 
+    # Public context helpers shared by sibling memory rails; keep private names compatible.
+    resolve_user_text_for_memory = _resolve_user_text_for_memory
+    is_background_run = _is_background_run
+    build_memory_context_block = _build_memory_context_block
+    extract_assistant_output = _extract_assistant_output
+
 
 __all__ = ["JiuwenMemoryRail"]
