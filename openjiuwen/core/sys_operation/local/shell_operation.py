@@ -313,6 +313,15 @@ class ShellOperation(BaseShellOperation):
                 if _PS_VARIABLE_PATTERN.search(command):
                     exe = _available_powershell()
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+                # Multiline commands (e.g. `python -c "..."` with literal
+                # newlines) cannot be executed by cmd.exe — it silently drops
+                # everything after the first newline, producing empty output
+                # with exit code 0 (Issue T2).  Route to Git Bash instead,
+                # which handles multiline scripts correctly.
+                if "\n" in command:
+                    exe = _available_bash(allow_wsl=False)
+                    if exe:
+                        return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
