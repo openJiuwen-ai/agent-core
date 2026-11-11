@@ -23,6 +23,8 @@ from openjiuwen.agent_teams.tools.database import (
     TeamMessageBase,
 )
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -736,6 +738,19 @@ async def test_multicast_message_single_batch(db, team_messaging):
     assert msgs3[0].content == "ping all"
     assert msgs2[0].from_member_name == "member1"
     assert msgs2[0].timestamp == msgs3[0].timestamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_multicast_rejects_duplicate_ids_before_persisting(db, team_messaging, message_bus):
+    with pytest.raises(BaseError, match="Message IDs must be unique per recipient") as exc:
+        await team_messaging.multicast_message(
+            content="ping all", to_member_names=["member2", "member3"], message_ids=["same-id", "same-id"],
+        )
+
+    assert exc.value.status == StatusCode.AGENT_TEAM_CONFIG_INVALID
+    assert await db.message.get_message("same-id") is None
+    message_bus.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio

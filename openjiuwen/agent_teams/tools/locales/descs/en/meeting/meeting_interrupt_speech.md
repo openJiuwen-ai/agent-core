@@ -1,0 +1,1 @@
+Interrupt the current Meeting audio lease when `expected_token` matches its lease token. Returns interruption details, or null when no matching active lease exists. A stale token does not affect a subsequent speaker. The interruption creates a barrier that remains until acknowledged.

@@ -6,6 +6,7 @@
 This module provides messaging functionality for team members and team leader.
 """
 
+import json
 import uuid
 from typing import (
     List,
@@ -21,6 +22,8 @@ from openjiuwen.agent_teams.schema.events import (
 )
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -57,6 +60,21 @@ class TeamMessageManager:
         self.db = db
         self.messager = messager
 
+    async def _publication_exists(
+        self, message_id: str, sender: str, content: str, to: str | None,
+        broadcast: bool, protocol: str, meta: dict | None = None,
+    ) -> bool:
+        """Validate a stable ID used by a retried Meeting publication."""
+        row = await self.db.message.get_message(message_id)
+        if row is None:
+            return False
+        if (row.team_name, row.from_member_name, row.content, row.to_member_name,
+                row.broadcast, row.protocol) != (self.team_name, sender, content, to, broadcast, protocol):
+            raise_error(StatusCode.AGENT_TEAM_STATE_INVALID, reason="Message ID belongs to different content")
+        if (json.loads(row.meta) if row.meta else None) != (meta or None):
+            raise_error(StatusCode.AGENT_TEAM_STATE_INVALID, reason="Message ID belongs to different metadata")
+        return True
+
     async def send_message(
         self,
         content: str,
@@ -64,6 +82,8 @@ class TeamMessageManager:
         from_member_name: str | None = None,
         protocol: str = "plain",
         meta: dict | None = None,
+        *,
+        message_id: str | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
@@ -80,9 +100,13 @@ class TeamMessageManager:
                 ``message_template.py``.
         """
         sender = from_member_name or self.member_name
-        message_id = str(uuid.uuid4())
+        supplied_id = message_id is not None
+        message_id = message_id or str(uuid.uuid4())
+        exists = supplied_id and await self._publication_exists(
+            message_id, sender, content, to_member_name, False, protocol, meta,
+        )
 
-        success = await self.db.message.create_message(
+        success = exists or await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
             from_member_name=sender,
@@ -93,6 +117,8 @@ class TeamMessageManager:
             protocol=protocol,
             meta=meta,
         )
+        if not success and supplied_id:
+            success = await self._publication_exists(message_id, sender, content, to_member_name, False, protocol, meta)
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
             return None
@@ -123,6 +149,9 @@ class TeamMessageManager:
         self,
         content: str,
         from_member_name: str | None = None,
+        *,
+        message_id: str | None = None,
+        protocol: str = "plain",
     ) -> Optional[str]:
         """Send a broadcast message.
 
@@ -132,16 +161,21 @@ class TeamMessageManager:
                 ``self.member_name``.
         """
         sender = from_member_name or self.member_name
-        message_id = str(uuid.uuid4())
+        supplied_id = message_id is not None
+        message_id = message_id or str(uuid.uuid4())
+        exists = supplied_id and await self._publication_exists(message_id, sender, content, None, True, protocol)
 
-        success = await self.db.message.create_message(
+        success = exists or await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
             from_member_name=sender,
             content=content,
             to_member_name=None,
             broadcast=True,
+            protocol=protocol,
         )
+        if not success and supplied_id:
+            success = await self._publication_exists(message_id, sender, content, None, True, protocol)
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
@@ -174,6 +208,8 @@ class TeamMessageManager:
         to_member_names: List[str],
         from_member_name: str | None = None,
         protocol: str = "plain",
+        *,
+        message_ids: list[str] | None = None,
     ) -> List[str]:
         """Send identical content to several members as N point-to-point messages.
 
@@ -191,6 +227,7 @@ class TeamMessageManager:
             from_member_name: Override sender id. Defaults to
                 ``self.member_name``.
             protocol: Message format (``"plain"`` / ``"json"``).
+            message_ids: Optional distinct publication IDs in recipient order.
 
         Returns:
             The created message ids in recipient order, or an empty list when
@@ -200,17 +237,33 @@ class TeamMessageManager:
         if not to_member_names:
             return []
 
-        pairs = [(str(uuid.uuid4()), to) for to in to_member_names]
+        if message_ids is not None and len(message_ids) != len(to_member_names):
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="One message ID is required per recipient")
+        if message_ids is not None and len(set(message_ids)) != len(message_ids):
+            raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason="Message IDs must be unique per recipient")
+        pairs = list(zip(message_ids, to_member_names)) if message_ids is not None else [
+            (str(uuid.uuid4()), to) for to in to_member_names
+        ]
+        missing = []
+        for message_id, to in pairs:
+            if message_ids is None or not await self._publication_exists(
+                message_id, sender, content, to, False, protocol,
+            ):
+                missing.append((message_id, to))
         created = await self.db.message.create_direct_messages(
-            team_name=self.team_name,
-            from_member_name=sender,
-            content=content,
-            recipients=pairs,
-            protocol=protocol,
-        )
-        if created != len(pairs):
-            team_logger.error("Failed to batch-create multicast messages from %s", sender)
-            return []
+            team_name=self.team_name, from_member_name=sender, content=content,
+            recipients=missing, protocol=protocol,
+        ) if missing else 0
+        if created != len(missing):
+            if message_ids is None:
+                team_logger.error("Multicast batch write failed for team %s", self.team_name)
+                return []
+            for message_id, to in missing:
+                if not await self._publication_exists(message_id, sender, content, to, False, protocol):
+                    team_logger.error(
+                        "Multicast batch write failed for team %s: message %s missing", self.team_name, message_id,
+                    )
+                    return []
 
         for message_id, to_member_name in pairs:
             try:

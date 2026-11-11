@@ -994,6 +994,33 @@ state["teams"][team_name] = {
 `TeamLifecycle` 进 spec → 跨进程序列化；`RuntimeState` 留在 pool entry，进程内
 in-memory，不写 spec。
 
+## Meeting publication identifiers
+
+The host decides which outbound messages enter the meeting queue and enqueues
+them before sending. A meeting lease governs explicitly queued requests.
+Ordinary Team sends follow their existing delivery contract, and the host
+supplies the speech text and acknowledges playback.
+
+`SpeechRequest` in `schema/meeting.py` distinguishes reserved publication IDs
+from published source references:
+
+- `publication_message_ids: tuple[str, ...]` is derived from the existing request
+  identity and route for requests containing text. It is available on enqueue,
+  claim, inspection, and reconstruction. Multicast uses a distinct ID for each
+  recipient in route order. Direct, broadcast, and group-chat routes each
+  reserve one ID.
+- Reserving an ID creates no Team message. The host supplies the reserved IDs to
+  the normal Team message sender and then records the resulting messages through
+  `MeetingCoordinator.finish_publication()`.
+- `source_message_ids` stays empty until publication is recorded. A reserved ID
+  alone cannot finish publication or acknowledge playback of unpublished text.
+- Speech-only requests expose no publication IDs. The member-facing speaker view
+  redacts reserved IDs together with source references and text.
+- The field is appended with an empty-tuple default to preserve existing
+  positional construction. It is a derived projection, not a database column.
+
+Usage: [Meeting audio queue](../../../../docs/dev/meeting_audio_queue.md).
+Implementation and validation: [F_20261106_1222_meeting-audio-queue](../../features/F_20261106_1222_meeting-audio-queue.md).
 ## Goal 模式配置
 
 ```python

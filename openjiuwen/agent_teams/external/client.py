@@ -29,7 +29,7 @@ from openjiuwen.agent_teams.inbound_render import render_clock
 from openjiuwen.agent_teams.message_template import expand_message, revision_getters, task_links
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
-from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 from openjiuwen.agent_teams.schema.task import TaskCreateResult, TaskDetail, TaskOpResult
 from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
 from openjiuwen.agent_teams.timefmt import format_absolute_time
@@ -42,6 +42,7 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.meeting.member import MeetingMemberClient
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.database import TeamDatabase
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -114,6 +115,7 @@ class ExternalTeamClient:
         # same TeamTool instances (same schema + render_for_llm text) as a native
         # in-process teammate. Empty for the ``operator`` scope.
         self._tools: dict[str, "Tool"] = {}
+        self._meeting_state_subscription = False
         self._connected = False
 
     @property
@@ -168,6 +170,45 @@ class ExternalTeamClient:
         the explicit op methods / backend).
         """
         return self._tools
+
+    @property
+    def meeting_enabled(self) -> bool:
+        """Last observed Team/session Meeting state; refresh via get_meeting_member()."""
+        return self._backend.meeting_enabled if self._backend is not None else False
+
+    async def _on_team_event(self, event: EventMessage) -> None:
+        if event.event_type != TeamEvent.MEETING_STATE_CHANGED or self._backend is None:
+            return
+        token = set_session_id(self.session_id)
+        try:
+            meeting = await self._backend.get_meeting()
+        finally:
+            reset_session_id(token)
+        if meeting is None:
+            self._tools.pop("meeting_get_speaker", None)
+            self._tools.pop("meeting_interrupt_speech", None)
+
+    @_bind_client_session
+    async def get_meeting_member(self) -> "MeetingMemberClient | None":
+        """Refresh and return this external identity's bound Meeting client."""
+        if self._backend is None:
+            raise RuntimeError("ExternalTeamClient must be connected")
+        meeting = await self._backend.get_meeting()
+        return meeting.for_member(self.member_name) if meeting is not None else None
+
+    @_bind_client_session
+    async def install_meeting_tools(self) -> dict[str, "Tool"]:
+        """Opt this member's external tool surface into Meeting observation/control."""
+        if self.scope != "member":
+            raise ValueError("Meeting member tools require a member-scope connection")
+        member = await self.get_meeting_member()
+        if member is None:
+            raise ValueError("An open meeting is required before installing member tools")
+        from openjiuwen.agent_teams.meeting.tools import create_meeting_tools
+
+        tools = await create_meeting_tools(member, language=self.language)
+        self._tools.update(tools)
+        return tools
 
     def bind_session_context(self) -> None:
         """Re-assert the session-id + language contextvars for this call.
@@ -238,6 +279,13 @@ class ExternalTeamClient:
         self._messages = backend.message_manager
         self._db = db
 
+        if transport_config.backend != "hybrid":
+            await self._messager.subscribe(
+                TeamTopic.TEAM.build(self.session_id, self.team_name), self._on_team_event,
+            )
+            self._meeting_state_subscription = True
+        await backend.get_meeting()
+
         if self._descriptor.scope == "member":
             # Build the workspace manager + resident cache BEFORE creating team
             # tools — ``create_team_tools`` reads ``backend.workspace_cache``
@@ -273,6 +321,9 @@ class ExternalTeamClient:
     async def close(self) -> None:
         """Stop the messager and release owned resources. Idempotent."""
         if self._messager is not None:
+            if self._meeting_state_subscription:
+                await self._messager.unsubscribe(TeamTopic.TEAM.build(self.session_id, self.team_name))
+                self._meeting_state_subscription = False
             await self._messager.stop()
             self._messager = None
         self._tasks = None

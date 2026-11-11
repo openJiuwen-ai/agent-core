@@ -396,6 +396,7 @@ class EventDispatcher:
                 TeamEvent.MEMBER_SHUTDOWN,
                 TeamEvent.MEMBER_CANCELED,
                 TeamEvent.STANDBY,
+                TeamEvent.MEETING_STATE_CHANGED,
                 TeamEvent.MESSAGE,
                 TeamEvent.BROADCAST,
                 TeamEvent.TASK_CLAIMED,

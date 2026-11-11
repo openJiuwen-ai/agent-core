@@ -112,6 +112,7 @@ class SessionManager:
                         StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                         error_msg="team session database initialization failed",
                     )
+                await team_backend.get_meeting()
             except BaseException:
                 self._reset_session_id_token()
                 self._state.team_session = None
