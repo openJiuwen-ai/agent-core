@@ -462,3 +462,99 @@ class TestGraphRetrieverDynamicRetrieverIndexType:
         assert gr.index_type is None
         triple_r = gr.get_retriever_for_mode("hybrid", is_chunk=False)
         assert not hasattr(triple_r, "index_type")
+
+
+class TestGraphRetrieverFilters:
+    """issue #2431: graph 路径也不能丢 filters
+
+    GraphKnowledgeBase 一直把 retrieval_config.filters 传给 GraphRetriever.retrieve()，
+    但 GraphRetriever 没有该形参，filters 落进 **kwargs 后再也没有被读出，于是
+    use_graph=True 时过滤条件被静默绕过，会返回不属于请求范围的 chunk。
+    """
+
+    @pytest.fixture
+    def chunk_retriever(self):
+        # 用文件顶部的 stub：裸 AsyncMock 会被 getattr 当成有 SUPPORTED_MODES
+        return _RetrieverStubNoIndexType()
+
+    @pytest.mark.asyncio
+    async def test_retrieve_forwards_filters_to_chunk_retrieval(self, chunk_retriever):
+        retriever = GraphRetriever(chunk_retriever=chunk_retriever)
+
+        await retriever.retrieve("query", top_k=5, mode="hybrid", filters={"tenant": "a"})
+
+        assert chunk_retriever.retrieve.await_args.kwargs["filters"] == {"tenant": "a"}
+
+    @pytest.mark.asyncio
+    async def test_empty_result_sparse_fallback_keeps_filters(self):
+        """初始 chunk 为空时的 sparse 兜底同样不能丢过滤条件"""
+        sparse_retriever = AsyncMock()
+        sparse_retriever.retrieve = AsyncMock(return_value=[])
+        retriever = GraphRetriever()
+        retriever.get_retriever_for_mode = MagicMock(return_value=sparse_retriever)
+
+        await retriever.graph_expansion(
+            query="query",
+            chunks=[],
+            topk=5,
+            mode="sparse",
+            filters={"tenant": "a"},
+        )
+
+        assert sparse_retriever.retrieve.await_args.kwargs["filters"] == {"tenant": "a"}
+
+    @pytest.mark.asyncio
+    async def test_beam_search_hands_filters_to_its_own_retriever(self):
+        """GraphRetriever 构造 TripleBeamSearch 时要把 filters 带过去，否则扩展跑出过滤范围"""
+        chunk_retriever = _RetrieverStubNoIndexType()
+        chunk_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(
+                    text="a b c",
+                    score=0.9,
+                    chunk_id="chunk_1",
+                    metadata={"chunk_id": "chunk_1", "triple": '["a", "b", "c"]'},
+                )
+            ]
+        )
+        triple_retriever = _RetrieverStubNoIndexType()
+        embed_model = AsyncMock()
+        embed_model.max_batch_size = 32
+        embed_model.embed_documents = AsyncMock(return_value=[[0.1, 0.2, 0.3]] * 2)
+        triple_retriever.embed_model = embed_model
+
+        retriever = GraphRetriever(chunk_retriever=chunk_retriever, triple_retriever=triple_retriever)
+        retriever._fetch_triples = AsyncMock(return_value=chunk_retriever.retrieve.return_value)
+
+        await retriever.retrieve("query", top_k=5, mode="hybrid", filters={"tenant": "a"})
+
+        assert triple_retriever.retrieve.await_args.kwargs["filters"] == {"tenant": "a"}
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_forwards_filters(self):
+        triple_retriever = AsyncMock()
+        triple_retriever.retrieve = AsyncMock(return_value=[])
+
+        search = TripleBeamSearch(retriever=triple_retriever, filters={"tenant": "a"})
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="a b c",
+                    score=0.9,
+                    metadata={"triple": '["a", "b", "c"]'},
+                )
+            ],
+            0.9,
+        )
+
+        await search._search_candidates(beam)
+
+        assert triple_retriever.retrieve.await_args.kwargs["filters"] == {"tenant": "a"}
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_filters_keeps_none(self, chunk_retriever):
+        retriever = GraphRetriever(chunk_retriever=chunk_retriever)
+
+        await retriever.retrieve("query", top_k=5, mode="hybrid")
+
+        assert chunk_retriever.retrieve.await_args.kwargs["filters"] is None
