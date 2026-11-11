@@ -11,6 +11,8 @@ instead of the stale "not supported" claims. These tests pin that copy down so
 it cannot regress.
 """
 
+import re
+
 import pytest
 
 from openjiuwen.agent_teams.tools.locales import cn as _cn
@@ -38,3 +40,24 @@ def test_cn_swarmflow_md_teaches_runtime_control():
     desc = make_translator("cn")("swarmflow")
     assert "运行态控制" in desc
     assert "action='stop'" in desc
+
+
+@pytest.mark.level0
+def test_swarmflow_md_documents_vote_contract_and_helper_import():
+    """cn+en descriptions list the vote fields and the build_reviewers import rule.
+
+    Issue #6306: scripts written per the description read ``v.label`` (crashed:
+    the field did not exist) and copied a skeleton whose import lines were
+    commented out (``NameError: build_reviewers``). The copy must now teach the
+    real vote fields, the no-``name``-field rule, and the explicit import.
+    """
+    cn = make_translator("cn")("swarmflow")
+    en = make_translator("en")("swarmflow")
+    assert "没有 `name`" in cn
+    assert "no `name`" in en
+    for desc in (cn, en):
+        assert "from openjiuwen.agent_teams.workflow.review import build_reviewers" in desc
+        # Skeleton examples must show real imports. Match by pattern (any
+        # commented `from swarmflow import ...` line) instead of one literal
+        # string, so a re-worded commented import cannot slip past the check.
+        assert re.search(r"(?m)^\s*#\s*from\s+swarmflow\s+import", desc) is None

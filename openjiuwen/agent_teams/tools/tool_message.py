@@ -167,6 +167,8 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
+        if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.conversation_mode == "group_chat":
+            return ToolOutput(success=False, error=self.t("send_message", "error_group_to_user"))
         if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.is_leader:
             return ToolOutput(success=False, error=self.t("send_message", "error_leader_to_user"))
         # "user" is the pseudo-member representing the human caller; skip

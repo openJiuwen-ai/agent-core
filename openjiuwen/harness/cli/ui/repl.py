@@ -970,7 +970,7 @@ def _render_interaction(request: Any, console: Console) -> None:
     The format follows the interrupt ``kind``:
 
     - ``ask_user``: questions with their options.
-    - ``skill_evolution_approval``: the proposed change and its choices.
+    - Skill approvals: the proposed change and its choices.
     - approvals (``permission``, ``confirm``, ``team_tool_approval`` and
       undeclared kinds): which tool wants approval and its arguments.
     - any other kind: its message and answer schema; the answer is typed as
@@ -1011,6 +1011,11 @@ def _render_interaction(request: Any, console: Console) -> None:
                         label = opt.get("label", "")
                         desc = opt.get("description", "")
                         console.print(f"  [dim]{j}.[/dim] {label} - {desc}")
+        return
+
+    if kind == InterruptKind.SKILL_AUTHORIZATION:
+        console.print("\n[bold yellow]⚠ Skill authorization[/bold yellow]")
+        console.print(request.message)
         return
 
     if kind == InterruptKind.SKILL_EVOLUTION_APPROVAL:
@@ -1075,6 +1080,9 @@ async def _answer_for_interaction(request: Any, prompt_session: PromptSession) -
         return await _answer_questions(request, prompt_session)
     if _answered_as_typed(kind):
         return await _answer_free_form(prompt_session)
+    if kind == InterruptKind.SKILL_AUTHORIZATION:
+        answer = await prompt_session.prompt_async("Skill approval (y/a/n or continue_without_overlay)> ")
+        return interrupt_answer(kind, text=answer)
     # Enter approves, as the CLI always did.
     answer = (await prompt_session.prompt_async("Approve? (y/a/n)> ")).strip() or "y"
     return interrupt_answer(kind, text=answer)

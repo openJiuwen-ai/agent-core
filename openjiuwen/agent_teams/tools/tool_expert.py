@@ -901,7 +901,11 @@ class SpawnExpertTool(_SpawnToolBase):
     the persona in ``prompt`` and the capability snapshot (or the external
     CLI launch config) in ``options.agent_template``, so it is rebuilt from
     the row alone. ``desc`` / ``prompt`` only add to the template's own.
+    Native experts can also inherit the leader's live context or an idle
+    teammate's last completed turn at registration.
     """
+
+    _FORK_SLOT = frozenset({"spawn_expert_fork"})
 
     def __init__(
         self,
@@ -916,7 +920,8 @@ class SpawnExpertTool(_SpawnToolBase):
         model_config_allocator: Callable[..., "Allocation | None"] | None = None,
         resolver: "ExpertTemplateResolver | None" = None,
     ):
-        super().__init__(team, t, "spawn_expert")
+        fork_enabled = team.expert_fork_enabled()
+        super().__init__(team, t, "spawn_expert", omit_slots=None if fork_enabled else self._FORK_SLOT)
         self._resolver = resolver or ExpertTemplateResolver(
             catalog=catalog,
             language=language,
@@ -956,6 +961,11 @@ class SpawnExpertTool(_SpawnToolBase):
             },
             "required": ["expert", "member_name"],
         }
+        if fork_enabled:
+            self.card.input_params["properties"].update({
+                "fork": {"type": "boolean", "description": t("spawn_expert", "fork")},
+                "fork_source": {"type": "string", "description": t("spawn_expert", "fork_source")},
+            })
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         try:
@@ -971,6 +981,14 @@ class SpawnExpertTool(_SpawnToolBase):
         expert = _optional_text(inputs.get("expert"))
         if expert is None:
             return self._fail("'expert' is required: an installed expert package name, or a member name with 'group'")
+        fork = inputs.get("fork")
+        fork_source = inputs.get("fork_source")
+        if (fork is not None or fork_source is not None) and not self.team.expert_fork_enabled():
+            return self._fail("Expert fork requires enable_fork=True and in-process member spawning")
+        if fork is not None and not isinstance(fork, bool):
+            return self._fail("'fork' must be a boolean")
+        if fork_source is not None and (fork is not True or _optional_text(fork_source) is None):
+            return self._fail("'fork_source' must be a non-empty member name and requires fork=true")
         group = _optional_text(inputs.get("group"))
         external_args = inputs.get("external_cli")
         if external_args is not None and not isinstance(external_args, dict):
@@ -979,6 +997,8 @@ class SpawnExpertTool(_SpawnToolBase):
             template = await self._resolver.resolve(expert, group)
         except ExpertUnavailable as exc:
             return self._fail(str(exc))
+        if fork and template.external_cli is not None:
+            return self._fail("Expert fork requires a native expert; external CLI experts cannot inherit team context")
         if template.external_cli is None and external_args:
             return self._fail(
                 f"Expert '{template.ref.label()}' runs natively; 'external_cli' applies only to experts with an "
@@ -1006,6 +1026,13 @@ class SpawnExpertTool(_SpawnToolBase):
         err = check_model_selectable(self.team, model_name, allocation)
         if err:
             return self._fail(err)
+        snapshot = None
+        source = _optional_text(inputs.get("fork_source")) or self.team.leader_member_name
+        if inputs.get("fork"):
+            try:
+                snapshot = self.team.capture_expert_fork(source)
+            except ValueError as exc:
+                return self._fail(str(exc))
         result = await register_teammate(
             self.team,
             member_name=identity.member_name,
@@ -1017,6 +1044,8 @@ class SpawnExpertTool(_SpawnToolBase):
             permissions_override=inputs.get("permissions"),
             agent_template=expert_member_record(template),
         )
+        if result.ok and snapshot is not None:
+            self.team.mark_fork_on_spawn(identity.member_name, True, fork_source=source, snapshot=snapshot)
         return self._registered(result, template, identity.member_name, identity.display_name, role_type="teammate")
 
     async def _spawn_external(

@@ -90,6 +90,7 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
+    _move_response_format_to_text(body)
     return clean_unicode(body)
 
 
@@ -110,6 +111,44 @@ def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, 
         expanded.update(nested)
     expanded.update(pending)
     return expanded
+
+
+def _move_response_format_to_text(body: dict[str, Any]) -> None:
+    """Translate a chat-style ``response_format`` into the Responses ``text.format`` field.
+
+    Other ``text`` settings are kept. A ``text.format`` the caller already set takes precedence.
+    """
+    if "response_format" not in body:
+        return
+    response_format = body.pop("response_format")
+    if response_format is None:
+        return
+
+    text_format = _text_format_from_response_format(response_format)
+    if text_format is None:
+        body["response_format"] = response_format
+        return
+
+    text = dict(body["text"]) if isinstance(body.get("text"), dict) else {}
+    if "format" in text:
+        logger.warning("Responses request sets both response_format and text.format; keeping text.format")
+    else:
+        text["format"] = text_format
+    body["text"] = text
+
+
+def _text_format_from_response_format(response_format: Any) -> Optional[dict[str, Any]]:
+    """Map a chat-style ``response_format`` dict to a Responses ``text.format`` dict.
+
+    ``json_schema`` formats are flattened: ``name``, ``schema``, ``strict`` and ``description``
+    move up next to ``type``. Other formats (``json_object``, ``text``) are used as they are.
+    """
+    if not isinstance(response_format, dict) or not response_format.get("type"):
+        return None
+    json_schema = response_format.get("json_schema")
+    if response_format["type"] == "json_schema" and isinstance(json_schema, dict):
+        return {"type": "json_schema", **json_schema}
+    return dict(response_format)
 
 
 def build_headers(
@@ -169,7 +208,7 @@ def convert_messages(messages: Union[str, list[BaseMessage], list[dict]]) -> tup
         inputs.append(
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": content_text}],
+                "content": _user_content_parts(message.get("content"), content_text),
             }
         )
 
@@ -474,6 +513,55 @@ def _content_part_text(part: Any) -> str:
         if value is not None:
             return str(value)
     return ""
+
+
+def _user_content_parts(content: Any, content_text: str) -> list[dict[str, Any]]:
+    """Map user content to Responses ``input_text`` and ``input_image`` parts in their original order.
+    Adjacent text parts are merged into one ``input_text``.
+    Parts that are neither text nor images are dropped.
+    """
+    if not isinstance(content, list):
+        return [{"type": "input_text", "text": content_text}]
+
+    parts: list[dict[str, Any]] = []
+    pending_text: list[str] = []
+
+    def flush_text() -> None:
+        if pending_text:
+            parts.append({"type": "input_text", "text": "".join(pending_text)})
+            pending_text.clear()
+
+    for part in content:
+        image = _input_image_part(part)
+        if image is not None:
+            flush_text()
+            parts.append(image)
+            continue
+        text = _content_part_text(part)
+        if text:
+            pending_text.append(text)
+    flush_text()
+
+    return parts or [{"type": "input_text", "text": ""}]
+
+
+def _input_image_part(part: Any) -> Optional[dict[str, Any]]:
+    """Convert a chat-style ``image_url`` part to a Responses ``input_image`` part."""
+    if not isinstance(part, dict) or part.get("type") != "image_url":
+        return None
+
+    image_url = part.get("image_url")
+    detail = None
+    if isinstance(image_url, dict):
+        detail = image_url.get("detail")
+        image_url = image_url.get("url")
+    if not isinstance(image_url, str) or not image_url:
+        return None
+
+    image: dict[str, Any] = {"type": "input_image", "image_url": image_url}
+    if detail:
+        image["detail"] = detail
+    return image
 
 
 def _tool_result_item(message: dict[str, Any], output: str) -> Optional[dict[str, Any]]:

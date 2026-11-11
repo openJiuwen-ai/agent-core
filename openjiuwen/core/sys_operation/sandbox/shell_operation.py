@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
+from openjiuwen.core.sys_operation.execution_environment import execution_environment_overlay
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
@@ -28,13 +29,14 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdResult:
         raw = await self.invoke(
             "execute_cmd", command=command, cwd=cwd,
-            timeout=timeout, environment=environment, options=options, shell_type=shell_type
+            timeout=timeout, environment=execution_environment_overlay(environment),
+            options=options, shell_type=shell_type,
         )
         return raw if isinstance(raw, ExecuteCmdResult) else ExecuteCmdResult(**raw)
 
@@ -44,13 +46,14 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         async for item in self.invoke_stream(
             "execute_cmd_stream", command=command, cwd=cwd,
-            timeout=timeout, environment=environment, options=options, shell_type=shell_type
+            timeout=timeout, environment=execution_environment_overlay(environment),
+            options=options, shell_type=shell_type,
         ):
             yield ExecuteCmdStreamResult(**item) if isinstance(item, dict) else item
 
@@ -59,7 +62,7 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             command: str,
             *,
             cwd: Optional[str] = None,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             grace: float = 3.0,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdBackgroundResult:
@@ -67,7 +70,7 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             "execute_cmd_background",
             command=command,
             cwd=cwd,
-            environment=environment,
+            environment=execution_environment_overlay(environment),
             grace=grace,
             shell_type=shell_type,
         )

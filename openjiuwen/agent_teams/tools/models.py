@@ -3,7 +3,7 @@
 
 """Team SQLModel definitions and dynamic model factories.
 
-Static tables: Team, TeamMember.
+Static tables: Team, TeamMember, TeamSessionSettings.
 Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage,
 MessageReadStatus, TeamTaskReviewVote.
 Configuration: DatabaseType, DatabaseConfig.
@@ -28,12 +28,23 @@ TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_review_vote_",
 )
 TEAM_STATIC_TABLES_TO_CLEAR = (
+    "team_session_settings",
     "team_info",
     "team_member",
 )
 
 
 # ----------------- Static Table Models -----------------
+
+
+class TeamSessionSettings(SQLModel, table=True):
+    """Host-owned execution settings keyed by the shared team session id."""
+
+    __tablename__ = "team_session_settings"
+
+    session_id: str = Field(primary_key=True)
+    settings_json: str = Field(default="{}")
+    version: int = Field(default=0)
 
 
 class Team(SQLModel, table=True):

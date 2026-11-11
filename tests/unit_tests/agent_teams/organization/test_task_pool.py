@@ -47,7 +47,6 @@ from openjiuwen.agent_teams.organization.tools import (
     OrgCreateTaskTool,
     OrgListAvailableTeamsTool,
     OrgListConfiguredTeamsTool,
-    OrgListExpertGroupsTool,
     OrgListLeaderMessagesTool,
     OrgReviewTaskTool,
     OrgSummaryCompleteTool,
@@ -92,7 +91,6 @@ def test_optional_organization_tool_schemas_use_empty_required_arrays() -> None:
     tools = [
         OrgListAvailableTeamsTool(runtime, "team-1", "session-1"),
         OrgListConfiguredTeamsTool(runtime, "team-1", "session-1"),
-        OrgListExpertGroupsTool(runtime, "team-1", "session-1"),
         OrgListLeaderMessagesTool(manager, "team-1", "leader-1", message_service),
         OrgViewPendingReviewsTool(manager, "team-1", "leader-1"),
     ]
@@ -141,6 +139,19 @@ class FakeAgent:
         self.member_name = backend.member_name
         self.harness = FakeHarness()
         self.spec = type("Spec", (), {"metadata": {"capabilities": ["analysis"]}})()
+        self._user_input_delivered = None
+
+    def arm_user_input_delivery(self):
+        self._user_input_delivered = asyncio.Event()
+        return self._user_input_delivered
+
+    def note_user_input_delivered(self) -> None:
+        event = self._user_input_delivered
+        if event is not None and not event.is_set():
+            event.set()
+
+    def clear_user_input_delivery(self) -> None:
+        self._user_input_delivered = None
 
 
 @pytest_asyncio.fixture
@@ -839,7 +850,7 @@ async def test_only_assigned_team_can_create_child_tasks(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_root_task_gets_default_summary_team_aggregation(org_manager):
+async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
     manager, _ = org_manager
     creator = OrgTaskCreator(
         creator_type="team_leader",
@@ -877,7 +888,7 @@ async def test_root_task_gets_default_summary_team_aggregation(org_manager):
     assert root.ok and root.task is not None
     assert child.ok and child.task is not None
     assert root.task.aggregation is not None
-    assert root.task.aggregation.mode == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert root.task.aggregation.mode == OrgTaskAggregationMode.HIERARCHICAL
     assert root.task.aggregation.final_output_task_id == "root-task-1"
     assert child.task.aggregation is None
     selected_root = await manager.get_task("root-task-1")
@@ -1905,7 +1916,7 @@ async def test_root_leader_selects_aggregation_mode_through_update_task_tool(org
         }
     )
     assert created.success
-    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.SUMMARY_TEAM
+    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
     assert (await manager.claim_task(task_id="tool-root-agg", team_id="team-a")).ok
 
     unauthorized = await OrgUpdateTaskTool(manager, team_id="team-b", leader_id="leader-b").invoke(
@@ -4360,6 +4371,168 @@ async def test_accepted_last_child_wakes_summary_team_root(active_organization_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "executor,recipient,completed,expected",
+    [("team-b", "team-a", True, True), ("team-b", "team-b", True, False),
+     ("team-a", "team-a", True, False), ("team-b", "team-a", False, False)],
+)
+async def test_delegated_root_completion_wakes_creator_only(
+    active_organization_runtime, executor, recipient, completed, expected,
+):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-delegated-root-delivery"
+    manager, creator = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    assert (await manager.create_task(
+        task_id="direct-root", title="One-line result", description="No child task required",
+        created_by=creator, required_capabilities=["analysis"], delegated_to_team_id=executor,
+    )).ok
+    assert (await manager.start_task(task_id="direct-root", team_id=executor)).ok
+    assert (await manager.set_root_aggregation_mode(
+        task_id="direct-root", team_id=executor, leader_id=f"leader-{executor}",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )).ok
+    if completed:
+        assert (await manager.complete_task(
+            task_id="direct-root", team_id=executor, output_abstract="P05-QUICK-12: 12",
+        )).ok
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents, session_id, org_id,
+        OrgTaskCompletedEvent(organization_id=org_id, team_id=executor, task_id="direct-root"),
+        team_id=recipient,
+    )
+    assert len(turns) == int(expected)
+    if expected:
+        assert turns[0]["team_name"] == "team-a"
+        assert turns[0]["inputs"]["_org_relay_source"] == "org_root_delivery"
+        prompt = turns[0]["inputs"]["query"]
+        assert "direct-root" in prompt
+        assert "org_view_tasks" in prompt
+        assert "output_abstract" in prompt
+
+
+async def _prepare_durable_root(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    manager, creator = await _seed_two_team_org(runtime, agents, session_id, "org-root-durable")
+    assert (await manager.create_task(
+        task_id="durable-root", title="One-line result", description="A delegated root",
+        created_by=creator, required_capabilities=["analysis"], delegated_to_team_id="team-b",
+    )).ok
+    assert (await manager.start_task(task_id="durable-root", team_id="team-b")).ok
+    assert (await manager.set_root_aggregation_mode(
+        task_id="durable-root", team_id="team-b", leader_id="leader-team-b",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )).ok
+    return runtime, agents, session_id, manager
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledged,legacy,scheduled", [
+    (False, False, False), (False, False, True), (False, True, False), (True, False, False),
+])
+async def test_delegated_root_delivery_survives_rebind(
+    active_organization_runtime, acknowledged, legacy, scheduled,
+):
+    runtime, agents, session_id, manager = await _prepare_durable_root(active_organization_runtime)
+    assert (await manager.complete_task(
+        task_id="durable-root", team_id="team-b", output_abstract="Saved root output",
+    )).ok
+    service = agents["team-a"].team_backend.org_message_service
+    notices = await service.list_leader_messages(team_id="team-a", unread_only=True)
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["metadata"]["kind"] == "root_completed"
+    if scheduled:
+        turns = _capture_org_turns(runtime)
+        await _emit_team_task_event(agents, session_id, "org-root-durable", OrgTaskCompletedEvent(
+            organization_id="org-root-durable", team_id="team-b", task_id="durable-root",
+        ))
+        assert len(turns) == 1
+    if legacy:
+        # Simulate a root completed by the pre-notification implementation.
+        await service.purge_organization()
+    if acknowledged:
+        assert (await service.ack_leader_message(
+            message_id=notice["message_id"], team_id="team-a", leader_id="leader-team-a",
+            handling_result="Delivered saved output",
+        )).ok
+    # No TASK_COMPLETED event is delivered; restart drops all queued memory.
+    runtime._scheduled_leader_messages.clear()
+    turns = await _rebind_owner_after_clear(runtime, agents, session_id)
+    assert len(turns) == (0 if acknowledged else 1)
+    if not acknowledged:
+        assert turns[0]["inputs"]["_org_relay_source"] == "org_root_delivery"
+        assert notice["message_id"] in turns[0]["inputs"]["query"]
+        assert "org_ack_leader_message" in turns[0]["inputs"]["query"]
+    # Rebinding must neither create a second notice nor discard its receipt.
+    assert len(await service.list_leader_messages(team_id="team-a")) == 1
+
+
+@pytest.mark.asyncio
+async def test_root_completion_and_notice_rollback_together(active_organization_runtime, monkeypatch):
+    _, agents, _, manager = await _prepare_durable_root(active_organization_runtime)
+    stage = manager._stage_root_completion_notice
+
+    async def fail_after_staging(*args):
+        await stage(*args)
+        raise RuntimeError("simulated transaction failure")
+
+    monkeypatch.setattr(manager, "_stage_root_completion_notice", fail_after_staging)
+    with pytest.raises(RuntimeError, match="simulated transaction failure"):
+        await manager.complete_task(task_id="durable-root", team_id="team-b", output_abstract="saved output")
+    assert (await manager.get_task("durable-root")).status is OrgTaskStatus.IN_PROGRESS
+    service = agents["team-a"].team_backend.org_message_service
+    assert await service.list_leader_messages(team_id="team-a") == []
+
+
+@pytest.mark.asyncio
+async def test_root_delivery_receipt_survives_database_reopen(tmp_path):
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
+
+    config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "root-delivery.db"))
+    db = TeamDatabase(config)
+    try:
+        manager = OrgTaskManager(db=db, organization_id="disk-org")
+        await manager.ensure_organization()
+        for team in ("owner", "executor"):
+            await manager.register_leader(team_id=team, leader_id=f"leader-{team}", capabilities=["analysis"])
+        creator = OrgTaskCreator(
+            creator_type="team_leader", creator_id="leader-owner", team_id="owner", organization_id="disk-org",
+        )
+        assert (await manager.create_task(
+            task_id="disk-root", title="disk root", description="saved result", created_by=creator,
+            required_capabilities=["analysis"], delegated_to_team_id="executor",
+        )).ok
+        assert (await manager.start_task(task_id="disk-root", team_id="executor")).ok
+        assert (await manager.set_root_aggregation_mode(
+            task_id="disk-root", team_id="executor", leader_id="leader-executor",
+            aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+        )).ok
+        assert (await manager.complete_task(
+            task_id="disk-root", team_id="executor", output_abstract="durable result",
+        )).ok
+    finally:
+        await db.close()
+    reopened = TeamDatabase(config)
+    try:
+        recovered = OrgTaskManager(db=reopened, organization_id="disk-org")
+        pending = await recovered.ensure_root_completion_notices(team_id="owner")
+        assert len(pending) == 1
+        service = OrgMessageService(db=reopened, organization_id="disk-org")
+        assert (await service.ack_leader_message(
+            message_id=pending[0]["message_id"], team_id="owner", leader_id="leader-owner",
+        )).ok
+    finally:
+        await reopened.close()
+    acknowledged = TeamDatabase(config)
+    try:
+        recovered = OrgTaskManager(db=acknowledged, organization_id="disk-org")
+        assert await recovered.ensure_root_completion_notices(team_id="owner") == []
+    finally:
+        await acknowledged.close()
+
+
+@pytest.mark.asyncio
 async def test_completed_child_does_not_schedule_parent_review_turn(active_organization_runtime):
     runtime, agents, session_id = active_organization_runtime
     org_id = "org-completed-no-review-wake"
@@ -4852,6 +5025,153 @@ async def test_drain_leader_turns_keeps_pending_review(active_organization_runti
     assert turns == ["review pending child"]
 
 
+def _patch_review_wake_timing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.organization.runtime._REVIEW_PROMPT_DELIVERY_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.organization.runtime._REVIEW_WAKE_RETRY_DELAY_SECONDS",
+        0,
+    )
+
+
+def _queue_paused_review(org_runtime, session_id, *, query: str = "review pending child") -> tuple:
+    review_key = (session_id, "team-a", "child-task")
+    org_runtime._scheduled_parent_reviews.add(review_key)
+    org_runtime._leader_turn_queues[(session_id, "team-a")] = deque(
+        [
+            {
+                "query": query,
+                "_org_review_task_id": "child-task",
+                "_org_review_key": review_key,
+            },
+        ]
+    )
+    return review_key
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_retries_when_the_review_prompt_is_not_delivered(
+    active_organization_runtime, monkeypatch
+):
+    """A review that never reaches the leader is cancelled and queued once more."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    _patch_review_wake_timing(monkeypatch)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+    cancelled = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        if len(turns) == 2:
+            assert review_key in org_runtime._scheduled_parent_reviews
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child", "review pending child"]
+    assert cancelled == [True, True]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+    assert not org_runtime._leader_turn_queues.get((session_id, "team-a"))
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_retries_once_when_the_review_stays_pending(
+    active_organization_runtime, monkeypatch
+):
+    """A finished review turn with no verdict is woken once more, then dropped."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-review-retry")
+    _patch_review_wake_timing(monkeypatch)
+
+    async def get_task_review(_task_id):
+        return SimpleNamespace(review_status=OrgTaskReviewStatus.PENDING)
+
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        if len(turns) == 2:
+            assert review_key in org_runtime._scheduled_parent_reviews
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child", "review pending child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_a_review_after_it_is_accepted(
+    active_organization_runtime, monkeypatch
+):
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-review-accepted")
+    _patch_review_wake_timing(monkeypatch)
+    verdict = {"status": OrgTaskReviewStatus.PENDING}
+
+    async def get_task_review(_task_id):
+        return SimpleNamespace(review_status=verdict["status"])
+
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id)
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        verdict["status"] = OrgTaskReviewStatus.ACCEPTED
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_waits_out_a_delivered_review(active_organization_runtime, monkeypatch):
+    """Once the review sentence is delivered, the short timeout does not cut the turn."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    _patch_review_wake_timing(monkeypatch)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    review_key = _queue_paused_review(org_runtime, session_id, query="review delivered child")
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        entry.agent.note_user_input_delivered()
+        await asyncio.sleep(0.15)
+        turns.append(kwargs["inputs"]["query"])
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review delivered child"]
+    assert review_key not in org_runtime._scheduled_parent_reviews
+
+
 @pytest.mark.asyncio
 async def test_drain_leader_turns_waits_until_running_team_pauses(active_organization_runtime, monkeypatch):
     org_runtime, _agents, session_id = active_organization_runtime
@@ -5053,3 +5373,123 @@ async def test_hierarchical_root_accepts_multiple_inputs_and_a_specialist_delive
     assert completed.task.aggregation.mode is OrgTaskAggregationMode.HIERARCHICAL
     assert completed.task.aggregation.summary_task_id is None
     assert completed.task.output_context.result_uri == "/artifacts/resume.pptx"
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_keeps_group_chat_mode(active_organization_runtime, monkeypatch):
+    """A group-chat leader receives the org wake without a team-mode interact."""
+    org_runtime, agents, session_id = active_organization_runtime
+    delivered: list[tuple[str, str, str]] = []
+    interact_calls: list[object] = []
+
+    async def deliver(query, *, team_name: str, session_id: str):
+        delivered.append((query, team_name, session_id))
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.success(None)
+
+    async def interact(*_args, **_kwargs):
+        interact_calls.append(_args)
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.failure("conversation_mode_mismatch")
+
+    async def settled(_entry) -> bool:
+        return True
+
+    agents["team-a"].team_backend.conversation_mode = "group_chat"
+    monkeypatch.setattr(org_runtime, "_team_is_idle_settled_for_org_wake", settled)
+    org_runtime._team_runtime_manager.deliver_organization_prompt = deliver
+    org_runtime._team_runtime_manager.interact = interact
+
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "review the business result"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert delivered == [("review the business result", "team-a", session_id)]
+    assert interact_calls == []
+    assert key not in org_runtime._leader_turn_queues
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_mode_mismatch(active_organization_runtime, monkeypatch):
+    """A permanent mode rejection does not park the wake for another identical try."""
+    org_runtime, _agents, session_id = active_organization_runtime
+
+    async def interact(*_args, **_kwargs):
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.failure("conversation_mode_mismatch")
+
+    async def settled(_entry) -> bool:
+        return True
+
+    monkeypatch.setattr(org_runtime, "_team_is_idle_settled_for_org_wake", settled)
+    org_runtime._team_runtime_manager.interact = interact
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "review the business result"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
+
+
+@pytest.mark.asyncio
+async def test_release_membership_keeps_tasks_and_team_context(active_organization_runtime):
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _leader = await _seed_two_team_org(
+        org_runtime, agents, session_id, "org-keep"
+    )
+    created = await manager.create_task(
+        task_id="root-keep",
+        title="kept output",
+        description="the child result stays after membership is released",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-keep",
+        ),
+    )
+    assert created.ok
+    agents["team-a"].kept_context = "private notes"
+    stops = []
+
+    class _Launcher:
+        async def stop(self, **kwargs):
+            stops.append(kwargs)
+
+    org_runtime._expert_team_launcher = _Launcher()
+    org_runtime._summary_team_launcher = _Launcher()
+
+    await org_runtime.release_membership(
+        organization_id="org-keep",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+
+    kept = await manager.get_task("root-keep")
+    organization = await manager.get_organization()
+    assert kept is not None
+    assert kept.title == "kept output"
+    assert organization is not None
+    assert organization.owner_team_id is None
+    assert organization.leaders == []
+    assert agents["team-a"].kept_context == "private notes"
+    assert agents["team-a"].team_backend.org_task_manager is None
+    assert agents["team-b"].team_backend.org_task_manager is None
+    assert await org_runtime._team_runtime_manager.pool.get("team-a") is not None
+    assert await org_runtime._team_runtime_manager.pool.get("team-b") is not None
+    assert stops == []
+
+    rebound = await org_runtime.create_organization(
+        organization_id="org-keep",
+        owner_team_id="team-c",
+        session_id=session_id,
+    )
+    assert rebound.owner_team_id == "team-c"
+    assert (await manager.get_task("root-keep")).title == "kept output"

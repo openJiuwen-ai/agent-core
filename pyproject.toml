@@ -20,11 +20,14 @@ classifiers = [
 ]
 dependencies = [
     # HTTP clients
-    "aiohttp>=3.11.12",
-    "requests>=2.32.3",
+    "aiohttp>=3.14.4",
+    "requests>=2.33.0",
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
+    # filelock 4.x binds a lock hold to the asyncio task that took it, while
+    # `HybridAsyncReadWriteLock` shares one hold between reader tasks. Lifting
+    # this bound needs that class redesigned first.
     "filelock>=3.25.0,<4",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
@@ -50,7 +53,7 @@ dependencies = [
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
     "fastmcp>=2.14.2,<4.0",
-    "mcp>=1.26.0",
+    "mcp>=1.30.0,<2",
     # Document processing
     "beautifulsoup4>=4.12.0",
     "markdown-it-py>=3.0.0",
@@ -66,13 +69,13 @@ dependencies = [
     "pycryptodome>=3.23.0",
     "charset-normalizer>=3.4.4",
     "pysbd>=0.3.4",
-    "oauthlib>=3.3.1",
+    "oauthlib>=4.0.0",
     "python-dotenv>=1.2.1",
     "json-repair>=0.55.0",
     "PyYAML>=6.0.2",
     "tenacity>=9.1.2",
     "alembic>=1.13.1",
-    "anyio>=4.0.0",
+    "anyio>=4.14.2,<4.15",
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
@@ -80,13 +83,14 @@ dependencies = [
     # OpenTelemetry SDK is imported unconditionally by openjiuwen.agent_evolving;
     # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
     # no longer pulls it, so declare it explicitly to keep imports working.
-    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-sdk>=1.45.1",
     # OTel HTTP auto-instrumentation for W3C traceparent propagation. Base
     # dependencies (not an extra) so deployments get the feature by simply
     # installing openjiuwen; the switch itself stays off by default (gated by
     # ObservabilityConfig.global_instrument_enable / the
     # OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE environment variable).
     "opentelemetry-instrumentation-httpx>=0.44b0",
+
     "opentelemetry-instrumentation-requests>=0.44b0",
     # PyPI name is ``aiohttp-client`` (module opentelemetry.instrumentation.aiohttp_client).
     "opentelemetry-instrumentation-aiohttp-client>=0.44b0",
@@ -110,22 +114,22 @@ pgvector = ["pgvector>=0.2.0"]
 gaussvector = ["psycopg2-binary>=2.9.10"]
 chromadb = ["chromadb>=1.5.4", "opentelemetry-proto>=1.33.0", "protobuf>=5.0,<7.0"]
 obs = ["aioboto3>=11.0.0"]
-zmq = ["pyzmq>=26.0.0", "tornado>=6.1"]
+zmq = ["pyzmq>=26.0.0", "tornado>=6.5.8"]
 sandbox = ["agent-sandbox>=0.0.26"]
 mem0 = ["mem0ai>=1.0.0"]
 jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
-claude = ["claude-agent-sdk>=0.2.115"]
+claude = ["claude-agent-sdk>=0.2.121,<0.3"]
 codex = ["openai-codex>=0.144.4"]
 # The SDK has only ever published pre-releases; the lower bound names one so
 # PEP 440 lets a resolver pick it up at all. Import name stays `deepseek_harness`.
 dsh = ["deepseek-harness-sdk>=0.1.5rc1"]
 ssh = ["asyncssh>=2.24.0"]
 observability = [
-    "opentelemetry-api>=1.25.0",
-    "opentelemetry-sdk>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
 ]
 cua = [
     # Install: pip install 'openjiuwen[cua]' (desktop tools for the cua agent; Windows and Linux X11).
@@ -137,7 +141,7 @@ cua = [
 mobile-gui = [
     # Install: pip install 'openjiuwen[mobile-gui]'
     "uiautomator2>=3.2.0",
-    "pillow>=10.0.0",
+    "pillow>=13.0.0",
 ]
 
 online-rl = [
@@ -163,7 +167,7 @@ all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
 [dependency-groups]
 # Testing
 test = [
-    "pytest>=8.3.5",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.0.0",
     "pytest-html>=4.1.1",
     "pytest-mock>=3.14.0",

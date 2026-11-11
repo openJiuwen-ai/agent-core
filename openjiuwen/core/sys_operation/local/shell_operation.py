@@ -430,7 +430,7 @@ class ShellOperation(BaseShellOperation):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdResult:
@@ -442,7 +442,7 @@ class ShellOperation(BaseShellOperation):
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
                 Explicit budgets are not shortened by an additional local shell cap.
-            environment: Key-value dict of custom environment variables.
+            environment: Variable overrides; null values remove inherited variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
@@ -567,7 +567,7 @@ class ShellOperation(BaseShellOperation):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
@@ -579,7 +579,7 @@ class ShellOperation(BaseShellOperation):
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
                 Explicit budgets are not shortened by an additional local shell cap.
-            environment: Key-value dict of custom environment variables.
+            environment: Variable overrides; null values remove inherited variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
@@ -757,7 +757,7 @@ class ShellOperation(BaseShellOperation):
             command: str,
             *,
             cwd: Optional[str] = None,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             grace: float = 3.0,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdBackgroundResult:
@@ -767,7 +767,7 @@ class ShellOperation(BaseShellOperation):
         Args:
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
-            environment: Key-value dict of custom environment variables.
+            environment: Variable overrides; null values remove inherited variables.
             grace: Seconds to wait for early failure detection (default: 3.0).
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
@@ -883,8 +883,28 @@ class ShellOperation(BaseShellOperation):
         if not hasattr(self._run_config, 'shell_allowlist') or not self._run_config.shell_allowlist:
             return True
 
-        cmd_prefix = command.split()[0] if command.strip() else ""
-        return any(cmd_prefix == allowed or cmd_prefix.endswith(os.sep + allowed)
+        text = command.strip()
+        if os.name == "nt" and text.startswith("&") and not text.startswith("&&"):
+            text = text[1:].lstrip()
+        try:
+            tokens = shlex.split(text, posix=False)
+        except ValueError:
+            return False
+        if not tokens:
+            return False
+        # Quoted executable tokens must not be concatenated with an unlisted suffix.
+        remainder = text[len(tokens[0]):]
+        if remainder and not remainder[0].isspace():
+            return False
+
+        def normalize(value: str) -> str:
+            if os.name != "nt":
+                return value
+            value = value.replace("\\", "/").casefold()
+            return value[:-4] if value.endswith(".exe") else value
+
+        cmd_prefix = normalize(_strip_matching_quotes(tokens[0]))
+        return any(cmd_prefix == normalize(allowed) or cmd_prefix.endswith("/" + normalize(allowed))
                    for allowed in self._run_config.shell_allowlist)
 
     def _resolve_cwd(self, cwd: Optional[str]) -> pathlib.Path:

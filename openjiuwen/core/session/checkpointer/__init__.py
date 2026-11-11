@@ -15,11 +15,13 @@ from openjiuwen.core.session.checkpointer.checkpointer import (
     CheckpointerFactory,
     CheckpointerProvider,
 )
+from openjiuwen.core.session.checkpointer.noop import NoopCheckpointer
 
 __all__ = [
     "CheckpointerFactory",
     "CheckpointerProvider",
     "Checkpointer",
+    "NoopCheckpointer",
     "Storage",
     "build_key",
     "build_key_with_namespace",

@@ -492,7 +492,7 @@ class OperationUtils:
         return await asyncio.to_thread(_sync_delete_tmp)
 
     @staticmethod
-    def prepare_environment(custom_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    def prepare_environment(custom_env: dict[str, str | None] | None = None) -> Dict[str, str]:
         """Create a merged environment dictionary for subprocess execution.
 
         Args:
@@ -501,10 +501,12 @@ class OperationUtils:
         Returns:
             Merged environment dictionary (OS env + custom env)
         """
-        env = os.environ.copy()
-        if custom_env:
-            env.update(custom_env)
-        return env
+        from openjiuwen.core.sys_operation.execution_environment import (
+            apply_environment_overlay,
+            execution_environment_overlay,
+        )
+
+        return apply_environment_overlay(os.environ, execution_environment_overlay(custom_env))
 
     @staticmethod
     def create_handler(process: asyncio.subprocess.Process,

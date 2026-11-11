@@ -158,6 +158,8 @@ class TeamRuntimeManager:
         spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
         inputs: object = None,
+        *,
+        preserve_conversation_mode: bool = False,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
         team_session = TeamRuntimeManager._build_session(session)
@@ -215,7 +217,7 @@ class TeamRuntimeManager:
                 await self.stop_team(team_name=team_name, session_id=target_session_id)
                 pool_entry = None
         requested_mode = self._conversation_mode(inputs)
-        if pool_entry is not None and requested_mode is not None:
+        if pool_entry is not None and requested_mode is not None and not preserve_conversation_mode:
             if getattr(getattr(pool_entry.agent, "team_backend", None), "conversation_mode", "team") != requested_mode:
                 raise ValueError("Team conversation mode cannot change within a session")
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
@@ -341,6 +343,8 @@ class TeamRuntimeManager:
         team_name: str,
         session_id: str,
         inputs: object,
+        on_payload=None,
+        on_activated=None,
     ) -> bool:
         """Run one background leader turn for organization coordination.
 
@@ -360,14 +364,23 @@ class TeamRuntimeManager:
         ran_turn = False
         finalized = False
         try:
-            activation = await self.activate(spec, session_id, inputs)
+            activation = await self.activate(
+                spec,
+                session_id,
+                inputs,
+                preserve_conversation_mode=True,
+            )
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
             ran_turn = True
+            if callable(on_activated):
+                await on_activated()
             stream = activation.agent.stream(inputs, session=activation.session)
             try:
                 async for chunk in stream:
                     payload = getattr(chunk, "payload", None)
+                    if callable(on_payload) and isinstance(payload, dict):
+                        await on_payload(payload)
                     if isinstance(payload, dict) and payload.get("event_type") in {
                         "team.idle",
                         "team.completed",
@@ -611,7 +624,11 @@ class TeamRuntimeManager:
 
         backend = getattr(entry.agent, "team_backend", None)
         requested_mode = self._conversation_mode(payload)
-        if backend is not None and requested_mode is not None:
+        # An explicit GodViewMessage is a private leader wake (e.g. a scheduled
+        # heartbeat), not a conversation turn, so it does not trip the mode
+        # lock — same as ``deliver_organization_prompt``. Free-form strings
+        # still do: they are user turns in the team conversation mode.
+        if backend is not None and requested_mode is not None and not isinstance(payload, GodViewMessage):
             if getattr(backend, "conversation_mode", "team") != requested_mode:
                 return DeliverResult.failure("conversation_mode_mismatch")
 
@@ -644,6 +661,37 @@ class TeamRuntimeManager:
                 entry=entry,
                 run_context=run_context,
             )
+        finally:
+            await entry.interact_gate.consume_done(ticket)
+
+    async def deliver_organization_prompt(
+        self,
+        query: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> DeliverResult:
+        """Inject an organization wake into the leader already running this session.
+
+        Organization coordination is not a user conversation-mode change. A
+        group-chat session therefore keeps its current runtime instead of
+        sending a team-mode ``interact`` that the mode lock must reject.
+        """
+
+        text = str(query or "").strip()
+        if not text:
+            return DeliverResult.failure("empty_organization_prompt")
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return DeliverResult.failure("not_active")
+        if entry.state is not RuntimeState.RUNNING:
+            return DeliverResult.failure("not_running")
+        ticket = await entry.interact_gate.admit()
+        if ticket is None:
+            return DeliverResult.failure("gate_closed")
+        try:
+            await entry.agent.deliver_input(text)
+            return DeliverResult.success(None)
         finally:
             await entry.interact_gate.consume_done(ticket)
 
@@ -1346,6 +1394,13 @@ class TeamRuntimeManager:
             # cancellation inside the TTL window is not misreported as user_pause.
             clear_cancellation_cause(team_session.get_session_id())
             await self._pre_run_with_inputs(team_session, inputs)
+            # Same agent, same session: the conversation carries on, so the
+            # leader is treated as restored like a cold recovery. The policy
+            # rail clears this if the transcript turns out not to hold the
+            # policy (a team the host built without a leader turn).
+            backend = getattr(pool_entry.agent, "team_backend", None)
+            if backend is not None:
+                backend.mark_history_restored()
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
@@ -1401,6 +1456,11 @@ class TeamRuntimeManager:
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
+        # NEW_TEAM_IN_SESSION already created them via ``resume_for_new_session``;
+        # CREATE / COLD_RECOVER only bind later in ``coordination.start``.
+        if kind in (RunActionKind.CREATE, RunActionKind.COLD_RECOVER):
+            await self._ensure_session_tables(agent, session_id)
+
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,
@@ -1435,6 +1495,36 @@ class TeamRuntimeManager:
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
         """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
         await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
+    async def _ensure_session_tables(agent: "TeamAgent", session_id: str) -> None:
+        """Create the per-session dynamic tables before the agent enters the pool.
+
+        Pool membership plus the ``team.runtime_ready`` chunk is what lets
+        embedders reach the backend (group roster sync -> ``build_team`` ->
+        ``on_team_built``, history reads). The leader's ``bind_session`` only
+        runs later in ``coordination.start``, so without this the session's
+        ``team_task_*`` / ``team_message_*`` tables do not exist yet at that
+        point. Idempotent: the later bind re-runs ``checkfirst`` creation.
+
+        Raises:
+            BaseError: When the tables cannot be created within the retry budget.
+        """
+        backend = getattr(agent, "team_backend", None)
+        db = getattr(backend, "db", None)
+        if db is None:
+            return
+        token = set_session_id(session_id)
+        try:
+            await db.initialize()
+            tables_ready = await db.create_cur_session_tables()
+        finally:
+            reset_session_id(token)
+        if tables_ready is False:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="team session database initialization failed",
+            )
 
     @staticmethod
     async def _flush_team_manifest(agent: "TeamAgent", session: AgentTeamSession) -> None:

@@ -21,6 +21,8 @@
 2. 调 `spawn_expert`；同一个专家需要多个实例时，换不同的 `member_name`，并用 `desc` 写清各自负责什么。
 3. 用 `create_task` / `send_message` 派活。
 
+{{spawn_expert_fork}}
+
 - 专家团的 `leader` 不能作为队友拉起。
 - 本团队由某个专家团组建时，`group` 写该团即可基于团内成员再拉同类型实例：新成员与团里预定义的同名成员完全同源，不重新读取磁盘上的包。
 - 外部运行时专家要求对应的 CLI 类型已在本团队声明（与 `spawn_teammate` 的 `cli_agent` 相同）；模型、认证回退、内置模型规则也与 `spawn_teammate` 填写 `cli_agent` 时相同，其中认证回退模型和内置模型写在 `external_cli` 对象里。

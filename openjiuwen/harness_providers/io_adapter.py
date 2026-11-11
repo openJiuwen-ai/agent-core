@@ -20,6 +20,9 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import LazyLogger, LogManager
+from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutputPayload
+from openjiuwen.core.controller.schema.dataframe import TextDataFrame
+from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
@@ -114,6 +117,10 @@ class HarnessIOAdapter:
             projection (lifecycle callbacks, telemetry bridges).
         emit_turn_lifecycle: Project turn start and terminal events onto the
             output queue when ``True``. Defaults to ``False`` for compatibility.
+        emit_turn_failure: Project a failed turn as the ``task_failed`` frame a
+            DeepAgent round emits, so a consumer that already renders those
+            sees the failure. For a host with nowhere else to report it.
+            Ignored when ``emit_turn_lifecycle`` already reports every turn.
         auto_approve_tools: When ``True`` provider tool-approval requests are
             allowed without asking; when ``False`` they surface as
             ``__interaction__`` chunks resolved by ``{"approved": bool}``.
@@ -133,6 +140,7 @@ class HarnessIOAdapter:
         *,
         event_observer: EventObserver | None = None,
         emit_turn_lifecycle: bool = False,
+        emit_turn_failure: bool = False,
         auto_approve_tools: bool = True,
         stop_on_unsupported_force_abort: bool = False,
         provider_interaction_handler: ProviderInteractionHandler | None = None,
@@ -140,6 +148,7 @@ class HarnessIOAdapter:
         self._harness = harness
         self._event_observer = event_observer
         self._emit_turn_lifecycle = emit_turn_lifecycle
+        self._emit_turn_failure = emit_turn_failure
         self._auto_approve_tools = auto_approve_tools
         self._provider_interaction_handler = provider_interaction_handler
         self._stop_on_unsupported_force_abort = stop_on_unsupported_force_abort
@@ -462,12 +471,31 @@ class HarnessIOAdapter:
                     chunk = self._project_item(envelope.item_id, payload)
                 elif isinstance(payload, TurnLifecycleEvent) and self._emit_turn_lifecycle:
                     chunk = self._project_turn_lifecycle(envelope.turn_id, payload)
+                elif isinstance(payload, TurnLifecycleEvent) and self._emit_turn_failure:
+                    chunk = self._project_turn_failure(envelope.turn_id, payload)
                 else:
                     chunk = None
                 if chunk is not None:
                     await self._output_queue.put(chunk)
         finally:
             await cursor.aclose()
+
+    def _project_turn_failure(self, turn_id: str | None, event: TurnLifecycleEvent) -> OutputSchema | None:
+        """Project a failed turn as a DeepAgent ``task_failed`` frame; None for any other turn event."""
+        if event.kind is not TurnEventKind.FAILED:
+            return None
+        error = event.result.error if event.result is not None else None
+        message = error.message if error is not None else ""
+        text = message or f"{self._harness.card.name} turn failed"
+        return ControllerOutputChunk(
+            index=self._next_output_index(),
+            payload=ControllerOutputPayload(
+                type=EventType.TASK_FAILED,
+                data=[TextDataFrame(text=text)],
+                metadata={"turn_id": turn_id or ""},
+            ),
+            last_chunk=True,
+        )
 
     def _project_turn_lifecycle(
         self, turn_id: str | None, event: TurnLifecycleEvent
