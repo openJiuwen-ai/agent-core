@@ -696,6 +696,7 @@ async def test_fast_empty_collection_defers_expensive_reclaim_and_keeps_progress
 @pytest.mark.asyncio
 async def test_usage_save_failure_keeps_completed_collection_and_cursor(tmp_path, monkeypatch):
     from openjiuwen.harness.personal_context import PersonalContext, context_usage
+    from tests.unit_tests.harness.personal_context.capacity_worker_helpers import ready_worker
 
     home = tmp_path / "home"
     source = tmp_path / "source"
@@ -716,6 +717,7 @@ async def test_usage_save_failure_keeps_completed_collection_and_cursor(tmp_path
     await core.set_configuration(config)
     await core.activate_runtime()
     try:
+        await ready_worker(home)
         await core.run_fetch(service_id="notes")
         await core._manual_fetch_tasks["notes"]
         record = (await core.get_fetch_run_status("notes"))["runs"][0]

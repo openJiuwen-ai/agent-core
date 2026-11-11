@@ -134,73 +134,8 @@ def test_successful_capacity_removal_preserves_description_coverage(tmp_path):
     capacity._validate_description_coverage(root)
 
 
-@pytest.mark.asyncio
-async def test_worker_start_failure_does_not_permanently_disable_maintenance(tmp_path, monkeypatch):
-    _tree(tmp_path)
-
-    def cannot_start(_thread):
-        raise OSError("temporary worker resource exhaustion")
-
-    with monkeypatch.context() as patcher:
-        patcher.setattr(capacity.threading.Thread, "start", cannot_start)
-        result = await capacity.run_capacity_maintenance(
-            tmp_path, limit_bytes=100_000, timeout=1, cancelled=lambda: False,
-        )
-        assert result["status"] == "failed"
-        assert tmp_path not in capacity._CAPACITY_WORKERS or capacity._CAPACITY_WORKERS[tmp_path].done()
-    result = await capacity.run_capacity_maintenance(
-        tmp_path, limit_bytes=100_000, timeout=1, cancelled=lambda: False,
-    )
-    assert result["status"] == "succeeded"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stop_kind", ["deadline", "cancel"])
-async def test_slow_preparation_never_blocks_or_later_overwrites_publication(tmp_path, monkeypatch, stop_kind):
-    root = _tree(tmp_path)
-    copying = threading.Event()
-    proceed = threading.Event()
-    original_copy = capacity._copy_tree
-
-    def slow_copy(source, target):
-        original_copy(source, target)
-        copying.set()
-        assert proceed.wait(3)
-
-    monkeypatch.setattr(capacity, "_copy_tree", slow_copy)
-    task = asyncio.create_task(capacity.run_capacity_maintenance(
-        tmp_path, limit_bytes=1000, timeout=0.75 if stop_kind == "deadline" else 2,
-        cancelled=lambda: False,
-    ))
-    try:
-        await _until(copying.is_set)
-        future = capacity._CAPACITY_WORKERS[tmp_path]
-        if stop_kind == "cancel":
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, 0.3)
-        else:
-            result = await asyncio.wait_for(task, 1)
-            assert result["reason"] == "time_budget"
-        assert not future.done()
-        # A stuck reader/preparer must not create more workers on later rounds.
-        result = await capacity.run_capacity_maintenance(
-            tmp_path, limit_bytes=1000, timeout=1, cancelled=lambda: False,
-        )
-        assert result["reason"] == "maintenance_busy"
-        assert capacity._CAPACITY_WORKERS[tmp_path] is future
-        with FileLock(tmp_path / "state/context_update.lock", timeout=0):
-            pass
-        new = tmp_path / "new-candidate"
-        shutil.copytree(root, new)
-        (new / "old.md").write_text("# New publication survives", encoding="utf-8")
-        await asyncio.wait_for(asyncio.to_thread(usage.publish_with_usage, tmp_path, new, {}), 1)
-    finally:
-        proceed.set()
-        await _until(lambda: tmp_path not in capacity._CAPACITY_WORKERS)
-        if not task.done():
-            await task
-    assert (root / "old.md").read_text(encoding="utf-8") == "# New publication survives"
+# Whole-job start failure, preparation timeout/cancellation, and subsequent
+# real reclamation are covered by test_capacity_worker_recovery.py.
 
 
 @pytest.mark.asyncio
