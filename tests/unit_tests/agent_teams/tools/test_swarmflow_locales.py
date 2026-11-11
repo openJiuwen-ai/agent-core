@@ -11,6 +11,8 @@ instead of the stale "not supported" claims. These tests pin that copy down so
 it cannot regress.
 """
 
+import re
+
 import pytest
 
 from openjiuwen.agent_teams.tools.locales import cn as _cn
@@ -55,6 +57,7 @@ def test_swarmflow_md_documents_vote_contract_and_helper_import():
     assert "no `name`" in en
     for desc in (cn, en):
         assert "from openjiuwen.agent_teams.workflow.review import build_reviewers" in desc
-        # Skeleton examples must show real imports, not commented-out ones.
-        assert "# from swarmflow import agent, parallel, compact, verify" not in desc
-        assert "# from swarmflow import verify" not in desc
+        # Skeleton examples must show real imports. Match by pattern (any
+        # commented `from swarmflow import ...` line) instead of one literal
+        # string, so a re-worded commented import cannot slip past the check.
+        assert re.search(r"(?m)^\s*#\s*from\s+swarmflow\s+import", desc) is None
