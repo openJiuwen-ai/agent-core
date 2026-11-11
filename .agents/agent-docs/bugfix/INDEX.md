@@ -25,6 +25,7 @@ generated: true
 | [harness/subagents](#module-10) |
 | [harness/tools/browser_move/decision](#module-11) |
 | [harness/tools/subagent](#module-12) |
+| [symphony/shared/fingerprint](#module-13) |
 
 <a id="module-1"></a>
 
@@ -121,3 +122,11 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-13"></a>
+
+## symphony/shared/fingerprint
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261109_1721_symphony-hidden-skill-scan](openjiuwen/symphony/B_20261109_1721_symphony-hidden-skill-scan.md) | B | Symphony 忽略技能归档和隐藏资产 | lin-xiaoyu | openjiuwen/symphony/shared/fingerprint | openjiuwen/symphony/shared/fingerprint/scanner.py, tests/unit_tests/symphony/test_scanner.py | 无独立 D：技能文件夹扫描的局部修复。 |
