@@ -61,7 +61,20 @@ def test_tool_message_content_sanitizes_multimodal_payload_in_fallback() -> None
                         }
                     ],
                 },
-            ]
+            ],
+            # flash 多文件路径的顶层聚合(真实产出形态,flash_read_tool._invoke_multi):
+            # 消毒守卫按它判定「载荷存在正规通道,文本副本是冗余的」。
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source_path": "/tmp/a.png",
+                    "data_url": f"data:image/png;base64,{big_payload}",
+                },
+                {
+                    "type": "image",
+                    "data_url": f"data:image/jpeg;base64,{big_payload}",
+                },
+            ],
         },
     )
 
@@ -70,8 +83,9 @@ def test_tool_message_content_sanitizes_multimodal_payload_in_fallback() -> None
     # base64 载荷绝不以文本身份出现在消息里
     assert "base64," not in content
     assert big_payload not in content
-    # 占位符替换了载荷
-    assert content.count("<multimodal payload omitted>") == 2
+    # 占位符替换了载荷:真实形态里每张图的载荷字符串化后出现两次
+    # (files 里的逐文件 multimodal + 顶层聚合 multimodal),2 张图 = 4 处替换
+    assert content.count("<multimodal payload omitted>") == 4
     # 其余结构保留:路径与逐文件文本仍可见
     assert "/tmp/a.png" in content
     assert "/tmp/b.jpg" in content
@@ -92,21 +106,45 @@ def test_tool_message_content_fallback_without_payload_is_unchanged() -> None:
     assert AbilityManager._build_tool_message_content(result) == str(result)
 
 
-def test_tool_message_content_fallback_sanitizes_bare_text_data_urls() -> None:
-    """文本结果里字面混入 data URL 形态的载荷同样替换——该形态本身就是
-    同款 token 炸弹;裸 base64(无 data: 前缀)不匹配,保持原样。"""
+def test_tool_message_content_preserves_data_urls_without_multimodal_channel() -> None:
+    """普通工具输出里的 data URL 是**数据本身**,不是多模态载荷的冗余副本——
+    无 multimodal 字段的结果不做任何替换,逐字保留。
 
-    result = ToolOutput(success=True, data={"note": "data:image/png;base64,XYZ=="})
+    stdout 输出 ``data:text/plain;base64,...``(构造 data URI 嵌 HTML、base64
+    编解码任务等)没有其他多模态副本,清掉即丢数据(检视:清理范围过大,
+    丢失普通工具的有效输出);纯文本会话同样受影响,故按字段守卫收窄。"""
 
-    content = AbilityManager._build_tool_message_content(result)
-    # 整个数据 URL(前缀+载荷)被替换为占位符
-    assert "<multimodal payload omitted>" in content
-    assert "base64," not in content
-    assert "XYZ" not in content
-    assert "'note'" in content
+    text_plain = ToolOutput(
+        success=True, data={"stdout": "data:text/plain;base64,aGVsbG8="}
+    )
+    assert AbilityManager._build_tool_message_content(text_plain) == str(text_plain)
 
+    image_uri = ToolOutput(success=True, data={"note": "data:image/png;base64,XYZ=="})
+    assert AbilityManager._build_tool_message_content(image_uri) == str(image_uri)
+
+    # 裸 base64(无 data: 前缀)不受影响,同样原样。
     bare = ToolOutput(success=True, data={"note": "XYZ=="})
     assert AbilityManager._build_tool_message_content(bare) == str(bare)
+
+
+def test_tool_message_content_sanitizes_text_data_urls_with_multimodal_channel() -> None:
+    """结果携带 multimodal 正规通道时,文本字段里字面出现的 data URL 视为
+    冗余副本,整体替换为占位符;其余字段结构保留。"""
+
+    result = ToolOutput(
+        success=True,
+        data={
+            "note": "echo data:image/png;base64,XYZ==",
+            "multimodal": [
+                {"type": "image", "data_url": "data:image/png;base64,XYZ=="}
+            ],
+        },
+    )
+
+    content = AbilityManager._build_tool_message_content(result)
+    assert "<multimodal payload omitted>" in content
+    assert "base64," not in content
+    assert "'note'" in content
 
 
 def test_react_agent_builds_multimodal_user_message_from_tool_result() -> None:

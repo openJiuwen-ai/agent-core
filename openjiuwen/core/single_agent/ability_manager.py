@@ -294,18 +294,24 @@ class AbilityManager:
                 return f"Tool succeeded but returned empty content.{suffix}"
             return ""
 
-        fallback = str(result)
-        if "base64," in fallback:
-            # 无顶层 ``content`` 键的结果（多文件 read_file 的 ``{'files': [...]}`` 等）
-            # 走到这里时整个 ToolOutput 会被字符串化——``multimodal`` 里的 base64 会
-            # 以纯文本进入上下文并随请求原样上线，按文本 token 计量可达百万级
-            # （2026-11-07 事故：5 张图 5.4MB 文本触发端点 input token limit 拒收）。
-            # 像素的正规通道是结果对象 ``data.multimodal`` → 提升出的 user 消息
-            # image 块（react_agent 处理），消息文本里的 base64 属于冗余的那份，
-            # 在此替换为占位符。仅命中 ``data:<mime>;base64,`` 数据 URL 形态，
-            # 纯文本结果不受影响。
-            return _MULTIMODAL_DATA_URL_RE.sub(_MULTIMODAL_PAYLOAD_PLACEHOLDER, fallback)
-        return fallback
+        # 无顶层 ``content`` 键的结果走字符串化兜底。消毒只对「携带 multimodal
+        # 载荷」的结果生效：多文件 read_file 的 ``{'files': [...], 'multimodal':
+        # [...]}`` 整体字符串化时,``multimodal`` 里的 base64 以纯文本进入上下文
+        # 并随请求原样上线,按文本 token 计量可达百万级（2026-11-07 事故:5 张图
+        # 5.4MB 文本触发端点 input token limit 拒收）。这类结果的像素有正规通道
+        # （``data.multimodal`` → react_agent 提升出的 user 消息 image 块）,消息
+        # 文本里的 base64 属于冗余副本,替换为占位符。
+        # 普通工具（bash/code 等）的输出里出现的 data URL 是**数据本身**而非副本
+        # ——stdout 输出 ``data:text/plain;base64,...``（构造 data URI 嵌 HTML、
+        # base64 编解码任务等）没有其他多模态副本,清掉即丢数据。故无 multimodal
+        # 字段的结果不做任何替换,逐字保留。仅命中 ``data:<mime>;base64,`` 数据
+        # URL 形态,裸 base64 文本不受影响。
+        multimodal = data.get("multimodal") if isinstance(data, dict) else None
+        if isinstance(multimodal, list) and multimodal:
+            fallback = str(result)
+            if "base64," in fallback:
+                return _MULTIMODAL_DATA_URL_RE.sub(_MULTIMODAL_PAYLOAD_PLACEHOLDER, fallback)
+        return str(result)
 
     def set_context_engine(self, context_engine) -> None:
         self._context_engine = context_engine
