@@ -1183,13 +1183,11 @@ def _emit_verify_settled(
     as the generic ``outcome`` — ``VerifyResult`` serialised by :func:`_preview`
     (same JSON-string channel as an agent node's outcome, not hand-built here).
 
-    Each vote dict takes its ``name`` from the vote's own ``label`` (carried
-    from ``Reviewer.label`` by :func:`_collect`, with the reviewer's label and
-    the ``{base}-{i}`` form as fallbacks) — a single source, so the vote list
-    and the roster always agree — and carries the reviewer ``agent()`` call's
-    deterministic ``agent_id`` (``None`` when the thunk never started its
-    call), so a consumer can match votes to reviewer agent nodes by either
-    key. ``role`` is display-only.
+    Each vote dict mirrors :func:`_reviewer_call`'s label rule
+    (``reviewer.label or f"{base}-{i}"``) in ``name`` and carries the
+    reviewer ``agent()`` call's deterministic ``agent_id`` (``None`` when the
+    thunk never started its call), so a consumer can match votes to reviewer
+    agent nodes by either key. ``role`` is display-only.
     """
     reviewers = ctx.reviewers
     base = ctx.base
@@ -1203,7 +1201,7 @@ def _emit_verify_settled(
                 decision = "fail"
         votes.append(
             {
-                "name": vote.label or reviewer.label or f"{base}-{i}",
+                "name": reviewer.label or f"{base}-{i}",
                 "agent_id": agent_ids[i] if i < len(agent_ids) else None,
                 "kind": vote.kind,
                 "role": vote.role,
