@@ -1,13 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Shared filesystem path helpers for agent teams.
+"""Resolve workspaces, journals and local state paths for agent teams.
 
-Single source of truth for the on-disk layout used by team workspaces,
-member workspaces, swarmflow run journals, and the default sqlite db.
-Centralizing it here keeps creation (``team_agent.py``, ``blueprint.py``)
-and cleanup (``TeamBackend.clean_team``) in sync: a future move of the
-root only needs to update this module.
+Home resolution uses the current evaluation task home, the process-wide
+configured home, then ``~/.openjiuwen``. Use the process-wide configuration
+for persistent business paths. Scope task homes to one evaluation and restore
+the previous binding with ``reset_task_openjiuwen_home(token)`` in ``finally``.
+
+An explicitly configured global Skill library stays shared across task homes.
+Default Skill visibility declarations follow the team and member workspaces.
 """
 
 from __future__ import annotations
@@ -15,14 +17,26 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 _configured_openjiuwen_home: Path | None = None
 _configured_global_skills_dir: Path | None = None
+_task_openjiuwen_home: ContextVar[Path | None] = ContextVar("task_openjiuwen_home", default=None)
 
 # Per-workspace Skill visibility declaration. Skills live in one physical
 # library (``global_skills_dir()``); members/teams only declare what they see.
 SKILL_VISIBILITY_FILENAME = "skills-visibility.json"
+
+
+def set_task_openjiuwen_home(path: str | Path) -> Token:
+    """Bind a home for one evaluation and return the token to reset in finally."""
+    return _task_openjiuwen_home.set(Path(path))
+
+
+def reset_task_openjiuwen_home(token: Token) -> None:
+    """Restore the parent task home after evaluation or cancellation."""
+    _task_openjiuwen_home.reset(token)
 
 
 def configure_openjiuwen_home(path: str | Path) -> None:
@@ -38,7 +52,10 @@ def reset_openjiuwen_home() -> None:
 
 
 def get_openjiuwen_home() -> Path:
-    """Return the root directory for openJiuWen local state."""
+    """Return the task home, configured process home or default home in that order."""
+    task_home = _task_openjiuwen_home.get()
+    if task_home is not None:
+        return task_home
     if _configured_openjiuwen_home is not None:
         return _configured_openjiuwen_home
     return Path.home() / ".openjiuwen"
@@ -66,9 +83,10 @@ def reset_global_skills_dir() -> None:
 
 
 def global_skills_dir() -> Path:
-    """Return the one physical Skill library shared by every team member.
+    """Return the host-configured Skill library or the current home's library.
 
-    Layout (standalone): ``{get_openjiuwen_home()}/workspace/skills``.
+    The configured library is shared across evaluations. The fallback is
+    ``{get_openjiuwen_home()}/workspace/skills``.
     """
     if _configured_global_skills_dir is not None:
         return _configured_global_skills_dir

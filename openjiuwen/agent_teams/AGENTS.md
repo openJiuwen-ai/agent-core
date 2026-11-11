@@ -306,6 +306,7 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 5. **paths.py 是文件系统布局的单一真相源**  
    `get_agent_teams_home()`、`team_home(team_name)`、`independent_member_workspace(member_name)`。创建和清理都走这里，不要散落 `Path("…")` 硬编码。
+   根路径优先级、评估 task home 生命周期和 Skill 库边界见 [S_16](docs/specs/S_16_top-level-utilities.md#pathspy)。
 
 6. **Spec → build() → Runtime 是单向流**  
    Spec 不保留运行时引用；build() 产出运行时对象；运行时对象不回写 Spec。想支持热更新？通过 session + resume 路径，而不是反向污染 Spec。

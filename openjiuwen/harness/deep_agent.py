@@ -314,6 +314,8 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
+        if isinstance(config, DeepAgentConfig):
+            config.validate_iteration_policy()
         self._filter_disabled_tools(config)
         from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
 
@@ -486,6 +488,8 @@ class DeepAgent(BaseAgent):
         new_react_config.max_iterations = (
             sys.maxsize if config.enable_task_loop else config.max_iterations
         )
+        new_react_config.on_max_iterations = config.on_max_iterations
+        new_react_config.max_iterations_hard_limit = config.max_iterations_hard_limit
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -958,6 +962,8 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
+        react_config.on_max_iterations = cfg.on_max_iterations
+        react_config.max_iterations_hard_limit = cfg.max_iterations_hard_limit
         react_config.max_iterations = (
             sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         )
