@@ -35,12 +35,12 @@ def _stdout_tail(stdout: Optional[str], n: int = 1) -> str:
 
 
 def _base_url() -> str:
-    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:18093")
+    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:8080")
 
 
 def _executor() -> str:
-    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "supervisor").strip().lower().strip("'\"")
-    return value if value in {"supervisor", "docker"} else "supervisor"
+    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "default").strip().lower()
+    return value if value in {"default", "docker"} else "default"
 
 
 def _extra_params() -> dict:
