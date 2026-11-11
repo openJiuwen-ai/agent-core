@@ -7,7 +7,18 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.context_engine.processor.forked.compressor.base import (
+    _is_real_user_message,
+)
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    AssistantMessage,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.tools.mobile_gui.rails.multimodal_skill_read_rail import (
     MULTIMODAL_SKILL_USER_MESSAGE_NAME,
@@ -283,6 +294,49 @@ def test_merge_consecutive_read_file_skill_user_messages(tmp_path):
         "data:image/png;base64,1",
         "data:image/png;base64,2",
     ]
+
+
+def test_merge_consecutive_skill_read_messages_preserves_origin_metadata(tmp_path):
+    """Merged skill read_file user turns keep the bridge origin marker.
+
+    ``before_model_call`` writes the merged message back into the stored
+    context via ``mc.set_messages``. Losing the harness_internal origin
+    marker there would make the compressor round-boundary check treat the
+    merged multimodal message as a genuine user turn again.
+    """
+    workspace = tmp_path / "wk"
+    skill_dir = workspace / "skills" / "s1"
+    skill_dir.mkdir(parents=True)
+    paths = []
+    for name in ("a.png", "b.png"):
+        p = skill_dir / name
+        p.write_bytes(b"x")
+        paths.append(str(p.resolve()))
+    init_cwd(str(workspace))
+
+    user_messages = [
+        image_user_message(resolved_path=path, image_b64=str(i)) for i, path in enumerate(paths)
+    ]
+    for msg in user_messages:
+        # Same markers the ReAct multimodal tool-image bridge stamps.
+        msg.metadata = {
+            OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+            OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "tool_media",
+        }
+
+    messages = list(user_messages)
+    decorate_read_file_skill_bundle_user_messages(messages)
+    merged = merge_consecutive_read_file_skill_user_messages(messages)
+
+    assert len(merged) == 1
+    combined = merged[0]
+    assert isinstance(combined, UserMessage)
+    assert combined.name == MULTIMODAL_SKILL_USER_MESSAGE_NAME
+    assert combined.metadata[OPENJIUWEN_MESSAGE_ORIGIN_METADATA] == (
+        OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL
+    )
+    assert combined.metadata[OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA] == "tool_media"
+    assert not _is_real_user_message(combined)
 
 
 def test_merge_consecutive_read_file_leaves_non_skill_user_messages_separate(tmp_path):
