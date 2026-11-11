@@ -189,9 +189,11 @@ async def read_snapshot(fs, path, *, allow_read_only=False):
     exists = getattr(result.data, "exists", None)
     digest = getattr(result.data, "content_sha256", None)
     supports_snapshot = isinstance(exists, bool) and isinstance(digest, str)
-    if (exists is not None and not isinstance(exists, bool)) or (
-        digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None)
-    ):
+    invalid_exists = exists is not None and not isinstance(exists, bool)
+    invalid_digest = digest is not None and (
+        not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
+    )
+    if invalid_exists or invalid_digest:
         raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED,
                           reason="Todo backend returned invalid snapshot metadata",
                           details={"reason": "invalid_snapshot_metadata"})
@@ -456,9 +458,6 @@ def todo_operation(method):
         except BaseError:
             raise
         except Exception as exc:
-            from openjiuwen.core.common.exception.codes import StatusCode
-            from openjiuwen.core.common.exception.errors import build_error
-
             raise build_error(StatusCode.TOOL_TODOS_INVOKE_FAILED, reason=str(exc)) from exc
 
     return invoke
