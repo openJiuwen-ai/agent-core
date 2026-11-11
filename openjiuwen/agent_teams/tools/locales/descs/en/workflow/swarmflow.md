@@ -165,6 +165,7 @@ When you need quality gating on your own deliverable, use `verify()` instead of 
 
 ```python
 r = await verify(build_reviewers(deliverable, [{"type": "verifier"}, {"type": "inspector"}]))
+# r: VerifyResult{verdict: "pass"|"fail"|None, passed: bool, votes: list[VerifyVote], feedback: str}
 for v in r.votes:   # VerifyVote{kind, decision, score, feedback, role, label}; no `name`
     log(f"{v.label} role={v.role} decision={v.decision} score={v.score} feedback={v.feedback[:80]}")
 ```

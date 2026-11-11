@@ -164,6 +164,7 @@ c = await parallel([... for x in b])
 
 ```python
 r = await verify(build_reviewers(deliverable, [{"type": "verifier"}, {"type": "inspector"}]))
+# r: VerifyResult{verdict: "pass"|"fail"|None, passed: bool, votes: list[VerifyVote], feedback: str}
 for v in r.votes:   # VerifyVote{kind, decision, score, feedback, role, label}，没有 name
     log(f"{v.label} role={v.role} decision={v.decision} score={v.score} feedback={v.feedback[:80]}")
 ```
