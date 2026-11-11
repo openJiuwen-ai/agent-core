@@ -7,14 +7,17 @@ import getpass
 import hashlib
 import os
 import re
-import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import sys_operation_logger
-from openjiuwen.harness.tools.shell._output_directory import get_output_root
+from openjiuwen.harness.tools.shell._output_directory import (
+    get_output_root,
+    open_output_directory,
+    write_output_file,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation import SysOperation
@@ -64,25 +67,19 @@ def _output_dir(operation: SysOperation | None = None) -> Path:
     name, requests mode 0700, and is created lazily on each call.
     """
     output_root = get_output_root(operation)
-    directory = (output_root if output_root is not None else Path(tempfile.gettempdir())) / _output_dir_name()
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # Check the predictable directory entry itself before chmod or writing.
-    entry = directory.lstat()
-    getuid = getattr(os, "getuid", None)
-    if not stat.S_ISDIR(entry.st_mode) or (getuid is not None and entry.st_uid != getuid()):
-        raise PermissionError(
-            f"The command output directory {directory} must be a directory owned by this account, "
-            "not a symlink or another account's directory; remove it to let it be recreated"
-        )
-    # Request owner-only permissions where supported by the filesystem.
-    try:
-        directory.chmod(0o700)
-    except OSError as exc:
-        sys_operation_logger.warning(
-            "Failed to restrict the command output directory, output_dir=%s, error=%s",
-            directory,
-            exc,
-        )
+    directory = (output_root if output_root is not None else Path(tempfile.gettempdir()).resolve()) / _output_dir_name()
+    with open_output_directory(directory) as directory_fd:
+        try:
+            if directory_fd is None:
+                directory.chmod(0o700)
+            else:
+                os.fchmod(directory_fd, 0o700)
+        except OSError as exc:
+            sys_operation_logger.warning(
+                "Failed to restrict the command output directory, output_dir=%s, error=%s",
+                directory,
+                exc,
+            )
     return directory
 
 
@@ -99,10 +96,7 @@ def persist_large_output(
     content_bytes = combined.encode("utf-8", errors="replace")
     digest = hashlib.sha256(content_bytes).hexdigest()[:12]
 
-    path = _output_dir(operation) / f"powershell_{digest}.txt"
-
-    if not path.exists():
-        path.write_bytes(content_bytes)
+    path = write_output_file(_output_dir(operation), f"powershell_{digest}.txt", content_bytes)
 
     return str(path), len(content_bytes)
 
@@ -209,10 +203,18 @@ def render_tool_content(
     """
     merged = _merge(output.stdout, output.stderr)
     if output.max_output_chars > 0 and len(merged) > output.max_output_chars:
-        path, size = persist_large_output(output.stdout, output.stderr, output.operation)
-        preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
-        stdout = _build_persisted_message(path, size, preview, has_more)
-        stderr = "(see persisted output)" if output.stderr else "(empty)"
+        try:
+            path, size = persist_large_output(output.stdout, output.stderr, output.operation)
+        except (OSError, RuntimeError, ValueError) as error:
+            stdout = (
+                f"Full output could not be saved ({type(error).__name__} {str(error)[:300]}).\n"
+                f"{truncate_output(merged, _PREVIEW_SIZE_BYTES)}"
+            )
+            stderr = "(included in truncated output)" if output.stderr else "(empty)"
+        else:
+            preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
+            stdout = _build_persisted_message(path, size, preview, has_more)
+            stderr = "(see persisted output)" if output.stderr else "(empty)"
     else:
         stdout = _LEADING_BLANK_LINES.sub("", output.stdout).rstrip() if output.stdout else "(empty)"
         stderr = output.stderr.rstrip() if output.stderr else "(empty)"
