@@ -17,6 +17,7 @@ from openjiuwen.core.common.logging.default.default_impl import (
 )
 from openjiuwen.core.common.logging.utils import (
     get_session_id,
+    reset_session_id,
     set_session_id,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "SafeRotatingFileHandler",
     "ContextFilter",
     "set_session_id",
+    "reset_session_id",
     "get_session_id",
 ]
