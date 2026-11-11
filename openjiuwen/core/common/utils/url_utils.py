@@ -5,7 +5,13 @@ import re
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
-_USERINFO_PATTERN = re.compile(r"//(?P<userinfo>[^/@\s]+)@")
+# Greedy on purpose: passwords may contain '@', so the match must run to the
+# LAST '@' before the path / query / fragment starts -- the same boundary the
+# main path gets from ``netloc.rpartition("@")``. Excluding '@' here would stop
+# at the first one and leak the rest of the password. '/', '?' and '#' terminate
+# the authority, so they stay excluded; without them the pattern would swallow a
+# query that merely contains an '@' and mangle a URL carrying no password.
+_USERINFO_PATTERN = re.compile(r"//(?P<userinfo>[^/?#\s]+)@")
 
 
 def _redact_userinfo_regex(url: str) -> str:
@@ -31,7 +37,9 @@ def redact_url_password(url: Optional[str]) -> Optional[str]:
 
     Returns:
         URL with password replaced by '***'. If no password present, returns original URL.
-        Returns original string if URL parsing fails. Returns None if url is None.
+        When ``urlparse`` rejects the URL, a regex fallback redacts the password of any
+        ``//user:pass@`` userinfo it can locate; a string containing no such userinfo is
+        returned unchanged. Returns None if url is None.
 
     Examples:
         >>> redact_url_password("redis://:secret@host:6379/0")
