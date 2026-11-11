@@ -6,6 +6,7 @@ import asyncio
 import base64
 import fnmatch
 import json
+import logging
 import os
 import re
 import shlex
@@ -33,8 +34,9 @@ from typing import (
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation.config import SandboxGatewayConfig
 from openjiuwen.core.sys_operation.result import (
     DownloadFileChunkData,
