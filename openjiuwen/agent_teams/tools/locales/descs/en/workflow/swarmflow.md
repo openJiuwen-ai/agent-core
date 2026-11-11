@@ -173,7 +173,7 @@ When you need quality gating on your own deliverable, use `verify()` instead of 
 
 Composition baseline: **light gate** = 1 `verifier`; **key deliverable** = `verifier` + `inspector` (multiple inspectors can split dimensions); **open / high-risk design** = `verifier` + `challenger` (add `inspector` if needed). A script may call `verify()` repeatedly with different compositions for deliverables at different stages.
 
-**Per-reviewer model and reading the result**: every reviewer role is an independent agent and can pin its model via the `"options"` key in its spec (overriding the team teammate model that reviewer inherits, and the `verify()`-level `options`):
+**Per-reviewer model and reading the result**: every reviewer role is an independent agent and can pin its model via the `"options"` key in its spec (overriding the team teammate model that reviewer inherits, and the `verify()`-level `options`). **`build_reviewers` must be imported explicitly** (`verify` / `phase` and the other swarmflow primitives are pre-bound by the loader, so their imports may be omitted):
 
 ```python
 from swarmflow import verify
