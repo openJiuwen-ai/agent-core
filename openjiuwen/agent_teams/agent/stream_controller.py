@@ -132,8 +132,13 @@ class StreamController:
         task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,
         model_group_label_getter: Optional[Callable[[], Optional[str]]] = None,
         served_model_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
+        team_quiet_callback: Optional[Callable[[], None]] = None,
     ):
         self._get_blueprint = blueprint_getter
+        # Fired once the roster has held still for the debounce window,
+        # whatever the task board says: goal mode uses it to give the
+        # leader's open goal a turn. None when goal mode is off.
+        self._team_quiet_callback = team_quiet_callback
         self._state = state
         self._resources = resources
         self._update_status = status_updater
@@ -615,6 +620,8 @@ class StreamController:
         registry = self._state.member_registry
         if registry is None or not registry.is_idle():
             return
+        if self._team_quiet_callback is not None:
+            self._team_quiet_callback()
         if not await self._is_task_board_settled():
             return
         snapshot = registry.snapshot()
@@ -666,6 +673,28 @@ class StreamController:
                 "member_count": len(members),
                 "members": members,
             },
+            source_member=bp.member_name if bp else None,
+            role=bp.role if bp else None,
+        )
+        self.stream_queue.put_nowait(marker)
+
+    def emit_goal_blocked(self, reason: str) -> None:
+        """Enqueue a goal-blocked marker chunk; the stream stays open.
+
+        The leader's goal stopped driving itself (it hit a limit, or was
+        assessed as stuck) while the user's request is still unmet. The team
+        is not complete; the consumer decides whether to send more input.
+
+        Args:
+            reason: Why the goal blocked, as given by its last assessment.
+        """
+        if self.stream_queue is None:
+            return
+        bp = self._get_blueprint()
+        marker = TeamOutputSchema(
+            type="message",
+            index=0,
+            payload={"event_type": "team.goal.blocked", "reason": reason},
             source_member=bp.member_name if bp else None,
             role=bp.role if bp else None,
         )

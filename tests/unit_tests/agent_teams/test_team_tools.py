@@ -1921,6 +1921,48 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_open_task_reports_assignee_status(self, agent_team, t, sample_agent_card):
+        """list and get both name the owner of an open task with its member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "assignee=member1[unstarted]" in tool.render_for_llm(listed)
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert detail.data["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "Assignee: member1[unstarted]" in tool.render_for_llm(detail)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_terminal_task_omits_assignee_status(self, agent_team, t, sample_agent_card):
+        """A finished task keeps its assignee but drops the member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+        assert await tm.cancel(task.task_id)
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] is None
+        rendered = tool.render_for_llm(listed)
+        assert "assignee=member1 " in rendered
+        assert "[unstarted]" not in rendered
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert "assignee_status" not in detail.data
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
@@ -2103,7 +2145,7 @@ class TestRenderForLlm:
         )
         result = tool.render_for_llm(output)
         assert "#t1 [pending] Fix bug" in result
-        assert "(dev-1)" in result
+        assert "assignee=dev-1 " in result
         assert "[blocked by #t1]" in result
         # t2 carries updated_at → its line shows the absolute local time;
         # t1 has no updated_at → the None guard skips time rendering.

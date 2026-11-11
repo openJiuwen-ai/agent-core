@@ -113,6 +113,12 @@ STRINGS: dict[str, str] = {
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
         "Example: {\"bash\": \"deny\", \"write_file\": \"ask\"}"
     ),
+    "spawn_teammate.goal": (
+        "Whether this teammate works in goal mode: it does not stop while a task it started "
+        "is unsubmitted, and its submission is assessed before the task is accepted as done. "
+        "Omit to follow the team default (on); pass false only for a member whose work "
+        "needs no such persistence, such as answering questions or standing by."
+    ),
     "spawn_teammate.fork": (
         "Inherit context from an existing member to skip repeated file reading "
         "and searching. true: inherit the caller's full current context. "
@@ -296,6 +302,11 @@ STRINGS: dict[str, str] = {
     "view_expert_groups.member": "get only, optional: expand just this member of the group",
     # ===== spawn_expert ========================================================
     # spawn_expert._desc lives in descs/en/expert/spawn_expert.md
+    "spawn_expert.fork": "When true, select the source context at registration and inject it at first start",
+    "spawn_expert.fork_source": (
+        "Requires fork=true. Omit or name the leader for live self-context, "
+        "or name an idle native teammate for its last completed turn"
+    ),
     "spawn_expert.expert": (
         "Required. A single expert's package name; with group, a member name of that group (not leader)"
     ),

@@ -172,3 +172,9 @@ footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上�
 归档与双向同步」约束 #1。
 
 新 F 文档直接放 `.agents/agent-docs/features/`，模块以 frontmatter modules 标注；历史子目录通过 features/INDEX.md 定位。作者使用 Git author，F/B 声明关联 designs，修改后按根 AGENTS.md 自动同步索引。
+
+## 工具执行环境
+
+`BuildContext.resolve_execution_environment` 提供工具调用时的异步环境解析扩展点。
+Spec / NativeHarness 将其绑定到 AbilityManager；作用域和本地/沙箱合并实现位于
+`core/sys_operation/execution_environment.py`。产品身份策略留在平台，详见 S_05、`F_20261104_1720_tool-execution-environment`。

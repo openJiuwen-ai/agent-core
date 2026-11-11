@@ -123,6 +123,13 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             return
         if self._team_completed_emitted:
             return
+        # Goal mode: a drained board is not yet a met request. While the
+        # leader's goal is open the team is not complete; asking also hands
+        # the leader a turn to check the board against that goal.
+        holds_completion = getattr(self._lifecycle, "goal_holds_completion", None)
+        if callable(holds_completion) and holds_completion():
+            team_logger.debug("[leader] team completion held back by an open goal")
+            return
 
         await self._finalize_non_contributing_worktrees("team completion")
         await self._publish_team_completed(team_backend.team_name, snapshot)

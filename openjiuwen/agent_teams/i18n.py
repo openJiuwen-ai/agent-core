@@ -35,6 +35,25 @@ _current_language: Language = _DEFAULT_LANGUAGE
 
 STRINGS: dict[str, dict[str, str]] = {
     "cn": {
+        "goal.task_objective": (
+            "完成你已开工的团队任务 #{task_id}：{title}\n\n{content}\n\n"
+            "任务做完并自查通过后，调用完成工具提交；未提交前不要停下。"
+            "确实无法推进时，说明卡在哪里并向 leader 求助。"
+        ),
+        "goal.task_revision": "\n\n验证未通过，需要返工。反馈：{feedback}",
+        "goal.submission_rejected": (
+            "任务 #{task_id} 还不能提交：评估认为尚未达成完成条件。\n依据：{evidence}\n"
+            "剩余工作：{remaining}\n完成这些之后再提交。"
+        ),
+        "goal.submit_now": "任务 #{task_id} 已被评估为完成，但还没有提交。现在调用完成工具提交它。",
+        "goal.member_blocked": (
+            "成员 {member} 在任务 #{task_id} 上停止了自主推进，需要你介入。原因：{reason}"
+        ),
+        "goal.leader_objective": (
+            "用户的请求如下。团队的全部工作都必须真正满足它：\n\n{request}\n\n"
+            "当所有成员都停下来时，对照这个请求逐项核对任务板与产出："
+            "有缺口就补任务或指派返工；确认全部满足后，再提交完成报告。"
+        ),
         "conversation.context": (
             "群聊消息通知。\n"
             "本次群聊时间范围（毫秒）：({from_timestamp}, {to_timestamp}]。\n"
@@ -519,6 +538,31 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "en": {
+        "goal.task_objective": (
+            "Finish the team task you started, #{task_id}: {title}\n\n{content}\n\n"
+            "Once the work is done and you have checked it yourself, hand it in with the "
+            "completion tool; do not stop before that. If you truly cannot make progress, "
+            "say what is blocking you and ask the leader for help."
+        ),
+        "goal.task_revision": "\n\nVerification failed and the task needs rework. Feedback: {feedback}",
+        "goal.submission_rejected": (
+            "Task #{task_id} cannot be handed in yet: the assessment found it is not complete.\n"
+            "Evidence: {evidence}\nRemaining work: {remaining}\nHand it in again once that is done."
+        ),
+        "goal.submit_now": (
+            "Task #{task_id} was assessed as complete but has not been handed in. "
+            "Call the completion tool for it now."
+        ),
+        "goal.member_blocked": (
+            "Member {member} has stopped driving task #{task_id} on its own and needs you to step in. "
+            "Reason: {reason}"
+        ),
+        "goal.leader_objective": (
+            "The user's request follows. The team's work must actually satisfy all of it:\n\n{request}\n\n"
+            "When every member has stopped, check the task board and the deliverables against this "
+            "request item by item: add tasks or assign rework for any gap, and submit the completion "
+            "report only once all of it is satisfied."
+        ),
         "conversation.context": (
             "Group message notice.\n"
             "Group history time range (milliseconds): ({from_timestamp}, {to_timestamp}].\n"

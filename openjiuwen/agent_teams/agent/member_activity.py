@@ -145,6 +145,11 @@ class MemberActivityRegistry:
         """Return whether every known member is currently at rest."""
         return all(status in MEMBER_QUIESCENT_STATUSES for status in self._statuses.values())
 
+    def others_idle(self) -> bool:
+        """Return whether every known member other than the owning one is at rest."""
+        others = [status for name, status in self._statuses.items() if name != self.self_member_name]
+        return all(status in MEMBER_QUIESCENT_STATUSES for status in others)
+
     def snapshot(self) -> dict[str, str]:
         """Return a name to status-value copy of the roster, for reporting."""
         return {name: status.value for name, status in self._statuses.items()}

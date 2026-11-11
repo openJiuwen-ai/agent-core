@@ -93,12 +93,18 @@ class TaskSummary(BaseModel):
     lightweight routing/identity field (one int, like status/assignee), not
     a heavy field like content — it lets the list view render a relative
     time so an idle member can tell which task has been stalling.
+
+    ``assignee_status`` is the assignee's current ``MemberStatus`` value, set
+    only while the task is open (non-terminal) and the assignee is still on
+    the roster. It tells the reader whether a stalled task has a working
+    owner or a dead one — the difference between waiting and stepping in.
     """
 
     task_id: str
     title: str
     status: str
     assignee: Optional[str] = None
+    assignee_status: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
     parent_task_id: Optional[str] = None
     # Set when this subtask was derived from an older revision of its parent
@@ -121,6 +127,7 @@ class TaskDetail(BaseModel):
     content: str
     status: str
     assignee: Optional[str] = None
+    assignee_status: Optional[str] = None
     reviewer: list[str] = Field(default_factory=list)
     review_round: int = 0
     max_review_rounds: Optional[int] = None

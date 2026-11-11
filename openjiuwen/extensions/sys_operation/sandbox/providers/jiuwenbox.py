@@ -1428,7 +1428,11 @@ def _merge_local_env(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
     if env is None:
         return None
     merged = dict(os.environ)
-    merged.update({str(k): str(v) for k, v in env.items()})
+    for key, value in env.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
     return merged
 
 
@@ -1926,12 +1930,19 @@ def wrap_remote_leaf(
         parts.extend(["--cwd", shlex.quote(cwd)])
     if env:
         for key, value in env.items():
-            parts.extend(["--env", shlex.quote(f"{key}={value}")])
+            if value is not None:
+                parts.extend(["--env", shlex.quote(f"{key}={value}")])
     if timeout is not None and timeout > 0:
         parts.extend(["--timeout-seconds", shlex.quote(str(int(timeout)))])
     if receives_pipe_stdin:
         parts.extend(["--stdin", "-"])
-    parts.extend(["--", "bash", "-lc", shlex.quote(leaf_text)])
+    parts.append("--")
+    removals = [key for key, value in (env or {}).items() if value is None]
+    if removals:
+        parts.append("env")
+        for key in removals:
+            parts.extend(["-u", shlex.quote(key)])
+    parts.extend(["bash", "-lc", shlex.quote(leaf_text)])
     return " ".join(parts)
 
 
@@ -2092,7 +2103,7 @@ def build_orchestration_env(
     """Merge caller env with reserved jiuwenbox orchestration keys (forced)."""
     merged: Dict[str, str] = {}
     if caller_env:
-        merged.update({str(k): str(v) for k, v in caller_env.items()})
+        merged.update(caller_env)
     # Reserved keys cannot be overridden by caller-provided environment.
     merged.pop("JIUWENBOX_URL", None)
     merged.pop("JIUWENBOX_API_TOKEN", None)

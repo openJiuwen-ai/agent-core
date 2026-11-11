@@ -128,6 +128,19 @@ capability 默认关是本仓一贯的 fail-safe 取向，且 fork 合入仅一�
 ### D8 触发时机与校验
 
 fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅标记意图，实际上下文注入发生在成员初始化完成的异步时刻。
+
+### 专家成员的上下文 fork
+
+在 `enable_fork: true`、`spawn_mode: inprocess` 且已接入专家目录的团队中，Leader 可以调用
+`spawn_expert(expert="finance", member_name="finance-2", fork=true, fork_source="researcher")`。
+省略 `fork_source` 或指定 Leader 时，继承 Leader 的实时对话。指定其他成员时，源成员须是空闲的
+进程内原生队友，使用它最近一次正常结束的 Turn 的快照。仍在运行、已暂停或有待处理交互的源成员
+会被拒绝，等它空闲后可重试。目标须为原生专家。
+
+`spawn_expert` 在登记成员时选定源对话，首次启动时注入。调度模式仍通过
+`create_task` 分派任务，在任务项中填 `assignee: "finance-2"`。新成员使用目标专家模板的人设、工具和技能，
+沿用既有 fork 身份转换机制。源成员最近完成的 Turn 快照随其会话状态保存。新成员待注入的快照
+保留在当前运行时，直到成员启动成功。
 对非法组合打 warning 并降级：
 - live fork（`fork=true`）传非 `full` 的 `fork_mode` → 忽略，按 `full` 注入
 - 命名 fork 的 checkpoint 不存在（或 `fork_source` 与其创建者不符）→ 回退为全量，并给 leader 发一条含可用快照名的消息

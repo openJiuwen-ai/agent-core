@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/`（5 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -145,6 +145,23 @@ class GoalStopConfig:
 | `COMPLETE` | 置 `COMPLETED`，`stop_reason="goal_completed"` 类 |
 | `CONTINUE` | 保持 `ACTIVE`，推进 attempt |
 | `BLOCKED` | 置 `BLOCKED`，`stop_reason` 记录阻塞原因 |
+
+## 第二个宿主：NativeHarness
+
+`GoalManager` 不再只由 `DeepAgent.start()` 构造。`agent_teams.harness.NativeHarness` 在
+`enable_goal(stop_config, ready=None)` 被调用过的前提下，于自己的 `start()` 里构造一个
+`GoalManager`（同样以 `SessionGoalStore` 落在它的 session 上）并绑定到 `TaskCompletionRail`。
+不变量 1（状态独占）对两个宿主同样成立。差别只在调度：NativeHarness 没有输出租约，
+`has_output_stream` 恒真；目标被替换或清除时不取消在跑的 goal round（其评估因记录不再匹配而
+自然作废）。调度细节见 agent_teams `S_18`。
+
+本包新增两个面向宿主的入口：
+
+- `TaskCompletionRail.set_goal_manager(goal_manager, *, stop_config=None)`：给出 `stop_config` 时替换
+  评估器，宿主因此可以使用自己的停止策略而不是默认的 HYBRID。
+- `TaskCompletionRail.assess_completion_claim(ctx, evidence) -> GoalAssessment | None`：按当前策略评估
+  一次"目标已完成"的声明，**不写** `GoalRecord`。没有 ACTIVE goal、或需要 transcript 评估而评估器
+  不可用时返回 None（不是否决，由调用方决定）。
 
 ## 与其它 spec 的关系
 
