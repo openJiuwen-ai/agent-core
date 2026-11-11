@@ -172,7 +172,7 @@ c = await parallel([... for x in b])
 
 组合基调：**轻量把关** = 1 个 `verifier`；**重要交付物** = `verifier` + `inspector`（可多个 inspector 分维度）；**开放性 / 高风险设计** = `verifier` + `challenger`（视需要再加 `inspector`）。同一脚本对不同阶段产物可用不同组成多次调用。
 
-**reviewer 指定模型并读取结果**：每个 reviewer 角色都是独立 agent，都可在自己的 spec 里用 `"options"` 键指定模型（覆盖该 reviewer 继承的团队 teammate 模型，也覆盖 `verify()` 级 `options`）：
+**reviewer 指定模型并读取结果**：每个 reviewer 角色都是独立 agent，都可在自己的 spec 里用 `"options"` 键指定模型（覆盖该 reviewer 继承的团队 teammate 模型，也覆盖 `verify()` 级 `options`）。**`build_reviewers` 必须显式 import**（`verify` / `phase` 等 swarmflow 原语由 loader 预绑定，可省略 import）：
 
 ```python
 from swarmflow import verify
