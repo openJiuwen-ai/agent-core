@@ -13,6 +13,8 @@ files:
   - openjiuwen/harness/tools/shell/powershell/_output.py
   - openjiuwen/harness/tools/shell/powershell/_tool.py
   - tests/unit_tests/harness/tools/test_shell_output_sandbox.py
+  - tests/unit_tests/harness/tools/test_bash/test_output.py
+  - tests/unit_tests/harness/tools/test_powershell/test_output.py
 designs: []
 design_note: 按已确认的沙箱内存储方案修复现有工具结果回读契约。
 ---
@@ -66,3 +68,52 @@ Git 中对应版本的 Shell 模块源码加载测试，文件工具结果为 88
 ```powershell
 .venv/Scripts/python.exe -B -m pytest -o addopts= -p no:cacheprovider tests/unit_tests/harness/tools/test_shell_output_sandbox.py tests/unit_tests/harness/tools/test_filesystem_tools.py tests/unit_tests/harness/tools/test_bash tests/unit_tests/harness/tools/test_powershell -q --tb=line --show-capture=no --disable-warnings
 ```
+
+## PR 审查后的异常与目录保护修复
+
+审查对象为 PR [#2641](https://github.com/openJiuwen-ai/agent-core/pull/2641) 的初版提交
+`259ff120c83a7c2eb55540bdb0df4b4854c0cfc1`。两条意见分别指出
+[保存失败缺少异常保护](https://github.com/openJiuwen-ai/agent-core/pull/2641#discussion_r4537894838)和
+[符号链接可能造成越界写入](https://github.com/openJiuwen-ai/agent-core/pull/2641#discussion_r4537895156)。
+本节续写该修复的证据，上文保留初版验证结果。
+
+### 复现与根因
+
+- `PermissionError` / `OSError` 会从保存逻辑直接冒泡，影响普通结果、流式最终结果和超时部分输出。
+  审查新增用例在旧实现的初轮结果为 22 项失败、2 项跳过、48 项未选中。
+- 初版只检查最终目录，父目录在解析后被替换为 Windows 目录联接时，仍会在临时测试沙箱的
+  `outside` 目录创建目录及文件。悬空文件符号链接也会被 `Path.exists()` 与 `write_bytes()` 组合跟随。
+- Windows 目录句柄只禁止删除共享时，目录仍可被原地设置为 reparse point。
+  新增两种 Shell 的原地修改测试均复现了越界写入。仅收紧共享标志仍不足以启用保护，
+  目录句柄还必须请求 `FILE_LIST_DIRECTORY`，让系统执行共享检查。
+
+### 修复决策
+
+- 两种 Shell 的渲染层捕获保存过程中的路径、权限与 I/O 异常，返回有限的首尾预览及长度受限的
+  错误说明。命令执行状态和退出码继续来自执行结果。
+- 无授权目录时保留 `PermissionError`，交由渲染层降级。返回 `None` 会触发当前接口的系统临时目录
+  回退，因此受限调用不能用该值表示保存失败。
+- 写入逐级锚定目录。POSIX 使用 `O_DIRECTORY | O_NOFOLLOW` 及目录描述符，Windows 使用
+  `FILE_LIST_DIRECTORY` 和仅允许读取共享的目录句柄，拒绝 reparse point 并阻止目录替换。
+- 完整内容先写入随机且排他创建的暂存文件，再发布到内容哈希文件名。POSIX 使用相对目录描述符的
+  `os.replace`。Windows 的普通重命名会与上述目录保护冲突，因此通过源文件句柄执行同父目录的
+  `NtSetInformationFile(FileRenameInformation)`，在发布期间保留目录保护。
+- 拒绝现有符号链接和非普通文件，发布后核对路径与文件身份。预先存在的硬链接会被替换目录项，
+  外部原文件的内容保持原值。部分写入失败会清理暂存文件并释放句柄。
+
+### 审查修复验证
+
+环境继续使用 Windows、Python 3.11.9。输出相关定向回归为 118 项通过、12 项跳过。
+原有真实子进程执行及 `ReadFileTool` 回读场景继续通过。
+
+```powershell
+.venv/Scripts/python.exe -B -m pytest -o addopts= -p no:cacheprovider tests/unit_tests/harness/tools/test_shell_output_sandbox.py tests/unit_tests/harness/tools/test_bash/test_output.py tests/unit_tests/harness/tools/test_powershell/test_output.py -q --tb=line --show-capture=no --disable-warnings
+```
+
+新增覆盖包括两种 Shell 的保存失败降级、目录被文件占用、目录解析后的联接替换、写入期间原地设置
+联接、发布期间替换父目录、无授权目录时的预览返回、部分写入清理、长异常说明及已有硬链接。
+
+完整相关回归使用上文的组合命令，结果为 354 项通过、12 项跳过、8 项失败。
+失败项仍为初版已对照的 5 项 Grep 空结果与 3 项 Windows 超时用例。
+12 项跳过包括原有 10 项平台权限测试，以及创建文件符号链接所需权限不足的 2 项测试。
+Windows 目录联接的复现与修复测试均实际执行。POSIX 实现尚未在 Linux 环境运行，需由对应平台的 CI 验证。

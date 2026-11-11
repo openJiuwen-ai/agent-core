@@ -107,8 +107,13 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      本地 `restrict_to_sandbox=True` 时，Bash / PowerShell 的超长输出保存到有效沙箱
      范围内的 `.outputs/` 子目录。优先选当前 workspace、cwd、project root 中可访问的位置，
      显式 `sandbox_root` 是访问边界，也可作为保存位置的回退。输出目录按符号链接解析后
-     校验范围。普通、流式最终结果和超时已有输出均返回可回读路径，文件跨工具调用保留，
-     供后续 `read_file` / 搜索调用使用。
+     校验范围。写入逐级拒绝符号链接和 Windows reparse point，POSIX 使用目录描述符，
+     Windows 在写入期间持有仅允许读取共享的目录句柄，阻止原地设置 reparse point 及重命名替换。
+     完整内容先写入排他创建的暂存文件，
+     再原子发布，并核对发布后的路径与文件身份。普通、流式最终结果和超时已有输出
+     在保存成功时返回可回读路径，文件跨工具调用保留，供后续 `read_file` / 搜索调用使用。
+     保存遇到路径、权限或 I/O 错误时返回有长度限制的首尾预览及保存失败说明，工具的命令
+     成功状态与退出码由执行结果决定。受限模式找不到授权保存位置时通过该降级路径返回。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
