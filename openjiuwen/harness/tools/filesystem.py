@@ -2608,7 +2608,11 @@ class GrepTool(Tool):
             rg_path: str = "rg",
     ) -> str:
         parts: List[str] = [
-            self._shell_quote(rg_path),
+            # On Windows, the command runs via PowerShell, which requires the
+            # call operator (&) to invoke a quoted executable path.  Without
+            # it, PowerShell treats the quoted string as a literal expression
+            # and the command silently fails (grep returns no matches).
+            f"& {self._shell_quote(rg_path)}" if os.name == "nt" else self._shell_quote(rg_path),
             "--hidden",
             "--color=never",
             "--max-columns",
