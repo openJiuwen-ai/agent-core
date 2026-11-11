@@ -1,8 +1,31 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import re
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
+
+# Greedy on purpose: passwords may contain '@', so the match must run to the
+# LAST '@' before the path / query / fragment starts -- the same boundary the
+# main path gets from ``netloc.rpartition("@")``. Excluding '@' here would stop
+# at the first one and leak the rest of the password. '/', '?' and '#' terminate
+# the authority, so they stay excluded; without them the pattern would swallow a
+# query that merely contains an '@' and mangle a URL carrying no password.
+_USERINFO_PATTERN = re.compile(r"//(?P<userinfo>[^/?#\s]+)@")
+
+
+def _redact_userinfo_regex(url: str) -> str:
+    """Best-effort redaction for URLs that ``urlparse`` cannot handle."""
+
+    def _replace(match: "re.Match[str]") -> str:
+        userinfo = match.group("userinfo")
+        if ":" not in userinfo:
+            return match.group(0)
+        username = userinfo.split(":", 1)[0]
+        redacted = f"{username}:***" if username else ":***"
+        return f"//{redacted}@"
+
+    return _USERINFO_PATTERN.sub(_replace, url, count=1)
 
 
 def redact_url_password(url: Optional[str]) -> Optional[str]:
@@ -14,7 +37,9 @@ def redact_url_password(url: Optional[str]) -> Optional[str]:
 
     Returns:
         URL with password replaced by '***'. If no password present, returns original URL.
-        Returns original string if URL parsing fails. Returns None if url is None.
+        When ``urlparse`` rejects the URL, a regex fallback redacts the password of any
+        ``//user:pass@`` userinfo it can locate; a string containing no such userinfo is
+        returned unchanged. Returns None if url is None.
 
     Examples:
         >>> redact_url_password("redis://:secret@host:6379/0")
@@ -29,22 +54,20 @@ def redact_url_password(url: Optional[str]) -> Optional[str]:
 
     try:
         parsed = urlparse(url)
+        # ``parsed.password`` only inspects the userinfo part, so it never touches
+        # ``parsed.port`` (which raises ValueError for invalid ports).
         if not parsed.password:
             return url
 
-        netloc_parts = []
-        if parsed.username:
-            netloc_parts.append(parsed.username)
-        netloc_parts.append(":***")
-
-        if parsed.hostname:
-            netloc_parts.append("@")
-            netloc_parts.append(parsed.hostname)
-        if parsed.port:
-            netloc_parts.append(f":{parsed.port}")
-
-        new_netloc = "".join(netloc_parts)
-        redacted = parsed._replace(netloc=new_netloc)
-        return urlunparse(redacted)
+        # Work on the raw netloc instead of rebuilding it from ``parsed.hostname``
+        # and ``parsed.port``: hostname drops IPv6 brackets and port raises
+        # ValueError for out-of-range / non-numeric ports.
+        userinfo, separator, hostport = parsed.netloc.rpartition("@")
+        if not separator:
+            return url
+        username = userinfo.split(":", 1)[0]
+        redacted_userinfo = f"{username}:***" if username else ":***"
+        return urlunparse(parsed._replace(netloc=f"{redacted_userinfo}@{hostport}"))
     except Exception:
-        return url
+        # Last-resort regex redaction so that malformed URLs never leak secrets.
+        return _redact_userinfo_regex(url)
