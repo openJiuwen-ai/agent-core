@@ -6,6 +6,7 @@ import threading
 from typing import Any, AsyncIterator, List, Optional, Union
 
 from openjiuwen.core.common.logging import LogEventType, llm_logger
+from openjiuwen.core.foundation.llm.payload_summary import summarize_llm_payload
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -520,8 +521,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             event_type=LogEventType.LLM_CALL_ERROR,
             model_name=body.get("model"),
             model_provider=self.model_client_config.client_provider,
-            messages=messages,
-            tools=tools,
+            **summarize_llm_payload({"messages": messages, "tools": tools}),
             is_stream=is_stream,
             exception=f"{type(error).__name__}: {error}",
         )

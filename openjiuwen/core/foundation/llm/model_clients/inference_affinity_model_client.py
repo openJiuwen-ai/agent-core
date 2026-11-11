@@ -10,6 +10,11 @@ import aiohttp
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.foundation.llm.payload_summary import (
+    safe_len,
+    summarize_content_for_log,
+    summarize_llm_payload,
+)
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
     AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -146,8 +151,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             event_type=LogEventType.LLM_CALL_START,
             model_name=params.get("model"),
             model_provider=self.model_client_config.client_provider,
-            messages=params.get("messages"),
-            tools=params.get("tools"),
+            **summarize_llm_payload(params),
             temperature=params.get("temperature"),
             top_p=params.get("top_p"),
             max_tokens=params.get("max_tokens"),
@@ -175,8 +179,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 event_type=LogEventType.LLM_CALL_END,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                messages=params.get("messages"),
-                tools=params.get("tools"),
+                **summarize_llm_payload(params),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
@@ -217,8 +220,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 event_type=LogEventType.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                messages=params.get("messages"),
-                tools=params.get("tools"),
+                **summarize_llm_payload(params),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
@@ -332,8 +334,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 event_type=LogEventType.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                messages=params.get("messages"),
-                tools=params.get("tools"),
+                **summarize_llm_payload(params),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
@@ -660,7 +661,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             event_type=LogEventType.LLM_CALL_END,
             model_name=self.model_config.model_name,
             model_provider=self.model_client_config.client_provider,
-            response_content=content,
+            **summarize_content_for_log(content),
             is_stream=False
         )
         llm_logger.info(
@@ -680,7 +681,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                     model_name=self.model_config.model_name,
                     model_provider=self.model_client_config.client_provider,
                     is_stream=False,
-                    metadata={"parser_content": parser_content}
+                    metadata={"parser_content_len": safe_len(parser_content)}
                 )
             except Exception as e:
                 llm_logger.warning(
@@ -869,7 +870,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 model_name=self.model_config.model_name,
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                line_content=line[:200] if len(line) <= 200 else f"{line[:200]}...",
+                line_chars=len(line),
                 exception=str(e)
             )
             return None

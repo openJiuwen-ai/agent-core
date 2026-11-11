@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional, Set
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.pii_mask import pii_preview
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
@@ -205,9 +206,10 @@ class BaseInterruptRail(AgentRail):
             )
             if tool_call_id in raw_input.user_inputs:
                 matched_value = raw_input.user_inputs[tool_call_id]
+                # 日志治理：HITL 用户答案原文
                 logger.info(
-                    "[_get_user_input] MATCHED! tool_call_id=%r value=%r",
-                    tool_call_id, repr(matched_value)[:200],
+                    "[_get_user_input] MATCHED! tool_call_id=%r value=%s",
+                    tool_call_id, pii_preview(matched_value),
                 )
                 return raw_input.user_inputs[tool_call_id]
             logger.warning(

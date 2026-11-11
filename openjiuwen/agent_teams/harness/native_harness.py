@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.pii_mask import pii_preview
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -1356,9 +1357,9 @@ class NativeHarness(DeepAgent):
         active.task = task
         self._st.active = active
         logger.info(
-            "[NativeHarness] round_id=%s started query=%r follow_up=%s",
+            "[NativeHarness] round_id=%s started query=%s follow_up=%s",
             round_id,
-            str(query)[:120],
+            pii_preview(query),
             is_follow_up,
         )
         return active
@@ -1463,13 +1464,13 @@ class NativeHarness(DeepAgent):
         while True:
             elapsed = loop.time() - started_at
             logger.warning(
-                "[NativeHarness] slow round: round_id=%s task_id=%s session_id=%s elapsed=%.3fs state=%s query=%r",
+                "[NativeHarness] slow round: round_id=%s task_id=%s session_id=%s elapsed=%.3fs state=%s query=%s",
                 active.round_id,
                 active.task_id,
                 self.session_id,
                 elapsed,
                 self.state.value,
-                str(active.original_query)[:120],
+                pii_preview(active.original_query),
             )
             await asyncio.sleep(_SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS)
 

@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any, Iterable, Optional, cast
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.pii_mask import pii_preview
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY, RESUME_ORIGINAL_TOOL_CALLS_KEY
@@ -74,6 +75,14 @@ _COMMAND_REQUIRED_TOOLS = frozenset({
     "core.powershell",
     "mcp_exec_command",
 })
+
+
+def _summarize_tool_args_for_log(tool_args: Any) -> Any:
+    """工具入参日志摘要：dict 逐键 5 字符脱敏预览，
+    其余只留脱敏预览形态。permission.rail.resolve 等 INFO 日志不得落明文 args。"""
+    if isinstance(tool_args, dict):
+        return {str(k): pii_preview(v) for k, v in tool_args.items()}
+    return pii_preview(tool_args)
 
 
 class PermissionInterruptRail(ConfirmInterruptRail):
@@ -782,7 +791,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         logger.info(
             "[PermissionEngine] permission.rail.resolve tool=%s normalized=%s "
             "tool_args=%s auto_confirm_key=%s user_input_type=%s",
-            tool_name, normalized_name, tool_args, auto_confirm_key,
+            tool_name, normalized_name, _summarize_tool_args_for_log(tool_args), auto_confirm_key,
             type(user_input).__name__ if user_input else None
         )
 

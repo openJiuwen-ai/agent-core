@@ -226,7 +226,7 @@ class Model:
                     event_type=LogEventType.LLM_CALL_ERROR,
                     model_name=effective_model_name,
                     model_provider=model_provider,
-                    tools=tools,
+                    tools_count=len(tools) if isinstance(tools, list) else 0,
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,

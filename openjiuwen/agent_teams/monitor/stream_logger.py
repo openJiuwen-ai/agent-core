@@ -37,6 +37,7 @@ import logging
 
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.common.security.pii_mask import mask_pii_text
 from openjiuwen.core.session.stream import OutputSchema
 
 # Chunk ``type`` values. ``OutputSchema.type`` is a plain ``str`` with no
@@ -92,6 +93,13 @@ def _cap(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "… (truncated)"
+
+
+def _cap_masked(text: str, limit: int) -> str:
+    """Cap + PII 掩码：掩码只扫 cap+64 前缀窗口
+    （限窗外内容反正不落盘），成本与大 payload 解耦；顺序仍是先掩后截，
+    跨边界模式不漏掩。"""
+    return _cap(mask_pii_text(text[: limit + 64]), limit)
 
 
 def _extract_content(payload: Any) -> str:
@@ -153,12 +161,12 @@ def _tool_call_summary(payload: Any) -> str:
     informative instead of showing two empty fields.
     """
     if not isinstance(payload, dict):
-        return _cap(str(payload), _GENERIC_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
     name = payload.get("tool_name", "")
     args_raw = payload.get("tool_args", "")
     if not name and not args_raw:
-        return _cap(str(payload), _GENERIC_CAP)
-    args = _cap(str(args_raw), _TOOL_ARGS_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
+    args = _cap_masked(str(args_raw), _TOOL_ARGS_CAP)
     return f"tool_name={name} tool_args={args}"
 
 
@@ -168,14 +176,14 @@ def _tool_result_summary(payload: Any) -> str:
     Same empty-field fallback as :func:`_tool_call_summary`.
     """
     if not isinstance(payload, dict):
-        return _cap(str(payload), _GENERIC_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
     name = payload.get("tool_name", "")
     args_raw = payload.get("tool_args", "")
     result_raw = payload.get("tool_result", "")
     if not name and not args_raw and not result_raw:
-        return _cap(str(payload), _GENERIC_CAP)
-    args = _cap(str(args_raw), _TOOL_ARGS_CAP)
-    result = _cap(str(result_raw), _TOOL_RESULT_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
+    args = _cap_masked(str(args_raw), _TOOL_ARGS_CAP)
+    result = _cap_masked(str(result_raw), _TOOL_RESULT_CAP)
     return f"tool_name={name} tool_args={args}\nresult: {result}"
 
 
@@ -188,14 +196,14 @@ def _tool_update_summary(payload: Any) -> str:
     ``finish``. Fall back to the raw payload if the wrapper is missing.
     """
     if not isinstance(payload, dict):
-        return _cap(str(payload), _GENERIC_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
     update = payload.get("tool_update")
     if not isinstance(update, dict):
-        return _cap(str(payload), _GENERIC_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
     name = update.get("tool_name", "")
     status = update.get("status", "")
     call_id = update.get("tool_call_id", "")
-    args = _cap(str(update.get("arguments", "")), _TOOL_ARGS_CAP)
+    args = _cap_masked(str(update.get("arguments", "")), _TOOL_ARGS_CAP)
     return f"tool_name={name} status={status} tool_call_id={call_id} arguments={args}"
 
 
@@ -219,13 +227,13 @@ def _controller_output_summary(payload: Any) -> str:
                             texts.append(text)
             if texts:
                 return "\n".join(texts)
-    return _cap(str(payload), _GENERIC_CAP)
+    return _cap_masked(str(payload), _GENERIC_CAP)
 
 
 def _runtime_ready_summary(payload: Any) -> str:
     """Compact summary of the ``team.runtime_ready`` ack."""
     if not isinstance(payload, dict):
-        return _cap(str(payload), _GENERIC_CAP)
+        return _cap_masked(str(payload), _GENERIC_CAP)
     return (
         f"team={payload.get('team_name')} "
         f"session={payload.get('session_id')} "
@@ -239,7 +247,7 @@ def _interaction_summary(payload: Any) -> str:
         iid = payload.get("interaction_id", "unknown")
     else:
         iid = getattr(payload, "id", "unknown")
-    return f"interaction_id={iid}\n{_cap(str(payload), _GENERIC_CAP)}"
+    return f"interaction_id={iid}\n{_cap_masked(str(payload), _GENERIC_CAP)}"
 
 
 def _generic_summary(payload: Any) -> str:
@@ -247,7 +255,7 @@ def _generic_summary(payload: Any) -> str:
     content = _extract_content(payload)
     if content:
         return content
-    return _cap(str(payload), _GENERIC_CAP)
+    return _cap_masked(str(payload), _GENERIC_CAP)
 
 
 @dataclass
@@ -400,11 +408,11 @@ class TeamStreamLogger:
         self._emit(run.category, member, role, "".join(run.buf))
 
     def _emit(
-        self,
-        category: str,
-        member: str | None,
-        role: str | None,
-        content: str,
+            self,
+            category: str,
+            member: str | None,
+            role: str | None,
+            content: str,
     ) -> None:
         """Format one record and write it to the file."""
         if not content:
