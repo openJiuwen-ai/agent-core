@@ -60,6 +60,12 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             content,
             run_context=event.payload.get("run_context"),
         )
+        # Goal mode: the request becomes the leader's goal only after it has
+        # been delivered. Opened first, the goal would start its own round on
+        # the idle leader and the same request would then be handled twice.
+        open_goal = getattr(self._round, "open_user_goal", None)
+        if callable(open_goal):
+            await open_goal(content)
 
     async def on_meeting_state_changed(self, event: EventMessage) -> None:
         """Refresh the local flag after another process changes meeting state."""

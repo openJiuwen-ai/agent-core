@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.goal import resolve_goal_spec, to_stop_config
 from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.messager import (
@@ -548,10 +549,31 @@ class AgentConfigurator:
 
         The default path builds a ``TeamHarness`` over DeepAgent. When
         ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
-        external CLI member), it is adopted as-is and the DeepAgent / rail /
+        external CLI member) -- or built here for a leader whose spec names a
+        third-party harness -- it is adopted as-is and the DeepAgent / rail /
         memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
+        leads_external_harness = ctx.role == TeamRole.LEADER and bool(ctx.cli_agent)
+        if member_runtime is None and leads_external_harness and self.team_backend is not None:
+            # A leader on a third-party harness (``LeaderSpec.cli_agent``).
+            # Unlike a spawned member, nobody hands it a runtime: it is built
+            # here, session-free, and bound to its session on every start.
+            from openjiuwen.agent_teams.spawn.external_leader import build_external_leader_runtime
+
+            member_runtime = build_external_leader_runtime(
+                spec,
+                ctx,
+                agent_id=self._card.id,
+                team_backend=self.team_backend,
+            )
+            if spec.enable_swarmflow and self.swarmflow is None:
+                # Same single construction point as the DeepAgent leader's:
+                # the team-level container every member's runs draw on.
+                from openjiuwen.agent_teams.rails.elements import observability_rail_specs
+                from openjiuwen.agent_teams.workflow.swarmflow_infra import build_swarmflow_infra
+
+                self.swarmflow = build_swarmflow_infra(spec, ctx, observability_rail_specs())
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
@@ -694,6 +716,7 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
+            TEAM_GOAL,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
@@ -786,6 +809,13 @@ class AgentConfigurator:
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
+
+        # Goal mode: a member's goal follows the task it started, so only
+        # members carry the task-tool rail; the leader's goal is the user's
+        # request and needs no tool hook.
+        goal_spec = resolve_goal_spec(spec, ctx)
+        if goal_spec is not None and ctx.role != TeamRole.LEADER and self.team_backend:
+            team_rail_specs.append(RailSpec(type=TEAM_GOAL, params={}))
 
         reliability_cfg = spec.reliability
         reliability_components = None
@@ -986,6 +1016,7 @@ class AgentConfigurator:
             initial_plan_mode=is_team_plan_leader,
             build_context=member_build_context,
             task_event_tracker=self._resources.task_event_tracker,
+            goal=to_stop_config(goal_spec) if goal_spec is not None else None,
         )
 
         # A member's own model calls (decision / tool use / script generation)
@@ -1211,6 +1242,7 @@ class AgentConfigurator:
             enable_member_messaging=spec.enable_member_messaging,
             max_subtask_depth=spec.max_subtask_depth,
             enable_fork=spec.enable_fork,
+            enable_member_goal=spec.member_goal is not None,
             evolution_enabled=spec.evolution_enabled,
             member_workspace_prefix=spec.member_workspace_prefix,
             external_cli_agents=spec.external_cli_agents,

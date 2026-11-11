@@ -144,6 +144,7 @@ class TeamBackend:
         enable_member_messaging: bool = False,
         max_subtask_depth: int = 0,
         enable_fork: bool = False,
+        enable_member_goal: bool = False,
         evolution_enabled: bool = True,
         member_workspace_prefix: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
@@ -430,6 +431,8 @@ class TeamBackend:
         # and whether ``spawn_teammate`` exposes the fork properties at all,
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
+        # Capability gate for the per-member goal switch on ``spawn_teammate``.
+        self._enable_member_goal: bool = enable_member_goal
         self._pending_forks: dict[str, dict] = {}  # member_name → {fork, since, source}
         self._checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
@@ -519,6 +522,15 @@ class TeamBackend:
         of its description.
         """
         return self._enable_fork
+
+    def member_goal_enabled(self) -> bool:
+        """Whether the team runs its members in goal mode.
+
+        Straight from ``TeamAgentSpec.member_goal`` being set. Gates the
+        ``goal`` property on ``spawn_teammate``: with member goal mode off
+        there is nothing for a per-member switch to switch.
+        """
+        return self._enable_member_goal
 
     def member_messaging_enabled(self) -> bool:
         """Whether scheduled-dispatch members may message each other directly.
@@ -904,6 +916,7 @@ class TeamBackend:
         permissions_override: Optional[dict[str, str]] = None,
         lifetime: str | None = None,
         agent_template: Optional["MemberAgentTemplate"] = None,
+        goal: Optional[bool] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -982,6 +995,7 @@ class TeamBackend:
             permissions_override=permissions_override,
             lifetime=lifetime,
             agent_template=agent_template,
+            goal=goal,
         )
 
         # Resolve the latest identity from the evolvable md before writing the
@@ -2478,6 +2492,7 @@ class TeamBackend:
                 allocation=allocation,
                 role=member_spec.role_type,
                 cli_agent=cli_agent,
+                goal=member_spec.goal,
             )
         if skipped_bridge_specs:
             team_logger.warning(
@@ -2912,18 +2927,33 @@ class TeamBackend:
     def mark_history_restored(self) -> None:
         """Record that this run restored a conversation containing the policy.
 
-        Called on the cold-recovery path (``TeamAgent.recover_from_session``),
-        which continues the *same* session: the child agent session shares the
+        Called on both paths that continue the *same* session: cold recovery
+        (``TeamAgent.recover_from_session``) and resume from pause
+        (``TeamRuntimeManager``). The child agent session shares the
         team session id, so the leader's history comes back with the original
         ``build_team`` result -- and therefore the collaboration policy -- still
         in it. See :meth:`rejects_rebuild`.
         """
         self._history_restored = True
 
+    def history_restored(self) -> bool:
+        """Whether this run continues an earlier conversation of the same session."""
+        return self._history_restored
+
+    def clear_history_restored(self) -> None:
+        """Record that the restored conversation does not hold the policy after all.
+
+        A team the host materialized through ``build_team`` on the backend
+        (rather than the tool) can be resumed or recovered before its leader
+        ever ran a turn. That history carries no policy, so the tool must stay callable:
+        it is the only way the leader can receive it.
+        """
+        self._history_restored = False
+
     async def rejects_rebuild(self) -> bool:
         """Whether ``build_team`` must refuse to run on this team.
 
-        A cold recovery already holds the policy in its restored history, and
+        A continued session already holds the policy in its history, and
         that result is never compacted away, so calling ``build_team`` again
         buys nothing and costs a round -- and a leader that does it is usually
         confused about whether its team exists, which the refusal corrects.

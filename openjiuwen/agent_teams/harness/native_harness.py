@@ -46,7 +46,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from enum import Enum
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
@@ -65,12 +65,20 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
     InvokeInputs,
+    RunKind,
     SteeringInput,
+    init_rail,
 )
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.goal.manager import GoalManager
+from openjiuwen.harness.goal.schema import GoalStatus, GoalStopConfig
+from openjiuwen.harness.goal.store import SessionGoalStore
+from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+from openjiuwen.harness.schema.interaction import InteractionEvent, InteractionEventType
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.agent_teams.harness.control import (
     _CmdAbort,
+    _CmdGoalWork,
     _CmdPause,
     _CmdResume,
     _CmdRoundFinished,
@@ -108,6 +116,9 @@ if TYPE_CHECKING:
 # (Payload keys avoid ``event`` because that is ``trigger``'s own topic arg.)
 _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
+#   harness.goal  -> kwargs: goal (dict | None) — the goal record after a change,
+#   None once it was cleared. Fired from whichever task changed the record.
+_EVENT_GOAL = "harness.goal"
 _EVENT_NAMESPACE = "native_harness"
 _SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS = 600.0
 
@@ -221,6 +232,13 @@ class NativeHarness(DeepAgent):
         # None unless an embedder supplied one; SwarmflowTool reads it to register
         # its run handle for pause/resume.
         self.background_task_controller: Any = None
+        # Goal support, off until ``enable_goal`` is called before ``start``.
+        # ``_goal_ready`` lets the host hold a goal attempt back until its own
+        # precondition holds; None means an attempt may start whenever the
+        # harness would otherwise go idle.
+        self._goal_stop_config: GoalStopConfig | None = None
+        self._goal_ready: Callable[[], Awaitable[bool]] | None = None
+        self._goal_event_tasks: set[asyncio.Task] = set()
 
         # Apply config + tools + spec rails directly onto this instance — no
         # throwaway template DeepAgent.
@@ -254,6 +272,11 @@ class NativeHarness(DeepAgent):
     def state(self) -> HarnessState:
         """Current lifecycle phase."""
         return self._st.phase
+
+    @property
+    def session(self) -> Session | None:
+        """The session this harness runs on, or None before ``start()``."""
+        return self._session
 
     @property
     def session_id(self) -> str | None:
@@ -381,6 +404,8 @@ class NativeHarness(DeepAgent):
             await controller.bind_session(self._session)
             coordinator.reset()
             self._bound_session_id = self._session.get_session_id()
+            if self._goal_stop_config is not None:
+                await self._setup_goal(self._session, self._goal_stop_config)
 
             self._st.supervisor_task = asyncio.create_task(
                 self._supervisor(),
@@ -539,6 +564,7 @@ class NativeHarness(DeepAgent):
         *,
         on_state: Callable[..., Any] | None = None,
         on_round: Callable[..., Any] | None = None,
+        on_goal: Callable[..., Any] | None = None,
     ) -> None:
         """Register optional lifecycle callbacks on the harness event bus.
 
@@ -554,11 +580,16 @@ class NativeHarness(DeepAgent):
         Args:
             on_state: Async callable receiving the ``harness.state`` payload.
             on_round: Async callable receiving the ``harness.round`` payload.
+            on_goal: Async callable receiving the ``harness.goal`` payload
+                (kwarg ``goal``: the record as a dict, or None once cleared).
+                Unlike the other two it does not run in the supervisor.
         """
         if on_state is not None:
             await self._events.register(_EVENT_STATE, on_state, namespace=_EVENT_NAMESPACE)
         if on_round is not None:
             await self._events.register(_EVENT_ROUND, on_round, namespace=_EVENT_NAMESPACE)
+        if on_goal is not None:
+            await self._events.register(_EVENT_GOAL, on_goal, namespace=_EVENT_NAMESPACE)
 
     # ------------------------------------------------------------------
     # External API: send / abort / pause
@@ -835,6 +866,8 @@ class NativeHarness(DeepAgent):
             await self._on_resume(cmd)
         elif isinstance(cmd, _CmdRoundFinished):
             await self._on_round_done(cmd)
+        elif isinstance(cmd, _CmdGoalWork):
+            await self._on_goal_work()
         else:  # pragma: no cover - defensive
             logger.warning("[NativeHarness] unknown control event: %r", cmd)
 
@@ -1250,6 +1283,15 @@ class NativeHarness(DeepAgent):
             await self._transition(HarnessState.IDLE)
             return
 
+        # An unfinished goal outranks idling and the task-plan continuation,
+        # but never queued input: everything above already ran first.
+        goal_round = await self._start_goal_round_if_ready(
+            reopen_blocked=active.run_kind is not RunKind.GOAL,
+        )
+        if goal_round is not None:
+            await self._emit_round("started", goal_round.round_id)
+            return
+
         # A continuation round that resumed a paused InteractiveInput round has
         # no replayable query, so there is nothing to drive a task-plan
         # continuation with.
@@ -1259,6 +1301,144 @@ class NativeHarness(DeepAgent):
             return
 
         await self._transition(HarnessState.IDLE)
+
+    # ------------------------------------------------------------------
+    # Goal support
+    # ------------------------------------------------------------------
+
+    def enable_goal(
+        self,
+        stop_config: GoalStopConfig,
+        *,
+        ready: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
+        """Turn on goal support for this harness. Call before ``start``.
+
+        With a goal active the harness no longer goes idle while the goal is
+        unfinished: when a round settles and no queued input is waiting, it
+        starts a goal attempt instead. Whoever owns the work sets and clears
+        the goal through ``goal_manager``.
+
+        Args:
+            stop_config: Stop policy for goal attempts (assessment strategy and
+                hard limits).
+            ready: Optional precondition checked before every attempt. An
+                attempt starts only when it returns True; a host whose
+                precondition becomes true later calls ``nudge_goal``.
+        """
+        self._goal_stop_config = stop_config
+        self._goal_ready = ready
+
+    def nudge_goal(self) -> None:
+        """Ask the supervisor to re-check whether a goal attempt should start.
+
+        Only an idle harness acts on it; a running round makes the same check
+        when it settles. Safe to call from any task, and a no-op when goal
+        support is off.
+        """
+        if self.goal_manager is None:
+            return
+        self._control.put_nowait(_CmdGoalWork())
+
+    async def _setup_goal(self, session: Session, stop_config: GoalStopConfig) -> None:
+        """Build the goal manager on this session and bind the completion rail."""
+        language = self._goal_prompt_language()
+        if self._task_completion_rail is None:
+            await self.register_rail(TaskCompletionRail(goal_language=language))
+        self.goal_manager = GoalManager(
+            store=SessionGoalStore(session),
+            event_manager=self._event_manager,
+            control_lock=self._interaction_control_lock,
+            # Output is the harness's own stream and outlives every round, so
+            # there is no reader lease to wait for.
+            has_output_stream=lambda: True,
+            cancel_active_round=self._leave_goal_round_running,
+            emit_event=self._emit_goal_event,
+            notify_work=self.nudge_goal,
+            language=language,
+        )
+        rail = self._task_completion_rail
+        if isinstance(rail, TaskCompletionRail):
+            rail.set_goal_manager(self.goal_manager, stop_config=stop_config)
+            init_rail(rail, self)
+
+    @staticmethod
+    async def _leave_goal_round_running(**_: Any) -> None:
+        """Let a goal attempt finish after its goal was replaced or cleared.
+
+        The attempt's assessment is discarded on its own — it no longer matches
+        the stored record — so cancelling adds nothing, and an abort here would
+        also throw away the input queued behind the round.
+        """
+
+    def _emit_goal_event(self, event: InteractionEvent) -> None:
+        """Forward a goal-record change onto the harness event bus."""
+        if event.type is not InteractionEventType.GOAL_UPDATED:
+            return
+        goal = event.payload.get("goal")
+        task = asyncio.create_task(
+            self._events.trigger(_EVENT_GOAL, goal=goal),
+            name="native_harness_goal_event",
+        )
+        self._goal_event_tasks.add(task)
+        task.add_done_callback(self._goal_event_tasks.discard)
+
+    async def _on_goal_work(self) -> None:
+        """Start a goal attempt from idle when one is due."""
+        if self._st.phase is not HarnessState.IDLE:
+            return
+        goal_round = await self._start_goal_round_if_ready()
+        if goal_round is None:
+            return
+        await self._transition(HarnessState.RUNNING)
+        await self._emit_round("started", goal_round.round_id)
+
+    async def _start_goal_round_if_ready(self, *, reopen_blocked: bool = False) -> ActiveRound | None:
+        """Start the next goal attempt, if the goal is active and may run.
+
+        Args:
+            reopen_blocked: Reopen a blocked goal first. Set when the round
+                that just settled served outside input: a blocked goal waits
+                for exactly that, and the input may have unblocked it. Never
+                set after a goal attempt, or a goal would unblock itself.
+
+        Returns:
+            The started goal round, or None when no attempt is due. The caller
+            announces the round and must not go idle.
+        """
+        manager = self.goal_manager
+        session = self._session
+        if manager is None or session is None:
+            return None
+        if self._goal_ready is not None and not await self._goal_ready():
+            return None
+        if reopen_blocked:
+            record = manager.peek()
+            if record is not None and record.status is GoalStatus.BLOCKED:
+                await manager.resume()
+        async with self._interaction_control_lock:
+            manager.ensure_active_goal_work_locked()
+            work = self._event_manager.next_work()
+        if work is None:
+            return None
+        # Rounds are serialized by this supervisor, so the event manager's
+        # in-flight bookkeeping has nothing to add; clear it at once or the
+        # same goal generation could never queue its continuation.
+        self._event_manager.mark_started(work)
+        self._event_manager.mark_finished(work)
+        goal_id = str(work.context["goal_id"])
+        revision = int(work.context["revision"])
+        started = await manager.begin_attempt(goal_id=goal_id, revision=revision)
+        if started is None:
+            return None
+        return self._start_round(
+            str(work.inputs["query"]),
+            run_kind=RunKind.GOAL,
+            run_context=RunContext(
+                session_id=session.get_session_id(),
+                extra={"goal_id": goal_id, "revision": revision},
+            ),
+        )
 
     def _drain_pending_messages(
         self,
@@ -1314,6 +1494,7 @@ class NativeHarness(DeepAgent):
         mode: _StartMode = _StartMode.DEFAULT,
         *,
         run_context: RunContext | None = None,
+        run_kind: RunKind | None = None,
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
@@ -1333,6 +1514,8 @@ class NativeHarness(DeepAgent):
                 ON_USER_MESSAGE rails see the individual inputs.
             mode: The mutually exclusive start behavior for this execution.
             run_context: Request-local context propagated into the model loop.
+            run_kind: Execution kind handed to the task loop; ``RunKind.GOAL``
+                for a goal attempt, None for an ordinary round.
         """
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
@@ -1357,6 +1540,7 @@ class NativeHarness(DeepAgent):
             steering_queue=asyncio.Queue(),
             turn=turn,
             run_context=run_context,
+            run_kind=run_kind,
             turn_opened=turn_opened,
             failure_retry=mode is _StartMode.FAILURE_RETRY,
             pre_round_snapshot=pre_round,
@@ -1420,6 +1604,7 @@ class NativeHarness(DeepAgent):
         inv_inputs = InvokeInputs(
             query=active.original_query,
             conversation_id=self._session.get_session_id(),
+            run_kind=active.run_kind,
             run_context=active.run_context,
         )
         ctx = AgentCallbackContext(agent=self, inputs=inv_inputs, session=self._session)
@@ -1436,6 +1621,7 @@ class NativeHarness(DeepAgent):
                     task_id=active.task_id,
                     turn_number=active.turn.turn_number,
                     resume_continuation=resume_continuation,
+                    run_kind=active.run_kind,
                     run_context=active.run_context,
                 )
                 result = await self.loop_controller.wait_round_completion()

@@ -18,7 +18,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-11-03 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md`、`F_20261103_0928_model-group-routed-model.md` |
 
 ## 范围 / 边界
@@ -654,6 +654,19 @@ TeamPermissionRail  ✗  conditional ✓ when team-coordinated
 ```
 
 当 `enable_permissions=True` 时 `TeamPermissionRail` 替代 `TeamToolApprovalRail`；两者互斥，不同时挂。
+
+## TeamGoalRail
+
+`rails/team_goal_rail.py`，manifest 名 `core.team.goal`（`rails/elements.py::build_team_goal_rail`）。
+`AgentConfigurator.setup_agent` 仅在 `resolve_goal_spec(spec, ctx)` 非空且角色不是 leader 时把它加入
+`team_rail_specs`；工厂在拿不到 team backend 时返回 None。
+
+- 钩子：`before_tool_call`（提交闸）与 `after_tool_call`（认领立项、提交成功后关闭 goal）。
+- `init(agent)` 记下外层 harness：工具钩子在内层 agent 上触发，而 goal manager、session 与评估用的
+  模型都在外层 harness 上。
+- 拒绝一次提交用按调用 id 的 `ctx.extra["_skip_tool_calls"]`，并填好 `tool_result` / `tool_msg`。
+- 不注入任何提示词 section；goal round 的协议提示由 harness 的 `TaskCompletionRail` 负责。
+- Leader 不挂这条 rail：它的 goal 是用户请求，没有工具钩子可挂。
 
 ## 与其它 spec 的关系
 

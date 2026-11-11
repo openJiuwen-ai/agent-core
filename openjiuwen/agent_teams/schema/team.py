@@ -181,6 +181,32 @@ class BridgeMailboxInjectMode(str, Enum):
     REPHRASE = "rephrase"
 
 
+class TeamGoalSpec(BaseModel):
+    """Goal-mode settings for a leader or for the team's members.
+
+    With goal mode on, a member keeps working on the task it started until the
+    task is submitted, and its submission is assessed before the task leaves
+    ``in_progress``; a leader keeps the team going until the user's request is
+    assessed as met. The limits bound how long that persistence may last.
+    """
+
+    strategy: Literal["agent_report", "transcript", "hybrid"] = "hybrid"
+    """How completion is judged.
+
+    ``"hybrid"`` (default) trusts a "still working" report but has an isolated
+    model call check a "done" or "blocked" claim against the conversation;
+    ``"transcript"`` always runs that check; ``"agent_report"`` trusts the
+    agent's own report, which also turns the submission check off.
+    """
+    max_attempts: Optional[int] = Field(default=10, ge=1)
+    """Self-driven continuation rounds allowed before the goal blocks.
+
+    ``None`` removes the limit; an unbounded goal can spend tokens without end.
+    """
+    token_budget: Optional[int] = Field(default=None, ge=1)
+    """Total tokens goal rounds may spend before the goal blocks. ``None`` = no budget."""
+
+
 class MemberSpecBase(BaseModel):
     """Shared identity surface for every team member (leader / teammate / bridge).
 
@@ -236,6 +262,11 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.HUMAN_AGENT,
         TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
+    goal: Optional[bool] = None
+    """Per-member goal-mode switch, meaningful only when the team sets
+    ``TeamAgentSpec.member_goal``. ``None`` (default) follows the team: on
+    whenever ``member_goal`` is configured. ``False`` opts this member out.
+    """
 
 
 class BridgeMemberSpec(TeamMemberSpec):
@@ -694,10 +725,17 @@ class TeamRuntimeContext(BaseModel):
     serialized with the spawn payload, so the target's ``TeamPolicyRail`` /
     ``TeamContextTracker`` can render a conversion notice in its identity block.
     """
+    goal_enabled: Optional[bool] = None
+    """The member's own goal-mode switch, read from ``TeamMember.options.goal``.
+
+    ``None`` follows the team's ``member_goal``; ``False`` opts the member out.
+    Has no effect on a leader, whose switch is ``LeaderSpec.goal``.
+    """
     cli_agent: Optional[str] = None
-    """When set, this teammate is driven by an external agent backend (e.g.
+    """When set, this member is driven by an external agent backend (e.g.
     ``"claude"`` SDK, ``"codex"`` SDK, or a named CLI adapter) instead
-    of a local DeepAgent.
+    of a local DeepAgent. A leader takes it from ``LeaderSpec.cli_agent``
+    (SDK backends only).
 
     The spawn path launches the CLI as a subprocess and the configurator
     builds a ``CliRuntimeBase`` implementation in place of ``TeamHarness``. ``None``
@@ -736,6 +774,7 @@ __all__ = [
     "ExternalCliMemberSpec",
     "ExternalCliModelConfig",
     "MemberOpResult",
+    "TeamGoalSpec",
     "MemberSpecBase",
     "TeamCompletionSnapshot",
     "TeamLifecycle",

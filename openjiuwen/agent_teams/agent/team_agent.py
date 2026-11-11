@@ -28,7 +28,9 @@ from openjiuwen.agent_teams.agent.member_activity import (
     MemberActivityRegistry,
     parse_member_status,
 )
+from openjiuwen.agent_teams.agent.goal_coordinator import TeamGoalCoordinator
 from openjiuwen.agent_teams.agent.member_factory import create_member_handle
+from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
 from openjiuwen.agent_teams.agent.session_manager import SessionManager
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
@@ -214,7 +216,10 @@ class TeamAgent(BaseAgent):
             task_board_probe=self.is_task_board_settled,
             model_group_label_getter=self._model_group_label,
             served_model_recorder=self._record_served_model,
+            team_quiet_callback=self._on_team_quiet,
         )
+        # Goal mode wiring, built in ``_setup_agent`` when this member has it on.
+        self._goal: TeamGoalCoordinator | None = None
         self._coordination = CoordinationKernel(self)
         self._user_input_delivered: asyncio.Event | None = None
 
@@ -246,9 +251,16 @@ class TeamAgent(BaseAgent):
     def build_context(self):
         """Return the assembly BuildContext, or None before configure()."""
         harness = self.harness
-        if harness is not None:
-            return harness.build_context
-        return None
+        if harness is None:
+            return None
+        from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+
+        if isinstance(harness, ExternalHarnessMemberRuntime):
+            # A third-party harness assembles nothing locally; what the team
+            # was assembled with is the spec's own context.
+            blueprint = self._configurator.blueprint
+            return blueprint.spec.build_context if blueprint is not None else None
+        return harness.build_context
 
     @property
     def tiny_agent_model_resolver(self):
@@ -555,6 +567,37 @@ class TeamAgent(BaseAgent):
         self._user_input_delivered = asyncio.Event()
         return self._user_input_delivered
 
+    async def open_user_goal(self, request: Any) -> None:
+        """Make a user request the leader's goal; no-op without goal mode."""
+        if self._goal is not None:
+            await self._goal.open_user_goal(request)
+
+    def goal_holds_completion(self) -> bool:
+        """Whether the leader's open goal forbids declaring the team complete."""
+        return self._goal is not None and self._goal.holds_completion()
+
+    def _on_team_quiet(self) -> None:
+        """The roster held still for the debounce window."""
+        if self._goal is not None:
+            self._goal.on_team_quiet()
+
+    def _setup_goal(self, ctx: TeamRuntimeContext) -> None:
+        """Wire goal mode onto the harness the configurator just built."""
+        harness = self._configurator.harness
+        self._goal = None
+        if not isinstance(harness, TeamHarness) or not harness.goal_enabled:
+            return
+        self._goal = TeamGoalCoordinator(
+            role=ctx.role,
+            member_name=ctx.member_name or "",
+            harness=harness,
+            task_manager_getter=lambda: self._configurator.task_manager,
+            message_manager_getter=lambda: self._configurator.message_manager,
+            registry_getter=lambda: self._state.member_registry,
+            leader_name_getter=lambda: ctx.team_spec.leader_member_name if ctx.team_spec else None,
+            emit_blocked=self._stream_controller.emit_goal_blocked,
+        )
+
     def note_user_input_delivered(self) -> None:
         """Mark that a user sentence has reached this leader."""
         event = getattr(self, "_user_input_delivered", None)
@@ -770,6 +813,13 @@ class TeamAgent(BaseAgent):
             ctx,
             member_runtime=member_runtime,
         )
+        if ctx.role == TeamRole.LEADER and ctx.cli_agent:
+            # The leader's third-party harness was built by the configurator;
+            # its team tools and context tracker need this agent's backend.
+            from openjiuwen.agent_teams.spawn.external_leader import bind_external_leader
+
+            bind_external_leader(self, spec, ctx)
+        self._setup_goal(ctx)
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``

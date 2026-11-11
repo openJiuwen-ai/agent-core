@@ -1339,3 +1339,108 @@ async def test_a_failed_send_gives_the_notice_back() -> None:
     await runtime.stop()
 
     assert tracker.released == 1 and not tracker.claimed
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_ends_the_turn_gracefully_when_the_provider_cannot_pause() -> None:
+    harness = _FakeHarness(
+        capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT}),
+        state=HarnessState.RUNNING,
+    )
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    await runtime.pause()
+
+    assert harness.abort_calls == [AbortMode.GRACEFUL]
+    assert harness.pause_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_is_a_no_op_for_an_idle_provider_that_cannot_pause() -> None:
+    harness = _FakeHarness(capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT}))
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+
+    await runtime.pause()
+
+    assert harness.abort_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_startup_hook_sees_the_member_session_before_the_context_is_resolved() -> None:
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    order: list[str] = []
+    runtime: ExternalHarnessMemberRuntime
+
+    async def context_factory(session: Any) -> HarnessContext:
+        order.append("context")
+        return _context()
+
+    async def hook(session: Any) -> None:
+        assert session is team_session
+        order.append(f"hook:checkpoint={runtime.has_stored_checkpoint()}")
+
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=context_factory,
+        member_agent_id="member-agent",
+    )
+    runtime.add_startup_hook(hook)
+
+    await runtime.start(team_session=team_session)
+    await runtime.stop()
+
+    assert order == ["hook:checkpoint=False", "context"]
+    assert team_session.created == [("member-agent", False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reset_tool_bindings_drops_what_the_previous_cycle_bound() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    runtime.bind_tools(_FakeToolGateway())
+
+    runtime.reset_tool_bindings()
+    await runtime.start()
+    await runtime.stop()
+
+    assert harness.start_contexts[0].tools is None
+
+
+async def _failed_turn_outputs(*, surface_turn_failures: bool) -> list[Any]:
+    from openjiuwen.harness_protocol import TurnError
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=_context(),
+        surface_turn_failures=surface_turn_failures,
+    )
+    await runtime.start()
+    result = TurnResult(
+        status=TurnStatus.FAILED,
+        error=TurnError(message="model is not supported", code="other", category="sdk_error"),
+    )
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.FAILED, result=result), turn_id="turn-1")
+    await runtime.stop()
+    return await _all_outputs(runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_turn_is_put_on_the_stream_when_nobody_else_is_told() -> None:
+    chunks = await _failed_turn_outputs(surface_turn_failures=True)
+
+    assert len(chunks) == 1
+    assert chunks[0].payload.type == "task_failed"
+    assert chunks[0].payload.data[0].text == "model is not supported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_turn_stays_off_the_stream_by_default() -> None:
+    assert await _failed_turn_outputs(surface_turn_failures=False) == []

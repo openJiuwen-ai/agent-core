@@ -27,6 +27,8 @@ TEAM_POLICY_TOOL_CALL_NAME = "build_team"
 # rides the first input, so it is found inside a user message rather than at
 # its very start.
 TEAM_POLICY_BLOCK_TAG = "<team-policy>"
+# Lead lines of a successful result; see BuildTeamTool.render_for_llm.
+TEAM_POLICY_RESULT_PREFIXES = ("Team created", "Existing team taken over")
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,29 @@ def build_team_collaboration_reinjected_messages(messages: List[BaseMessage]) ->
             )
         )
     ]
+
+
+def holds_team_policy(messages: List[BaseMessage]) -> bool:
+    """Whether a transcript carries the leader's collaboration policy.
+
+    True for a successful ``build_team`` result, or for the block
+    :func:`build_team_policy_reinjected_messages` leaves behind once compaction
+    has removed that result. A refused or failed call does not count.
+    """
+    for message in messages:
+        if isinstance(message, UserMessage):
+            if f"[{TEAM_POLICY_LABEL}]" in str(message.content):
+                return True
+            continue
+        if not isinstance(message, AssistantMessage):
+            continue
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            if (getattr(tool_call, "name", "") or "") != TEAM_POLICY_TOOL_CALL_NAME:
+                continue
+            result_text = find_tool_result_text(messages, getattr(tool_call, "id", None)).strip()
+            if result_text.startswith(TEAM_POLICY_RESULT_PREFIXES):
+                return True
+    return False
 
 
 def build_team_policy_reinjected_messages(

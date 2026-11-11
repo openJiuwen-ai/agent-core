@@ -355,3 +355,12 @@ async def test_group_context_accepts_restored_language_alias(group, language):
     await group.handler.on_poll_mailbox(None)
     group.host.deliver_input.assert_awaited_once()
     assert "restored mention" in group.host.deliver_input.call_args.args[0]
+
+
+def test_context_notice_makes_reading_history_conditional():
+    from openjiuwen.agent_teams.i18n import STRINGS
+
+    assert "直接回答，不要读文件" in STRINGS["cn"]["conversation.context"]
+    assert "回答任务前" not in STRINGS["cn"]["conversation.context"]
+    assert "without reading the file" in STRINGS["en"]["conversation.context"]
+    assert "Before answering" not in STRINGS["en"]["conversation.context"]

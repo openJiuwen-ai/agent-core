@@ -635,6 +635,7 @@ async def register_teammate(
     permissions_override: dict[str, str] | None = None,
     lifetime: str | None = None,
     agent_template: "MemberAgentTemplate | None" = None,
+    goal: bool | None = None,
 ) -> "MemberOpResult":
     """Register one ordinary LLM teammate row (UNSTARTED) — the single place that
     knows how a teammate's card and mode are derived.
@@ -663,6 +664,7 @@ async def register_teammate(
         permissions_override=permissions_override,
         lifetime=lifetime,
         agent_template=agent_template,
+        goal=goal,
     )
 
 
@@ -723,6 +725,7 @@ class SpawnTeammateTool(_SpawnToolBase):
         super().__init__(team, t, "spawn_teammate", omit_slots=omit_slots or None)
         self._allocate_model_config = model_config_allocator
         self._fork_enabled = fork_enabled
+        self._member_goal_enabled = team.member_goal_enabled()
         self._external_cli_enabled = external_cli_enabled
         model_description = model_name_description(team, t)
         if external_cli_enabled:
@@ -780,6 +783,8 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "description": t("spawn_teammate", "fork_mode"),
                 },
             })
+        if self._member_goal_enabled:
+            properties["goal"] = {"type": "boolean", "description": t("spawn_teammate", "goal")}
         if external_cli_enabled:
             properties.update({
                 "cli_agent": {"type": "string", "description": t("spawn_teammate", "cli_agent")},
@@ -819,11 +824,21 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "disabled (enable_fork=False on TeamAgentSpec). Spawn the "
                     "teammate without these arguments, or enable fork in the team spec."
                 )
+        goal = inputs.get("goal")
+        if goal is not None and not self._member_goal_enabled:
+            return self._fail(
+                "Cannot use goal: member goal mode is off for this team "
+                "(member_goal is not set on TeamAgentSpec). Spawn the teammate without it."
+            )
+        if goal is not None and not isinstance(goal, bool):
+            return self._fail("'goal' must be a boolean")
         err = self._check_external_cli_args(inputs)
         if err:
             return self._fail(err)
         cli_agent = _optional_text(inputs.get("cli_agent"))
         if cli_agent is not None:
+            if goal is not None:
+                return self._fail("Cannot use goal with cli_agent: goal mode needs a locally run teammate")
             return await self._spawn_external_cli(inputs, cli_agent)
 
         member_name = inputs["member_name"]
@@ -844,6 +859,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             allocation=allocation,
             isolation=inputs.get("isolation"),
             permissions_override=inputs.get("permissions"),
+            goal=goal,
         )
         fork_value = inputs.get("fork")
         if fork_value and fork_value not in ("false", False):
