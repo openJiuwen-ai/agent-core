@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import LogEventType, create_log_event
 from openjiuwen.core.common.logging.events import SysOperationEvent
+from openjiuwen.core.common.security.pii_mask import pii_preview
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
@@ -63,8 +64,7 @@ def _clip_log_payload(value: Any, depth: int = 0) -> Any:
         return f"<{len(value)} bytes omitted>"
 
     if isinstance(value, dict):
-        return {key: _clip_log_payload(item, depth + 1) for key, item in value.items()}
-
+        return {key: _clip_log_payload_value(key, item, depth) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         items = list(value)
         clipped = [_clip_log_payload(item, depth + 1) for item in items[:_LOG_PAYLOAD_MAX_ITEMS]]
@@ -73,6 +73,25 @@ def _clip_log_payload(value: Any, depth: int = 0) -> Any:
         return clipped
 
     return value
+
+
+# 自由文本内容键：execute_code 的 code、写文件的
+# content 等是工具入参级用户内容，路径等结构性键不受此影响。
+_CONTENT_KEYS = frozenset({"code", "content", "data", "text", "script", "query", "command"})
+
+
+def _is_content_entry(key: Any, item: Any) -> bool:
+    """是否为"自由文本内容"键值对（走字符预览而非原样裁剪）。"""
+    if not isinstance(key, str) or not isinstance(item, str):
+        return False
+    return bool(item) and key.lower() in _CONTENT_KEYS
+
+
+def _clip_log_payload_value(key: Any, item: Any, depth: int) -> Any:
+    """dict 值裁剪入口：内容键走 pii_preview 5 字符预览，其余按原样裁剪。"""
+    if _is_content_entry(key, item):
+        return pii_preview(item)
+    return _clip_log_payload(item, depth + 1)
 
 
 class BaseOperation:

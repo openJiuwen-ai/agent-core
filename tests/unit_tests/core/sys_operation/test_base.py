@@ -31,10 +31,14 @@ def test_short_values_pass_through_untouched() -> None:
 def test_long_text_is_clipped_with_the_omitted_count() -> None:
     body = "x" * (LOG_PAYLOAD_MAX_CHARS + 500)
 
-    clipped = _clip_log_payload({"content": body})["content"]
-
+    # 非内容键：仍按 1024 字符裁剪
+    clipped = _clip_log_payload({"note": body})["note"]
     assert clipped.startswith("x" * LOG_PAYLOAD_MAX_CHARS)
     assert clipped.endswith("...(+500 chars omitted)")
+
+    # 内容键（content/code/text…）：字符脱敏预览
+    previewed = _clip_log_payload({"content": body})["content"]
+    assert previewed == "xxxxx…(len=1524)"
 
 
 def test_long_binary_content_is_replaced_by_its_size() -> None:

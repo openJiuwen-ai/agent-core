@@ -30,6 +30,7 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.common.security.pii_mask import pii_preview
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -1494,7 +1495,13 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _summarize_tool_args_for_log(tool_name: str, tool_args: Any) -> Any:
-        """Redact high-risk tool arguments while keeping generic logs useful."""
+        """Redact high-risk tool arguments while keeping generic logs useful.
+
+        日志治理：原实现只对浏览器工具摘要，其余工具原样返回原始
+        args（"Executing tool ... with args" INFO 日志明文落盘，实测
+        celia_memory_store 的 content 携用户手机号/地址）。现在所有工具统一
+        走摘要：敏感键 redact、其余键脱敏后只露部分字符预览。
+        """
         name = str(tool_name or "")
         lowered_name = name.lower()
 
@@ -1537,11 +1544,8 @@ class ReActAgent(BaseAgent):
                 }
             return task_summary
 
-        is_browser_tool = ReActAgent._is_browser_tool_name(lowered_name)
-        if not is_browser_tool:
-            return tool_args
-
         if not isinstance(parsed, dict):
+            # 非 dict 参数（原始字符串等）：不打印内容，只留形态。
             return {"kind": type(parsed).__name__, "repr_length": len(str(parsed)), "redacted": True}
 
         if lowered_name == "browser_batch_interact":
@@ -1596,9 +1600,11 @@ class ReActAgent(BaseAgent):
         summary: Dict[str, Any] = {"kind": "dict", "keys": sorted(str(key) for key in parsed.keys())}
         safe_values: Dict[str, Any] = {}
         redacted_values: Dict[str, Any] = {}
+        masked_values: Dict[str, Any] = {}
         text_keys = {
             "value", "text", "query", "name", "email", "phone",
             "mobile", "password", "address", "code", "script", "js",
+            "content",
         }
         for key, value in parsed.items():
             key_str = str(key)
@@ -1609,10 +1615,16 @@ class ReActAgent(BaseAgent):
                 "selector", "role", "label", "placeholder", "checked", "timeout", "timeout_ms", "max_items"
             }:
                 safe_values[key_str] = value if isinstance(value, (bool, int, float)) else str(value)[:120]
+            else:
+                # 其余键（command/path/content 等自由文本）：脱敏后只露部分字符
+                # 预览：截断只暴露部分内容字符）。
+                masked_values[key_str] = pii_preview(value)
         if safe_values:
             summary["safe_values"] = safe_values
         if redacted_values:
             summary["redacted_values"] = redacted_values
+        if masked_values:
+            summary["masked_values"] = masked_values
         return summary
 
     async def _execute_tool_call(

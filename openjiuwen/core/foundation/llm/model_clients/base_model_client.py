@@ -22,6 +22,7 @@ from openjiuwen.core.common.logging import (
 )
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.payload_summary import summarize_llm_payload
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -479,8 +480,7 @@ class BaseModelClient(ABC):
                 event_type=LogEventType.LLM_CALL_START,
                 model_name=model if model else self.model_config.model_name,
                 model_provider=self.model_client_config.client_provider,
-                messages=messages_dict,
-                tools=tools_dict,
+                **summarize_llm_payload({"messages": messages_dict, "tools": tools_dict}),
                 temperature=final_temperature,
                 top_p=final_top_p,
                 max_tokens=final_max_tokens,
