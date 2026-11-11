@@ -26,7 +26,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-10-25 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`）、`F_119_scheduled-completion-handoff-via-note.md`（任务行 `summary` 列与改派 / 重置清空）、`F_128_scheduled-member-subtasks.md`（任务行 `parent_task_id` / `created_by` 列、`IN_PROGRESS → BLOCKED` 挂起、`max_subtask_depth`）。其余条目见 `docs/features/`、`F_129_task-revision-and-staleness.md`（任务行 `revision` / `observed_revision` / `parent_revision` / `change_notes`、`TaskUpdatedEvent.revision`、版本快照） |
 
 ## 范围 / 边界
@@ -650,6 +650,7 @@ team（如直接 streaming 的单 agent）。`role` 用 `TeamRole`（`str` 枚�
 | `title` | `str` |
 | `status` | `str`（`TaskStatus.value`） |
 | `assignee` | `Optional[str]` |
+| `assignee_status` | `Optional[str]`（负责人此刻的 `MemberStatus.value`；仅任务未结束且负责人仍在名册时有值，读取时由名册投影填入，不持久化，见 `F_20261110_1912_view-task-names-the-assignee-and-its-status`） |
 | `blocked_by` | `list[str]` |
 | `updated_at` | `Optional[int]`（毫秒级 wall-clock 最近一次状态变更时刻） |
 
@@ -992,6 +993,29 @@ state["teams"][team_name] = {
 
 `TeamLifecycle` 进 spec → 跨进程序列化；`RuntimeState` 留在 pool entry，进程内
 in-memory，不写 spec。
+
+## Goal 模式配置
+
+```python
+class TeamGoalSpec(BaseModel):
+    strategy: Literal["agent_report", "transcript", "hybrid"] = "hybrid"
+    max_attempts: int | None = 10     # ge=1；None = 不限
+    token_budget: int | None = None   # ge=1
+
+LeaderSpec.goal: TeamGoalSpec | None = None
+TeamAgentSpec.member_goal: TeamGoalSpec | None = None
+TeamMemberSpec.goal: bool | None = None          # 预定义成员；None = 跟随 member_goal
+TeamMemberOptions.goal: bool | None = None       # 落库的成员级开关
+TeamRuntimeContext.goal_enabled: bool | None     # 由 options.goal 带入成员装配
+```
+
+- 全部默认关闭。生效规则由 `agent_teams/goal.py::resolve_goal_spec` 唯一定义：leader 取
+  `leader.goal`；角色为 `TEAMMATE` 且 `goal_enabled is not False` 的成员取 `member_goal`；其余角色、
+  以及任何带 `cli_agent` 的成员一律无 goal。
+- `leader.goal` 与 `leader.cli_agent` 同时配置在 spec 校验期被拒。
+- `TeamMemberOptions` 是 JSON blob，新增 `goal` 键不需要 DB 迁移。
+- goal 自身的状态不在 team DB：`GoalRecord` 与成员 goal 绑定的任务 id（键 `team.goal.task_id`）都在
+  成员自己的 session state。
 
 ## 与其它 spec 的关系
 

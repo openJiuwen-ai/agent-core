@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-03T10:53+08:00 -->
+<!-- generated-at: 2026-11-10T21:19+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -21,7 +21,8 @@ generated: true
 | [agent_teams/workflow](#module-3) |
 | [extensions/observability](#module-4) |
 | [harness](#module-5) |
-| [未分类](#module-6) |
+| [harness_providers](#module-6) |
+| [未分类](#module-7) |
 
 <a id="module-1"></a>
 
@@ -46,6 +47,13 @@ generated: true
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0030](proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | draft | @chenchunzhou | core | 2026-10-15 |
 | [SDD-0031](proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | 集群模式teammate支持swarmflow工具 | draft | @xiajing | core | 2026-11-03 |
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+| [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 
 ### 开发后 (archive)
 
@@ -112,6 +120,12 @@ generated: true
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0024](proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | draft | @alan_cheng | observability | 2026-09-15 |
 
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+
 ### 开发后 (archive)
 
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
@@ -119,6 +133,16 @@ generated: true
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
 <a id="module-6"></a>
+
+## harness_providers
+
+### 开发中 (active)
+
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
+|---|---|---|---|---|---|
+| [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
+
+<a id="module-7"></a>
 
 ## 未分类
 

@@ -113,6 +113,12 @@ STRINGS: dict[str, str] = {
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
         "Example: {\"bash\": \"deny\", \"write_file\": \"ask\"}"
     ),
+    "spawn_teammate.goal": (
+        "Whether this teammate works in goal mode: it does not stop while a task it started "
+        "is unsubmitted, and its submission is assessed before the task is accepted as done. "
+        "Omit to follow the team default (on); pass false only for a member whose work "
+        "needs no such persistence, such as answering questions or standing by."
+    ),
     "spawn_teammate.fork": (
         "Inherit context from an existing member to skip repeated file reading "
         "and searching. true: inherit the caller's full current context. "
