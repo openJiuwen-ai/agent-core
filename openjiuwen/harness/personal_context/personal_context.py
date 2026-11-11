@@ -905,7 +905,14 @@ class PersonalContext:
 
     def shutdown(self) -> None:
         """Shut down the dedicated query pool when this instance is discarded."""
-        self._query_executor.shutdown(wait=False, cancel_futures=True)
+        from openjiuwen.harness.personal_context.context_capacity import _cancel_capacity_worker
+
+        try:
+            _cancel_capacity_worker(self._home)
+        except Exception as exc:
+            logger.warning("PersonalContext capacity shutdown failed (%s)", type(exc).__name__)
+        finally:
+            self._query_executor.shutdown(wait=False, cancel_futures=True)
 
     async def get_graph(self, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
         """Read one breadth-first slice of the last published Context graph."""
@@ -1676,8 +1683,11 @@ class PersonalContext:
         if timeout_seconds <= 0:
             raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
         deadline = asyncio.get_running_loop().time() + timeout_seconds
+        from openjiuwen.harness.personal_context.context_capacity import _close_capacity_worker
+
         async with _control_lock(self._state_lock):
             if self._state == "CREATED":
+                await _close_capacity_worker(self._home)
                 return
             if cancel_authorization:
                 await self._cancel_authorization()
@@ -1799,6 +1809,7 @@ class PersonalContext:
                 except BaseError as exc:
                     stop_error = stop_error or exc
         pipeline_running = False
+        await _close_capacity_worker(self._home)
         if pipeline is not None:
             try:
                 pipeline_running = pipeline.is_running()
@@ -2266,6 +2277,9 @@ class PersonalContext:
         retry_quarantined: bool = False,
     ) -> None:
         normal_started = asyncio.get_running_loop().time()
+        from openjiuwen.harness.personal_context.context_capacity import _warm_capacity_worker
+
+        _warm_capacity_worker(self._home)
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
         run_started_at = datetime.now(UTC)

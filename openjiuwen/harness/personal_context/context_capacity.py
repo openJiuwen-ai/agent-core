@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import os
 import posixpath
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
-from filelock import Timeout
+from filelock import FileLock, Timeout
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
@@ -46,61 +48,316 @@ from openjiuwen.harness.personal_context.context_usage import (
 from openjiuwen.harness.personal_context.source_markdown import rewrite_markdown_prose
 
 
-_CAPACITY_WORKERS: dict[Path, concurrent.futures.Future] = {}
+_CAPACITY_WORKERS: dict[Path, dict] = {}
 _CAPACITY_WORKERS_LOCK = threading.Lock()
 _COMMIT_TIMEOUT_SECONDS = 1.0
-_COMMIT_LOCK_SECONDS = 0.1
+COMMIT_LOCK_SECONDS = 0.1
+_WORKER_STARTUP_SECONDS = 15.0
+_MIN_MAINTENANCE_SECONDS = 0.01
+
+
+def _forget_worker(home: Path, worker: dict) -> bool:
+    if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
+        return False
+    try:
+        if _CAPACITY_WORKERS.get(home) is worker:
+            _CAPACITY_WORKERS.pop(home, None)
+        return True
+    finally:
+        _CAPACITY_WORKERS_LOCK.release()
+
+
+def _reap_worker(home: Path, worker: dict) -> concurrent.futures.Future | None:
+    """Own terminal cleanup even after the original event loop has closed."""
+    worker["closing"] = True
+    worker["io"].shutdown(wait=False, cancel_futures=True)
+    process = worker.get("process")
+    if process is None:
+        launch = worker.get("launch")
+        if launch is not None and not launch.done():
+            return None  # The creating thread still owns any late handle.
+    elif process.poll() is None:
+        try:
+            process.kill()
+        except OSError as exc:
+            logger.warning("PersonalContext capacity termination failed (%s)", type(exc).__name__)
+    completion = concurrent.futures.Future()
+    if process is not None:
+        existing = worker.setdefault("cleanup", completion)
+        if existing is not completion:
+            return existing
+
+    def finish():
+        try:
+            if process is not None:
+                while True:
+                    try:
+                        process.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        # Retry termination off-loop after each short wait.
+                        with contextlib.suppress(OSError):
+                            process.kill()
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
+            while not _forget_worker(home, worker):
+                time.sleep(0.01)  # A short registry collision cannot strand a dead worker.
+        except OSError as exc:
+            logger.warning("PersonalContext capacity cleanup failed (%s)", type(exc).__name__)
+        finally:
+            completion.set_result(None)
+
+    try:
+        threading.Thread(target=finish, name="pcs-capacity-cleanup", daemon=True).start()
+    except RuntimeError:
+        if process is not None and worker.get("cleanup") is completion:
+            worker.pop("cleanup", None)
+        completion.set_result(None)
+    return completion
+
+
+async def _stop_worker(home: Path, worker: dict) -> None:
+    completion = _reap_worker(home, worker)
+    if completion is not None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(completion)), timeout=0.1)
+    process = worker.get("process")
+    if process is not None and process.poll() is not None:
+        _forget_worker(home, worker)
+
+
+async def _start_worker(home: Path, worker: dict) -> None:
+    ready = worker["ready"]
+    succeeded = False
+    startup_deadline = time.monotonic() + _WORKER_STARTUP_SECONDS
+    try:
+        if worker["closing"]:
+            raise asyncio.CancelledError
+        launch = concurrent.futures.Future()
+        worker["launch"] = launch
+
+        def spawn():
+            if not launch.set_running_or_notify_cancel():
+                return
+            try:
+                if worker["closing"] or worker["loop"].is_closed():
+                    launch.set_result(None)
+                    return
+                process = subprocess.Popen([
+                    # A Windows venv redirector can leave its child alive on
+                    # kill. Target the interpreter with the same import paths.
+                    str(Path(sys.base_prefix) / "python.exe") if os.name == "nt" else sys.executable,
+                    "-X", "utf8", str(Path(__file__).with_name("_capacity_worker.py")),
+                    str(_WORKER_STARTUP_SECONDS), json.dumps(sys.path),
+                ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                worker["process"] = process
+                # The creating thread owns late handles even if its async
+                # waiter was cancelled or its event loop has already closed.
+                if worker["closing"] or worker["loop"].is_closed():
+                    _reap_worker(home, worker)
+                launch.set_result(process)
+            except Exception as exc:
+                launch.set_exception(exc)
+            finally:
+                if worker["closing"] or worker["loop"].is_closed():
+                    _reap_worker(home, worker)
+
+        # Process creation itself can block inside the OS. Use one owned
+        # daemon, not the normal tools' executor or the event-loop thread.
+        thread = threading.Thread(target=spawn, name="pcs-capacity-start", daemon=True)
+        try:
+            thread.start()
+        except Exception as exc:
+            launch.set_exception(exc)
+            raise
+        # A cancelled launch can still create an OS process. Retain ownership
+        # until its handle arrives, then kill it rather than leaking a writer.
+        process = await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(launch)), timeout=max(0, startup_deadline - time.monotonic()),
+        )
+        if process is None:
+            raise asyncio.CancelledError
+        worker["process"] = process
+        message = await asyncio.wait_for(
+            worker["loop"].run_in_executor(worker["io"], process.stdout.readline),
+            timeout=max(0, startup_deadline - time.monotonic()),
+        )
+        if json.loads(message) != {"ready": True} or worker["closing"]:
+            raise ValueError("capacity worker did not become ready")
+        succeeded = True
+        ready.set_result({"ready": True})
+    except (Exception, asyncio.CancelledError) as exc:
+        if not ready.done():
+            ready.set_result({"ready": False, "reason": type(exc).__name__})
+    finally:
+        if not succeeded:
+            await _stop_worker(home, worker)
+
+
+def _warm_capacity_worker(home: Path) -> dict | None:
+    """Start read-only imports ahead of optional maintenance, without waiting."""
+    if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
+        return None
+    try:
+        previous = _CAPACITY_WORKERS.get(home)
+        if previous is not None:
+            process = previous.get("process")
+            if process is not None:
+                if process.poll() is None:
+                    return previous
+            elif previous["startup"] is None or not previous["startup"].done():
+                return previous
+            launch = previous.get("launch")
+            if launch is not None and not launch.done():
+                return previous
+        loop = asyncio.get_running_loop()
+        # None is an explicit pre-start state. A foreign-thread shutdown can
+        # mark it closed before task creation; the late task must not spawn.
+        worker = {"ready": loop.create_future(), "process": None, "busy": False, "closing": False,
+                  "loop": loop, "startup": None, "launch": None,
+                  "io": concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pcs-capacity-io")}
+        _CAPACITY_WORKERS[home] = worker
+        worker["startup"] = loop.create_task(_start_worker(home, worker), name="pcs-capacity-startup")
+        if worker["closing"]:
+            _cancel_worker_startup(worker)
+        return worker
+    finally:
+        _CAPACITY_WORKERS_LOCK.release()
+
+
+def _cancel_worker_startup(worker: dict) -> None:
+    def cancel():
+        if not worker["ready"].done():
+            worker["ready"].set_result({"ready": False, "reason": "CancelledError"})
+        startup = worker["startup"]
+        if startup is not None and not startup.done():
+            startup.cancel()
+
+    with contextlib.suppress(RuntimeError):
+        worker["loop"].call_soon_threadsafe(cancel)
+
+
+def _cancel_capacity_worker(home: Path) -> None:
+    """Request immediate termination from synchronous Core shutdown."""
+    worker = _CAPACITY_WORKERS.get(home)
+    if worker is None:
+        return
+    _reap_worker(home, worker)
+    _cancel_worker_startup(worker)
+
+
+async def _close_capacity_worker(home: Path) -> None:
+    worker = _CAPACITY_WORKERS.get(home)
+    if worker is None:
+        return
+    _cancel_capacity_worker(home)
+    await _stop_worker(home, worker)
 
 
 async def run_capacity_maintenance(
     home: Path, *, limit_bytes: int, timeout: float, cancelled: Callable[[], bool],
 ) -> dict[str, object]:
-    """Bound optional work without waiting for a stuck preparation thread."""
+    """Terminate the entire optional job when its preparation or commit stalls."""
     skipped = {"status": "failed", "reason": "time_budget"}
-    if timeout <= 0 or cancelled():
+    # Tiny empty runs cannot cover IPC and termination. Leave a ready worker
+    # untouched for a later useful round instead of immediately killing it.
+    if timeout < _MIN_MAINTENANCE_SECONDS or cancelled():
         return skipped
     deadline = time.monotonic() + timeout
-    stop = threading.Event()
+    worker = _warm_capacity_worker(home)
+    if worker is None:
+        return {**skipped, "reason": "maintenance_busy"}
     if not _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
         return {**skipped, "reason": "maintenance_busy"}
     try:
-        previous = _CAPACITY_WORKERS.get(home)
-        if previous is not None and not previous.done():
+        if worker["busy"] or worker["closing"]:
             return {**skipped, "reason": "maintenance_busy"}
-        future = concurrent.futures.Future()
-        _CAPACITY_WORKERS[home] = future
+        worker["busy"] = True
     finally:
         _CAPACITY_WORKERS_LOCK.release()
-
-    def work():
-        try:
-            result = maintain_capacity(home, limit_bytes=limit_bytes, cancelled=stop.is_set, deadline=deadline)
-        except Exception as exc:
-            result = {"status": "failed", "reason": type(exc).__name__}
-        future.set_result(result)
-        if _CAPACITY_WORKERS_LOCK.acquire(blocking=False):
-            try:
-                if _CAPACITY_WORKERS.get(home) is future:
-                    _CAPACITY_WORKERS.pop(home, None)
-            finally:
-                _CAPACITY_WORKERS_LOCK.release()
-
+    reader = None
+    completed = False
+    warming = True
     try:
-        threading.Thread(target=work, name="pcs-capacity", daemon=True).start()
-    except Exception as exc:
-        # A failed optional worker startup must not disable all future attempts.
-        future.set_result({"status": "failed", "reason": type(exc).__name__})
-        return future.result()
-    try:
-        while not future.done():
-            remaining = deadline - time.monotonic()
+        # Do not spend foreground collection time waiting for optional imports.
+        # Read-only startup retains its own deadline and can serve a later run.
+        if not worker["ready"].done():
+            return skipped
+        if not worker["ready"].result()["ready"]:
+            return {**skipped, "reason": worker["ready"].result()["reason"]}
+        process = worker["process"]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or cancelled() or worker["closing"]:
+            return skipped
+        warming = False
+        request = {"home": str(home), "limit_bytes": limit_bytes, "deadline": deadline}
+
+        def send():
+            process.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+            process.stdin.flush()
+
+        await asyncio.wait_for(worker["loop"].run_in_executor(worker["io"], send), timeout=remaining)
+        stage_deadline = deadline
+        while True:
+            remaining = stage_deadline - time.monotonic()
             if remaining <= 0 or cancelled():
                 return skipped
-            await asyncio.sleep(min(0.005, remaining))
-        return future.result()
+            if reader is None:
+                reader = worker["loop"].run_in_executor(worker["io"], process.stdout.readline)
+            await asyncio.wait({reader}, timeout=min(0.05, remaining))
+            if not reader.done():
+                if remaining <= 0.05:
+                    return skipped
+                continue
+            message = reader.result()
+            reader = None
+            if not message:
+                if time.monotonic() >= stage_deadline:
+                    return skipped
+                return {**skipped, "reason": "worker_exited"}
+            response = json.loads(message)
+            if response.get("event") == "commit_started":
+                stage_deadline = min(deadline, time.monotonic() + COMMIT_LOCK_SECONDS)
+            elif response.get("event") == "commit_finished":
+                stage_deadline = deadline
+            else:
+                completed = True
+                return response["result"]
+    except Exception as exc:
+        return {**skipped, "reason": type(exc).__name__}
     finally:
-        # A late preparation may finish its own temporary files, never publish.
-        stop.set()
+        if reader is not None:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+        current = asyncio.current_task()
+        if not completed:
+            stopping = not warming or cancelled()
+            if current is not None and current.cancelling():
+                stopping = True
+            if stopping:
+                await _stop_worker(home, worker)
+        worker["busy"] = False
+
+
+def _cleanup_capacity_temporary(home: Path) -> None:
+    """Remove only abandoned, marked candidates inside this home's state dir."""
+    state = _state_path(home, "context_usage.json").parent
+    for path in state.glob("context-capacity-*"):
+        try:
+            _assert_no_symlinks(path)
+            marker = path / ".owner.lock"
+            if not path.is_dir() or not marker.is_file():
+                continue
+            with FileLock(marker, timeout=0):
+                pass  # A live preparer retains this lock until its cleanup.
+            shutil.rmtree(_extended_path(path))
+        except (OSError, Timeout, BaseError):
+            continue
 
 
 def _file_signature(path: Path) -> list[int]:
@@ -120,7 +377,7 @@ def _commit_candidate(
     ready_path = manifest.with_suffix(".ready")
     process = subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("_capacity_commit.py")), str(manifest), str(end),
-         str(_COMMIT_LOCK_SECONDS)],
+         str(COMMIT_LOCK_SECONDS)],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
@@ -129,7 +386,7 @@ def _commit_candidate(
         while True:
             if not ready and ready_path.exists():
                 ready = True
-                end = min(end, time.monotonic() + _COMMIT_LOCK_SECONDS)
+                end = min(end, time.monotonic() + COMMIT_LOCK_SECONDS)
             if cancelled() or time.monotonic() >= end:
                 process.kill()
                 return skipped
@@ -213,7 +470,7 @@ def _repair_navigation(root: Path, removed: set[str]) -> None:
 
 def maintain_capacity(
     home: Path, *, limit_bytes: int, cancelled: Callable[[], bool] | None = None,
-    deadline: float | None = None,
+    deadline: float | None = None, commit_candidate: Callable | None = None,
 ) -> dict[str, object]:
     """Prepare without a publication lock and try one short, optional commit.
 
@@ -221,7 +478,9 @@ def maintain_capacity(
     navigation once and report the resulting size without iterative fine-tuning.
     Keep sources, cursors and retired usage records.
     """
+    _cleanup_capacity_temporary(home)
     root = home / "workspace" / "context"
+    commit_candidate = commit_candidate or _commit_candidate
     deadline = deadline if deadline is not None else time.monotonic() + 2.0
     cancelled = cancelled or (lambda: False)
 
@@ -273,7 +532,9 @@ def maintain_capacity(
         return {**result, "status": "over_limit", "reason": "navigation_exceeds_capacity"}
 
     state = _state_path(home, "context_usage.json").parent
-    with tempfile.TemporaryDirectory(prefix="context-capacity-", dir=state) as temporary:
+    with tempfile.TemporaryDirectory(prefix="context-capacity-", dir=state) as temporary, FileLock(
+        Path(temporary) / ".owner.lock", timeout=0,
+    ):
         candidate = Path(temporary) / "context"
         _copy_tree(root, candidate)
         if expired():
@@ -326,7 +587,7 @@ def maintain_capacity(
                 "replace": sorted(replacements, key=lambda name: name == "description.md"),
                 "remove": sorted(set(sizes) - set(candidate_paths)),
             }), encoding="utf-8")
-            outcome = _commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
+            outcome = commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
             actually_removed = set(outcome.get("removed", []))
             if outcome["status"] != "succeeded":
                 if outcome["status"] == "failed" or actually_removed:

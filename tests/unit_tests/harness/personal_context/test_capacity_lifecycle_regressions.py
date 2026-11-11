@@ -2,7 +2,6 @@
 """Capacity settings and maintenance must not disrupt the existing runtime."""
 
 import asyncio
-import threading
 from pathlib import Path
 
 import pytest
@@ -11,6 +10,7 @@ from filelock import FileLock, Timeout
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context import PersonalContext, context_capacity
 from openjiuwen.harness.personal_context import personal_context as runtime
+from tests.unit_tests.harness.personal_context.capacity_worker_helpers import inject_worker, ready_worker, until
 
 
 def _config(*, source: Path | None = None, with_model: bool = False):
@@ -193,9 +193,7 @@ async def test_stalled_preparation_does_not_hold_writers_or_delay_stop(tmp_path,
     from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
 
     core = await _start_empty_run(tmp_path)
-    started = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
+    started = tmp_path / "preparation-started"
     original_commit = LocalFilesFetchService.commit_run
 
     async def commit_with_useful_work(provider, **kwargs):
@@ -205,35 +203,29 @@ async def test_stalled_preparation_does_not_hold_writers_or_delay_stop(tmp_path,
 
     monkeypatch.setattr(LocalFilesFetchService, "commit_run", commit_with_useful_work)
 
-    def maintain(*_args, **_kwargs):
-        started.set()
-        try:
-            assert release.wait(timeout=5)
-            return {"status": "failed", "reason": "test_preparation_released"}
-        finally:
-            finished.set()
-
-    monkeypatch.setattr(context_capacity, "maintain_capacity", maintain)
+    inject_worker(monkeypatch, tmp_path,
+                  "def maintain(*args, **kwargs):\n"
+                  f"    Path({str(started)!r}).touch()\n"
+                  "    time.sleep(60)\n"
+                  "capacity.maintain_capacity = maintain")
+    worker = await ready_worker(core._home)
     try:
         await core.run_fetch(service_id="notes")
         manual = core._manual_fetch_tasks["notes"]
-        assert await asyncio.to_thread(started.wait, 2)
+        await until(started.exists, timeout=2)
         if stop_requested and not manual.done():
             await asyncio.wait_for(core.stop_fetch_run("notes"), timeout=0.5)
         await asyncio.wait_for(asyncio.shield(manual), timeout=0.5)
-        assert not release.is_set()
+        assert worker["process"].returncode is not None
         with FileLock(core._home / "state/context_update.lock", timeout=0):
             pass
         record = (await core.get_fetch_run_status("notes"))["runs"][0]
         assert record["run_state"] in {"succeeded", "cancelled"}
         assert core._read_cursor("notes") is not None
-        # A second run remains usable while the old optional thread is stuck.
+        # A second run remains usable after the old optional job is terminated.
         await core.run_fetch(service_id="notes")
         await asyncio.wait_for(asyncio.shield(core._manual_fetch_tasks["notes"]), timeout=0.5)
         assert (await core.get_fetch_run_status("notes"))["runs"][0]["run_state"] == "succeeded"
     finally:
-        release.set()
-        if started.is_set():
-            assert await asyncio.to_thread(finished.wait, 2)
         await core.deactivate_runtime()
         core.shutdown()
