@@ -522,17 +522,25 @@ class ShellOperation(BaseShellOperation):
                     event_type=LogEventType.SYS_OP_ERROR,
                     metadata={"command": command[:200]},
                 )
-            if os.name == "nt":
-                system_encoding = self._detect_shell_encoding()
-                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
-                    lang_encoding = self._get_lang_encoding(system_encoding)
-                    exec_env["LANG"] = f"C.{lang_encoding}"
             # Resolve the execution plan upfront so we can pick the correct
             # output encoding per shell type (bash/sh → UTF-8, cmd/PowerShell
             # → system code page).  Without this, ripgrep output (UTF-8) was
             # decoded as GBK on Chinese Windows, yielding garbled or empty
             # results — the root cause of the "grep tool is broken" bug (T1).
             _args, _use_shell, resolved_shell = self._resolve_execution_plan(command, shell_type_enum)
+            if os.name == "nt":
+                if resolved_shell in ("bash", "sh"):
+                    # Git Bash/MSYS2 on Windows uses UTF-8 internally.  Setting
+                    # LANG=C.<system-cp> (e.g. C.CP1252) corrupts CJK characters
+                    # in command transport — each CJK byte gets a 0x18 byte
+                    # injected.  Force LANG=C.UTF-8 so CJK commands survive
+                    # intact (Issue T4 Defect 1).
+                    exec_env["LANG"] = "C.UTF-8"
+                else:
+                    system_encoding = self._detect_shell_encoding()
+                    if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                        lang_encoding = self._get_lang_encoding(system_encoding)
+                        exec_env["LANG"] = f"C.{lang_encoding}"
             proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
             track_sid = _track_shell_process(proc)
 
@@ -675,12 +683,15 @@ class ShellOperation(BaseShellOperation):
                     event_type=LogEventType.SYS_OP_ERROR,
                     metadata={"command": command[:200]},
                 )
-            if os.name == "nt":
-                system_encoding = self._detect_shell_encoding()
-                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
-                    lang_encoding = self._get_lang_encoding(system_encoding)
-                    exec_env["LANG"] = f"C.{lang_encoding}"
             _args, _use_shell, resolved_shell = self._resolve_execution_plan(command, shell_type_enum)
+            if os.name == "nt":
+                if resolved_shell in ("bash", "sh"):
+                    exec_env["LANG"] = "C.UTF-8"
+                else:
+                    system_encoding = self._detect_shell_encoding()
+                    if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                        lang_encoding = self._get_lang_encoding(system_encoding)
+                        exec_env["LANG"] = f"C.{lang_encoding}"
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, stream=True,
             )
@@ -1054,13 +1065,15 @@ class ShellOperation(BaseShellOperation):
 
         On Windows:
         - bash / sh (e.g. Git Bash / MSYS2) emit UTF-8 by default.
+        - PowerShell 7 (pwsh) emits UTF-8 when stdout is redirected (which
+          is always the case in subprocess execution).  Using the system
+          code page here causes CJK output to be decoded as mojibake
+          (Issue T4 Defect 2).
         - cmd uses the system code page (typically CP936/GBK on Chinese Windows).
-        - PowerShell also uses the system code page by default; safest to use
-          the system code page and rely on ``errors='replace'`` for edge cases.
 
         On non-Windows, always use the system preferred encoding (typically UTF-8).
         """
-        if os.name == "nt" and resolved_shell in ("bash", "sh"):
+        if os.name == "nt" and resolved_shell in ("bash", "sh", "powershell"):
             return "utf-8"
         return ShellOperation._detect_shell_encoding()
 
