@@ -315,6 +315,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+| [B_20261110_2112_anthropic-disabled-thinking-fallback](bugfix/core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/model_clients/_disabled_thinking.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, tests/unit_tests/core/foundation/llm/test_anthropic_model_client.py | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
 
 <a id="module-8"></a>
 

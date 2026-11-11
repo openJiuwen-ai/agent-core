@@ -50,6 +50,7 @@ from openjiuwen.core.foundation.llm.reasoning import (
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
+from openjiuwen.core.foundation.llm.model_clients._disabled_thinking import DisabledThinkingFallback
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema import (
@@ -631,6 +632,9 @@ class AnthropicModelClient(BaseModelClient):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(custom_headers=model_client_config.custom_headers)
+        self._disabled_thinking_fallback = DisabledThinkingFallback(
+            model_client_config.client_provider, "Anthropic-compatible",
+        )
 
     def _validate_config(self):
         super()._validate_config()
@@ -1033,6 +1037,7 @@ class AnthropicModelClient(BaseModelClient):
         if effective_headers:
             params["extra_headers"] = effective_headers
 
+        params = self._disabled_thinking_fallback.apply_cached(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1056,7 +1061,11 @@ class AnthropicModelClient(BaseModelClient):
             if timeout is not None:
                 params["timeout"] = timeout
 
-            response = await async_client.messages.create(**params)
+            response = await self._disabled_thinking_fallback.call(
+                async_client.messages.create,
+                params,
+                is_stream=False,
+            )
 
             llm_logger.info(
                 "Anthropic API response received.",
