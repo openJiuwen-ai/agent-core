@@ -2,8 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Shell output files must remain readable through the configured sandbox."""
 
+import hashlib
+import importlib
+import os
 import re
 import shutil
+import subprocess
 import tempfile
 from contextvars import ContextVar
 from pathlib import Path
@@ -205,3 +209,366 @@ async def test_shell_output_does_not_grant_access_to_other_temp_files(tool_type,
 
     assert not read.success
     assert "outside sandbox" in read.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("entry", ["invoke", "stream", "error", "timeout"])
+@pytest.mark.parametrize("failure_type", [PermissionError, OSError])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+async def test_persistence_failure_returns_bounded_output(
+    tool_type, entry, failure_type, sandbox, monkeypatch,
+):
+    operation, _, _ = sandbox
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    stdout = "OUTPUT-HEAD\n" + "x" * 30000
+    stderr = "STDERR-END"
+    exit_code = 1 if entry == "error" else 0
+    status = StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR if entry == "timeout" else StatusCode.SUCCESS
+    shell = MagicMock()
+    shell.execute_cmd = AsyncMock(return_value=ExecuteCmdResult(
+        code=status.code,
+        message="execution timed out" if entry == "timeout" else "success",
+        data=ExecuteCmdData(command="echo output", stdout=stdout, stderr=stderr, exit_code=exit_code),
+    ))
+
+    async def stream_output(*args, **kwargs):
+        yield ExecuteCmdStreamResult(
+            code=StatusCode.SUCCESS.code,
+            message="success",
+            data=ExecuteCmdChunkData(text=stdout, type="stdout", chunk_index=0),
+        )
+        yield ExecuteCmdStreamResult(
+            code=StatusCode.SUCCESS.code,
+            message="success",
+            data=ExecuteCmdChunkData(text=stderr, type="stderr", chunk_index=1, exit_code=exit_code),
+        )
+
+    def fail_persistence(*args, **kwargs):
+        raise failure_type("output storage unavailable")
+
+    shell.execute_cmd_stream = stream_output
+    monkeypatch.setattr(operation, "shell", lambda: shell)
+    monkeypatch.setattr(module, "persist_large_output", fail_persistence)
+    tool = tool_type(operation)
+    if entry == "stream":
+        results = [result async for result in tool.stream({"command": "echo output"})]
+        result = results[-1]
+    else:
+        result = await tool.invoke({"command": "echo output"})
+
+    assert result.success is (entry not in ("error", "timeout"))
+    rendered = tool.render_for_llm(result)
+    assert "Full output could not be saved" in rendered
+    assert "Full output saved to:" not in rendered
+    assert "OUTPUT-HEAD" in rendered
+    assert "STDERR-END" in rendered
+    assert len(rendered) < 5000
+    if entry == "timeout":
+        assert "execution timed out" in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+async def test_unusable_output_directory_keeps_command_result(tool_type, sandbox, monkeypatch):
+    operation, allowed_root, temp_root = sandbox
+    for base in (allowed_root / "workspace", allowed_root):
+        (base / ".outputs").write_text("occupied by a file", encoding="utf-8")
+    shell = MagicMock()
+    shell.execute_cmd = AsyncMock(return_value=ExecuteCmdResult(
+        code=StatusCode.SUCCESS.code,
+        message="success",
+        data=ExecuteCmdData(command="echo output", stdout="OUTPUT-HEAD\n" + "x" * 30000, exit_code=0),
+    ))
+    monkeypatch.setattr(operation, "shell", lambda: shell)
+    result = await tool_type(operation).invoke({"command": "echo output"})
+
+    assert result.success
+    assert "Full output could not be saved" in result.data["content"]
+    assert not list(temp_root.iterdir())
+
+
+def _make_directory_link(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True, capture_output=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def _set_windows_junction_in_place(directory: Path, target: Path) -> None:
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    device_io_control = kernel32.DeviceIoControl
+    device_io_control.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
+    device_io_control.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    # Request write access to turn this existing empty directory into a junction.
+    handle = create_file(str(directory), 0x40000000, 7, None, 3, 0x02200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        substitute = ("\\??\\" + str(target)).encode("utf-16-le")
+        display = str(target).encode("utf-16-le")
+        data = struct.pack("<HHHH", 0, len(substitute), len(substitute) + 2, len(display))
+        data += substitute + b"\0\0" + display + b"\0\0"
+        payload = struct.pack("<IHH", 0xA0000003, len(data), 0) + data
+        buffer = ctypes.create_string_buffer(payload)
+        returned = wintypes.DWORD()
+        if not device_io_control(handle, 0x000900A4, buffer, len(payload), None, 0,
+                                 ctypes.byref(returned), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        close_handle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory reparse points")
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_directory_cannot_become_junction_during_write(tool_type, sandbox, monkeypatch):
+    operation, allowed_root, _ = sandbox
+    outside = allowed_root.parent / "outside"
+    control = allowed_root / "junction-control"
+    control.mkdir()
+    _set_windows_junction_in_place(control, outside)
+    assert control.resolve() == outside.resolve()
+
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    directory = module._output_dir(operation)
+    original_open = os.open
+    blocked = []
+
+    def change_directory_before_write(path, flags, *args, **kwargs):
+        if Path(path).parent == directory:
+            try:
+                _set_windows_junction_in_place(directory, outside)
+            except OSError as error:
+                blocked.append(error.winerror)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", change_directory_before_write)
+    content, _ = module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert list(outside.iterdir()) == []
+    assert blocked == [32]  # ERROR_SHARING_VIOLATION
+    assert "Full output saved to:" in content
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_outputs_parent_swap_cannot_write_outside_sandbox(tool_type, sandbox, monkeypatch):
+    operation, allowed_root, _ = sandbox
+    outside = allowed_root.parent / "outside"
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    original_root = module.get_output_root
+
+    def swap_parent_after_resolution(op):
+        root = original_root(op)
+        _make_directory_link(root, outside)
+        return root
+
+    monkeypatch.setattr(module, "get_output_root", swap_parent_after_resolution)
+    module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_output_directory_swap_cannot_write_outside_sandbox(tool_type, sandbox, monkeypatch):
+    operation, allowed_root, _ = sandbox
+    outside = allowed_root.parent / "outside"
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    original_directory = module._output_dir
+
+    def swap_directory_after_preparation(op=None):
+        directory = original_directory(op)
+        directory.rename(directory.with_name(directory.name + "-retained"))
+        _make_directory_link(directory, outside)
+        return directory
+
+    monkeypatch.setattr(module, "_output_dir", swap_directory_after_preparation)
+    module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_dangling_output_symlink_cannot_write_outside_sandbox(tool_type, sandbox):
+    operation, allowed_root, _ = sandbox
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    stdout = "x" * 30000
+    digest = hashlib.sha256(stdout.encode("utf-8")).hexdigest()[:12]
+    name = "bash" if tool_type is BashTool else "powershell"
+    output_path = module._output_dir(operation) / f"{name}_{digest}.txt"
+    outside_file = allowed_root.parent / "outside" / "written.txt"
+    try:
+        output_path.symlink_to(outside_file)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("Creating file symlinks requires Windows privilege")
+        raise
+
+    module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout=stdout, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert not outside_file.exists()
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_no_allowed_output_root_returns_preview_without_temp_fallback(tool_type, sandbox):
+    operation, allowed_root, temp_root = sandbox
+    outside = allowed_root.parent / "outside"
+    for base in (allowed_root / "workspace", allowed_root):
+        _make_directory_link(base / ".outputs", outside)
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+
+    content, is_error = module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert not is_error
+    assert "Full output could not be saved" in content
+    assert "Full output saved to:" not in content
+    assert list(temp_root.iterdir()) == []
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_parent_change_during_publication_cannot_write_outside(tool_type, sandbox, monkeypatch):
+    operation, allowed_root, _ = sandbox
+    outside = allowed_root.parent / "outside"
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    directory = module._output_dir(operation)
+    output_directory = importlib.import_module("openjiuwen.harness.tools.shell._output_directory")
+    publisher = output_directory if os.name == "nt" else os
+    replace_name = "_replace_windows_output_file" if os.name == "nt" else "replace"
+    original_replace = getattr(publisher, replace_name)
+    attempted = []
+
+    def swap_parent_then_publish(source, destination, **kwargs):
+        attempted.append(True)
+        try:
+            directory.parent.rename(directory.parent.with_name(".outputs-retained"))
+        except PermissionError:
+            assert os.name == "nt"
+        else:
+            _make_directory_link(directory.parent, outside)
+        return original_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(publisher, replace_name, swap_parent_then_publish)
+    content, _ = module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert attempted
+    assert list(outside.iterdir()) == []
+    if os.name == "nt":
+        assert "Full output saved to:" in content
+    else:
+        assert "Full output could not be saved" in content
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_partial_output_write_failure_removes_staging_file(tool_type, sandbox, monkeypatch):
+    operation, _, _ = sandbox
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    directory = module._output_dir(operation)
+    original_fdopen = os.fdopen
+
+    class PartialWriteFailure:
+        def __init__(self, descriptor, mode):
+            self.stream = original_fdopen(descriptor, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def write(self, content):
+            self.stream.write(content[:10])
+            raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fdopen", PartialWriteFailure)
+    content, _ = module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert "Full output could not be saved" in content
+    assert list(directory.iterdir()) == []
+    directory.rename(directory.with_name(directory.name + "-closed"))
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_persistence_failure_detail_is_bounded(tool_type, sandbox, monkeypatch):
+    operation, _, _ = sandbox
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+
+    def fail_persistence(*args, **kwargs):
+        raise OSError("E" * 10000)
+
+    monkeypatch.setattr(module, "persist_large_output", fail_persistence)
+    content, _ = module.render_tool_content(module.CommandOutput(
+        command="echo output", stdout="x" * 30000, stderr="", exit_code=0,
+        warning=None, max_output_chars=20000, operation=operation,
+    ), False)
+
+    assert "Full output could not be saved" in content
+    assert len(content) < 5000
+
+
+@pytest.mark.parametrize("tool_type", [BashTool, PowerShellTool], ids=["bash", "powershell"])
+@pytest.mark.parametrize("sandbox", ["custom"], indirect=True)
+def test_preexisting_hardlink_does_not_overwrite_outside_file(tool_type, sandbox):
+    operation, allowed_root, _ = sandbox
+    module = importlib.import_module(tool_type.__module__.removesuffix("._tool") + "._output")
+    content = b"x" * 30000
+    digest = hashlib.sha256(content).hexdigest()[:12]
+    name = "bash" if tool_type is BashTool else "powershell"
+    output_path = module._output_dir(operation) / f"{name}_{digest}.txt"
+    outside_file = allowed_root.parent / "outside" / "existing.txt"
+    outside_file.write_bytes(b"original outside content")
+    output_path.hardlink_to(outside_file)
+
+    saved_path, _ = module.persist_large_output(content.decode("utf-8"), "", operation)
+
+    assert outside_file.read_bytes() == b"original outside content"
+    assert Path(saved_path).read_bytes() == content
