@@ -87,6 +87,8 @@ async def run(args):
     - `agent_type`：把这个节点派给**三方 CLI Agent**（`'claude'` / `'codex'`），`agent()` 与 `agent_session()` 均可用。取值必须同时是引擎支持的 CLI 后端**且**在本团队的三方 Agent 白名单内，否则该节点直接失败（错误里给出两个名单）。与 `schema` 组合时走"提示词约束 + JSON 解析"：CLI 未返回合法 JSON 视同未提交（重试后为 `None`）。模型选项见上方 `model` / `builtin_model` / `effort` 三条（pool 端点或 CLI 自身登录，**无回退**）；三方轮次的 token 在轮末计入预算（最坏超支一轮）。`agent_session` 的记忆按 run 隔离：同一 run 续跑找回上下文，全新 run 从零开始。
     - `agent_template`：把这个节点交给**当前会话已绑定专家团的某个成员**来干（填成员名，如 `'clip'`；不带组前缀）。worker 以该成员的人设 + 能力快照（技能 / 工具 / 门禁 / MCP）运行，不再继承 teammate 的通用工具；`agent()` 与 `agent_session()` 均可用，会话在首个真实轮次锁定成员，中途换人需 `fork()`。名字不在专家团内、填 `'leader'`（Team Leader 不是 worker）、带 `/`、与 `agent_type` 同时出现、或该成员声明了外部运行时 → 发射前直接失败并给出可用成员名。不写则与以前完全一样（通用 worker）。
 - `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` —— 对一份产物跑一轮**多 reviewer 验收判定**并返回结构化 `VerifyResult`（`{verdict: "pass"|"fail"|None, votes, feedback, passed}`）。每个 reviewer 是并行的一次结构化 `agent()`：`verdict` 类投 pass/fail（一票否决），`score` 类投 0~1 分（平均分 ≥ `threshold` 才通过）。任一 reviewer 未投票 → `verdict=None`（undecided），脚本自行决定重试或放弃。**单次判定、不驱动返工**——返回 `feedback` 供脚本组织执行者重做后再 `verify()`。**推荐用业务辅助 `build_reviewers(deliverable, specs, ...)` 从 `type`（`verifier` / `inspector` / `challenger`）+ 产物（文本或文件路径）构建 reviewer**（省 token、提示词一致、自动映射 kind）；仅在需要完全定制提示词时才直接构造 `Reviewer{kind, prompt, label, options}`（见「验证（verify）」一节）。
+  - **票字段**（遍历 `votes` 只读这些）：`VerifyResult` = `verdict` / `passed` / `votes` / `feedback`；每票 = `kind` / `decision` / `score` / `feedback` / `role` / `label`，**没有 `name`**。`label` 是评审员实例名（唯一；事件 `verify_votes[].name` 同源，形如 `verify-verdict-0` 或自定义 `verify-<label>`），`role` 是业务角色（verifier/inspector/challenger，可重复、可为 None）；未投票 reviewer 也占一票（`decision`/`score` 为 None）。示例：`[{"label": v.label, "score": v.score, "feedback": v.feedback} for v in r.votes]`。
+  - `build_reviewers` 是业务 helper：必须显式 `from openjiuwen.agent_teams.workflow.review import build_reviewers`（loader 只预绑定 `swarmflow` 原语）。
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。`options.model` **仅在会话首轮生效**（avatar 开启时解析并固化）；中途传不同 `model` 会直接报错，需要不同模型请用 `fork()` 派生新会话。
 - `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` —— 从 `agent_session` 派生一个**独立分支**（`fork_mode` 五种）：`full` 全量继承；`before`/`after` 以第 N 轮为界保留前/后；`keep_before_compact_after`/`keep_after_compact_before` 保留一侧、另一侧压成摘要。`keep_rounds` 是**轮数**（每次 `send()` 计一轮）：**`full` 之外的模式必填**（缺省会直接报错，没有截断点就没法截断）；传入的轮数超过父会话实际轮数时**降级为全量**并告警，不报错。fork 在调用时刻冻结父上下文，此后两条线互不影响；子会话可继续 `send`、也可再 `fork`（链式）。`human_session` 不支持 fork。
   - **链式 fork 约束**：**不要 `fork` 一个尚未发送过任何消息的 fork 子会话**——它会降级为镜像兜底（丢失 ToolMessage）。链式派生时，每个被 `fork` 的会话都必须先 `send` 过；若想基于父会话的早期状态派生，直接用父会话的 `fork_mode` + `keep_rounds`（如 `before`/`after`）表达，而不是先 fork 出一个未发送的子再 fork 它。
@@ -203,8 +205,8 @@ r = await verify(reviewers, threshold=0.85)
 **对抗验证（默认 pipeline）** —— 从多个维度并行评审（'bugs' / 'perf'），每个维度一完成就立刻对其发现跑一轮 `verify()` 一票否决（'bugs' 在验证时 'perf' 还在评审，不浪费墙钟）。**用 `build_reviewers` 构建 reviewer（推荐路径）**：单 `challenger` 即对抗式（任一 reviewer 投 fail 即裁掉）；要多视角，就在 specs 里放多个不同 `instruction` 的 `challenger`（见下方「多视角评审 + loop-until-dry」一例）：
 
 ```python
-# from swarmflow import agent, parallel, compact, verify
-# from openjiuwen.agent_teams.workflow.review import build_reviewers
+from swarmflow import agent, parallel, compact, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
 
 async def run(args):
     dims = [{"key": "bugs", "prompt": "找 bug"}, {"key": "perf", "prompt": "找性能问题"}]
@@ -313,8 +315,8 @@ async def run(args):
 质量门槛（inspector）—— 对**关键最终交付物 / 被下游消费**的产物，光 verifier（最低门槛）不够，加 `inspector` 打分、平均 ≥ 0.85 才过；各维度分在 `r.votes[i].score`、评分理由在 `r.votes[i].feedback`：
 
 ```python
-# from swarmflow import verify
-# from openjiuwen.agent_teams.workflow.review import build_reviewers
+from swarmflow import verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
 
 async def run(args):
     r = await verify(build_reviewers(
