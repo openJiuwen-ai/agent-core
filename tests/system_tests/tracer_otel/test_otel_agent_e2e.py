@@ -326,7 +326,7 @@ class TestE2EAgentWithOtelRail:
         all_names = [s.name for s in finished]
 
         # Root chain span (OtelRail.before_invoke → on_chain_start)
-        chain_spans = [s for s in finished if s.name.startswith("chain.")]
+        chain_spans = [s for s in finished if s.name == "otel_rail_agent"]
         assert len(chain_spans) >= 1, f"Expected chain span, got: {all_names}"
         chain_span = chain_spans[0]
         assert chain_span.kind == trace.SpanKind.INTERNAL

@@ -791,7 +791,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_chain_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            self._start_non_llm_span(span, inputs, instance_info, InvokeType.CHAIN.value, "chain")
+            # Jaeger 首屏直接显示执行 agent 名（rail 转发的 agent_name），
+            # 不再拼 invoke_type 前缀（chain.xxx）；缺省回退类名
+            info = instance_info or {}
+            chain_name = info.get("agent_name") or info.get("class_name", "unknown")
+            self._start_non_llm_span(
+                span, inputs, instance_info, InvokeType.CHAIN.value, "chain",
+                span_name=str(chain_name),
+            )
         except Exception as exc:
             session_logger.warning("otel agent handler: on_chain_start failed: %s", exc)
 
