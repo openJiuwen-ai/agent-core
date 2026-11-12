@@ -25,6 +25,8 @@ class SessionDigest:
     feedback_signals: List[str] = field(default_factory=list)
     n_user_turns: int = 0
     n_assistant_turns: int = 0
+    # Max startTimeUnixNano across spans in this trace (for harvest watermarks).
+    max_start_ns: int = 0
     # Ordered conversation turns. Each item is
     # ``{"role": "user"|"assistant"|"tool", "content": str, "skills": [str]}``.
     # ``tool`` turns carry the tool name in ``content`` and any skill names

@@ -19,7 +19,7 @@ _OP_TO_ACTION = {
     "append": "append",
     "replace": "replace",
     "merge": "merge",
-    "delete": "skip",
+    "delete": "delete",
 }
 
 
@@ -46,27 +46,20 @@ def edit_record_to_evolution(
     op = (edit.op or "").strip().lower()
     action = _OP_TO_ACTION.get(op, "append")
     content = (edit.content or "").strip()
+    if action == "delete":
+        content = content or (edit.anchor or "").strip()
     rationale = (edit.rationale or "").strip()
     summary = rationale or (content.splitlines()[0].strip() if content else "skill_train sleep edit")
     context = f"skill_train sleep adopt skill={skill_name}"
     if edit.anchor:
         context = f"{context}; anchor={edit.anchor}"
 
-    if action == "skip":
-        change = EvolutionPatch(
-            section=_DEFAULT_SECTION,
-            action="skip",
-            content=content or rationale or "deleted via sleep edit",
-            target=EvolutionTarget.BODY,
-            skip_reason=rationale or f"sleep edit op={op or 'delete'}",
-        )
-    else:
-        change = EvolutionPatch(
-            section=_DEFAULT_SECTION,
-            action=action,
-            content=content or summary,
-            target=EvolutionTarget.BODY,
-        )
+    change = EvolutionPatch(
+        section=_DEFAULT_SECTION,
+        action=action,
+        content=content or summary,
+        target=EvolutionTarget.BODY,
+    )
     return EvolutionRecord.make(
         source=_SLEEP_SOURCE,
         context=context,

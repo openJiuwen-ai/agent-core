@@ -66,22 +66,58 @@ def format_rebuild_context(rebuild_context: dict[str, Any] | None) -> str:
         return "Deterministic Rebuild Context: empty."
     lines = ["Deterministic Rebuild Context:"]
     for item in rebuild_context.get("records", []):
-        lines.append(
-            "\n[{record_id}] {summary}\ntarget={target} section={section} score={score}\n{content}".format(
-                record_id=item.get("record_id", ""),
-                summary=item.get("summary", ""),
-                target=item.get("target", ""),
-                section=item.get("section", ""),
-                score=item.get("score", ""),
-                content=item.get("content", ""),
+        action = str(item.get("action") or "append").strip().lower() or "append"
+        if action == "delete":
+            lines.append(
+                "\n[{record_id}] action=delete | {summary}\n"
+                "target={target} section={section} score={score}\n"
+                "REMOVE the following from SKILL.md (do not rewrite into a "
+                "\"when user asks to delete…\" rule):\n{content}".format(
+                    record_id=item.get("record_id", ""),
+                    summary=item.get("summary", ""),
+                    target=item.get("target", ""),
+                    section=item.get("section", ""),
+                    score=item.get("score", ""),
+                    content=item.get("content", ""),
+                )
             )
-        )
+        else:
+            lines.append(
+                "\n[{record_id}] action={action} | {summary}\n"
+                "target={target} section={section} score={score}\n{content}".format(
+                    record_id=item.get("record_id", ""),
+                    action=action,
+                    summary=item.get("summary", ""),
+                    target=item.get("target", ""),
+                    section=item.get("section", ""),
+                    score=item.get("score", ""),
+                    content=item.get("content", ""),
+                )
+            )
     overflow = rebuild_context.get("overflow_index") or {}
     if overflow.get("items"):
         lines.append("\nOverflow Summary Index:")
         lines.extend(_format_index_lines(list(overflow.get("items", []))))
         lines.append("Read overflow details only if they are needed for the rebuild.")
     return "\n".join(lines)
+
+
+_REBUILD_ACTION_RULES = (
+    "Experience action rules (must follow):\n"
+    "- action=delete: permanently remove the listed topic and every related "
+    "skill line, markdown section, template, format code, and self-check from "
+    "SKILL.md. Related means headings/bullets that mention the same topic "
+    "(including synonym phrasing in the experience summary/content).\n"
+    "- Do NOT keep deleted topics with \"unless the user excludes…\", "
+    "\"when the user asks to delete/omit…\", or \"Must not include…\" meta-rules. "
+    "Deletion means the topic is gone from the skill body.\n"
+    "- action=replace: rewrite the matching existing guidance in place.\n"
+    "- action=append/merge: add durable reusable guidance only when it is not "
+    "already implied by a delete/replace. If an append/replace experience itself "
+    "says to exclude/omit/delete a topic (e.g. 必须不包含 / Must not include / "
+    "删除…), treat that as a delete of that topic from SKILL.md, not as a new "
+    "soft rule to append.\n"
+)
 
 
 def build_simplify_command_prompt(
@@ -178,6 +214,7 @@ def build_rebuild_command_prompt(
         f"Intent: {intent}\n"
         f"{min_score_line}"
         "Old version has been archived. Create the rebuilt skill body from the deterministic context below.\n"
+        f"{_REBUILD_ACTION_RULES}"
         f"{format_rebuild_context(rebuild_context)}\n"
         f"Use {creator} for the rebuild.\n"
         "Use list_skill_experiences/read_skill_experiences only for overflow records that are not already inlined.\n"
@@ -231,7 +268,11 @@ def build_rebuild_llm_direct_prompt(
         "frontmatter between --- lines and the full markdown body. "
         "Do not wrap the output in markdown code fences. "
         "Do not call tools, mention tools, or edit evolutions.json. "
-        "Do not include commentary before or after the file."
+        "Do not include commentary before or after the file. "
+        "When an experience has action=delete, you MUST delete the corresponding "
+        "content from SKILL.md: remove matching lines, related sections, templates, "
+        "format codes, and self-checks for that topic. Do not rewrite deletes into "
+        "conditional \"do not use when asked\" / \"when the user asks to delete\" rules."
     )
     user = (
         f"Rebuild subject {json.dumps(normalized_subject, ensure_ascii=False)}.\n"
@@ -240,7 +281,12 @@ def build_rebuild_llm_direct_prompt(
         f"Target path (host will write this file): `{target_skill_md}`\n"
         "Old version has been archived. Merge the deterministic experiences below "
         "into the current SKILL.md. Preserve useful structure; incorporate durable "
-        "instruction changes from the experiences.\n\n"
+        "instruction changes from the experiences.\n"
+        "Critical: for every experience with action=delete, find the matching "
+        "content in Current SKILL.md (by the experience content/summary topic) and "
+        "delete that content from the rebuilt file—do not keep it, soften it, or "
+        "replace it with an exclude/omit meta-rule.\n\n"
+        f"{_REBUILD_ACTION_RULES}\n"
         f"{format_rebuild_context(rebuild_context)}\n\n"
         "Current SKILL.md:\n"
         f"{current_skill_md}\n"
@@ -251,15 +297,18 @@ def build_rebuild_llm_direct_prompt(
 def _format_index_lines(items: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for item in items:
+        action = str(item.get("action") or "").strip()
+        action_part = f" | action={action}" if action else ""
         lines.append(
             (
-                "- {record_id} | {summary} | target={target} | section={section} | "
-                "score={score} | updated_at={updated_at}"
+                "- {record_id} | {summary} | target={target} | section={section}"
+                "{action_part} | score={score} | updated_at={updated_at}"
             ).format(
                 record_id=item.get("record_id", ""),
                 summary=item.get("summary", ""),
                 target=item.get("target", ""),
                 section=item.get("section", ""),
+                action_part=action_part,
                 score=item.get("score", ""),
                 updated_at=item.get("updated_at", ""),
             )

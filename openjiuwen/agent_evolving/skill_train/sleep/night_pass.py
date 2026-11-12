@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Tuple
 
 from openjiuwen.agent_evolving.skill_train.sleep.backend import Backend
 from openjiuwen.agent_evolving.skill_train.sleep.gate import SleepGateSnapshot, evaluate_gate, select_gate_score
 from openjiuwen.agent_evolving.skill_train.sleep.holdout import any_regression, compare_task_scores
 from openjiuwen.agent_evolving.skill_train.sleep.memory import apply_edits_detailed
+from openjiuwen.agent_evolving.skill_train.sleep.mine import correction_kinds_from_task
 from openjiuwen.agent_evolving.skill_train.sleep.replay import aggregate_scores, replay_batch
 from openjiuwen.agent_evolving.skill_train.sleep.types import EditRecord, ReplayResult, TaskRecord
 
@@ -72,6 +73,37 @@ def _json_safe(value: float) -> float | None:
 def split_fail_win(pairs: PairList) -> Tuple[PairList, PairList]:
     fails = [(task, result) for task, result in pairs if result.hard < 1.0]
     wins = [(task, result) for task, result in pairs if result.hard >= 1.0]
+    return fails, wins
+
+
+def force_mined_correction_failures(pairs: PairList) -> Tuple[PairList, PairList]:
+    """Keep mined user corrections in the reflect failure set.
+
+    Sleep ``attempt`` only sees ``intent`` (no follow-up). A skill that already
+    omits an excluded field can make replay pass the exclude rubric, so
+    ``correction:exclude|add|replace`` tasks never reach ``reflect`` /
+    ``_supplement_exclude_deletes``. Force those mined corrections into fails
+    (hard=0) while leaving true wins without correction tags alone.
+    """
+    fails: PairList = []
+    wins: PairList = []
+    for task, result in pairs:
+        if result.hard < 1.0:
+            fails.append((task, result))
+            continue
+        if correction_kinds_from_task(task):
+            fails.append(
+                (
+                    task,
+                    replace(
+                        result,
+                        hard=0.0,
+                        fail_reason=result.fail_reason or "mined_correction",
+                    ),
+                )
+            )
+            continue
+        wins.append((task, result))
     return fails, wins
 
 
@@ -139,7 +171,7 @@ def evolve_one_target(
     target: str,
 ) -> None:
     pairs = replay_batch(backend, train_tasks, board.skill, board.memory)
-    fails, wins = split_fail_win(pairs)
+    fails, wins = force_mined_correction_failures(pairs)
     evolve_skill = target == "skill"
     # 已采纳经验的去重交给 Reflect LLM（prompt 注入 CUR_DOC + 防重复指令），
     # 生成端再由 dedup.filter_duplicate_edits 做确定性兜底。

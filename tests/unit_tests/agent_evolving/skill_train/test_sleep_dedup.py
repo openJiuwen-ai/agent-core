@@ -13,11 +13,22 @@ blocks the optimizer reads.
 from __future__ import annotations
 
 from openjiuwen.agent_evolving.skill_train.sleep.model_backend import (
+    _candidate_delete_lines,
     _edits_from_payload,
     _format_failure_block,
+    _supplement_exclude_deletes,
+    _term_tokens,
+)
+from openjiuwen.agent_evolving.skill_train.sleep.night_pass import (
+    force_mined_correction_failures,
+    split_fail_win,
 )
 from openjiuwen.agent_evolving.skill_train.sleep.prompts import DEFAULTS, render
-from openjiuwen.agent_evolving.skill_train.sleep.types import ReplayResult, TaskRecord
+from openjiuwen.agent_evolving.skill_train.sleep.types import (
+    EditRecord,
+    ReplayResult,
+    TaskRecord,
+)
 
 
 def _task(**overrides) -> TaskRecord:
@@ -43,13 +54,22 @@ def test_reflect_prompt_contains_duplication_rules() -> None:
     assert "synonymous with" in reflect
 
 
+def test_reflect_prompt_prefers_delete_for_exclude_corrections() -> None:
+    reflect = DEFAULTS["reflect"]
+    assert "Op selection (match the user's correction intent)" in reflect
+    assert "correction: exclude|add|replace" in reflect
+    assert "MUST `delete`" in reflect
+    assert "when the user asks to delete/omit" in reflect
+
+
 def test_reflect_prompt_places_duplication_rules_before_current_doc() -> None:
     reflect = DEFAULTS["reflect"]
     lang = reflect.index("Language and anchoring rules")
+    ops = reflect.index("Op selection (match the user's correction intent)")
     dup = reflect.index("Duplication rules")
     doc = reflect.index("# Current __TARGET__")
     failures = reflect.index("# Recurring failures")
-    assert lang < dup < doc < failures
+    assert lang < ops < dup < doc < failures
 
 
 def test_reflect_prompt_keeps_failure_contract_placeholders() -> None:
@@ -175,6 +195,165 @@ def test_format_failure_block_includes_core_lines() -> None:
     assert "rubric: 回答必须包含AQI" in block
     assert "response: 杭州今天晴" in block
     assert "why: 缺少空气质量数据" in block
+
+
+def test_format_failure_block_includes_exclude_correction_labels() -> None:
+    task = _task(
+        reference="用户任务：杭州天气\n- 必须不包含：空气质量数据",
+        tags=["correction:exclude", "exclude:空气质量数据"],
+    )
+    result = ReplayResult(id="t1", hard=0.0, response="AQI 62", fail_reason="仍含空气质量")
+    block = _format_failure_block(task, result)
+    assert "correction: exclude" in block
+    assert "exclude_target: 空气质量数据" in block
+
+
+def test_term_tokens_peels_uv_glued_cjk_exclude_labels() -> None:
+    tokens = _term_tokens("UV紫外线指数数据")
+    assert "UV" in tokens
+    assert "紫外线" in tokens
+    skill = (
+        "# 天气\n"
+        "- UV 指数用 Open-Meteo 预报\n"
+        "- 当用户要求空气质量或 UV 指数时，必须给出紫外线指数\n"
+        "- UV 指数：明确数值与等级（用户问及时）\n"
+    )
+    lines = _candidate_delete_lines(skill, "UV紫外线指数数据")
+    assert lines
+    assert any("UV" in line or "紫外" in line for line in lines)
+
+
+def test_force_mined_correction_failures_keeps_passing_exclude_in_fails() -> None:
+    """Replay can pass exclude rubrics when skill already omits the field.
+
+    Those mined corrections must still reach reflect / delete synthesis.
+    """
+    exclude = _task(
+        id="ex1",
+        reference="- 必须不包含：UV紫外线指数数据",
+        tags=["correction:exclude", "exclude:UV紫外线指数数据"],
+    )
+    plain = _task(id="plain1", intent="杭州的天气")
+    pairs = [
+        (exclude, ReplayResult(id="ex1", hard=1.0, soft=1.0, response="晴 20℃")),
+        (plain, ReplayResult(id="plain1", hard=1.0, soft=1.0, response="晴 20℃")),
+    ]
+    naive_fails, naive_wins = split_fail_win(pairs)
+    assert naive_fails == []
+    assert len(naive_wins) == 2
+
+    fails, wins = force_mined_correction_failures(pairs)
+    assert [task.id for task, _ in fails] == ["ex1"]
+    assert fails[0][1].hard == 0.0
+    assert fails[0][1].fail_reason == "mined_correction"
+    assert [task.id for task, _ in wins] == ["plain1"]
+
+
+def test_supplement_exclude_deletes_drops_meta_add_and_adds_delete() -> None:
+    skill = (
+        "# 天气\n\n"
+        "- 用户点名\"空气质量数据\"时，最终回复必须出现 AQI\n"
+        "- 回复前自检：空气质量必须出现\n"
+        "- 缺数据时重新查询\n"
+    )
+    task = _task(
+        reference="- 必须不包含：空气质量数据",
+        tags=["correction:exclude", "exclude:空气质量数据"],
+    )
+    result = ReplayResult(id="t1", hard=0.0, fail_reason="仍含空气质量")
+    edits = [
+        EditRecord(
+            target="skill",
+            op="add",
+            content="### 用户明确要求删除字段时必须完全省略\n- 当用户要求删除空气质量时……",
+        ),
+        EditRecord(target="skill", op="add", content="网络失败时仍须降级重试"),
+    ]
+    out = _supplement_exclude_deletes(
+        skill,
+        [(task, result)],
+        edits,
+        budget=4,
+        target="skill",
+    )
+    assert all(
+        not (
+            (e.op or "").lower() == "add"
+            and "用户明确要求删除" in (e.content or "")
+        )
+        for e in out
+    )
+    deletes = [e for e in out if (e.op or "").lower() == "delete"]
+    assert deletes
+    assert any("空气质量" in (e.anchor or "") for e in deletes)
+    assert any((e.op or "").lower() == "add" and "降级重试" in (e.content or "") for e in out)
+
+
+def test_supplement_exclude_deletes_fills_remaining_targets_when_model_partial() -> None:
+    """Model delete for one exclude must not skip synthesizing the others."""
+    skill = (
+        "# 天气\n\n"
+        "- 用户点名\"空气质量数据\"时，最终回复必须出现 AQI\n"
+        "- 用户点名\"UV指数数据\"时，最终回复必须出现 UV\n"
+        "- 回复前自检：空气质量与 UV 都必须出现\n"
+    )
+    task = _task(
+        reference="- 必须不包含：空气质量数据\n- 必须不包含：UV指数数据",
+        tags=[
+            "correction:exclude",
+            "exclude:空气质量数据",
+            "exclude:UV指数数据",
+        ],
+    )
+    result = ReplayResult(id="t1", hard=0.0, fail_reason="仍含排除字段")
+    model_delete = EditRecord(
+        target="skill",
+        op="delete",
+        content='- 用户点名"空气质量数据"时，最终回复必须出现 AQI',
+        anchor='- 用户点名"空气质量数据"时，最终回复必须出现 AQI',
+        rationale="exclude:空气质量数据",
+    )
+    out = _supplement_exclude_deletes(
+        skill,
+        [(task, result)],
+        [model_delete, EditRecord(target="skill", op="add", content="无关补充")],
+        budget=6,
+        target="skill",
+    )
+    deletes = [e for e in out if (e.op or "").lower() == "delete"]
+    assert any("空气质量" in (e.anchor or "") for e in deletes)
+    assert any("UV" in (e.anchor or "") for e in deletes)
+    assert len(deletes) >= 2
+
+
+def test_supplement_exclude_deletes_prioritizes_deletes_within_budget() -> None:
+    skill = (
+        "# 天气\n\n"
+        "- 用户点名\"空气质量数据\"时，最终回复必须出现 AQI\n"
+        "- 回复前自检：空气质量必须出现\n"
+    )
+    task = _task(
+        reference="- 必须不包含：空气质量数据",
+        tags=["correction:exclude", "exclude:空气质量数据"],
+    )
+    result = ReplayResult(id="t1", hard=0.0, fail_reason="仍含空气质量")
+    edits = [
+        EditRecord(target="skill", op="replace", content="仅当用户点名时输出空气质量", anchor="旧"),
+        EditRecord(target="skill", op="replace", content="自检排除空气质量", anchor="旧2"),
+        EditRecord(target="skill", op="add", content="网络失败时仍须降级重试"),
+        EditRecord(target="skill", op="add", content="另一条无关规则"),
+    ]
+    out = _supplement_exclude_deletes(
+        skill,
+        [(task, result)],
+        edits,
+        budget=3,
+        target="skill",
+    )
+    assert out
+    assert (out[0].op or "").lower() == "delete"
+    assert sum(1 for e in out if (e.op or "").lower() == "delete") >= 1
+    assert len(out) <= 3
 
 
 def test_format_failure_block_prefers_fail_reason_over_rationale() -> None:
