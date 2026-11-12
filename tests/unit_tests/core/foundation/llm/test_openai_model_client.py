@@ -15,6 +15,8 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
+    _finish_reason_normalize_enabled,
+    _normalize_missing_finish_reason,
 )
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -541,7 +543,7 @@ class TestDisabledThinkingCompatibility:
         client = _make_client()
         sdk_client = _mock_sdk_client(
             _unsupported_disabled_thinking_error(),
-            _stream_response("a", "b"),
+            _stream_response_with_finish("a", "b"),
         )
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
@@ -1275,3 +1277,169 @@ class TestExtractReasoningContent:
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+class TestNormalizeMissingFinishReason:
+    """Gateway-cut normalization helpers (#6101): a stream ending without any
+    finish_reason is normalized so downstream truncation machinery engages."""
+
+    @staticmethod
+    def _msg(finish_reason, tool_calls=None):
+        return _Obj(finish_reason=finish_reason, tool_calls=tool_calls, content="x")
+
+    @pytest.mark.parametrize("finish_reason", ["stop", "length", "tool_calls", "content_filter"])
+    def test_real_values_pass_through(self, finish_reason):
+        normalized, detail = _normalize_missing_finish_reason(self._msg(finish_reason))
+        assert normalized == finish_reason
+        assert detail is None
+
+    @pytest.mark.parametrize("missing", [None, "", "null"])
+    def test_missing_values_normalize_to_length(self, missing):
+        normalized, detail = _normalize_missing_finish_reason(self._msg(missing))
+        assert normalized == "length"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_tool_calls_normalizes_to_tool_calls(self):
+        # cut before any arguments streamed: tool turn, not text truncation
+        normalized, detail = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[_Obj(id="t1")])
+        )
+        assert normalized == "tool_calls"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_truncated_arguments_falls_back_to_length(self):
+        # gateway cut mid-arguments: the fragment must NOT become "tool_calls"
+        # (downstream bracket-repair would silently complete and execute it)
+        normalized, detail = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[_Obj(id="t1", name="write", arguments='{"tasks":["a","b"')])
+        )
+        assert normalized == "length"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_complete_arguments_normalizes_to_tool_calls(self):
+        normalized, detail = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[_Obj(id="t1", name="write", arguments='{"tasks":["a"]}')])
+        )
+        assert normalized == "tool_calls"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_empty_arguments_counts_as_complete(self):
+        # nothing streamed for the arguments: not a truncation fragment
+        normalized, detail = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[_Obj(id="t1", name="ping", arguments="  ")])
+        )
+        assert normalized == "tool_calls"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_one_truncated_call_among_complete_ones_falls_back(self):
+        normalized, detail = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[
+                _Obj(id="t1", name="ok", arguments='{"a":1}'),
+                _Obj(id="t2", name="cut", arguments='{"b":'),
+            ])
+        )
+        assert normalized == "length"
+        assert detail == "gateway_cut"
+
+    def test_missing_with_dict_shaped_tool_calls_checks_nested_arguments(self):
+        truncated, _ = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[{"function": {"name": "write", "arguments": '{"tasks":["a","b"'}}])
+        )
+        assert truncated == "length"
+        complete, _ = _normalize_missing_finish_reason(
+            self._msg(None, tool_calls=[{"function": {"name": "write", "arguments": '{"tasks":["a"]}'}}])
+        )
+        assert complete == "tool_calls"
+
+    def test_switch_defaults_to_enabled(self, monkeypatch):
+        monkeypatch.delenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", raising=False)
+        assert _finish_reason_normalize_enabled() is True
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", "off", "OFF", " False "])
+    def test_switch_env_disable_values(self, monkeypatch, value):
+        monkeypatch.setenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", value)
+        assert _finish_reason_normalize_enabled() is False
+
+    def test_switch_env_explicit_true(self, monkeypatch):
+        monkeypatch.setenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", "true")
+        assert _finish_reason_normalize_enabled() is True
+
+
+def _stream_response_missing_finish(*contents: str):
+    """SDK-style chunks with content but never a finish_reason (gateway cut)."""
+
+    async def gen():
+        for content in contents:
+            yield _stream_chunk(content)
+
+    return gen()
+
+
+def _stream_response_with_finish(*contents: str, finish_reason: str = "stop"):
+    async def gen():
+        last = len(contents) - 1
+        for i, content in enumerate(contents):
+            fr = finish_reason if i == last else None
+            yield _stream_chunk(content, finish_reason=fr)
+
+    return gen()
+
+
+async def _accumulate(chunks):
+    """Mirror consumer accumulation (llm_controller / react_agent use __add__)."""
+    acc = None
+    for chunk in chunks:
+        acc = chunk if acc is None else acc + chunk
+    return acc
+
+
+class TestStreamMissingFinishReasonNormalization:
+    @pytest.mark.asyncio
+    async def test_missing_finish_reason_normalizes_to_length(self, monkeypatch):
+        monkeypatch.delenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", raising=False)
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_stream_response_missing_finish("a", "b"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        # correction chunk is content-free and carries the normalized state
+        assert [c.content for c in chunks] == ["a", "b", ""]
+        assert chunks[-1].finish_reason == "length"
+        assert chunks[-1].metadata.get("finish_reason_detail") == "gateway_cut"
+
+        acc = await _accumulate(chunks)
+        assert acc.finish_reason == "length"
+        assert acc.content == "ab"
+        assert acc.metadata.get("finish_reason_detail") == "gateway_cut"
+
+    @pytest.mark.asyncio
+    async def test_real_finish_reason_not_touched(self, monkeypatch):
+        monkeypatch.delenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", raising=False)
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_stream_response_with_finish("a", "b"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        assert [c.content for c in chunks] == ["a", "b"]
+        assert all(c.metadata.get("finish_reason_detail") is None for c in chunks)
+        acc = await _accumulate(chunks)
+        assert acc.finish_reason == "stop"
+        assert acc.metadata.get("finish_reason_detail") is None
+
+    @pytest.mark.asyncio
+    async def test_switch_off_keeps_null_without_correction_chunk(self, monkeypatch):
+        monkeypatch.setenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", "false")
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_stream_response_missing_finish("a", "b"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        # no behavior change: no correction chunk, terminal state stays "null";
+        # consumers therefore see no detail metadata either
+        assert [c.content for c in chunks] == ["a", "b"]
+        acc = await _accumulate(chunks)
+        assert acc.finish_reason == "null"
+        assert acc.metadata.get("finish_reason_detail") is None
