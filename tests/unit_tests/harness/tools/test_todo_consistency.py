@@ -134,6 +134,62 @@ async def test_snapshot_failures_keep_the_load_error_code(env, monkeypatch, read
 
 
 @pytest.mark.asyncio
+async def test_backend_digest_representation_is_preserved_for_conditional_writes(env, monkeypatch):
+    creator, modifier, listing, session, path = env
+    read_file, write_file = creator.fs.read_file, creator.fs.write_file
+    expected_digests = []
+
+    async def read_with_prefix(*args, **kwargs):
+        result = await read_file(*args, **kwargs)
+        result.data.content_sha256 = "sha256:" + result.data.content_sha256
+        return result
+
+    async def compare_with_prefix(*args, **kwargs):
+        options = dict(kwargs["options"])
+        digest = options["expected_content_sha256"]
+        expected_digests.append(digest)
+        assert digest.startswith("sha256:")
+        options["expected_content_sha256"] = digest.removeprefix("sha256:")
+        return await write_file(*args, **{**kwargs, "options": options})
+
+    monkeypatch.setattr(creator.fs, "read_file", read_with_prefix)
+    monkeypatch.setattr(creator.fs, "write_file", compare_with_prefix)
+    await create(creator, session)
+    await update(modifier, session, "A", status="completed")
+    listed = await listing.invoke({}, session=session)
+    assert len(expected_digests) == 2
+    assert listed.todo_snapshot == json.loads(path.read_text())
+    assert listed.todo_snapshot["revision"] == 2
+    assert listed.todo_snapshot["todos"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", [
+    {"exists": "true", "content_sha256": "0" * 64},
+    {"exists": True, "content_sha256": 42},
+    {"exists": True, "content_sha256": ""},
+    {"exists": True, "content_sha256": "   "},
+])
+async def test_invalid_snapshot_metadata_is_not_a_read_only_fallback(env, monkeypatch, metadata):
+    from unittest.mock import AsyncMock
+    from openjiuwen.harness.tools.todo_store import read_snapshot
+
+    _, modifier, listing, session, path = env
+    result = SimpleNamespace(code=0, data=SimpleNamespace(content="[]", **metadata))
+    monkeypatch.setattr(listing.fs, "read_file", AsyncMock(return_value=result))
+    for operation in (
+        lambda: listing.invoke({}, session=session),
+        lambda: modifier.load_todos("session"),
+        lambda: read_snapshot(listing.fs, str(path), allow_read_only=True),
+    ):
+        with pytest.raises(BaseError) as caught:
+            await operation()
+        assert caught.value.code == 182500
+        assert caught.value.details["reason"] == "invalid_snapshot_metadata"
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_inflight_publication_failure_does_not_claim_zero_writes(env, monkeypatch, cancel):
     from unittest.mock import patch

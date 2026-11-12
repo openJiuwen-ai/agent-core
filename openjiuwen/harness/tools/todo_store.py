@@ -5,7 +5,6 @@ import asyncio
 import copy
 import json
 import os
-import re
 import uuid
 import weakref
 from contextvars import ContextVar
@@ -191,7 +190,7 @@ async def read_snapshot(fs, path, *, allow_read_only=False):
     supports_snapshot = isinstance(exists, bool) and isinstance(digest, str)
     invalid_exists = exists is not None and not isinstance(exists, bool)
     invalid_digest = digest is not None and (
-        not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
+        not isinstance(digest, str) or not digest.strip()
     )
     if invalid_exists or invalid_digest:
         raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED,
