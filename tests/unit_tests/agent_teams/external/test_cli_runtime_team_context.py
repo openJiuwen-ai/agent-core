@@ -115,6 +115,10 @@ class _FakeBackend:
     async def get_members_max_updated_at(self) -> int:
         return self.members_mtime
 
+    async def get_team_activity_probe(self) -> tuple[int, int] | None:
+        """合并后的单连接活动探针。"""
+        return (self.team_mtime, self.members_mtime)
+
     async def get_team_info(self):
         return self.team
 

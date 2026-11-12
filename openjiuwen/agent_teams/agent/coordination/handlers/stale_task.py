@@ -96,6 +96,10 @@ class StaleTaskHandler(BaseCoordinationHandler):
     # recurring quiet episodes are still reported, but at an ever-thinning
     # cadence (alarm fatigue is worse than no alarm).
     _SILENCE_SCALE_CAP: ClassVar[int] = 8
+    # Witness 结果窗口缓存：水位线秒级滞后对分钟级沉默判定
+    # 无感（tick 本身 30s 一跳、tick_delta 分辨率 ±30s），缓存把稳态下
+    # 每 tick 的 GROUP BY 扫描摊薄到每窗口一次。
+    _WITNESS_CACHE_TTL_S: ClassVar[float] = 15.0
 
     def __init__(
             self,
@@ -133,6 +137,10 @@ class StaleTaskHandler(BaseCoordinationHandler):
         # reappear through this path. GC'd when the task leaves IN_PROGRESS.
         self._inprogress_watch: dict[str, dict[str, float]] = {}
         self._last_inprogress_tick_at: float | None = None
+        # witness 水位缓存（expires_monotonic, witness_map）；见
+        # _load_inprogress_sweep_inputs。仅缓存非空探针结果，handler 实例
+        # 随 leader 运行时回收，无跨团队泄漏。
+        self._witness_cache: tuple[float, dict[str, tuple[int, int]]] | None = None
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Periodic task-board sweep: flag stale CLAIMED + leader stale PENDING."""
@@ -425,6 +433,74 @@ class StaleTaskHandler(BaseCoordinationHandler):
             int(idle),
         )
 
+    def _filter_watched_inprogress(self, tasks: list) -> list:
+        """从任务行筛出本 sweep 的观察对象（守卫条件与历史口径一致）。"""
+        return [
+            tk
+            for tk in tasks
+            # Defensive guard
+            if tk.assignee and tk.assignee != self._blueprint.member_name
+        ]
+
+    async def _load_inprogress_sweep_inputs(self) -> tuple[list, dict[str, tuple[int, int]]] | None:
+        """IN_PROGRESS 任务行 + witness 水位。
+
+        - 缓存命中（15s 窗口内）：只读任务行（1 checkout），witness 复用缓存；
+        - 缓存未命中：走 ``TeamDatabase.fetch_stale_sweep_probe`` 单连接探针
+          （任务 + 见证同一块，1 checkout）——原来每 tick 两次 checkout 降
+          为稳态一次，GROUP BY 扫描摊薄到每窗口一次。探针返回的任务行已按
+          status/assignee 过滤，此处再经 ``_filter_watched_inprogress`` 统一
+          口径（幂等）。
+        - witness 缓存只存非空结果：空板 tick 不填缓存（避免把"还没人说话"
+          的零水位带到下一个有任务的 tick——虽然 TTL 也只有 15s）。
+
+        Returns:
+            ``(watched_tasks, witness_map)``；探针重试耗尽返回 None（调用方
+            冻结本 tick）。无 DB 后端的退化形态返回 ``(tasks, {})``——
+            witness 恒空，回落到任务 updated_at 单见证（旧 message_manager 缺失路径的同语义）。
+        """
+        team_backend = getattr(self._infra, "team_backend", None)
+        team_db = getattr(team_backend, "db", None)
+        if team_db is None:
+            tasks = await self._infra.task_manager.list_tasks(status=TaskStatus.IN_PROGRESS.value)
+            return self._filter_watched_inprogress(tasks), {}
+        now_mono = time.monotonic()
+        cache = self._witness_cache
+        if cache is not None and cache[0] > now_mono:
+            tasks = await self._infra.task_manager.list_tasks(status=TaskStatus.IN_PROGRESS.value)
+            team_logger.info(
+                "stale-inprogress: witness cache hit (senders=%d)", len(cache[1])
+            )
+            return self._filter_watched_inprogress(tasks), cache[1]
+        started_mono = time.monotonic()
+        probe = await team_db.fetch_stale_sweep_probe(
+            team_backend.team_name,
+            task_status=TaskStatus.IN_PROGRESS.value,
+            exclude_assignee=self._blueprint.member_name,
+        )
+        elapsed_ms = (time.monotonic() - started_mono) * 1000.0
+        if probe is None:
+            team_logger.warning(
+                "stale-inprogress: sweep probe read failed after retries, "
+                "freezing this tick (team=%s)",
+                getattr(team_backend, "team_name", "?"),
+            )
+            return None
+        tasks, witness = probe
+        if tasks:
+            self._witness_cache = (now_mono + self._WITNESS_CACHE_TTL_S, witness)
+        if elapsed_ms > 2000.0:
+            team_logger.warning(
+                "stale-inprogress: slow sweep probe %.0fms (tasks=%d senders=%d)",
+                elapsed_ms, len(tasks), len(witness),
+            )
+        else:
+            team_logger.info(
+                "stale-inprogress: sweep probe %.0fms cache=miss tasks=%d senders=%d",
+                elapsed_ms, len(tasks), len(witness),
+            )
+        return self._filter_watched_inprogress(tasks), witness
+
     async def _check_stale_inprogress_tasks(self) -> None:
         """Leader-only: review prompt for IN_PROGRESS tasks that stall or outrun their welcome.
 
@@ -460,12 +536,14 @@ class StaleTaskHandler(BaseCoordinationHandler):
         if task_manager is None:
             return
 
-        in_progress = [
-            tk
-            for tk in await task_manager.list_tasks(status=TaskStatus.IN_PROGRESS.value)
-            # Defensive guard
-            if tk.assignee and tk.assignee != self._blueprint.member_name
-        ]
+        loaded = await self._load_inprogress_sweep_inputs()
+        if loaded is None:
+            # 探针重试耗尽：冻结本 tick——tick_delta 不消费
+            # （_last_inprogress_tick_at 不动，span 下一 tick 续算）、沉默钟
+            # 与 tenure 都不累计。读失败绝不误判成员停滞；
+            # 合并探针下任务行同样不可得，连 age 钟也一并停走（双重保守）。
+            return
+        in_progress, latest_by_sender = loaded
 
         # GC watch entries for tasks that left IN_PROGRESS — completed,
         # sent to review, cancelled, or reassigned. Both ladders reset.
@@ -487,33 +565,10 @@ class StaleTaskHandler(BaseCoordinationHandler):
             tick_delta = min(now - self._last_inprogress_tick_at, 300.0)
         self._last_inprogress_tick_at = now
 
-        # Witness source: per-sender mailbox high-water marks. A query
-        # failure FREEZES the silence clock for this tick (tenure still
-        # accrues): "no witness data" must never masquerade as "no output" —
-        # a transient read failure (database locked under write contention;
-        # the message table has no sender/timestamp index by design) would
-        # otherwise fabricate a stall out of thin air and escalate into a
-        # convergence order against a healthy, reporting member. The lower
-        # bound keeps the GROUP BY scan proportional to "messages posted
-        # after the oldest watched task started" — the bound is what keeps
-        # the query cheap on long-lived sessions.
-        latest_by_sender: dict[str, tuple[int, int]] = {}
-        witness_ok = True
-        message_manager = self._infra.message_manager
-        if message_manager is not None:
-            now_ms = get_current_time()
-            since_ms = min((tk.updated_at or now_ms) for tk in in_progress)
-            try:
-                latest_by_sender = await message_manager.latest_timestamps_by_sender(
-                    since_timestamp=since_ms
-                )
-            except Exception as e:
-                witness_ok = False
-                team_logger.warning(
-                    "stale-inprogress: sender witness query failed, "
-                    "freezing the silence clock this tick: %s",
-                    e,
-                )
+        # Witness source: per-sender mailbox high-water marks, loaded by
+        # _load_inprogress_sweep_inputs（单连接探针 + 15s 窗口缓存）；
+        # 探针重试耗尽已提前 return 冻结本 tick——"no witness
+        # data" must never masquerade as "no output"。
 
         review_lines: list[str] = []
         final_lines: list[str] = []
@@ -532,34 +587,31 @@ class StaleTaskHandler(BaseCoordinationHandler):
                 },
             )
             watch["tenure_accum"] += tick_delta
-            if witness_ok:
-                if witness_s > watch["last_witness"]:
-                    if watch["last_witness"]:
-                        team_logger.debug("stale-inprogress witness refresh: task=%s", task.task_id)
-                    watch["last_witness"] = witness_s
-                    watch["silent_accum"] = 0.0
-                    # The refresh re-arms the silence ladder (tier back to
-                    # 0), but re-arming after a FIRED ladder doubles the
-                    # tolerance (capped): a member who reports just often
-                    # enough still gets a fresh review per quiet episode,
-                    # yet the prompts thin out instead of nagging every
-                    # window. An unfired ladder keeps the base tolerance —
-                    # the backoff answers nagging, not mere output.
-                    if watch["silence_tier"] > 0:
-                        watch["silence_scale"] = min(
-                            watch["silence_scale"] * 2,
-                            self._SILENCE_SCALE_CAP,
-                        )
-                        team_logger.debug(
-                            "stale-inprogress silence re-armed with backoff: task=%s scale=%d",
-                            task.task_id,
-                            watch["silence_scale"],
-                        )
-                    watch["silence_tier"] = 0
-                else:
-                    watch["silent_accum"] += tick_delta
-            # witness_ok=False: the silence clock freezes this tick — neither
-            # refreshed nor accumulated (see the witness-query comment above).
+            if witness_s > watch["last_witness"]:
+                if watch["last_witness"]:
+                    team_logger.debug("stale-inprogress witness refresh: task=%s", task.task_id)
+                watch["last_witness"] = witness_s
+                watch["silent_accum"] = 0.0
+                # The refresh re-arms the silence ladder (tier back to
+                # 0), but re-arming after a FIRED ladder doubles the
+                # tolerance (capped): a member who reports just often
+                # enough still gets a fresh review per quiet episode,
+                # yet the prompts thin out instead of nagging every
+                # window. An unfired ladder keeps the base tolerance —
+                # the backoff answers nagging, not mere output.
+                if watch["silence_tier"] > 0:
+                    watch["silence_scale"] = min(
+                        watch["silence_scale"] * 2,
+                        self._SILENCE_SCALE_CAP,
+                    )
+                    team_logger.debug(
+                        "stale-inprogress silence re-armed with backoff: task=%s scale=%d",
+                        task.task_id,
+                        watch["silence_scale"],
+                    )
+                watch["silence_tier"] = 0
+            else:
+                watch["silent_accum"] += tick_delta
 
             silent_min = int(watch["silent_accum"] // 60)
             age_min = int(watch["tenure_accum"] // 60)

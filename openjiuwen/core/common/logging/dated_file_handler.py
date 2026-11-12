@@ -10,10 +10,13 @@ Layout mirrors the desktop logger (<dataRoot>/logs/YYYY-MM-DD/system.log):
 
 - One directory per local calendar day; the date is resolved on every emit,
   so a long-lived process switches files at midnight.
-- Within a day, a 2 MB cap rotates the active file to "<stem>.old.log"
-  (only the most recent backup is kept, same as the desktop).
+- Within a day, a size cap rotates the active file aside to a numbered
+  "<stem>.<NNN>.log" backup; the newest ``backup_count`` backups per day
+  are kept (default 10) and older ones are pruned, so the per-day volume
+  is bounded at (backup_count + 1) x max_bytes per file.
 - Expired date directories are removed by cleanup_expired_dated_log_dirs
-  (retention defaults to 90 days, same as the desktop audit logs).
+  (retention defaults to 90 days, same as the desktop audit logs) — this
+  date-dir cleanup bounds the total log volume across days.
 
 Failures are silently ignored per call: logging must never block business
 flow.
@@ -32,9 +35,20 @@ from typing import Optional
 # 日内上限 10MB 对齐桌面端 logger.ts 的 MAX_BYTES 与 jiuwenswarm 侧
 # utils._LOG_DATED_MAX_BYTES（2MB 时滚动过于频繁，排障窗口太短）。
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_BACKUP_COUNT = 10
 DEFAULT_RETENTION_DAYS = 90
 
 _DATED_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_backup_name(name: str, stem: str) -> bool:
+    """Match ``<stem>.<NNN>.log`` numbered backup names."""
+    return re.fullmatch(re.escape(stem) + r"\.\d+\.log", name) is not None
+
+
+def _backup_number(path: Path, stem: str) -> int:
+    """Return the sequence number of a ``<stem>.<NNN>.log`` backup."""
+    return int(path.name[len(stem) + 1: -len(".log")])
 
 
 def format_log_date(now: Optional[datetime.date] = None) -> str:
@@ -55,7 +69,9 @@ class DatedDailyFileHandler(logging.FileHandler):
     The active file is ``<base_dir>/<YYYY-MM-DD>/<filename>`` where the
     date is resolved from the local clock on every emit. Crossing midnight
     closes the old stream and opens the new day's file. A size cap within
-    the day rotates to ``<stem>.old.log``, keeping only one backup.
+    the day rotates the active file aside to a numbered
+    ``<stem>.<NNN>.log`` backup; the newest ``backup_count`` backups per
+    day are kept, older ones pruned.
 
     ``filename`` may contain subdirectories (e.g. ``run/jiuwen.log``).
     ``base_dir`` is exposed for idempotency checks by callers.
@@ -64,6 +80,7 @@ class DatedDailyFileHandler(logging.FileHandler):
         base_dir: Directory under which per-day subdirectories are created.
         filename: Log file path relative to the date directory.
         max_bytes: Per-day size cap; ``0`` disables rotation.
+        backup_count: Numbered backups kept per day; ``<0`` keeps all.
         encoding: File encoding.
     """
 
@@ -72,11 +89,13 @@ class DatedDailyFileHandler(logging.FileHandler):
         base_dir: str | os.PathLike,
         filename: str,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        backup_count: int = DEFAULT_BACKUP_COUNT,
         encoding: str = "utf-8",
     ) -> None:
         self.base_dir = os.fspath(base_dir)
         self._relative_filename = filename
         self.max_bytes = max_bytes
+        self.backup_count = backup_count
         self._current_date: Optional[str] = None
         super().__init__(self._current_path(), mode="a", encoding=encoding, delay=True)
         self._current_date = format_log_date()
@@ -122,6 +141,15 @@ class DatedDailyFileHandler(logging.FileHandler):
                     pass
 
     def _rotate_if_needed(self, record: logging.LogRecord) -> None:
+        """Roll the active file aside once it exceeds ``max_bytes``.
+
+        The current content is copied to the next numbered backup and
+        the active file is truncated in place (copy+truncate keeps the
+        open stream valid on Windows, where rename of an open file fails).
+        Afterwards the oldest backups beyond ``backup_count`` are pruned,
+        bounding the per-day volume; the date-dir retention cleanup bounds
+        the total volume across days.
+        """
         if not self.stream or self.max_bytes <= 0:
             return
         try:
@@ -129,12 +157,64 @@ class DatedDailyFileHandler(logging.FileHandler):
             self.stream.seek(0, os.SEEK_END)
             if self.stream.tell() + len(message.encode(self.encoding or "utf-8")) < self.max_bytes:
                 return
-            backup = Path(self.baseFilename).with_suffix(".old.log")
-            if backup.exists():
-                backup.unlink()
-            shutil.copy2(self.baseFilename, backup)
+            shutil.copy2(self.baseFilename, self._next_backup_path())
             self.stream.seek(0)
             self.stream.truncate(0)
+            self._prune_backups()
+        except OSError:
+            pass
+
+    def _next_backup_path(self) -> Path:
+        """Return ``<stem>.<NNN>.log`` with NNN = max existing + 1.
+
+        Numbers are monotonically increasing within the day directory and
+        zero-padded to three digits, so name sort order is chronological.
+        A fresh number is minted per rotation and existing backups are
+        never renamed — two processes sharing one directory (desktop mode
+        runs gateway and agent side by side) can interleave without
+        clobbering each other's backups; a same-number race just bumps to
+        the next free number. The backup's content time is its mtime
+        (``copy2`` preserves it).
+        """
+        active = Path(self.baseFilename)
+        try:
+            highest = max(
+                (
+                    _backup_number(p, active.stem)
+                    for p in active.parent.iterdir()
+                    if _is_backup_name(p.name, active.stem)
+                ),
+                default=0,
+            )
+        except OSError:
+            highest = 0
+        number = highest + 1
+        backup = active.with_name(f"{active.stem}.{number:03d}.log")
+        while backup.exists():
+            number += 1
+            backup = active.with_name(f"{active.stem}.{number:03d}.log")
+        return backup
+
+    def _prune_backups(self) -> None:
+        """Delete the oldest numbered backups beyond ``backup_count``.
+
+        Zero-padded numbers make name sort order chronological.
+        ``backup_count < 0`` disables pruning (keep all).
+        """
+        if self.backup_count < 0:
+            return
+        active = Path(self.baseFilename)
+        try:
+            backups = sorted(
+                (
+                    p
+                    for p in active.parent.iterdir()
+                    if _is_backup_name(p.name, active.stem)
+                ),
+                key=lambda p: _backup_number(p, active.stem),
+            )
+            for stale in backups[: max(0, len(backups) - self.backup_count)]:
+                stale.unlink(missing_ok=True)
         except OSError:
             pass
 
