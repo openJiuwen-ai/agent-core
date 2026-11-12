@@ -7,6 +7,7 @@ author_email: 2127132571@qq.com
 modules:
   - openjiuwen/harness
 files:
+  - openjiuwen/core/sys_operation/sys_operation.py
   - openjiuwen/harness/tools/shell/_output_directory.py
   - openjiuwen/harness/tools/shell/bash/_output.py
   - openjiuwen/harness/tools/shell/bash/_tool.py
@@ -15,6 +16,7 @@ files:
   - tests/unit_tests/harness/tools/test_shell_output_sandbox.py
   - tests/unit_tests/harness/tools/test_bash/test_output.py
   - tests/unit_tests/harness/tools/test_powershell/test_output.py
+  - tests/unit_tests/core/sys_operation/test_sys_operation.py
 designs: []
 design_note: 按已确认的沙箱内存储方案修复现有工具结果回读契约。
 ---
@@ -117,3 +119,56 @@ Git 中对应版本的 Shell 模块源码加载测试，文件工具结果为 88
 失败项仍为初版已对照的 5 项 Grep 空结果与 3 项 Windows 超时用例。
 12 项跳过包括原有 10 项平台权限测试，以及创建文件符号链接所需权限不足的 2 项测试。
 Windows 目录联接的复现与修复测试均实际执行。POSIX 实现尚未在 Linux 环境运行，需由对应平台的 CI 验证。
+
+## 2026-11-12 门禁详情核查与修正
+
+门禁报告对应 `528bc4b7586879e40c8c6da807f99c243dfe732d`。报告中的 UT 与 Ruff 已通过，
+CodeCheck 静态检查和开源合规检查失败。
+
+### CodeCheck 报告
+
+[静态检查详情](https://www.openlibing.com/apps/entryCheckDashCode/MR_7c84f9039374494889745a88c7973321/4ebb970c29dd6422d3c0f455c7f69cce?projectId=300075&codeHostingPlatformFlag=gitcode)
+列出四项问题，均位于 `_output_directory.py`。
+
+- `G.CLS.11` 指出第 26 行跨类访问 `_run_config`。新增 `SysOperation.work_config` 只读属性，
+  提供实际生效的本地配置；远程沙箱模式返回 `None`。输出目录选择改用该公开接口。
+- `G.FIO.01` 指出第 88 行 `os.open` 缺少权限参数。该调用只读打开已有目录，未使用 `O_CREAT`；
+  修订后的统一打开函数显式传入 `0o700`。
+- `G.PRM.03` 指出第 88、104 行未关闭描述符。原实现已通过 `ExitStack.callback` 释放，
+  本次将打开和 `finally` 中的关闭集中到 `_open_posix_directory`，由 `ExitStack` 管理该上下文。
+  描述符仍在逐级遍历和输出写入期间保持打开。
+
+新增六项测试覆盖配置默认值、显式配置、只读属性、远程模式，以及描述符在正常和异常退出时的释放。
+这些测试在修改前为六项失败；修订后的定向组合为 124 项通过、12 项跳过。
+描述符释放测试使用受控替身，POSIX 目录描述符的真实平台运行仍需 Linux CI 验证。
+
+```powershell
+.venv/Scripts/python.exe -B -m pytest -o addopts= -p no:cacheprovider tests/unit_tests/core/sys_operation/test_sys_operation.py tests/unit_tests/harness/tools/test_shell_output_sandbox.py tests/unit_tests/harness/tools/test_bash/test_output.py tests/unit_tests/harness/tools/test_powershell/test_output.py -q --tb=line --show-capture=no --disable-warnings
+```
+
+完整相关回归为 360 项通过、12 项跳过、8 项失败，失败项与前述基线记录一致。
+Windows 超时用例退出时另有异步任务取消与管道清理告警。
+
+```powershell
+.venv/Scripts/python.exe -B -m pytest -o addopts= -p no:cacheprovider tests/unit_tests/core/sys_operation/test_sys_operation.py tests/unit_tests/harness/tools/test_shell_output_sandbox.py tests/unit_tests/harness/tools/test_filesystem_tools.py tests/unit_tests/harness/tools/test_bash tests/unit_tests/harness/tools/test_powershell -q --tb=line --show-capture=no --disable-warnings
+```
+
+### 开源合规报告比对
+
+[合规详情](https://www.openlibing.com/apps/personalScandTaskInfor/person/a373cf7e-8749-400f-bb78-185f62e821e3?projectId=300075&codeHostingPlatformFlag=gitcode)
+包含七条记录，其中四条已自动确认，三条待分析。
+
+- `_output_directory.py` 第 49–57、126–134 行被标记为与两个项目各有 7% 相似度。
+  公开版本比对显示，匹配区域为 `ctypes` 对 `CreateFileW` 的参数和返回类型声明。
+  对应文件为
+  [hermes-feishu-streaming-card v4.7.1](https://github.com/baileyh8/hermes-feishu-streaming-card/blob/v4.7.1/hermes_feishu_card/cli.py#L6177)
+  和 [image2editable v0.2.0](https://github.com/dsy-xueai/image2editable/blob/v0.2.0/image2editable/runtime_models.py#L459)。
+- 测试文件第 302–329、336–340 行被标记为与 `seedance-2.0 v6.7.0` 有 5% 相似度。
+  公开文件第 1309 行附近为 `DeviceIoControl` 的标准调用；报告同时列出的第 539–566 行
+  为其他目录链接测试，不能仅据该行号对应关系认定复制了完整片段。
+  [公开文件](https://github.com/emily2040/seedance-2.0/blob/v6.7.0/tests/test_install_payload.py#L1309)
+
+这些记录的页面状态仍为未确认。分析入口要求通过 GitCode 登录，并在表单中指定审核人；
+访客状态无法完成该审核。本次保留比对依据供项目审核人确认。
+接口原型可对照 Microsoft 的 [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+和 [DeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol) 文档。
