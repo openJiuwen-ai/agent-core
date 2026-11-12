@@ -40,21 +40,31 @@ def get_output_root(operation: SysOperation | None) -> Path | None:
 
 
 @contextmanager
-def _hold_windows_directory(path: Path) -> Iterator[None]:
-    """Reject reparse points and block directory mutation until the handle closes."""
+def _open_windows_file(path: Path, *, access: int, sharing: int, flags: int) -> Iterator[int]:
+    """Open an existing Windows entry and release its handle on every exit path."""
     import ctypes
     from ctypes import wintypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
+    create_file = ctypes.WINFUNCTYPE(
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        use_last_error=True,
+    )(("CreateFileW", kernel32))
+    close_handle = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE)(("CloseHandle", kernel32))
+
+    handle = create_file(str(path), access, sharing, None, 3, flags, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield handle
+    finally:
+        close_handle(handle)
+
+
+@contextmanager
+def _hold_windows_directory(path: Path) -> Iterator[None]:
+    """Reject reparse points and block directory mutation until the handle closes."""
 
     # FILE_SHARE_READ denies write handles used to set reparse points and delete/rename access.
     share_read = 0x00000001
@@ -62,16 +72,11 @@ def _hold_windows_directory(path: Path) -> Iterator[None]:
     list_directory = 0x00000001
     # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT opens the directory itself.
     directory_flags = 0x02000000 | 0x00200000
-    handle = create_file(str(path), list_directory, share_read, None, 3, directory_flags, None)
-    if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
+    with _open_windows_file(path, access=list_directory, sharing=share_read, flags=directory_flags):
         entry = path.lstat()
         if not stat.S_ISDIR(entry.st_mode) or entry.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise PermissionError(f"Output directory {path} must be a real directory, not a symlink or junction")
         yield
-    finally:
-        close_handle(handle)
 
 
 @contextmanager
@@ -129,17 +134,6 @@ def _replace_windows_output_file(source: Path, destination: Path) -> None:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-
     ntdll = ctypes.WinDLL("ntdll")
     set_information = ntdll.NtSetInformationFile
     set_information.argtypes = [
@@ -162,10 +156,7 @@ def _replace_windows_output_file(source: Path, destination: Path) -> None:
         ]
 
     # DELETE access permits rename. OPEN_REPARSE_POINT keeps the source entry itself.
-    handle = create_file(str(source), 0x00010000, 7, None, 3, 0x00200000, None)
-    if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
+    with _open_windows_file(source, access=0x00010000, sharing=7, flags=0x00200000) as handle:
         information = RenameInformation(True, None, len(name.encode("utf-16-le")), name)
         io_status = IOStatus()
         # FileRenameInformation (10), with a simple name and NULL root, stays in the same parent.
@@ -173,8 +164,6 @@ def _replace_windows_output_file(source: Path, destination: Path) -> None:
                                  ctypes.sizeof(information), 10)
         if status < 0:
             raise ctypes.WinError(error_code(status))
-    finally:
-        close_handle(handle)
 
 
 def write_output_file(directory: Path, filename: str, content: bytes) -> Path:
