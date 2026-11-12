@@ -166,6 +166,9 @@ def _infra(db, bus, member_name: str) -> TeamInfra:
         ],
     )
     backend.resolve_leader_member_name = AsyncMock(return_value=LEADER)
+    # 沉默巡检的单连接探针走 team_backend.db——接真实内存库与团队名
+    backend.db = db
+    backend.team_name = TEAM
     infra.team_backend = backend
     return infra
 
