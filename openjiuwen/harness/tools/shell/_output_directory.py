@@ -23,8 +23,8 @@ def get_output_root(operation: SysOperation | None) -> Path | None:
     """Return a sandbox-contained output root, or the legacy temp-root default."""
     if operation is None or operation.mode != OperationMode.LOCAL:
         return None
-    config = operation._run_config
-    if not config.restrict_to_sandbox:
+    config = operation.work_config
+    if config is None or not config.restrict_to_sandbox:
         return None
 
     preferred_roots = [get_workspace(), get_cwd(), get_project_root()]
@@ -75,6 +75,16 @@ def _hold_windows_directory(path: Path) -> Iterator[None]:
 
 
 @contextmanager
+def _open_posix_directory(path: Path | str, flags: int, *, dir_fd: int | None = None) -> Iterator[int]:
+    """Keep directory acquisition and release paired across every exit path."""
+    descriptor = os.open(path, flags, 0o700, dir_fd=dir_fd)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
 def open_output_directory(directory: Path) -> Iterator[int | None]:
     """Create and anchor each directory component without following links."""
     directory = Path(os.path.abspath(directory))
@@ -85,8 +95,7 @@ def open_output_directory(directory: Path) -> Iterator[int | None]:
             stack.enter_context(_hold_windows_directory(current))
         else:
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            directory_fd = os.open(current, flags)
-            stack.callback(os.close, directory_fd)
+            directory_fd = stack.enter_context(_open_posix_directory(current, flags))
 
         for component in directory.parts[1:]:
             current = current / component
@@ -101,15 +110,13 @@ def open_output_directory(directory: Path) -> Iterator[int | None]:
                 stack.enter_context(_hold_windows_directory(current))
             else:
                 try:
-                    directory_fd = os.open(component, flags, dir_fd=directory_fd)
+                    directory_fd = stack.enter_context(_open_posix_directory(component, flags, dir_fd=directory_fd))
                 except OSError as error:
                     if error.errno in (errno.ELOOP, errno.ENOTDIR):
                         raise PermissionError(
                             f"Output directory {current} must be a real directory, not a symlink"
                         ) from error
                     raise
-                stack.callback(os.close, directory_fd)
-
         entry = os.fstat(directory_fd) if directory_fd is not None else directory.lstat()
         getuid = getattr(os, "getuid", None)
         if getuid is not None and entry.st_uid != getuid():
