@@ -304,28 +304,17 @@ def _set_windows_junction_in_place(directory: Path, target: Path) -> None:
     import struct
     from ctypes import wintypes
 
+    output_directory = importlib.import_module("openjiuwen.harness.tools.shell._output_directory")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
     device_io_control = kernel32.DeviceIoControl
     device_io_control.argtypes = [
         wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
         wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
     ]
     device_io_control.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
 
     # Request write access to turn this existing empty directory into a junction.
-    handle = create_file(str(directory), 0x40000000, 7, None, 3, 0x02200000, None)
-    if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
+    with output_directory._open_windows_file(directory, access=0x40000000, sharing=7, flags=0x02200000) as handle:
         substitute = ("\\??\\" + str(target)).encode("utf-16-le")
         display = str(target).encode("utf-16-le")
         data = struct.pack("<HHHH", 0, len(substitute), len(substitute) + 2, len(display))
@@ -336,8 +325,6 @@ def _set_windows_junction_in_place(directory: Path, target: Path) -> None:
         if not device_io_control(handle, 0x000900A4, buffer, len(payload), None, 0,
                                  ctypes.byref(returned), None):
             raise ctypes.WinError(ctypes.get_last_error())
-    finally:
-        close_handle(handle)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory reparse points")
@@ -598,3 +585,39 @@ def test_posix_directory_descriptor_is_released(fail_in_context, monkeypatch):
 
     assert opened == [("child", os.O_RDONLY, 0o700, 456)]
     assert closed == [123]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file handle sharing")
+@pytest.mark.parametrize("fail_in_context", [False, True], ids=["normal", "exception"])
+def test_windows_file_handle_is_released(fail_in_context, tmp_path):
+    output_directory = importlib.import_module("openjiuwen.harness.tools.shell._output_directory")
+    source = tmp_path / "output.txt"
+    destination = tmp_path / "closed.txt"
+    source.write_bytes(b"complete output")
+
+    try:
+        with output_directory._open_windows_file(
+            source, access=0x80000000, sharing=0x00000001, flags=0x00200000,
+        ) as handle:
+            assert isinstance(handle, int)
+            with pytest.raises(PermissionError):
+                source.rename(destination)
+            if fail_in_context:
+                raise RuntimeError("handle consumer failed")
+    except RuntimeError as error:
+        assert fail_in_context
+        assert str(error) == "handle consumer failed"
+
+    source.rename(destination)
+    assert destination.read_bytes() == b"complete output"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file handle errors")
+def test_windows_file_handle_reports_open_failure(tmp_path):
+    output_directory = importlib.import_module("openjiuwen.harness.tools.shell._output_directory")
+
+    with pytest.raises(FileNotFoundError):
+        with output_directory._open_windows_file(
+            tmp_path / "missing.txt", access=0x80000000, sharing=0x00000001, flags=0x00200000,
+        ):
+            pytest.fail("A missing file must fail before entering the context")
