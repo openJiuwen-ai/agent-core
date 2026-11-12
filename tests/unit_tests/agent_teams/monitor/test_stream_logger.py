@@ -42,7 +42,7 @@ def _headers(path):
             tag = f"[{level}] member="
             idx = line.find(tag)
             if idx != -1:
-                out.append((level, line[idx + len(f"[{level}] ") :]))
+                out.append((level, line[idx + len(f"[{level}] "):]))
                 break
     return out
 
@@ -450,3 +450,27 @@ def test_flush_closes_file(tmp_path):
     agg.flush()
 
     assert agg._file is None
+
+
+def test_tool_summaries_mask_pii():
+    """tool_call/tool_result/tool_update 摘要的 args/result 过 pii_mask。"""
+    from openjiuwen.agent_teams.monitor.stream_logger import (
+        _tool_call_summary,
+        _tool_result_summary,
+        _tool_update_summary,
+    )
+
+    payload = {
+        "tool_name": "mcp_celia-memory_celia_memory_store",
+        "tool_args": {"content": "手机号 13800138000"},
+        "tool_result": "ok 13800138000",
+    }
+    for summary in (_tool_call_summary, _tool_result_summary):
+        out = summary(payload)
+        assert "13800138000" not in out
+
+    update = _tool_update_summary(
+        {"tool_update": {"tool_name": "t", "status": "in_progress",
+                         "tool_call_id": "c1", "arguments": '{"content": "13800138000"}'}}
+    )
+    assert "13800138000" not in update

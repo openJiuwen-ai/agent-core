@@ -24,6 +24,15 @@ from openjiuwen.core.common.logging.events import (
     LogLevel,
 )
 from openjiuwen.core.common.logging.utils import get_session_id
+from openjiuwen.core.common.security.pii_mask import mask_pii_text
+
+
+def _mask_pii_safe(text: str) -> str:
+    """mask_pii_text with a never-block-logging guard。"""
+    try:
+        return mask_pii_text(text)
+    except Exception:
+        return text
 
 
 def resolve_log_type_label(log_type: str) -> str:
@@ -75,14 +84,12 @@ _BRACE_PLACEHOLDER_RE = re.compile(
 class StructuredLoggerMixin:
     """Common structured logging behavior shared by backend adapters."""
 
-    _CONTROL_CHAR_MAP = {
-        "\r": "\\r",
-        "\n": "\\n",
-        "\t": "\\t",
-        "\b": "\\b",
-        "\v": "\\v",
-        "\f": "\\f",
-        "\0": "\\0",
+    # str.translate 查表（C 层）的控制字符转义映射。
+    # 注意：类体内推导式引不到类属性，命名转义须字面展开。
+    _CONTROL_CHAR_TRANS = {
+        **{i: f"\\x{i:02x}" for i in range(32)},
+        13: "\\r", 10: "\\n", 9: "\\t", 8: "\\b", 11: "\\v", 12: "\\f", 0: "\\0",
+        127: "\\x7f",
     }
 
     log_type: str
@@ -112,26 +119,35 @@ class StructuredLoggerMixin:
             return msg_str
 
     def _sanitize_message(self, msg: Any) -> str:
-        """Escape control characters in plain log messages."""
+        """Escape control characters in plain log messages + mask PII patterns.
+
+        日志治理：核心日志模块内置 PII 模式脱敏（共享件
+        ``common/security/pii_mask.mask_pii_text``），standalone 宿主也兜底；
+        宿主侧扩展规则在此之上叠加，幂等共存。
+        """
         if not isinstance(msg, str):
             return str(msg)
 
-        result: List[str] = []
-        for char in msg:
-            code = ord(char)
-            if code < 32 or code == 127:
-                result.append(self._CONTROL_CHAR_MAP.get(char, f"\\x{code:02x}"))
-            else:
-                result.append(char)
-        return "".join(result)
+        return _mask_pii_safe(msg.translate(self._CONTROL_CHAR_TRANS))
+
+    @staticmethod
+    def _mask_event_value(value: Any) -> Any:
+        """Recursively mask PII patterns in structured-event field values."""
+        if isinstance(value, str):
+            return _mask_pii_safe(value)
+        if isinstance(value, dict):
+            return {k: StructuredLoggerMixin._mask_event_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(StructuredLoggerMixin._mask_event_value(v) for v in value)
+        return value
 
     def _build_structured_event_dict(
-        self,
-        log_level: LogLevel,
-        msg: str,
-        event_type: Optional[LogEventType | str] = None,
-        event: Optional[BaseLogEvent] = None,
-        **kwargs: Any,
+            self,
+            log_level: LogLevel,
+            msg: str,
+            event_type: Optional[LogEventType | str] = None,
+            event: Optional[BaseLogEvent] = None,
+            **kwargs: Any,
     ) -> Optional[Dict[str, Any]]:
         """Build a structured event payload for backends that support it."""
         if event is not None:
@@ -143,7 +159,7 @@ class StructuredLoggerMixin:
             elif not event.message:
                 event.message = ""
 
-            return event.to_dict()
+            return {k: self._mask_event_value(v) for k, v in event.to_dict().items()}
 
         if event_type is None:
             return None
@@ -161,4 +177,4 @@ class StructuredLoggerMixin:
             kwargs["message"] = self._sanitize_message(msg)
 
         event_obj = create_log_event(event_type, log_level=log_level, **kwargs)
-        return event_obj.to_dict()
+        return {k: self._mask_event_value(v) for k, v in event_obj.to_dict().items()}

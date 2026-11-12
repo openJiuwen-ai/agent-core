@@ -391,6 +391,15 @@ class LLMEvent(BaseLogEvent):
     timeout: Optional[float] = None  # timeout parameter
     stop: Optional[str] = None  # stop parameter
     max_retries: Optional[int] = None  # max_retries parameter
+    # 日志治理（不打印优先）：messages/tools 全量字段的摘要替代。
+    # 预览文本在调用侧已过 pii_mask 源头脱敏。
+    messages_count: Optional[int] = None  # len(messages)
+    messages_chars: Optional[int] = None  # 全部消息 content 字符数合计
+    last_user_preview: Optional[str] = None  # 当前轮最后一条 user 消息截断预览
+    tools_count: Optional[int] = None  # len(tools)
+    content_chars: Optional[int] = None  # response_content 的字符数替代
+    content_preview: Optional[str] = None  # response_content 的截断预览替代
+    line_chars: Optional[int] = None  # SSE 原始行长度（替代 line 内容片段）
 
     def __post_init__(self):
         super().__post_init__()

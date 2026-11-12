@@ -12,6 +12,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.payload_summary import summarize_llm_payload
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema import (
     AudioGenerationResponse,
@@ -468,8 +469,7 @@ class AscendAffinityModelClient(BaseModelClient):
                 event_type=LogEventType.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                messages=params.get("messages"),
-                tools=params.get("tools"),
+                **summarize_llm_payload(params),
                 is_stream=False,
                 exception=str(exc),
             )
@@ -563,8 +563,7 @@ class AscendAffinityModelClient(BaseModelClient):
                 event_type=LogEventType.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                messages=params.get("messages"),
-                tools=params.get("tools"),
+                **summarize_llm_payload(params),
                 is_stream=True,
                 exception=str(exc),
             )
@@ -771,7 +770,7 @@ class AscendAffinityModelClient(BaseModelClient):
                 model_name=self.model_config.model_name,
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                line_content=line[:200],
+                line_chars=len(line),
                 exception=str(exc),
             )
             return None
