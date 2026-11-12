@@ -172,3 +172,24 @@ Windows 超时用例退出时另有异步任务取消与管道清理告警。
 访客状态无法完成该审核。本次保留比对依据供项目审核人确认。
 接口原型可对照 Microsoft 的 [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
 和 [DeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol) 文档。
+
+## 2026-11-12 Windows 句柄生命周期整理
+
+`c5b0c7f` 的门禁中 CodeCheck、UT、Ruff 均已通过，合规报告仍有三条待分析记录。
+目录保护、暂存文件发布和目录联接测试辅助函数重复声明了 `CreateFileW` / `CloseHandle`，
+并各自处理句柄取得和释放。
+
+本轮将句柄生命周期集中到 `_open_windows_file`，通过 `WINFUNCTYPE` 绑定 Windows 调用约定、
+参数和返回类型，使用 `use_last_error=True` 获取打开失败的错误码。
+各调用方传入各自的访问权限、共享权限和文件标志，上下文正常退出或抛出异常时均关闭句柄。
+目录联接测试辅助函数通过该上下文取得写句柄，并执行实际的 `DeviceIoControl` 设置操作。
+
+新增三项真实 Windows 用例检查上下文内禁止重命名、正常与异常退出后可重命名，
+以及文件不存在时在进入上下文前返回 `FileNotFoundError`。
+新增测试在实现前均因缺少该上下文管理器失败。实现后与两项目录联接竞态测试组合为五项通过。
+
+配置、沙箱输出、Bash 输出与 PowerShell 输出的定向组合为 127 项通过、12 项跳过。
+完整相关回归为 363 项通过、12 项跳过、8 项失败。
+失败用例名称与既有基线一致，为五项 Grep 空结果用例、
+`test_timeout_returns_collected_output` 和
+`test_command_deadline_returns_partial_output_and_reaps_process` 的两个参数场景。
