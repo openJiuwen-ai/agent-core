@@ -147,3 +147,13 @@ Local work configuration for LOCAL mode security boundaries and command restrict
 * **sandbox_root**(List[str], optional): Filesystem operation security boundary. When `restrict_to_sandbox` is `True`, denies access to paths outside this list. Default: `None`.
 * **restrict_to_sandbox**(bool, optional): Whether to restrict filesystem operations within `sandbox_root`. Default: `False`.
 * **dangerous_patterns**(List[str], optional): Dangerous command regex pattern list. If `None`, uses built-in default patterns. Default: `None`.
+
+
+### ADX registered Local rootfs
+
+The `adx-environment` provider accepts `rootfs_template` in launcher `extra_params`
+with SDK 0.1.0rc5 or newer. This selects a deployment-registered Local artifact;
+when configured, the provider omits `image` from the SDK request. Template names
+are part of the environment cache scope, so changing the selected artifact does
+not reuse a tool environment created from a different rootfs. Artifact import,
+image-reference mapping and distribution belong to deployment tooling.
