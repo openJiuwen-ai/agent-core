@@ -46,14 +46,15 @@ def _candidate_groups(leaf_ids: list[str]) -> dict:
 
 
 def _candidate_payload(leaf_ids: list[str]) -> dict:
-    return {"groups": _candidate_groups(leaf_ids)}
+    refs = {leaf_id: f"l{index:04d}" for index, leaf_id in enumerate(sorted(leaf_ids), start=1)}
+    return {"groups": {"g1": {"leaf_refs": [refs[leaf_id] for leaf_id in leaf_ids]}}}
 
 
 class TreeEquivalenceDegradationTests(unittest.TestCase):
     def test_degrades_to_empty_groups_when_candidate_retries_fail(self) -> None:
         harness = _Harness(
             [
-                {"groups": {"g1": {"leaf_ids": ["alpha", "unknown"]}}},
+                {"groups": {"g1": {"leaf_refs": ["l0001", "unknown"]}}},
                 {"groups": {}},
             ]
         )
