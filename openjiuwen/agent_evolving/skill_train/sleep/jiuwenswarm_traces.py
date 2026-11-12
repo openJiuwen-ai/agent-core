@@ -649,6 +649,7 @@ def _digest_from_trace(
             user_index += 1
             turns.extend(tool_turns.get(user_index, []))
 
+    max_start_ns = max((_start_time(span) for span in spans), default=0)
     return SessionDigest(
         trace_id=trace_id,
         project=project,
@@ -659,6 +660,7 @@ def _digest_from_trace(
         feedback_signals=[],
         n_user_turns=len(user_prompts),
         n_assistant_turns=len(assistant_finals),
+        max_start_ns=max_start_ns,
         turns=turns,
     )
 
@@ -669,11 +671,14 @@ def load_jiuwenswarm_session_digests(
     project: str = "invoked",
     trace_id: str | None = None,
     max_sessions: int = 0,
+    since_ns: int = 0,
 ) -> list[SessionDigest]:
     """Group ``traces-*.jsonl`` spans by OTLP ``traceId`` and emit SessionDigest rows.
 
     Each ``traceId`` is one complete conversation trajectory stored in
     ``SessionDigest.trace_id``. Optional ``trace_id`` filters to one trajectory.
+    When ``since_ns > 0``, digests with ``max_start_ns <= since_ns`` are dropped
+    (already consumed by a prior harvest watermark).
     """
     root = Path(path).expanduser()
     files = _trace_files(root)
@@ -702,6 +707,7 @@ def load_jiuwenswarm_session_digests(
 
     digests: list[SessionDigest] = []
     drop_reasons: dict[str, int] = {}
+    watermark = max(int(since_ns or 0), 0)
     # Prefer recently active traces when max_sessions truncates.
     ordered_traces = sorted(
         by_trace.items(),
@@ -710,8 +716,14 @@ def load_jiuwenswarm_session_digests(
     )
     for tid, spans in ordered_traces:
         digest = _digest_from_trace(tid, spans, project=project, drop_reasons=drop_reasons)
-        if digest is not None:
-            digests.append(digest)
+        if digest is None:
+            continue
+        if watermark > 0 and int(digest.max_start_ns or 0) <= watermark:
+            drop_reasons["before_harvest_watermark"] = (
+                drop_reasons.get("before_harvest_watermark", 0) + 1
+            )
+            continue
+        digests.append(digest)
         if max_sessions > 0 and len(digests) >= max_sessions:
             break
     if drop_reasons:

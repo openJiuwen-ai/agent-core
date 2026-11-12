@@ -27,7 +27,7 @@ USER_INTENT_SIGNAL: Final[Literal["user_intent"]] = "user_intent"
 EVOLUTION_TARGET_VALUES: Final[tuple[str, ...]] = ("description", "body", "script")
 EVOLUTION_SUBJECT_KIND_VALUES: Final[tuple[str, ...]] = ("skill", "team-skill", "swarm-skill")
 SIMPLIFY_ACTION_VALUES: Final[tuple[str, ...]] = ("DELETE", "MERGE", "REFINE", "KEEP")
-VALID_PATCH_ACTIONS = frozenset({"append", "merge", "replace", "skip"})
+VALID_PATCH_ACTIONS = frozenset({"append", "merge", "replace", "delete", "skip"})
 VALID_SECTIONS = frozenset(
     {
         "Instructions",

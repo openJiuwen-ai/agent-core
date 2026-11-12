@@ -102,9 +102,68 @@ _META_QUESTION = ("？", "?", "什么", "哪个", "怎么", "如何", "吗", "wh
 _META_TOPIC = ("skill", "技能", "工具", "tool", "用的", "怎么做", "怎么查", "哪里查", "来源", "数据源")
 _CONTINUATION_PREFIX = ("那", "那么", "还有", "再", "也", "然后", "另外", "and ", "what about", "how about", "also")
 _CONTINUATION_SUFFIX = ("呢", "呢?", "呢？")
-_MISSING_RE = re.compile(
-    r"^(?:这个|这)?(?:不对|错了)?[，,。\s]*(?:缺少|少了|漏了|遗漏|没有|缺)(?:了)?[:：]?\s*(?P<what>.+)$"
+# Shared lead-in for short revisions of the previous answer.
+_REV_LEAD = (
+    r"(?:请)?(?:帮我|帮忙|麻烦)?"
+    r"(?:把|将)?"
+    r"(?:上[一条个次]?|刚才|之前的?)?"
+    r"(?:回复|答案|结果|输出|内容|数据|表格|字段|列表)?"
+    r"(?:里的|中的|里面的|里|中)?"
 )
+# 增: "缺少/补充/加上/增加 X" → must include X.
+_ADD_RE = re.compile(
+    r"^(?:"
+    r"(?:这个|这|输出|结果)?(?:不对|错了|错误|不好)?[，,。\s]*"
+    r"(?:缺少|少了|漏了|遗漏|没有|没给|没加|缺|"
+    r"补充|补上|补全|加上|加一下|再加|还要|还需要|需要有|要有|得有|"
+    r"增加|添加|新增|加入|附上|附带|给出|给出下|显示|展示|列出|包含|"
+    r"带上|带上点|加上点|再给|再给下)"
+    r"(?:了|上|一下)?[:：]?\s*(?P<what>.+)"
+    r"|"
+    rf"{_REV_LEAD}"
+    r"(?:补充|补上|加上|增加|添加|新增|加入|附上|显示|展示|列出)\s*(?P<what_ctx>.+)"
+    r"|"
+    r"(?:please\s+)?(?:add|include|show|provide|append|with|also\s+include)\s+"
+    r"(?:the\s+)?(?P<what_en>.+)"
+    r")$",
+    re.IGNORECASE,
+)
+# Back-compat alias used by older call sites / tests.
+_MISSING_RE = _ADD_RE
+# 删: "删除/去掉/不要 X" → must not include X.
+# Length-gated in classify so long standalone tasks (删服务器日志…) stay tasks.
+_EXCLUDE_RE = re.compile(
+    r"^(?:"
+    rf"{_REV_LEAD}"
+    r"(?:删除|删掉|删去|去掉|移除|剔除|隐去|隐藏|取消|"
+    r"不要|别要|别给|别显示|别展示|无需|不用|不需要|省略|略去)\s*(?P<what>.+)"
+    r"|"
+    r"(?:请)?(?:帮我|帮忙)?"
+    r"(?:删除|删掉|删去|去掉|移除|剔除|不要|别要|别显示|无需|不用)\s*(?P<what_bare>.+)"
+    r"|"
+    r"(?:please\s+)?(?:remove|delete|drop|omit|exclude|hide|without|no more)\s+"
+    r"(?:the\s+)?(?P<what_en>.+)"
+    r")$",
+    re.IGNORECASE,
+)
+# 改: "改成 X" / "把 A 改成 B" → must change (A) to X/B.
+_REPLACE_RE = re.compile(
+    r"^(?:"
+    rf"{_REV_LEAD}"
+    r"(?P<old>.+?)\s*"
+    r"(?:改成|改为|换成|换为|替换成|替换为|变成|更新为|调整为)\s*"
+    r"(?P<new>.+)"
+    r"|"
+    r"(?:请)?(?:帮我|帮忙)?"
+    r"(?:改成|改为|换成|换为|替换成|替换为|变成|更新为|调整为)\s*(?P<what>.+)"
+    r"|"
+    r"(?:please\s+)?(?:change|replace|switch|update)\s+"
+    r"(?:(?:the\s+)?(?P<old_en>.+?)\s+(?:to|with|into)\s+)?"
+    r"(?:the\s+)?(?P<new_en>.+)"
+    r")$",
+    re.IGNORECASE,
+)
+_REVISION_MAX_LEN = 30
 _TRAILING_PUNCT = "。！!，,；;、 \t"
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 # Intent mentions like "使用 tianqi 技能" / "用 tianqi-weather 技能".
@@ -152,6 +211,53 @@ def _normalize(text: str) -> str:
     return (text or "").strip().strip(_TRAILING_PUNCT + "~～").lower()
 
 
+def _match_group(match: re.Match[str] | None, *names: str) -> str:
+    if match is None:
+        return ""
+    for name in names:
+        try:
+            value = match.group(name)
+        except IndexError:
+            continue
+        if value:
+            return str(value).strip().rstrip(_TRAILING_PUNCT)
+    return ""
+
+
+def _clean_revision_text(text: str) -> str:
+    return (text or "").strip().rstrip(_TRAILING_PUNCT)
+
+
+def _add_what(text: str) -> str:
+    """Return the detail that must be included, or empty."""
+    return _match_group(_ADD_RE.match(_clean_revision_text(text)), "what", "what_ctx", "what_en")
+
+
+def _exclude_what(text: str) -> str:
+    """Return the detail that must be excluded, or empty."""
+    return _match_group(
+        _EXCLUDE_RE.match(_clean_revision_text(text)),
+        "what",
+        "what_bare",
+        "what_en",
+    )
+
+
+def _replace_parts(text: str) -> tuple[str, str]:
+    """Return (old, new) for a replace revision; old may be empty."""
+    match = _REPLACE_RE.match(_clean_revision_text(text))
+    if match is None:
+        return "", ""
+    old = _match_group(match, "old", "old_en")
+    new = _match_group(match, "new", "what", "new_en")
+    return old, new
+
+
+def _looks_like_crud_revision(text: str) -> bool:
+    """True when text matches short add / delete / replace revision patterns."""
+    return bool(_add_what(text) or _exclude_what(text) or _replace_parts(text)[1])
+
+
 def classify_user_turn(text: str) -> str:
     """Classify one user turn as greeting / correction / meta / task."""
     raw = (text or "").strip()
@@ -163,6 +269,9 @@ def classify_user_turn(text: str) -> str:
         return TURN_GREETING
     lower = raw.lower()
     if any(marker in lower for marker in _STRONG_CORRECTION):
+        return TURN_CORRECTION
+    # Short 增/删/改 revisions of the previous answer.
+    if len(norm) <= _REVISION_MAX_LEN and _looks_like_crud_revision(raw):
         return TURN_CORRECTION
     if len(norm) <= 15:
         if any(marker in lower for marker in _WEAK_CORRECTION):
@@ -254,11 +363,22 @@ def _rewrite_follow_up(kind: str, text: str, *, cjk: bool) -> str:
         return f"需回应用户追问：{clean}" if cjk else f"Must answer the user's follow-up question: {clean}"
     if kind == TURN_FOLLOWUP:
         return f"需同时覆盖后续请求：{clean}" if cjk else f"Must also cover the follow-up request: {clean}"
-    match = _MISSING_RE.match(clean)
-    if match:
-        what = match.group("what").strip().rstrip(_TRAILING_PUNCT)
-        if what:
-            return f"必须包含：{what}" if cjk else f"Must include: {what}"
+    # Prefer 改 → 删 → 增 so "改成…" is not swallowed by add/delete verbs.
+    old, new = _replace_parts(clean)
+    if new:
+        if old:
+            return (
+                f"必须将：{old} 改为 {new}"
+                if cjk
+                else f"Must change {old} to {new}"
+            )
+        return f"必须改为：{new}" if cjk else f"Must change to: {new}"
+    excluded = _exclude_what(clean)
+    if excluded:
+        return f"必须不包含：{excluded}" if cjk else f"Must not include: {excluded}"
+    added = _add_what(clean)
+    if added:
+        return f"必须包含：{added}" if cjk else f"Must include: {added}"
     return clean
 
 
@@ -342,13 +462,73 @@ def _segment_outcome(segment: Segment, digest: SessionDigest) -> str:
     return "unknown"
 
 
-def _tags_for(digest: SessionDigest, tools: List[str]) -> List[str]:
+def _segment_correction_tags(segment: Segment) -> List[str]:
+    """Tag CRUD correction kinds mined from follow-ups (exclude/add/replace)."""
+    tags: List[str] = []
+    for kind, text in segment.follow_ups:
+        if kind != TURN_CORRECTION:
+            continue
+        old, new = _replace_parts(text)
+        if new:
+            tags.append("correction:replace")
+            continue
+        excluded = _exclude_what(text)
+        if excluded:
+            tags.append("correction:exclude")
+            tags.append(f"exclude:{_short(excluded, 40)}")
+            continue
+        added = _add_what(text)
+        if added:
+            tags.append("correction:add")
+            tags.append(f"add:{_short(added, 40)}")
+    return list(dict.fromkeys(tags))
+
+
+def _tags_for(digest: SessionDigest, tools: List[str], segment: Segment | None = None) -> List[str]:
     tags: List[str] = []
     if tools:
         tags.append("tools:" + "+".join(tools[:4]))
     if digest.trace_id:
         tags.append("trajectory:" + digest.trace_id)
-    return tags
+    if segment is not None:
+        tags.extend(_segment_correction_tags(segment))
+    return list(dict.fromkeys(tags))
+
+
+def correction_kinds_from_task(task: TaskRecord) -> List[str]:
+    """Return correction kinds for a mined task: exclude / add / replace."""
+    kinds: List[str] = []
+    for tag in task.tags or ():
+        if tag.startswith("correction:"):
+            kind = tag.split(":", 1)[1].strip()
+            if kind:
+                kinds.append(kind)
+    if kinds:
+        return list(dict.fromkeys(kinds))
+    blob = f"{task.reference or ''}\n{task.context_excerpt or ''}"
+    if re.search(r"必须不包含|Must not include", blob):
+        kinds.append("exclude")
+    if re.search(r"必须包含|Must include", blob):
+        kinds.append("add")
+    if re.search(r"必须将：|必须改为：|Must change", blob):
+        kinds.append("replace")
+    return list(dict.fromkeys(kinds))
+
+
+def exclude_targets_from_task(task: TaskRecord) -> List[str]:
+    """Targets the user asked to omit (from tags and rubric lines)."""
+    targets: List[str] = []
+    for tag in task.tags or ():
+        if tag.startswith("exclude:"):
+            value = tag.split(":", 1)[1].strip()
+            if value:
+                targets.append(value)
+    blob = task.reference or ""
+    for match in re.finditer(r"(?:必须不包含|Must not include)[:：]\s*(.+)", blob):
+        value = match.group(1).strip().rstrip("。．.")
+        if value:
+            targets.append(value)
+    return list(dict.fromkeys(targets))
 
 
 def heuristic_mine(digests: List[SessionDigest], *, max_tasks: int = 40) -> List[TaskRecord]:
@@ -381,7 +561,11 @@ def heuristic_mine(digests: List[SessionDigest], *, max_tasks: int = 40) -> List
                     outcome=_segment_outcome(segment, digest),
                     reference_kind="rubric" if rubric else "none",
                     reference=rubric,
-                    tags=_tags_for(digest, segment.tools or list(digest.tools_used or [])),
+                    tags=_tags_for(
+                        digest,
+                        segment.tools or list(digest.tools_used or []),
+                        segment,
+                    ),
                     source_traces=[digest.trace_id],
                     skill_hint=skill_hint,
                 )
@@ -478,6 +662,36 @@ def assign_splits(
     return tasks
 
 
+def mine_capped(
+    digests: List[SessionDigest],
+    *,
+    max_tasks: int = 40,
+    val_fraction: float = 0.34,
+    test_fraction: float = 0.0,
+    seed: int = 42,
+) -> tuple[List[TaskRecord], bool]:
+    """Mine tasks and report whether ``max_tasks`` truncated the scan.
+
+    ``truncated`` is True when ``heuristic_mine`` stopped early after filling
+    ``max_tasks`` slots (checked on the pre-dedup list). Callers that advance a
+    harvest watermark must not use task timestamps alone when truncated — later
+    digests may have been skipped.
+    """
+    cap = max(int(max_tasks or 0), 0)
+    raw = heuristic_mine(digests, max_tasks=cap)
+    # Pre-dedup length hits the cap ⇒ heuristic_mine returned early; later
+    # digests may be unscanned. Exact-fill with no leftovers is also treated as
+    # truncated (conservative) so harvest watermarks do not skip unread traces.
+    truncated = cap > 0 and len(raw) >= cap
+    tasks = assign_splits(
+        dedup_tasks(raw),
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        seed=seed,
+    )
+    return tasks, truncated
+
+
 def mine(
     digests: List[SessionDigest],
     *,
@@ -486,11 +700,11 @@ def mine(
     test_fraction: float = 0.0,
     seed: int = 42,
 ) -> List[TaskRecord]:
-    tasks = heuristic_mine(digests, max_tasks=max_tasks)
-    tasks = dedup_tasks(tasks)
-    return assign_splits(
-        tasks,
+    tasks, _truncated = mine_capped(
+        digests,
+        max_tasks=max_tasks,
         val_fraction=val_fraction,
         test_fraction=test_fraction,
         seed=seed,
     )
+    return tasks

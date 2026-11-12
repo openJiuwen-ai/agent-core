@@ -15,12 +15,17 @@ from openjiuwen.agent_evolving.skill_train.sleep.jiuwenswarm_traces import (
 from openjiuwen.agent_evolving.skill_train.sleep.types import SessionDigest
 
 
-def harvest_otlp_trajectories(cfg: SleepConfig) -> List[SessionDigest]:
+def harvest_otlp_trajectories(
+    cfg: SleepConfig,
+    *,
+    since_ns: int = 0,
+) -> List[SessionDigest]:
     """Load JiuwenSwarm traces into SessionDigest rows, one per OTLP ``traceId``.
 
     ``cfg.trajectory_store_dir`` may be a directory containing
     ``traces-*.jsonl`` or a single trace file. Returns an empty list when no
     trace files are present. ``SessionDigest.trace_id`` stores the ``traceId``.
+    ``since_ns`` drops digests already at or before a prior skill harvest watermark.
     """
     root = Path(cfg.resolved_trajectory_dir())
     if not has_jiuwenswarm_traces(root):
@@ -30,4 +35,5 @@ def harvest_otlp_trajectories(cfg: SleepConfig) -> List[SessionDigest]:
         project=cfg.project or "invoked",
         trace_id=cfg.trace_id,
         max_sessions=cfg.max_trajectories,
+        since_ns=since_ns,
     )
