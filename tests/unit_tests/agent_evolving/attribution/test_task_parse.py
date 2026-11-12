@@ -17,6 +17,13 @@ from openjiuwen.agent_evolving.attribution.task_parse import (
     extract_file_candidates,
     run_task_parse,
 )
+from openjiuwen.agent_evolving.attribution.trajectory_summary.models import (
+    AgentSummary,
+    Segment,
+    SummaryTree,
+    Turn,
+    TurnInput,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -179,19 +186,92 @@ def test_extract_low_confidence_counted_not_listed() -> None:
     assert all(path != "/tmp/o.txt" for path, _, _ in candidates)
 
 
-def test_build_task_parse_digest_sections_and_dedup() -> None:
+def _turn(
+    agent_id: str,
+    number: int,
+    narrative: str,
+    segments: list[str],
+    inputs: list[TurnInput] | None = None,
+) -> Turn:
+    turn_id = f"{agent_id}:turn:{number}"
+    return Turn(
+        turn_id,
+        number,
+        agent_id,
+        f"{agent_id}:0",
+        f"{agent_id}:1",
+        1,
+        2,
+        narrative,
+        [
+            Segment(f"{agent_id}:segment:{index}", turn_id, agent_id, f"{agent_id}:0", f"{agent_id}:1", 1, 2, text)
+            for index, text in enumerate(segments, start=1)
+        ],
+        inputs or [],
+    )
+
+
+def test_build_task_parse_digest_uses_the_tree_the_candidates_and_the_lead_tail() -> None:
     nodes = {
-        "main": [
-            _node(0, "user", "帮我做任务"),
-            _node(1, "assistant", "我来处理"),
-            _node(2, "assistant", calls=[_call("write_file", {"file_path": "/w/f.md", "content": "x"})]),
+        "leader": [
+            TrajectoryNode(
+                node_id=f"leader:{index}",
+                subagent_key="leader",
+                display_name="团队领导",
+                kind="team_leader",
+                role="assistant",
+                content=f"节点{index}",
+                tool_calls=[_call("write_file", {"file_path": "/w/f.md"})] if index == 6 else [],
+                start_ts_ns=index,
+                end_ts_ns=index,
+            )
+            for index in range(7)
         ]
     }
-    candidates = [("/w/f.md", "main:2", "write_file")]
-    digest = build_task_parse_digest(nodes, candidates, "zh")
-    assert "帮我做任务" in digest
-    assert "文件产物候选" in digest
-    assert "/w/f.md" in digest
+    tree = SummaryTree(
+        agent_summaries={
+            "leader": AgentSummary("leader", "团队领导", "team_leader", "领导全过程", "leader:0", "leader:6", 0, 6)
+        },
+        turns={
+            "leader": [
+                _turn(
+                    "leader",
+                    1,
+                    "接单并分派",
+                    ["接单并分派"],
+                    [
+                        TurnInput("other", "leader:0", "unknown", None, "<system-reminder>忽略"),
+                        TurnInput("user_input", "leader:1", "user", None, "生成一个格斗小游戏"),
+                        TurnInput("message", "leader:2", "agent", None, "请实现核心", sender_name="team-leader"),
+                    ],
+                ),
+                _turn("leader", 2, "两段合并后的收尾", ["先修缺陷", "再调平衡"]),
+            ]
+        },
+    )
+    digest = build_task_parse_digest(nodes, [("/w/f.md", "leader:6", "write_file")], "zh", tree)
+    assert digest.startswith("## 分层轨迹")
+    assert "生成一个格斗小游戏" in digest
+    assert "<system-reminder>" not in digest
+    assert "请实现核心" not in digest
+    assert "具体执行轨迹" not in digest.split("turn 2")[0]
+    assert "具体执行轨迹" in digest
+    assert "- segment 1：先修缺陷" in digest
+    assert "- segment 2：再调平衡" in digest
+    assert "## 文件产物候选" in digest and "/w/f.md | leader:6 | write_file" in digest
+    assert "## 主体末尾原文（团队领导，最后 5 个节点）" in digest
+    assert "leader:1:" not in digest.split("## 主体末尾原文")[1]
+    assert "leader:2:" in digest and "leader:6:" in digest
+    assert "tool_calls:" in digest
+
+
+def test_build_task_parse_digest_uses_main_when_there_is_no_leader() -> None:
+    nodes = {"main": [_node(0, "assistant", "写好了")]}
+    digest = build_task_parse_digest(nodes, [], "zh", None)
+    assert "## 分层轨迹\n（无）" in digest
+    assert "## 文件产物候选" in digest and "（无）" in digest
+    assert "## 主体末尾原文（M，最后 5 个节点）" in digest
+    assert "main:0: 写好了" in digest
 
 
 class _FakeLLM:
