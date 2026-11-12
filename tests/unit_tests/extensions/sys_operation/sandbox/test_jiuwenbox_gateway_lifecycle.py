@@ -34,6 +34,7 @@ def remote(monkeypatch):
     state = SimpleNamespace(
         gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, delete_failures=0, block_create=False,
         entered=threading.Event(), release=threading.Event(), clients=[], lost=set(), inventory=None,
+        delete_receipt=None,
     )
 
     def respond(request):
@@ -55,6 +56,8 @@ def remote(monkeypatch):
         if request.method == "DELETE":
             if state.fail_delete or state.delete_failures:
                 state.delete_failures = max(0, state.delete_failures - 1)
+                if state.delete_receipt is not None:
+                    return httpx.Response(409, json=state.delete_receipt)
                 return httpx.Response(500, json={"detail": "ACL cleanup failed"})
             state.active.discard(sid)
             return httpx.Response(204)
@@ -119,6 +122,32 @@ async def test_release_scope_failure_blocks_reuse_until_retry(remote):
     remote.fail_delete = False
     assert await jb.release_jiuwenbox_scope("http://localhost:8321", owned.isolation_key_template) == ["sandbox-1"]
     assert not remote.active
+    assert not jb._JiuwenBoxProviderMixin._pending_deletions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt,attempts", [
+    ({"code": "SANDBOX_ACL_CLEANUP_FAILED", "retryable": False}, 1),
+    ({"code": "SANDBOX_ACL_CLEANUP_FAILED", "retryable": True}, 3),
+    ({"code": "OTHER_ERROR", "retryable": False}, 3),
+    ({"error": "ACL cleanup failed"}, 3),
+])
+async def test_permanent_acl_receipt_stops_retries_but_preserves_pending_ownership(remote, receipt, attempts):
+    owned = operation()
+    await owned.fs().read_file("/probe")
+    key = owned.isolation_key_template
+    remote.fail_delete = True
+    remote.delete_receipt = receipt
+    with pytest.raises(RuntimeError) as caught:
+        await jb.release_jiuwenbox_scope("http://localhost:8321", key)
+    assert sum(method == "DELETE" for method, _ in remote.requests) == attempts
+    assert isinstance(caught.value.__cause__, httpx.HTTPStatusError)
+    assert caught.value.__cause__.response.json() == receipt
+    assert jb._JiuwenBoxProviderMixin._pending_deletions
+    assert jb._JiuwenBoxProviderMixin._shared_sandbox_ids[f"http://localhost:8321|{key}"] == "sandbox-1"
+    assert (await owned.fs().read_file("/probe")).code != 0
+    remote.fail_delete = False
+    assert await jb.release_jiuwenbox_scope("http://localhost:8321", key) == ["sandbox-1"]
     assert not jb._JiuwenBoxProviderMixin._pending_deletions
 
 
