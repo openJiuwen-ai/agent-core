@@ -572,3 +572,29 @@ def test_preexisting_hardlink_does_not_overwrite_outside_file(tool_type, sandbox
 
     assert outside_file.read_bytes() == b"original outside content"
     assert Path(saved_path).read_bytes() == content
+
+
+@pytest.mark.parametrize("fail_in_context", [False, True], ids=["normal", "exception"])
+def test_posix_directory_descriptor_is_released(fail_in_context, monkeypatch):
+    output_directory = importlib.import_module("openjiuwen.harness.tools.shell._output_directory")
+    opened = []
+    closed = []
+
+    def open_directory(path, flags, mode, *, dir_fd):
+        opened.append((path, flags, mode, dir_fd))
+        return 123
+
+    monkeypatch.setattr(os, "open", open_directory)
+    monkeypatch.setattr(os, "close", closed.append)
+    try:
+        with output_directory._open_posix_directory("child", os.O_RDONLY, dir_fd=456) as descriptor:
+            assert descriptor == 123
+            assert closed == []
+            if fail_in_context:
+                raise OSError("directory consumer failed")
+    except OSError as error:
+        assert fail_in_context
+        assert str(error) == "directory consumer failed"
+
+    assert opened == [("child", os.O_RDONLY, 0o700, 456)]
+    assert closed == [123]
