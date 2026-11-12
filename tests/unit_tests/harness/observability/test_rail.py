@@ -19,8 +19,10 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     TaskIterationInputs,
+    RunKind,
     ToolCallInputs,
 )
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent import AgentCard
@@ -41,6 +43,8 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
     OJ_REQUEST_ID,
+    OJ_GOAL_ID,
+    OJ_GOAL_ATTEMPT_NUMBER,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
@@ -1338,3 +1342,35 @@ async def test_sub_agent_dispatched_by_a_member_joins_the_member_turn(tracing):
 
     assert _turn_of(_finished(tracing.exporter, "agent.explore_agent.invoke")[0]) == ("member-turn-a", 3)
     assert _turn_of(_finished(tracing.exporter, "agent.explore_agent.react_iteration.1")[0]) == ("member-turn-a", 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_kind", [RunKind.GOAL, "goal", RunKind.NORMAL])
+async def test_goal_round_metadata_reaches_physical_model_request(tracing, run_kind):
+    agent = _agent()
+    agent.goal_manager = SimpleNamespace(peek=lambda: SimpleNamespace(attempt_count=2))
+    ctx = _iteration_ctx(agent)
+    ctx.inputs.run_kind = run_kind
+    ctx.inputs.run_context = RunContext(extra={"goal_id": "goal-2"})
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True), tracer=tracing.tracer,
+    )
+    await rail.before_task_iteration(ctx)
+    await rail.before_model_call(AgentCallbackContext(
+        agent=agent, inputs=ModelCallInputs(react_iteration=1), extra=ctx.extra,
+    ))
+    request = handler._open_llm_span({"messages": [], "model": "fake"})
+    assert request is not None
+    handler._close_llm_span(request.otel_llm_state, SimpleNamespace(
+        content="done", reasoning_content="", finish_reason="stop",
+        tool_calls=None, usage_metadata=None,
+    ))
+    await rail.after_task_iteration(ctx)
+    attributes = _finished(tracing.exporter, "llm.call")[0].attributes
+    if run_kind == RunKind.NORMAL:
+        assert OJ_GOAL_ID not in attributes
+        assert OJ_GOAL_ATTEMPT_NUMBER not in attributes
+    else:
+        assert attributes[OJ_GOAL_ID] == "goal-2"
+        assert attributes[OJ_GOAL_ATTEMPT_NUMBER] == 2
