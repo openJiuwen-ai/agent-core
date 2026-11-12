@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/`（5 文件） |
-| 最近一次修订日期 | 2026-11-10 |
+| 最近一次修订日期 | 2026-11-12 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -101,7 +101,7 @@ class GoalManager:
     async def apply_assessment(self, ...) -> None
 
 class GoalEvaluator:
-    def evaluate(...) -> GoalAssessment
+    def assess(...) -> GoalAssessment
 
 class SessionGoalStore:
     def load(self) -> Optional[GoalRecord]
@@ -131,7 +131,7 @@ class GoalStopConfig:
 |---|---|---|---|
 | `goal_id` / `session_id` | set 时 | — | 主键对 |
 | `objective` | set 时 | — | 目标文本 |
-| `status` | set 时 `ACTIVE` | pause/complete/blocked | 五态见上 |
+| `status` | set 时 `ACTIVE` | pause/complete/blocked | 四态见上 |
 | `revision` | set / resume 时递增 | — | 目标修订 |
 | `attempt_count` | `begin_attempt` | clear | 受 max_attempts |
 | `token_usage` | `accumulate_usage` | clear | TokenUsage 四字段 |
@@ -171,3 +171,15 @@ class GoalStopConfig:
 - goal 工具（`SubmitGoalReportTool` / `GetCurrentGoalTool`）—— `S_05`。
 - `GoalRecord` 是 pydantic 序列化模型（`model_dump_json` 快照路径由 core / 模型规约锚定）；token
   budget 语义与 `S_05` 的 `ModelUsageRecord` 共享字段命名。
+
+
+## Goal 评估的观测边界
+
+9. Goal 执行轮沿用执行 Agent 身份，采集层从可信运行态标记 goal id 与 attempt number；不是新成员。
+10. 独立 transcript 评估的模型调用使用 openjiuwen.request.purpose=goal_assessment，携带
+    openjiuwen.goal.id / attempt.number / assessment.id / strategy。物理 request id 仍唯一；观测元数据不传给模型供应商。
+11. 评估输入与输出只属于其 inference，不推进执行 Agent 的 context.window.commit，
+    不贡献执行消息重建或执行上下文的 lineage。原始 span、usage 和失败原因完整保留。
+12. task-local 观测 scope 在成功、异常、取消和兼容重试后均恢复外层上下文；评估不改变 GoalManager 的唯一状态权威。
+
+实施与验证：[F_20261112_1120_goal-assessment-isolation](../../features/F_20261112_1120_goal-assessment-isolation.md)。
