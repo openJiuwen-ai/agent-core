@@ -986,6 +986,8 @@ class TestModelContext:
         await context.clear_messages(with_history=True)
         assert len(context) == 0
         assert context.get_messages(with_history=True) == []
+        # 用量报告的 message_event 应保持 clear 语义（防止 mutation 标签被覆盖为 remove）
+        assert context._last_message_mutation == "clear"
 
     @pytest.mark.asyncio
     async def test_clear_messages_keeps_history_beyond_window(self):
@@ -996,6 +998,7 @@ class TestModelContext:
         await context.clear_messages(with_history=False)
         remaining = context.get_messages(with_history=True)
         assert [m.content for m in remaining] == ["h-0", "h-1"]
+        assert context._last_message_mutation == "clear"
 
     @pytest.mark.asyncio
     async def test_model_context_window_with_incomplete_dialogue_round(self):

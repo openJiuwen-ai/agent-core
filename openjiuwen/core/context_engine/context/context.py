@@ -620,11 +620,10 @@ class SessionModelContext(ModelContext):
         # 无法清空窗口外的历史消息。
         popped_messages = self._message_buffer.clear(with_history=with_history)
         if popped_messages:
-            # pop_messages owns the revision increment; clear only refines the
-            # mutation label for the next request-local context report.
+            # 直接递增修订号并将 mutation 标签置为 clear，与基线终态一致
+            # （基线由 pop_messages 递增修订号后再在外层覆写标签为 clear）。
             ContextUtils.invalidate_usage_metadata(self._message_buffer.get_back())
-            self._last_message_mutation = "clear"
-            self._mark_message_changed("remove")
+            self._mark_message_changed("clear")
         self._offload_message_buffer = OffloadMessageBuffer()
         self._configure_offload_message_buffer()
         return
