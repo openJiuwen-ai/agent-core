@@ -15,7 +15,7 @@ DEFAULT_INNER_LOG_CONFIG = {
             "target": "stdout",
             "level": "INFO",
             "serialize": False,
-            "colorize": True,
+            "colorize": False,
             "enqueue": False,
             "backtrace": True,
             "diagnose": False,
@@ -63,6 +63,6 @@ DEFAULT_INNER_LOG_CONFIG = {
         },
         "agent": {
             "level": "INFO",
-        }
+        },
     },
 }
