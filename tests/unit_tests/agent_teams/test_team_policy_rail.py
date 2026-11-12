@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from unittest.mock import AsyncMock
+
 from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
     build_team_extra_section,
@@ -393,6 +395,7 @@ class _FakeTeamBackend:
 
         self.team_mtime_calls = 0
         self.members_mtime_calls = 0
+        self.probe_calls = 0
         self.get_info_calls = 0
         self.list_members_calls = 0
 
@@ -403,6 +406,13 @@ class _FakeTeamBackend:
     async def get_members_max_updated_at(self) -> int:
         self.members_mtime_calls += 1
         return self._members_mtime
+
+    async def get_team_activity_probe(self) -> tuple[int, int] | None:
+        """合并后的单连接活动探针（PM-77 E1）——一次调用顶替原来两个探针。"""
+        self.team_mtime_calls += 1
+        self.members_mtime_calls += 1
+        self.probe_calls += 1
+        return (self._team_mtime, self._members_mtime)
 
     async def get_team_info(self):
         self.get_info_calls += 1
@@ -1246,3 +1256,103 @@ class TestTeamPolicyRailSnapshotCollapse:
         assert "<team-context>" in body
         assert body.index("<team-context>") < body.index("fresh board")
         assert "stale board" not in body
+
+
+class TestTeamContextActivityProbe:
+    """team-info 与 roster 的 mtime 探针合并为单连接一次读；
+    读失败 fail-open——本轮跳过刷新、基线不推进、成员回合不炸。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_single_probe_call_per_pending_text(self):
+        """一次 pending_text 只发一次合并探针，不再两次独立探针。"""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "报数小队", "count off"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        await _admit(rail, ctx, "go")
+
+        assert backend.probe_calls == 1
+        assert backend.team_mtime_calls == 1  # 合并探针内部顶替（不叠旧探针）
+        assert backend.members_mtime_calls == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_probe_failure_skips_refresh_without_raising(self):
+        """探针读失败（None）：回合照常，team-info/roster 本轮跳过且基线不推进——
+        下一轮探针恢复时照常在同一 mtime 上重新刷新。"""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "报数小队", "count off"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        session = _StubSession()
+
+        backend.get_team_activity_probe = AsyncMock(return_value=None)
+        ctx = _StubContext(session=session)
+        first = await _admit(rail, ctx, "go")
+        # 身份段不受影响；团队信息/花名册被跳过，回合不炸
+        assert "# 成员身份" in first.content
+        assert "# 团队信息" not in first.content
+        assert TEAM_CONTEXT_STATE_KEY not in session.state or (
+            "team_info_mtime" not in session.state[TEAM_CONTEXT_STATE_KEY]
+        )
+        assert backend.get_info_calls == 0
+
+        # 探针恢复：下一轮正常刷新
+        backend.get_team_activity_probe = AsyncMock(return_value=(1, 1))
+        second = await _admit(rail, _StubContext(session=session), "next")
+        assert "# 团队信息" in second.content
+        assert backend.get_info_calls == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_probe_raise_skips_refresh_without_raising(self):
+        """后端封装未带重试、探针直接抛异常：同样 fail-open 不炸回合。"""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "报数小队", "count off"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        backend.get_team_activity_probe = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "go")
+        assert "# 成员身份" in message.content
+        assert "# 团队信息" not in message.content
+        assert backend.get_info_calls == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_refetch_failure_keeps_baseline_unadvanced(self):
+        """探针成功但全量回读失败：本轮跳过该段、mtime 基线不推进，
+        下一轮在同一 mtime 上重试（不会永久丢一次名册变更）。"""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "报数小队", "count off"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        session = _StubSession()
+
+        backend.get_team_info = AsyncMock(side_effect=RuntimeError("database is locked"))
+        ctx = _StubContext(session=session)
+        first = await _admit(rail, ctx, "go")
+        assert "# 团队信息" not in first.content
+        assert "# 成员身份" in first.content  # 身份段不受影响
+        # 花名册段独立：roster 探针成功则照常渲染（两段互不连坐）
+        assert "dev1" in first.content
+
+        # 回读恢复后下一轮补发团队信息
+        backend.get_team_info = AsyncMock(return_value=backend._team)
+        second = await _admit(rail, _StubContext(session=session), "next")
+        assert "# 团队信息" in second.content

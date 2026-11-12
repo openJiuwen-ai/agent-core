@@ -59,7 +59,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamEvent,
     ToolApprovalResultEvent,
 )
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
     MemberRosterEntry,
@@ -2148,12 +2148,17 @@ def _stub_inprogress_sweep(
         tasks: list,
         sender_activity: dict | None = None,
 ) -> None:
-    """Wire the stale-inprogress sweep's infra: task list + sender witness."""
+    """Wire the stale-inprogress sweep's infra: sweep probe + task list.
+
+    PM-77 D1/D2 后 sweep 的输入经 ``TeamDatabase.fetch_stale_sweep_probe``
+    单连接探针（miss）或 ``task_manager.list_tasks``（witness 缓存 hit）——
+    探针直接桩在内存 db 实例上；list_tasks 桩保留给缓存命中路径。
+    """
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=list(tasks))
     agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.latest_timestamps_by_sender = AsyncMock(
-        return_value=dict(sender_activity or {}),
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe = AsyncMock(
+        return_value=(list(tasks), dict(sender_activity or {})),
     )
     agent.deliver_input = AsyncMock()
 
@@ -2175,10 +2180,10 @@ def _seed_inprogress_watch(handler, task_id: str, **overrides) -> dict:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_inprogress_witness_query_uses_oldest_task_bound():
-    """The sender-activity query is bounded by the oldest watched task's
-    updated_at — the scan stays proportional to "messages posted after the
-    oldest in-flight task started", not the whole session mailbox."""
+async def test_stale_inprogress_sweep_uses_single_connection_probe():
+    """sweep 首查（缓存 miss）走 TeamDatabase 单连接探针——任务行
+    与 witness 同块读取，团队名/状态过滤/leader 排除作为探针参数传递；
+    since 下界在探针内部由任务行现算（DB 层用例覆盖）。"""
     agent = _make_leader()
     older = _make_claimed_task("t-old", assignee="dev-1", updated_at=1_600_000_000_000)
     newer = _make_claimed_task("t-new", assignee="dev-2", updated_at=1_700_000_000_000)
@@ -2187,9 +2192,13 @@ async def test_stale_inprogress_witness_query_uses_oldest_task_bound():
     handler = agent._coordination.dispatcher.stale_task
     await handler._check_stale_inprogress_tasks()
 
-    agent._configurator.message_manager.latest_timestamps_by_sender.assert_awaited_once_with(
-        since_timestamp=1_600_000_000_000,
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe.assert_awaited_once_with(
+        "test-team",
+        task_status=TaskStatus.IN_PROGRESS.value,
+        exclude_assignee="leader-1",
     )
+    # 探针路径下不经 task_manager.list_tasks（那是缓存命中路径）
+    agent._configurator.task_manager.list_tasks.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2281,28 +2290,71 @@ async def test_stale_inprogress_rearmed_ladder_needs_doubled_silence():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_inprogress_witness_query_failure_freezes_silence_clock():
-    """A failed witness query must not read as 'no output': the silence
-    clock freezes for the tick (tenure still accrues), so a transient read
-    error cannot fabricate a stall against a healthy, reporting member."""
+async def test_stale_inprogress_probe_failure_freezes_whole_tick():
+    """A failed sweep probe must not read as 'no output': the whole tick
+    freezes — silence AND tenure both stop, and the tick delta stays
+    unconsumed for the next successful tick (合并探针语义：任务行
+    与见证同生同灭，读失败绝不误判停滞」的双重保守形态）。"""
     agent = _make_leader()
     task = _make_claimed_task("t-2d", assignee="dev-1", updated_at=0)
     _stub_inprogress_sweep(agent, [task])
-    agent._configurator.message_manager.latest_timestamps_by_sender = AsyncMock(
-        side_effect=RuntimeError("database is locked"),
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe = AsyncMock(
+        return_value=None,  # 重试耗尽
     )
 
     handler = agent._coordination.dispatcher.stale_task
     # 590s silent; the coming tick would add 300s (capped) and cross the
     # 600s threshold — a fabricated review prompt without the freeze.
     watch = _seed_inprogress_watch(handler, "t-2d", silent_accum=590.0)
-    handler._last_inprogress_tick_at = time.time() - 10000.0
+    frozen_tick_at = time.time() - 10000.0
+    handler._last_inprogress_tick_at = frozen_tick_at
 
     await handler._check_stale_inprogress_tasks()
 
     agent.deliver_input.assert_not_called()
     assert watch["silent_accum"] == 590.0  # frozen, not 590 + 300
-    assert watch["tenure_accum"] == 300.0  # tenure still accrues
+    assert watch["tenure_accum"] == 0.0  # tenure also frozen (merged probe)
+    assert handler._last_inprogress_tick_at == frozen_tick_at  # delta 未消费
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_cache_hit_skips_probe():
+    """15s 窗口内第二 tick 复用缓存 witness——探针只调一次，
+    任务行走 task_manager.list_tasks（每 tick 新鲜）；缓存的见证水位
+    照常驱动沉默钟。"""
+    agent = _make_leader()
+    task = _make_claimed_task("t-cache", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task], sender_activity={"dev-1": (1_700_000_000_000, 2)})
+
+    handler = agent._coordination.dispatcher.stale_task
+    await handler._check_stale_inprogress_tasks()
+    await handler._check_stale_inprogress_tasks()
+
+    agent._configurator.team_backend.db.fetch_stale_sweep_probe.assert_awaited_once()
+    agent._configurator.task_manager.list_tasks.assert_awaited_once()  # 仅第二 tick
+    watch = handler._inprogress_watch["t-cache"]
+    assert watch["last_witness"] == 1_700_000_000.0
+    assert watch["silent_accum"] < 1.0  # 第二 tick 只积累了几毫秒 delta
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_inprogress_witness_cache_expiry_requeries():
+    """缓存过期（窗口外）后重新走探针。"""
+    agent = _make_leader()
+    task = _make_claimed_task("t-cache2", assignee="dev-1", updated_at=0)
+    _stub_inprogress_sweep(agent, [task])
+
+    handler = agent._coordination.dispatcher.stale_task
+    await handler._check_stale_inprogress_tasks()
+    assert handler._witness_cache is not None
+    # 人为置过期：下一 tick 必须重新走探针而非复用缓存
+    handler._witness_cache = (time.monotonic() - 1.0, handler._witness_cache[1])
+    await handler._check_stale_inprogress_tasks()
+
+    assert agent._configurator.team_backend.db.fetch_stale_sweep_probe.await_count == 2
+    agent._configurator.task_manager.list_tasks.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2678,8 +2730,7 @@ def _external_backend() -> MagicMock:
     """Backend serving one team row and two peers of ``claude-1``."""
     backend = MagicMock()
     backend.team_name = "test-team"
-    backend.get_team_updated_at = AsyncMock(return_value=1)
-    backend.get_members_max_updated_at = AsyncMock(return_value=1)
+    backend.get_team_activity_probe = AsyncMock(return_value=(1, 1))
     backend.get_member = AsyncMock(
         return_value=SimpleNamespace(
             member_name="claude-1",
@@ -2834,12 +2885,14 @@ async def test_external_member_context_refresh_survives_delivery_failure():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_external_member_context_refresh_survives_build_failure():
-    """A failed context build is non-fatal and never falls into peer shutdown."""
+async def test_external_member_context_probe_failure_delivers_identity_only():
+    """探针读失败时恰好投递 1 条身份段（不依赖 DB），
+    团队信息/花名册本轮跳过、下轮重试——显式断言条数与内容，fail-open
+    回归（异常穿透致零投递）时本用例即红。"""
     backend = _external_backend()
     runtime = _external_runtime(backend)
     _, host, handler = _make_external_member_context_handler(harness=runtime, backend=backend)
-    backend.get_team_updated_at.side_effect = RuntimeError("db unavailable")
+    backend.get_team_activity_probe.side_effect = RuntimeError("db unavailable")
     event = EventMessage.from_event(
         MemberShutdownEvent(
             team_name="test-team",
@@ -2851,6 +2904,32 @@ async def test_external_member_context_refresh_survives_build_failure():
     await handler.on_member_event(event)
 
     backend.get_team_info.assert_not_awaited()
+    host.shutdown_self.assert_not_awaited()
+    assert len(runtime.sent) == 1
+    assert "# 成员身份" in runtime.sent[0]
+    assert "# 团队信息" not in runtime.sent[0]
+    assert "reviewer-1" not in runtime.sent[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_context_refresh_survives_build_failure():
+    """handler 的「公告构建失败不炸」分支：pending_text 真抛异常（身份段
+    get_member 失败）时事件被吞、零投递、不自杀。"""
+    backend = _external_backend()
+    runtime = _external_runtime(backend)
+    _, host, handler = _make_external_member_context_handler(harness=runtime, backend=backend)
+    backend.get_member = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="test-team",
+            member_name="reviewer-1",
+            force=True,
+        )
+    )
+
+    await handler.on_member_event(event)
+
     assert runtime.sent == []
     host.shutdown_self.assert_not_awaited()
 

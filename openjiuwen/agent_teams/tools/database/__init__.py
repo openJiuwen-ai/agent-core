@@ -13,6 +13,7 @@ Model definitions live in models.py.
 import asyncio
 from typing import Optional
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -24,6 +25,9 @@ from openjiuwen.agent_teams.tools.database.config import (
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
+    retry_on_locked as _retry_on_locked,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
@@ -73,6 +77,10 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.agent_teams.tools.models import (
     TeamTaskDependencyBase as TeamTaskDependencyBase,
+)
+from openjiuwen.agent_teams.tools.models import (
+    _get_message_model,
+    _get_task_model,
 )
 from openjiuwen.core.common.logging import team_logger
 
@@ -283,6 +291,112 @@ class TeamDatabase:
 
         team_logger.info("Force deleted team session data for %s", team_name)
         return cleanup_success
+
+    async def fetch_stale_sweep_probe(
+            self,
+            team_name: str,
+            *,
+            task_status: str,
+            exclude_assignee: str | None = None,
+    ) -> tuple[list[TeamTaskBase], dict[str, tuple[int, int]]] | None:
+        """沉默巡检探针：单连接取 IN_PROGRESS 任务行 + 消息见证水位。
+
+        跨表读收在 TeamDatabase（引擎属主）而非散到调用方：任务表与消息表
+        两条 SELECT 放进同一个 ``DbSessions.read()`` 块，一次 checkout 覆盖
+        原来 ``list_tasks`` + ``latest_timestamps_by_sender`` 的两次，读连接持有期减半。
+        ``since_timestamp`` 下界在块内由取回的任务行现算（最老 watched 任务
+        的 ``updated_at``），与 ``MessageDao.get_latest_timestamps_by_sender``
+        的下界语义逐字对齐——只是从"调用方两次读"变成"块内先算后查"。
+
+        瞬时失败（``database is locked`` / 读池 checkout 超时）经
+        ``retry_on_locked`` 退避重试；预算耗尽返回 ``None``——调用方
+        （stale-inprogress sweep）据此冻结本 tick 的沉默钟。
+
+        Args:
+            team_name: 团队标识。
+            task_status: 任务状态过滤（调用方固定传 IN_PROGRESS）。
+            exclude_assignee: 从结果剔除该 assignee 的任务（leader 自身任务
+                不参与催收，与调用方原有过滤一致）。
+
+        Returns:
+            ``(任务行列表, {sender: (latest_ms, count)})``；重试耗尽返回 None。
+        """
+        await self._ensure_initialized()
+        team_task_model = _get_task_model()
+        message_model = _get_message_model()
+
+        async def _op() -> tuple[list[TeamTaskBase], dict[str, tuple[int, int]]]:
+            async with self._sessions.read() as session:
+                task_query = select(team_task_model).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.status == task_status,
+                    team_task_model.assignee.isnot(None),
+                )
+                if exclude_assignee is not None:
+                    task_query = task_query.where(team_task_model.assignee != exclude_assignee)
+                tasks = list((await session.execute(task_query)).scalars().all())
+                if not tasks:
+                    # 空板：无 watched 任务则无见证需求，跳过 GROUP BY 扫描
+                    return [], {}
+                now_ms = _get_current_time()
+                since_ms = min((tk.updated_at or now_ms) for tk in tasks)
+                witness_rows = (await session.execute(
+                    select(
+                        message_model.from_member_name,
+                        func.max(message_model.timestamp),
+                        func.count(),
+                    )
+                    .where(
+                        message_model.team_name == team_name,
+                        message_model.timestamp >= since_ms,
+                    )
+                    .group_by(message_model.from_member_name)
+                )).all()
+            witness = {
+                sender: (latest, count)
+                for sender, latest, count in witness_rows
+                if sender and latest is not None
+            }
+            return tasks, witness
+
+        return await _retry_on_locked(
+            _op, on_locked_result=None, label=f"fetch_stale_sweep_probe {team_name}"
+        )
+
+    async def get_team_activity_probe(self, team_name: str) -> tuple[int, int] | None:
+        """团队活动探针：单连接取 ``team_info.updated_at`` 与成员最大 ``updated_at``。
+
+        team-context 提示词段缓存的两个 mtime 探针（每成员每轮各一次）合并
+        进同一个 ``DbSessions.read()`` 块——原来两次独立 checkout（
+        ``TeamDao.get_team_updated_at`` + ``MemberDao.get_members_max_updated_at``）
+        变一次，读连接持有期减半。
+
+        瞬时失败经 ``retry_on_locked`` 退避；耗尽返回 ``None``——调用方
+        （TeamContextTracker）按 fail-open 跳过本轮刷新、下轮重试，不让
+        一次瞬时读失败炸掉成员回合。
+
+        Returns:
+            ``(team_updated_at_ms, members_max_updated_at_ms)``；行缺失按 0
+            （与两个单查方法的既有语义一致）；重试耗尽返回 None。
+        """
+        await self._ensure_initialized()
+
+        async def _op() -> tuple[int, int]:
+            async with self._sessions.read() as session:
+                team_value = (await session.execute(
+                    select(Team.updated_at).where(Team.team_name == team_name)
+                )).scalar_one_or_none()
+                member_value = (await session.execute(
+                    select(func.max(TeamMember.updated_at)).where(TeamMember.team_name == team_name)
+                )).scalar_one_or_none()
+            return (
+                int(team_value) if team_value is not None else 0,
+                int(member_value) if member_value is not None else 0,
+            )
+
+        return await _retry_on_locked(
+            _op, on_locked_result=None, label=f"get_team_activity_probe {team_name}"
+        )
 
     async def close(self) -> None:
         """Close the database engine(s) and release all connections."""

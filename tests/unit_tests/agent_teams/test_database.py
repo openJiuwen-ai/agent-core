@@ -7,6 +7,7 @@ import asyncio
 import gc
 import json
 import warnings
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -1842,6 +1843,167 @@ class TestMessageOperations:
         unbounded = await db.message.get_latest_timestamps_by_sender("team22")
         assert unbounded["member-old"] == (1000, 1)
         assert "member-new" in unbounded
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fetch_stale_sweep_probe_matches_separate_reads(self, db, monkeypatch):
+        """合并探针结果与「list_tasks 过滤 + witness 下界现算」逐字段等价。
+
+        since 下界在探针内部由取回任务行现算（最老 watched 任务的
+        updated_at），与调用方先查任务再算下界的旧两段式语义一致。
+        """
+        token = set_session_id("session_id")
+        try:
+            await db.team.create_team(
+                team_name="team-probe", display_name="Team Probe", leader_member_name="leader-p"
+            )
+            await db.task.create_task(
+                task_id="tp-1", team_name="team-probe", title="A", content="c", status="in_progress"
+            )
+            await db.task.create_task(
+                task_id="tp-2", team_name="team-probe", title="B", content="c", status="in_progress"
+            )
+            await db.task.create_task(
+                task_id="tp-3", team_name="team-probe", title="C", content="c", status="pending"
+            )
+            # 设定 assignee 与可控 updated_at（create_task 不带 assignee，直接改行）
+            task_model = _get_task_model()
+            async with db.session_local() as session:
+                await session.execute(
+                    update(task_model).where(task_model.task_id == "tp-1")
+                    .values(assignee="dev-1", updated_at=1_600_000_000_000)
+                )
+                await session.execute(
+                    update(task_model).where(task_model.task_id == "tp-2")
+                    .values(assignee="leader-p", updated_at=1_500_000_000_000)
+                )
+                await session.commit()
+            await db.message.create_message(
+                message_id="probe-msg", team_name="team-probe",
+                from_member_name="dev-1", to_member_name="leader-p", content="hi",
+            )
+
+            probe = await db.fetch_stale_sweep_probe(
+                "team-probe", task_status="in_progress", exclude_assignee="leader-p"
+            )
+            assert probe is not None
+            probe_tasks, probe_witness = probe
+
+            # 对照：旧两段式（任务过滤 + 下界现算的 witness 查询）
+            legacy_tasks = [
+                tk for tk in await db.task.get_team_tasks("team-probe", "in_progress")
+                if tk.assignee and tk.assignee != "leader-p"
+            ]
+            since_ms = min(tk.updated_at for tk in legacy_tasks)
+            legacy_witness = await db.message.get_latest_timestamps_by_sender(
+                "team-probe", since_timestamp=since_ms
+            )
+            assert [tk.task_id for tk in probe_tasks] == [tk.task_id for tk in legacy_tasks]
+            assert probe_witness == legacy_witness
+            assert "dev-1" in probe_witness
+        finally:
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fetch_stale_sweep_probe_empty_tasks_returns_empty(self, db):
+        """空板（无匹配任务）探针返回 ([], {}) 且不做见证扫描。"""
+        token = set_session_id("session_id")
+        try:
+            await db.team.create_team(
+                team_name="team-empty-probe", display_name="Team Empty", leader_member_name="leader-e"
+            )
+            probe = await db.fetch_stale_sweep_probe(
+                "team-empty-probe", task_status="in_progress", exclude_assignee="leader-e"
+            )
+            assert probe == ([], {})
+        finally:
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_probes_use_single_read_connection(self, db, monkeypatch):
+        """两个探针各自只 checkout 一次读连接。"""
+        token = set_session_id("session_id")
+        try:
+            await db.team.create_team(
+                team_name="team-conn", display_name="Team Conn", leader_member_name="leader-c"
+            )
+            await db.task.create_task(
+                task_id="tc-1", team_name="team-conn", title="A", content="c", status="in_progress"
+            )
+            task_model = _get_task_model()
+            async with db.session_local() as session:
+                await session.execute(
+                    update(task_model).where(task_model.task_id == "tc-1")
+                    .values(assignee="dev-1", updated_at=1_600_000_000_000)
+                )
+                await session.commit()
+
+            checkout_count = 0
+            original_read = db._sessions.read
+
+            def counting_read():
+                nonlocal checkout_count
+                checkout_count += 1
+                return original_read()
+
+            monkeypatch.setattr(db._sessions, "read", counting_read)
+
+            await db.fetch_stale_sweep_probe(
+                "team-conn", task_status="in_progress", exclude_assignee="leader-c"
+            )
+            assert checkout_count == 1
+
+            checkout_count = 0
+            await db.get_team_activity_probe("team-conn")
+            assert checkout_count == 1
+        finally:
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_get_team_activity_probe_matches_separate_reads(self, db):
+        """活动探针与两个独立 mtime 查询结果一致；缺行按 0。"""
+        await db.team.create_team(
+            team_name="team-act", display_name="Team Act", leader_member_name="leader-a"
+        )
+        agent_card = AgentCard(name="DevAgent").model_dump_json()
+        await db.member.create_member(
+            member_name="dev-a", team_name="team-act", display_name="Dev A",
+            agent_card=agent_card, status="ready",
+        )
+
+        probe = await db.get_team_activity_probe("team-act")
+        assert probe is not None
+        assert probe[0] == await db.team.get_team_updated_at("team-act")
+        assert probe[1] == await db.member.get_members_max_updated_at("team-act")
+        assert probe[0] > 0
+        assert probe[1] > 0
+
+        # 不存在的团队：两个 mtime 均按 0（与单查语义一致）
+        assert await db.get_team_activity_probe("team-nonexistent") == (0, 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_probes_return_none_after_retry_exhaustion(self, db, monkeypatch):
+        """瞬时错误重试耗尽后探针返回 None（调用方据此 fail-open）。"""
+        from sqlalchemy.exc import OperationalError as _OperationalError
+
+        def failing_read():
+            raise _OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+        monkeypatch.setattr(db._sessions, "read", failing_read)
+        # 跳过指数退避的真实等待（0.5s + 1s）
+        monkeypatch.setattr(
+            "openjiuwen.agent_teams.tools.database.engine.asyncio.sleep",
+            AsyncMock(),
+        )
+
+        assert await db.fetch_stale_sweep_probe(
+            "team-x", task_status="in_progress", exclude_assignee=None
+        ) is None
+        assert await db.get_team_activity_probe("team-x") is None
 
     @pytest.mark.asyncio
     @pytest.mark.level1

@@ -10,6 +10,7 @@ import os
 import pytest
 
 from openjiuwen.core.common.logging.dated_file_handler import (
+    DEFAULT_BACKUP_COUNT,
     DEFAULT_MAX_BYTES,
     DatedDailyFileHandler,
     cleanup_expired_dated_log_dirs,
@@ -59,7 +60,8 @@ class TestDatedDailyFileHandler:
         assert "day two" in day_two.read_text(encoding="utf-8")
 
     @staticmethod
-    def test_rotates_to_old_log_at_size_cap(tmp_path):
+    def test_rotates_to_numbered_backup_at_size_cap(tmp_path):
+        """Exceeding the daily cap rolls aside to a numbered backup."""
         handler = DatedDailyFileHandler(tmp_path, "app.log", max_bytes=200)
         logger = logging.getLogger("test_dated_rotate")
         logger.setLevel(logging.INFO)
@@ -69,8 +71,69 @@ class TestDatedDailyFileHandler:
             logger.info("message %03d padded to exceed cap", i)
         handler.flush()
 
-        backup = tmp_path / format_log_date() / "app.old.log"
-        assert backup.exists()
+        day = tmp_path / format_log_date()
+        backups = list(day.glob("app.*.log"))
+        assert backups, "expected at least one numbered backup"
+        assert all(b.suffix == ".log" and b.stem.rsplit(".", 1)[1].isdigit() for b in backups)
+        assert not (day / "app.old.log").exists()
+
+    @staticmethod
+    def test_rotation_prunes_oldest_beyond_backup_count(tmp_path):
+        """Only the newest ``backup_count`` backups survive per day."""
+        handler = DatedDailyFileHandler(tmp_path, "app.log", max_bytes=200, backup_count=3)
+        logger = logging.getLogger("test_dated_rotate_prune")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
+        for i in range(40):
+            logger.info("message %03d padded to exceed cap", i)
+        handler.flush()
+        handler.close()
+
+        day = tmp_path / format_log_date()
+        backups = sorted(day.glob("app.*.log"))
+        assert len(backups) == 3, f"expected 3 backups, got {backups}"
+        # 存活的三个备份是序号最高（最新）的三个，且序号连续。
+        numbers = [int(b.stem.rsplit(".", 1)[1]) for b in backups]
+        assert numbers == sorted(numbers)
+        assert numbers[-1] - numbers[0] == 2
+
+        # The surviving backups are the newest: the earliest messages are
+        # pruned away, the latest ones are still on disk.
+        contents = (day / "app.log").read_text(encoding="utf-8")
+        for backup in backups:
+            contents += backup.read_text(encoding="utf-8")
+        assert "message 000" not in contents
+        assert "message 039" in contents
+
+    @staticmethod
+    def test_negative_backup_count_keeps_all_without_loss(tmp_path):
+        """``backup_count < 0`` disables pruning; every backup is kept."""
+        handler = DatedDailyFileHandler(tmp_path, "app.log", max_bytes=200, backup_count=-1)
+        logger = logging.getLogger("test_dated_rotate_all")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+
+        total = 40
+        for i in range(total):
+            logger.info("message %03d padded to exceed cap", i)
+        handler.flush()
+        handler.close()
+
+        day = tmp_path / format_log_date()
+        backups = sorted(day.glob("app.*.log"))
+        assert len(backups) >= 3, f"expected multiple backups, got {backups}"
+
+        contents = (day / "app.log").read_text(encoding="utf-8")
+        for backup in backups:
+            contents += backup.read_text(encoding="utf-8")
+        for i in range(total):
+            assert f"message {i:03d}" in contents
+
+    @staticmethod
+    def test_default_backup_count_is_ten(tmp_path):
+        handler = DatedDailyFileHandler(tmp_path, "app.log")
+        assert handler.backup_count == DEFAULT_BACKUP_COUNT == 10
 
     @staticmethod
     def test_base_dir_exposed_for_idempotency(tmp_path):

@@ -102,18 +102,18 @@ class TeamContextTracker:
     """
 
     def __init__(
-        self,
-        *,
-        team_backend: "TeamBackend | None",
-        member_name: str | None,
-        role: TeamRole,
-        display_name: str = "",
-        member_workspace_path: str | None = None,
-        member_prompt: str = "",
-        team_workspace_mount: str | None = None,
-        team_workspace_path: str | None = None,
-        expose_human_agents_to_teammates: bool = False,
-        language: str = "cn",
+            self,
+            *,
+            team_backend: "TeamBackend | None",
+            member_name: str | None,
+            role: TeamRole,
+            display_name: str = "",
+            member_workspace_path: str | None = None,
+            member_prompt: str = "",
+            team_workspace_mount: str | None = None,
+            team_workspace_path: str | None = None,
+            expose_human_agents_to_teammates: bool = False,
+            language: str = "cn",
     ) -> None:
         self._team_backend = team_backend
         self._member_name = member_name
@@ -159,13 +159,16 @@ class TeamContextTracker:
         identity_body = await self._identity_body(baseline, updated)
         if identity_body:
             standing.append(identity_body)
-        info_body = await self._team_info_body(baseline, updated)
+        # team-info 与 roster 的 mtime 探针合并为一次单连接读；
+        # 失败按 fail-open 跳过本轮刷新、基线不推进。
+        activity_probe = await self._fetch_activity_probe()
+        info_body = await self._team_info_body(baseline, updated, activity_probe)
         if info_body:
             standing.append(info_body)
         if standing:
             blocks.append(render_team_context(body="\n".join(standing)))
 
-        roster_block = await self._roster_block(baseline, updated)
+        roster_block = await self._roster_block(baseline, updated, activity_probe)
         if roster_block:
             blocks.append(roster_block)
 
@@ -230,7 +233,41 @@ class TeamContextTracker:
             language=self._language,
         )
 
-    async def _team_info_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
+    async def _fetch_activity_probe(self) -> tuple[int, int] | None:
+        """团队活动探针（team_info mtime + roster mtime，单连接）。
+
+        Returns:
+            ``(team_mtime, roster_mtime)``；无后端或读失败重试耗尽返回
+            ``None``——fail-open：本轮跳过 team-info 与 roster 刷新、对应
+            基线键不推进，下一轮自然重试。一次瞬时读失败（锁竞争/读池
+            超时）绝不炸掉成员回合。
+        """
+        if self._team_backend is None:
+            return None
+        try:
+            probe = await self._team_backend.get_team_activity_probe()
+        except Exception as exc:  # noqa: BLE001 - 后端未带重试的封装也不许炸回合
+            team_logger.warning(
+                "[{}] team-context activity probe raised; "
+                "skipping team info/roster refresh this round: {}",
+                self._member_name or "?",
+                exc,
+            )
+            return None
+        if probe is None:
+            team_logger.warning(
+                "[{}] team-context activity probe failed after retries; "
+                "skipping team info/roster refresh this round",
+                self._member_name or "?",
+            )
+        return probe
+
+    async def _team_info_body(
+            self,
+            baseline: dict[str, Any],
+            updated: dict[str, Any],
+            activity_probe: tuple[int, int] | None,
+    ) -> str | None:
         """Render team metadata when its ``updated_at`` probe has moved.
 
         Re-announced rather than replaced on change: the previous block stays in
@@ -246,11 +283,22 @@ class TeamContextTracker:
         """
         if self._team_backend is None:
             return None
-        mtime = await self._team_backend.get_team_updated_at()
+        if activity_probe is None:
+            # fail-open：探针读失败本轮不刷新（基线不推进，下轮重试）
+            return None
+        mtime = activity_probe[0]
         if mtime == baseline.get(_TEAM_INFO_MTIME):
             return None
+        try:
+            info = await self._team_backend.get_team_info()
+        except Exception as exc:  # noqa: BLE001 - 瞬时读失败不炸成员回合
+            team_logger.warning(
+                "[{}] team-context team info refetch failed, retry next round: {}",
+                self._member_name or "?",
+                exc,
+            )
+            return None
         updated[_TEAM_INFO_MTIME] = mtime
-        info = await self._team_backend.get_team_info()
         if info is None:
             return None
         return build_team_info_text(
@@ -264,7 +312,12 @@ class TeamContextTracker:
             language=self._language,
         )
 
-    async def _roster_block(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
+    async def _roster_block(
+            self,
+            baseline: dict[str, Any],
+            updated: dict[str, Any],
+            activity_probe: tuple[int, int] | None,
+    ) -> str | None:
         """Render a roster snapshot the first time, deltas after that.
 
         ``TeamBackend.list_members`` already drops the member itself, so the
@@ -275,10 +328,21 @@ class TeamContextTracker:
         """
         if self._team_backend is None:
             return None
-        mtime = await self._team_backend.get_members_max_updated_at()
+        if activity_probe is None:
+            # fail-open：探针读失败本轮不刷新（基线不推进，下轮重试）
+            return None
+        mtime = activity_probe[1]
         if mtime == baseline.get(_ROSTER_MTIME):
             return None
-        members = await self._team_backend.list_members()
+        try:
+            members = await self._team_backend.list_members()
+        except Exception as exc:  # noqa: BLE001 - 瞬时读失败不炸成员回合
+            team_logger.warning(
+                "[{}] team-context roster refetch failed, retry next round: {}",
+                self._member_name or "?",
+                exc,
+            )
+            return None
         roster = [
             {
                 "member_name": member.member_name,
