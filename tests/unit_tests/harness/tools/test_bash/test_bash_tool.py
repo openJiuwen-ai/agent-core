@@ -4,7 +4,6 @@
 
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -107,32 +106,6 @@ async def test_silent_command_empty_content(sys_op) -> None:
         assert res.data["content"] == ""
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
-
-
-# ── destructive warning ──────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_destructive_warning_present(sys_op) -> None:
-    tool = BashTool(sys_op)
-    # Run the amend inside a throwaway repo via workdir so it can never rewrite
-    # the real repository HEAD; we only assert the destructive warning surfaces.
-    repo = tempfile.mkdtemp()
-    try:
-        for setup in (
-            ["git", "init", "-q"],
-            ["git", "config", "user.email", "t@e2e.local"],
-            ["git", "config", "user.name", "t"],
-            ["git", "commit", "--allow-empty", "-q", "-m", "init"],
-        ):
-            subprocess.run(
-                setup, cwd=repo, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        # git commit --amend triggers a destructive warning, now prepended to content.
-        res = await tool.invoke({"command": "git commit --amend -m test", "workdir": repo})
-        assert "rewrite" in res.data["content"].lower()
-    finally:
-        shutil.rmtree(repo, ignore_errors=True)
 
 
 # ── injection blocked ────────────────────────────────────────

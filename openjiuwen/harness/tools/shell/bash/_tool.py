@@ -38,9 +38,6 @@ from openjiuwen.harness.tools.shell.bash._permission import (
     PermissionMode,
     check_permission,
 )
-from openjiuwen.harness.tools.shell.bash._security import (
-    get_destructive_warning,
-)
 from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
 
 # Matches sudo not already followed by -n / -En / --non-interactive
@@ -205,8 +202,6 @@ class BashTool(Tool):
         if p.workdir and not os.path.isdir(resolved_cwd):
             return ToolOutput(success=False, error=f"workdir does not exist: {resolved_cwd}")
 
-        warning = get_destructive_warning(p.command)
-
         if p.description:
             sys_operation_logger.debug("BashTool: %s — %s", p.description, p.command)
 
@@ -279,7 +274,6 @@ class BashTool(Tool):
                         stdout=res.data.stdout or "",
                         stderr=res.data.stderr or "",
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
-                        warning=warning,
                         max_output_chars=p.max_output_chars,
                     ),
                     res.message,
@@ -303,7 +297,6 @@ class BashTool(Tool):
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,
@@ -332,8 +325,6 @@ class BashTool(Tool):
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
-
-        warning = get_destructive_warning(p.command)
 
         if p.description:
             sys_operation_logger.debug("BashTool(stream): %s — %s", p.description, p.command)
@@ -397,7 +388,6 @@ class BashTool(Tool):
                 stdout=accumulated_stdout,
                 stderr=accumulated_stderr,
                 exit_code=final_exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,
