@@ -1036,6 +1036,10 @@ def create_todos_tool(
 ) -> List[TodoTool]:
     """Create a set of todo tools that share the same lock manager.
 
+    The creator defaults to require_explicit_plan_action=False: an active plan
+    may be replaced. Hosts requiring explicit plan_action=new/rebuild must set
+    require_explicit_plan_action=True on the returned TodoCreateTool before
+    registration. The same-invoke recreation guard applies in either case.
 
     Args:
         operation: System operation for file system access.

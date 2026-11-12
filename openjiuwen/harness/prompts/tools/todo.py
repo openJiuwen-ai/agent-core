@@ -26,7 +26,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 - 第一个任务自动设为 in_progress，其余为 pending
 - 同一时间只能有一个 in_progress 任务
 - 任务描述必须具体、可执行、清晰明确
-- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
+- 本工具用于创建或替换计划；宿主启用活动计划保护时，替换未完成计划须显式传 plan_action=new/rebuild；继续或追加请使用 todo_modify
 - 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID
 """
 
@@ -44,7 +44,8 @@ Input is a JSON array (each task must include an id field):
 - First task is automatically set to in_progress, others to pending
 - Only one task can be in_progress at a time
 - Task descriptions must be specific, actionable, and clear
-- Calling this tool replaces the current session's task list; use todo_modify to append tasks
+- Creates or replaces a plan. If the host protects active plans, explicitly pass plan_action=new/rebuild
+  to replace an unfinished plan. Use todo_modify to continue or append tasks.
 - When the currently available model information is not obtained, the selected_model_id field should not be added; otherwise, selected_model_id must be added to specify the model ID for executing the task.
 """
 

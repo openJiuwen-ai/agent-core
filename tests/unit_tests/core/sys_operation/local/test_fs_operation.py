@@ -1846,6 +1846,55 @@ async def test_failed_lock_release_does_not_clear_ownership(work_dir, monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["read", "write"])
+@pytest.mark.parametrize("cause", ["body", "cancel_before", "cancel_during"])
+async def test_release_failure_preserves_body_error_or_cancellation(work_dir, monkeypatch, mode, cause):
+    path = Path(work_dir) / "release-primary-error.txt"
+    lock = ReadWriteLockManager.get_lock(path)
+    release = lock.file_lock.release
+    body_started, release_started, allow_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    body_error = ValueError("body failed")
+
+    async def fail_release():
+        release_started.set()
+        await allow_release.wait()
+        raise OSError("release failed")
+
+    async def use_lock():
+        async with ReadWriteLockManager.lock_guard(path, mode, 1):
+            if cause == "body":
+                raise body_error
+            if cause == "cancel_before":
+                body_started.set()
+                await asyncio.Future()
+
+    monkeypatch.setattr(lock.file_lock, "release", fail_release)
+    task = asyncio.create_task(use_lock())
+    try:
+        if cause == "cancel_before":
+            await asyncio.wait_for(body_started.wait(), 2)
+            task.cancel()
+        await asyncio.wait_for(release_started.wait(), 2)
+        if cause == "cancel_during":
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        allow_release.set()
+        expected = ValueError if cause == "body" else asyncio.CancelledError
+        with pytest.raises(expected) as caught:
+            await task
+        if cause == "body":
+            assert caught.value is body_error
+        assert lock._writer if mode == "write" else lock._readers == 1
+    finally:
+        allow_release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        monkeypatch.setattr(lock.file_lock, "release", release)
+        await release()
+        lock._readers, lock._writer = 0, False
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="POSIX access ACL")
 async def test_conditional_replace_preserves_acl_and_readonly(sys_op, work_dir):
     import hashlib

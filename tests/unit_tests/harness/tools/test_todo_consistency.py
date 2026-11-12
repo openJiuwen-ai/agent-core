@@ -352,7 +352,8 @@ async def test_unknown_publication_guidance_reaches_actual_tool_message(env, mon
 
 
 @pytest.mark.asyncio
-async def test_legacy_migration_validates_the_published_plan(env):
+@pytest.mark.parametrize("resolved_status", ["pending", "completed", "cancelled"])
+async def test_legacy_migration_validates_the_published_plan(env, resolved_status):
     _, modifier, _, session, path = env
     path.parent.mkdir()
     path.write_text(json.dumps([
@@ -366,7 +367,17 @@ async def test_legacy_migration_validates_the_published_plan(env):
         ]}, session=session)
     assert caught.value.code == 182503
     assert caught.value.details["reason"] == "migration_conflict"
+    assert "would migrate the legacy Todo file" in str(caught.value)
+    assert "todo_get" in str(caught.value) and "todo_modify(action=update)" in str(caught.value)
     assert path.read_bytes() == before
+    await update(modifier, session, "old", status=resolved_status)
+    await modifier.invoke({"action": "append", "todos": [
+        {"id": "new", "content": "new", "status": "in_progress"},
+    ]}, session=session)
+    saved = json.loads(path.read_text())
+    assert saved["revision"] == 2
+    assert saved["todos"][0]["status"] == resolved_status
+    assert saved["todos"][1]["status"] == "in_progress"
 
 
 @pytest.mark.asyncio
@@ -384,6 +395,25 @@ async def test_legal_legacy_migration_allows_followup_and_preserves_extensions(e
     assert saved["revision"] == 2
     assert saved["todos"][0]["extension"] == {"keep": True}
     assert saved["todos"][1]["content"] == "changed"
+
+
+@pytest.mark.asyncio
+async def test_versioned_publication_conflict_is_not_a_migration(env):
+    from openjiuwen.harness.tools.todo_store import current_transaction
+
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    before = path.read_bytes()
+
+    async def invalid_update():
+        tx = current_transaction(modifier, "session")
+        tx.pending = [{**row, "status": "in_progress"} for row in tx.snapshot.todos]
+
+    with pytest.raises(BaseError) as caught:
+        await transact(modifier, "session", invalid_update)
+    assert caught.value.details["reason"] == "state_conflict"
+    assert "would migrate the legacy Todo file" not in str(caught.value)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.asyncio
@@ -555,11 +585,14 @@ async def test_create_boundary_and_batch_plan(env):
 
 @pytest.mark.asyncio
 async def test_active_plan_creation_policy_is_scoped_to_the_tool_instance(env):
+    from openjiuwen.harness.tools.todo import create_todos_tool
+
     creator, modifier, _, session, path = env
     await create(creator, session)
     before = json.loads(path.read_text())
 
-    guarded = TodoCreateTool(SimpleNamespace(fs=lambda: modifier.fs), modifier.workspace)
+    guarded = create_todos_tool(SimpleNamespace(fs=lambda: modifier.fs), modifier.workspace)[0]
+    assert guarded.require_explicit_plan_action is False
     guarded.snapshot_guard = creator.snapshot_guard
     guarded.require_explicit_plan_action = True
     with pytest.raises(FrameworkError, match="active plan"):

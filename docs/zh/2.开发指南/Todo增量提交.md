@@ -14,7 +14,18 @@ Todo 工具仍按任务 ID 增、删、改；同一清单的完整读改写在�
 
 创建策略由宿主实例决定：普通 Core/Code 工具保留原创建行为；Flash 显式设置 `require_explicit_plan_action=True`，活动计划默认拒绝覆盖，继续/追加使用 todo_modify，明确新建/重建传 `plan_action="new"` 或 `"rebuild"`。保留单次 invoke 重复创建限制，失败不消耗创建标记。
 
+`TodoCreateTool` 和 `create_todos_tool` 返回的创建工具默认 `require_explicit_plan_action=False`，因此跨轮默认创建可以替换未完成计划。需要保护活动计划的宿主，应在注册前将返回的 `TodoCreateTool` 实例属性显式设为 True；工厂不自动识别运行模式。此默认值不放宽同 invoke 内重复创建限制。
+
+| 配套源码中的宿主 | 创建工具配置 | 活动计划的默认 create |
+|---|---|---|
+| Core 工厂、普通调用及 Code | False | 按原创建规则允许替换 |
+| Jiuwen Flash | Flash 装配时显式设为 True | 拒绝，须明确传 plan_action=new/rebuild |
+
+OfficeAce 等接入须按实际运行模式和 Core/Jiuwen 配套版本确认，不能仅凭产品名称认定保护开启。旧 Core 不读取该属性时，宿主赋值并不代表策略生效；正式交付仍须先合入配套 Core，再更新 Jiuwen 官方依赖锁并验证。
+
 发布前校验目标快照的 ID、状态与全计划单进行项约束。旧数组按代际过滤后的业务校验不能允许写出多进行项的新格式；迁移冲突在首次发布前拒绝，原文件不动，不自动完成/取消旧任务。读取已有不一致文件不等于允许继续提交不一致状态。
+
+任一次旧数组实际修改都可能触发迁移，并非仅 create。`migration_conflict` 表示旧数组候选不满足新格式约束；`state_conflict` 表示已有新格式的最终候选冲突，业务入口的 `multiple_in_progress` 则表示业务状态校验拒绝。错误列出候选冲突 ID；被拒的新条目尚未写入。调用方可用 todo_get 检查已有冲突任务，依据实际进度显式 update 为 pending/completed/cancelled，保留最多一个进行项后重试。不能仅为消除校验错误自动完成、取消或删除旧任务。
 
 ## 宿主接入
 

@@ -232,6 +232,11 @@ def validate_published_todos(snapshot, records):
         message = ("Invalid Todo status" if invalid else
                    "More than one task is marked as 'in_progress' (only one allowed)")
         message += f". Candidate conflicting task IDs: {invalid or active}. The update was not committed."
+        if reason == "migration_conflict":
+            message += " This update would migrate the legacy Todo file to the versioned format."
+        message += (" Read existing conflicting tasks with todo_get and explicitly correct their statuses using "
+                    "todo_modify(action=update), then retry. Keep at most one task in_progress; "
+                    "never mark unfinished work completed.")
         raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason=message,
                           details={"reason": reason, "conflicting_ids": invalid or active, "committed": False})
 
