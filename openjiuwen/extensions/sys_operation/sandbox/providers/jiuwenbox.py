@@ -234,6 +234,18 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
+def _is_permanent_acl_cleanup_error(error: BaseException) -> bool:
+    """Only an explicit Box receipt disables transport-level cleanup retries."""
+    if not isinstance(error, httpx.HTTPStatusError) or error.response is None or error.response.status_code != 409:
+        return False
+    try:
+        payload = error.response.json()
+    except ValueError:
+        return False
+    return (isinstance(payload, dict) and payload.get("code") == "SANDBOX_ACL_CLEANUP_FAILED"
+            and payload.get("retryable") is False)
+
+
 # Match jiuwenbox "Sandbox '<id>' not found" 404 only; not file/dir 404s.
 _SANDBOX_NOT_FOUND_RE = re.compile(r"^\s*Sandbox\b.*\bnot found\b", re.IGNORECASE)
 
@@ -1440,7 +1452,7 @@ class _JiuwenBoxProviderMixin:
                             await asyncio.to_thread(client.delete_sandbox, sandbox_id)
                         break
                     except Exception as exc:
-                        if attempt == _SANDBOX_DELETE_MAX_ATTEMPTS:
+                        if attempt == _SANDBOX_DELETE_MAX_ATTEMPTS or _is_permanent_acl_cleanup_error(exc):
                             raise _DeleteTransportError(
                                 f"cleanup failed after {attempt} attempts; replacement creation blocked; "
                                 f"last error: {type(exc).__name__}: {exc}"
