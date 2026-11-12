@@ -1,36 +1,165 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""模式匹配器 - 仅支持 wildcard 模式；含权限规则持久化.
+"""模式匹配与「始终允许」规则合并；含权限规则持久化.
 
-wildcard 模式：
-- * → .*  (零个或多个)
-- ? → .   (恰好一个)
-- 正则元字符转义
-- " *" 结尾 → ( .*)? 便于 "ls *" 匹配 "ls" 或 "ls -la"
-- 全串匹配防注入
+「始终允许」的纯内存 merge 逻辑位于本包 :mod:`.approval_rules`；
+本模块保留 core 的匹配器与“落盘”职责（写 agent YAML / CLI 信任目录）。
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-from copy import deepcopy
 import logging
 import os
 import re
 import sys
-from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
-
-
 from urllib.parse import urlparse
+
 import yaml
-from openjiuwen.harness.security.models import PermissionsSection
-from openjiuwen.harness.security.suggestions import (
-    PermissionSuggestion,
-    build_permission_suggestions,
+
+from openjiuwen.harness.security.approval_rules import (
+    merge_external_directory_allow_into_permissions as merge_external_directory_allow_into_permissions,
 )
+from openjiuwen.harness.security.approval_rules import (
+    merge_file_guard_access_allows as merge_file_guard_access_allows,
+)
+from openjiuwen.harness.security.approval_rules import (
+    merge_file_guard_path_rule as merge_file_guard_path_rule,
+)
+from openjiuwen.harness.security.approval_rules import (
+    merge_permission_allow_rule_into_permissions as merge_permission_allow_rule_into_permissions,
+)
+from openjiuwen.harness.security.models import PermissionsSection
+from openjiuwen.harness.security.suggestions import PermissionSuggestion as PermissionSuggestion
+from openjiuwen.harness.security.suggestions import (
+    build_permission_suggestions as build_permission_suggestions,
+)
+
+# Restrictive character class: Unicode letters, digits, underscores (including
+# CJK) plus common argument/path characters; shell metacharacters are excluded.
+_WILDCARD_CHARS = r'[-\w \._/:"\'%+]'
+
+
+def match_wildcard(value: str, pattern: str) -> bool:
+    """Return whether the whole ``value`` matches the wildcard ``pattern``."""
+    if not pattern or not value:
+        return False
+    val = value.replace("\\", "/")
+    pat = pattern.replace("\\", "/")
+    to_escape = set(".+^${}()|[]\\")
+    escaped = "".join("\\" + c if c in to_escape else c for c in pat)
+    escaped = escaped.replace("?", _WILDCARD_CHARS)
+    if escaped.endswith(" *"):
+        escaped = escaped[:-2] + "( " + _WILDCARD_CHARS + "*)?"
+    else:
+        escaped = escaped.replace("*", _WILDCARD_CHARS + "*")
+    flags = re.IGNORECASE if sys.platform == "win32" else 0
+    try:
+        return bool(re.fullmatch(escaped, val, flags))
+    except re.error:
+        return False
+
+
+class PatternMatcher:
+    """Wildcard matcher supporting only ``*`` and ``?``."""
+
+    @staticmethod
+    def match(pattern: str, value: str) -> bool:
+        if not pattern or not value:
+            return False
+        return match_wildcard(value, pattern)
+
+    def match_any(self, patterns: list[str], value: str) -> bool:
+        return any(self.match(pattern, value) for pattern in patterns)
+
+
+class PathMatcher:
+    """Match file paths, falling back to parent-directory prefixes."""
+
+    def __init__(self) -> None:
+        self._pm = PatternMatcher()
+
+    def match_path(self, pattern: str, path: str | Path) -> bool:
+        normalized_path = str(path).replace("\\", "/")
+        normalized_pattern = pattern.replace("\\", "/")
+        if self._pm.match(normalized_pattern, normalized_path):
+            return True
+        path_obj = Path(str(path))
+        for parent in path_obj.parents:
+            parent_str = str(parent).replace("\\", "/")
+            if self._pm.match(normalized_pattern, parent_str):
+                return True
+            if self._pm.match(normalized_pattern, parent_str + "/"):
+                return True
+            if self._pm.match(normalized_pattern, parent_str + "/*"):
+                return True
+        return False
+
+    def match_path_any(self, patterns: list[str], path: str | Path) -> bool:
+        return any(self.match_path(pattern, path) for pattern in patterns)
+
+
+class URLMatcher:
+    """Match URLs by full URL, hostname, netloc or base URL."""
+
+    def __init__(self) -> None:
+        self._pm = PatternMatcher()
+
+    def match_url(self, pattern: str, url: str) -> bool:
+        if not url:
+            return False
+        if self._pm.match(pattern, url):
+            return True
+        try:
+            parsed = urlparse(url)
+            if self._pm.match(pattern, parsed.hostname or ""):
+                return True
+            if self._pm.match(pattern, parsed.netloc):
+                return True
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            if self._pm.match(pattern, base_url):
+                return True
+            if self._pm.match(pattern, base_url + "/*"):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def match_url_any(self, patterns: list[str], url: str) -> bool:
+        return any(self.match_url(pattern, url) for pattern in patterns)
+
+
+class CommandMatcher:
+    """Match shell command text with whole-string wildcard anchoring."""
+
+    def __init__(self) -> None:
+        self._pm = PatternMatcher()
+
+    def match_command(self, pattern: str, command: str) -> bool:
+        if not command:
+            return False
+        return self._pm.match(pattern, command)
+
+    def match_command_any(self, patterns: list[str], command: str) -> bool:
+        return any(self.match_command(pattern, command) for pattern in patterns)
+
+
+def build_command_allow_pattern(cmd: str) -> str:
+    """Build a wildcard pattern matching a complete command."""
+    return cmd.strip() + " *"
+
+
+def contains_path(parent: str | Path, child: str | Path) -> bool:
+    """Return whether ``child`` is under ``parent`` (path-traversal safe)."""
+    try:
+        rel = os.path.relpath(Path(child).resolve(), Path(parent).resolve())
+        return not rel.startswith("..") and rel != ".."
+    except (ValueError, OSError):
+        return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -89,306 +218,6 @@ def _load_agent_config_for_persist(
     return {"permissions": deepcopy(fallback_permissions)}
 
 
-_SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
-_PATH_APPROVAL_TOOLS = frozenset({
-    "read_file", "write_file", "edit_file",
-    "read_text_file", "write_text_file",
-    "write", "read",
-    "glob_file_search", "glob", "list_dir", "list_files",
-    "grep", "search_replace",
-})
-_PATH_APPROVAL_KEYS = (
-    "path", "file_path", "target_file", "file", "old_path", "new_path",
-    "source_path", "dest_path", "directory", "dir",
-)
-
-
-@dataclass(frozen=True)
-class _ApprovalOverrideSignature:
-    tool_name: str
-    tools: list[str]
-    match_type: str
-    existing_match_type: str | None
-    pattern: str
-    existing_pattern: str | None
-    existing_action: str
-
-
-# 限制性字符类：允许 Unicode 字母、数字、下划线（含中文）及常见参数/路径字符，排除 shell 元字符
-# + 和 % 用于 date 等命令的格式化参数，其余字符限制保持不变
-# - 置于开头避免被解析为范围
-_WILDCARD_CHARS = r'[-\w \._/:"\'%+]'
-
-
-def match_wildcard(value: str, pattern: str) -> bool:
-    """通配符匹配.
-
-    - * → 限制性字符类* (排除 shell 元字符，防命令拼接)
-    - ? → 限制性字符类 (恰好一个)
-    - 正则元字符转义
-    - " *" 结尾 → ( 字符类*)? 使 "ls *" 可匹配 "ls" 或 "ls -la"
-    - 全串匹配防止 "git status; rm -rf /" 匹配 "git status *"
-
-    Args:
-        value: 被匹配字符串（来自工具输入）
-        pattern: 通配符模式（来自配置，可信）
-
-    Returns:
-        是否匹配
-    """
-    if not pattern or not value:
-        return False
-    val = value.replace("\\", "/")
-    pat = pattern.replace("\\", "/")
-    # 1. 转义正则特殊字符（* 和 ? 保留，后续单独处理）
-    to_escape = set(".+^${}()|[]\\")
-    escaped = "".join("\\" + c if c in to_escape else c for c in pat)
-    # 2. 先替换 ?（必须在 * 之前，否则会误替换 ")? " 中的 ?）
-    escaped = escaped.replace("?", _WILDCARD_CHARS)
-    # 3. * → 限制性字符类*
-    if escaped.endswith(" *"):
-        escaped = escaped[:-2] + "( " + _WILDCARD_CHARS + "*)?"
-    else:
-        escaped = escaped.replace("*", _WILDCARD_CHARS + "*")
-    # 3. 全串匹配
-    flags = re.IGNORECASE if sys.platform == "win32" else 0
-    try:
-        return bool(re.fullmatch(escaped, val, flags))
-    except re.error:
-        return False
-
-
-
-
-class PatternMatcher:
-    """模式匹配器 - 仅支持 wildcard 模式 (*, ?)."""
-
-    @staticmethod
-    def match(pattern: str, value: str) -> bool:
-        if not pattern or not value:
-            return False
-        return match_wildcard(value, pattern)
-
-    def match_any(self, patterns: list[str], value: str) -> bool:
-        """匹配任意一个模式."""
-        return any(self.match(p, value) for p in patterns)
-
-
-class PathMatcher:
-    """路径匹配器."""
-
-    def __init__(self):
-        self._pm = PatternMatcher()
-
-    def match_path(self, pattern: str, path: str | Path) -> bool:
-        """匹配文件路径 (规范化分隔符后再比较)."""
-        normalized_path = str(path).replace("\\", "/")
-        normalized_pattern = pattern.replace("\\", "/")
-
-        if self._pm.match(normalized_pattern, normalized_path):
-            return True
-
-        # 尝试匹配父目录层级
-        path_obj = Path(str(path))
-        for parent in path_obj.parents:
-            parent_str = str(parent).replace("\\", "/")
-            if self._pm.match(normalized_pattern, parent_str):
-                return True
-            if self._pm.match(normalized_pattern, parent_str + "/"):
-                return True
-            if self._pm.match(normalized_pattern, parent_str + "/*"):
-                return True
-        return False
-
-    def match_path_any(self, patterns: list[str], path: str | Path) -> bool:
-        return any(self.match_path(p, path) for p in patterns)
-
-
-class URLMatcher:
-    """URL 匹配器."""
-
-    def __init__(self):
-        self._pm = PatternMatcher()
-
-    def match_url(self, pattern: str, url: str) -> bool:
-        """匹配 URL (支持 hostname、netloc、full URL)."""
-        if not url:
-            return False
-        if self._pm.match(pattern, url):
-            return True
-        try:
-            parsed = urlparse(url)
-            if self._pm.match(pattern, parsed.hostname or ""):
-                return True
-            if self._pm.match(pattern, parsed.netloc):
-                return True
-            base_url = f"{parsed.scheme}://{parsed.netloc}"
-            if self._pm.match(pattern, base_url):
-                return True
-            if self._pm.match(pattern, base_url + "/*"):
-                return True
-        except Exception:
-            return False
-        return False
-
-    def match_url_any(self, patterns: list[str], url: str) -> bool:
-        return any(self.match_url(p, url) for p in patterns)
-
-
-class CommandMatcher:
-    """命令匹配器 - 仅支持 wildcard，全串锚定防注入."""
-
-    def __init__(self):
-        self._pm = PatternMatcher()
-
-    def match_command(self, pattern: str, command: str) -> bool:
-        """匹配命令字符串 (wildcard 模式，全串锚定)."""
-        if not command:
-            return False
-        return self._pm.match(pattern, command)
-
-    def match_command_any(self, patterns: list[str], command: str) -> bool:
-        return any(self.match_command(p, command) for p in patterns)
-
-
-def build_command_allow_pattern(cmd: str) -> str:
-    """构建匹配完整命令的通配符模式.
-
-    Examples:
-        "start chrome"   → start chrome *
-        "npm install"    → npm install *
-        "ls"             → ls *
-    """
-    return cmd.strip() + " *"
-
-
-def contains_path(parent: str | Path, child: str | Path) -> bool:
-    """子路径是否在父路径下（含路径穿越防护）.
-    """
-    try:
-        rel = os.path.relpath(Path(child).resolve(), Path(parent).resolve())
-        return not rel.startswith("..") and rel != ".."
-    except (ValueError, OSError):
-        return False
-
-
-# ---------- 权限规则持久化 ----------
-
-
-def _persist_tiered_approval_override_suggestions(
-    permissions: PermissionsSection,
-    suggestions: list[PermissionSuggestion],
-) -> bool:
-    """写入 command 类 approval_overrides；path 类忽略（路径只写 file_guard）。"""
-    if not suggestions:
-        return False
-    overrides = permissions.get("approval_overrides")
-    if not isinstance(overrides, list):
-        overrides = []
-        permissions["approval_overrides"] = overrides
-
-    persisted_any = False
-    for suggestion in suggestions:
-        if str(suggestion.match_type or "").strip().lower() == "path":
-            logger.info(
-                "[PermissionEngine] permission.persist.skip reason=path_suggestion_use_file_guard "
-                "pattern=%s",
-                suggestion.pattern,
-            )
-            continue
-        for tool_name in suggestion.tools:
-            if _ensure_single_allow_override(
-                    overrides,
-                    tool_name=tool_name,
-                    match_type=suggestion.match_type,
-                    pattern=suggestion.pattern,
-                    action=suggestion.action,
-            ):
-                persisted_any = True
-    return persisted_any
-
-
-def _ensure_single_allow_override(
-    overrides: list[Any],
-    *,
-    tool_name: str,
-    match_type: str,
-    pattern: str,
-    action: str,
-) -> bool:
-    for existing in overrides:
-        if not isinstance(existing, dict):
-            continue
-        tools = existing.get("tools") or []
-        if isinstance(tools, str):
-            tools = [tools]
-        existing_match_type = existing.get("match_type")
-        existing_pattern = existing.get("pattern")
-        existing_action = str(existing.get("action") or "").strip().lower()
-        signature = _ApprovalOverrideSignature(
-            tool_name=tool_name,
-            tools=tools,
-            match_type=match_type,
-            existing_match_type=existing_match_type,
-            pattern=pattern,
-            existing_pattern=existing_pattern,
-            existing_action=existing_action,
-        )
-        if _is_same_allow_override(signature):
-            logger.info(
-                "[PermissionEngine] permission.persist.skip tool=%s reason=approval_override_exists "
-                "match_type=%s pattern=%s",
-                tool_name,
-                match_type,
-                pattern,
-            )
-            return True
-
-    overrides.append({
-        "id": _build_approval_override_id(tool_name, match_type, pattern),
-        "tools": [tool_name],
-        "match_type": match_type,
-        "pattern": pattern,
-        "action": action,
-    })
-    return True
-
-
-def _is_same_allow_override(signature: _ApprovalOverrideSignature) -> bool:
-    if signature.tool_name not in signature.tools:
-        return False
-    if signature.existing_match_type != signature.match_type:
-        return False
-    if signature.existing_pattern != signature.pattern:
-        return False
-    return signature.existing_action == "allow"
-
-
-def _build_approval_override_id(tool_name: str, match_type: str, pattern: str) -> str:
-    raw = f"user_allow_{tool_name}_{match_type}_{pattern}"
-    collapsed = re.sub(r"[^a-zA-Z0-9]+", "_", raw).strip("_").lower()
-    if not collapsed:
-        return "user_allow_override"
-    return collapsed[:120]
-
-
-def _persist_tiered_tool_allow(
-    permissions: PermissionsSection,
-    tool_name: str,
-) -> bool:
-    """Persist whole-tool allow for tools without safe parameter suggestions."""
-    if not tool_name:
-        return False
-    tools = permissions.get("tools")
-    if not isinstance(tools, dict):
-        tools = {}
-        permissions["tools"] = tools
-    if tools.get(tool_name) == "allow":
-        return False
-    tools[tool_name] = "allow"
-    return True
-
-
 def write_permissions_section_to_agent_config_yaml(
     config_yaml_path: Path | None,
     permissions: PermissionsSection | dict[str, Any],
@@ -419,207 +248,6 @@ def write_permissions_section_to_agent_config_yaml(
             exc_info=True,
         )
         return False
-
-
-def _axes_for_file_guard_action(action: str) -> tuple[str, str, str]:
-    """HITL「总是允许」按当时 path action 落盘，避免 read 场景写开放 write。"""
-    act = (action or "read").strip().lower()
-    if act == "write":
-        return "allow", "allow", "ask"
-    if act == "exec":
-        return "allow", "ask", "allow"
-    return "allow", "ask", "ask"
-
-
-def _escalate_axis_toward_allow(old: Any, new: str) -> str:
-    """合并同 path 规则：仅在 new=allow 时抬升，不降级已有 allow/deny。"""
-    if new == "allow":
-        return "allow"
-    if old in ("allow", "ask", "deny"):
-        return str(old)
-    return new
-
-
-def merge_file_guard_path_rule(
-    permissions: PermissionsSection | dict[str, Any],
-    path: str,
-    *,
-    read: str = "allow",
-    write: str = "allow",
-    exec_: str = "ask",
-    match: str = "prefix",
-) -> tuple[PermissionsSection, bool]:
-    """在 ``permissions`` 副本上合并一条 ``file_guard.paths`` 规则；返回 ``(merged, wrote_any)``。
-
-    用于 ``/add-dir`` / HITL「总是允许」路径类决策。``exec_`` 默认 ``ask``（目录信任 ≠ 默认可执行）。
-    同 path 已存在时按轴向 allow 抬升合并，避免后一次 read-only 覆盖掉已有 write allow。
-    """
-    path_norm = path.replace("\\", "/").rstrip("/")
-    if not path_norm:
-        return cast(PermissionsSection, deepcopy(permissions)), False
-
-    perms = cast(PermissionsSection, deepcopy(permissions))
-    fg = perms.get("file_guard")
-    if not isinstance(fg, dict):
-        fg = {}
-        perms["file_guard"] = fg  # type: ignore[typeddict-unknown-key]
-    fg["enabled"] = True
-    paths = fg.get("paths")
-    if not isinstance(paths, list):
-        paths = []
-        fg["paths"] = paths
-
-    for i, existing in enumerate(paths):
-        if not isinstance(existing, dict):
-            continue
-        existing_path = str(existing.get("path") or "").replace("\\", "/").rstrip("/")
-        if existing_path != path_norm:
-            continue
-        merged_read = _escalate_axis_toward_allow(existing.get("read"), read)
-        merged_write = _escalate_axis_toward_allow(existing.get("write"), write)
-        merged_exec = _escalate_axis_toward_allow(existing.get("exec"), exec_)
-        merged_match = existing.get("match", "prefix") or match
-        unchanged = (
-            existing.get("read") == merged_read
-            and existing.get("write") == merged_write
-            and existing.get("exec") == merged_exec
-            and existing.get("match", "prefix") == merged_match
-        )
-        if unchanged:
-            return cast(PermissionsSection, perms), False
-        paths[i] = {
-            **existing,
-            "path": path_norm,
-            "read": merged_read,
-            "write": merged_write,
-            "exec": merged_exec,
-            "match": merged_match,
-        }
-        logger.info(
-            "[PermissionEngine] permission.merge.file_guard path=%s read=%s write=%s exec=%s",
-            path_norm, merged_read, merged_write, merged_exec,
-        )
-        return cast(PermissionsSection, perms), True
-
-    entry = {
-        "path": path_norm,
-        "read": read,
-        "write": write,
-        "exec": exec_,
-        "match": match,
-    }
-    paths.append(entry)
-    logger.info(
-        "[PermissionEngine] permission.merge.file_guard path=%s read=%s write=%s exec=%s",
-        path_norm, read, write, exec_,
-    )
-    return cast(PermissionsSection, perms), True
-
-
-def merge_file_guard_access_allows(
-    permissions: PermissionsSection | dict[str, Any],
-    accesses: list[tuple[str, str]],
-) -> tuple[PermissionsSection, bool]:
-    """按 ``(path, action)`` 写入 ``file_guard.paths``（HITL「总是允许」主路径）。
-
-    - 使用触达路径本身，**不上卷父目录**（``ls dir`` → 信任 ``dir``，不是 ``dir`` 的父级）
-    - 轴权限按 action：``read`` → 仅 read allow；``write`` → read+write allow；``exec`` → read+exec allow
-    """
-    if not accesses:
-        return cast(PermissionsSection, deepcopy(permissions)), False
-    perms = cast(PermissionsSection, deepcopy(permissions))
-    wrote = False
-    for path_str, action in accesses:
-        if not isinstance(path_str, str) or not path_str.strip():
-            continue
-        path_norm = path_str.replace("\\", "/").rstrip("/")
-        if not path_norm:
-            continue
-        read, write, exec_ = _axes_for_file_guard_action(action)
-        perms, did = merge_file_guard_path_rule(
-            perms, path_norm, read=read, write=write, exec_=exec_,
-        )
-        wrote = wrote or did
-    return cast(PermissionsSection, perms), wrote
-
-
-def merge_external_directory_allow_into_permissions(
-    permissions: PermissionsSection | dict[str, Any],
-    paths: list[str],
-    *,
-    actions: list[str] | None = None,
-) -> tuple[PermissionsSection, bool]:
-    """Deprecated：请改用 :func:`merge_file_guard_access_allows`。
-
-    写入触达路径本身（不上卷父目录）；缺省按 **read** 轴 allow（write/exec 保持 ask），
-    避免 ``ls`` 类读操作过度授权 write。可通过 ``actions`` 与 ``paths`` 对齐传入动作。
-    """
-    if not paths:
-        return cast(PermissionsSection, deepcopy(permissions)), False
-    access_list: list[tuple[str, str]] = []
-    for i, path_str in enumerate(paths):
-        act = "read"
-        if actions is not None and i < len(actions) and actions[i]:
-            act = str(actions[i])
-        access_list.append((path_str, act))
-    return merge_file_guard_access_allows(permissions, access_list)
-
-
-def merge_permission_allow_rule_into_permissions(
-    permissions: PermissionsSection | dict[str, Any],
-    tool_name: str,
-    tool_args: dict[str, Any],
-) -> tuple[PermissionsSection, bool]:
-    """在 ``permissions`` 副本上合并「始终允许」规则；返回 ``(merged, applied)``。
-
-    ``applied`` 为假表示未写入任何变更（如 tiered 下当前非 ASK 或无安全 suggestion）。
-    """
-    from openjiuwen.harness.security.models import PermissionLevel
-    from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-    from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
-
-    perms = cast(PermissionsSection, deepcopy(permissions))
-    current_permission, _matched_rule = evaluate_tiered_policy(
-        perms, tool_name, tool_args,
-    )
-    if current_permission != PermissionLevel.ASK:
-        logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
-            tool_name,
-            current_permission.value,
-        )
-        return cast(PermissionsSection, perms), False
-    shell_ast_result = None
-    if tool_name in _SHELL_APPROVAL_TOOLS:
-        shell_ast_result = parse_shell_for_permission(
-            str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
-        )
-    suggestions = build_permission_suggestions(
-        tool_name,
-        tool_args,
-        shell_ast_result=shell_ast_result,
-    )
-    # path 类 suggestion 不写 approval_overrides（路径细则由 rail 侧 file_guard 落盘）；
-    # 若 A 当前为 ask（如 tools.write_file: ask），则抬升整工具 tools.<name>: allow。
-    non_path = [s for s in suggestions if str(s.match_type or "").lower() != "path"]
-    if not _persist_tiered_approval_override_suggestions(perms, non_path):
-        if tool_name not in _SHELL_APPROVAL_TOOLS:
-            if _persist_tiered_tool_allow(perms, tool_name):
-                logger.info(
-                    "[PermissionEngine] permission.merge.ok tool=%s target=tools",
-                    tool_name,
-                )
-                return cast(PermissionsSection, perms), True
-        logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
-            tool_name,
-        )
-        return cast(PermissionsSection, perms), False
-    logger.info(
-        "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
-        tool_name,
-    )
-    return cast(PermissionsSection, perms), True
 
 
 def persist_cli_trusted_directory(
@@ -657,15 +285,12 @@ def persist_cli_trusted_directory(
         if cfg_path is None:
             return {"ok": False, "error": "no agent config yaml path (pass config_yaml_path)"}
 
-        data = _load_agent_config_for_persist(
-            cfg_path, fallback_permissions=bootstrap_permissions
-        )
+        data = _load_agent_config_for_persist(cfg_path, fallback_permissions=bootstrap_permissions)
         if data is None:
             return {
                 "ok": False,
                 "error": (
-                    "cannot bootstrap yaml (missing file; pass bootstrap_permissions with "
-                    "non-empty permissions dict)"
+                    "cannot bootstrap yaml (missing file; pass bootstrap_permissions with non-empty permissions dict)"
                 ),
             }
         permissions = data.get("permissions")
@@ -685,8 +310,7 @@ def persist_cli_trusted_directory(
         permissions = merged
 
         logger.info(
-            "[PermissionEngine] permission.persist.cli_add_dir.file_guard path=%s "
-            "read=allow write=allow exec=ask",
+            "[PermissionEngine] permission.persist.cli_add_dir.file_guard path=%s read=allow write=allow exec=ask",
             dir_norm,
         )
 
@@ -709,13 +333,15 @@ def persist_cli_trusted_directory(
 
         shell_tools = sorted(_SHELL_TOOLS)
         if not _has_id(shell_override_id):
-            overrides.append({
-                "id": shell_override_id,
-                "tools": shell_tools,
-                "match_type": "command",
-                "pattern": shell_pattern,
-                "action": "allow",
-            })
+            overrides.append(
+                {
+                    "id": shell_override_id,
+                    "tools": shell_tools,
+                    "match_type": "command",
+                    "pattern": shell_pattern,
+                    "action": "allow",
+                }
+            )
             logger.info(
                 "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s",
                 shell_override_id,

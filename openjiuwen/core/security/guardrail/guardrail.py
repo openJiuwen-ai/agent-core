@@ -25,12 +25,13 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.security.guardrail.context import GuardrailContext
-from openjiuwen.core.security.guardrail.backends import GuardrailBackend
-from openjiuwen.core.security.guardrail.models import (
+from agent_shield.detection import (
+    GuardrailBackend,
+    GuardrailContext,
     GuardrailResult,
     to_guardrail_result,
 )
+
 from openjiuwen.core.common.logging import logger
 
 

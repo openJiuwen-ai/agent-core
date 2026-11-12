@@ -9,7 +9,6 @@ import hashlib
 import logging
 import threading
 import weakref
-from typing import Any
 
 from .models import (
     GrantDecision,
@@ -42,7 +41,8 @@ class _RetiredSessionFilter:
         digest = hashlib.sha256(session_id.encode("utf-8")).digest()
         bit_count = _RETIRED_SESSION_FILTER_BYTES * 8
         for offset in range(0, _RETIRED_SESSION_HASH_COUNT * 4, 4):
-            yield int.from_bytes(digest[offset:offset + 4], "big") % bit_count
+            end = offset + 4
+            yield int.from_bytes(digest[offset:end], "big") % bit_count
 
     def add(self, session_id: str) -> None:
         for index in self._indexes(session_id):
@@ -78,6 +78,7 @@ def _permission_change(method):
             session_id = args[0] if args else kwargs.get("session_id")
             scope = args[1] if len(args) > 1 else kwargs.get("agent_scope_id")
             self.notify_permission_listeners(session_id, scope, method.__name__)
+
     return changed
 
 
@@ -141,7 +142,9 @@ class SkillGrantStore:
             self._skill_executions[key] = name
         logger.info(
             "[skill_authorization] skill_execution.enter session=%s scope=%s skill=%s",
-            key[0], key[1], name,
+            key[0],
+            key[1],
+            name,
         )
 
     def exit_skill_execution(self, session_id: str, agent_scope_id: str) -> None:
@@ -152,7 +155,9 @@ class SkillGrantStore:
         if name:
             logger.info(
                 "[skill_authorization] skill_execution.exit session=%s scope=%s skill=%s",
-                key[0], key[1], name,
+                key[0],
+                key[1],
+                name,
             )
 
     def get_active_skill_execution(
@@ -202,10 +207,7 @@ class SkillGrantStore:
             approval_tool_call_id=approval_tool_call_id,
         )
         with self._lock:
-            if (
-                authorization_generation is not None
-                and authorization_generation != self.authorization_generation
-            ):
+            if authorization_generation is not None and authorization_generation != self.authorization_generation:
                 raise RuntimeError("Skill authorization changed while approval was pending")
             if key[0] in self._retired_sessions:
                 raise RuntimeError(
@@ -215,8 +217,12 @@ class SkillGrantStore:
         logger.info(
             "[skill_authorization] grant.pending_created session=%s scope=%s skill=%s "
             "decision=%s permissions_hash=%s tool_call_id=%s",
-            key[0], key[1], manifest.skill_name, decision.value,
-            manifest.permissions_hash, approval_tool_call_id,
+            key[0],
+            key[1],
+            manifest.skill_name,
+            decision.value,
+            manifest.permissions_hash,
+            approval_tool_call_id,
         )
         return copy.deepcopy(grant)
 
@@ -248,17 +254,16 @@ class SkillGrantStore:
 
             matched = candidate.matches_identity(manifest)
             if matched and candidate.approval_tool_call_id:
-                matched = (
-                    approval_tool_call_id is not None
-                    and candidate.approval_tool_call_id == approval_tool_call_id
-                )
+                matched = approval_tool_call_id is not None and candidate.approval_tool_call_id == approval_tool_call_id
             if not matched:
                 del scope_grants[name]
                 self._drop_empty_scope(key)
                 logger.warning(
                     "[skill_authorization] grant.activate_rejected session=%s scope=%s skill=%s "
                     "reason=identity_or_tool_call_mismatch",
-                    key[0], key[1], name,
+                    key[0],
+                    key[1],
+                    name,
                 )
                 return None
 
@@ -271,22 +276,28 @@ class SkillGrantStore:
                     logger.info(
                         "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s "
                         "action=to_approved_inactive",
-                        key[0], key[1], other_name,
+                        key[0],
+                        key[1],
+                        other_name,
                     )
                 else:
                     del scope_grants[other_name]
                     logger.info(
-                        "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s "
-                        "action=deleted",
-                        key[0], key[1], other_name,
+                        "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s action=deleted",
+                        key[0],
+                        key[1],
+                        other_name,
                     )
 
             candidate.touch(GrantStatus.ACTIVE)
             self._invalidated_scopes.discard(key)
             logger.info(
-                "[skill_authorization] grant.activated session=%s scope=%s skill=%s "
-                "decision=%s permissions_hash=%s",
-                key[0], key[1], name, candidate.decision.value, candidate.permissions_hash,
+                "[skill_authorization] grant.activated session=%s scope=%s skill=%s decision=%s permissions_hash=%s",
+                key[0],
+                key[1],
+                name,
+                candidate.decision.value,
+                candidate.permissions_hash,
             )
             return copy.deepcopy(candidate)
 
@@ -396,7 +407,10 @@ class SkillGrantStore:
             self._drop_empty_scope(key)
         logger.info(
             "[skill_authorization] grant.pending_dropped session=%s scope=%s skill=%s reason=%s",
-            key[0], key[1], name, reason,
+            key[0],
+            key[1],
+            name,
+            reason,
         )
         return True
 
@@ -430,14 +444,19 @@ class SkillGrantStore:
                         logger.info(
                             "[skill_authorization] grant.revoked session=%s scope=%s skill=%s "
                             "reason=%s action=to_approved_inactive",
-                            key[0], key[1], name, reason,
+                            key[0],
+                            key[1],
+                            name,
+                            reason,
                         )
                 else:
                     del scope_grants[name]
                     logger.info(
-                        "[skill_authorization] grant.revoked session=%s scope=%s skill=%s "
-                        "reason=%s action=deleted",
-                        key[0], key[1], name, reason,
+                        "[skill_authorization] grant.revoked session=%s scope=%s skill=%s reason=%s action=deleted",
+                        key[0],
+                        key[1],
+                        name,
+                        reason,
                     )
             self._drop_empty_scope(key)
 
@@ -455,13 +474,13 @@ class SkillGrantStore:
                 del self._grants[key]
                 logger.info(
                     "[skill_authorization] grant.session_cleared session=%s scope=%s grants=%s",
-                    key[0], key[1], count,
+                    key[0],
+                    key[1],
+                    count,
                 )
             for key in [key for key in self._skill_executions if key[0] == sid]:
                 self._skill_executions.pop(key, None)
-            self._invalidated_scopes = {
-                key for key in self._invalidated_scopes if key[0] != sid
-            }
+            self._invalidated_scopes = {key for key in self._invalidated_scopes if key[0] != sid}
 
     @_permission_change
     def clear_scope(self, session_id: str, agent_scope_id: str) -> None:
@@ -474,7 +493,9 @@ class SkillGrantStore:
         if grants:
             logger.info(
                 "[skill_authorization] grant.scope_cleared session=%s scope=%s grants=%s",
-                key[0], key[1], len(grants),
+                key[0],
+                key[1],
+                len(grants),
             )
 
     @_permission_change
@@ -539,35 +560,28 @@ def set_skill_grant_store(store: SkillGrantStore) -> None:
         _grant_store = store
 
 
-def sync_grants_on_permissions_reload(
-    old_config: Any,
-    new_config: Any,
-) -> None:
-    """权限配置热更新联动。
+def reset_all_grants() -> None:
+    """撤销全部 Skill 授权记录并推进代次。
 
-    - ``skill_authorization.enabled`` 由 true 变 false：清空全部 Grant；
-    - 由 false 变 true：不自动激活已加载 Skill（仅记日志，须重新调用 ``skill_tool``）；
-    - 其余普通热更新：不清 Grant。
+    宿主在运行时关闭动态授权时调用；代次推进使关闭前已发出的审批答案
+    永久失效。等待中的委托审批由宿主侧自行清理。
     """
-    from .schema import (
-        is_skill_authorization_enabled,
+    _advance_skill_authorization_generation()
+    get_skill_grant_store().clear_all()
+    logger.info(
+        "[skill_authorization] grants cleared; authorization generation advanced",
     )
 
-    was_enabled = is_skill_authorization_enabled(old_config)
-    now_enabled = is_skill_authorization_enabled(new_config)
-    if was_enabled and not now_enabled:
-        from .subagent_approval_registry import (
-            get_subagent_approval_registry,
-        )
 
-        _advance_skill_authorization_generation()
-        get_subagent_approval_registry().clear_all()
-        get_skill_grant_store().clear_all()
-        logger.info(
-            "[skill_authorization] feature disabled at runtime; all grants cleared",
-        )
-    elif now_enabled and not was_enabled:
-        logger.info(
-            "[skill_authorization] feature enabled at runtime; "
-            "already-loaded skills are NOT auto-activated (reload via skill_tool required)",
-        )
+__all__ = [
+    "GrantDecision",
+    "GrantStatus",
+    "SkillGrant",
+    "SkillGrantStore",
+    "SkillManifest",
+    "get_skill_authorization_generation",
+    "get_skill_grant_store",
+    "peek_skill_grant_store",
+    "reset_all_grants",
+    "set_skill_grant_store",
+]

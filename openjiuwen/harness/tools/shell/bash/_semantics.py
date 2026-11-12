@@ -1,6 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Command classification and exit-code semantic interpretation."""
+"""Command classification and exit-code semantic interpretation.
+
+本模块为 bash 方言的 shell 语义实现（命令分类、只读/静默判断、退出码语义），
+由 core 自身维护（此前曾临时托管在安全包中）。
+"""
+
 from __future__ import annotations
 
 import re
@@ -30,32 +35,107 @@ class ExitCodeMeaning:
 
 # ── command sets ──────────────────────────────────────────────
 
-_SEARCH_COMMANDS: frozenset[str] = frozenset({
-    "find", "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    "locate", "which", "whereis", "type", "command", "findstr",
-})
+_SEARCH_COMMANDS: frozenset[str] = frozenset(
+    {
+        "find",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "ag",
+        "ack",
+        "locate",
+        "which",
+        "whereis",
+        "type",
+        "command",
+        "findstr",
+    }
+)
 
-_READ_COMMANDS: frozenset[str] = frozenset({
-    "cat", "head", "tail", "less", "more", "wc", "stat",
-    "file", "strings", "jq", "yq", "awk", "gawk", "cut",
-    "sort", "uniq", "tr", "tee", "od", "xxd", "hexdump",
-    "sha256sum", "sha1sum", "md5sum", "md5", "shasum",
-    "get-content", "get-item", "test-path", "select-object", "where-object",
-})
+_READ_COMMANDS: frozenset[str] = frozenset(
+    {
+        "cat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "wc",
+        "stat",
+        "file",
+        "strings",
+        "jq",
+        "yq",
+        "awk",
+        "gawk",
+        "cut",
+        "sort",
+        "uniq",
+        "tr",
+        "tee",
+        "od",
+        "xxd",
+        "hexdump",
+        "sha256sum",
+        "sha1sum",
+        "md5sum",
+        "md5",
+        "shasum",
+        "get-content",
+        "get-item",
+        "test-path",
+        "select-object",
+        "where-object",
+    }
+)
 
-_LIST_COMMANDS: frozenset[str] = frozenset({
-    "ls", "dir", "tree", "du", "df", "lsof", "lsblk", "get-childitem",
-})
+_LIST_COMMANDS: frozenset[str] = frozenset(
+    {
+        "ls",
+        "dir",
+        "tree",
+        "du",
+        "df",
+        "lsof",
+        "lsblk",
+        "get-childitem",
+    }
+)
 
-_NEUTRAL_COMMANDS: frozenset[str] = frozenset({
-    "echo", "printf", "true", "false", ":", "test", "[",
-})
+_NEUTRAL_COMMANDS: frozenset[str] = frozenset(
+    {
+        "echo",
+        "printf",
+        "true",
+        "false",
+        ":",
+        "test",
+        "[",
+    }
+)
 
-_SILENT_COMMANDS: frozenset[str] = frozenset({
-    "mv", "cp", "rm", "mkdir", "rmdir", "chmod", "chown",
-    "chgrp", "touch", "ln", "cd", "export", "unset",
-    "source", ".", "wait", "pushd", "popd",
-})
+_SILENT_COMMANDS: frozenset[str] = frozenset(
+    {
+        "mv",
+        "cp",
+        "rm",
+        "mkdir",
+        "rmdir",
+        "chmod",
+        "chown",
+        "chgrp",
+        "touch",
+        "ln",
+        "cd",
+        "export",
+        "unset",
+        "source",
+        ".",
+        "wait",
+        "pushd",
+        "popd",
+    }
+)
 
 _KIND_LOOKUP: dict[str, CommandKind] = {}
 for _cmds, _kind in (
@@ -98,6 +178,7 @@ def _extract_base_command(segment: str) -> str:
 
 
 # ── public API ────────────────────────────────────────────────
+
 
 def classify_command(command: str) -> CommandKind:
     """Classify the overall command by its *last* pipeline segment.
@@ -146,6 +227,7 @@ def is_silent(command: str) -> bool:
 
 
 # ── exit-code interpretation ─────────────────────────────────
+
 
 def _grep_semantics(code: int, _stdout: str, _stderr: str) -> ExitCodeMeaning:
     if code == 0:

@@ -6,6 +6,7 @@ Tests for guardrail framework data models.
 """
 
 import agent_shield.detection as detection
+from agent_shield.detection import RuleBasedPromptInjectionBackend
 
 from openjiuwen.core.security.guardrail import (
     GuardrailResult,
@@ -13,7 +14,6 @@ from openjiuwen.core.security.guardrail import (
     RiskLevel,
     to_guardrail_result,
 )
-from openjiuwen.core.security.guardrail.backends import RuleBasedPromptInjectionBackend
 
 
 class TestForwardedTypes:

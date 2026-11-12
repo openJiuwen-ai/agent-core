@@ -1,6 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Host argument/result adaptation; all decisions use an already published key."""
 
+from collections.abc import Mapping
+from typing import Any
+
 from agent_shield.tool_permission import PermissionLevel, PermissionResult, get_permission_manager
 
 
@@ -42,14 +45,29 @@ def merge_permission_results(results):
     )
 
 
-async def check_tool_permission(tool_name, tool_args, key):
-    """Expand a host fetch URL list into the SDK's scalar URL contract."""
+async def check_tool_permission(
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    key: str | None = None,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> PermissionResult:
+    """Expand a host fetch URL list into the SDK's scalar URL contract.
+
+    ``config`` is the Manager's one-shot configuration; when it is given ``key``
+    is ignored and nothing is registered.
+    """
     manager = get_permission_manager()
     if tool_name in _FETCH_TOOLS:
         urls = tool_args.get("url")
         if isinstance(urls, list):
             if not urls or any(not isinstance(url, str) or not url.strip() for url in urls):
                 return PermissionResult(PermissionLevel.DENY, "host:invalid_urls", "Invalid fetch URL list")
-            results = [await manager.check_permission(tool_name, {**tool_args, "url": url}, key) for url in urls]
+            results = [
+                await manager.check_permission(
+                    tool_name, {**tool_args, "url": url}, key, config=config
+                )
+                for url in urls
+            ]
             return merge_permission_results(results)
-    return await manager.check_permission(tool_name, tool_args, key)
+    return await manager.check_permission(tool_name, tool_args, key, config=config)

@@ -79,7 +79,8 @@ def _compose_tools(merged: dict[str, Any], base: dict[str, Any], overlay_tools: 
         if overlay_level not in _TOOL_LEVELS:
             logger.warning(
                 "[skill_authorization] compose.tools.skip tool=%s invalid level=%r",
-                tool_name, raw_level,
+                tool_name,
+                raw_level,
             )
             continue
         base_level = _base_tool_level(base, tool_name)
@@ -87,7 +88,8 @@ def _compose_tools(merged: dict[str, Any], base: dict[str, Any], overlay_tools: 
             # 显式或默认 DENY 不可被任何声明改变。
             logger.info(
                 "[skill_authorization] compose.tools.keep_deny tool=%s overlay=%s",
-                tool_name, overlay_level,
+                tool_name,
+                overlay_level,
             )
             continue
         if overlay_level == "allow":
@@ -99,7 +101,8 @@ def _compose_tools(merged: dict[str, Any], base: dict[str, Any], overlay_tools: 
                 # 原档位缺失 / 非法：不按 skill 声明放宽（fail-closed）。
                 logger.warning(
                     "[skill_authorization] compose.tools.skip_raise tool=%s base_level=%r",
-                    tool_name, base_level,
+                    tool_name,
+                    base_level,
                 )
         else:
             # ask / deny 直接收紧生效。
@@ -135,9 +138,7 @@ def command_rule_fingerprint(rule: Any) -> tuple[str, str, str] | None:
     # tiered policy 对同一形态的 wildcard 规则也会回退到命令头匹配。
     # 因此 `echo *` 的 head/wildcard 在实际裁决上等价，统一指纹避免重复授权。
     head_pattern = normalized_pattern[:-2].strip() if normalized_pattern.endswith(" *") else ""
-    if scope in {"head", "wildcard"} and head_pattern and not any(
-        char.isspace() for char in head_pattern
-    ):
+    if scope in {"head", "wildcard"} and head_pattern and not any(char.isspace() for char in head_pattern):
         scope = "head"
     return normalized_pattern, action, scope
 
@@ -174,7 +175,9 @@ def _compose_rules(merged: dict[str, Any], overlay_rules: list[Any]) -> None:
         # （schema 拒绝规则自带 tools，故覆盖赋值不会吞掉真实声明。）
         native_rule = copy.deepcopy(rule)
         native_rule["tools"] = [
-            "bash", "mcp_exec_command", "create_terminal",
+            "bash",
+            "mcp_exec_command",
+            "create_terminal",
         ]
         base_rules.append(native_rule)
         existing.add(fingerprint)
@@ -257,10 +260,7 @@ def _axis_denied_by_ancestor(
         base_path = _native_entry_path(entry)
         if base_path is not None and _is_same_or_ancestor(base_path, path):
             return True
-    return any(
-        deny_axis == axis and _is_same_or_ancestor(deny_path, path)
-        for deny_path, deny_axis in overlay_denies
-    )
+    return any(deny_axis == axis and _is_same_or_ancestor(deny_path, path) for deny_path, deny_axis in overlay_denies)
 
 
 def _find_prefix_entry_index(paths: list[Any], path: str) -> int | None:
@@ -296,7 +296,8 @@ def _compose_file_guard_global(
         if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(entry, dict):
             logger.warning(
                 "[skill_authorization] compose.file_guard.skip path=%r entry=%r",
-                raw_path, entry,
+                raw_path,
+                entry,
             )
             continue
         path = _normalize_guard_path(raw_path)
@@ -317,14 +318,17 @@ def _compose_file_guard_global(
             if axis not in _FILE_GUARD_AXES:
                 logger.warning(
                     "[skill_authorization] compose.file_guard.skip_axis path=%s axis=%r",
-                    path, axis,
+                    path,
+                    axis,
                 )
                 continue
             overlay_level = _normalize_level(raw_level)
             if overlay_level not in _TOOL_LEVELS:
                 logger.warning(
                     "[skill_authorization] compose.file_guard.skip_axis path=%s axis=%s level=%r",
-                    path, axis, raw_level,
+                    path,
+                    axis,
+                    raw_level,
                 )
                 continue
             base_level = _native_entry_axis(existing_entry, axis) if existing_entry is not None else None
@@ -337,7 +341,9 @@ def _compose_file_guard_global(
             if _axis_denied_by_ancestor(base_paths, overlay_denies, path, axis):
                 logger.info(
                     "[skill_authorization] compose.file_guard.keep_deny path=%s axis=%s overlay=%s",
-                    path, axis, overlay_level,
+                    path,
+                    axis,
+                    overlay_level,
                 )
                 continue
             if overlay_level == "ask":
@@ -532,8 +538,8 @@ class SkillAuthorizationContext:
     request_id: str = ""
 
 
-_SKILL_AUTHORIZATION_CONTEXT: contextvars.ContextVar[SkillAuthorizationContext | None] = (
-    contextvars.ContextVar("jiuwenswarm_skill_authorization_context", default=None)
+_SKILL_AUTHORIZATION_CONTEXT: contextvars.ContextVar[SkillAuthorizationContext | None] = contextvars.ContextVar(
+    "jiuwenswarm_skill_authorization_context", default=None
 )
 
 
@@ -558,3 +564,14 @@ def reset_skill_authorization_context(token: contextvars.Token) -> None:
 def get_skill_authorization_context() -> SkillAuthorizationContext | None:
     """读取当前授权 Context；缺失时调用方不得应用 Skill overlay。"""
     return _SKILL_AUTHORIZATION_CONTEXT.get()
+
+
+__all__ = [
+    "SkillAuthorizationContext",
+    "command_rule_fingerprint",
+    "compose_skill_permissions",
+    "effective_file_guard_axis_level",
+    "get_skill_authorization_context",
+    "reset_skill_authorization_context",
+    "setup_skill_authorization_context",
+]
