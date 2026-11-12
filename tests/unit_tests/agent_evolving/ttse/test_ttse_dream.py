@@ -14,6 +14,7 @@ import pytest
 from openjiuwen.agent_evolving.ttse import TTSEConfig, TTSERecordStore
 from openjiuwen.agent_evolving.ttse.dream import (
     DreamState,
+    PersistedCluster,
     _cap_cluster_by_count,
     _sample_rules,
     bump_dream_session_count,
@@ -27,6 +28,7 @@ from openjiuwen.agent_evolving.ttse.dream import (
     prune_stale,
     run_dream_pass,
     save_dream_state,
+    save_dream_clusters,
     should_run_dream,
 )
 from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip
@@ -70,6 +72,92 @@ def _make_store(tmp_path, *, cfg=None, embedding=None) -> tuple[TTSERecordStore,
     if embedding is not None:
         config.embedding = embedding
     return TTSERecordStore(config, embedding=embedding), config
+
+
+@pytest.mark.asyncio
+async def test_dream_bank_replace_failure_does_not_mark_deletions_committed(tmp_path, monkeypatch, caplog):
+    from openjiuwen.agent_evolving.ttse import stores
+
+    now = time.time()
+    path = tmp_path / "bank.json"
+    old = _new_record("expired tip", now=now - 120 * 86400)
+    old["last_injected_at"] = old["created_at"]
+    invalid = _new_record("vague advice without a condition", now=now)
+    valid = {**_new_record("When reading logs: use grep to locate errors", now=now), "form_checked": True}
+    path.write_text(json.dumps({"facts": [], "tips": [old, invalid, valid], "retired": []}), encoding="utf-8")
+    before = path.read_bytes()
+    cfg = TTSEConfig(store_path=str(path), dream_min_hours=24, dream_min_rules=100, dream_ttl_days=90)
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(lambda prompt: "INDEX: 0 | VERDICT: PURGE | REASON: tip_malformed")
+    original_replace = stores.os.replace
+
+    def replace(source, destination):
+        if os.path.abspath(destination) == os.path.abspath(path):
+            raise PermissionError("simulated bank file sharing violation")
+        return original_replace(source, destination)
+
+    state = DreamState()
+    with monkeypatch.context() as context:
+        context.setattr(stores.os, "replace", replace)
+        with pytest.raises(PermissionError, match="sharing violation"):
+            await run_dream_pass(store, cfg, llm=llm, model="test", state=state, now=now)
+    assert len(store.tips) == 1
+    assert path.read_bytes() == before
+    assert not os.path.exists(f"{path}.tmp")
+    assert state.last_dream_at == 0
+    assert load_dream_state(cfg.resolved_dream_state_path()).last_dream_at == 0
+    assert "dream done" not in caplog.text
+
+    result, _ = await run_dream_pass(store, cfg, llm=llm, model="test", state=state, now=now + 1)
+    assert result.skipped is False
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [row["text"] for row in saved["tips"]] == [valid["text"]]
+    assert TTSERecordStore(cfg).stats() == {"facts": 0, "tips": 1, "retired": 0}
+    assert load_dream_state(cfg.resolved_dream_state_path()).last_dream_at > 0
+
+
+@pytest.mark.asyncio
+async def test_dream_preserves_duplicate_rows_without_model_merge(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=100,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    fact = {**_new_record("the log is in core/jiuwen.log", count=2),
+            "category": "software-engineering-devops"}
+    duplicate = {**fact, "count": 5, "inject_hits": 8}
+    tip = {**_new_record("When locating logs: use bash to list the core log directory"),
+           "category": "software-engineering-devops", "form_checked": True}
+    bank = {"facts": [fact, duplicate], "tips": [tip, dict(tip)], "retired": []}
+    (tmp_path / "bank.json").write_text(json.dumps(bank), encoding="utf-8")
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    expected = json.loads(json.dumps({"facts": store.facts, "tips": store.tips, "retired": store.retired}))
+    llm = ScriptedLLM(lambda prompt: pytest.fail("model merge threshold was not reached"))
+
+    await run_dream_pass(store, cfg, llm=llm, model="dummy-model")
+
+    saved = json.loads((tmp_path / "bank.json").read_text(encoding="utf-8"))
+    assert saved == expected
+    assert not llm.calls
+    assert TTSERecordStore(cfg).stats() == {"facts": 2, "tips": 2, "retired": 0}
+
+
+@pytest.mark.asyncio
+async def test_dream_without_model_merge_keeps_distinct_tracks_categories_and_wording(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=100,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    rows = [
+        {**_new_record("log path"), "category": "software-engineering-devops"},
+        {**_new_record("log path"), "category": "external-service-automation"},
+        {**_new_record("log path with rotation"), "category": "software-engineering-devops"},
+    ]
+    store.facts = rows
+    store.tips = [dict(rows[0])]
+    await run_dream_pass(store, cfg, llm=ScriptedLLM(lambda prompt: ""), model="dummy-model")
+    assert store.facts == rows
+    assert len(store.tips) == 1
 
 
 # ----------------------------------------------------------------------
@@ -797,7 +885,7 @@ async def test_dream_merge_canonical_form_checked_false(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_bump_dream_session_count_persists_and_resets_at_interval(tmp_path):
+def test_bump_dream_session_count_persists_after_interval(tmp_path):
     path = str(tmp_path / "dream-state.json")
     count, reached = bump_dream_session_count(path, interval=3)
     assert (count, reached) == (1, False)
@@ -806,7 +894,13 @@ def test_bump_dream_session_count_persists_and_resets_at_interval(tmp_path):
     assert (count, reached) == (2, False)
     count, reached = bump_dream_session_count(path, interval=3)
     assert (count, reached) == (3, True)
-    assert load_dream_state(path).non_followup_count == 0
+    assert load_dream_state(path).non_followup_count == 3
+    assert bump_dream_session_count(path, interval=3) == (4, True)
+    assert load_dream_state(path).non_followup_count == 4
+
+
+def test_default_dream_interval_is_fifty():
+    assert TTSEConfig().dream_interval == 50
 
 
 def test_dream_state_legacy_json_defaults_count_to_zero(tmp_path):
@@ -896,6 +990,141 @@ async def test_dream_without_embedding_still_prunes(tmp_path):
     assert not result.skipped
     assert result.pruned_facts == 1
     assert result.merged_clusters == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("different_ids", [False, True])
+@pytest.mark.parametrize("legacy_cache", [False, True])
+@pytest.mark.parametrize("verdict", ["MERGE", "KEEP_DISTINCT", "SUBSET"])
+async def test_dream_llm_preserves_identical_record_occurrences(
+    tmp_path, different_ids, legacy_cache, verdict,
+):
+    text = "jiuwen logs are in C:/logs/jiuwen.log"
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=1,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    size = 3 if verdict == "SUBSET" else 2
+    rows = [
+        {**_new_record(text), "id": f"row-{i}" if different_ids else "same-id",
+         "category": "software-engineering-devops"}
+        for i in range(size)
+    ]
+    (tmp_path / "bank.json").write_text(
+        json.dumps({"facts": rows, "tips": [], "retired": []}), encoding="utf-8",
+    )
+    if legacy_cache:
+        save_dream_clusters(cfg.resolved_dream_clusters_path(), [
+            PersistedCluster(
+                id="old-singleton", track="fact", category="software-engineering-devops",
+                description="only one unique rule", member_texts=[text],
+                last_verdict="KEEP_DISTINCT", dirty=False, updated_at=format_ts(time.time()),
+            ),
+        ])
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    original_rows = json.loads(json.dumps(store.facts))
+    indices = ",".join(str(i) for i in range(size))
+
+    def handler(prompt):
+        # Both clustering and consolidation must see every original occurrence.
+        for i in range(size):
+            assert f"{i}. count=1 | {text}" in prompt
+        assert store.facts == original_rows
+        if "You are clustering" in prompt:
+            return f"THINKING:\nidentical records\nREASON: repeated rows\nGROUPS:\n- {indices}\n"
+        assert f"0: {indices}" in prompt
+        if verdict == "KEEP_DISTINCT":
+            decision = f"VERDICT: KEEP_DISTINCT | CANONICAL: | KEEP_INDICES: {indices}"
+        elif verdict == "SUBSET":
+            decision = f"VERDICT: MERGE | CANONICAL: {text} | MERGE_INDICES: 0,1 | KEEP_INDICES: 2"
+        else:
+            decision = f"VERDICT: MERGE | CANONICAL: {text} | KEEP_INDICES:"
+        return f"THINKING:\ncompare separate rows\nREASON: model decision\nDECISIONS:\n- group=0 | ids={indices} | {decision}\n"
+
+    llm = ScriptedLLM(handler)
+    result, state = await run_dream_pass(store, cfg, llm=llm, model="test-model")
+
+    assert len(llm.calls) == 2
+    saved = json.loads((tmp_path / "bank.json").read_text(encoding="utf-8"))["facts"]
+    assert saved == store.facts
+    if verdict == "KEEP_DISTINCT":
+        assert saved == original_rows
+        assert result.kept_clusters == 1
+        # Multiplicity survives cache reload; unchanged records are not retried.
+        state.last_dream_at = 0
+        await run_dream_pass(store, cfg, llm=llm, model="test-model", state=state)
+        assert len(llm.calls) == 2
+    else:
+        assert result.merged_clusters == 1
+        assert len(saved) == (2 if verdict == "SUBSET" else 1)
+        assert sum(r["count"] for r in saved) == size
+        if verdict == "SUBSET":
+            assert original_rows[2] in saved
+
+
+@pytest.mark.asyncio
+async def test_dream_duplicate_cluster_indices_keep_selected_occurrences(tmp_path):
+    text = "jiuwen logs are in C:/logs/jiuwen.log"
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=1,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    rows = [
+        {**_new_record(text, count=count), "category": "software-engineering-devops"}
+        for count in (1, 2, 3)
+    ]
+    (tmp_path / "bank.json").write_text(
+        json.dumps({"facts": rows, "tips": [], "retired": []}), encoding="utf-8",
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    first = dict(store.facts[0])
+
+    def handler(prompt):
+        if "You are clustering" in prompt:
+            return "THINKING:\nselect last two rows\nREASON: selected pair\nGROUPS:\n- 1,2\n"
+        assert f"0. count=2 | {text}" in prompt
+        assert f"1. count=3 | {text}" in prompt
+        return (
+            "THINKING:\nmerge selected occurrences\nREASON: consolidate\nDECISIONS:\n"
+            f"- group=0 | ids=0,1 | VERDICT: MERGE | CANONICAL: {text} | KEEP_INDICES:\n"
+        )
+
+    result, _ = await run_dream_pass(store, cfg, llm=ScriptedLLM(handler), model="m")
+
+    assert result.merged_clusters == 1
+    assert len(store.facts) == 2
+    assert first in store.facts
+    assert sorted(r["count"] for r in store.facts) == [1, 5]
+
+
+@pytest.mark.asyncio
+async def test_dream_applies_disjoint_clusters_with_identical_text(tmp_path):
+    text = "jiuwen logs are in C:/logs/jiuwen.log"
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"), dream_min_hours=0, dream_min_rules=1,
+        dream_prune_enabled=False, dream_purge_tips_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    for _ in range(4):
+        await store.add_record_direct(
+            "fact", text, category="software-engineering-devops", save=False,
+        )
+
+    def handler(prompt):
+        if "You are clustering" in prompt:
+            return "THINKING:\ntwo independent pairs\nREASON: pairs\nGROUPS:\n- 0,1\n- 2,3\n"
+        return (
+            "THINKING:\nmerge each proposed pair\nREASON: pairs\nDECISIONS:\n"
+            f"- group=0 | ids=0,1 | VERDICT: MERGE | CANONICAL: {text} | KEEP_INDICES:\n"
+            f"- group=1 | ids=2,3 | VERDICT: MERGE | CANONICAL: {text} | KEEP_INDICES:\n"
+        )
+
+    result, _ = await run_dream_pass(store, cfg, llm=ScriptedLLM(handler), model="m")
+
+    assert result.merged_clusters == 2
+    saved = json.loads((tmp_path / "bank.json").read_text(encoding="utf-8"))["facts"]
+    assert len(saved) == 2
+    assert [r["count"] for r in saved] == [2, 2]
 
 
 @pytest.mark.asyncio
