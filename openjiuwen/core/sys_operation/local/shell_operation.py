@@ -327,6 +327,17 @@ def _looks_like_posix(command: str) -> bool:
     return any(_segment_base_command(segment) in _POSIX_COMMANDS for segment in _split_shell_segments(command or ""))
 
 
+def _contains_multiline_payload(command: str) -> bool:
+    """True when the command embeds newline characters.
+
+    ``cmd /c`` executes only up to the first newline and silently drops the
+    remaining lines while still exiting 0 (e.g. ``cd "E:/w" && python -c
+    "<newline>print('hi')<newline>"``). Such commands must be routed to a
+    shell that accepts a multiline command string (Git Bash ``-lc``).
+    """
+    return "\n" in (command or "")
+
+
 def _reject_cmd_null_redirect_for_bash(command: str) -> None:
     """Reject CMD-style null redirects before running a command under bash/sh.
 
@@ -430,7 +441,7 @@ class ShellOperation(BaseShellOperation):
                     exe = _available_powershell()
                     command = ShellOperation._inject_ps_utf8(command)
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
-                if _looks_like_posix(command):
+                if _looks_like_posix(command) or _contains_multiline_payload(command):
                     exe = _available_bash(allow_wsl=False)
                     if exe:
                         _reject_cmd_null_redirect_for_bash(command)
@@ -487,7 +498,7 @@ class ShellOperation(BaseShellOperation):
         shell_type: ShellType = ShellType.AUTO,
         background: bool = False,
         stream: bool = False,
-    ) -> asyncio.subprocess.Process:
+    ) -> tuple[asyncio.subprocess.Process, str]:
         """Create an asyncio subprocess with the appropriate shell.
 
         Args:
@@ -503,9 +514,11 @@ class ShellOperation(BaseShellOperation):
                 effects such as git launching a pager.
 
         Returns:
-            asyncio.subprocess.Process
+            (process, resolved_shell_name): the spawned process and the shell
+            that actually ran the command, so callers can tell cmd-specific
+            semantics apart from bash/sh/powershell ones.
         """
-        args, use_shell, _ = self._resolve_execution_plan(command, shell_type)
+        args, use_shell, resolved_shell = self._resolve_execution_plan(command, shell_type)
 
         # 进程组隔离：创建新 session，后续可用 os.killpg() 清理整棵进程树。
         # 仅 POSIX 生效；Windows 通过 CREATE_NEW_PROCESS_GROUP 但语义不同，
@@ -522,7 +535,7 @@ class ShellOperation(BaseShellOperation):
 
         if use_shell:
             cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
-            return await asyncio.create_subprocess_shell(
+            process = await asyncio.create_subprocess_shell(
                 cmd,
                 cwd=str(cwd),
                 env=env,
@@ -531,7 +544,8 @@ class ShellOperation(BaseShellOperation):
                 stderr=stderr,
                 **subprocess_kw,
             )
-        return await asyncio.create_subprocess_exec(
+            return process, resolved_shell
+        process = await asyncio.create_subprocess_exec(
             *args,
             cwd=str(cwd),
             env=env,
@@ -540,6 +554,7 @@ class ShellOperation(BaseShellOperation):
             stderr=stderr,
             **subprocess_kw,
         )
+        return process, resolved_shell
 
     async def execute_cmd(
             self,
@@ -600,6 +615,7 @@ class ShellOperation(BaseShellOperation):
             return _create_exec_cmd_err(error_msg="command can not be empty")
 
         actual_cwd = None
+        resolved_shell: Optional[str] = None
         try:
             # Resolve CWD
             actual_cwd = self._resolve_cwd(cwd)
@@ -631,7 +647,9 @@ class ShellOperation(BaseShellOperation):
                 if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
-            proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
+            proc, resolved_shell = await self._create_subprocess(
+                command, actual_cwd, exec_env, shell_type=shell_type_enum,
+            )
             track_sid = _track_shell_process(proc)
 
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
@@ -648,7 +666,8 @@ class ShellOperation(BaseShellOperation):
                                                 cwd=str(actual_cwd),
                                                 exit_code=invoke_data.exit_code,
                                                 stdout=invoke_data.stdout,
-                                                stderr=invoke_data.stderr
+                                                stderr=invoke_data.stderr,
+                                                resolved_shell=resolved_shell,
                                             ))
             success_result = ExecuteCmdResult(
                 code=StatusCode.SUCCESS.code,
@@ -658,7 +677,8 @@ class ShellOperation(BaseShellOperation):
                     cwd=str(actual_cwd),
                     exit_code=invoke_data.exit_code,
                     stdout=invoke_data.stdout,
-                    stderr=invoke_data.stderr
+                    stderr=invoke_data.stderr,
+                    resolved_shell=resolved_shell,
                 )
             )
             sys_operation_logger.info("End to execute cmd", event=self._create_sys_operation_event(
@@ -739,6 +759,8 @@ class ShellOperation(BaseShellOperation):
             )
             return
 
+        actual_cwd = None
+        resolved_shell: Optional[str] = None
         try:
             actual_cwd = self._resolve_cwd(cwd)
             if not self._check_allowlist(command):
@@ -772,7 +794,7 @@ class ShellOperation(BaseShellOperation):
                 if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
-            process = await self._create_subprocess(
+            process, resolved_shell = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, stream=True,
             )
             track_sid = _track_shell_process(process)
@@ -787,7 +809,12 @@ class ShellOperation(BaseShellOperation):
 
                 def _handle_std_out_err(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
                     """Handle STDOUT/STDERR stream events"""
-                    chunk_data = ExecuteCmdChunkData(text=event.data, type=event.type.value, chunk_index=idx)
+                    chunk_data = ExecuteCmdChunkData(
+                        text=event.data,
+                        type=event.type.value,
+                        chunk_index=idx,
+                        resolved_shell=resolved_shell,
+                    )
                     stream_result = ExecuteCmdStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message=f"Get {chunk_data.type} stream successfully",
@@ -804,14 +831,18 @@ class ShellOperation(BaseShellOperation):
 
                 def _handle_exec_error(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
                     """Handle execution error events"""
-                    chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=-1)
+                    chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=-1, resolved_shell=resolved_shell)
                     error_msg = f"execution receive error: {event.data}"
                     return _create_exec_cmd_stream_err(error_msg, chunk_data)
 
                 def _handle_process_exit(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
                     """Handle process exit event (final chunk)"""
                     exit_code = event.data
-                    chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=exit_code)
+                    chunk_data = ExecuteCmdChunkData(
+                        chunk_index=idx,
+                        exit_code=exit_code,
+                        resolved_shell=resolved_shell,
+                    )
                     exit_result = ExecuteCmdStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message="Command executed successfully",
@@ -933,7 +964,7 @@ class ShellOperation(BaseShellOperation):
 
             exec_env = OperationUtils.prepare_environment(environment)
             grace = _resolve_background_grace_seconds(grace)
-            process = await self._create_subprocess(
+            process, _ = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
             )
             track_sid = _track_shell_process(process)

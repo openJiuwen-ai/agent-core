@@ -285,6 +285,30 @@ async def test_shell_list_tools(sys_op):
 
 
 @pytest.mark.asyncio
+async def test_execute_cmd_reports_resolved_shell(sys_op):
+    """The result must expose the shell that actually ran the command, so
+    callers can apply cmd-only semantics only when cmd really ran."""
+    res = await sys_op.shell().execute_cmd("echo resolved-shell-probe")
+
+    assert res.code == StatusCode.SUCCESS.code
+    expected = "cmd" if platform.system() == "Windows" else "sh"
+    assert res.data.resolved_shell == expected
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_reports_resolved_shell(sys_op):
+    """Streaming chunks must carry the same resolved shell as one-shot execution."""
+    expected = "cmd" if platform.system() == "Windows" else "sh"
+    exit_chunk = None
+    async for result in sys_op.shell().execute_cmd_stream(command="echo stream-probe"):
+        if result.data is not None and result.data.exit_code is not None:
+            exit_chunk = result.data
+
+    assert exit_chunk is not None
+    assert exit_chunk.resolved_shell == expected
+
+
+@pytest.mark.asyncio
 async def test_execute_cmd_stream_basic(sys_op):
     """Test basic streaming command execution (stdout/stderr chunked output)"""
     try:
@@ -596,3 +620,39 @@ async def test_bash_dev_null_does_not_create_nul_file(work_dir):
     finally:
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
         await Runner.stop()
+
+
+# ── Windows AUTO multiline routing ────────────────────────────
+
+
+def test_windows_auto_routes_multiline_command_to_git_bash(monkeypatch):
+    """Multiline commands must not fall through to cmd: `cmd /c` only runs the
+    first line and silently drops the rest (exit code 0, empty output)."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Program Files\Git\bin\bash.exe"
+    command = 'cd "E:/work" && python -c "\nprint(\'hi\')\n"'
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "bash"
+    assert use_shell is False
+    assert args[0] == exe
+
+
+def test_windows_auto_multiline_without_bash_falls_back_to_cmd(monkeypatch):
+    """Without Git Bash, keep the cmd fallback; the BashTool hint layer covers it."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    command = 'cd "E:/work" && python -c "\nprint(\'hi\')\n"'
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: None)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert resolved_shell == "cmd"
+    assert use_shell is True

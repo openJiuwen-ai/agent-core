@@ -45,6 +45,36 @@ _SUDO_NEEDS_N_RE = re.compile(
     r"\bsudo\b(?!(?:\s+-[a-zA-Z]*n|\s+--non-interactive))(?=\s)"
 )
 
+_MULTILINE_EMPTY_HINT_CN = (
+    "命令退出码为 0 但没有任何输出。注意：Windows 下 cmd 只执行多行命令的第一行，"
+    "后续行会被静默丢弃。若预期应有输出，请先把多行脚本写入临时文件再单行执行"
+    "（如 `python script.py`），或将命令改写为单行 `&&` 链。"
+)
+
+_MULTILINE_EMPTY_HINT_EN = (
+    "Command exited 0 but produced no output. Note: Windows cmd only runs the "
+    "first line of a multiline command and silently drops the rest. If output "
+    "was expected, write the script to a temp file and run it on a single line "
+    "(e.g. `python script.py`), or rewrite the command as a single `&&` chain."
+)
+
+
+def _multiline_empty_output_hint(command: str, language: str, resolved_shell: Optional[str]) -> Optional[str]:
+    """Detect the Windows cmd truncation signature and return an actionable hint.
+
+    ``cmd /c`` runs only up to the first newline of a command while still
+    exiting 0 with empty output, which otherwise looks like a silent success
+    and invites identical retries (observed as the [153001] tool-args loop).
+    Only flag the exact signature: Windows host + multiline command + the
+    command actually resolved to cmd. Bash runs multiline commands natively,
+    and ``auto`` routes them to Git Bash when it is available.
+    """
+    if os.name != "nt" or "\n" not in (command or "") or resolved_shell != "cmd":
+        return None
+    if (language or "cn").strip().lower().startswith("en"):
+        return _MULTILINE_EMPTY_HINT_EN
+    return _MULTILINE_EMPTY_HINT_CN
+
 
 def _make_sudo_noninteractive(command: str) -> str:
     """Inject -n into sudo calls so they fail fast instead of hanging for a password."""
@@ -85,6 +115,7 @@ class BashTool(Tool):
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
+        self._language = language
         # Tool-local guard for call-site policy (team worktree deny patterns etc.).
         # Agent-level adjudication still lives in PermissionInterruptRail.
         self._permission = PermissionConfig(
@@ -301,6 +332,14 @@ class BashTool(Tool):
             ),
             meaning.is_error,
         )
+        if not is_error and not content:
+            hint = _multiline_empty_output_hint(
+                p.command,
+                self._language,
+                res.data.resolved_shell if res.data else None,
+            )
+            if hint:
+                content = hint
         return ToolOutput(
             success=not is_error,
             data={"content": content},
@@ -342,6 +381,7 @@ class BashTool(Tool):
         accumulated_stdout = ""
         accumulated_stderr = ""
         final_exit_code: int = -1
+        resolved_shell: Optional[str] = None
 
         async for chunk in self._operation.shell().execute_cmd_stream(
                 p.command,
@@ -356,6 +396,7 @@ class BashTool(Tool):
 
             data = chunk.data
             elapsed = round(time.monotonic() - start, 2)
+            resolved_shell = getattr(data, "resolved_shell", None) or resolved_shell
 
             if data.exit_code is not None:
                 final_exit_code = data.exit_code
@@ -392,6 +433,10 @@ class BashTool(Tool):
             ),
             meaning.is_error,
         )
+        if not is_error and not content:
+            hint = _multiline_empty_output_hint(p.command, self._language, resolved_shell)
+            if hint:
+                content = hint
         yield ToolOutput(
             success=not is_error,
             data={"content": content},
