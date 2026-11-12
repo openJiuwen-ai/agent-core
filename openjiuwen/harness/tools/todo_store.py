@@ -236,11 +236,6 @@ def validate_published_todos(snapshot, records):
                           details={"reason": reason, "conflicting_ids": invalid or active, "committed": False})
 
 
-def _serialize_snapshot(snapshot):
-    """单独的发布序列化边界，故障注入不应同时破坏 FS/日志使用的全局 json。"""
-    return json.dumps(snapshot.document(), ensure_ascii=False)
-
-
 def _publication_error(reason, counts, cause=None):
     error = build_error(
         StatusCode.TOOL_TODOS_SAVE_FAILED, reason=f"{reason}. {_UNKNOWN_PUBLICATION_HINT}", cause=cause,
@@ -378,7 +373,7 @@ async def transact(
                     check_active()
                 publication = tool.fs.write_file(
                     path,
-                    _serialize_snapshot(committed),
+                    json.dumps(committed.document(), ensure_ascii=False),
                     mode="text",
                     prepend_newline=False,
                     options={

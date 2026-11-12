@@ -190,6 +190,30 @@ async def test_invalid_snapshot_metadata_is_not_a_read_only_fallback(env, monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+async def test_serialization_failure_does_not_publish_or_replace_global_json(env, monkeypatch, error_type):
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.harness.tools import todo_store
+
+    creator, modifier, _, session, path = env
+    await create(creator, session)
+    before = path.read_bytes()
+    write = AsyncMock()
+
+    def fail_dump(*_args, **_kwargs):
+        raise error_type("serialization failed")
+
+    monkeypatch.setattr(todo_store, "json", SimpleNamespace(loads=json.loads, dumps=fail_dump))
+    monkeypatch.setattr(modifier.fs, "write_file", write)
+    assert json.loads(json.dumps({"unrelated": True})) == {"unrelated": True}
+    with pytest.raises(BaseError if error_type is RuntimeError else KeyboardInterrupt, match="serialization failed"):
+        await update(modifier, session, "A", content="changed")
+    write.assert_not_called()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_inflight_publication_failure_does_not_claim_zero_writes(env, monkeypatch, cancel):
     from unittest.mock import patch

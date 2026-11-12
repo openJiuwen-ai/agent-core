@@ -1,15 +1,17 @@
 """显式终态仅增加诊断，不改变工具负载、回调和异常控制流。"""
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging.events import EventStatus
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.core.foundation.tool import execution_logging
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.callback.events import ToolCallEvents
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.todo_store import TodoResult
 
@@ -33,7 +35,7 @@ def terminal_records(info, warning):
 
 
 @pytest.mark.asyncio
-async def test_nested_forwarding_counts_one_public_call_and_keeps_payload():
+async def test_forwarding_preserves_payload_and_existing_call_id():
     async def result(_inputs, **_kwargs):
         return TodoResult({"message": "done"}, outcome="success", counts={"applied_count": 1})
 
@@ -48,11 +50,8 @@ async def test_nested_forwarding_counts_one_public_call_and_keeps_payload():
     assert dict(returned) == {"message": "done"}
     records = terminal_records(info, warning)
     assert len(records) == 2
-    kinds = {record["metadata"]["invocation_kind"] for record in records}
-    assert kinds == {"model", "internal_engine"}
+    assert {record["tool_name"] for record in records} == {"todo", "todo_modify"}
     assert all(record["tool_call_id"] == "call-A" for record in records)
-    assert sum(record["metadata"]["invocation_kind"] == "model" for record in records) == 1
-    assert execution_logging._EXECUTION.get() is None
 
 
 @pytest.mark.asyncio
@@ -70,6 +69,7 @@ async def test_explicit_outcome_does_not_change_dict_return(outcome, status):
     assert dict(returned) == {"message": "unchanged shape"}
     records = terminal_records(info, warning)
     assert len(records) == 1 and records[0]["status"] == status
+    assert records[0]["metadata"]["outcome"] == outcome
 
 
 @pytest.mark.asyncio
@@ -79,43 +79,71 @@ async def test_unknown_publication_is_not_reported_as_zero_applied():
                           details={"commit_state": "unknown", "reason": "publication_unknown"})
 
     tool = ExampleTool(failure)
-    with patch.object(execution_logging.logger, "info") as info, patch.object(execution_logging.logger, "warning") as warning:
-        with pytest.raises(Exception, match="response lost"):
-            await tool.invoke({}, tool_call_id="call-A")
+    with (
+        patch.object(execution_logging.logger, "info") as info,
+        patch.object(execution_logging.logger, "warning") as warning,
+        pytest.raises(Exception, match="response lost"),
+    ):
+        await tool.invoke({}, tool_call_id="call-A")
     record = terminal_records(info, warning)[0]
     assert record["status"] == EventStatus.FAILURE
     assert record["metadata"]["outcome"] == "unknown"
     assert record["metadata"]["item_counts"]["applied_count"] is None
-    assert record["metadata"]["root_error_code"] == 182501
+    assert record["metadata"]["outer_error_code"] == 182501
     assert "response lost" in record["error_message"]
 
 
 @pytest.mark.asyncio
-async def test_cancelled_invocation_rethrows_and_cleans_context():
-    async def cancelled(_inputs, **_kwargs):
-        raise asyncio.CancelledError()
+@pytest.mark.parametrize("error,status", [
+    (asyncio.CancelledError(), EventStatus.CANCELLED),
+    (TimeoutError("timed out"), EventStatus.TIMEOUT),
+    (RuntimeError("failed"), EventStatus.FAILURE),
+])
+async def test_invocation_error_is_logged_and_rethrown(error, status):
+    async def failure(_inputs, **_kwargs):
+        raise error
 
-    tool = ExampleTool(cancelled)
-    with patch.object(execution_logging.logger, "info") as info, patch.object(execution_logging.logger, "warning") as warning:
-        with pytest.raises(asyncio.CancelledError):
-            await tool.invoke({}, tool_call_id="call-A")
-    assert terminal_records(info, warning)[0]["status"] == EventStatus.CANCELLED
-    assert execution_logging._EXECUTION.get() is None
+    tool = ExampleTool(failure)
+    with (
+        patch.object(execution_logging.logger, "info") as info,
+        patch.object(execution_logging.logger, "warning") as warning,
+        pytest.raises(type(error)) as caught,
+    ):
+        await tool.invoke({}, tool_call_id="call-A")
+    assert caught.value is error
+    assert terminal_records(info, warning)[0]["status"] == status
 
 
 @pytest.mark.asyncio
 async def test_non_opt_in_tool_keeps_existing_boolean_log_and_plain_dict_behavior():
     async def result(inputs, **_kwargs):
-        return ToolOutput(success=True) if inputs else {"message": "plain"}
+        return ToolOutput(success=inputs["success"]) if inputs else {"message": "plain"}
 
     tool = ExampleTool(result, enabled=False)
     with patch.object(execution_logging.logger, "info") as info, patch.object(execution_logging.logger, "warning") as warning:
         returned = await tool.invoke({})
         assert returned == {"message": "plain"}
         assert not info.called
-        assert (await tool.invoke({"run": True})).success is True
+        assert (await tool.invoke({"success": True})).success is True
+        assert (await tool.invoke({"success": False})).success is False
     assert terminal_records(info, warning) == []
     assert info.call_count == 1
+    assert warning.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result,outcome", [
+    (ToolOutput(success=True), "success"),
+    (ToolOutput(success=False), "failure"),
+    ({"message": "no explicit status"}, "unknown"),
+])
+async def test_explicit_logging_uses_boolean_fallback_without_assuming_dict_success(result, outcome):
+    async def operation(_inputs, **_kwargs):
+        return result
+
+    with patch.object(execution_logging.logger, "info") as info, patch.object(execution_logging.logger, "warning") as warning:
+        assert await ExampleTool(operation).invoke({}) is result
+    assert terminal_records(info, warning)[0]["metadata"]["outcome"] == outcome
 
 
 @pytest.mark.asyncio
@@ -127,16 +155,87 @@ async def test_logging_failure_does_not_change_confirmed_business_result():
     with patch.object(execution_logging.logger, "info", side_effect=RuntimeError("logging unavailable")):
         returned = await tool.invoke({}, tool_call_id="call-A")
     assert returned.tool_commit_state == "committed"
-    assert execution_logging._EXECUTION.get() is None
 
 
 @pytest.mark.asyncio
-async def test_missing_model_id_is_unattributed_direct_execution():
-    async def result(_inputs, **_kwargs):
-        return TodoResult({"message": "done"})
+async def test_logging_failure_does_not_replace_original_error():
+    error = build_error(StatusCode.TOOL_TODOS_SAVE_FAILED, reason="response lost")
 
+    async def failure(_inputs, **_kwargs):
+        raise error
+
+    with (
+        patch.object(execution_logging.logger, "warning", side_effect=RuntimeError("logging unavailable")),
+        pytest.raises(type(error)) as caught,
+    ):
+        await ExampleTool(failure).invoke({})
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+async def test_overlapping_calls_keep_their_own_log_records():
+    release = asyncio.Event()
+
+    async def operation(inputs, **_kwargs):
+        if inputs["wait"]:
+            await release.wait()
+        else:
+            release.set()
+        return TodoResult({"message": "done"}, counts={"applied_count": inputs["count"]})
+
+    tool = ExampleTool(operation)
     with patch.object(execution_logging.logger, "info") as info, patch.object(execution_logging.logger, "warning") as warning:
-        await ExampleTool(result).invoke({})
-    record = terminal_records(info, warning)[0]
-    assert record["metadata"]["invocation_kind"] == "direct"
-    assert record["metadata"]["tool_call_id"] is None
+        await asyncio.gather(
+            tool.invoke({"wait": True, "count": 1}, tool_call_id="slow"),
+            tool.invoke({"wait": False, "count": 2}, tool_call_id="fast"),
+        )
+    records = terminal_records(info, warning)
+    assert len(records) == 2
+    assert {row["tool_call_id"]: row["metadata"]["item_counts"]["applied_count"] for row in records} == {
+        "slow": 1, "fast": 2,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failing_event", [ToolCallEvents.TOOL_CALL_STARTED, ToolCallEvents.TOOL_CALL_FINISHED])
+async def test_callback_error_boundaries_match_existing_wrapper(enabled, failing_event):
+    error = RuntimeError("callback failed")
+    seen = []
+    operation = AsyncMock(return_value=TodoResult(
+        {"message": "done"}, commit_state="committed", counts={"applied_count": 1},
+    ))
+    tool = ExampleTool(operation, enabled=enabled)
+
+    async def trigger(event, *_args, **_kwargs):
+        if event in (ToolCallEvents.TOOL_CALL_STARTED, ToolCallEvents.TOOL_CALL_FINISHED, ToolCallEvents.TOOL_CALL_ERROR):
+            seen.append(event)
+        if event == failing_event:
+            raise error
+
+    with (
+        patch.object(Runner.callback_framework, "trigger", side_effect=trigger),
+        patch.object(execution_logging.logger, "info") as info,
+        patch.object(execution_logging.logger, "warning") as warning,
+        pytest.raises(RuntimeError) as caught,
+    ):
+        await tool.invoke({})
+    assert caught.value is error
+    expected = [ToolCallEvents.TOOL_CALL_STARTED]
+    if failing_event == ToolCallEvents.TOOL_CALL_FINISHED:
+        operation.assert_awaited_once()
+        expected.append(ToolCallEvents.TOOL_CALL_FINISHED)
+    else:
+        operation.assert_not_awaited()
+    if enabled or failing_event == ToolCallEvents.TOOL_CALL_FINISHED:
+        expected.append(ToolCallEvents.TOOL_CALL_ERROR)
+    assert seen == expected
+    records = terminal_records(info, warning)
+    if enabled:
+        assert len(records) == 1
+        assert records[0]["metadata"]["outcome"] == "failure"
+        if failing_event == ToolCallEvents.TOOL_CALL_FINISHED:
+            assert records[0]["metadata"]["commit_state"] == "committed"
+            assert records[0]["metadata"]["item_counts"]["applied_count"] == 1
+    else:
+        assert records == []
