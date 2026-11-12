@@ -18,16 +18,16 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Protocol
 
 from openjiuwen.agent_evolving.attribution.language import output_language_directive
 from openjiuwen.agent_evolving.attribution.model import TaskParseResult
 from openjiuwen.agent_evolving.attribution.nodes import TrajectoryNode, user_request_nodes, user_request_text
 
-_ASSISTANT_NO_TOOL_CALL_LIMIT = 10000
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.attribution.trajectory_summary.models import SummaryTree
+
 _EDGE_NODE_LIMIT = 2000
-_USER_MESSAGE_LIMIT = 1000
-_USER_REQUEST_LIMIT = 8000
 _EDGE_NODE_COUNT = 5
 _FILE_CANDIDATE_LIMIT = 20
 _LEAD_KINDS = frozenset({"team_leader", "main_agent", "main"})
@@ -633,84 +633,111 @@ def build_task_parse_digest(
     nodes_by_subagent: Mapping[str, list[TrajectoryNode]],
     file_candidates: Sequence[tuple[str, str, str]],
     language: str = "zh",
-    user_requests: Sequence[tuple[str, str]] = (),
+    summary_tree: SummaryTree | None = None,
 ) -> str:
-    """Assemble the disclosure digest (the user's own messages, assistant texts, head/tail, users)."""
-    assistant_block: list[str] = []
-    edge_block: list[str] = []
-    user_block: list[str] = []
-    disclosed: set[int] = set()
-    node_id_by_index: dict[int, str] = {}
-    index_by_node_id: dict[str, int] = {}
-
-    flat: list[TrajectoryNode] = []
-    for subagent in sorted(nodes_by_subagent):
-        for node in nodes_by_subagent[subagent]:
-            node_id_by_index[id(node)] = node.node_id
-            index_by_node_id[node.node_id] = len(flat)
-            flat.append(node)
-
-    for node in flat:
-        if node.role == "assistant" and not _node_has_tool_calls(node) and node.content:
-            assistant_block.append(f"{node.node_id}{_clock(node)}: {node.content[:_ASSISTANT_NO_TOOL_CALL_LIMIT]}")
-            disclosed.add(id(node))
-
-    for subagent in sorted(nodes_by_subagent):
-        nodes = nodes_by_subagent[subagent]
-        for node in nodes[:_EDGE_NODE_COUNT] + nodes[-_EDGE_NODE_COUNT:]:
-            if id(node) in disclosed:
-                continue
-            edge_block.append(f"{node.node_id}: {_node_line(node, _EDGE_NODE_LIMIT)}")
-            disclosed.add(id(node))
-
-    for node in flat:
-        if node.role != "user" or id(node) in disclosed:
-            continue
-        content = str(node.content or "")
-        if "<system-reminder>" in content:
-            continue
-        user_block.append(f"{node.node_id}: {content[:_USER_MESSAGE_LIMIT]}")
-        disclosed.add(id(node))
-
-    sections: list[str] = []
-    if user_requests:
-        clocks = {
-            node.node_id: _clock(node)
-            for node in getattr(nodes_by_subagent, "user_requests", None) or flat
-            if node.node_id in dict(user_requests)
-        }
-        request_text = "\n\n".join(
-            f"{node_id}{clocks.get(node_id, '')}: {text[:_USER_REQUEST_LIMIT]}" for node_id, text in user_requests
-        )
-        title = (
-            "## 用户本人发出的消息（原文，按时间顺序；任务以此为准）"
-            if language != "en"
-            else "## The user's own messages (verbatim, in order; the task comes from these)"
-        )
-        sections.append(f"{title}\n{request_text}")
-    assistant_text = "\n".join(assistant_block) if assistant_block else "（无）"
-    edge_text = "\n".join(edge_block) if edge_block else "（无）"
-    user_text = "\n".join(user_block) if user_block else "（无）"
-    sections.append(f"## 助手消息正文（不含 tool call 的 assistant 消息）\n{assistant_text}")
-    sections.append(f"## 各 subagent 首/尾节点（前 5 + 后 5，带 node_id）\n{edge_text}")
-    sections.append(f"## 过程中的用户消息\n{user_text}")
+    """Assemble the user prompt: the summary tree, file candidates, and the lead subject's tail."""
+    english = str(language).strip().lower() == "en"
+    empty = "(none)" if english else "（无）"
+    tree_text = _summary_tree_text(nodes_by_subagent, summary_tree, english) or empty
     if file_candidates:
-        rows = "\n".join(
+        file_text = "\n".join(
             f"- {path} | {node_id} | {tool_type}"
             for path, node_id, tool_type in file_candidates[:_FILE_CANDIDATE_LIMIT]
         )
-        sections.append(f"## 文件产物候选（路径 | 节点ID | 工具类型，按优先级排序）\n{rows}")
-    del node_id_by_index, index_by_node_id
-    return "\n\n".join(sections)
+    else:
+        file_text = empty
+    tail_title, tail_text = _lead_tail_text(nodes_by_subagent, english)
+    tree_title = "## Hierarchical trajectory" if english else "## 分层轨迹"
+    file_title = (
+        "## File artifact candidates (path | node id | tool type, by priority)"
+        if english
+        else "## 文件产物候选（路径 | 节点ID | 工具类型，按优先级排序）"
+    )
+    return "\n\n".join(
+        [f"{tree_title}\n{tree_text}", f"{file_title}\n{file_text}", f"{tail_title}\n{tail_text or empty}"]
+    )
 
 
-def _clock(node: TrajectoryNode) -> str:
-    """`` [HH:MM:SS]`` (UTC) of a node's start, to compare what came first; ``""`` when unknown."""
-    if not node.start_ts_ns:
+def _summary_tree_text(
+    nodes_by_subagent: Mapping[str, list[TrajectoryNode]],
+    summary_tree: SummaryTree | None,
+    english: bool,
+) -> str:
+    """Render agents and turns. One segment stays inside the turn summary."""
+    if summary_tree is None or not summary_tree.turns:
         return ""
-    from datetime import datetime, timezone
+    blocks: list[str] = []
+    for agent_id, turns in summary_tree.turns.items():
+        lines = [_agent_title(agent_id, summary_tree, nodes_by_subagent)]
+        for index, turn in enumerate(turns, start=1):
+            number = turn.turn_number if turn.turn_number is not None else index
+            lines.append(f"  turn {number}")
+            user_inputs = [item for item in turn.inputs if item.kind == "user_input" and item.source == "user"]
+            if user_inputs:
+                lines.append("    User input:" if english else "    用户输入：")
+                sep = ": " if english else "："
+                lines.extend(f"    - {item.node_id}{sep}{item.text}" for item in user_inputs)
+            lines.append("    Turn summary:" if english else "    turn 摘要：")
+            if turn.narrative:
+                lines.append(_indent(turn.narrative, "    "))
+            if len(turn.segments) >= 2:
+                lines.append("    Execution trace:" if english else "    具体执行轨迹：")
+                for seg_index, segment in enumerate(turn.segments, start=1):
+                    head = f"    - segment {seg_index}" + (":" if english else "：")
+                    narrative = segment.narrative or ""
+                    if "\n" not in narrative:
+                        lines.append(f"{head}{narrative}".rstrip())
+                    else:
+                        lines.append(head)
+                        lines.append(_indent(narrative, "      "))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
-    return datetime.fromtimestamp(node.start_ts_ns / 1e9, tz=timezone.utc).strftime(" [%H:%M:%S]")
+
+def _agent_title(
+    agent_id: str,
+    summary_tree: SummaryTree,
+    nodes_by_subagent: Mapping[str, list[TrajectoryNode]],
+) -> str:
+    summary = summary_tree.agent_summaries.get(agent_id)
+    if summary is not None and summary.display_name:
+        return summary.display_name
+    rows = nodes_by_subagent.get(agent_id) or []
+    if rows and rows[0].display_name:
+        return rows[0].display_name
+    return agent_id
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line if line else prefix.rstrip() for line in text.splitlines())
+
+
+def _lead_tail_text(
+    nodes_by_subagent: Mapping[str, list[TrajectoryNode]],
+    english: bool,
+) -> tuple[str, str]:
+    """The last five nodes of the team leader, or of main when the selection has no leader."""
+    chosen: list[TrajectoryNode] | None = None
+    for rows in nodes_by_subagent.values():
+        if any(node.kind == "team_leader" for node in rows):
+            chosen = list(rows)
+            break
+    if chosen is None:
+        for rows in nodes_by_subagent.values():
+            if any(node.kind in {"main", "main_agent"} for node in rows):
+                chosen = list(rows)
+                break
+    bare = "## Subject tail" if english else "## 主体末尾原文"
+    if not chosen:
+        return bare, ""
+    name = chosen[0].display_name or chosen[0].subagent_key
+    title = (
+        f"## Subject tail ({name}, last {_EDGE_NODE_COUNT} nodes)"
+        if english
+        else f"## 主体末尾原文（{name}，最后 {_EDGE_NODE_COUNT} 个节点）"
+    )
+    body = "\n".join(f"{node.node_id}: {_node_line(node, _EDGE_NODE_LIMIT)}" for node in chosen[-_EDGE_NODE_COUNT:])
+    return title, body
 
 
 def _node_line(node: TrajectoryNode, limit: int) -> str:
@@ -743,13 +770,24 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "report_task_description",
             "description": (
-                "汇报总结的任务描述文本（可含多个相关子任务）。 / Report the summarized task "
-                "description (may cover multiple related subtasks)."
+                "汇报当前有效任务的描述。新的独立需求只写最后一条；对同一结果的修改要带上它所依赖的前序需求；"
+                "道谢、确认和闲聊不写。source_node_ids 照抄这些用户输入的 node_id。 / Report the effective task. "
+                "A new independent request uses only its own message; a revision of the same result includes "
+                "the earlier demands it depends on; thanks, confirmations and small talk are left out. "
+                "source_node_ids copies those user-input node ids."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "任务描述文本。 / The task description text."}
+                    "task": {"type": "string", "description": "任务描述文本。 / The task description text."},
+                    "source_node_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "任务描述所依据的用户输入 node_id，按时间顺序照抄。 / User-input node ids the "
+                            "description rests on, copied in time order."
+                        ),
+                    },
                 },
                 "required": ["task"],
             },
@@ -760,8 +798,8 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "report_message_artifacts",
             "description": (
-                "汇报任务消息产物节点（node_id 必须照抄轨迹摘要，不可编造）。 / Report the task "
-                "message artifact nodes (node_ids must be copied from the digest; never fabricate)."
+                "汇报任务消息产物节点（node_id 必须照抄「主体末尾原文」，不可编造）。 / Report the task "
+                "message artifact nodes (node_ids must be copied from the subject tail; never fabricate)."
             ),
             "parameters": {
                 "type": "object",
@@ -805,10 +843,12 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "report_delivery_round",
             "description": (
-                "指出最后一次把任务结果交给用户的那一轮从用户的哪条消息开始（照抄「用户本人发出的消息」的"
-                "node_id）；之后只是道谢、确认或闲聊的消息不算。 / Name the user message that starts the round "
-                "in which the task's result was last delivered (node id copied from the user's own messages); "
-                "later thanks, confirmations or small talk do not count."
+                "指出最后一条真正需求从哪条用户消息开始（照抄分层轨迹里「用户输入」的 node_id）。"
+                "修改同一结果时填修改那一条，不填被它依赖的更早一条；之后的道谢、确认或闲聊不算；"
+                "更早一件已经换掉的任务不算。 / Name the user message that starts the last real demand "
+                "(node id copied from User input). A revision names the revision, not the earlier message "
+                "it depends on; later thanks, confirmations or small talk do not count, nor does an "
+                "earlier task that this demand replaced."
             ),
             "parameters": {
                 "type": "object",
@@ -822,12 +862,13 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "report_requirements",
             "description": (
-                "汇报当前有效的需求清单：把用户所有消息里对结果的要求合并成一份，后面的修改以后面为准，被推翻的"
-                "旧要求不写；确认、回答、闲聊和只关于做法的话不写；用户纠正或抱怨过的点 corrected=true。 / "
-                "Report the current requirement list: every demand on the result from all the user's messages, "
-                "later changes overriding earlier ones (overridden demands left out); confirmations, answers, "
-                "small talk and remarks only about how to work are not demands; mark points the user "
-                "corrected or complained about with corrected=true."
+                "汇报当前有效任务的需求清单：只含最后一条真正需求，加上它修改同一结果时所依赖的前序要求。"
+                "同一件事里后面的修改以后面为准；更早一件已经换掉的任务整段不写；确认、回答、闲聊和只关于做法的话不写；"
+                "用户纠正或抱怨过的点 corrected=true。 / Report the requirement list of the effective task: "
+                "the last real demand, plus earlier demands of the same result that it revises. Within that "
+                "task a later change wins; an earlier task it replaced is left out entirely; confirmations, "
+                "answers, small talk and remarks only about how to work are not demands; mark points the "
+                "user corrected or complained about with corrected=true."
             ),
             "parameters": {
                 "type": "object",
@@ -862,11 +903,11 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "report_user_feedback",
             "description": (
-                "汇报用户本人追加的消息里，表明之前的工作有问题或没满足用户的那些（纠正、抱怨、追问漏掉的"
-                "信息）；新需求、换一种做法、回答、确认都不算；没有就传空列表。 / Report which of the user's "
-                "follow-up messages say the work so far was wrong or fell short (a correction, a complaint, "
-                "asking for something left out); a new request, another way of doing it, an answer or a "
-                "confirmation is not; pass an empty list when there is none."
+                "只在当前有效任务的范围内，汇报表明之前的工作有问题或没满足用户的用户输入（纠正、抱怨、追问漏掉的"
+                "信息）；新的另一件事、换一种做法、回答、确认、道谢都不算；没有就传空列表。 / Inside the effective "
+                "task only, report the user inputs that say the work so far was wrong or fell short (a "
+                "correction, a complaint, asking for something left out); a different task, another way of "
+                "doing it, an answer, a confirmation or thanks is not; pass an empty list when there is none."
             ),
             "parameters": {
                 "type": "object",
@@ -875,8 +916,8 @@ TASK_PARSE_TOOLS: list[dict[str, Any]] = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "这些用户消息的节点 ID（照抄「用户本人发出的消息」）。 / Node ids of those "
-                            "messages, copied from the user's own messages."
+                            "这些用户消息的节点 ID（照抄分层轨迹里的「用户输入」）。 / Node ids of those "
+                            "messages, copied from User input in the hierarchical trajectory."
                         ),
                     }
                 },
@@ -1058,9 +1099,30 @@ class DeliveryRound:
     end_ns: int | None
     whole: Mapping[str, list[TrajectoryNode]]
     workspace: str | None
+    other_turns: frozenset[str] = frozenset()
 
     def holds(self, node: TrajectoryNode) -> bool:
-        return node.start_ts_ns >= self.start.start_ts_ns and (self.end_ns is None or node.start_ts_ns < self.end_ns)
+        """Whether ``node`` was produced for this user message.
+
+        The clock runs from this user message's timestamp to the next one. A
+        context-window commit can stamp the user message after the reply it
+        asked for, so a node of the same runtime turn still belongs here when
+        it started earlier. A node tagged with another user message's turn
+        does not, even when that late commit leaves it inside this clock.
+        Nodes with no turn id keep the clock alone.
+        """
+        if node.turn_id and node.turn_id in self.other_turns:
+            return False
+        if self._on_clock(node):
+            return True
+        if not self.start.turn_id or node.turn_id != self.start.turn_id:
+            return False
+        return self.end_ns is None or node.start_ts_ns < self.end_ns
+
+    def _on_clock(self, node: TrajectoryNode) -> bool:
+        return node.start_ts_ns >= self.start.start_ts_ns and (
+            self.end_ns is None or node.start_ts_ns < self.end_ns
+        )
 
     def delivery_nodes(self, reported: Sequence[str] = ()) -> set[str]:
         """The leader's last step handing the result over in this round, as a one-item set (empty when none).
@@ -1134,22 +1196,55 @@ class DeliveryRound:
         return sum(len(str(node.content)) for node in self.replies()) >= _SHORT_REPLY_CHARS
 
 
+def _task_user_texts(
+    calls: list[dict[str, Any]], user_requests: list[tuple[str, str]], delivery_node_id: str | None
+) -> list[str]:
+    """Verbatim user messages the effective task rests on, in session order.
+
+    The model lists them as ``source_node_ids`` on ``report_task_description``. Ids that are not the
+    user's own messages are dropped. With none left, the single message that starts the delivery round
+    is the task; the other messages in the session are not added back.
+    """
+    by_id = dict(user_requests)
+    order = {node_id: index for index, (node_id, _) in enumerate(user_requests)}
+    description = next((call for call in calls if call.get("name") == "report_task_description"), None)
+    arguments = _arguments(description) if description is not None else None
+    raw_ids = arguments.get("source_node_ids") if isinstance(arguments, Mapping) else None
+    chosen: list[str] = []
+    if isinstance(raw_ids, (list, tuple)):
+        for node_id in raw_ids:
+            node_id = str(node_id)
+            if node_id in by_id and node_id not in chosen:
+                chosen.append(node_id)
+        chosen.sort(key=lambda node_id: order[node_id])
+    if not chosen and delivery_node_id in by_id:
+        chosen = [delivery_node_id]
+    return [by_id[node_id] for node_id in chosen]
+
+
 def delivery_round(
     whole: Mapping[str, list[TrajectoryNode]], workspace: str | None = None, named: str | None = None
 ) -> DeliveryRound | None:
     """The round that last delivered the task's result; ``None`` without any message from the user.
 
     By rule it is the last round that wrote or sent a file, else the last one with a reply of some length
-    (so a closing "thanks" / "you're welcome" is skipped).  The model names the user message that started
-    the delivery (``named``, from task parsing).  It only matters when the rule's round sent no file: a
+    (so a closing "thanks" / "you're welcome" is skipped). The model names the user message that started
+    the delivery (``named``, from task parsing). It only matters when the rule's round sent no file: a
     named earlier round that delivered is then the delivery (a later side question answered at length is
-    not the result).  Otherwise the rule stands: a file sent says where the result was delivered.
+    not the result). Otherwise the rule stands: a file sent says where the result was delivered.
     """
     starts = user_request_nodes(whole)
     if not starts:
         return None
+    turn_ids = [node.turn_id for node in starts]
     rounds = [
-        DeliveryRound(node, starts[index + 1].start_ts_ns if index + 1 < len(starts) else None, whole, workspace)
+        DeliveryRound(
+            node,
+            starts[index + 1].start_ts_ns if index + 1 < len(starts) else None,
+            whole,
+            workspace,
+            frozenset(turn for turn in turn_ids if turn and turn != node.turn_id),
+        )
         for index, node in enumerate(starts)
     ]
     by_rule = next((item for item in reversed(rounds) if item.written()), None) or next(
@@ -1173,6 +1268,7 @@ async def run_task_parse(
     status_sink: Any = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    summary_tree: SummaryTree | None = None,
 ) -> TaskParseResult:
     """Run the file-artifact rules and the task-parse pseudo-agent.
 
@@ -1181,10 +1277,9 @@ async def run_task_parse(
     run with :class:`TaskParseError`.
     """
     whole = getattr(nodes_by_subagent, "whole", None)
-    # deliverables are judged at their final version, so the candidates come from the whole session
-    file_candidates, extraction_stats = extract_file_candidates(whole or nodes_by_subagent, workspace)
+    file_candidates, extraction_stats = extract_file_candidates(nodes_by_subagent, workspace)
     user_requests = user_request_of(nodes_by_subagent)
-    digest = build_task_parse_digest(nodes_by_subagent, file_candidates, language, user_requests)
+    digest = build_task_parse_digest(nodes_by_subagent, file_candidates, language, summary_tree)
     system = system_prompt or load_task_parse_prompt(language)
     counter = status_counter if status_counter is not None else [0]
     attempts = 0
@@ -1274,17 +1369,18 @@ async def run_task_parse(
         named_round = _named_user_message(calls, "report_delivery_round", user_requests)
         reported_messages, reported_files = len(message_artifacts), len(file_artifacts)
         round_start, round_selected = None, None
+        delivery = delivery_round(whole if whole is not None else nodes_by_subagent, workspace, named_round)
+        round_start = delivery.start.node_id if delivery else None
         if whole is None:
             message_artifacts = [m for m in message_artifacts if not _is_team_internal(nodes_by_subagent, m[0])]
         else:
-            delivery = delivery_round(whole, workspace, named_round)
-            round_start = delivery.start.node_id if delivery else None
             round_selected = delivery is not None and delivery.lead_selected(nodes_by_subagent, file_artifacts)
             if round_selected:
                 message_artifacts = delivery.reply()
                 file_artifacts = delivery.files(file_artifacts)
             else:
                 message_artifacts, file_artifacts = [], []
+        task_user_texts = _task_user_texts(calls, user_requests, round_start)
         run_meta = {
             "attempts": attempts,
             "file_candidates": len(file_candidates),
@@ -1292,6 +1388,7 @@ async def run_task_parse(
             "file_artifacts": len(file_artifacts),
             "message_artifacts": len(message_artifacts),
             "user_requests": len(user_requests),
+            "task_sources": len(task_user_texts),
             "reported_messages": reported_messages,
             "reported_files": reported_files,
             "delivery_round": round_start,
@@ -1308,7 +1405,7 @@ async def run_task_parse(
             file_artifacts=file_artifacts,
             file_candidates=list(file_candidates),
             run_meta=run_meta,
-            user_request="\n\n".join(text for _, text in user_requests),
+            user_request="\n\n".join(task_user_texts),
             user_feedback=user_feedback,
             requirements=requirements or [],
             delivery_round=round_start,
