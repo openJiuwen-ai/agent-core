@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Task completion rail with integrated goal lifecycle support.
 
 ``TaskCompletionRail`` unified task-completion strategy Rail.
@@ -28,8 +28,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from openjiuwen.core.foundation.llm.call_scope import llm_observation_scope
+from openjiuwen.extensions.observability.semconv import (
+    OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER, OJ_GOAL_ASSESSMENT_ID, OJ_GOAL_STRATEGY,
+)
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -743,18 +748,13 @@ class TaskCompletionRail(DeepAgentRail):
             self._extract_attempt_context(ctx),
             language,
         )
-        try:
-            response = await model.invoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    UserMessage(content=user_prompt),
-                ],
-                tools=[],
-                temperature=0.0,
-                top_p=1.0,
-            )
-        except TypeError:
-            # Some custom model objects accept invoke() without sampling kwargs.
+        attributes = {
+            OJ_GOAL_ID: record.goal_id,
+            OJ_GOAL_ATTEMPT_NUMBER: record.attempt_count,
+            OJ_GOAL_ASSESSMENT_ID: uuid.uuid4().hex,
+            OJ_GOAL_STRATEGY: self._goal_evaluator.strategy.value if self._goal_evaluator is not None else "hybrid",
+        }
+        with llm_observation_scope("goal_assessment", attributes=attributes):
             try:
                 response = await model.invoke(
                     [
@@ -762,18 +762,30 @@ class TaskCompletionRail(DeepAgentRail):
                         UserMessage(content=user_prompt),
                     ],
                     tools=[],
+                    temperature=0.0,
+                    top_p=1.0,
                 )
+            except TypeError:
+                # Some custom model objects accept invoke() without sampling kwargs.
+                try:
+                    response = await model.invoke(
+                        [
+                            SystemMessage(content=system_prompt),
+                            UserMessage(content=user_prompt),
+                        ],
+                        tools=[],
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GoalLifecycle] Transcript assessor invocation failed"
+                    )
+                    return None
             except Exception:
-                logger.exception(
-                    "[GoalLifecycle] Transcript assessor invocation failed"
-                )
+                logger.exception("[GoalLifecycle] Transcript assessor invocation failed")
                 return None
-        except Exception:
-            logger.exception("[GoalLifecycle] Transcript assessor invocation failed")
-            return None
 
-        content = getattr(response, "content", None)
-        return content if isinstance(content, str) else str(content or "")
+            content = getattr(response, "content", None)
+            return content if isinstance(content, str) else str(content or "")
 
     @staticmethod
     def _resolve_transcript_model(ctx: AgentCallbackContext) -> Optional[Any]:
