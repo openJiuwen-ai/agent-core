@@ -211,6 +211,118 @@ def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir
     assert "未挂载" not in hint
 
 
+def test_embedded_images_hint_switches_guidance_by_native_multimodal(temp_dir):
+    """能力开关分流：原生多模态指路 read_file；关闭分支逐字保留 VQA 文案。"""
+    import zipfile as _zipfile
+
+    file_path = os.path.join(temp_dir, "hint.docx")
+    with _zipfile.ZipFile(file_path, "w") as zf:
+        zf.writestr("word/media/image1.png", b"png")
+        zf.writestr("word/media/image2.png", b"png")
+
+    legacy = filesystem_module._embedded_images_hint(file_path, "word/media/", "Word 文档")
+    assert "visual_question_answering 工具识别" in legacy
+    assert "read_file 读取" not in legacy
+
+    off = filesystem_module._embedded_images_hint(
+        file_path, "word/media/", "Word 文档", native_multimodal=False
+    )
+    assert off == legacy, "NLP 链路（关闭分支）文案必须逐字不变"
+
+    native = filesystem_module._embedded_images_hint(
+        file_path, "word/media/", "Word 文档", native_multimodal=True
+    )
+    assert "read_file 读取提取出的图片文件" in native
+    assert "像素会作为图像内容直接进入你的上下文" in native
+    assert "visual_question_answering" not in native
+
+
+def test_pptx_embedded_images_hint_native_multimodal_switches_guidance(temp_dir):
+    """pptx 分布提示同源分流：开 → read_file；关 → VQA（默认参数保持旧行为）。"""
+    import zipfile as _zipfile
+
+    file_path = os.path.join(temp_dir, "native.pptx")
+    with _zipfile.ZipFile(file_path, "w") as zf:
+        zf.writestr("ppt/media/image1.png", b"png")
+        zf.writestr(
+            "ppt/slides/_rels/slide1.xml.rels",
+            '<Relationship Target="../media/image1.png"/>',
+        )
+
+    native = filesystem_module._pptx_embedded_images_hint(file_path, native_multimodal=True)
+    assert "read_file 读取提取出的图片文件" in native
+    assert "visual_question_answering" not in native
+
+    legacy = filesystem_module._pptx_embedded_images_hint(file_path)
+    assert "visual_question_answering 工具识别" in legacy
+    assert "read_file 读取提取出的图片文件" not in legacy
+
+
+@pytest.mark.asyncio
+async def test_read_file_docx_hint_follows_resolver(sys_op, temp_dir):
+    """端到端：resolver=True 的会话读含图 docx，提示不再推 VQA 而是指路 read_file。"""
+    import zipfile as _zipfile
+    from docx import Document
+
+    file_path = os.path.join(temp_dir, "media.docx")
+    Document().save(file_path)
+    # python-docx 保存不含媒体；向 zip 追加 media 模拟嵌入图片。
+    with _zipfile.ZipFile(file_path, "a") as zf:
+        zf.writestr("word/media/image1.png", b"png")
+
+    native_tool = ReadFileTool(sys_op, image_multimodal_resolver=lambda: True)
+    res = await native_tool.invoke({"file_path": file_path})
+    assert res.success, res.error
+    assert "read_file 读取提取出的图片文件" in res.data["content"]
+    assert "visual_question_answering" not in res.data["content"]
+
+    legacy_tool = ReadFileTool(sys_op, image_multimodal_resolver=lambda: False)
+    res_off = await legacy_tool.invoke({"file_path": file_path})
+    assert res_off.success, res_off.error
+    assert "visual_question_answering 工具识别" in res_off.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_image_hint_follows_resolver(sys_op, temp_dir, monkeypatch):
+    """PDF 嵌入图片提示同源分流：resolver 决定指路 read_file 还是 VQA。"""
+    import openjiuwen.harness.tools.filesystem as fs_mod
+
+    file_path = os.path.join(temp_dir, "img.pdf")
+    with open(file_path, "wb") as fh:
+        fh.write(b"%PDF-1.4 fake content\n")
+
+    class _PageWithImage:
+        def __init__(self):
+            # pdfplumber 页对象契约：images 非空即该页有嵌入图片。
+            self.images = [{"x0": 0}]
+
+        def extract_text(self):
+            return "page text"
+
+    class _FakePdf:
+        def __init__(self):
+            self.pages = [_PageWithImage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(fs_mod.pdfplumber, "open", lambda *_a, **_kw: _FakePdf())
+
+    native_tool = ReadFileTool(sys_op, image_multimodal_resolver=lambda: True)
+    res = await native_tool.invoke({"file_path": file_path})
+    assert res.success, res.error
+    assert "read_file 读取提取出的图片文件" in res.data["content"]
+    assert "visual_question_answering" not in res.data["content"]
+
+    legacy_tool = ReadFileTool(sys_op, image_multimodal_resolver=lambda: False)
+    res_off = await legacy_tool.invoke({"file_path": file_path})
+    assert res_off.success, res_off.error
+    assert "visual_question_answering 工具识别" in res_off.data["content"]
+
+
 @pytest.mark.asyncio
 async def test_read_file_image_compresses_large_image_within_budget(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
