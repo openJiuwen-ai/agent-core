@@ -50,3 +50,46 @@ async def test_executor_forwards_browser_capabilities_to_subagent_creation() -> 
     )
     subagent.prepare_task_resources.assert_awaited_once()
     subagent.cleanup_task_resources.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_executor_resolves_browser_type_variant_before_forwarding_capabilities() -> None:
+    task_manager = MagicMock()
+    task_manager.get_task = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                metadata={
+                    "subagent_type": "browser\u2011agent",
+                    "task_description": "save the page",
+                    "sub_session_id": "browser-session",
+                    "browser_capabilities": ["pdf"],
+                }
+            )
+        ]
+    )
+    subagent = MagicMock()
+    subagent.invoke = AsyncMock(return_value={"output": "done"})
+    subagent.prepare_task_resources = AsyncMock()
+    subagent.cleanup_task_resources = AsyncMock()
+    deep_agent = MagicMock()
+    deep_agent.create_subagent.return_value = subagent
+    deep_agent._find_subagent_spec.return_value = SimpleNamespace(
+        agent_card=SimpleNamespace(name="browser_agent")
+    )
+    dependencies = SimpleNamespace(
+        config=MagicMock(),
+        ability_manager=MagicMock(),
+        context_engine=MagicMock(),
+        task_manager=task_manager,
+        event_queue=MagicMock(),
+    )
+    executor = SessionSpawnExecutor(dependencies, deep_agent)
+
+    chunks = [chunk async for chunk in executor.execute_ability("task-1", MagicMock())]
+
+    assert len(chunks) == 1
+    deep_agent.create_subagent.assert_called_once_with(
+        "browser_agent",
+        "browser-session",
+        browser_capabilities=["pdf"],
+    )

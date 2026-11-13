@@ -62,6 +62,7 @@ from openjiuwen.harness.subagent_runtime.status_events import (
     resolve_turn_outcome,
 )
 from openjiuwen.harness.subagent_runtime.transcript_events import TranscriptEmitter
+from openjiuwen.harness.subagent_type import resolve_subagent_type_name
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
 
@@ -159,6 +160,7 @@ class SubagentControl:
         role: str | None = None,
         browser_capabilities: list[str] | None = None,
     ) -> SpawnResult:
+        subagent_type = resolve_subagent_type_name(self._parent_agent, subagent_type)
         sticky = is_sticky_subagent_type(subagent_type)
         sid = subagent_id or build_subagent_id(
             self._parent_session_id,
@@ -1012,6 +1014,7 @@ class SubagentControl:
         )
 
     def _lookup_subagent_config(self, subagent_type: str) -> Any | None:
+        subagent_type = resolve_subagent_type_name(self._parent_agent, subagent_type)
         deep_config = getattr(self._parent_agent, "deep_config", None)
         subagents = getattr(deep_config, "subagents", None) or []
         for spec in subagents:
