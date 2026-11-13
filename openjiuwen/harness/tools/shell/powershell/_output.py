@@ -171,7 +171,6 @@ def _merge(first: str, second: str) -> str:
 class CommandOutput:
     """Bundled command execution result and rendering configuration."""
 
-    command: str
     stdout: str
     stderr: str
     exit_code: int
@@ -185,11 +184,11 @@ def render_tool_content(
 ) -> tuple[str, bool]:
     """Render command output into the model-facing (content, is_error) standard.
 
-    Mirrors the bash_v2 post-processing without depending on the anyshell engine:
-    stdout and stderr are merged (the error path surfaces the merged stream after
-    an ``Exit code N`` header), oversized output is persisted to disk and shown as
-    a ``<persisted-output>`` preview, and any destructive-command warning is
-    prepended so it stays visible to the model.
+    The content has ``Stdout:``, ``Stderr:`` and ``Exit Code:`` sections (an
+    empty stream shows as ``(empty)``). Oversized output is persisted to disk and
+    shown as a ``<persisted-output>`` preview of the merged streams in the
+    ``Stdout:`` section, and any destructive-command warning is prepended so it
+    stays visible to the model.
 
     Args:
         output: Bundled command result and rendering configuration.
@@ -209,8 +208,9 @@ def render_tool_content(
         stdout = _LEADING_BLANK_LINES.sub("", output.stdout).rstrip() if output.stdout else "(empty)"
         stderr = output.stderr.rstrip() if output.stderr else "(empty)"
 
+    # The command is not echoed: the model's own tool call, directly before this
+    # result, already holds it, and echoing it doubles every long command in context.
     content = (
-        f"Command: {output.command}\n"
         f"Stdout: {stdout}\n\n"
         f"Stderr: {stderr}\n"
         f"Exit Code: {output.exit_code}"
