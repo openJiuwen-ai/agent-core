@@ -2,10 +2,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import getpass
 import heapq
 import hashlib
 import os
 import pathlib
+import re
+import stat
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -60,11 +63,53 @@ class ReadWriteLockManager:
         return cls.ensure_lock_dir() / f"{digest}.db"
 
     @classmethod
+    def _lock_dir_name(cls) -> str:
+        """Return the per-user directory name for the lock databases."""
+        base = "openjiuwen-fs-rwlocks"
+        # The effective uid owns what this process creates, so it names and checks the directory.
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None:
+            return f"{base}-{geteuid()}"
+        # Windows has no geteuid; fall back to the login name, sanitized for path use.
+        # getuser() raises where neither the environment nor the password database
+        # names an account. Every fs().read_file() derives this directory, so an
+        # exception here would stop all file access; one shared name is what this
+        # module used before the per-user suffix.
+        try:
+            user = getpass.getuser()
+        except (ImportError, KeyError, OSError):
+            user = ""
+        return f"{base}-{re.sub(r'[^A-Za-z0-9_.-]', '_', user or 'unknown')}"
+
+    @classmethod
     def ensure_lock_dir(cls) -> pathlib.Path:
-        """Create or reuse the machine-local directory for lock databases."""
+        """Create or reuse the machine-local directory for lock databases.
+
+        Raises:
+            PermissionError: the path is a symlink, not a directory, or owned by another effective uid.
+        """
         if cls._lock_dir is None:
-            cls._lock_dir = pathlib.Path(tempfile.gettempdir()) / "openjiuwen-fs-rwlocks"
-        cls._lock_dir.mkdir(parents=True, exist_ok=True)
+            cls._lock_dir = pathlib.Path(tempfile.gettempdir()) / cls._lock_dir_name()
+        cls._lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The name is predictable, so another account can create it first. Refuse a
+        # symlink or a directory this uid does not own: following it would put our
+        # lock databases, and the chmod below, wherever that account chose.
+        st = os.lstat(cls._lock_dir)
+        geteuid = getattr(os, "geteuid", None)
+        if not stat.S_ISDIR(st.st_mode) or (geteuid is not None and st.st_uid != geteuid()):
+            raise PermissionError(
+                f"refusing the read-write lock directory {cls._lock_dir}: it must be a real "
+                f"directory owned by the current user; remove it so it can be recreated"
+            )
+        # Owner-only: the databases are per-user now, and /tmp is world-readable.
+        try:
+            cls._lock_dir.chmod(0o700)
+        except OSError as exc:
+            sys_operation_logger.warning(
+                "Failed to restrict the read-write lock directory, lock_dir=%s, error=%s",
+                cls._lock_dir,
+                exc,
+            )
         return cls._lock_dir
 
     @classmethod
