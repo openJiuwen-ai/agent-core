@@ -319,6 +319,8 @@ class ReActAgentConfig(BaseModel):
     )
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
+    on_max_iterations: str = "error"
+    max_iterations_hard_limit: int | None = Field(default=None, gt=0)
 
     llm_return_token_ids: bool = Field(
         default=False,
@@ -3059,7 +3061,11 @@ class ReActAgent(BaseAgent):
                     _truncation_retry_count = 0
                     _truncation_persist_count = 0
                     _empty_response_retry_count = 0
-                    for iteration in range(start_iteration, self._config.max_iterations):
+                    iteration_limit = min(
+                        self._config.max_iterations,
+                        self._config.max_iterations_hard_limit or self._config.max_iterations,
+                    )
+                    for iteration in range(start_iteration, iteration_limit):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
                         ctx.extra["_react_iteration"] = iteration + 1
 
@@ -3414,7 +3420,12 @@ class ReActAgent(BaseAgent):
                                 "output": "Max iterations reached without completion",
                                 "result_type": "error",
                                 "finish_reason": "max_iterations",
+                                "termination_reason": "max_iterations",
+                                "iterations_used": int(ctx.extra.get("_react_iteration", 0)),
+                                "truncated_by_max_iterations": True,
                             }
+                            if self._config.on_max_iterations == "return_observations":
+                                result["observations"] = self._iteration_observations_from_context(context)
                             invoke_inputs.result = result
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
@@ -3789,6 +3800,27 @@ class ReActAgent(BaseAgent):
                 AssistantMessage(content=marker)
             )
         return kept
+
+    @staticmethod
+    def _iteration_observations_from_context(context: ModelContext) -> list[dict[str, Any]]:
+        """Recover persisted evidence from the current user turn, including HITL resumes."""
+        observations: list[dict[str, Any]] = []
+        tool_names: dict[str, str] = {}
+        for message in context.get_messages():
+            if isinstance(message, UserMessage):
+                metadata = message.metadata or {}
+                source = metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA)
+                if source in (None, "query"):
+                    observations.clear()
+                    tool_names.clear()
+            elif isinstance(message, AssistantMessage):
+                tool_names.update({call.id: call.name for call in message.tool_calls or []})
+            elif isinstance(message, ToolMessage):
+                observation = message.model_dump(mode="json")
+                observation["name"] = observation.get("name") or tool_names.get(message.tool_call_id)
+                observations.append(observation)
+        return observations
+
 
 
 __all__ = [

@@ -204,6 +204,9 @@ include = ["openjiuwen*"]
 
 [tool.setuptools.package-data]
 openjiuwen = [
+    "rsi/**/*.yaml",
+    "rsi/**/*.md",
+    "rsi/**/*.template",
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
     "**/auto_harness/resources/*.yaml",
