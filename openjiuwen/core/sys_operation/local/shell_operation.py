@@ -313,6 +313,15 @@ class ShellOperation(BaseShellOperation):
                 if _PS_VARIABLE_PATTERN.search(command):
                     exe = _available_powershell()
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+                # Multiline commands (e.g. `python -c "..."` with literal
+                # newlines) cannot be executed by cmd.exe — it silently drops
+                # everything after the first newline, producing empty output
+                # with exit code 0 (Issue T2).  Route to Git Bash instead,
+                # which handles multiline scripts correctly.
+                if "\n" in command:
+                    exe = _available_bash(allow_wsl=False)
+                    if exe:
+                        return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
@@ -518,10 +527,16 @@ class ShellOperation(BaseShellOperation):
                 if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
+            # Resolve the execution plan upfront so we can pick the correct
+            # output encoding per shell type (bash/sh → UTF-8, cmd/PowerShell
+            # → system code page).  Without this, ripgrep output (UTF-8) was
+            # decoded as GBK on Chinese Windows, yielding garbled or empty
+            # results — the root cause of the "grep tool is broken" bug (T1).
+            _args, _use_shell, resolved_shell = self._resolve_execution_plan(command, shell_type_enum)
             proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
             track_sid = _track_shell_process(proc)
 
-            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
+            encoding = (options or {}).get("encoding", self._resolve_shell_encoding(resolved_shell))
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
             try:
                 invoke_data = await process_handler.invoke()
@@ -665,13 +680,14 @@ class ShellOperation(BaseShellOperation):
                 if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
+            _args, _use_shell, resolved_shell = self._resolve_execution_plan(command, shell_type_enum)
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, stream=True,
             )
             track_sid = _track_shell_process(process)
 
             chunk_size = (options or {}).get("chunk_size", 1024)
-            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
+            encoding = (options or {}).get("encoding", self._resolve_shell_encoding(resolved_shell))
             process_handler = OperationUtils.create_handler(process=process, chunk_size=chunk_size, encoding=encoding,
                                                             timeout=timeout)
 
@@ -1031,6 +1047,22 @@ class ShellOperation(BaseShellOperation):
             return encoding if encoding else "utf-8"
         except Exception:
             return "utf-8"
+
+    @staticmethod
+    def _resolve_shell_encoding(resolved_shell: str) -> str:
+        """Choose subprocess output encoding based on the resolved shell type.
+
+        On Windows:
+        - bash / sh (e.g. Git Bash / MSYS2) emit UTF-8 by default.
+        - cmd uses the system code page (typically CP936/GBK on Chinese Windows).
+        - PowerShell also uses the system code page by default; safest to use
+          the system code page and rely on ``errors='replace'`` for edge cases.
+
+        On non-Windows, always use the system preferred encoding (typically UTF-8).
+        """
+        if os.name == "nt" and resolved_shell in ("bash", "sh"):
+            return "utf-8"
+        return ShellOperation._detect_shell_encoding()
 
     @staticmethod
     def _get_lang_encoding(encoding: str) -> str:
