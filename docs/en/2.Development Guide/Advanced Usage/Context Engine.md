@@ -146,6 +146,58 @@ async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
 - ContextEngine is created and held by the Agent, and it is not recommended to create a global instance separately in workflow components or externally.
 - `create_context` and `save_contexts` are called uniformly at the Agent's `invoke` entry point to ensure session isolation and lifecycle consistency.
 
+### Runnable Example: Using ContextEngine Standalone
+
+The example above is illustrative: it depends on an Agent base class and a Controller, so it cannot be run as written. The following minimal example runs on its own (no LLM call) and shows the full lifecycle of a session, an `AgentCard`, and a `ContextEngine`:
+
+```python
+import asyncio
+
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+async def main():
+    # 1. Create a session with an AgentCard
+    card = AgentCard(id="context_demo", name="context_demo",
+                     description="Context Engine demo")
+    session = create_agent_session(session_id="demo-session", card=card)
+    await session.pre_run(inputs={"query": "hello"})
+
+    # 2. Create a ContextEngine and establish a context for this session
+    engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+    context = await engine.create_context(
+        "demo_ctx", session,
+        history_messages=[UserMessage(content="Hi"),
+                          AssistantMessage(content="Hello! How can I help?")],
+    )
+    print("messages in context:", len(context.get_messages()))
+
+    # 3. Append a message
+    await context.add_messages(UserMessage(content="Tell me a joke"))
+    print("after add:", len(context.get_messages()))
+
+    # 4. Persist the context and finish the session
+    await engine.save_contexts(session)
+    await session.post_run()
+    print("done")
+
+
+asyncio.run(main())
+```
+
+Expected output (checkpointer INFO logs are also printed while it runs):
+
+```text
+messages in context: 2
+after add: 3
+done
+```
+
+> **Note**: A session created with `create_agent_session` needs a `card` (an `AgentCard`). If there is neither an agent config nor a `card`, `pre_run` fails with `AttributeError: 'NoneType' object has no attribute 'id'` because the agent id cannot be resolved.
+
 ## Workflow Using Context
 
 Workflow execution occurs **inside the Agent's invoke**, scheduled by Controller (e.g., WorkflowController, LLMController). The `ModelContext` used by Workflow is created by **the Agent's context_engine** and passed through `Runner.run_workflow`, rather than being created by Workflow components themselves.
