@@ -811,37 +811,6 @@ class SubmitExperienceEvolutionTool(_AttributionTool):
         return self.ok({"status": status})
 
 
-class SubmitTrajectorySummaryTool(_AttributionTool):
-    """提交这段轨迹的叙事摘要（收口必交）。"""
-
-    tool_name = "submit_trajectory_summary"
-    tool_id = "SubmitTrajectorySummaryTool"
-    description = (
-        "提交这段轨迹的叙事摘要：发生了什么、存在哪些问题（含未标记规则信号的归因结论）。一段话即可，"
-        "控制在 300 字以内，不要包含具体节点 id（如 main:0）；覆盖式；收口必交。/ Submit this "
-        "trajectory's narrative summary: what happened and what problems exist (including conclusions "
-        "for unmarked rule signals). One paragraph; keep it within 300 characters; do not include "
-        "concrete node ids (e.g. main:0); overwrites; required before finishing."
-    )
-    input_schema = _schema(
-        {
-            "summary": _text_prop(
-                "轨迹摘要（一段话，≤300 字，不含节点 id）",
-                "Trajectory summary (one paragraph, ≤300 chars, no node ids)",
-            )
-        },
-        ["summary"],
-    )
-
-    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
-        del kwargs
-        summary = str(inputs.get("summary") or "").strip()
-        if not summary:
-            return self.fail("summary must be a non-empty string")
-        status = self._runtime.record_trajectory_summary(summary)
-        return self.ok({"status": status})
-
-
 class CheckAttributionCompleteTool(_AttributionTool):
     """校验归因是否收口；结束前必须调用并收到 all_done=true。"""
 
@@ -849,12 +818,11 @@ class CheckAttributionCompleteTool(_AttributionTool):
     tool_id = "CheckAttributionCompleteTool"
     description = (
         "校验归因是否收口：reward 信号已归因或标无效；被标 skill/experience 的信号已提交对应归因；"
-        "每个被标 skill 有全局建议、被标 experience 有经验判定；轨迹摘要已提交。返回 all_done，false "
+        "每个被标 skill 有全局建议、被标 experience 有经验判定。返回 all_done，false "
         "时附未完成分组；宣布结束前必须调用并收到 all_done=true。/ Verify attribution closure: "
         "reward signals attributed or invalidated; marked skill/experience signals have their cause; "
-        "every marked skill has global advice and marked experience has a verdict; the trajectory "
-        "summary is submitted. Returns all_done, with pending groups when false; must be called and "
-        "return all_done=true before finishing."
+        "every marked skill has global advice and marked experience has a verdict. Returns all_done, "
+        "with pending groups when false; must be called and return all_done=true before finishing."
     )
     input_schema = _schema({}, [])
 
@@ -869,12 +837,55 @@ class CheckAttributionCompleteTool(_AttributionTool):
         return self.ok(state)
 
 
+class ViewSummaryTool(_AttributionTool):
+    """Read one scope of the precomputed hierarchical summary."""
+
+    tool_name = "view_summary"
+    tool_id = "ViewSummaryTool"
+    description = (
+        "读取分层轨迹摘要。先按 agent_id 获取主体范围与 Turn 索引，再按 agent_id -> turn_id -> "
+        "segment_id 读取上下文；读取 Segment 后可用 view_partial_trajectory 按首尾节点展开原文。"
+        "空参数返回摘要概览；ID 必须照抄摘要输出。/ Read the hierarchical trajectory summary. "
+        "Use agent_id for the agent range and turn index, then agent_id -> turn_id -> segment_id; "
+        "after a segment, read the original span with view_partial_trajectory. Empty arguments return "
+        "the overview; copy ids verbatim."
+    )
+    input_schema = _schema(
+        {
+            "agent_id": _text_prop(
+                "主体 ID；单独使用返回 AgentSummary 与 Turn 索引，ID 照抄摘要",
+                "Agent id; alone returns the AgentSummary and turn index, copy the id verbatim",
+            ),
+            "turn_id": _text_prop(
+                "Turn ID；必须与 agent_id 同传，ID 照抄摘要",
+                "Turn id; requires agent_id, copy the id verbatim",
+            ),
+            "segment_id": _text_prop(
+                "Segment ID；必须与 agent_id、turn_id 同传，ID 照抄摘要",
+                "Segment id; requires agent_id and turn_id, copy the id verbatim",
+            ),
+        },
+        [],
+    )
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        del kwargs
+        return self.ok(
+            self._runtime.view_summary(
+                agent_id=str(inputs.get("agent_id") or ""),
+                turn_id=str(inputs.get("turn_id") or ""),
+                segment_id=str(inputs.get("segment_id") or ""),
+            )
+        )
+
+
 _TOOLS: list[type[_AttributionTool]] = [
     KeywordRegTool,
     ViewTrajectoryTool,
     ViewPartialTrajectoryTool,
     ViewNodeDetailTool,
     ViewNodeFieldTool,
+    ViewSummaryTool,
     SubmitRewardFailureTool,
     SubmitSkillEvolutionCauseTool,
     SubmitExperienceCauseTool,
@@ -883,7 +894,6 @@ _TOOLS: list[type[_AttributionTool]] = [
     SubmitSkillEvolutionTool,
     SubmitExperienceEvolutionTool,
     SubmitArtifactImprovementTool,
-    SubmitTrajectorySummaryTool,
     CheckAttributionCompleteTool,
 ]
 
@@ -891,21 +901,6 @@ _TOOLS: list[type[_AttributionTool]] = [
 def build_attribution_tools(runtime: AttributionAgentRuntime, signals: list[DiagnosticSignal]) -> list[Tool]:
     """Instantiate the attribution tools bound to one run's runtime."""
     return [tool_cls(runtime, list(signals)) for tool_cls in _TOOLS]
-
-
-_SUMMARY_TOOLS: list[type[_AttributionTool]] = [
-    KeywordRegTool,
-    ViewTrajectoryTool,
-    ViewPartialTrajectoryTool,
-    ViewNodeDetailTool,
-    ViewNodeFieldTool,
-    SubmitTrajectorySummaryTool,
-]
-
-
-def build_summary_tools(runtime: AttributionAgentRuntime) -> list[Tool]:
-    """Instantiate the read + summary tools for a summary-only run."""
-    return [tool_cls(runtime, []) for tool_cls in _SUMMARY_TOOLS]
 
 
 def render_trajectory_view(nodes: list[TrajectoryNode], language: str) -> dict[str, Any]:
@@ -937,7 +932,6 @@ def render_partial_view(
 
 __all__ = [
     "build_attribution_tools",
-    "build_summary_tools",
     "render_partial_view",
     "render_trajectory_view",
     "same_subagent",
