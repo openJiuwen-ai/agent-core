@@ -2,6 +2,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
+import inspect
 from typing import Annotated, List, Literal, Optional, Tuple
 import pytest
 from pydantic import Field, BaseModel
@@ -386,3 +387,157 @@ class TestToolDecorator:
         self.assertEqual(len(items_any_of), 2)
         self.assertEqual(items_any_of[0], {"type": "integer"})
         self.assertEqual(items_any_of[1], {"type": "integer"})
+
+
+class TestLocalFunctionPublicIdentity:
+    """issue #2495: @tool 装饰对象应暴露公开的工具名与直接调用入口"""
+
+    def test_name_reflects_card_name(self):
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.name == "greet"
+        # 与 ToolCard 保持一致（ToolCard.name 才是注册用的名字）
+        assert greet.name == greet.card.name
+
+    def test_name_reflects_explicit_override(self):
+        @tool(name="greeter")
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.name == "greeter"
+
+    def test_func_is_the_decorated_function(self):
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        assert greet.func is not None
+        assert greet.func("world") == "hello, world"
+        # 与被装饰的原始函数同名，而不是内部包装器
+        assert greet.func.__name__ == "greet"
+
+    def test_func_bypasses_var_positional_wrapper(self):
+        """声明了 *args 时 _func 是内部包装器，func 必须仍是原函数"""
+
+        @tool
+        def total(base: int, *rest: int) -> int:
+            """Sum a base with the remaining numbers."""
+            return base + sum(rest)
+
+        # 原函数签名保持不变，可以直接按 Python 语义调用
+        assert str(__import__("inspect").signature(total.func)) == "(base: int, *rest: int) -> int"
+        assert total.func(1, 2, 3) == 6
+
+    @pytest.mark.asyncio
+    async def test_invoke_path_is_unchanged(self):
+        """新增 name / func 只是读属性，invoke 的 schema 校验与回调不受影响"""
+
+        @tool
+        def add(a: int, b: int) -> int:
+            """Add two integers."""
+            return a + b
+
+        assert await add.invoke({"a": 2, "b": 3}) == 5
+        # 非法入参仍应被 schema 拦下，不会绕过去
+        with pytest.raises(Exception):
+            await add.invoke({"a": "not-an-int", "b": 3})
+
+    def test_name_does_not_live_on_tool_base(self):
+        """name 只挂在 LocalFunction 上，不能做成 Tool 基类的 property。
+
+        ``MockTool``（`tests/unit_tests/core/session/tracer/test_decorator.py:87`）
+        这类子类一直在构造里 ``self.name = ...``；若基类提供只读 property，
+        这一行会抛 ``AttributeError: property 'name' has no setter``。加 setter
+        同样不行 —— 那会写穿到 ``card.name``，而 tracer 用 ``tool.card.name``
+        作为上报的 ``class_name``（见 ``test_decorate_tool`` 的断言），
+        name 会被一并改掉。
+        """
+        from openjiuwen.core.foundation.tool.base import Tool
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction
+
+        assert inspect.getattr_static(Tool, "name", None) is None
+        assert isinstance(inspect.getattr_static(LocalFunction, "name"), property)
+
+    def test_a_subclass_may_still_assign_its_own_name(self):
+        """回归：MockTool 式的 ``self.name = ...`` 必须继续可用"""
+        from openjiuwen.core.foundation.tool.base import Tool
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        class _NamedTool(Tool):
+            def __init__(self, card):
+                super().__init__(card)
+                self.name = "mock tool"
+
+            async def invoke(self, inputs, **kwargs):
+                return {}
+
+            async def stream(self, inputs, **kwargs):
+                pass
+
+            def get_tool_info(self) -> ToolInfo:
+                pass
+
+        t = _NamedTool(ToolCard(name="test_tool", description="test tool"))
+        assert t.name == "mock tool"
+        # card 不被写穿
+        assert t.card.name == "test_tool"
+
+    def test_name_follows_a_card_rename(self):
+        """name 是 card.name 的实时视图，不是构造时拍下的快照"""
+
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        greet.card.name = "greeter"
+        assert greet.name == "greeter"
+
+    def test_name_is_read_only_on_local_function(self):
+        """LocalFunction 上的 name 只读：改名必须走 card，否则两处会不一致"""
+
+        @tool
+        def greet(name: str) -> str:
+            """Greet someone by name."""
+            return f"hello, {name}"
+
+        with pytest.raises(AttributeError):
+            greet.name = "other"
+
+    def test_the_other_tool_implementations_are_unaffected(self):
+        """MCPTool / RestfulApi 不是 LocalFunction，本次改动不碰它们。
+
+        issue #2495 报的是 ``@tool`` 装饰的对象，所以 name 只落在
+        LocalFunction 上。其他工具实现维持原状 —— 这正是把属性放在
+        LocalFunction 而不是 Tool 基类上的另一个理由：基类上多一个
+        只读属性，对这些类的所有子类都是潜在的行为变化。
+        """
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction
+        from openjiuwen.core.foundation.tool.mcp.base import MCPTool
+        from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi
+
+        for cls in (MCPTool, RestfulApi):
+            assert not issubclass(cls, LocalFunction)
+            # 没有从本次改动继承到任何 name 属性
+            assert inspect.getattr_static(cls, "name", None) is None
+
+    def test_subclass_of_local_function_keeps_name(self):
+        """LocalFunction 自己的子类（如 symphony 的 _DirectoryFunction）继承 name"""
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction
+
+        class _MyFunc(LocalFunction):
+            pass
+
+        def body(x: int) -> int:
+            """Double it."""
+            return x * 2
+
+        f = _MyFunc(card=ToolCard(name="doubler", description="d"), func=body)
+        assert isinstance(f, LocalFunction)
+        assert f.name == "doubler"
+        assert f.func is body
