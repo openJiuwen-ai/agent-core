@@ -2,15 +2,16 @@
 
 """Memory Index Manager - Core memory management for JiuWenClaw."""
 
-import os
-import json
-import sqlite3
-import struct
 import asyncio
 import contextlib
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any, Set, TYPE_CHECKING
+import json
+import os
+import sqlite3
+import struct
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+
 from openjiuwen.core.common.logging import memory_logger as logger
 
 
@@ -634,7 +635,17 @@ class MemoryIndexManager:
             return False
         if not row or not row["sql"]:
             return False
-        return "tokenize=trigram" not in row["sql"].lower()
+        # Compare against a normalized schema: _ensure_schema writes
+        # tokenize='trigram' (quoted), so a bare substring check for
+        # "tokenize=trigram" never matches the table this same code creates —
+        # every process start re-detected the table as legacy, dropped it, and
+        # (once meta ftsTrigram=true suppressed the migration reindex) left the
+        # FTS index permanently empty. Strip quotes and all whitespace
+        # (spaces, tabs, newlines) before comparing so quoted and unquoted
+        # forms are equivalent regardless of formatting.
+        sql = "".join(row["sql"].split())
+        sql = sql.replace("'", "").replace('"', "").lower()
+        return "tokenize=trigram" not in sql
 
     async def _initialize_provider(self) -> None:
         """Initialize embedding provider."""
