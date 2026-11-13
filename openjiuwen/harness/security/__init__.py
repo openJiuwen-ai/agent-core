@@ -28,6 +28,10 @@ from openjiuwen.harness.security.permission_engine.host import (
     RequestPermissionConfirmationHook,
     ToolPermissionHost,
 )
+from openjiuwen.harness.security.permission_engine.prompt_texts import (
+    ENGLISH_PERMISSION_PROMPT_TEXTS,
+    PermissionPromptTexts,
+)
 from openjiuwen.harness.security.permission_engine.models import (
     ApprovalOverrideEntry,
     PermissionConfirmResponse,
@@ -49,6 +53,7 @@ from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers im
 )
 
 __all__ = [
+    "ENGLISH_PERMISSION_PROMPT_TEXTS",
     "get_package_builtin_rules_path",
     "inline_package_command_rules",
     "load_package_command_rules",
@@ -63,6 +68,7 @@ __all__ = [
     "PermissionEngine",
     "ApprovalOverrideEntry",
     "PermissionLevel",
+    "PermissionPromptTexts",
     "PermissionResult",
     "PermissionsSection",
     "ToolPermissionHost",
