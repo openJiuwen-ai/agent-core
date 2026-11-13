@@ -2,16 +2,20 @@
 #  -*- coding: UTF-8 -*-
 #  Copyright c) Huawei Technologies Co. Ltd. 2025-2025
 
+import json
+
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import (
+    STATUS_TO_EXCEPTION,
+    BaseError,
+    ToolError,
+    _format_template,
     build_error,
     raise_error,
-    STATUS_TO_EXCEPTION,
-    _format_template,
-    BaseError,
 )
+from openjiuwen.core.common.schema.card import BaseCard
 
 
 def test_build_error_returns_instance():
@@ -44,3 +48,26 @@ def test_format_template_missing_key_safe():
     rendered = _format_template(tmpl, params=None)
     assert isinstance(rendered, str)
     assert "<missing:" in rendered
+
+
+def test_tool_error_merges_card_into_existing_details():
+    card = BaseCard(name="demo")
+    e = ToolError(StatusCode.TOOL_EXECUTION_ERROR, details={"tool": "xyz"}, card=card)
+    assert e.details["tool"] == "xyz"
+    assert e.details["card"] == card.model_dump()
+    assert e.card() == card
+
+
+def test_tool_error_json_output_is_serializable():
+    card = BaseCard(name="demo")
+    e = ToolError(StatusCode.TOOL_EXECUTION_ERROR, details={"tool": "xyz"}, card=card)
+    payload = json.loads(e.to_json())
+    assert payload["details"]["tool"] == "xyz"
+    assert payload["details"]["card"]["name"] == "demo"
+    assert payload["params"]["card"]["name"] == "demo"
+
+
+def test_tool_error_without_card_keeps_details():
+    e = ToolError(StatusCode.TOOL_EXECUTION_ERROR, details={"tool": "xyz"})
+    assert e.details == {"tool": "xyz"}
+    assert e.card() is None
