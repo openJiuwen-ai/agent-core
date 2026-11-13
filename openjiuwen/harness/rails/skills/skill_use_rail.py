@@ -19,6 +19,7 @@ from openjiuwen.harness.prompts.sections.skills import (
     build_skill_line,
     build_skill_lines,
     build_skills_section,
+    resolve_skill_directory,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -541,7 +542,7 @@ class SkillUseRail(DeepAgentRail):
                         skill_name=skill.name,
                         description=skill.description,
                         language=self.system_prompt_builder.language,
-                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                        skill_directory=self._skill_directory(skill),
                     )
                 )
             return build_skills_section(
@@ -800,6 +801,8 @@ class SkillUseRail(DeepAgentRail):
 
         if not additions and not removals and not evolution_skills:
             return ""
+        # The baseline header that explains `Directory:` never reaches a later addition.
+        has_directory = any(self._skill_directory(skill) for skill in additions)
 
         if is_english:
             lines = [
@@ -807,12 +810,18 @@ class SkillUseRail(DeepAgentRail):
             ]
             if additions:
                 lines.append("Newly available skills:")
+                if has_directory:
+                    lines.append(
+                        "The `Directory:` line under each skill is its absolute directory. "
+                        "Join the relative paths in its `SKILL.md` onto it."
+                    )
                 lines.extend(
                     build_skill_line(
                         index=index,
                         skill_name=skill.name,
                         description=skill.description,
                         language=self.system_prompt_builder.language,
+                        skill_directory=self._skill_directory(skill),
                     )
                     for index, skill in enumerate(additions)
                 )
@@ -829,12 +838,18 @@ class SkillUseRail(DeepAgentRail):
         lines = ["Skill 环境状态更新。请根据当前任务需要，按需调用相关 Skill。"]
         if additions:
             lines.append("新增可用 Skill：")
+            if has_directory:
+                lines.append(
+                    "每个 Skill 下方的 `Directory:` 是其目录的绝对路径。"
+                    "将其 `SKILL.md` 中的相对路径拼接到该路径之后。"
+                )
             lines.extend(
                 build_skill_line(
                     index=index,
                     skill_name=skill.name,
                     description=skill.description,
                     language=self.system_prompt_builder.language,
+                    skill_directory=self._skill_directory(skill),
                 )
                 for index, skill in enumerate(additions)
             )
@@ -859,7 +874,7 @@ class SkillUseRail(DeepAgentRail):
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
                     language=self.system_prompt_builder.language,
-                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                    skill_directory=self._skill_directory(skill),
                 )
             )
 
@@ -1002,9 +1017,14 @@ class SkillUseRail(DeepAgentRail):
         return str(description).strip()
 
     @staticmethod
-    def _skill_md_path(skill: Skill) -> Path:
-        """Return SKILL.md path for a skill."""
-        return skill.directory / "SKILL.md"
+    def _skill_directory(skill: Skill) -> str:
+        """Return the absolute directory a skill and its bundled files live in.
+
+        Empty when the skill carries no directory to render; see
+        ``resolve_skill_directory``, which the skill_tool result text renders
+        through as well so the field has one normalization rather than two.
+        """
+        return resolve_skill_directory(skill.directory)
 
     @staticmethod
     def _parse_skill_dirs(raw: str) -> List[str]:
