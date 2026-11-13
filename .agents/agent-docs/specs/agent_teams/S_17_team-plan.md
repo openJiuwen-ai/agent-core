@@ -18,7 +18,7 @@ author_email: weichenhao3@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `schema/blueprint.py`、`runtime/team_plan.py`、`harness.py`、`tools/team_tools.py`、`tools/task_manager.py`、`schema/events.py` |
-| 最近一次修订日期 | 2026-06-03 |
+| 最近一次修订日期 | 2026-11-09 |
 | 关联 feature | `F_21_team-plan.md` |
 
 ## 范围 / 边界
@@ -131,7 +131,7 @@ Team-level plan 的顺序必须是：
 4. 生成或清洗 `plan_id`。
 5. 拒绝重复 `plan_id`。
 6. 解析并校验 `plan_path` 指向真实文件。
-7. 如果任务仍是 `PENDING`，先 claim 到当前 member。
+7. 如果任务仍是 `PENDING`，按 `assignee` 分流：未分配时 `claim_task` 到当前 member；已分配给当前 member 时（预派、改派或依赖解除后的待开工态）走 `TaskDao.start_task`，正常预派进入 `PLANNING`，`resume_pending` 的父任务直接恢复 `IN_PROGRESS`。`claim_task` 的 CAS 只接受 `assignee IS NULL`，不能用于已分配任务。
 8. 将 Markdown 复制到受管快照路径。
 9. 更新 `plans/index.json`。
 10. 发布 `TaskPlanRequestEvent`。
