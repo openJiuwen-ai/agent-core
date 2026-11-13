@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import runner_logger
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
@@ -337,9 +337,9 @@ class ContextProcessorRail(DeepAgentRail):
             f"{name}={processor_config.__class__.__module__}.{processor_config.__class__.__qualname__}"
             for name, processor_config in all_processors
         )
-        logger.info("context processors initialized: %s", processor_paths)
+        runner_logger.info("context processors initialized: %s", processor_paths)
         for name, processor_config in all_processors:
-            logger.info(
+            runner_logger.info(
                 "processor effective config: %s %s",
                 name,
                 self._summarize_processor_config(processor_config),
@@ -362,12 +362,12 @@ class ContextProcessorRail(DeepAgentRail):
         recall_requested = isinstance(recall_config, CompressionRecallConfig) and recall_config.enabled
         self._recall_enabled = recall_requested and supported_compressor_present
         if isinstance(recall_config, CompressionRecallConfig):
-            logger.info(
+            runner_logger.info(
                 "compression recall effective config: %s",
                 self._summarize_processor_config(recall_config),
             )
         if recall_requested and not supported_compressor_present:
-            logger.warning("compression recall is enabled but no supported forked compressor is configured")
+            runner_logger.warning("compression recall is enabled but no supported forked compressor is configured")
         if self._recall_enabled:
             self._protect_compression_recall_tool_results(all_processors)
             self._register_compression_recall_tool(agent)
@@ -394,7 +394,7 @@ class ContextProcessorRail(DeepAgentRail):
         if self._session_memory_mgr is None:
             self._session_memory_mgr = SessionMemoryManager(memory_cfg)
         self._session_memory_mgr.bind_model_defaults(model_config, model_client_config)
-        logger.info(
+        runner_logger.info(
             "SessionMemoryManager enabled: async session memory updates active, config: %s",
             self._summarize_processor_config(memory_cfg),
         )
@@ -526,7 +526,7 @@ class ContextProcessorRail(DeepAgentRail):
                 continue
             # Clear first so a caller-level retry / next invoke starts clean.
             session.update_state({state_key: 0})
-            logger.warning(
+            runner_logger.warning(
                 "[ContextProcessorRail] %s: compaction_count=%d >= threshold=%d; aborting run",
                 marker,
                 count,
