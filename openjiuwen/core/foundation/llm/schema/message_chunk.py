@@ -129,6 +129,39 @@ def merge_pydantic_models(left: Any, right: Any) -> Any:
         return right
 
 
+def _find_tool_call_merge_index(
+        merged_tool_calls: list[ToolCall],
+        incoming: ToolCall,
+) -> int | None:
+    """Find the accumulated tool call that owns an incoming stream fragment."""
+    if incoming.id:
+        for position, existing in enumerate(merged_tool_calls):
+            if existing.id == incoming.id:
+                return position
+
+        # A provider may attach the ID after the first fragment. In that case,
+        # only use the stream index to complete an existing call without an ID;
+        # a different non-empty ID represents a new call even if its index was
+        # reused by the provider.
+        if incoming.index is not None:
+            for position, existing in enumerate(merged_tool_calls):
+                if existing.index == incoming.index and not existing.id:
+                    return position
+        elif merged_tool_calls and not merged_tool_calls[-1].id:
+            return len(merged_tool_calls) - 1
+        return None
+
+    if incoming.index is not None:
+        for position, existing in enumerate(merged_tool_calls):
+            if existing.index == incoming.index:
+                return position
+        return None
+
+    # Some compatible providers omit both ID and index from continuation
+    # fragments. Preserve the existing single-call fallback in that case.
+    return len(merged_tool_calls) - 1 if merged_tool_calls else None
+
+
 class BaseMessageChunk(BaseMessage):
     model_config = ConfigDict(arbitrary_types_allowed=True, json_encoders={type(None): lambda _: None})
 
@@ -172,22 +205,29 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     arguments=tc.arguments,
                     index=tc.index,
                     response_item_id=tc.response_item_id,
+                    extra_content=tc.extra_content,
                 ))
 
         if other.tool_calls:
             for incoming in other.tool_calls:
-                if merged_tool_calls:
-                    last = merged_tool_calls[-1]
-                    same_id = (last.id and incoming.id and last.id == incoming.id) or (not last.id or not incoming.id)
-                    if (same_id and hasattr(last, 'type') and last.type == 'function'
-                            and hasattr(incoming, 'type') and incoming.type == 'function'):
-                        merged_tool_calls[-1] = ToolCall(
-                            id=last.id or incoming.id,
-                            type=last.type or incoming.type,
-                            name=(last.name if last.name else incoming.name) or "",
-                            arguments=(last.arguments or "") + (incoming.arguments or ""),
-                            index=last.index,
-                            response_item_id=last.response_item_id or incoming.response_item_id,
+                merge_index = _find_tool_call_merge_index(merged_tool_calls, incoming)
+                if merge_index is not None:
+                    existing = merged_tool_calls[merge_index]
+                    if existing.type == 'function' and incoming.type == 'function':
+                        merged_tool_calls[merge_index] = ToolCall(
+                            id=existing.id or incoming.id,
+                            type=existing.type or incoming.type,
+                            name=(existing.name if existing.name else incoming.name) or "",
+                            arguments=(existing.arguments or "") + (incoming.arguments or ""),
+                            index=existing.index if existing.index is not None else incoming.index,
+                            response_item_id=existing.response_item_id or incoming.response_item_id,
+                            # Provider metadata is opaque: keep the latest value
+                            # when present instead of merging its nested fields.
+                            extra_content=(
+                                incoming.extra_content
+                                if incoming.extra_content is not None
+                                else existing.extra_content
+                            ),
                         )
                         continue
                 # otherwise, push as a new tool_call
@@ -198,6 +238,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     arguments=incoming.arguments,
                     index=len(merged_tool_calls),
                     response_item_id=incoming.response_item_id,
+                    extra_content=incoming.extra_content,
                 ))
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
