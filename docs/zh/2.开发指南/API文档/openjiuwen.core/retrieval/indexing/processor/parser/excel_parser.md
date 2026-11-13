@@ -37,6 +37,7 @@ parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
 
 * 支持的文件扩展名：`.xlsx`, `.XLSX`, `.csv`, `.CSV`, `.tsv`, `.TSV`
 * 每个 sheet 第一行视为表头；每行生成一个 row 文档，每列生成一个 column 文档
+* 空表头或仅含空白的表头使用 `Column N`（从 1 开始的列号），对应单元格的值在行文档和列文档中都会保留
 * metadata 中包含 `sheet_name`、`source_type`（"row" 或 "column"）等
 
 ### supports

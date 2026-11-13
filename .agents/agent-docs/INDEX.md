@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: 待遇安然风
+author_email: 206432729@qq.com
 generated: true
 ---
 
@@ -23,18 +23,19 @@ generated: true
 | [core/context_engine](#module-6) |
 | [core/controller](#module-7) |
 | [core/foundation/llm](#module-8) |
-| [core/runner/drunner/dmessage_queue](#module-9) |
-| [core/session](#module-10) |
-| [core/sys_operation](#module-11) |
-| [extensions/a2a](#module-12) |
-| [extensions/observability](#module-13) |
-| [harness](#module-14) |
-| [harness/subagents](#module-15) |
-| [harness/tools/browser_move](#module-16) |
-| [harness/tools/browser_move/decision](#module-17) |
-| [harness/tools/subagent](#module-18) |
-| [harness_providers](#module-19) |
-| [未分类](#module-20) |
+| [core/retrieval](#module-9) |
+| [core/runner/drunner/dmessage_queue](#module-10) |
+| [core/session](#module-11) |
+| [core/sys_operation](#module-12) |
+| [extensions/a2a](#module-13) |
+| [extensions/observability](#module-14) |
+| [harness](#module-15) |
+| [harness/subagents](#module-16) |
+| [harness/tools/browser_move](#module-17) |
+| [harness/tools/browser_move/decision](#module-18) |
+| [harness/tools/subagent](#module-19) |
+| [harness_providers](#module-20) |
+| [未分类](#module-21) |
 
 <a id="module-1"></a>
 
@@ -339,16 +340,15 @@ generated: true
 
 <a id="module-9"></a>
 
-## core/runner/drunner/dmessage_queue
+## core/retrieval
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
-| [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
-| [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+| [B_20261113_1747_excel-blank-header-values](bugfix/retrieval/B_20261113_1747_excel-blank-header-values.md) | B | Preserve tabular row values under blank headers | 待遇安然风 | openjiuwen/core/retrieval | openjiuwen/core/retrieval/indexing/processor/parser/excel_parser.py, tests/unit_tests/core/retrieval/indexing/processor/parser/test_excel_parser.py | 无独立 D：Local correction of the existing empty-header fallback contract; no independent design or public API change. |
 
 <a id="module-10"></a>
 
-## core/session
+## core/runner/drunner/dmessage_queue
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
@@ -357,6 +357,15 @@ generated: true
 
 <a id="module-11"></a>
 
+## core/session
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
+| [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-12"></a>
+
 ## core/sys_operation
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
@@ -364,7 +373,7 @@ generated: true
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | core/sys_operation, harness | openjiuwen/core/sys_operation/execution_environment.py, openjiuwen/core/single_agent/ability_manager.py, openjiuwen/harness/schema/build_context.py, openjiuwen/core/sys_operation/local/shell_operation.py, openjiuwen/core/sys_operation/sandbox/shell_operation.py | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | agent_teams, core/sys_operation | openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/core/sys_operation/execution_environment.py, openjiuwen/core/sys_operation/sandbox/providers/base_provider.py, openjiuwen/core/sys_operation/sandbox/code_operation.py, openjiuwen/core/sys_operation/local/code_operation.py | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 
-<a id="module-12"></a>
+<a id="module-13"></a>
 
 ## extensions/a2a
 
@@ -373,7 +382,7 @@ generated: true
 | [B_20261103_1050_grandocean-review-feedback](bugfix/core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 | [S_01_runtime-data-compatibility](specs/core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
 
-<a id="module-13"></a>
+<a id="module-14"></a>
 
 ## extensions/observability
 
@@ -386,7 +395,7 @@ generated: true
 | [F_20261112_1120_goal-assessment-isolation](features/F_20261112_1120_goal-assessment-isolation.md) | F | Goal 评估调用的观测隔离实施 | alan_cheng | core/foundation/llm, extensions/observability, harness, agent_evolving/trajectory | openjiuwen/core/foundation/llm/call_scope.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/extensions/observability/semconv.py, openjiuwen/extensions/observability/trajectory_events.py, openjiuwen/harness/rails/task_completion_rail.py, openjiuwen/harness/observability/rail.py, openjiuwen/agent_evolving/trajectory/messages.py, openjiuwen/agent_evolving/trajectory/spans.py | [D-20261112-1120-goal-assessment-isolation](designs/active/D-20261112-1120-goal-assessment-isolation/design.md) |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
-<a id="module-14"></a>
+<a id="module-15"></a>
 
 ## harness
 
@@ -467,7 +476,7 @@ generated: true
 | [S_18_subagents-and-lifecycle](specs/harness/S_18_subagents-and-lifecycle.md) | S | S_18 SubAgent 预设与生命周期 | yangzequ | openjiuwen/harness | — | — |
 | [S_19_harness-providers](specs/harness/S_19_harness-providers.md) | S | S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂） | alan_cheng | openjiuwen/harness | — | — |
 
-<a id="module-15"></a>
+<a id="module-16"></a>
 
 ## harness/subagents
 
@@ -476,7 +485,7 @@ generated: true
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-16"></a>
+<a id="module-17"></a>
 
 ## harness/tools/browser_move
 
@@ -484,7 +493,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-17"></a>
+<a id="module-18"></a>
 
 ## harness/tools/browser_move/decision
 
@@ -492,7 +501,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-18"></a>
+<a id="module-19"></a>
 
 ## harness/tools/subagent
 
@@ -500,7 +509,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-19"></a>
+<a id="module-20"></a>
 
 ## harness_providers
 
@@ -508,7 +517,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | agent_teams, harness_providers | — | — |
 
-<a id="module-20"></a>
+<a id="module-21"></a>
 
 ## 未分类
 
