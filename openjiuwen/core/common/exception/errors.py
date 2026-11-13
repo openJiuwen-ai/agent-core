@@ -7,10 +7,10 @@ import json
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
-    Optional,
     Any,
     Dict,
     Mapping,
+    Optional,
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -235,7 +235,7 @@ class ToolError(ExecutionError):
             self._card = deepcopy(card)
             if details is None:
                 details = {}
-            details = details.update({"card": self._card})
+            details = {**details, "card": self._card}
         else:
             self._card = None
         super().__init__(status=status, msg=msg, details=details, cause=cause, card=card, **kwargs)
