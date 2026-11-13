@@ -106,7 +106,8 @@ class TTSEConfig:
         detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
         detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
         dream_enabled: Run periodic Auto-dream bank hygiene.
-        dream_interval: Non-follow-up task iterations between dream attempts.
+        dream_interval: Non-follow-up task iterations required after a completed
+            dream. Once reached, skipped attempts retain eligibility.
         dream_min_hours: Min hours since last successful dream.
         dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
         dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates
@@ -171,7 +172,7 @@ class TTSEConfig:
     )
     # Auto-dream (bank hygiene)
     dream_enabled: bool = True
-    dream_interval: int = 20
+    dream_interval: int = 50
     dream_min_hours: float = 24.0
     dream_min_rules: int = 8
     dream_soft_lo: float = 0.72
