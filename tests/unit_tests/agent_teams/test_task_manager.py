@@ -1837,3 +1837,37 @@ def test_dispatch_mode_is_exposed_read_only(db, message_bus):
     )
 
     assert manager.dispatch_mode == "scheduled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_open_tasks_counts_only_non_terminal_tasks(task_manager):
+    assert not await task_manager.has_open_tasks()
+
+    await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="done", content="c", task_id="done"),
+            TaskGraphSpec(title="dropped", content="c", task_id="dropped"),
+        ]
+    )
+    assert await task_manager.has_open_tasks()
+
+    assert await task_manager.claim("done")
+    assert (await task_manager.complete("done")).ok
+    assert await task_manager.cancel("dropped") is not None
+    assert not await task_manager.has_open_tasks()
+
+    await task_manager.add_graph([TaskGraphSpec(title="review", content="c", task_id="review")])
+    assert await task_manager.claim("review")
+    assert await task_manager.db.task.update_task_status("review", TaskStatus.IN_REVIEW.value)
+    assert await task_manager.has_open_tasks()
+    assert await task_manager.board_counts() == (3, 1)
+
+    assert await task_manager.db.task.update_task_status("review", TaskStatus.COMPLETED.value)
+    await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="next", content="c", task_id="next", depends_on=("later",)),
+            TaskGraphSpec(title="later", content="c", task_id="later"),
+        ]
+    )
+    assert await task_manager.has_open_tasks()

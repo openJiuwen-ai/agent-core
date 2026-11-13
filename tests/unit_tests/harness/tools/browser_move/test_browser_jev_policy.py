@@ -79,12 +79,18 @@ def setup_policy(mode="hybrid", *, goal="点击销量排序", deadline=None, ses
     page = BrowserPageState(page_id="page-a")
     page.register_interactives({"url": "https://example.test/", "title": "Search", "elements": [{
         "selector_hint": "#sales", "selector_hint_validated": True, "match_count": 1,
-        "role": "button", "accessible_name": "销量", "text": "销量", "visible": True,
+        "role": "button", "kind": "sort", "accessible_name": "销量", "text": "销量", "visible": True,
         "enabled": True, "actionable": True, "clickable": True,
         "decision_state": {"tag": "button", "node_guard": {"document": "doc-a", "node": 1}},
     }]})
     runtime = SimpleNamespace(
         ensure_page_state=lambda: page,
+        registered_playwright_tool_names=lambda: {
+            "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_tabs",
+            "browser_hover", "browser_evaluate", "browser_run_code_unsafe",
+        },
+        resolve_playwright_tool=AsyncMock(),
+        resolve_playwright_run_code_tool=AsyncMock(),
         probe_interactives=AsyncMock(return_value={"ok": True, "url": page.url}),
         call_playwright_run_code_unsafe=AsyncMock(return_value={"result": {"ok": True}}),
         unwrap_mcp_text_result=lambda value: value,

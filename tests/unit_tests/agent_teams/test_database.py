@@ -319,6 +319,59 @@ class TestTeamDatabaseInit:
             engine.dispose()
 
     @pytest.mark.level1
+    def test_task_migration_adds_subtask_columns_idempotently(self):
+        """A pre-F_128 task table gains ``parent_task_id`` / ``created_by``; old rows read as top-level."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_presubtask (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        review_round INTEGER NOT NULL DEFAULT 0,
+                        max_review_rounds INTEGER,
+                        summary TEXT,
+                        note TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_presubtask (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'pending')"
+                )
+
+                _ensure_dynamic_table_indexes(conn, ["team_task_presubtask"], {"team_task_presubtask"})
+                _ensure_dynamic_table_indexes(conn, ["team_task_presubtask"], {"team_task_presubtask"})
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_presubtask")}
+                row = (
+                    conn.exec_driver_sql(
+                        "SELECT parent_task_id, created_by, resume_pending, revision, observed_revision, "
+                        "parent_revision, change_notes FROM team_task_presubtask"
+                    )
+                    .mappings()
+                    .one()
+                )
+
+            assert {"parent_task_id", "created_by", "resume_pending"} <= columns
+            # F_129: task versioning columns, zero for old rows ("unedited, seen").
+            assert {"revision", "observed_revision", "parent_revision", "change_notes"} <= columns
+            versions = (row["revision"], row["observed_revision"], row["parent_revision"], row["change_notes"])
+            assert versions == (0, 0, 0, None)
+            assert row["parent_task_id"] is None
+            assert row["created_by"] is None
+            assert not row["resume_pending"]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
     def test_team_info_migration_adds_capability_columns(self):
         """A pre-F_62 team_info table gains dispatch_mode / enable_task_verification."""
         from openjiuwen.agent_teams.tools.database.engine import _ensure_team_info_capability_columns
@@ -3317,7 +3370,9 @@ class TestRuntimeCleanup:
                 "pending",
             )
 
+            await database.session_settings.initialize("cleanup_session_a", {"enabled": True})
             deleted_tables, cleared_tables = await database.cleanup_all_runtime_state()
+            assert await database.session_settings.get("cleanup_session_a") is None
 
             suffix_a = _sanitize_session_id_for_table("cleanup_session_a")
             suffix_b = _sanitize_session_id_for_table("cleanup_session_b")
@@ -3329,7 +3384,7 @@ class TestRuntimeCleanup:
             assert f"team_message_{suffix_b}" in deleted_tables
             assert f"message_read_status_{suffix_a}" in deleted_tables
             assert f"message_read_status_{suffix_b}" in deleted_tables
-            assert cleared_tables == ["team_info", "team_member"]
+            assert cleared_tables == ["team_session_settings", "team_info", "team_member"]
 
             async with database.engine.begin() as conn:
                 table_names = await conn.run_sync(
@@ -3342,7 +3397,7 @@ class TestRuntimeCleanup:
                     await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
                 ).scalar_one()
 
-            assert sorted(table_names) == ["team_info", "team_member"]
+            assert sorted(table_names) == ["team_info", "team_member", "team_session_settings"]
             assert team_count == 0
             assert member_count == 0
         finally:

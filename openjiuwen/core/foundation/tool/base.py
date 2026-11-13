@@ -13,6 +13,7 @@ from pydantic import PrivateAttr
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.tool.execution import ToolExecution
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo, ToolOutput
 
@@ -85,6 +86,14 @@ class ToolCard(BaseCard):
         description=(
             "Whether the tool is exposed directly to the model or deferred "
             "until it is discovered by tool_search."
+        ),
+    )
+    execution: ToolExecution = Field(
+        default=ToolExecution.SERVER,
+        description=(
+            "Who executes calls to this tool. 'client' means the connected client "
+            "runs it: the agent pauses the call with a client_tool interrupt instead "
+            "of calling invoke, and the client's answer becomes the tool result."
         ),
     )
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
@@ -239,6 +248,30 @@ class Tool(metaclass=_ToolMeta):
     def is_parallel_safe(self) -> bool:
         """Return whether this tool may run concurrently with sibling tool calls."""
         return bool(getattr(self.card, "parallel_safe", True))
+
+    # An override hook: subclasses with an internal deadline (Bash) read their
+    # own inputs, and callers dispatch it on the instance.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
+    def get_call_timeout(
+            self,
+            inputs: dict[str, Any],
+            *,
+            default_timeout: float,
+    ) -> float:
+        """Return the outer invocation budget for these inputs.
+
+        Tools with an internal execution deadline may override this to allow
+        their execution budget plus bounded cleanup time. The default keeps
+        the card-level timeout policy unchanged.
+
+        Args:
+            inputs: Parsed arguments for this invocation.
+            default_timeout: Budget resolved from the tool card or runtime default.
+
+        Returns:
+            Outer invocation timeout in seconds.
+        """
+        return default_timeout
 
     # An override hook: subclasses render from their own state, and callers
     # dispatch it on the instance.

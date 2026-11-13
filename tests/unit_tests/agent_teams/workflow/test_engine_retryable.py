@@ -15,6 +15,8 @@ Default errors keep the existing retry/feedback behaviour untouched.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
@@ -117,6 +119,51 @@ async def test_attempt_calls_retries_default_backend_error():
     assert out.succeeded is False
     assert out.attempts == 3
     assert out.error_detail == "try 3"
+
+
+class _OkAgentResult:
+    """Minimal backend success: no schema, no tokens."""
+
+    skipped = False
+    text = "ok"
+    structured = None
+    tokens = None
+    cache_tokens = None
+    input_tokens = None
+    output_tokens = None
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_human_turn_is_exempt_from_outer_timeout():
+    """A human turn's ``timeout`` option is the person-wait limit by contract,
+    not the attempt limit: the outer wrap would bill the person's answer time
+    to the classify/format segment and turn a slow reply into a retryable
+    failure that re-asks the person (the repeated-popup root cause)."""
+    async def slow_call(feedback=None):
+        await asyncio.sleep(0.15)
+        return _OkAgentResult()
+
+    out = await _p._attempt_calls(
+        _rt(), {"label": "h", "timeout": 0.05}, None, None, slow_call, is_human=True,
+    )
+    assert out.succeeded is True
+    assert out.result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_timeout_log_carries_injected_reason():
+    """py3.11 bare ``TimeoutError`` str is empty; the attempt log must print
+    the injected ``last_err`` text so the failure reason is diagnosable."""
+    async def make_call(feedback=None):
+        raise TimeoutError()
+
+    rt = _rt()
+    logged: list[str] = []
+    rt.log_sink = logged.append
+    out = await _p._attempt_calls(rt, {"label": "t", "timeout": 5}, None, None, make_call)
+    assert out.succeeded is False
+    assert out.error_detail == "timed out after 5s"
+    assert any("timed out after 5s" in line for line in logged)
 
 
 # ---------------------------------------------------------------------------

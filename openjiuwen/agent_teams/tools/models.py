@@ -3,7 +3,7 @@
 
 """Team SQLModel definitions and dynamic model factories.
 
-Static tables: Team, TeamMember.
+Static tables: Team, TeamMember, TeamSessionSettings.
 Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage,
 MessageReadStatus, TeamTaskReviewVote.
 Configuration: DatabaseType, DatabaseConfig.
@@ -28,12 +28,23 @@ TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_review_vote_",
 )
 TEAM_STATIC_TABLES_TO_CLEAR = (
+    "team_session_settings",
     "team_info",
     "team_member",
 )
 
 
 # ----------------- Static Table Models -----------------
+
+
+class TeamSessionSettings(SQLModel, table=True):
+    """Host-owned execution settings keyed by the shared team session id."""
+
+    __tablename__ = "team_session_settings"
+
+    session_id: str = Field(primary_key=True)
+    settings_json: str = Field(default="{}")
+    version: int = Field(default=0)
 
 
 class Team(SQLModel, table=True):
@@ -96,7 +107,8 @@ class TeamMember(SQLModel, table=True):
             "worktree: {isolation, path}, permissions_override: {bash: deny, ...}}"
         ),
     )
-    # Set on roster mutations only (create_member).  Status / execution
+    # Set on roster mutations only (create_member, and a model-group member's
+    # routed model changing — the leader's roster shows it).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
@@ -161,6 +173,31 @@ class TeamTaskBase(SQLModel):
     # members, reviewers and the leader (``view_task``) can read it; events
     # never carry it. Since F_119 it is the full detail behind ``summary``.
     note: Optional[str] = Field(default=None, nullable=True)
+    # Member subtasks (F_128): the task its creator was executing when it
+    # split the work. NULL marks a top-level (leader-created) task. Written
+    # by the tool from the caller's active task, never by the model. No
+    # index: children lookups scan small boards, and every INSERT would pay
+    # for one.
+    parent_task_id: Optional[str] = Field(default=None, nullable=True)
+    # Member that created the task (F_128). Audit / display only — no
+    # permission or routing decision reads it. NULL means the leader.
+    created_by: Optional[str] = Field(default=None, nullable=True)
+    # Set when the owner parks this task to wait on its subtasks (F_128);
+    # consumed by the next start (which resumes instead of beginning) and
+    # cleared by reassign / reset, after which a start is a fresh one.
+    resume_pending: bool = Field(default=False, nullable=False)
+    # Task versioning (F_129). ``revision`` bumps on every title / content
+    # edit; ``observed_revision`` is the revision the current assignee was
+    # actually shown (advanced only where the framework hands it the
+    # content); ``parent_revision`` is the parent's revision a subtask was
+    # derived from. A difference is the standing "not yet seen" / "stale"
+    # signal — no separate notification flag exists.
+    revision: int = Field(default=0, nullable=False)
+    observed_revision: int = Field(default=0, nullable=False)
+    parent_revision: int = Field(default=0, nullable=False)
+    # Edit notes (F_129 / D8): JSON list of ``{"revision", "note", "by"}``,
+    # appended with the revision bump they describe. Kept as audit history.
+    change_notes: Optional[str] = Field(default=None, nullable=True)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:

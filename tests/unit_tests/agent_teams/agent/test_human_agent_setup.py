@@ -284,3 +284,27 @@ def test_human_agent_never_attaches_tool_approval_rail() -> None:
 
     rails = list(avatar.harness.inner_agent._pending_rails)
     assert not any(isinstance(r, TeamToolApprovalRail) for r in rails)
+
+
+@pytest.mark.level1
+def test_a_member_runtime_and_its_rail_share_the_task_notice_tracker() -> None:
+    """F_129: the configurator hands one tracker to the harness and to every rebuilt policy rail."""
+    avatar = _build_human_agent_runtime()
+    tracker = avatar._configurator._resources.task_event_tracker
+    rails = list(avatar.harness.inner_agent._pending_rails)
+    policy = next(r for r in rails if isinstance(r, TeamPolicyRail))
+
+    assert tracker is not None
+    assert avatar.harness._task_event_tracker is tracker
+    assert policy._outcome_tracker is tracker
+
+
+@pytest.mark.level1
+def test_the_leader_gets_no_task_notice_tracker() -> None:
+    leader = _human_agent_team_spec().build()
+    rails = list(leader.harness.inner_agent._pending_rails)
+    policy = next(r for r in rails if isinstance(r, TeamPolicyRail))
+
+    assert leader._configurator._resources.task_event_tracker is None
+    assert leader.harness._task_event_tracker is None
+    assert policy._outcome_tracker is None

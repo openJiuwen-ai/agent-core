@@ -35,6 +35,8 @@ from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperati
 from openjiuwen.harness.schema.build_context import (
     PARENT_SYS_OPERATION_EXTRAS_KEY,
     BuildContext,
+)
+from openjiuwen.harness.schema.build_context import (
     extension_bus as get_extension_bus,
 )
 from openjiuwen.harness.schema.config import (
@@ -330,10 +332,7 @@ class BuiltinToolSpec(BaseModel):
         ensure_builtin_elements_registered()
         factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
         if factory is None:
-            raise ValueError(
-                f"Unknown tool type '{self.type}'. "
-                f"Registered types: {list(_TOOL_PROVIDER_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown tool type '{self.type}'. Registered types: {list(_TOOL_PROVIDER_REGISTRY)}")
         if context is None:
             context = BuildContext(language=language)
         return factory(dict(self.params), context)
@@ -514,7 +513,7 @@ class DeepAgentSpec(BaseModel):
         if not self.tools:
             return None
         resolved: list = []
-        for item in self.tools:
+        for item in self.tools or []:
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{tool_id_prefix}.{item.type}" if tool_id_prefix else None
                 resolved.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
@@ -600,6 +599,7 @@ class DeepAgentSpec(BaseModel):
             llm_model,
             card=self.card,
             extension_bus=get_extension_bus(build_ctx),
+            tool_owner_id=build_ctx.tool_owner_id,
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
@@ -652,6 +652,8 @@ class DeepAgentSpec(BaseModel):
         parts = self.resolve_parts(context)
         agent = DeepAgent(parts.config.card)
         apply_deep_agent_parts(agent, parts)
+        if context is not None:
+            agent.ability_manager.execution_environment_resolver = context.resolve_execution_environment
         return agent
 
     def _progressive_tool_kwargs(self) -> dict[str, Any]:

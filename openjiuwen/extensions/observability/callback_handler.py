@@ -106,6 +106,10 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
+    OJ_GOAL_ID,
+    OJ_GOAL_ATTEMPT_NUMBER,
+    OJ_GOAL_ASSESSMENT_ID,
+    OJ_GOAL_STRATEGY,
     OJ_REQUEST_ID,
     OJ_REQUEST_MESSAGE_COUNT,
     OJ_REQUEST_NUMBER,
@@ -165,6 +169,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.call_scope import (
+    current_llm_observation_context,
     expects_unified_llm_completion,
     get_current_llm_call_id,
     is_llm_observation_suppressed,
@@ -1052,11 +1057,11 @@ class OtelCallbackHandler:
         self._record_standard_structured_input(span, messages)
 
         span.set_attribute(OJ_REQUEST_NUMBER, self._next_request_number())
-        request_purpose = kwargs.get("request_purpose")
-        if request_purpose not in ("assistant", "compaction"):
+        observation = current_llm_observation_context()
+        request_purpose = observation.purpose if observation is not None else kwargs.get("request_purpose")
+        if request_purpose not in ("assistant", "compaction", "goal_assessment"):
             request_purpose = "assistant"
-        if request_purpose in ("assistant", "compaction"):
-            span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
+        span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
 
         # The message count is a display fact, kept on the agent span that
         # owns this call as well as on the call itself.
@@ -1074,6 +1079,8 @@ class OtelCallbackHandler:
             span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
 
         self._propagate_session_context(span, include_additive=True)
+        if observation is not None:
+            span.set_attributes(observation.attributes)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
         session_id = str(
             span.attributes.get(GEN_AI_CONVERSATION_ID)
@@ -2136,6 +2143,8 @@ class OtelCallbackHandler:
                     OJ_RUN_ID,
                     OJ_TURN_ID,
                     OJ_TURN_NUMBER,
+                    OJ_GOAL_ID,
+                    OJ_GOAL_ATTEMPT_NUMBER,
                     OJ_EXECUTION_SUBJECT_ID,
                     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
                     OJ_EXECUTION_SUBJECT_KIND,
@@ -2192,6 +2201,11 @@ class OtelCallbackHandler:
             OJ_STEP_ID,
             OJ_STEP_NUMBER,
             OJ_REQUEST_NUMBER,
+            OJ_REQUEST_PURPOSE,
+            OJ_GOAL_ID,
+            OJ_GOAL_ATTEMPT_NUMBER,
+            OJ_GOAL_ASSESSMENT_ID,
+            OJ_GOAL_STRATEGY,
         ):
             value = source.attributes.get(key)
             if value is not None:

@@ -39,7 +39,6 @@ from openjiuwen.agent_teams.tools.team_tools import (
     ListMembersTool,
     SendMessageTool,
     ShutdownMemberTool,
-    SpawnExternalCliTool,
     SpawnHumanAgentTool,
     SpawnTeammateTool,
     TaskCreateTool,
@@ -51,6 +50,14 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness_protocol import HarnessCapability, HarnessCard, ModelChoice
 from openjiuwen.harness_providers import register_harness_provider, unregister_harness_provider
+
+
+@pytest.fixture
+def sdk_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registration tests independent of optional external CLI SDKs."""
+    from openjiuwen.agent_teams.external.cli_agent import backends
+
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
 
 
 @pytest.fixture
@@ -551,63 +558,50 @@ class TestSpawnTools:
         assert result.data["role_type"] == "human_agent"
         assert await team.is_human_agent("alice") is True
 
-    # ----- spawn_external_cli -----
+    # ----- spawn_teammate on an external CLI -----
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_external_cli_requires_cli_agent(self, agent_team, t):
-        """An empty cli_agent is rejected at the tool layer."""
-        tool = SpawnExternalCliTool(agent_team, t)
-        result = await tool.invoke(
-            {"member_name": "cli-1", "display_name": "CLI One", "desc": "external cli worker", "cli_agent": ""}
-        )
-        assert result.success is False
-        assert "cli_agent" in (result.error or "")
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_external_cli_undeclared_fails(self, agent_team, t):
-        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
-        tool = SpawnExternalCliTool(agent_team, t)
-        result = await tool.invoke(
-            {
-                "member_name": "cli-2",
-                "display_name": "CLI Two",
-                "prompt": "worker",
-                "cli_agent": "claude",
-                "fallback_model_name": "claude-fallback",
-            }
-        )
-        assert result.success is False
-        assert "not declared" in (result.error or "")
+    async def test_external_cli_gated_off_without_declared_kinds(self, agent_team, t):
+        """No declared CLI kind: cli_agent / external_cli are absent, and smuggled ones are rejected unwritten."""
+        tool = SpawnTeammateTool(agent_team, t)
+        props = tool.card.input_params["properties"]
+        assert "cli_agent" not in props
+        assert "external_cli" not in props
+        assert "第三方 CLI" not in tool.card.description
+        assert "builtin_model" not in tool.card.description
+        for extra in ({"cli_agent": "claude"}, {"external_cli": {}}):
+            result = await tool.invoke(
+                {"member_name": "cli-2", "display_name": "CLI Two", "desc": "worker", **extra}
+            )
+            assert result.success is False
+            assert "declares no external CLI kinds" in (result.error or "")
+        assert await agent_team.get_member("cli-2") is None
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    @pytest.mark.usefixtures("sdk_installed")
     async def test_external_cli_success(self, db, message_bus, t):
-        """A declared cli_agent registers the external-CLI member."""
+        """A declared cli_agent registers the external-CLI member; prompt is optional."""
         await db.team.create_team(team_name="ext_cli_tools_team", display_name="Ext", leader_member_name="leader1")
-        team = TeamBackend(
-            team_name="ext_cli_tools_team",
-            member_name="leader1",
-            is_leader=True,
-            db=db,
-            messager=message_bus,
-            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
-        )
+        team = _external_cli_team(db, message_bus, "ext_cli_tools_team")
         fallback_allocation = AsyncMock()
         fallback_allocation.to_db_ref = lambda: {"model_name": "claude-fallback", "model_index": 0}
-        tool = SpawnExternalCliTool(
+        tool = SpawnTeammateTool(
             team,
             t,
             model_config_allocator=lambda model_name, **kwargs: fallback_allocation,
         )
+        props = tool.card.input_params["properties"]
+        assert {"cli_agent", "external_cli"} <= set(props)
+        assert tool.card.input_params["required"] == ["member_name", "display_name", "desc"]
         result = await tool.invoke(
             {
                 "member_name": "claude-1",
                 "display_name": "Claude One",
-                "prompt": "reviewer",
+                "desc": "reviewer",
                 "cli_agent": "claude",
-                "fallback_model_name": "claude-fallback",
+                "external_cli": {"fallback_model_name": "claude-fallback"},
             }
         )
         assert result.success is True, result.error
@@ -615,19 +609,89 @@ class TestSpawnTools:
         assert result.data["cli_agent"] == "claude"
         assert await team.is_external_cli_agent("claude-1")
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_external_cli_undeclared_kind_fails(self, db, message_bus, t):
+        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
+        team = _external_cli_team(db, message_bus, "ext_cli_undeclared_team")
+        result = await SpawnTeammateTool(team, t).invoke(
+            {"member_name": "cli-3", "display_name": "CLI Three", "desc": "worker", "cli_agent": "codex"}
+        )
+        assert result.success is False
+        assert "not declared" in (result.error or "")
 
-def test_external_cli_schema_keeps_fallback_optional_and_restricts_model_override(agent_team, t):
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"isolation": "worktree"},
+            {"permissions": {"bash": "deny"}},
+            {"fork": True},
+            {"fork_source": "leader1"},
+            {"fork_mode": "full"},
+        ],
+    )
+    async def test_external_cli_rejects_local_only_fields(self, db, message_bus, t, extra):
+        """Local-only fields beside cli_agent are rejected before the member row is written."""
+        team = _external_cli_team(db, message_bus, "ext_cli_local_only_team")
+        tool = SpawnTeammateTool(team, t, fork_enabled=True)
+        result = await tool.invoke(
+            {"member_name": "cli-4", "display_name": "CLI Four", "desc": "worker", "cli_agent": "claude", **extra}
+        )
+        assert result.success is False
+        assert f"{next(iter(extra))} cannot be set with cli_agent 'claude'" in (result.error or "")
+        assert await team.get_member("cli-4") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    @pytest.mark.parametrize(
+        ("extra", "error"),
+        [
+            ({"external_cli": {"fallback_model_name": "x"}}, "applies only to an external CLI member"),
+            ({"cli_agent": "claude", "external_cli": "claude-fallback"}, "'external_cli' must be an object"),
+        ],
+    )
+    async def test_external_cli_object_needs_cli_agent(self, db, message_bus, t, extra, error):
+        """external_cli is an object, and only for an external CLI member."""
+        team = _external_cli_team(db, message_bus, "ext_cli_object_team")
+        result = await SpawnTeammateTool(team, t).invoke(
+            {"member_name": "cli-5", "display_name": "CLI Five", "desc": "worker", **extra}
+        )
+        assert result.success is False
+        assert error in (result.error or "")
+        assert await team.get_member("cli-5") is None
+
+
+def _external_cli_team(db, message_bus, team_name: str) -> TeamBackend:
+    """A leader backend declaring one external CLI kind (claude)."""
+    return TeamBackend(
+        team_name=team_name,
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+
+
+def _fallback_schema(tool: SpawnTeammateTool) -> dict:
+    """The external_cli.fallback_model_name property of a spawn_teammate schema."""
+    return tool.card.input_params["properties"]["external_cli"]["properties"]["fallback_model_name"]
+
+
+def test_external_cli_schema_keeps_fallback_optional_and_restricts_model_override(db, message_bus, t):
     """Omitting the fallback means none, and inferred model overrides are forbidden."""
-    tool = SpawnExternalCliTool(agent_team, t)
-    assert "fallback_model_name" not in tool.card.input_params["required"]
-    fallback_schema = tool.card.input_params["properties"]["fallback_model_name"]
-    assert fallback_schema["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
+    team = _external_cli_team(db, message_bus, "ext_cli_schema_team")
+    tool = SpawnTeammateTool(team, t)
+    assert "external_cli" not in tool.card.input_params["required"]
+    assert _fallback_schema(tool)["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
     assert "model_name" not in tool.card.input_params["required"]
     model_description = tool.card.input_params["properties"]["model_name"]["description"]
-    assert "仅当用户明确指定" in model_description
-    assert "你不得自行选择、推断或补全" in model_description
-    assert "必须省略" in model_description
-    fallback_description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    assert "仅当用户明确指定该第三方 Agent 使用的模型时填写" in model_description
+    assert "你不得自行选择或推断" in model_description
+    assert "external_cli.builtin_model" in model_description
+    fallback_description = _fallback_schema(tool)["description"]
     assert "从团队模型池中按该第三方 Agent 支持的模型调用协议选择兼容模型" in fallback_description
     assert "该 cli_agent 存在兼容模型时必须填写" in fallback_description
     assert "该第三方 Agent" in fallback_description
@@ -636,12 +700,13 @@ def test_external_cli_schema_keeps_fallback_optional_and_restricts_model_overrid
     assert "当前模型在模型池中且协议兼容时，优先选择" in fallback_description
     assert "当前模型不在模型池中或协议不兼容时，再选择其他兼容模型" in fallback_description
     assert "当前模型在模型池中且协议兼容时优先选择当前模型" in tool.card.description
+    assert "## 在第三方 CLI 上运行" in tool.card.description
     for description in (model_description, fallback_description):
         assert "Claude" not in description
         assert "Codex" not in description
 
-    english_tool = SpawnExternalCliTool(agent_team, make_translator("en"))
-    english_fallback_description = english_tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    english_tool = SpawnTeammateTool(team, make_translator("en"))
+    english_fallback_description = _fallback_schema(english_tool)["description"]
     assert "Prefer the current model when it is present in the pool" in english_fallback_description
     assert "current model is absent from the pool" in english_fallback_description
     assert "prefer the current model when it is present in the pool" in english_tool.card.description
@@ -678,8 +743,8 @@ def test_external_cli_schema_exposes_safe_model_protocol_catalog(db, message_bus
         ],
     )
 
-    tool = SpawnExternalCliTool(team, t)
-    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    tool = SpawnTeammateTool(team, t)
+    description = _fallback_schema(tool)["description"]
 
     assert '"model_name": "deepseek-v4-flash", "protocol": "OpenAI"' in description
     assert '"model_name": "claude-fallback", "protocol": "Anthropic"' in description
@@ -722,7 +787,7 @@ async def test_external_cli_requires_current_model_when_present_and_compatible(d
         current_model_provider="OpenAI",
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
     )
-    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: AsyncMock())
+    tool = SpawnTeammateTool(team, t, model_config_allocator=lambda model_name, **kwargs: AsyncMock())
 
     result = await tool.invoke(
         {
@@ -730,7 +795,7 @@ async def test_external_cli_requires_current_model_when_present_and_compatible(d
             "display_name": "Codex Priority",
             "prompt": "writer",
             "cli_agent": "codex",
-            "fallback_model_name": "other-model",
+            "external_cli": {"fallback_model_name": "other-model"},
         }
     )
 
@@ -739,6 +804,7 @@ async def test_external_cli_requires_current_model_when_present_and_compatible(d
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool(db, message_bus, t):
     """A per-agent current model outside the pool does not block fallback."""
     await db.team.create_team(
@@ -765,7 +831,7 @@ async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool
         current_model_provider="OpenAI",
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
     )
-    tool = SpawnExternalCliTool(
+    tool = SpawnTeammateTool(
         team,
         t,
         model_config_allocator=lambda model_name, **kwargs: fallback_allocation,
@@ -777,7 +843,7 @@ async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool
             "display_name": "Codex Pool Fallback",
             "prompt": "writer",
             "cli_agent": "codex",
-            "fallback_model_name": "pool-fallback",
+            "external_cli": {"fallback_model_name": "pool-fallback"},
         }
     )
 
@@ -785,6 +851,7 @@ async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_native_mode_allows_null_without_compatible_fallback(db, message_bus, t):
     """Null explicitly selects native mode when no compatible fallback exists."""
     await db.team.create_team(
@@ -807,7 +874,7 @@ async def test_external_cli_native_mode_allows_null_without_compatible_fallback(
         model_pool_provider=lambda: [incompatible_entry],
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
     )
-    tool = SpawnExternalCliTool(
+    tool = SpawnTeammateTool(
         team,
         t,
         model_config_allocator=lambda model_name, **kwargs: None,
@@ -818,7 +885,7 @@ async def test_external_cli_native_mode_allows_null_without_compatible_fallback(
             "display_name": "Claude Native",
             "prompt": "reviewer",
             "cli_agent": "claude",
-            "fallback_model_name": None,
+            "external_cli": {"fallback_model_name": None},
         }
     )
     assert result.success is True, result.error
@@ -871,11 +938,11 @@ async def test_external_cli_without_auth_fallback_only_accepts_an_omitted_fallba
             model_pool_provider=lambda: [entry],
             external_cli_agents=[ExternalCliAgentSpec(cli_agent="nofallback")],
         )
-        tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
-        assert "nofallback" not in tool.card.input_params["properties"]["fallback_model_name"]["description"]
+        tool = SpawnTeammateTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+        assert "nofallback" not in _fallback_schema(tool)["description"]
         inputs = {"member_name": "worker-1", "display_name": "Worker", "prompt": "work", "cli_agent": "nofallback"}
         if fallback is not None:
-            inputs["fallback_model_name"] = fallback
+            inputs["external_cli"] = {"fallback_model_name": fallback}
 
         result = await tool.invoke(inputs)
     finally:
@@ -920,10 +987,11 @@ async def _model_group_codex_tool(db, message_bus, t):
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
     )
     team.update_model_allocator(IntelliRouterAllocator(pool))
-    return team, SpawnExternalCliTool(team, t, model_config_allocator=team.allocate_model)
+    return team, SpawnTeammateTool(team, t, model_config_allocator=team.allocate_model)
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("sdk_installed")
 async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, message_bus, t):
     """The logical "*" current model must not be forced as an external CLI fallback."""
     team, tool = await _model_group_codex_tool(db, message_bus, t)
@@ -934,7 +1002,7 @@ async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, mes
             "display_name": "Codex Group",
             "prompt": "reviewer",
             "cli_agent": "codex",
-            "fallback_model_name": "deepseek-flash",
+            "external_cli": {"fallback_model_name": "deepseek-flash"},
         }
     )
 
@@ -954,7 +1022,7 @@ async def test_external_cli_in_model_group_still_rejects_the_logical_entry(db, m
             "display_name": "Codex Star",
             "prompt": "reviewer",
             "cli_agent": "codex",
-            "fallback_model_name": "*",
+            "external_cli": {"fallback_model_name": "*"},
         }
     )
 
@@ -966,7 +1034,7 @@ async def test_external_cli_in_model_group_still_rejects_the_logical_entry(db, m
 async def test_external_cli_in_model_group_catalog_hides_the_logical_current_model(db, message_bus, t):
     _team, tool = await _model_group_codex_tool(db, message_bus, t)
 
-    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    description = _fallback_schema(tool)["description"]
 
     assert '"current_model": null' in description
     assert '"deepseek-flash"' in description and '"glm-flash"' in description
@@ -995,7 +1063,7 @@ async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, mes
         model_pool_provider=lambda: [compatible_entry],
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
     )
-    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+    tool = SpawnTeammateTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
 
     result = await tool.invoke(
         {
@@ -1003,7 +1071,7 @@ async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, mes
             "display_name": "Claude Required",
             "prompt": "reviewer",
             "cli_agent": "claude",
-            "fallback_model_name": None,
+            "external_cli": {"fallback_model_name": None},
         }
     )
 
@@ -1028,7 +1096,7 @@ async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t
         model_pool_provider=lambda: [],
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
     )
-    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+    tool = SpawnTeammateTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
 
     result = await tool.invoke(
         {
@@ -1036,7 +1104,7 @@ async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t
             "display_name": "Claude Invalid",
             "prompt": "reviewer",
             "cli_agent": "claude",
-            "fallback_model_name": "invented-model",
+            "external_cli": {"fallback_model_name": "invented-model"},
         }
     )
 
@@ -1045,8 +1113,9 @@ async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t
 
 
 class TestSpawnToolCapabilityGate:
-    """The three non-teammate spawn tools are wired only when the matching
-    team capability is engaged; spawn_teammate is always available."""
+    """The human / bridge spawn tools are wired only when the matching team
+    capability is engaged; spawn_teammate is always available and takes an
+    external CLI through its own gated properties."""
 
     @pytest.mark.level0
     def test_default_team_only_has_spawn_teammate(self, agent_team):
@@ -1057,11 +1126,10 @@ class TestSpawnToolCapabilityGate:
         assert "spawn_teammate" in names
         assert "spawn_human_agent" not in names
         assert "spawn_bridge_agent" not in names
-        assert "spawn_external_cli" not in names
 
     @pytest.mark.level0
     def test_all_capabilities_wire_all_spawn_tools(self, db, message_bus):
-        """HITT + Bridge + external CLI together expose all four spawn tools."""
+        """HITT + Bridge + external CLI: one spawn tool per kind of member, none for the CLI runtime."""
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 
         team = TeamBackend(
@@ -1074,8 +1142,12 @@ class TestSpawnToolCapabilityGate:
             enable_bridge=True,
             external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
         )
-        names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=team)}
-        assert {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"} <= names
+        tools = create_team_tools(role="leader", agent_team=team)
+        names = {tool.card.name for tool in tools}
+        assert {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent"} <= names
+        assert "spawn_external_cli" not in names
+        spawn_teammate = next(tool for tool in tools if tool.card.name == "spawn_teammate")
+        assert "cli_agent" in spawn_teammate.card.input_params["properties"]
 
     @pytest.mark.level1
     def test_hitt_only_wires_human_agent(self, db, message_bus):
@@ -1094,7 +1166,6 @@ class TestSpawnToolCapabilityGate:
         assert "spawn_teammate" in names
         assert "spawn_human_agent" in names
         assert "spawn_bridge_agent" not in names
-        assert "spawn_external_cli" not in names
 
 
 class TestShutdownMemberTool:
@@ -1850,6 +1921,48 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_open_task_reports_assignee_status(self, agent_team, t, sample_agent_card):
+        """list and get both name the owner of an open task with its member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "assignee=member1[unstarted]" in tool.render_for_llm(listed)
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert detail.data["assignee_status"] == MemberStatus.UNSTARTED.value
+        assert "Assignee: member1[unstarted]" in tool.render_for_llm(detail)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_terminal_task_omits_assignee_status(self, agent_team, t, sample_agent_card):
+        """A finished task keeps its assignee but drops the member status"""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        tm = agent_team.task_manager
+        task = await tm.add(title="Owned", content="Content")
+        assert (await tm.assign(task.task_id, "member1")).ok
+        assert await tm.cancel(task.task_id)
+
+        tool = ViewTaskToolV2(tm, t)
+        listed = await tool.invoke({"action": "list"})
+        summary = listed.data["tasks"][0]
+        assert summary["assignee"] == "member1"
+        assert summary["assignee_status"] is None
+        rendered = tool.render_for_llm(listed)
+        assert "assignee=member1 " in rendered
+        assert "[unstarted]" not in rendered
+
+        detail = await tool.invoke({"action": "get", "task_id": task.task_id})
+        assert "assignee_status" not in detail.data
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
@@ -2032,7 +2145,7 @@ class TestRenderForLlm:
         )
         result = tool.render_for_llm(output)
         assert "#t1 [pending] Fix bug" in result
-        assert "(dev-1)" in result
+        assert "assignee=dev-1 " in result
         assert "[blocked by #t1]" in result
         # t2 carries updated_at → its line shows the absolute local time;
         # t1 has no updated_at → the None guard skips time rendering.

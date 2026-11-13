@@ -19,7 +19,7 @@ import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterable, List, Literal, Optional, Tuple, Union, cast
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Union, cast
 
 from pydantic import BaseModel, Field
 
@@ -79,10 +79,13 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.state import (
+    DEFERRED_TOOL_IMAGES_KEY,
     INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    TOOL_CALLS_STILL_PAUSED_KEY,
     BaseInterruptionState,
     ToolInterruptionState,
 )
@@ -126,6 +129,12 @@ _IMAGE_SHOWN_ONCE_NOTE = "This image was shown once and is no longer attached."
 # few hundred milliseconds; the bar sits above that so an INFO line means a
 # genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
 SLOW_INVOKE_PREP_SECONDS = 1.0
+EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或检查上下文。"
+EMPTY_RESPONSE_MAX_RETRIES = 1
+_EMPTY_RESPONSE_NOTICE = (
+    "[EMPTY_RESPONSE] The previous turn had no content and no tool_calls. "
+    "Reply with user-visible content or a tool call."
+)
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -329,6 +338,15 @@ class ReActAgentConfig(BaseModel):
     parallel_tool_calls: bool = Field(
         default=True,
         description="Whether to execute tool calls in parallel (as opposed to in sequence)",
+    )
+
+    retain_tool_facts_on_abort: bool = Field(
+        default=False,
+        description=(
+            "When a turn is cancelled or fails mid-batch, keep the tool calls already issued and the "
+            "results already obtained instead of dropping incomplete tool call groups. Calls still without "
+            "a result are left for the caller to resolve."
+        ),
     )
 
     def configure_model(self, model_name: str) -> "ReActAgentConfig":
@@ -543,6 +561,11 @@ class InterruptionState(BaseInterruptionState):
     pending_component_id: str
 
 
+# Check of one final model request: None lets the call go ahead; a result dict ends the round
+# without calling the model (see ReActAgent.set_final_request_check).
+FinalRequestCheck = Callable[[AgentCallbackContext], Awaitable[Optional[Dict[str, Any]]]]
+
+
 class ReActAgent(BaseAgent):
     """ReAct paradigm Agent implementation
     ReAct loop: Reasoning -> Acting -> Observation -> Repeat
@@ -572,7 +595,7 @@ class ReActAgent(BaseAgent):
         # Get sys_operation if configured
         sys_operation = None
         if self._config.sys_operation_id:
-            from openjiuwen.core.runner import Runner
+            from openjiuwen.core.runner.runner import Runner
 
             sys_operation = Runner.resource_mgr.get_sys_operation(self._config.sys_operation_id)
         self.context_engine = ContextEngine(
@@ -594,6 +617,27 @@ class ReActAgent(BaseAgent):
         # Manual context snapshots reuse the last finalized model tool list so
         # their tool-token estimate matches the immediately preceding request.
         self._last_model_tools: list[ToolInfo] | None = None
+        # Per-session results of the running tool batch, kept until they are written to the context
+        # (retain_tool_facts_on_abort only).
+        self._tool_fact_journals: Dict[str, Dict[str, ToolMessage]] = {}
+        # Optional per-instance check of each final model request; off unless installed.
+        self._final_request_check: Optional[FinalRequestCheck] = None
+
+    def set_final_request_check(self, check: Optional["FinalRequestCheck"]) -> None:
+        """Install the check of each final model request on this instance, or remove it with None.
+
+        The check runs inside every model call attempt, after the final system prompt, window
+        messages and tool definitions are built and before the provider is called. It returns None
+        to let the call go ahead, or a result dict that ends this round without calling the model,
+        the way a force-finish result does. It is not an exception, so no rail retry and no model
+        exception recovery follow it; cancellation still propagates.
+        """
+        self._final_request_check = check
+
+    async def _final_request_finish(self, ctx: AgentCallbackContext) -> Optional[Dict[str, Any]]:
+        """The installed check's result for this final request; None when none is installed or it allows the call."""
+        check = self._final_request_check
+        return None if check is None else await check(ctx)
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -705,7 +749,7 @@ class ReActAgent(BaseAgent):
         # Get sys_operation from Runner.resource_mgr if sys_operation_id is configured
         sys_operation = None
         if config.sys_operation_id:
-            from openjiuwen.core.runner import Runner
+            from openjiuwen.core.runner.runner import Runner
 
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
@@ -894,7 +938,9 @@ class ReActAgent(BaseAgent):
         if self._skill_util is None:
             return
 
-        if not rendered_system_prompt or not self._skill_util.has_skill():
+        # Skills are injected whenever any skill is registered; an empty
+        # rendered system prompt must not silently drop the skills section.
+        if not self._skill_util.has_skill():
             self.prompt_builder.remove_section(_SKILLS_SECTION)
             return
 
@@ -1115,7 +1161,7 @@ class ReActAgent(BaseAgent):
             turn_step_core_executed,
             validate_turn_step_identity,
         )
-        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.runner import Runner
 
         step = self._next_turn_step(ctx)
         bus = Runner.get_extension_bus()
@@ -1239,7 +1285,8 @@ class ReActAgent(BaseAgent):
             return
         session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
         try:
-            await sync_to_context(context, session_id)
+            # The attachment hook is dynamic and guarded by callable() above.
+            await sync_to_context(context, session_id)  # pylint: disable=not-callable
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
             logger.warning(
                 "[ReActAgent] prompt attachment history sync failed: %s",
@@ -1291,9 +1338,7 @@ class ReActAgent(BaseAgent):
             usage_prompt_sections = tuple(self._context_usage_prompt_sections())
         else:
             ctx.extra["_prompt_compose_sections"] = compose_output.sections
-            final_prompt = self.prompt_builder.render_sections(
-                section.text for section in compose_output.sections
-            )
+            final_prompt = self.prompt_builder.render_sections(section.text for section in compose_output.sections)
             usage_prompt_sections = tuple(self._context_usage_prompt_sections(compose_output.sections))
         final_system = [SystemMessage(content=final_prompt)]
         await self._sync_prompt_attachments(ctx, ctx.context)
@@ -1313,7 +1358,8 @@ class ReActAgent(BaseAgent):
             if model_client_config is None:
                 model_client_config = getattr(self._config, "model_client_config", None)
             context_window_kwargs["window_mutators"] = [
-                build_window_mutator(
+                # The extension hook passed the callable() guard above.
+                build_window_mutator(  # pylint: disable=not-callable
                     session_id=attachment_session_id,
                     model_client_config=model_client_config,
                 )
@@ -1332,7 +1378,7 @@ class ReActAgent(BaseAgent):
     async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
         """Trigger prompt composition at the final post-rail render boundary."""
         from openjiuwen.core.events import Event
-        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.runner import Runner
 
         bus = Runner.get_extension_bus()
         if bus is None:
@@ -1877,7 +1923,7 @@ class ReActAgent(BaseAgent):
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
         on_exception=AgentCallbackEvent.ON_MODEL_EXCEPTION,
     )
-    async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
+    async def _railed_model_call(self, ctx: AgentCallbackContext) -> Union[AssistantMessage, Dict[str, Any]]:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
         All BEFORE_MODEL_CALL rails have run at this point and may have
@@ -1891,6 +1937,10 @@ class ReActAgent(BaseAgent):
 
         Uses llm.stream() when ctx.extra["_streaming"] is True,
         falls back to llm.invoke() otherwise.
+
+        An installed final request check (set_final_request_check) sees the
+        final messages and tools; a result dict from it is returned instead
+        of calling the model.
         """
         # --- Finalize system message and context window (post-rails) ---
         llm = self._get_llm()
@@ -1898,11 +1948,29 @@ class ReActAgent(BaseAgent):
             llm,
             self._config.kv_cache_affinity_config,
         )
-        context_window, usage_prompt_sections = await self._build_model_context_window(
-            ctx,
-            model_client_config=getattr(llm, "model_client_config", None),
-        )
-        self._last_model_tools = list(ctx.inputs.tools or [])
+        for rebuild_attempt in range(2):
+            context_window, usage_prompt_sections = await self._build_model_context_window(
+                ctx,
+                model_client_config=getattr(llm, "model_client_config", None),
+            )
+            self._last_model_tools = list(ctx.inputs.tools or [])
+
+            # The final request is now known; an installed check may finish the round or
+            # replace the context and request one fresh build before the provider is called.
+            ctx.extra["_final_request_context_window"] = context_window
+            try:
+                finish = await self._final_request_finish(ctx)
+            finally:
+                ctx.extra.pop("_final_request_context_window", None)
+            rebuild = ctx.consume_context_rebuild_request()
+            if finish is not None:
+                if rebuild:
+                    raise RuntimeError("final request check cannot finish and rebuild the same model call")
+                return finish
+            if not rebuild:
+                break
+            if rebuild_attempt:
+                raise RuntimeError("final request check requested more than one context rebuild")
 
         # Freeze the final-window report before the provider call.  The same
         # request-local object is used by post_call; post_call must not ask the
@@ -2138,6 +2206,25 @@ class ReActAgent(BaseAgent):
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
+            # Backfill latency onto usage_metadata so tracer consumers
+            # (OtelRail after_model_call -> on_llm_end) can stamp TTFT /
+            # inter-token latency on the LLM span (#1833); perf_metrics alone
+            # only reaches the UI stream channel below.
+            #
+            # **写语义明确的字段，不再复用 `first_token_time`**：该字段在既有契约里是
+            # 「首 token 时刻」（与 `request_start_time` 同族的时间戳字符串），而这里要说
+            # 的是「等了多久」。此前把 `ttft_ms/1000` 写进去，OTel 侧当秒数解析（自洽），
+            # 任何按字段名理解的下游（studio 侧、其他 provider 回填）会把 `0.35` 当成
+            # 绝对时间戳。`ttft_seconds` 承载相对延迟（GenAI semconv 的
+            # `gen_ai.response.time_to_first_chunk` 单位是秒），`first_token_time` 保持原义。
+            if "ttft_ms" in perf_metrics:
+                ai_message.usage_metadata.ttft_seconds = round(perf_metrics["ttft_ms"] / 1000, 6)
+            # 总时延一并回填（单位秒，与 ttft_seconds 对齐）：只回填 TTFT 会让 span 出现
+            # 「TTFT 有、total latency 为 0」的半缺失状态。
+            ai_message.usage_metadata.total_latency = round(call_latency / 1000, 6)
+            if "tpot_ms" in perf_metrics:
+                ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
+
             await session.write_stream(
                 OutputSchema(
                     type="llm_usage",
@@ -2157,6 +2244,21 @@ class ReActAgent(BaseAgent):
         finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
         usage = getattr(message, "usage_metadata", None)
         code = int(getattr(usage, "code", 0) or 0)
+        content = getattr(message, "content", "")
+        no_answer = not getattr(message, "tool_calls", None) and not (isinstance(content, str) and content.strip())
+        if finish_reason in {"length", "max_tokens"} and no_answer:
+            # A reasoning model can spend its whole output budget thinking and stop
+            # before any answer or tool call. Treating that as the final answer
+            # would end the turn with an empty "successful" result.
+            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+            raise_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=(
+                    f"model hit its output limit (finish_reason={finish_reason}, output_tokens={output_tokens}) "
+                    "before producing an answer or a tool call"
+                ),
+                details={"finish_reason": finish_reason, "output_tokens": output_tokens},
+            )
         if finish_reason not in {"error", "failed"} and code == 0:
             return
         error_message = str(getattr(usage, "err_msg", "") or getattr(message, "content", "") or "")
@@ -2513,7 +2615,8 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
-        from openjiuwen.core.runner import Runner
+        journal_key, retention = self._open_tool_fact_journal(session)
+        from openjiuwen.core.runner.runner import Runner
 
         bus = Runner.get_extension_bus()
         if bus is None:
@@ -2522,12 +2625,13 @@ class ReActAgent(BaseAgent):
                 tool_call=tool_calls,
                 session=session,
                 parallel_tool_calls=self._config.parallel_tool_calls,
+                **retention,
             )
         else:
-            results = await self._execute_tool_call_event(bus, ctx, tool_calls, session)
+            results = await self._execute_tool_call_event(bus, ctx, tool_calls, session, retention=retention)
 
         tool_names = {call.id: call.name for call in tool_calls}
-        for tool_result, tool_message in results:
+        for _, tool_message in results:
             if tool_message is not None:
                 await context.add_messages(tool_message)
                 if cast(ReActAgentConfig, self._config).on_max_iterations != "error":
@@ -2535,11 +2639,45 @@ class ReActAgent(BaseAgent):
                     observation["name"] = observation.get("name") or tool_names.get(tool_message.tool_call_id)
                     ctx.extra.setdefault("_iteration_observations", []).append(observation)
 
-        multimodal_message = self._build_multimodal_tool_results_message(tool_result for tool_result, _ in results)
+        await self._add_tool_result_images(ctx, results, context, journal_key=journal_key)
+        return results
+
+    async def _add_tool_result_images(
+        self,
+        ctx: AgentCallbackContext,
+        results: list,
+        context: ModelContext,
+        *,
+        journal_key: Optional[str] = None,
+    ) -> None:
+        """Give the model the images of tool results in one user message after the tool messages.
+
+        While a call of this assistant turn is still paused, hold them back: a
+        user message must not come between the tool messages of one turn.
+        """
+        image_items = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
+        for tool_result, _ in results:
+            image_items.extend(self._iter_multimodal_image_items(tool_result))
+        # The handler writes the literal boolean True; compare strictly so a
+        # context that is not a real AgentCallbackContext (extra is not a
+        # dict) cannot read as paused and leak the journal past the batch.
+        turn_paused = ctx.extra.get(TOOL_CALLS_STILL_PAUSED_KEY) is True or any(
+            isinstance(tool_result, ToolInterruptException) or self._hitl_handler.is_sub_agent_interrupt(tool_result)
+            for tool_result, _ in results
+        )
+        if turn_paused:
+            if image_items:
+                ctx.extra[DEFERRED_TOOL_IMAGES_KEY] = image_items
+            # 仍在暂停期：批量结果尚未全部落上下文，abort 仍需 journal 兜底，不 pop。
+            return
+        multimodal_message = self._build_multimodal_message_from_items(image_items)
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
 
-        return results
+        # Only now are the batch's results in the context; until then an abort uses the journal.
+        if journal_key is not None:
+            self._tool_fact_journals.pop(journal_key, None)
+        return
 
     @staticmethod
     async def _execute_tool_call_event(
@@ -2547,6 +2685,8 @@ class ReActAgent(BaseAgent):
         ctx: AgentCallbackContext,
         tool_calls: List,
         session: Optional[Session],
+        *,
+        retention: Dict[str, Any],
     ) -> list:
         """Run one tool batch through ``tool.call``; failures propagate and never replay the direct call."""
         from openjiuwen.core.events import Event
@@ -2563,6 +2703,7 @@ class ReActAgent(BaseAgent):
                 tool_call=final_tool_calls,
                 session=session,
                 parallel_tool_calls=ctx.agent.config.parallel_tool_calls,
+                **retention,
             )
 
         trigger_context = ToolCallTriggerContext(
@@ -2583,31 +2724,36 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
+        return ReActAgent._build_multimodal_message_from_items(
+            item for tool_result in tool_results for item in ReActAgent._iter_multimodal_image_items(tool_result)
+        )
+
+    @staticmethod
+    def _build_multimodal_message_from_items(image_items: Any) -> Optional[UserMessage]:
         content: List[dict[str, Any]] = []
         loaded_paths: List[str] = []
         shown_once: set[int] = set()
 
-        for tool_result in tool_results:
-            for item in ReActAgent._iter_multimodal_image_items(tool_result):
-                source = str(item.get("source") or "tool")
-                source_path = str(item.get("source_path") or "unknown image")
-                data_url = item["data_url"]
-                loaded_paths.append(source_path)
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"Image loaded from {source}: {source_path}",
-                    }
-                )
-                image_part = {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                    },
+        for item in image_items:
+            source = str(item.get("source") or "tool")
+            source_path = str(item.get("source_path") or "unknown image")
+            data_url = item["data_url"]
+            loaded_paths.append(source_path)
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Image loaded from {source}: {source_path}",
                 }
-                if item.get("keep_in_context") is False:
-                    shown_once.add(id(image_part))
-                content.append(image_part)
+            )
+            image_part = {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                },
+            }
+            if item.get("keep_in_context") is False:
+                shown_once.add(id(image_part))
+            content.append(image_part)
 
         if not content:
             return None
@@ -3016,9 +3162,7 @@ class ReActAgent(BaseAgent):
         raw_turn_number = inputs.get("_turn_number") if isinstance(inputs, dict) else None
         turn_number = (
             raw_turn_number
-            if isinstance(raw_turn_number, int)
-            and not isinstance(raw_turn_number, bool)
-            and raw_turn_number > 0
+            if isinstance(raw_turn_number, int) and not isinstance(raw_turn_number, bool) and raw_turn_number > 0
             else None
         )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
@@ -3231,6 +3375,7 @@ class ReActAgent(BaseAgent):
                     if hard_iteration_limit is not None:
                         iteration_limit = min(iteration_limit, hard_iteration_limit)
                     ctx.extra["_iteration_limit"] = iteration_limit
+                    empty_response_retries = 0
                     for iteration in range(start_iteration, iteration_limit):
                         logger.info(f"ReAct iteration {iteration + 1}")
                         ctx.extra["_react_iteration"] = iteration + 1
@@ -3303,6 +3448,36 @@ class ReActAgent(BaseAgent):
                                 ctx.extra["_last_image_unsupported"] = False
                                 await self.context_engine.save_contexts(session)
                                 continue
+                            if isinstance(ai_message.content, str) and not ai_message.content.strip():
+                                if (
+                                    empty_response_retries < EMPTY_RESPONSE_MAX_RETRIES
+                                    and iteration + 1 < iteration_limit
+                                ):
+                                    empty_response_retries += 1
+                                    await context.add_messages(
+                                        UserMessage(
+                                            content=_EMPTY_RESPONSE_NOTICE,
+                                            metadata={OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: "empty_response"},
+                                        )
+                                    )
+                                    logger.info(
+                                        "[ReActAgent] empty no-tool turn; retry=%s/%s session_id=%s "
+                                        "iteration=%s reasoning_present=%s",
+                                        empty_response_retries,
+                                        EMPTY_RESPONSE_MAX_RETRIES,
+                                        session.get_session_id(),
+                                        iteration + 1,
+                                        bool(ai_message.reasoning_content),
+                                    )
+                                    continue
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = {
+                                    "output": EMPTY_RESPONSE_MSG,
+                                    "result_type": "error",
+                                    "finish_reason": ai_message.finish_reason or "null",
+                                    "reasoning_present": bool(ai_message.reasoning_content),
+                                }
+                                break
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             invoke_inputs.result = result
@@ -3312,6 +3487,8 @@ class ReActAgent(BaseAgent):
 
                         finish = ctx.consume_force_finish()
                         if finish:
+                            # The turn ends here; images held for its paused calls go with it.
+                            ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None)
                             await self.context_engine.save_contexts(session)
                             invoke_inputs.result = finish.result
                             break
@@ -3324,6 +3501,8 @@ class ReActAgent(BaseAgent):
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if hitl_interrupt:
+                            # Images of the calls that finished wait for the paused ones.
+                            hitl_interrupt.deferred_tool_images = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
                             await self._commit_interrupt(
                                 hitl_interrupt, context, session, invoke_inputs, sub_agent_outputs
                             )
@@ -3436,8 +3615,12 @@ class ReActAgent(BaseAgent):
             "finalization_succeeded": False,
         }
         strategy = cast(ReActAgentConfig, self._config).on_max_iterations
-        logger.warning("ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
-                       result["iterations_used"], result["max_iterations"], strategy)
+        logger.warning(
+            "ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
+            result["iterations_used"],
+            result["max_iterations"],
+            strategy,
+        )
         if strategy == "error":
             return result
 
@@ -3468,8 +3651,7 @@ class ReActAgent(BaseAgent):
         try:
             answer = await self._call_model(ctx, context, None)
             finish = ctx.consume_force_finish()
-            # A rail or callback that already decided the result owns that result.
-            if finish is not None and isinstance(finish.result, dict):
+            if finish is not None:
                 return finish.result
             if isinstance(answer, dict):
                 return answer
@@ -3528,9 +3710,7 @@ class ReActAgent(BaseAgent):
                     if pending_id is None:
                         await session.write_stream(schema)
                         continue
-                    if (
-                        hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
-                    ):
+                    if hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id:
                         await session.write_stream(schema)
         else:
             await session.write_stream(
@@ -3542,7 +3722,12 @@ class ReActAgent(BaseAgent):
             )
 
     async def stream(
-        self, inputs: Any, session: Optional[Session] = None, stream_modes: Optional[List[StreamMode]] = None
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+        stream_modes: Optional[List[StreamMode]] = None,
+        *,
+        _background_task_lifecycle=None,
     ) -> AsyncIterator[Any]:
         """Stream execute ReAct process
 
@@ -3577,12 +3762,19 @@ class ReActAgent(BaseAgent):
         if self.is_agent_session:
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
 
-        async with aclosing(self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup)) as chunks:
+        async with aclosing(
+            self._inner_stream(
+                session=session,
+                inputs=inputs,
+                need_cleanup=need_cleanup,
+                _background_task_lifecycle=_background_task_lifecycle,
+            )
+        ) as chunks:
             async for chunk in chunks:
                 yield chunk
 
     @with_session()
-    async def _inner_stream(self, session, inputs, need_cleanup):
+    async def _inner_stream(self, session, inputs, need_cleanup, _background_task_lifecycle=None):
         abort_persisted = False
 
         async def stream_process():
@@ -3600,6 +3792,8 @@ class ReActAgent(BaseAgent):
                 else:
                     await self._write_invoke_result_to_stream(final_result, session)
             except asyncio.CancelledError:
+                if _background_task_lifecycle is not None:
+                    _background_task_lifecycle.begin_finalization(asyncio.current_task())
                 abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request cancelled by user]",
@@ -3615,6 +3809,8 @@ class ReActAgent(BaseAgent):
                 raise
             except Exception as e:
                 logger.error("ReActAgent stream error: %s", e, exc_info=True)
+                if _background_task_lifecycle is not None:
+                    _background_task_lifecycle.begin_finalization(asyncio.current_task())
                 abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request interrupted by an unexpected error]",
@@ -3623,6 +3819,8 @@ class ReActAgent(BaseAgent):
                 error_result = {"output": str(e), "result_type": "error"}
                 await self._write_invoke_result_to_stream(error_result, session)
             finally:
+                if _background_task_lifecycle is not None:
+                    _background_task_lifecycle.begin_finalization(asyncio.current_task())
                 if need_cleanup and not abort_persisted:
                     await self.context_engine.save_contexts(session)
                 if self.is_agent_session:
@@ -3633,6 +3831,15 @@ class ReActAgent(BaseAgent):
         if self.is_agent_session:
             # Agent sessions use stream_iterator for consuming output
             task = asyncio.create_task(stream_process())
+
+            if _background_task_lifecycle is not None:
+                async with _background_task_lifecycle.scope(task):
+                    async for result in session.stream_iterator():
+                        yield result
+                    # Consumer cancellation must not propagate directly into
+                    # a producer already committing its native Session.
+                    await asyncio.shield(task)
+                return
 
             try:
                 async for result in session.stream_iterator():
@@ -3650,7 +3857,7 @@ class ReActAgent(BaseAgent):
 
     async def clear_session(self, session_id: str = "default_session"):
         """Release session resources and clear context cache."""
-        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.runner import Runner
 
         await Runner.release(session_id=session_id)
         await self.context_engine.clear_context(session_id=session_id)
@@ -3742,6 +3949,7 @@ class ReActAgent(BaseAgent):
         in the same session still sees what the user asked before the abort.
         """
         session_id = session.get_session_id()
+        journal = self._tool_fact_journals.pop(session_id, None)
         context = self.context_engine.get_context(session_id=session_id)
         if context is None:
             return
@@ -3750,7 +3958,10 @@ class ReActAgent(BaseAgent):
         if not current:
             return
 
-        kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
+        if self._config is not None and self._config.retain_tool_facts_on_abort:
+            kept = self._retain_cancelled_turn_messages(current, journal or {}, marker=marker)
+        else:
+            kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
         context.set_messages(kept, with_history=False)
 
     async def _persist_context_after_abort(
@@ -3822,6 +4033,74 @@ class ReActAgent(BaseAgent):
                 "Cancellation-specific context persistence was cancelled for session %s",
                 session.get_session_id(),
             )
+
+    def _open_tool_fact_journal(self, session: Optional[Session]) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Start the batch's journal when retaining tool facts; returns its key and extra execute arguments."""
+        config = self._config
+        if config is None or not config.retain_tool_facts_on_abort or session is None:
+            return None, {}
+        journal_key = session.get_session_id()
+        journal: Dict[str, ToolMessage] = {}
+        self._tool_fact_journals[journal_key] = journal
+
+        def on_tool_result(tool_call: ToolCall, message: Optional[ToolMessage]) -> None:
+            # Every reported message may enter the context; None means the call has no result yet.
+            if message is None:
+                journal.pop(tool_call.id, None)
+            else:
+                journal[tool_call.id] = message
+
+        # Passed only when retaining, so callers that wrap or replace execute keep their call shape.
+        return journal_key, {"on_tool_result": on_tool_result}
+
+    @staticmethod
+    def _retain_cancelled_turn_messages(
+        messages: List[Any],
+        journal: Dict[str, ToolMessage],
+        marker: str = "[Request cancelled by user]",
+    ) -> List[Any]:
+        """Keep an aborted turn's real tool facts (retain_tool_facts_on_abort).
+
+        Each tool call group is kept: results already in the context stay, results the
+        batch obtained but did not write yet are added from ``journal`` in call order, and
+        calls still without a result are left for the caller to resolve. Orphan tool
+        results are dropped and a bare trailing UserMessage gets the abort marker, as in
+        ``_sanitize_cancelled_turn_messages``.
+        """
+        kept: List[Any] = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            msg = messages[i]
+            if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                kept.append(msg)
+                call_ids = [getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)]
+                answered = set()
+                j = i + 1
+                while j < n and isinstance(messages[j], ToolMessage):
+                    # Results of other calls are orphans here and are dropped.
+                    if messages[j].tool_call_id in call_ids and messages[j].tool_call_id not in answered:
+                        kept.append(messages[j])
+                        answered.add(messages[j].tool_call_id)
+                    j += 1
+                for tc_id in call_ids:
+                    if tc_id not in answered and tc_id in journal:
+                        kept.append(journal[tc_id])
+                        answered.add(tc_id)
+                i = j
+                continue
+
+            if isinstance(msg, ToolMessage):
+                # Orphan tool result without a matching assistant tool_calls.
+                i += 1
+                continue
+
+            kept.append(msg)
+            i += 1
+
+        if kept and isinstance(kept[-1], UserMessage):
+            kept.append(AssistantMessage(content=marker))
+        return kept
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(

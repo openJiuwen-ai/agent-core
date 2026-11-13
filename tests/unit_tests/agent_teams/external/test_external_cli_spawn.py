@@ -124,6 +124,9 @@ async def test_predefined_member_installs_skills_in_project_with_worktree(
         def bind_team_context_tracker(self, _tracker):
             pass
 
+        def bind_task_outcome_tracker(self, _tracker):
+            pass
+
         async def stop(self):
             pass
 

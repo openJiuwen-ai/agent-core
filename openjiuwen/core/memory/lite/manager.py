@@ -100,6 +100,8 @@ EMBEDDING_CACHE_TABLE = "embedding_cache"
 SESSION_DIRTY_DEBOUNCE_MS = 5000
 
 INDEX_CACHE: Dict[str, 'MemoryIndexManager'] = {}
+# Upper bound for joining the watchdog observer threads on close.
+_OBSERVER_JOIN_TIMEOUT_S = 5.0
 
 # Module-level lock shared across all initialize() calls in this process so the
 # rebuild (clear tables + reindex) is serialized per-process — distinct from the
@@ -239,6 +241,8 @@ class MemoryIndexManager:
 
         self.provider: Optional[EmbeddingProvider] = None
         self.provider_key: str = ""
+        self.embedding_available: bool = False
+        self.embedding_error: Optional[str] = None
 
         self.dirty = True
         self.sessions_dirty = False
@@ -376,6 +380,11 @@ class MemoryIndexManager:
         mismatched index in place. Returns False when there is no prior index — in
         that case ``sync`` builds the index normally, nothing to rebuild.
         """
+        # An unavailable endpoint is a runtime health condition, not a
+        # configuration change. Preserve an existing vector index while using
+        # keyword search until the endpoint becomes available again.
+        if self.provider is None:
+            return False
         try:
             cursor = self.db.execute(
                 "SELECT value FROM meta WHERE key = ?", (META_KEY,)
@@ -641,6 +650,8 @@ class MemoryIndexManager:
         if self.embedding_config is None or not getattr(self.embedding_config, "api_key", None):
             self.provider = None
             self.provider_key = "none:no-embedding"
+            self.embedding_available = False
+            self.embedding_error = "embedding configuration is missing"
             logger.info(
                 "Embedding provider not configured (no embedding_config / api_key); "
                 "memory will use FTS5 keyword search only."
@@ -656,10 +667,32 @@ class MemoryIndexManager:
             # key: this both drives _should_full_reindex detection and isolates
             # embedding_cache entries per config.
             self.provider_key = self.provider.config_fingerprint
+            await self._validate_embedding_provider()
             logger.info(f"Embedding provider: {self.provider.id} / {self.provider.model}")
         except Exception as e:
-            logger.error(f"Failed to initialize embedding provider: {e}")
-            raise
+            self._disable_embedding(f"embedding validation failed: {type(e).__name__}")
+            logger.warning("Embedding provider unavailable; memory will use FTS5 keyword search only")
+
+    async def _validate_embedding_provider(self) -> None:
+        """Verify the configured embedding endpoint and model before use."""
+        if self.provider is None:
+            return
+        embedding = await asyncio.wait_for(
+            self.provider.embed_query("memory availability check"),
+            timeout=10.0,
+        )
+        if not embedding:
+            raise RuntimeError("embedding endpoint returned an empty vector")
+        self.embedding_available = True
+        self.embedding_error = None
+
+    def _disable_embedding(self, reason: str) -> None:
+        """Switch to keyword-only memory search after an embedding failure."""
+        self.provider = None
+        # Keep the configured fingerprint. Changing this on a transient
+        # failure would incorrectly trigger a full reindex and remove vectors.
+        self.embedding_available = False
+        self.embedding_error = reason
 
     async def _load_vector_extension(self) -> None:
         """Load sqlite-vec extension."""
@@ -872,6 +905,11 @@ class MemoryIndexManager:
 
     async def _should_full_reindex(self) -> bool:
         """Check if full reindex is needed."""
+        # An unavailable endpoint is a runtime health condition, not a
+        # configuration change. Preserve an existing vector index while using
+        # keyword search until the endpoint becomes available again.
+        if self.provider is None:
+            return False
         try:
             cursor = self.db.execute(
                 "SELECT value FROM meta WHERE key = ?",
@@ -1186,6 +1224,7 @@ class MemoryIndexManager:
 
         except Exception as e:
             logger.error(f"Failed to get embedding: {e}")
+            self._disable_embedding(f"embedding request failed: {type(e).__name__}")
             return None
 
     async def search(
@@ -1514,9 +1553,11 @@ class MemoryIndexManager:
             )
         except asyncio.TimeoutError:
             logger.warning("Embedding query timed out")
+            self._disable_embedding("embedding request timed out")
             return []
         except Exception as e:
             logger.error(f"Embedding query failed: {e}")
+            self._disable_embedding(f"embedding request failed: {type(e).__name__}")
             return []
 
     async def read_file(
@@ -1608,6 +1649,10 @@ class MemoryIndexManager:
             "available": True,
             "provider": self.provider.id if self.provider else None,
             "model": self.provider.model if self.provider else None,
+            "embedding": {
+                "available": self.embedding_available,
+                "error": self.embedding_error,
+            },
             "files": int(file_count),
             "chunks": int(chunk_count),
             "sourceCounts": source_counts,
@@ -1654,7 +1699,8 @@ class MemoryIndexManager:
         if self._file_observer:
             try:
                 self._file_observer.stop()
-                self._file_observer.join()
+                # Joining waits on the emitter threads; keep that off the loop.
+                await asyncio.to_thread(self._file_observer.join, _OBSERVER_JOIN_TIMEOUT_S)
             except Exception:
                 logger.warning("File observer stopped")
 
@@ -1676,6 +1722,36 @@ def clear_memory_manager_cache() -> None:
     如需彻底释放，改用 aclose_memory_manager_cache()。
     """
     INDEX_CACHE.clear()
+
+
+async def aclose_memory_managers_for(agent_id: str, workspace: "Workspace") -> int:
+    """Close every cached manager one agent opened on one workspace.
+
+    A manager runs a watchdog ``Observer`` (one thread plus one per watched
+    directory), a SQLite connection and timers for as long as it stays in
+    ``INDEX_CACHE``. Rails only fetch it, so without this an in-process team
+    keeps every retired member's manager alive until the process exits.
+    Called from the member's permanent teardown.
+
+    Args:
+        agent_id: The agent card id the managers were opened with.
+        workspace: The agent's workspace; matched by root path.
+
+    Returns:
+        The number of managers closed.
+    """
+    root = str(workspace.root_path) if workspace is not None and workspace.root_path else ""
+    owned = [
+        mgr
+        for mgr in list(INDEX_CACHE.values())
+        if mgr.agent_id == agent_id and str(mgr.workspace.root_path or "") == root
+    ]
+    for mgr in owned:
+        try:
+            await mgr.close()
+        except Exception as e:
+            logger.warning(f"close memory manager for {agent_id} failed: {e}")
+    return len(owned)
 
 
 async def aclose_memory_manager_cache() -> None:

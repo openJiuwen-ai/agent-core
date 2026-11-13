@@ -267,9 +267,14 @@ def test_default_timeout_used_when_no_resilience_property(monkeypatch) -> None:
         am = AbilityManager(owner_id="to-2")
         # No resilience property → falls back to (monkeypatched) default 0.2s.
         tool = _make_hang_tool("hang_default")
+        tool.card.input_params = {
+            "type": "object",
+            "properties": {"timeout": {"type": "integer"}},
+        }
         try:
             am.add_ability(tool.card, tool)
-            tc = _tool_call("hang_default")
+            # A timeout argument has no special meaning for ordinary tools.
+            tc = _tool_call("hang_default", args='{"timeout": 900}')
 
             t0 = time.monotonic()
             with pytest.raises(AbilityExecutionError, match="timed out"):

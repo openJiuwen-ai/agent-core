@@ -41,6 +41,8 @@ def _stub_spec(bus: ExtensionEventBus | None) -> Any:
         lifecycle="temporary",
         teammate_mode="build_mode",
         dispatch_mode="autonomous",
+        enable_member_messaging=False,
+        max_subtask_depth=0,
         team_mode="default",
         predefined_members=[],
         expose_human_agents_to_teammates=False,

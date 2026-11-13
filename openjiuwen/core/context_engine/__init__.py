@@ -1,19 +1,70 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+# Initialize schema before base: schema.context_state imports ContextStats.
+# isort: off
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
-from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
-from openjiuwen.core.context_engine.context_engine import ContextEngine
+# isort: on
+from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.compaction import (
-    CompactionCandidate, CompactionDecision, CompactionError, CompactionHook,
-    CompactionNext, CompactionRequest, CompactionSkipped, CompactionTrigger,
+    CompactionCandidate,
+    CompactionDecision,
+    CompactionError,
+    CompactionHook,
+    CompactionNext,
+    CompactionRequest,
+    CompactionSkipped,
+    CompactionTrigger,
 )
-
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    clear_cancellation_cause,
+    mark_cancellation_cause,
+    resolve_cancellation_cause,
+)
+from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
+    CurrentRoundCompressor,
+    CurrentRoundCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+    DialogueCompressor,
+    DialogueCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+    FullCompactProcessor,
+    FullCompactProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
+    MicroCompactProcessor,
+    MicroCompactProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+    RoundLevelCompressor,
+    RoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
+    MessageOffloader,
+    MessageOffloaderConfig,
+)
+from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
+    MessageSummaryOffloader,
+    MessageSummaryOffloaderConfig,
+)
+from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
+    ToolResultBudgetProcessor,
+    ToolResultBudgetProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.offloader.tool_result_window_processor import (
+    ToolResultWindowProcessor,
+    ToolResultWindowProcessorConfig,
+)
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
-from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
-from openjiuwen.core.context_engine.token.tiktoken_model_counter import TiktokenModelCounter
 from openjiuwen.core.context_engine.token.native_tokenizer_counter import NativeTokenizerCounter
 from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
+from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+from openjiuwen.core.context_engine.token.tiktoken_model_counter import TiktokenModelCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
@@ -25,50 +76,12 @@ from openjiuwen.core.context_engine.usage import (
     ContextUsageAnalyzer,
     ContextUsageMeasurement,
     ContextUsageSnapshot,
-    ContextWindowUsage,
     ContextWindowTokenReport,
+    ContextWindowUsage,
     RequestKVCacheUsage,
     SessionKVCacheAggregator,
     SessionKVCacheUsage,
     request_usage_from_metadata,
-)
-
-from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-    MessageOffloader,
-    MessageOffloaderConfig
-)
-from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
-    ToolResultBudgetProcessor,
-    ToolResultBudgetProcessorConfig,
-)
-from openjiuwen.core.context_engine.processor.offloader.tool_result_window_processor import (
-    ToolResultWindowProcessor,
-    ToolResultWindowProcessorConfig,
-)
-from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
-    MessageSummaryOffloader,
-    MessageSummaryOffloaderConfig
-)
-from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
-    MicroCompactProcessor,
-    MicroCompactProcessorConfig,
-)
-from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
-    DialogueCompressor,
-    DialogueCompressorConfig
-)
-from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
-    CurrentRoundCompressor,
-    CurrentRoundCompressorConfig
-)
-from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
-    RoundLevelCompressor,
-    RoundLevelCompressorConfig
-)
-from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
-    FullCompactProcessor,
-    FullCompactProcessorConfig,
 )
 
 # context base classes
@@ -79,7 +92,11 @@ _CORE_CLASSES = [
     "ContextWindowChange",
     "ModelContext",
     "ContextStats",
-    "ContextEngine"
+    "ContextEngine",
+    "CancellationCause",
+    "clear_cancellation_cause",
+    "mark_cancellation_cause",
+    "resolve_cancellation_cause",
 ]
 
 

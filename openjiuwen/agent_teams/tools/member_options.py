@@ -30,6 +30,18 @@ class MemberBuiltinModel(BaseModel):
     effort: str | None = None
 
 
+class MemberServedModel(BaseModel):
+    """A model a model-group member was routed to, from ``since`` (ms epoch) on."""
+
+    model: str
+    since: int
+
+
+# Served-model history entries kept per member: enough to tell a user about
+# recent switches, bounded so a flapping route cannot grow the row.
+MAX_SERVED_MODELS = 5
+
+
 class MemberWorktreeOptions(BaseModel):
     """Worktree isolation options stored on a team member."""
 
@@ -42,6 +54,26 @@ class MemberWorktreeOptions(BaseModel):
     head_commit: str | None = None
 
 
+class MemberAgentTemplate(BaseModel):
+    """The expert template a member was spawned from (``spawn_expert``).
+
+    Persisted so the member rebuilds from the row alone — in a subprocess, on
+    cold recovery, after the package was upgraded or removed. A native member
+    carries ``snapshot``; an external-CLI member carries ``external_cli``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: dict[str, Any] = Field(default_factory=dict)
+    """``{"name": ..., "group": ...}`` (``ExpertRef.to_dict()``)."""
+    version: str = ""
+    """Template version at spawn time; empty when unknown."""
+    snapshot: dict[str, Any] | None = None
+    """Capability snapshot (``AgentTemplateSpec`` without prompt sections) of a native member."""
+    external_cli: dict[str, Any] | None = None
+    """Merged ``ExternalCliAgentSpec`` JSON of an external-CLI member."""
+
+
 class TeamMemberOptions(BaseModel):
     """Extensible per-member configuration blob persisted in TeamMember.options."""
 
@@ -50,6 +82,13 @@ class TeamMemberOptions(BaseModel):
     model_ref: MemberModelRef | None = None
     fallback_model_ref: MemberModelRef | None = None
     builtin_model: MemberBuiltinModel | None = None
+    served_models: list[MemberServedModel] | None = Field(
+        default=None,
+        description=(
+            "Models the team's model group routed this member to, oldest first, one "
+            "entry per change of model (bounded). Written only on a model-group pool."
+        ),
+    )
     cli_agent: str | None = None
     worktree: MemberWorktreeOptions | None = None
     lifetime: MemberLifetime | None = Field(
@@ -61,6 +100,13 @@ class TeamMemberOptions(BaseModel):
             "member settles into once the scheduler finds nothing left on its board."
         ),
     )
+    goal: bool | None = Field(
+        default=None,
+        description=(
+            "Per-member goal-mode switch. None follows the team's member_goal; "
+            "False opts this member out. Has no effect when the team has no member_goal."
+        ),
+    )
     permissions_override: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -69,6 +115,7 @@ class TeamMemberOptions(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template: MemberAgentTemplate | None = None
 
 
 def load_member_options(raw: str | None) -> TeamMemberOptions:
@@ -141,9 +188,13 @@ def build_member_options(
     worktree_path: str | None = None,
     permissions_override: dict[str, str] | None = None,
     lifetime: MemberLifetime | None = None,
+    agent_template: MemberAgentTemplate | None = None,
+    goal: bool | None = None,
 ) -> str | None:
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
+    parsed.goal = goal
+    parsed.agent_template = agent_template
     parsed.lifetime = lifetime
     parsed.model_ref = _model_ref_from_mapping(model_ref)
     parsed.fallback_model_ref = _model_ref_from_mapping(fallback_model_ref)
@@ -183,6 +234,20 @@ def set_member_builtin_model(raw_options: str | None, builtin_model: MemberBuilt
     """Replace the built-in model section inside a TeamMember.options JSON string."""
     parsed = load_member_options(raw_options)
     parsed.builtin_model = builtin_model
+    return dump_member_options(parsed)
+
+
+def append_member_served_model(raw_options: str | None, model: str, since: int) -> str | None:
+    """Record that a model-group member was routed to ``model`` from ``since`` on.
+
+    A model equal to the latest entry is not a change and leaves the options
+    as they are; the history keeps the newest ``MAX_SERVED_MODELS`` entries.
+    """
+    parsed = load_member_options(raw_options)
+    history = parsed.served_models or []
+    if history and history[-1].model == model:
+        return raw_options
+    parsed.served_models = [*history, MemberServedModel(model=model, since=since)][-MAX_SERVED_MODELS:]
     return dump_member_options(parsed)
 
 
@@ -231,6 +296,11 @@ def get_member_builtin_model(record: object) -> MemberBuiltinModel | None:
     return get_member_options(record).builtin_model
 
 
+def get_member_served_models(record: object) -> list[MemberServedModel]:
+    """Return the models the team's model group routed the member to, oldest first."""
+    return get_member_options(record).served_models or []
+
+
 def get_member_cli_agent(record: object) -> str | None:
     """Return the external CLI backend name from options."""
     return get_member_options(record).cli_agent
@@ -239,6 +309,14 @@ def get_member_cli_agent(record: object) -> str | None:
 def get_member_worktree(record: object) -> MemberWorktreeOptions | None:
     """Return the member's worktree options from options."""
     return get_member_options(record).worktree
+
+
+def get_member_goal(record: object) -> bool | None:
+    """Return the member's own goal-mode switch from options.
+
+    ``None`` means the member follows the team's ``member_goal``.
+    """
+    return get_member_options(record).goal
 
 
 def get_member_permissions_override(record: object) -> dict[str, str] | None:
@@ -255,6 +333,11 @@ def _record_value(record: object, key: str) -> Any:
     if isinstance(record, Mapping):
         return record.get(key)
     return getattr(record, key, None)
+
+
+def get_member_agent_template(record: object) -> MemberAgentTemplate | None:
+    """Return the expert template the member was spawned from, or None."""
+    return get_member_options(record).agent_template
 
 
 def get_member_lifetime(record: object) -> MemberLifetime | None:

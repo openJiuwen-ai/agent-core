@@ -1,13 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Boundary validation of ``display_name`` across the five spawn tools.
+"""Boundary validation of ``display_name`` across every spawn path.
 
 Schema ``required`` only binds the hosting LLM; MCP clients call ``invoke``
 directly without validating against ``input_params``. A missing or blank
 ``display_name`` used to escape the boundary as ``None`` and resurface as a
 deep ``AgentCard`` pydantic error (or, for the HITT pair, a silent fallback
 to an i18n default roster name).
+
+The external-CLI member is now a ``spawn_teammate`` call with ``cli_agent``
+(the former ``spawn_external_cli`` tool was folded into it), so that path is
+covered through ``spawn_teammate_cli``: the ``display_name`` check fires
+before the CLI capability gate, proving the boundary check comes first.
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_member import (
     SpawnBridgeAgentTool,
-    SpawnExternalCliTool,
     SpawnHumanAgentTool,
     SpawnPassiveHumanTool,
     SpawnTeammateTool,
@@ -32,10 +36,10 @@ from openjiuwen.agent_teams.tools.tool_member import (
 
 SPAWN_TOOL_NAMES = (
     "spawn_teammate",
+    "spawn_teammate_cli",
     "spawn_human_agent",
     "spawn_passive_human",
     "spawn_bridge_agent",
-    "spawn_external_cli",
 )
 
 _INVALID_FORMS = (
@@ -80,10 +84,10 @@ def _make_tool(team: TeamBackend, tool_name: str):
     proves the check fires before the capability gates."""
     tools = {
         "spawn_teammate": SpawnTeammateTool,
+        "spawn_teammate_cli": SpawnTeammateTool,
         "spawn_human_agent": SpawnHumanAgentTool,
         "spawn_passive_human": SpawnPassiveHumanTool,
         "spawn_bridge_agent": SpawnBridgeAgentTool,
-        "spawn_external_cli": SpawnExternalCliTool,
     }
     return tools[tool_name](team, make_translator("en"))
 
@@ -101,8 +105,12 @@ async def test_spawn_tools_reject_missing_display_name(backend, tool_name, displ
     under an i18n default name.
     """
     tool = _make_tool(backend, tool_name)
+    # The external-CLI member rides spawn_teammate via ``cli_agent``; the
+    # fixture backend declares no CLI kinds, so a display_name failure here
+    # proves the boundary check runs before the CLI capability gate.
+    extra = {"cli_agent": "claude"} if tool_name == "spawn_teammate_cli" else {}
 
-    result = await tool.invoke({"member_name": "dev-1", **display_name_form})
+    result = await tool.invoke({"member_name": "dev-1", **display_name_form, **extra})
 
     assert result.success is False
     assert "'display_name' is required" in (result.error or "")

@@ -173,3 +173,24 @@ def test_spec_steer_batch_size_validation():
         TeamAgentSpec(**base, steer_batch_size=0)
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, steer_batch_size=-1)
+
+
+@pytest.mark.level1
+def test_spec_bootstrap_mode_validation():
+    """``bootstrap_mode="framework"`` is only valid under scheduled dispatch (F_122)."""
+    base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
+    spec = TeamAgentSpec(**base)
+    assert spec.bootstrap_mode == "leader"
+    assert spec.team_display_name is None
+    assert spec.team_desc is None
+
+    framework = TeamAgentSpec(**base, dispatch_mode="scheduled", bootstrap_mode="framework")
+    assert framework.bootstrap_mode == "framework"
+    # Round-trips with the rest of the spec.
+    restored = TeamAgentSpec.model_validate_json(framework.model_dump_json())
+    assert restored.bootstrap_mode == "framework"
+
+    with pytest.raises(ValueError, match="requires dispatch_mode='scheduled'"):
+        TeamAgentSpec(**base, bootstrap_mode="framework")
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, dispatch_mode="autonomous", bootstrap_mode="framework")

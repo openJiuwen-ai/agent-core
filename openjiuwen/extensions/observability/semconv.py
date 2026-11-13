@@ -60,11 +60,20 @@ OJ_INFERENCE_ID = "openjiuwen.inference.id"
 OJ_INFERENCE_INPUT_OBSERVED = "openjiuwen.inference.input_observed"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
+OJ_GOAL_ID = "openjiuwen.goal.id"
+OJ_GOAL_ATTEMPT_NUMBER = "openjiuwen.goal.attempt.number"
+OJ_GOAL_ASSESSMENT_ID = "openjiuwen.goal.assessment.id"
+OJ_GOAL_STRATEGY = "openjiuwen.goal.strategy"
 # Transport-level retries the provider SDK made inside this one LLM request
 # before the response that was streamed (connection errors, 429, 5xx). Their
 # time is part of every request-relative duration, so a reader needs the count
 # to tell a slow provider from a retried one.
 OJ_REQUEST_RETRY_COUNT = "openjiuwen.request.retry_count"
+# Model-group routing of one LLM request. A model group sends every request to
+# the logical "*" model and its router picks the deployment inside the call;
+# these name the group and the route that served the request.
+OJ_MODEL_GROUP_ID = "openjiuwen.model_group.id"
+OJ_MODEL_GROUP_ROUTE_ID = "openjiuwen.model_group.route_id"
 OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
 # Which compaction this is for its subject, counting operations rather than
 # model calls: a compaction the provider throttles is retried, and all of its

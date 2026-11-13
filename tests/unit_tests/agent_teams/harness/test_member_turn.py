@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.harness.turn import (
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from tests.test_logger import logger
 from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
@@ -130,6 +131,41 @@ def test_without_a_store_a_turn_is_still_minted() -> None:
 
     assert opened is True
     assert turn.turn_number == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_fork_requires_idle_and_excludes_aborted_turn() -> None:
+    await Runner.start()
+    harness = NativeHarness(make_spec())
+    harness.track_completed_turn_fork = True
+    fake = await start_harness(harness)
+    consumer = asyncio.create_task(drain_outputs(harness, []))
+    try:
+        with pytest.raises(ValueError, match="no completed turn"):
+            harness.capture_completed_turn_fork()
+        await harness.send("completed")
+        assert await wait_for_state(harness, HarnessState.IDLE)
+        snapshot = harness.capture_completed_turn_fork()
+        assert any(message["content"] == "completed" for message in snapshot.messages)
+
+        fake.sleep_seconds = 10.0
+        fake.sleep_from_iteration = fake.completed_iterations + 1
+        fake.iterations = 2
+        await harness.send("aborted")
+        assert await wait_completed_iterations(fake, fake.sleep_from_iteration)
+        with pytest.raises(ValueError, match="must be idle"):
+            harness.capture_completed_turn_fork()
+        await harness.abort(immediate=True)
+        assert await wait_for_state(harness, HarnessState.IDLE)
+        assert harness.capture_completed_turn_fork().messages == snapshot.messages
+
+        harness.loop_session.update_state({INTERRUPTION_KEY: {"pending": True}})
+        with pytest.raises(ValueError, match="pending interrupt"):
+            harness.capture_completed_turn_fork()
+    finally:
+        await harness.stop()
+        await consumer
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

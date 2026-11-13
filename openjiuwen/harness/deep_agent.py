@@ -36,6 +36,10 @@ from openjiuwen.core.common.logging.invocation import invocation_log_scope
 from openjiuwen.core.common.run_context import normalize_run_context
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    mark_cancellation_cause,
+)
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
@@ -125,7 +129,10 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
-from openjiuwen.harness.tools.subagent._control_registry import release_subagent_control
+from openjiuwen.harness.tools.subagent._control_registry import (
+    _CONTROL_ATTR,
+    release_subagent_control,
+)
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -143,7 +150,6 @@ from openjiuwen.harness.schema.interaction import (
 from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
-    from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
@@ -699,7 +705,76 @@ class DeepAgent(BaseAgent):
                     model=explicit_model,
                 )
         self._sync_prompt_builder_references()
+        # Propagate the new model to context processors (compressors,
+        # offloaders) so they don't stay pinned to the model that was active
+        # when ContextProcessorRail.init() first injected them. Without this,
+        # a hot-reload that switches the primary model leaves compressors using
+        # the old model — if that endpoint is down, compression silently fails
+        # (status=noop) and the context window grows unbounded. set_llm()
+        # already rebinds cached processors on the restore_model path.
+        self._hot_reload_context_processor_models(config, rebind_cached=not restore_model)
         logger.info("[DeepAgent] Model configuration hot reloaded")
+
+    def _hot_reload_context_processor_models(
+        self,
+        config: DeepAgentConfig,
+        *,
+        rebind_cached: bool = True,
+    ) -> None:
+        """Make context processors follow the hot-reloaded primary model.
+
+        ``ContextProcessorRail.init()`` injects the primary model into each
+        processor config (compressors, offloaders) only while ``model`` is
+        ``None``, and each model-backed processor builds its ``Model`` once in
+        ``__init__``. Two things therefore go stale on a model switch:
+
+        1. The processor config templates in ``react_agent.config.context_processors``,
+           which seed processors for contexts created later. Only configs that
+           already carry a model are updated, keeping the rail's injection semantics.
+        2. Processors already instantiated in the ``ContextEngine`` context pool.
+           These are rebound through the public chain
+           ``ReActAgent.update_model_context`` → ``ContextEngine.update_model_context``
+           → ``ModelContext.rebind_model`` → ``ContextProcessor.rebind_model``.
+           Errors propagate so an incomplete rebind is not silently masked.
+
+        Args:
+            config: The incoming DeepAgent config carrying the new model.
+            rebind_cached: Whether to rebind cached processors. ``False`` when the
+                caller already rebound them via ``ReActAgent.set_llm``.
+        """
+        if self._react_agent is None or config.model is None:
+            return
+        new_model_config = config.model.model_config
+        new_model_client_config = config.model.model_client_config
+        react_config = self._react_agent.config
+        updated = 0
+        for _key, cfg in getattr(react_config, "context_processors", None) or []:
+            changed = False
+            if getattr(cfg, "model", None) is not None:
+                cfg.model = new_model_config
+                changed = True
+            if getattr(cfg, "model_client", None) is not None:
+                cfg.model_client = new_model_client_config
+                changed = True
+            if changed:
+                updated += 1
+        if updated:
+            logger.info(
+                "[DeepAgent] Context processor configs rebound to new primary model: %d", updated,
+            )
+
+        update_model_context = getattr(self._react_agent, "update_model_context", None)
+        if not rebind_cached or not callable(update_model_context):
+            return
+        # Keep configure()'s resolved model name / window: update_model_context()
+        # overwrites both on the context engine and every cached context.
+        update_model_context(
+            model_name=react_config.model_name,
+            context_window_tokens=react_config.context_engine_config.model_context_window_tokens_override,
+            model=config.model,
+            model_config=new_model_config,
+            model_client_config=new_model_client_config,
+        )
 
     def _extension_bound_tool_names(self) -> set[str]:
         """Return tool names owned by successful Plugin / AgentTemplate loads."""
@@ -3467,6 +3542,32 @@ class DeepAgent(BaseAgent):
         effective_inputs["_steering_queue"] = steering_queue
         if host_iteration_limit is not None:
             effective_inputs["_host_max_iterations"] = host_iteration_limit
+
+        # ``_deep_config`` may be absent on a partially constructed agent
+        # (tests build one via ``__new__`` with only ``_react_agent``).
+        deep_config = getattr(self, "_deep_config", None)
+        lifecycle = (
+            deep_config.stream_task_lifecycle
+            if deep_config is not None
+            else None
+        )
+        if lifecycle is not None:
+            # Opt-in ownership for Persistent. The default native/personal
+            # branch below retains its existing call and stream semantics.
+            try:
+                async with aclosing(self._react_agent.stream(
+                    effective_inputs, session, stream_modes,
+                    _background_task_lifecycle=lifecycle,
+                )) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
+            finally:
+                # The session decorator is another generator boundary; its
+                # close alone is not a producer-completion signal. Drain the
+                # explicitly registered tasks before this native call exits.
+                await lifecycle.cancel_and_wait()
+            return
+
         async with aclosing(self._react_agent.stream(
             effective_inputs, session, stream_modes,
         )) as chunks:
@@ -3932,6 +4033,10 @@ class DeepAgent(BaseAgent):
                 Falls back to the bound loop session when omitted.
         """
         proposal_session = session or self._loop_session
+        if self._has_in_flight_abort_target(proposal_session):
+            self._mark_cancellation_cause(
+                CancellationCause.CANCEL, session=proposal_session
+            )
         if self._moa_scope_owner is not None:
             if proposal_session is None:
                 self._moa_scope_owner.close_all("aborted")
@@ -3947,6 +4052,8 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+        if self._deep_config is not None and self._deep_config.stream_task_lifecycle is not None:
+            await self._deep_config.stream_task_lifecycle.cancel_and_wait()
         await self._release_session_subagent_controls(
             session or self._loop_session,
             reason="aborted",
@@ -4522,8 +4629,52 @@ class DeepAgent(BaseAgent):
         active = self._active_interaction_round
         if active is None:
             return False
+        self._mark_cancellation_cause(CancellationCause.CANCEL)
         await self._cancel_active_round(reason=reason)
         return True
+
+    def _mark_cancellation_cause(
+        self,
+        cause: CancellationCause,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Tag the target session so compression reports cancel instead of failed.
+
+        ``session`` overrides the bound context session: ``abort(session=...)``
+        may target a session other than the bound one, and the mark must land
+        on the same session the guard checked. Falls back to the bound
+        resolution when omitted.
+        """
+        try:
+            if session is not None:
+                session_id = session.get_session_id()
+            else:
+                session_id = self._resolve_context_session_id()
+        except Exception:
+            logger.debug("[DeepAgent] cancel cause not bound to a session", exc_info=True)
+            return
+        mark_cancellation_cause(session_id, cause)
+
+    def _has_in_flight_abort_target(self, session: Optional[Session]) -> bool:
+        """Whether ``abort()`` has anything it can actually cancel right now.
+
+        The cancellation-cause mark must only be set when a real cancellation
+        is about to happen: a no-op abort would otherwise leave a stale mark
+        that relabels a later internal failure as ``user_cancel`` within the
+        registry TTL. Mirrors the three targets ``abort()`` cancels: the
+        active interaction round, the streaming task-loop background task,
+        and persistent subagent controls held for ``session``.
+        """
+        if self._active_interaction_round is not None:
+            return True
+        stream_task = self._stream_process_task
+        if stream_task is not None and not stream_task.done():
+            return True
+        if session is not None:
+            controls = getattr(self, _CONTROL_ATTR, None) or {}
+            if session.get_session_id() in controls:
+                return True
+        return False
 
     async def _cancel_active_round(
         self,

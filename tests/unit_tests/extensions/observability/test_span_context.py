@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -17,6 +18,7 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
+    bind_root_span_context,
     cascade_close_children,
     clear_root_span,
     clear_current_session_id,
@@ -88,6 +90,40 @@ def test_clear_root_span_expected_identity_does_not_remove_replacement() -> None
             old.end()
         if new.is_recording():
             new.end()
+        reset_state()
+        provider.shutdown()
+
+
+def test_child_session_root_binding_is_context_local_and_inherited_by_tasks() -> None:
+    provider, _ = _provider()
+    tracer = provider.get_tracer("root-context-alias-test")
+    root = tracer.start_span("root.team")
+    other_root = tracer.start_span("root.other-team")
+    try:
+        set_root_span(root, session_id="team-session")
+
+        async def child_lookup(span, child_session_id: str):
+            async def task_lookup():
+                return get_root_span(session_id=child_session_id)
+
+            with bind_root_span_context(span, session_id=child_session_id):
+                task = asyncio.create_task(task_lookup())
+            return await task
+
+        async def scenario():
+            return await asyncio.gather(
+                child_lookup(root, "team/workflow/avatar-a"),
+                child_lookup(other_root, "team/workflow/avatar-b"),
+            )
+
+        assert asyncio.run(scenario()) == [root, other_root]
+        assert get_root_span(session_id="team/workflow/avatar-a") is None
+        assert get_root_span(session_id="team/workflow/avatar-b") is None
+        assert get_root_span(session_id="team-session") is root
+    finally:
+        clear_root_span(session_id="team-session", expected_span=root)
+        root.end()
+        other_root.end()
         reset_state()
         provider.shutdown()
 

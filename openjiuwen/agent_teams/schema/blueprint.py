@@ -44,6 +44,7 @@ from openjiuwen.agent_teams.schema.team import (
     ExternalCliMemberSpec,
     MemberSpecBase,
     TeamLifecycle,
+    TeamGoalSpec,
     TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
@@ -172,6 +173,25 @@ class LeaderSpec(MemberSpecBase):
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
     desc: str = Field(default_factory=lambda: t("blueprint.default_desc"))
+    cli_agent: Optional[str] = None
+    """Run the leader on a third-party harness instead of the local DeepAgent.
+
+    Names one entry of ``TeamAgentSpec.external_cli_agents`` by its
+    ``cli_agent``; the launch config is read from that entry, exactly as for a
+    member spawned on the same kind. Only SDK backends (``"claude"`` /
+    ``"codex"``) can drive a leader: its team tools need the leader's own
+    backend, so they must be mounted in process. ``None`` (default) keeps the
+    DeepAgent leader built from ``agents["leader"]``.
+    """
+    goal: Optional[TeamGoalSpec] = None
+    """Goal mode for the leader. ``None`` (default) keeps it off.
+
+    When set, the user's request becomes the leader's goal: the team is not
+    declared complete while that goal is still open, and once every member has
+    gone quiet the leader is driven to check the task board against the
+    request — adding work, or reporting it done for assessment. Not available
+    to a leader on a third-party harness (``cli_agent``).
+    """
 
 
 class TinyAgentSpec(BaseModel):
@@ -250,6 +270,15 @@ class TeamAgentSpec(BaseModel):
     """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
+    agent_group_name: Optional[str] = None
+    """Name of the AgentGroup this team was assembled from, if any.
+
+    Set by the host that seeds ``predefined_members`` / ``agents[<member>]``
+    from an AgentGroup package. ``spawn_expert`` uses it to spawn further
+    instances of a bound member from the team's own assembled spec (its
+    ``agents[<member>].agent_template_spec`` and predefined persona) instead
+    of re-reading the package from disk.
+    """
     external_cli_agents: list[ExternalCliAgentSpec] = []
     """Static launch configs for external CLI agents (claudecode / codex / ...).
 
@@ -361,6 +390,64 @@ class TeamAgentSpec(BaseModel):
     reviewer). The reviewer machinery itself (column, guards, voting) is
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
+    """
+    enable_member_messaging: bool = False
+    """Let scheduled-dispatch members message each other directly.
+
+    Scheduled dispatch narrows a member's ``send_message`` to the leader and
+    the user, so the leader routes every exchange. When True, members keep
+    the full reach an autonomous member has — point-to-point, multicast and
+    broadcast to peers — while ``"leader"`` stays a valid role recipient.
+    Prompts and the tool description follow the same flag. Static
+    configuration; ignored under ``dispatch_mode="autonomous"``, where
+    members already reach each other. See F_126.
+    """
+    max_subtask_depth: int = Field(default=0, ge=0)
+    """Let scheduled-dispatch members split their task into subtasks.
+
+    ``0`` (default) keeps ``create_task`` leader-only. A positive value gives
+    scheduled members a ``create_task`` that parks their executing task at
+    ``BLOCKED`` until the new subtasks finish, and caps how deep subtasks may
+    nest (a leader task is depth 0, its subtasks depth 1, ...). Static
+    configuration, no ``build_team`` override; ignored under
+    ``dispatch_mode="autonomous"``. See F_128.
+    """
+    member_goal: Optional[TeamGoalSpec] = None
+    """Goal mode for the team's members. ``None`` (default) keeps it off.
+
+    When set, a member's goal is the task it started (claimed, started by the
+    scheduler, or plan-approved): it keeps working on it instead of going idle,
+    and its submission is assessed before the task leaves ``in_progress``.
+    Applies to locally run teammates; a member opts out with
+    ``TeamMemberSpec.goal=False`` or ``spawn_teammate(goal=false)``. Members on
+    a third-party harness, human members and bridge members are unaffected.
+    """
+    bootstrap_mode: Literal["leader", "framework"] = "leader"
+    """Who materializes the team row, and how the leader receives its policy.
+
+    ``"leader"`` (default): the leader calls the ``build_team`` tool, which
+    creates the team and discloses the collaboration policy in its result
+    (F_76). ``"framework"``: the leader's coordination kernel builds the team
+    itself on ``start()`` when no team row exists yet, the leader's tool set
+    carries no ``build_team``, and the policy reaches the leader through the
+    ``TeamContextTracker`` as a ``<team-policy>`` block ahead of its first
+    input. Only valid together with ``dispatch_mode="scheduled"`` — the
+    task-driven handoffs are what make a pre-built, memberless team usable.
+    See F_122.
+    """
+    team_display_name: str | None = None
+    """Team label written to the team row by a framework bootstrap.
+
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``, where the leader names the
+    team in its ``build_team`` call.
+    """
+    team_desc: str | None = None
+    """Team description written to the team row by a framework bootstrap.
+
+    Lands in ``team_card.md`` and in the team info every member reads.
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``.
     """
     default_max_review_rounds: int = 3
     """Default per-task review-round ceiling (scheduled dispatch).
@@ -497,15 +584,16 @@ class TeamAgentSpec(BaseModel):
     enable_fork: bool = False
     """Spec-level capability gate for context inheritance (fork).
 
-    True opens three surfaces at once, all keyed off this one flag:
+    True opens the following surfaces:
 
     - the ``checkpoint(name)`` tool, which lets any member save a named
       snapshot of its own conversation position;
-    - the ``fork`` / ``fork_source`` / ``compact`` properties on
-      ``spawn_teammate``'s schema;
-    - the "context inheritance" section of ``spawn_teammate``'s description.
+    - the ``fork`` / ``fork_source`` / ``fork_mode`` properties and
+      context inheritance instructions on ``spawn_teammate``;
+    - for in-process teams, the ``fork`` / ``fork_source`` properties and
+      context inheritance instructions on ``spawn_expert``.
 
-    False (default) removes all three. Schema and prose are gated on the same
+    False (default) removes these surfaces. Schema and prose are gated on the same
     signal deliberately: a leader that reads about ``fork`` but has no
     ``fork`` property to fill deliberates over a mechanism it cannot invoke,
     which is worse than never mentioning it.
@@ -520,13 +608,18 @@ class TeamAgentSpec(BaseModel):
     enable_swarmflow: bool = False
     """Spec-level capability gate for swarmflow orchestration.
 
-    True wires the leader-only ``swarmflow(script_path, args)`` tool, which
-    runs a swarmflow script (a multi-agent workflow) in the background. The
-    script's ``agent()`` calls execute as single-shot ``WORKER`` members via
-    the team worker backend, and phase progress is streamed back to the leader
-    (a spectator) which narrates it to the user. False (default) hides the
-    tool. Workers reuse the leader's model; no separate worker spec is required
-    for the MVP. See ``openjiuwen/agent_teams/workflow``.
+    True wires the ``swarmflow(script_path, args)`` tool on the leader AND on
+    every in-process teammate that received the shared team handles (the tool
+    factory drops the name again for members without them — subprocess /
+    external CLI). The tool runs a swarmflow script (a multi-agent workflow)
+    in the background. The script's ``agent()`` calls execute as single-shot
+    ``WORKER`` members via the team worker backend, and phase progress is
+    streamed back on the team topic: the leader (a spectator) narrates it to
+    the user, a teammate owner reports its run's result back to the
+    leader. False (default) hides the tool everywhere. Evolution direction:
+    this switch is meant to default-on and eventually disappear once teammate
+    orchestration is fully proven — do not add a second member-level switch.
+    See ``openjiuwen/agent_teams/workflow``.
     """
     swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
     """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""
@@ -682,6 +775,37 @@ class TeamAgentSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_leader_cli_agent(self) -> "TeamAgentSpec":
+        """Reject a third-party leader harness the team cannot host.
+
+        The leader's team tools are built over its own backend and mounted in
+        process, which only the SDK backends offer. Context fork snapshots
+        the conversation of the local harness the leader no longer has.
+        """
+        cli_agent = self.leader.cli_agent
+        if cli_agent is None:
+            return self
+        declared = {cfg.cli_agent for cfg in self.external_cli_agents}
+        if cli_agent not in declared:
+            raise ValueError(
+                f"leader.cli_agent={cli_agent!r} is not declared in external_cli_agents "
+                f"(declared: {sorted(declared)})",
+            )
+        from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
+
+        backend = backend_for(cli_agent)
+        if backend is None or backend.kind != "sdk":
+            raise ValueError(
+                f"leader.cli_agent={cli_agent!r} cannot drive a leader; only SDK backends "
+                f"('claude' / 'codex') mount the leader's team tools in process",
+            )
+        if self.enable_fork:
+            raise ValueError(f"leader.cli_agent={cli_agent!r} does not support: enable_fork")
+        if self.leader.goal is not None:
+            raise ValueError(f"leader.cli_agent={cli_agent!r} does not support: leader.goal")
+        return self
+
+    @model_validator(mode="after")
     def _validate_review_settings(self) -> "TeamAgentSpec":
         """Range-check the verify-gate knobs (F_62).
 
@@ -712,6 +836,23 @@ class TeamAgentSpec(BaseModel):
         if self.stale_pending_idle_timeout <= 0:
             raise ValueError(
                 f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bootstrap_mode(self) -> "TeamAgentSpec":
+        """Reject a framework bootstrap outside scheduled dispatch (F_122).
+
+        A framework-built team starts with no members; only the scheduling
+        runtime turns ``create_task`` into member handoffs, so under
+        autonomous dispatch the pre-built team would sit idle while its
+        leader lacks the ``build_team`` call that normally hands it the
+        policy. Failing here keeps that combination from ever being built.
+        """
+        if self.bootstrap_mode == "framework" and self.dispatch_mode != "scheduled":
+            raise ValueError(
+                "bootstrap_mode='framework' requires dispatch_mode='scheduled'; "
+                f"got dispatch_mode={self.dispatch_mode!r}",
             )
         return self
 
@@ -812,6 +953,8 @@ class TeamAgentSpec(BaseModel):
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
+            enable_member_messaging=self.enable_member_messaging,
+            max_subtask_depth=self.max_subtask_depth,
             teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
@@ -845,7 +988,10 @@ class TeamAgentSpec(BaseModel):
             model_allocator.allocate(model_name=self.leader.model_name) if model_allocator is not None else None
         )
         leader_member_model = leader_allocation.to_team_model_config() if leader_allocation else None
-        self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
+        # A third-party leader harness brings its own model (its CLI login or
+        # the kind's endpoint config), so an unresolved pool model is not an error.
+        if self.leader.cli_agent is None:
+            self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
 
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
@@ -857,6 +1003,7 @@ class TeamAgentSpec(BaseModel):
             messager_config=messager_config,
             db_config=db_config,
             member_model=leader_member_model,
+            cli_agent=self.leader.cli_agent,
         )
 
         agent = _TeamAgent(leader_card)

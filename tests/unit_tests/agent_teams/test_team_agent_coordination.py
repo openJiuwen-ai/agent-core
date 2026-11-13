@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
@@ -67,7 +68,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.team_context import TASK_REVISION_STATE_KEY, TaskRevisionTracker, TeamContextTracker
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import (
@@ -1417,8 +1418,11 @@ async def test_task_claimed_for_self_uses_teammate_template():
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(
-        return_value=MagicMock(task_id="task-42", title="Fix bug", content="reproduce and fix", status="pending")
+        return_value=MagicMock(
+            task_id="task-42", title="Fix bug", content="reproduce and fix", status="pending", revision=0
+        )
     )
+    agent._configurator.task_manager.observe_revision = AsyncMock()
     agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
@@ -1538,25 +1542,130 @@ async def test_task_cancelled_for_self_steers_member_off_task():
     assert "view_task" in content
 
 
+class _ChildSession:
+    def __init__(self) -> None:
+        self.state: dict = {}
+
+    def get_session_id(self) -> str:
+        return "child-session"
+
+    def get_state(self, key: str):
+        return self.state.get(key)
+
+    def update_state(self, data: dict) -> None:
+        self.state.update(data)
+
+    async def commit(self) -> None:
+        return None
+
+
+def _harness_with_tracker(edited: list, *, send: AsyncMock) -> tuple[TeamHarness, TaskRevisionTracker]:
+    """A TeamHarness over a stub native, handed the member's task notice tracker."""
+    backend = SimpleNamespace(task_manager=SimpleNamespace(unseen_edits=AsyncMock(return_value=edited)))
+    tracker = TaskRevisionTracker(team_backend=backend, member_name="dev-1")
+    harness = TeamHarness(
+        SimpleNamespace(),
+        None,
+        SimpleNamespace(send=send),
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        task_event_tracker=tracker,
+    )
+    return harness, tracker
+
+
+def _edited_task(task_id: str, revision: int) -> SimpleNamespace:
+    return SimpleNamespace(task_id=task_id, title="build", revision=revision, observed_revision=0, change_notes=None)
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_task_updated_for_self_tells_member_to_reread():
-    """A member whose claimed task's content was edited is told to re-read via
-    the [任务变更] prompt; it keeps the task (no re-claim)."""
+async def test_task_updated_for_self_asks_the_runtime_to_announce():
+    """F_129: the edit event renders nothing itself; the runtime's tracker speaks."""
     agent = _make_leader()
-    agent._is_agent_running = lambda: False
+    runtime = SimpleNamespace(announce_task_revisions=AsyncMock(), send=AsyncMock())
+    agent._configurator.harness = runtime
     agent.deliver_input = AsyncMock()
-
     event = EventMessage.from_event(
-        TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+        TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="task-42", revision=1)
     )
+
     await agent._coordination.dispatcher.task_board.on_task_updated(event)
 
-    agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
-    assert "[任务变更]" in content
-    assert "task-42" in content
-    assert "view_task" in content
+    runtime.announce_task_revisions.assert_awaited_once()
+    agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_a_runtime_without_the_capability_gets_no_early_notice():
+    agent = _make_leader()
+    agent._configurator.harness = SimpleNamespace(send=AsyncMock())
+
+    await agent.announce_task_revisions()
+
+    agent._configurator.harness.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_team_harness_announces_the_tracker_notice_once_as_a_steer():
+    send = AsyncMock()
+    harness, _tracker = _harness_with_tracker([_edited_task("task-42", 1)], send=send)
+    session = _ChildSession()
+    harness._active_agent_session = session
+
+    await harness.announce_task_revisions()
+    await harness.announce_task_revisions()
+
+    send.assert_awaited_once()
+    assert 'kind="task-revised"' in send.await_args.args[0] and "task-42" in send.await_args.args[0]
+    assert send.await_args.kwargs == {"immediate": True}
+    assert session.state[TASK_REVISION_STATE_KEY] == ["task-42@1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_harness_gives_the_claim_back_when_send_fails():
+    failing = AsyncMock(side_effect=RuntimeError("x"))
+    harness, tracker = _harness_with_tracker([_edited_task("task-42", 1)], send=failing)
+    session = _ChildSession()
+    harness._active_agent_session = session
+
+    with pytest.raises(RuntimeError):
+        await harness.announce_task_revisions()
+
+    assert await tracker.claim(session) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_harness_outside_a_run_cycle_claims_nothing():
+    send = AsyncMock()
+    harness, tracker = _harness_with_tracker([_edited_task("task-42", 1)], send=send)
+
+    await harness.announce_task_revisions()
+
+    send.assert_not_awaited()
+    assert await tracker.claim(_ChildSession()) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_an_external_runtime_announces_for_itself():
+    agent = _make_leader()
+    runtime = SimpleNamespace(
+        state=None,
+        announce_team_context=AsyncMock(),
+        announce_task_revisions=AsyncMock(),
+    )
+    agent._configurator.harness = runtime
+    agent.deliver_input = AsyncMock()
+
+    await agent.announce_task_revisions()
+
+    runtime.announce_task_revisions.assert_awaited_once()
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1569,7 +1678,6 @@ async def test_dispatch_routes_targeted_task_events_to_handlers():
     cases = (
         (TaskRevokedEvent(team_name="test-team", member_name="leader-1", task_id="t-1"), "[任务撤回]"),
         (TaskCancelledEvent(team_name="test-team", member_name="leader-1", task_id="t-2"), "[任务取消]"),
-        (TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="t-3"), "[任务变更]"),
     )
     for event_model, marker in cases:
         agent = _make_leader()
@@ -1577,6 +1685,12 @@ async def test_dispatch_routes_targeted_task_events_to_handlers():
         await agent._coordination.dispatcher.dispatch(EventMessage.from_event(event_model))
         agent.deliver_input.assert_awaited_once()
         assert marker in agent.deliver_input.await_args.args[0]
+
+    agent = _make_leader()
+    agent.announce_task_revisions = AsyncMock()
+    updated = TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="t-3")
+    await agent._coordination.dispatcher.dispatch(EventMessage.from_event(updated))
+    agent.announce_task_revisions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1609,6 +1723,7 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     task_row.title = "Write design doc"
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(return_value=task_row)
+    agent._configurator.task_manager.observe_revision = AsyncMock()
     agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 

@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.goal import resolve_goal_spec, to_stop_config
 from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.messager import (
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -192,6 +194,20 @@ class _SwarmflowModelResolver:
         return [e.model_name for e in (self._spec.model_pool or [])]
 
 
+def _derive_expert_binding(spec: TeamAgentSpec) -> Any:
+    """What the leader's ``spawn_expert`` needs from the team spec."""
+    from openjiuwen.agent_teams.experts.bound_group import bound_agent_group
+    from openjiuwen.agent_teams.rails.team_context import ExpertBinding
+
+    base = spec.agents.get("teammate") or spec.agents.get("leader")
+    workspace = base.workspace.root_path if base is not None and base.workspace is not None else None
+    return ExpertBinding(
+        bound_group=bound_agent_group(spec),
+        persona_workspace=workspace,
+        persona_language=base.language if base is not None else None,
+    )
+
+
 def _derive_swarmflow_worker_base_spec(
     spec: TeamAgentSpec,
     observability_rail_specs: list[Any],
@@ -286,6 +302,14 @@ class AgentConfigurator:
         self._infra.workspace_initialized = value
 
     @property
+    def swarmflow(self) -> Optional["SwarmflowInfra"]:
+        return self._infra.swarmflow
+
+    @swarmflow.setter
+    def swarmflow(self, value: Optional["SwarmflowInfra"]) -> None:
+        self._infra.swarmflow = value
+
+    @property
     def task_manager(self) -> Any:
         return self._infra.task_manager
 
@@ -357,7 +381,9 @@ class AgentConfigurator:
         on_team_built: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
-        agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         resolved_language = _resolve_language(agent_spec.language)
         self._blueprint = TeamAgentBlueprint(
             card=self._card,
@@ -523,10 +549,31 @@ class AgentConfigurator:
 
         The default path builds a ``TeamHarness`` over DeepAgent. When
         ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
-        external CLI member), it is adopted as-is and the DeepAgent / rail /
+        external CLI member) -- or built here for a leader whose spec names a
+        third-party harness -- it is adopted as-is and the DeepAgent / rail /
         memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
+        leads_external_harness = ctx.role == TeamRole.LEADER and bool(ctx.cli_agent)
+        if member_runtime is None and leads_external_harness and self.team_backend is not None:
+            # A leader on a third-party harness (``LeaderSpec.cli_agent``).
+            # Unlike a spawned member, nobody hands it a runtime: it is built
+            # here, session-free, and bound to its session on every start.
+            from openjiuwen.agent_teams.spawn.external_leader import build_external_leader_runtime
+
+            member_runtime = build_external_leader_runtime(
+                spec,
+                ctx,
+                agent_id=self._card.id,
+                team_backend=self.team_backend,
+            )
+            if spec.enable_swarmflow and self.swarmflow is None:
+                # Same single construction point as the DeepAgent leader's:
+                # the team-level container every member's runs draw on.
+                from openjiuwen.agent_teams.rails.elements import observability_rail_specs
+                from openjiuwen.agent_teams.workflow.swarmflow_infra import build_swarmflow_infra
+
+                self.swarmflow = build_swarmflow_infra(spec, ctx, observability_rail_specs())
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
@@ -550,7 +597,9 @@ class AgentConfigurator:
             self._attach_workspace_cache(spec, ctx, resolved_language)
             return member_runtime
 
-        agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
 
@@ -667,6 +716,7 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
+            TEAM_GOAL,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
@@ -692,9 +742,9 @@ class AgentConfigurator:
         member_observability_rail_specs = observability_rail_specs()
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
-        # (one per role_type) from the leader's tool set.
+        # (one per kind of member) from the leader's tool set.
         exclude = (
-            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
+            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent"]
             if _resolve_team_mode(spec) == "predefined"
             else []
         )
@@ -705,6 +755,7 @@ class AgentConfigurator:
                 params={
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "lifecycle": spec.lifecycle,
                     "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
@@ -725,6 +776,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_path": team_workspace_path,
                     "team_outputs_dir": team_outputs_dir,
@@ -757,6 +809,13 @@ class AgentConfigurator:
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
+
+        # Goal mode: a member's goal follows the task it started, so only
+        # members carry the task-tool rail; the leader's goal is the user's
+        # request and needs no tool hook.
+        goal_spec = resolve_goal_spec(spec, ctx)
+        if goal_spec is not None and ctx.role != TeamRole.LEADER and self.team_backend:
+            team_rail_specs.append(RailSpec(type=TEAM_GOAL, params={}))
 
         reliability_cfg = spec.reliability
         reliability_components = None
@@ -824,11 +883,17 @@ class AgentConfigurator:
                 member_card_id=self._card.id,
                 project_dir=member_project_dir,
             )
-        # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
-        # positional pool lookup by ``agent(model=...)`` name hint; no hint
-        # resolves to None so the worker falls back to the leader's model, but
-        # an explicit name that misses the pool raises (no silent downgrade).
-        # The leader-only async ``swarmflow`` tool is gated on this being non-None.
+        # Swarmflow shared infrastructure (worker-model resolver / worker +
+        # human base specs / concurrency governor / budget ledger /
+        # external-CLI allowlist / expert table). It is a team-level
+        # singleton — one governor and one ledger across every member —
+        # hosted on the leader's TeamInfra: the leader constructs the
+        # container once (gate unchanged: role + ``enable_swarmflow``) and
+        # re-uses it on later setups, while an in-process teammate reads
+        # the instance injected by ``share_swarmflow_with`` before
+        # configure. A member with no injection keeps every field empty,
+        # and the tool factory's resolver gate then drops ``swarmflow``
+        # from its tool set.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
@@ -836,56 +901,41 @@ class AgentConfigurator:
         swarmflow_budget = None
         swarmflow_external_cli_agents: tuple[Any, ...] = ()
         swarmflow_expert_specs: dict[str, Any] = {}
-        if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
-            # Callable class (same call contract as the historical closure) so
-            # the inject chain stays unchanged, plus pool_names for the
-            # engine's fail-fast model-hint check. The resolver-level
-            # ValueError raise from release/v0.1.19-2 is kept verbatim: it
-            # backs the non-engine callers (CLI MCP tool set, tool gateway)
-            # and the shrunk-pool window behind the engine's pre-flight.
-            swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
+        infra = self.swarmflow
+        if infra is None and ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
+            from openjiuwen.agent_teams.workflow.swarmflow_infra import build_swarmflow_infra
 
-            base_specs = spec.agents
-            swarmflow_worker_base_spec = _derive_swarmflow_worker_base_spec(spec, member_observability_rail_specs)
-            # Human-session avatars derive from the human_agent spec; fall back to
-            # the raw worker base so human_session still works when no dedicated
-            # human_agent spec is configured (it just lacks human-tuned desc).
-            # Like the worker base, it mounts the observability rail pair so
-            # the avatar's records carry an agent span in the trajectory.
-            human_base = base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
-            swarmflow_human_base_spec = (
-                human_base.model_copy(
-                    update={"rails": list(human_base.rails or []) + member_observability_rail_specs},
-                )
-                if human_base is not None
-                else None
+            infra = build_swarmflow_infra(spec, ctx, member_observability_rail_specs)
+            self.swarmflow = infra
+        if infra is not None:
+            swarmflow_model_resolver = infra.model_resolver
+            swarmflow_worker_base_spec = infra.worker_base_spec
+            swarmflow_human_base_spec = infra.human_base_spec
+            swarmflow_concurrency_governor = infra.concurrency_governor
+            swarmflow_budget = infra.budget
+            swarmflow_external_cli_agents = infra.external_cli_agents
+            swarmflow_expert_specs = infra.expert_specs
+
+        # The host's expert catalog backs the leader's expert tools; members
+        # never get it (spawning is a leader capability).
+        expert_catalog = None
+        expert_binding = None
+        if ctx.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.experts.catalog import get_process_expert_catalog
+
+            expert_catalog = get_process_expert_catalog()
+            if expert_catalog is not None:
+                expert_binding = _derive_expert_binding(spec)
+
+        # One task notice tracker per member, owned here: every rebuilt policy
+        # rail borrows it through extras and the TeamHarness is handed it, so
+        # the rail and the event-driven announcement share one baseline (F_129).
+        if ctx.role != TeamRole.LEADER and self._resources.task_event_tracker is None:
+            from openjiuwen.agent_teams.team_context import build_task_event_tracker
+
+            self._resources.task_event_tracker = build_task_event_tracker(
+                spec.dispatch_mode, team_backend=self.team_backend, member_name=member_name
             )
-
-            from openjiuwen.agent_teams.workflow.concurrency import (
-                ConcurrencyGovernor,
-                validate_swarmflow_concurrency,
-            )
-
-            l2_cap = validate_swarmflow_concurrency(spec.swarmflow_concurrency)
-            swarmflow_concurrency_governor = ConcurrencyGovernor(
-                spec.swarmflow_concurrency,
-                agents_per_run_cap=l2_cap,
-            )
-
-            from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-
-            # One ledger per leader, shared by every run it launches (like the
-            # governor's L3): concurrent runs draw down one pool. ``total=None``
-            # keeps it unbounded while still giving scripts a live ``spent()``.
-            swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
-            swarmflow_external_cli_agents = _derive_swarmflow_external_cli_agents(spec)
-
-            from openjiuwen.agent_teams.workflow.backends.expert_specs import derive_swarmflow_expert_specs
-
-            # Experts are AgentGroup members already in the blueprint; a script
-            # picks one by member name. Derived once here, next to the worker
-            # base spec, so both ride the same rails and progressive_tool switch.
-            swarmflow_expert_specs = derive_swarmflow_expert_specs(spec, member_observability_rail_specs)
 
         inject_team_handles(
             member_build_context.extras,
@@ -903,6 +953,9 @@ class AgentConfigurator:
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,
+            expert_catalog=expert_catalog,
+            expert_binding=expert_binding,
+            task_event_tracker=self._resources.task_event_tracker,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep
@@ -962,15 +1015,24 @@ class AgentConfigurator:
             member_name=member_name,
             initial_plan_mode=is_team_plan_leader,
             build_context=member_build_context,
+            task_event_tracker=self._resources.task_event_tracker,
+            goal=to_stop_config(goal_spec) if goal_spec is not None else None,
+            track_completed_turn_fork=(
+                spec.enable_fork and spec.spawn_mode == "inprocess" and ctx.role == TeamRole.TEAMMATE
+            ),
         )
 
-        # Leader's own model calls (decision / tool use / script generation) bill
-        # the session budget — NOT the per-run budget. Only when swarmflow is
-        # enabled (swarmflow_budget is a real ledger) does the leader carry this
-        # rail; the per-run ledger is passed as None so the rail only adds to the
-        # session pool. TinyAgent intent classify gets the same treatment in
-        # avatar_session_backend.
-        if swarmflow_budget is not None and ctx.role == TeamRole.LEADER:
+        # A member's own model calls (decision / tool use / script generation)
+        # bill the session budget — NOT the per-run budget. Every member whose
+        # swarmflow handles are wired carries this rail (the leader that
+        # constructed them, an in-process teammate that received the share):
+        # "whoever holds the ledger bills it", so teammate loops draw down the
+        # same session pool the leader's and the workers' calls do. The
+        # per-run ledger is passed as None so the rail only adds to the
+        # session pool; a member without injected handles mounts no rail
+        # (behaviour unchanged). TinyAgent intent classify gets the same
+        # treatment in avatar_session_backend.
+        if swarmflow_budget is not None:
             from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 
             self.harness.add_rail(SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None))
@@ -1057,10 +1119,25 @@ class AgentConfigurator:
         spec: TeamAgentSpec,
         role: TeamRole,
         member_name: Optional[str] = None,
+        *,
+        agent_template_spec: Optional[dict[str, Any]] = None,
     ):
+        """Select the ``DeepAgentSpec`` a member is built from.
+
+        A member's own ``agents[<member>]`` entry wins (predefined members,
+        already assembled by the host). A member spawned from an expert
+        template (``spawn_expert``) carries the template's capability
+        snapshot instead, applied to the shared base spec. Everyone else uses
+        the shared base for its role.
+        """
         if member_name and member_name in spec.agents:
             return spec.agents[member_name]
-        return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
+        base = spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
+        if agent_template_spec:
+            from openjiuwen.agent_teams.experts.template_member import apply_template_snapshot
+
+            return apply_template_snapshot(base, agent_template_spec)
+        return base
 
     def setup_team_backend(
         self,
@@ -1130,7 +1207,9 @@ class AgentConfigurator:
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
-        current_agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        current_agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         current_model_config = ctx.member_model or current_agent_spec.model
         current_model_name = None
         current_model_provider = None
@@ -1163,7 +1242,10 @@ class AgentConfigurator:
             enable_bridge=spec.enable_bridge,
             dispatch_mode=spec.dispatch_mode,
             enable_task_verification=spec.enable_task_verification,
+            enable_member_messaging=spec.enable_member_messaging,
+            max_subtask_depth=spec.max_subtask_depth,
             enable_fork=spec.enable_fork,
+            enable_member_goal=spec.member_goal is not None,
             evolution_enabled=spec.evolution_enabled,
             member_workspace_prefix=spec.member_workspace_prefix,
             external_cli_agents=spec.external_cli_agents,

@@ -261,7 +261,7 @@ def _log(state: dict[str, Any], entry: dict[str, Any]) -> None:
     )
 
 
-def _never_performed(error: Any) -> bool:
+def action_not_performed(error: Any) -> bool:
     """Playwright failed locator resolution/actionability before sending the action.
 
     Its call log says "performing <action>" only once the action is actually sent to the page; an
@@ -290,7 +290,8 @@ def _never_performed(error: Any) -> bool:
     return waiting and not dispatched
 
 
-def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
+def native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
+    """Recognize undispatched target resolution errors from native action tools."""
     if not tool.endswith(("browser_click", "browser_type", "browser_select_option", "browser_press_key")):
         return False
     # Match the native executor's exact error envelope, not arbitrary page text.
@@ -302,6 +303,26 @@ def _native_preflight_failure(tool: str, result: dict[str, Any]) -> bool:
             error,
         )
     )
+
+
+def _unperformed_diagnostic(error: Any) -> str:
+    """Name executor-reported waiting causes without inferring page/business causes."""
+    if not action_not_performed(error):
+        return ""
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error or ""))
+    if "strict mode violation" in text:
+        return "target_not_unique"
+    call_log = text.partition("Call log:")[2].lower()
+    causes = (
+        ("intercepts pointer events", "pointer_intercepted"),
+        ("element is not attached", "target_detached"),
+        ("element is not visible", "target_not_visible"),
+        ("element is not enabled", "target_disabled"),
+        ("element is not stable", "target_unstable"),
+        ("element is outside of the viewport", "target_outside_viewport"),
+    )
+    matches = [(call_log.rfind(text), reason) for text, reason in causes if text in call_log]
+    return max(matches)[1] if matches else "locator_or_actionability_wait"
 
 
 def _aggregate(entry: dict[str, Any]) -> None:
@@ -337,10 +358,10 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         or result.get("executed") is False
         or not success and result.get("executed") is not True
         and (
-            _native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
+            native_preflight_failure(str(getattr(inputs, "tool_name", "")), result)
             or str(getattr(inputs, "tool_name", "")).endswith(
                 ("browser_click", "browser_type", "browser_select_option", "browser_press_key")
-            ) and _never_performed(result.get("error") or result.get("result"))
+            ) and action_not_performed(result.get("error") or result.get("result"))
         )
     )
     executed = False if rejected else True if success else result.get("executed")
@@ -360,13 +381,16 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         if rejected:
             step.update(execution_state="rejected_before_dispatch", executed=False)
         elif received is not None:
+            for key in ("execution_stage", "keyboard", "focus_before"):
+                if key in received:
+                    step[key] = received[key]
             ok = received.get("ok") is True
             ran = True if ok else received.get("executed")
             uncertain_execution = not ok and ran is not False and ran is not True
             if (
                 uncertain_execution
                 and step.get("op") in {"click", "fill", "type", "select_option", "set_checked", "press", "press_key"}
-                and _never_performed(received.get("error"))
+                and action_not_performed(received.get("error"))
             ):
                 ran = False  # Timed out before the action was sent: not a write, nothing to reconcile.
             step.update(
@@ -387,6 +411,19 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
             step.update(execution_state="dispatched_unknown", executed=None)
         else:
             step.update(execution_state=status, executed=executed)
+        error = (received or {}).get("error") if received is not None else (
+            result.get("error") or result.get("result")
+        )
+        if (step.get("executed") is False
+                and step.get("op") in {"click", "fill", "type", "select_option", "set_checked", "press", "press_key"}):
+            diagnostic = _unperformed_diagnostic(error)
+            if diagnostic:
+                step["failure_reason"] = diagnostic
+                step["recovery_hint"] = (
+                    "Nothing was dispatched. Inspect the intended control with a fixed probe/current snapshot; "
+                    "resolve visibility, obstruction or binding before retrying. Do not force-click or repeat "
+                    "an unchanged target. This diagnostic does not identify a business cause."
+                )
         if step.get("execution_state") in {"acknowledged", "verified"} and step.get("expected_feedback"):
             step["observed_feedback"] = step["expected_feedback"]
             step["evidence_ref"] = {"call_id": entry["call_id"], "source": entry.get("source"),
@@ -475,8 +512,13 @@ _PROJECTED_STEP_KEYS = (
     "effect_domain",
     "effect_verified",
     "error",
+    "failure_reason",
+    "recovery_hint",
     "evidence_ref",
     "observed_feedback",
+    "execution_stage",
+    "keyboard",
+    "focus_before",
 )
 
 

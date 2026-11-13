@@ -110,3 +110,30 @@ def test_rails_argument_must_be_a_list_not_the_spec_factory():
 
     with pytest.raises(TypeError, match="observability_rail_specs\(\)"):
         derive_swarmflow_expert_specs(_team(), observability_rail_specs)
+
+
+def test_bound_group_loader_assembles_members_like_the_expert_table(tmp_path):
+    import asyncio
+
+    from openjiuwen.agent_teams.experts import load_agent_group_package
+    from openjiuwen.agent_teams.experts.template_member import compose_template_member
+    from openjiuwen.agent_teams.workflow.backends.expert_specs import BoundGroupExpertLoader
+    from tests.unit_tests.agent_teams.tools.test_tool_expert import FakeCatalog, _group_package
+
+    group_dir = _group_package(tmp_path / "designer")
+    base = DeepAgentSpec(language="cn", tools=[BuiltinToolSpec(type="core.web_search")], rails=[RailSpec(type="r")])
+    loader = BoundGroupExpertLoader(
+        catalog=FakeCatalog({}, {"designer": group_dir}), group="designer", worker_base_spec=base
+    )
+
+    clip = asyncio.run(loader.load("clip"))
+    external = asyncio.run(loader.load("cli-member"))
+
+    expected = compose_template_member(base, load_agent_group_package(group_dir)["clip"])
+    assert (clip.member_name, clip.display_name, clip.persona) == ("clip", "视频镜头师", expected.persona)
+    assert clip.spec.tools == [], "capabilities come from the template snapshot alone"
+    assert clip.spec.agent_template_spec == expected.spec.agent_template_spec
+    assert clip.spec.rails == base.rails
+    assert external.is_external and external.spec is None
+    assert asyncio.run(loader.load("leader")) is None
+    assert asyncio.run(loader.load("ghost")) is None

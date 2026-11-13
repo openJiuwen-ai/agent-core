@@ -24,8 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
-from openjiuwen.agent_evolving.signal.base import EvolutionTarget
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal, make_evolution_signal
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal, EvolutionTarget, make_evolution_signal
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_llm_exchange, read_tool_call
 from openjiuwen.agent_evolving.trajectory.team import span_category
@@ -554,6 +553,11 @@ def _tool_call_proves_skill_read(
         re.IGNORECASE,
     )
     has_skill_path = path_pattern.search(args_text) is not None
+    if isinstance(call_args, Mapping):
+        has_skill_path = has_skill_path or any(
+            isinstance(value, str) and path_pattern.search(value) is not None
+            for value in call_args.values()
+        )
     base_tool_name = tool_name.rsplit(".", 1)[-1].replace("-", "_")
     if base_tool_name == "skill_tool" and skill_name in _named_skill_values(call_args):
         return True

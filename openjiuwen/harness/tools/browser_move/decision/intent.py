@@ -115,8 +115,21 @@ def search_values(goal: str) -> list[str]:
 
 def explicit_urls(goal: str) -> list[str]:
     urls = []
-    for match in re.finditer(r'https?://[^\s<>`"“”「」，。；]+', normalize_goal(goal)):
-        url = match.group().rstrip(".,;)")
+    for match in re.finditer(r'https?://[^\s<>`"“”「」『』，。；]+', normalize_goal(goal)):
+        url = match.group()
+        # Unmatched closing delimiters belong to surrounding prose. Keep balanced
+        # URL parentheses, IPv6 brackets, IDNs and Chinese path/query literals.
+        closing = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】"}
+        stack = []
+        for index, char in enumerate(url):
+            if char in closing:
+                stack.append(closing[char])
+            elif char in closing.values():
+                if not stack or stack[-1] != char:
+                    url = url[:index]
+                    break
+                stack.pop()
+        url = url.rstrip(".,;")
         try:
             parsed = urlsplit(url)
             if parsed.hostname and not parsed.username and not parsed.password:

@@ -61,7 +61,7 @@
         "complete": {"const": true},
         "delta": {"type": "array", "items": {"$ref": "#/$defs/contextDelta"}},
         "messages": {"type": "array", "items": {"$ref": "#/$defs/contextMessage"}},
-        "request_purpose": {"enum": ["assistant", "compaction"]},
+        "request_purpose": {"enum": ["assistant", "compaction", "goal_assessment"]},
         "transition_kind": {"enum": ["epoch_baseline", "compaction", "trim_baseline"]},
         "baseline_reason": {"enum": ["runtime_epoch_start", "trimmed_window"]},
         "correlation_kind": {"const": "compaction"},

@@ -22,7 +22,11 @@ context, which every per-chunk task then inherits.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Optional
 
 # Id of the LLM request whose callbacks are currently firing, or "" outside
@@ -36,6 +40,39 @@ _llm_observation_suppressed: ContextVar[bool] = ContextVar(
     "_openjiuwen_llm_observation_suppressed",
     default=False,
 )
+
+
+@dataclass(frozen=True)
+class LlmObservationContext:
+    """Callback-only purpose and correlation, never provider request options."""
+
+    purpose: str
+    attributes: Mapping[str, str | int]
+
+
+_llm_observation_context: ContextVar[LlmObservationContext | None] = ContextVar(
+    "openjiuwen_llm_observation_context", default=None,
+)
+
+
+def current_llm_observation_context() -> LlmObservationContext | None:
+    """Return the observation context bound by the calling operation."""
+    return _llm_observation_context.get()
+
+
+@contextmanager
+def llm_observation_scope(
+    purpose: str,
+    *,
+    attributes: Mapping[str, str | int],
+) -> Iterator[None]:
+    """Bind immutable operation facts across calls, retries and async tasks."""
+    context = LlmObservationContext(purpose, MappingProxyType(dict(attributes)))
+    token = _llm_observation_context.set(context)
+    try:
+        yield
+    finally:
+        _llm_observation_context.reset(token)
 
 
 def get_current_llm_call_id() -> str:

@@ -95,17 +95,87 @@ def _negotiate_provider_fallback(
     return None
 
 
+def _resolve_member_models(
+    ctx: "TeamRuntimeContext",
+    cli_cfg: "ExternalCliAgentSpec | None",
+) -> "tuple[ExternalCliModelConfig | None, ExternalCliModelConfig | None]":
+    """Pick the model an external CLI member runs on, and its authentication fallback.
+
+    In order: the built-in model chosen for the member, the pool allocation
+    (when it converts to the CLI's provider), the kind's static config.
+
+    Returns:
+        The primary model config and the fallback config, either may be None.
+    """
+    # When the pool allocator assigned a model to this member, convert it to
+    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
+    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
+    # spec config when no pool allocation or no provider match exists.
+    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
+    fallback_external_model_config = None
+    if ctx.builtin_model is not None:
+        # A built-in model runs on the CLI's own login: it replaces both the
+        # pool endpoint and the static endpoint config.
+        team_logger.info(
+            "[external-cli] member {} using built-in model: model={} effort={}",
+            ctx.member_name,
+            ctx.builtin_model.model,
+            ctx.builtin_model.effort,
+        )
+        external_model_config = ctx.builtin_model
+    elif ctx.member_model is not None:
+        pool_model_config = _team_model_config_to_external(ctx.member_model, cli_agent=ctx.cli_agent)
+        if pool_model_config is not None:
+            team_logger.info(
+                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
+                ctx.member_name,
+                pool_model_config.provider,
+                pool_model_config.model,
+                pool_model_config.api_base,
+            )
+            external_model_config = pool_model_config
+        else:
+            team_logger.info(
+                "[external-cli] member {} pool model conversion returned None; falling back to static config",
+                ctx.member_name,
+            )
+    else:
+        team_logger.info(
+            "[external-cli] member {} no pool model assigned; using static config",
+            ctx.member_name,
+        )
+    if ctx.fallback_member_model is not None:
+        fallback_external_model_config = _team_model_config_to_external(
+            ctx.fallback_member_model,
+            cli_agent=ctx.cli_agent,
+        )
+    backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
+    if backend is not None and backend.kind == "provider":
+        external_model_config = _negotiate_provider_endpoint(ctx, external_model_config)
+        fallback_external_model_config = _negotiate_provider_fallback(ctx, fallback_external_model_config)
+    return external_model_config, fallback_external_model_config
+
+
 def _external_cli_config_for_member(
     spec: "TeamAgentSpec",
     member_name: str | None,
     cli_agent: str | None,
+    template_config: "ExternalCliAgentSpec | None" = None,
 ) -> "ExternalCliAgentSpec | None":
-    """Prefer a predefined member's config, then the dynamic kind config."""
+    """Pick the launch config of one external CLI member.
+
+    In order: a predefined member's own config; the config persisted on the
+    member row by ``spawn_expert`` (``template_config``, read back into
+    ``TeamRuntimeContext.template_external_cli``); the team's declared config
+    for the CLI kind.
+    """
     from openjiuwen.agent_teams.schema.team import ExternalCliMemberSpec
 
     for member in spec.predefined_members:
         if isinstance(member, ExternalCliMemberSpec) and member.member_name == member_name:
             return member.external_cli
+    if template_config is not None:
+        return template_config
     return next(
         (entry for entry in spec.external_cli_agents if entry.cli_agent == cli_agent),
         None,
@@ -208,6 +278,8 @@ async def _build_member_system_prompt(
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
         dispatch_mode=spec.dispatch_mode,
+        member_messaging=spec.enable_member_messaging,
+        member_subtasks=spec.max_subtask_depth > 0,
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
@@ -229,6 +301,7 @@ def _build_team_context_tracker(
     ctx: "TeamRuntimeContext",
     member_name: str | None,
     team_name: str,
+    policy_text: str | None = None,
 ) -> "TeamContextTracker":
     """Build the tracker feeding team state into this CLI member's messages.
 
@@ -246,6 +319,8 @@ def _build_team_context_tracker(
         ctx: The member's runtime context (role / private prompt / language).
         member_name: The member's semantic identifier.
         team_name: The team this member belongs to.
+        policy_text: The leader's collaboration policy as a ``<team-policy>``
+            block, for a framework-built team; ``None`` for every other member.
 
     Returns:
         A tracker scoped to this member.
@@ -265,6 +340,7 @@ def _build_team_context_tracker(
         team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
+        policy_text=policy_text,
     )
 
 
@@ -330,21 +406,122 @@ def _resolve_external_paths(
     return cwd, tuple(extra_dirs)
 
 
+def _external_swarmflow_host(
+    team_agent: "TeamAgent",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    team_name: str,
+    member_name: str | None,
+    session_id: str,
+    runtime: Any,
+) -> Any:
+    """Build the async-tool host for this CLI member's ``swarmflow`` tool.
+
+    ``SwarmflowTool`` probes its ``parent_agent`` for five surfaces
+    (launch/inject via ``launch_async_tool``, attribution via
+    ``build_context.member_name``, ``model``, controller registration). An
+    external CLI member has no NativeHarness, so the leader's shared
+    infrastructure (governor / budget / resolver / base specs / expert table)
+    is re-hosted on an :class:`ExternalSwarmflowHost`: a per-member
+    async-tool runtime whose completion injection forwards into the member's
+    own runtime (``send(immediate=False)`` — follow-up mid-turn, fresh turn
+    when idle), with a derived per-member build context (platform subclass
+    preserved, so worker harness builds see the real platform shape) and the
+    session-level controller every in-process member shares.
+
+    Returns ``None`` when the team has no shared infrastructure (the host
+    never enabled swarmflow): the factory's resolver gate then drops the
+    tool, unchanged behavior for non-swarmflow teams.
+    """
+    infra = team_agent.infra.swarmflow
+    if infra is None:
+        return None
+    from openjiuwen.agent_teams.workflow.external_swarmflow_host import ExternalSwarmflowHost
+
+    from openjiuwen.agent_teams.rails.team_context import TeamHandleKey
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+
+    base_context = spec.build_context
+    member_card_id = f"{team_name}_{member_name}" if member_name else None
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    if base_context is not None:
+        member_context = base_context.derive(
+            member_name=member_name,
+            role=ctx.role.value,
+            member_card_id=member_card_id,
+            language=language,
+        )
+        member_context.extras = dict(member_context.extras)
+    else:
+        # A team assembled without a platform context still needs one here,
+        # the way an in-process member gets a plain one from its configurator:
+        # the handles below have nowhere else to ride.
+        member_context = BuildContext(
+            language=language,
+            member_name=member_name,
+            role=ctx.role.value,
+            member_card_id=member_card_id,
+        )
+    # SwarmflowTool reads the external-CLI allowlist and expert table from its
+    # parent_agent.build_context.extras (the same keys the leader's
+    # inject_team_handles writes). Re-host both from the shared infra here, or
+    # the member's inner agent(agent_type=...) / agent_template nodes resolve
+    # against an empty allowlist and are rejected as "not declared".
+    member_context.extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = infra.external_cli_agents
+    member_context.extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = infra.expert_specs
+    host = ExternalSwarmflowHost(
+        build_context=member_context,
+        background_task_controller=team_agent.background_task_controller,
+    )
+    host.bind_member_runtime(runtime)
+    return host
+
+
 def _bind_protocol_member_team_tools(
     runtime: Any,
     *,
+    leader: "TeamAgent",
     teammate: "TeamAgent",
     teammate_backend: "TeamBackend",
     spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     team_name: str,
     session_id: str,
+    role_tool_options: dict[str, Any] | None = None,
+    swarmflow_host: Any = None,
 ) -> None:
-    """Bind local team tools through the protocol provider's native channel."""
+    """Bind local team tools through the protocol provider's native channel.
+
+    ``role_tool_options`` carries what only a leader's tool set needs (model
+    allocator, team / bootstrap mode, expert catalog, extra exclusions); a
+    teammate passes nothing and gets the builders' defaults. ``swarmflow_host``
+    is the host to reuse instead of building one: a leader's runtime serves
+    every run cycle, and its background runs must outlive the cycle that
+    launched them.
+
+    A team with shared swarmflow infrastructure additionally hosts the native
+    ``swarmflow`` tool for this CLI member (see ``_external_swarmflow_host``):
+    the tool keeps its one launch-and-inject contract, only the host under it
+    differs from an in-process member's NativeHarness. The shared infra and
+    session controller live on the leader (a teammate's runtime is handed no
+    controller), so the host reads them off ``leader``, not ``teammate``.
+    """
     if not runtime.inject_mcp:
         return
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    if swarmflow_host is None:
+        swarmflow_host = _external_swarmflow_host(leader, spec, ctx, team_name, ctx.member_name, session_id, runtime)
+    swarmflow_handles: dict[str, Any] = {}
+    if swarmflow_host is not None:
+        infra = leader.infra.swarmflow
+        swarmflow_handles = {
+            "swarmflow_model_resolver": infra.model_resolver,
+            "swarmflow_worker_base_spec": infra.worker_base_spec,
+            "swarmflow_human_base_spec": infra.human_base_spec,
+            "concurrency_governor": infra.concurrency_governor,
+            "swarmflow_budget": infra.budget,
+        }
     if runtime.provider_name == "claude-code":
         from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
         from openjiuwen.harness_protocol import McpServerConfig, McpTransport
@@ -358,9 +535,12 @@ def _bind_protocol_member_team_tools(
             lifecycle=spec.lifecycle,
             language=language,
             workspace_manager=teammate.infra.workspace_manager,
+            parent_agent=swarmflow_host,
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+            **swarmflow_handles,
+            **(role_tool_options or {}),
         )
         runtime.bind_mcp_servers(
             [
@@ -388,9 +568,12 @@ def _bind_protocol_member_team_tools(
             lifecycle=spec.lifecycle,
             language=language,
             workspace_manager=teammate.infra.workspace_manager,
+            parent_agent=swarmflow_host,
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+            **swarmflow_handles,
+            **(role_tool_options or {}),
         )
     )
 
@@ -410,28 +593,15 @@ def _bind_trajectory_recorder(
     """
     if not session_id:
         return
-    try:
-        from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
-    except ImportError:
-        return
-    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
-
     subject = teammate.observability_execution_subject(session_id)
-    try:
-        recorder = HarnessTrajectoryRecorder.create(
-            subject=subject,
-            agent_name=subject.display_name,
-            agent_mode="team",
-            attributes={
-                AT_TEAM_NAME: team_name,
-                AT_MEMBER_NAME: teammate.member_name or subject.display_name,
-                "agentteam.backend": runtime.provider_name,
-            },
-        )
-    except ValueError:
-        team_logger.warning("[external-cli] trajectory disabled for member {}: incomplete subject", subject.subject_id)
-        return
-    runtime.bind_trajectory_recorder(recorder)
+    from openjiuwen.agent_teams.external.member_runtime import _bind_harness_trajectory_recorder
+
+    _bind_harness_trajectory_recorder(
+        runtime,
+        subject=subject,
+        team_name=team_name,
+        member_name=teammate.member_name or subject.display_name,
+    )
 
 
 async def external_cli_spawn(
@@ -490,53 +660,9 @@ async def external_cli_spawn(
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent)
+    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent, ctx.template_external_cli)
 
-    # When the pool allocator assigned a model to this member, convert it to
-    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
-    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
-    # spec config when no pool allocation or no provider match exists.
-    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
-    fallback_external_model_config = None
-    if ctx.builtin_model is not None:
-        # A built-in model runs on the CLI's own login: it replaces both the
-        # pool endpoint and the static endpoint config.
-        team_logger.info(
-            "[external-cli] member {} using built-in model: model={} effort={}",
-            ctx.member_name,
-            ctx.builtin_model.model,
-            ctx.builtin_model.effort,
-        )
-        external_model_config = ctx.builtin_model
-    elif ctx.member_model is not None:
-        pool_model_config = _team_model_config_to_external(ctx.member_model, cli_agent=ctx.cli_agent)
-        if pool_model_config is not None:
-            team_logger.info(
-                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
-                ctx.member_name,
-                pool_model_config.provider,
-                pool_model_config.model,
-                pool_model_config.api_base,
-            )
-            external_model_config = pool_model_config
-        else:
-            team_logger.info(
-                "[external-cli] member {} pool model conversion returned None; falling back to static config",
-                ctx.member_name,
-            )
-    else:
-        team_logger.info(
-            "[external-cli] member {} no pool model assigned; using static config",
-            ctx.member_name,
-        )
-    if ctx.fallback_member_model is not None:
-        fallback_external_model_config = _team_model_config_to_external(
-            ctx.fallback_member_model,
-            cli_agent=ctx.cli_agent,
-        )
-    if backend is not None and backend.kind == "provider":
-        external_model_config = _negotiate_provider_endpoint(ctx, external_model_config)
-        fallback_external_model_config = _negotiate_provider_fallback(ctx, fallback_external_model_config)
+    external_model_config, fallback_external_model_config = _resolve_member_models(ctx, cli_cfg)
 
     async def promote_fallback_model() -> bool:
         """Persist the fallback model as this member's active model."""
@@ -641,12 +767,11 @@ async def external_cli_spawn(
             team_name,
         ),
     )
-    if spec.dispatch_mode == "scheduled" and teammate_backend is not None:
-        from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+    from openjiuwen.agent_teams.team_context import build_task_event_tracker
 
-        runtime.bind_task_outcome_tracker(
-            TaskOutcomeTracker(team_backend=teammate_backend, member_name=member_name),
-        )
+    runtime.bind_task_outcome_tracker(
+        build_task_event_tracker(spec.dispatch_mode, team_backend=teammate_backend, member_name=member_name),
+    )
     from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
     if isinstance(runtime, ExternalHarnessMemberRuntime):
@@ -659,6 +784,7 @@ async def external_cli_spawn(
     if isinstance(runtime, ExternalHarnessMemberRuntime) and teammate_backend is not None:
         _bind_protocol_member_team_tools(
             runtime,
+            leader=team_agent,
             teammate=teammate,
             teammate_backend=teammate_backend,
             spec=spec,

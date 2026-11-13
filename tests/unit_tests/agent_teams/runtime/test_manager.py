@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
     MagicMock,
+    Mock,
 )
 
 import pytest
@@ -17,6 +18,7 @@ from openjiuwen.agent_teams.agent.member import TeamMember
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.interaction import ExternalTeamEvent
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
+from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
@@ -434,6 +436,10 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         calls.append("reset")
         return 1
 
+    async def create_tables() -> bool:
+        calls.append("tables")
+        return True
+
     async def add_to_pool(entry: ActiveTeam) -> None:
         assert entry.agent is agent
         calls.append("activate")
@@ -441,6 +447,7 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
     backend = SimpleNamespace(
         db=SimpleNamespace(
             initialize=initialize,
+            create_cur_session_tables=create_tables,
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
         )
     )
@@ -459,7 +466,8 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
         inputs=None,
     )
 
-    assert calls == ["initialize", "reset", "activate"]
+    # Session tables are ensured (initialize is idempotent) before pooling.
+    assert calls == ["initialize", "reset", "initialize", "tables", "activate"]
 
 
 class TestRunOrganizationTurn:
@@ -509,6 +517,7 @@ class TestRunOrganizationTurn:
         entry.interact_gate.close_and_drain.assert_not_called()
         session.post_run.assert_not_called()
         agent.invoke.assert_not_called()
+        assert manager.activate.await_args.kwargs["preserve_conversation_mode"] is True
 
     @pytest.mark.asyncio
     async def test_idle_marker_ends_turn_and_runs_finalize(self):
@@ -545,14 +554,20 @@ class TestRunOrganizationTurn:
             )
         )
         manager.finalize = AsyncMock(side_effect=finalize)
+        activated = []
+
+        async def on_activated():
+            activated.append(chunks_consumed.copy())
 
         result = await manager.run_organization_turn(
             team_name="team-a",
             session_id="session-1",
             inputs={"query": "claim task"},
+            on_activated=on_activated,
         )
 
         assert result is True
+        assert activated == [[]]
         agent.stream.assert_called_once()
         agent.invoke.assert_not_awaited()
         assert chunks_consumed == ["content", "idle"]
@@ -705,3 +720,198 @@ class TestActivatePausedModelSelection:
             requested_pool=[self._entry(client_id="second-build", api_key="ROTATED")],
         )
         stop_team.assert_awaited_once_with(team_name="team-a", session_id="session-1")
+
+
+class TestResumeFromPauseClearsCancellationCause:
+    """Resuming a paused team must drop the team-level pause mark.
+
+    ``pause()`` marks the team session so a cancelled compression reports
+    ``paused``. The mark is not consumed on resolve; without an explicit
+    clear on resume, a post-resume internal cancellation inside the TTL
+    window would be misreported as ``user_pause``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_resume_from_pause_clears_pause_mark(self, monkeypatch):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            mark_cancellation_cause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        mark_cancellation_cause("session-1", CancellationCause.PAUSE)
+        try:
+            manager = TeamRuntimeManager()
+            team_spec = SimpleNamespace(model_pool=[], model_pool_strategy="by_model_name")
+            agent = SimpleNamespace(runtime_context=SimpleNamespace(team_spec=team_spec))
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.PAUSED,
+                )
+            )
+            monkeypatch.setattr(
+                manager,
+                "_inspect_session",
+                AsyncMock(return_value=(True, True, None)),
+            )
+            monkeypatch.setattr(manager, "_pre_run_with_inputs", AsyncMock())
+            org_manager = MagicMock()
+            org_manager.ensure_control_tools = AsyncMock()
+            org_manager.ensure_team_binding = AsyncMock()
+            monkeypatch.setattr(manager, "_organization_runtime_manager", org_manager)
+
+            spec = SimpleNamespace(
+                team_name="team-a",
+                model_pool=[],
+                model_pool_strategy="by_model_name",
+            )
+            activation = await manager.activate(spec, "session-1")
+
+            assert activation.agent is agent
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()
+
+
+class TestColdActivationClearsCancellationCause:
+    """Cold activations must not inherit stale stop/pause marks.
+
+    ``stop_team`` marks the team session with CANCEL and tears the runtime
+    down; a fresh team on the same session (COLD_RECOVER /
+    NEW_TEAM_IN_SESSION / CREATE) must clear the mark, else an internal
+    failure inside the TTL window is misreported as ``user_cancel``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_activation_clears_stale_cancel_mark(self, monkeypatch):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            mark_cancellation_cause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        mark_cancellation_cause("session-1", CancellationCause.CANCEL)
+        try:
+            manager = TeamRuntimeManager()
+            # Empty pool + fresh session + no team row -> RunActionKind.CREATE.
+            monkeypatch.setattr(
+                manager,
+                "_inspect_session",
+                AsyncMock(return_value=(False, False, None)),
+            )
+            monkeypatch.setattr(manager, "_pre_run_with_inputs", AsyncMock())
+            monkeypatch.setattr(manager, "_flush_team_manifest", AsyncMock())
+            org_manager = MagicMock()
+            org_manager.ensure_control_tools = AsyncMock()
+            org_manager.ensure_team_binding = AsyncMock()
+            monkeypatch.setattr(manager, "_organization_runtime_manager", org_manager)
+
+            agent = SimpleNamespace()
+            spec = SimpleNamespace(
+                team_name="team-a",
+                model_pool=[],
+                model_pool_strategy="by_model_name",
+                build=MagicMock(return_value=agent),
+            )
+            activation = await manager.activate(spec, "session-1")
+
+            assert activation.agent is agent
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()
+
+
+class TestIdempotentPauseDoesNotRefreshMark:
+    """An already-PAUSED entry's pause is a no-op and must not re-mark.
+
+    Re-marking on the idempotent path would refresh the TTL window of a
+    stale PAUSE mark; only a real transition into PAUSED may mark.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_running_entry_pause_marks_pause_cause(self):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            CancellationCause,
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        try:
+            manager = TeamRuntimeManager()
+            agent = SimpleNamespace(pause_coordination=AsyncMock())
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.RUNNING,
+                )
+            )
+
+            assert await manager.pause(team_name="team-a", session_id="session-1")
+            agent.pause_coordination.assert_awaited_once()
+            assert resolve_cancellation_cause("session-1") is CancellationCause.PAUSE
+        finally:
+            reset_cancellation_causes()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_already_paused_entry_pause_does_not_remark(self):
+        from openjiuwen.core.context_engine.context.cancellation import (
+            reset_cancellation_causes,
+            resolve_cancellation_cause,
+        )
+
+        reset_cancellation_causes()
+        try:
+            manager = TeamRuntimeManager()
+            agent = SimpleNamespace(pause_coordination=AsyncMock())
+            await manager.pool.add(
+                ActiveTeam(
+                    team_name="team-a",
+                    agent=agent,
+                    current_session_id="session-1",
+                    state=RuntimeState.PAUSED,
+                )
+            )
+
+            assert await manager.pause(team_name="team-a", session_id="session-1")
+            assert resolve_cancellation_cause("session-1") is None
+        finally:
+            reset_cancellation_causes()
+
+
+@pytest.mark.asyncio
+async def test_resume_from_pause_marks_the_conversation_as_continued():
+    """A resumed leader keeps its history, so it must not be routed into build_team again."""
+    manager = TeamRuntimeManager()
+    manager._pre_run_with_inputs = AsyncMock()
+    backend = SimpleNamespace(mark_history_restored=Mock())
+    entry = SimpleNamespace(
+        agent=SimpleNamespace(team_backend=backend),
+        state=RuntimeState.PAUSED,
+        interact_gate=SimpleNamespace(reset=AsyncMock()),
+    )
+
+    activation = await manager._apply_action(
+        RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
+        spec=SimpleNamespace(team_name="team-a"),
+        team_session=SimpleNamespace(get_session_id=lambda: "session-1"),
+        pool_entry=entry,
+        inputs={"query": "again"},
+    )
+
+    backend.mark_history_restored.assert_called_once_with()
+    assert entry.state is RuntimeState.RUNNING
+    assert activation.agent is entry.agent

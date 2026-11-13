@@ -51,6 +51,86 @@ async def _ready_bus() -> ExtensionEventBus:
     return bus
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["cn", "en"])
+async def test_framework_policy_keeps_capabilities_through_extension_chain(language: str) -> None:
+    """Merged scheduled capabilities reach handlers and stay out of the leader prefix."""
+    from openjiuwen.agent_teams.extensions.policy import (
+        render_policy_sections,
+        select_policy_disclosure_sections,
+        select_policy_prefix_sections,
+    )
+    from openjiuwen.agent_teams.prompts.sections import TeamSectionName
+
+    context = TeamPolicyContext(
+        language=language,
+        dispatch_mode="scheduled",
+        bootstrap_mode="framework",
+        member_messaging=True,
+        member_subtasks=True,
+        bound_group_name="review-experts",
+        base_prompt="caller instruction",
+    )
+    visited = []
+
+    async def extend(event, ops, next_handler):
+        visited.append(await ops.team.policy_context())
+        output = await next_handler(event)
+        extra = PromptSection(name="business_rule", content={language: "extension instruction"}, priority=50)
+        return TeamPolicyBuildOutput(sections=(*output.sections, extra))
+
+    bus = await _ready_bus()
+    bus.register_event_handler(TEAM_BUILD_POLICY, extend, match_pattern={}, handler_level=HandlerLevel.USER)
+    output = await build_team_policy_sections(
+        TeamPolicyBuildInput(team_name="policy-regression", role=TeamRole.LEADER),
+        context,
+        loader=load_template,
+        bus=bus,
+        session_id="policy-regression-session",
+    )
+    assert visited == [context]
+    prefix = select_policy_prefix_sections(output.sections)
+    assert {section.name for section in prefix} == {
+        TeamSectionName.PREBUILT, TeamSectionName.BOUND_GROUP, TeamSectionName.EXTRA,
+    }
+    disclosure = select_policy_disclosure_sections(output.sections)
+    assert not {section.name for section in prefix} & {section.name for section in disclosure}
+    rendered = render_policy_sections(disclosure, language=language)
+    assert "extension instruction" in rendered
+    assert load_template("dispatch_scheduled_leader_messaging_open", language).content.strip() in rendered
+    assert load_template("dispatch_scheduled_leader_subtasks", language).content.strip() in rendered
+
+
+@pytest.mark.asyncio
+async def test_framework_rail_delivers_extension_policy_without_prefix_sections() -> None:
+    """The deferred bus build updates the actual delivery tracker before first input."""
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
+
+    async def extend(event, _ops, next_handler):
+        output = await next_handler(event)
+        extra = PromptSection(name="business_rule", content={"en": "extension-only-disclosure"}, priority=50)
+        return TeamPolicyBuildOutput(sections=(*output.sections, extra))
+
+    bus = await _ready_bus()
+    bus.register_event_handler(TEAM_BUILD_POLICY, extend, match_pattern={}, handler_level=HandlerLevel.USER)
+    rail = TeamPolicyRail(
+        role=TeamRole.LEADER,
+        language="en",
+        bootstrap_mode="framework",
+        base_prompt="caller-prefix-only",
+        dispatch_mode="scheduled",
+        bound_group_name="prefix-bound-group",
+        extension_bus=bus,
+    )
+    ctx = SimpleNamespace(inputs=SimpleNamespace(parts=["first input"]), session=None)
+    await rail.on_user_message(ctx)
+    assert "extension-only-disclosure" in rail._tracker._policy_text
+    assert "caller-prefix-only" not in rail._tracker._policy_text
+    assert "prefix-bound-group" not in rail._tracker._policy_text
+
+
 def _monitor_input() -> TeamMonitorEventInput:
     return TeamMonitorEventInput(
         team_name="research-team",

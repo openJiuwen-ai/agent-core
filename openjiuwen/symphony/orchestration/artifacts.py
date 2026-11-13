@@ -67,12 +67,49 @@ class GraphArtifactStore:
         if version is None:
             current = self._read_current()
             version = str(current.get("version") or "")
-        if not version or not re.fullmatch(r"[A-Za-z0-9._-]+", version):
-            raise ValueError("Invalid Symphony graph artifact version.")
-        path = self.root / "versions" / version / "graph.json"
+        path = self._artifact_path(version)
         payload = _read_json(path)
         _validate_schema(payload)
         return payload
+
+    def current_artifact(self) -> GraphBuildResult | None:
+        """Resolve one published version without loading the full graph.
+
+        A missing pointer returns ``None``. Corrupt pointers, missing artifacts,
+        and unsupported pointer schemas raise the same errors as :meth:`read`.
+        Legacy ``path`` pointers are supported through their version field;
+        arbitrary pointer paths are never used to locate files.
+        Graph content validation remains the responsibility of :meth:`read`.
+        """
+        try:
+            current = self._read_current()
+        except FileNotFoundError:
+            return None
+        version = str(current.get("version") or "")
+        path = self._artifact_path(version)
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing Symphony graph artifact: {path}")
+        return GraphBuildResult(
+            version=version,
+            graph_path=path,
+            generated_at=str(current.get("generated_at") or ""),
+        )
+
+    def _artifact_path(self, version: str) -> Path:
+        if (
+            not version
+            or version in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", version)
+        ):
+            raise ValueError("Invalid Symphony graph artifact version.")
+        path = self.root / "versions" / version / "graph.json"
+        try:
+            contained = path.resolve().is_relative_to(self.root.resolve())
+        except RuntimeError as exc:
+            raise ValueError("Invalid Symphony graph artifact symbolic link.") from exc
+        if not contained:
+            raise ValueError("Symphony graph artifact must remain inside its root.")
+        return path
 
     def current_version(self) -> str | None:
         """Return the currently active immutable graph version, if any."""

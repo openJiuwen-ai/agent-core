@@ -62,6 +62,27 @@ async def test_restart_teammate_passes_no_initial_message():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+async def test_restart_teammate_hands_last_error_to_on_failed(monkeypatch):
+    """Exhausted retries still return False, but the caller learns why."""
+    monkeypatch.setattr("openjiuwen.agent_teams.agent.spawn_manager.asyncio.sleep", AsyncMock())
+    sm = _make_spawn_manager()
+    sm._configurator.team_backend.db = SimpleNamespace(
+        member=SimpleNamespace(reset_member_execution_status=AsyncMock(), update_member_status=AsyncMock()),
+    )
+    sm.cleanup_teammate = AsyncMock()
+    sm.build_context_from_db = AsyncMock(return_value=SimpleNamespace(member_name="dev-1"))
+    sm.spawn_teammate = AsyncMock(side_effect=[RuntimeError("first"), RuntimeError("invalid reference")])
+    on_failed = AsyncMock()
+
+    ok = await sm.restart_teammate("dev-1", max_retries=2, on_failed=on_failed)
+
+    assert ok is False
+    on_failed.assert_awaited_once()
+    assert str(on_failed.await_args.args[0]) == "invalid reference"
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_unhealthy_dormant_member_is_not_restarted():
     """A retired member's runtime exiting is its retirement, not a failure (F_118)."""
