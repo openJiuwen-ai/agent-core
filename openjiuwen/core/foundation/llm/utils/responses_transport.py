@@ -55,6 +55,7 @@ _PARAM_REFUSAL_MARKERS = (
     "未知参数",
     "无法识别",
 )
+_PARAM_REFUSAL_CODES = {"unknown_parameter", "unsupported_parameter", "unrecognized_parameter"}
 
 
 def _mentions_field(text: str, field: str) -> bool:
@@ -64,9 +65,11 @@ def _mentions_field(text: str, field: str) -> bool:
 def _refused_param(response: httpx.Response, body: dict[str, Any]) -> Optional[str]:
     """Return the droppable field that ``response`` says the endpoint refused, if any.
 
-    The structured OpenAI ``error.param`` is checked first. Otherwise the error text must
-    name the field and use refusal wording, so value errors such as "stop: too many
-    items" and errors about other fields are raised as before.
+    Both checks need evidence of a refusal. A structured OpenAI error counts when its
+    ``param`` is the field and its ``code`` or message says the parameter is unknown or
+    unsupported; otherwise the error text must name the field and use refusal wording.
+    Value errors such as "Invalid type for 'stop'" or "stop: too many items", and errors
+    about other fields, are raised as before.
     """
     status_code = response.status_code
     if status_code < 400 or status_code >= 500 or status_code in _PARAM_REFUSAL_NON_RETRY_STATUSES:
@@ -81,7 +84,12 @@ def _refused_param(response: httpx.Response, body: dict[str, Any]) -> Optional[s
         payload = None
     error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(error, dict) and error.get("param") in candidates:
-        return error["param"]
+        # ``param`` is also set for value/type errors about the field, so require
+        # refusal wording (or an unknown/unsupported code) before dropping it.
+        code = str(error.get("code") or "").lower()
+        message = str(error.get("message") or "").lower()
+        if code in _PARAM_REFUSAL_CODES or any(marker in message for marker in _PARAM_REFUSAL_MARKERS):
+            return error["param"]
 
     # The whole body is searched, so errors that a gateway wraps (e.g. OpenRouter's
     # error.metadata.raw) are found too. The decoded JSON is added for servers that

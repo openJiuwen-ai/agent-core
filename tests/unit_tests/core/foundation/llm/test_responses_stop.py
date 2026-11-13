@@ -41,6 +41,23 @@ _OPENROUTER_WRAPPED_ERROR = {
         "metadata": {"raw": json.dumps(_OPENAI_STOP_ERROR, indent=2), "provider_name": "Azure"},
     }
 }
+# OpenAI-style value errors also set ``param``; they are about the value, not a refusal of the field.
+_OPENAI_STOP_TYPE_ERROR = {
+    "error": {
+        "message": "Invalid type for 'stop': expected one of a string or array of strings, but got an integer instead.",
+        "type": "invalid_request_error",
+        "param": "stop",
+        "code": "invalid_type",
+    }
+}
+_OPENAI_STOP_LENGTH_ERROR = {
+    "error": {
+        "message": "Invalid 'stop': array too long. Expected an array with maximum length 4, but got 20 instead.",
+        "type": "invalid_request_error",
+        "param": "stop",
+        "code": "array_above_max_length",
+    }
+}
 # json.dumps escapes non-ASCII by default, so this body carries \uXXXX escapes, not Chinese text.
 _ESCAPED_CHINESE_ERROR = json.dumps({"error": {"message": "当前模型不支持stop参数"}}).encode()
 # OpenRouter's own check for too many stop items: it names stop but is not a refusal of the field.
@@ -164,8 +181,18 @@ def test_configured_stop_reaches_the_account_body():
         (422, {"error": {"message": "stop is not supported for this model"}}),
         (400, {"error": {"code": "InvalidParameter", "message": "参数 stop 不支持"}}),
         (400, _ESCAPED_CHINESE_ERROR),
+        (400, {"error": {"message": "Bad request", "param": "stop", "code": "unsupported_parameter"}}),
     ],
-    ids=["openai_error_param", "detail_message", "plain_text", "openrouter_wrapped", "422", "chinese", "escaped"],
+    ids=[
+        "openai_error_param",
+        "detail_message",
+        "plain_text",
+        "openrouter_wrapped",
+        "422",
+        "chinese",
+        "escaped",
+        "refusal_code",
+    ],
 )
 async def test_refused_stop_is_retried_without_it(refusal, warnings):
     """OpenAI's ``/v1/responses`` answers ``400 Unknown parameter: 'stop'``; the retry drops it."""
@@ -239,6 +266,8 @@ async def test_accepted_stop_is_sent_once(warnings):
         (400, {"error": {"message": "Unknown parameter: 'stop_sequences'"}}),
         (400, "Provider returned error"),
         (400, _OPENROUTER_STOP_VALUE_ERROR),
+        (400, _OPENAI_STOP_TYPE_ERROR),
+        (400, _OPENAI_STOP_LENGTH_ERROR),
         (400, {"error": {"code": 1210, "message": "API 调用参数有误，请检查文档。"}}),
         (403, {"error": {"message": "Unknown parameter: 'stop'", "param": "stop"}}),
         (429, {"error": {"message": "Unknown parameter: 'stop'", "param": "stop"}}),
@@ -249,6 +278,8 @@ async def test_accepted_stop_is_sent_once(warnings):
         "longer_name",
         "vague",
         "stop_value_error",
+        "openai_type_error",
+        "openai_length_error",
         "zhipu_generic",
         "forbidden",
         "rate_limit",
