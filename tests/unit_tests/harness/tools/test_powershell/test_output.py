@@ -183,6 +183,7 @@ class TestPersistLargeOutput:
                 warnings.append(args)
 
         monkeypatch.setattr(Path, "chmod", fail_chmod)
+        monkeypatch.setattr(os, "fchmod", fail_chmod, raising=False)
         monkeypatch.setattr(_output, "sys_operation_logger", RecordingLogger)
 
         path, _ = persist_large_output("output body", "")

@@ -7,12 +7,20 @@ import getpass
 import hashlib
 import os
 import re
-import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import sys_operation_logger
+from openjiuwen.harness.tools.shell._output_directory import (
+    get_output_root,
+    open_output_directory,
+    write_output_file,
+)
+
+if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation import SysOperation
 
 
 def truncate_output(text: str, max_chars: int, *, head_ratio: float = 0.8) -> str:
@@ -68,40 +76,36 @@ def _output_dir_name() -> str:
     return f"{_OUTPUT_DIR_BASE_NAME}-{re.sub(r'[^A-Za-z0-9_.-]', '_', user or 'unknown')}"
 
 
-def _output_dir() -> Path:
+def _output_dir(operation: SysOperation | None = None) -> Path:
     """Create or reuse the per-user directory holding persisted command output.
 
-    The name carries the uid and the mode is 0700 because the shared
-    temporary directory is writable by every account.  The path is resolved
-    on each call rather than at import, so an overridden temporary directory
-    is honoured and the directory is recreated after an external cleanup.
+    Restricted local operations use an allowed .outputs directory. Other
+    calls use the process temporary directory. The directory has a per-user
+    name, requests mode 0700, and is created lazily on each call.
     """
-    directory = Path(tempfile.gettempdir()) / _output_dir_name()
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # The name is predictable, so another account can create it first, as a
-    # symlink or as its own directory; chmod and writes would follow it. Once
-    # this entry is our own directory, the sticky temp root keeps it ours.
-    entry = directory.lstat()
-    getuid = getattr(os, "getuid", None)
-    if not stat.S_ISDIR(entry.st_mode) or (getuid is not None and entry.st_uid != getuid()):
-        raise PermissionError(
-            f"The command output directory {directory} must be a directory owned by this account, "
-            "not a symlink or another account's directory; remove it to let it be recreated"
-        )
-    # Owner-only: the outputs are per-user now, and the temp root is world-readable.
-    try:
-        directory.chmod(0o700)
-    except OSError as exc:
-        sys_operation_logger.warning(
-            "Failed to restrict the command output directory, output_dir=%s, error=%s",
-            directory,
-            exc,
-        )
+    output_root = get_output_root(operation)
+    directory = (output_root if output_root is not None else Path(tempfile.gettempdir()).resolve()) / _output_dir_name()
+    with open_output_directory(directory) as directory_fd:
+        try:
+            if directory_fd is None:
+                directory.chmod(0o700)
+            else:
+                os.fchmod(directory_fd, 0o700)
+        except OSError as exc:
+            sys_operation_logger.warning(
+                "Failed to restrict the command output directory, output_dir=%s, error=%s",
+                directory,
+                exc,
+            )
     return directory
 
 
-def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
-    """Write raw command output to a temp file for later retrieval.
+def persist_large_output(
+    stdout: str,
+    stderr: str,
+    operation: SysOperation | None = None,
+) -> tuple[str, int]:
+    """Write raw command output to a file for later retrieval.
 
     The file is named by a content hash so identical outputs reuse the
     same file.  The caller should include the returned path in the tool
@@ -110,6 +114,7 @@ def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
     Args:
         stdout: Raw standard output.
         stderr: Raw standard error.
+        operation: Runtime operation carrying the local sandbox configuration.
 
     Returns:
         (file_path, total_bytes) of the persisted file.
@@ -121,10 +126,7 @@ def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
     content_bytes = combined.encode("utf-8", errors="replace")
     digest = hashlib.sha256(content_bytes).hexdigest()[:12]
 
-    path = _output_dir() / f"bash_{digest}.txt"
-
-    if not path.exists():
-        path.write_bytes(content_bytes)
+    path = write_output_file(_output_dir(operation), f"bash_{digest}.txt", content_bytes)
 
     return str(path), len(content_bytes)
 
@@ -206,6 +208,7 @@ class CommandOutput:
     exit_code: int
     warning: str | None
     max_output_chars: int
+    operation: SysOperation | None = None
 
 
 def render_tool_content(
@@ -230,10 +233,18 @@ def render_tool_content(
     """
     merged = _merge(output.stdout, output.stderr)
     if output.max_output_chars > 0 and len(merged) > output.max_output_chars:
-        path, size = persist_large_output(output.stdout, output.stderr)
-        preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
-        stdout = _build_persisted_message(path, size, preview, has_more)
-        stderr = "(see persisted output)" if output.stderr else "(empty)"
+        try:
+            path, size = persist_large_output(output.stdout, output.stderr, output.operation)
+        except (OSError, RuntimeError, ValueError) as error:
+            stdout = (
+                f"Full output could not be saved ({type(error).__name__} {str(error)[:300]}).\n"
+                f"{truncate_output(merged, _PREVIEW_SIZE_BYTES)}"
+            )
+            stderr = "(included in truncated output)" if output.stderr else "(empty)"
+        else:
+            preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
+            stdout = _build_persisted_message(path, size, preview, has_more)
+            stderr = "(see persisted output)" if output.stderr else "(empty)"
     else:
         stdout = _LEADING_BLANK_LINES.sub("", output.stdout).rstrip() if output.stdout else "(empty)"
         stderr = output.stderr.rstrip() if output.stderr else "(empty)"
