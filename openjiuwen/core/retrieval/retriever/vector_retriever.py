@@ -10,6 +10,7 @@ from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.retriever.base import Retriever
@@ -41,6 +42,7 @@ class VectorRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "vector",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -79,13 +81,14 @@ class VectorRetriever(Retriever):
         search_results = await self.vector_store.search(
             query_vector=query_vector,
             top_k=top_k,
+            filters=filters,
         )
         # If vector retrieval returns no results, fallback to BM25
         if not search_results:
             search_results = await self.vector_store.sparse_search(
                 query_text=query,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
 
         # Convert to RetrievalResult
@@ -124,6 +127,7 @@ class VectorRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "vector",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[SearchResult]:
         """
@@ -149,13 +153,14 @@ class VectorRetriever(Retriever):
         search_results = await self.vector_store.search(
             query_vector=query_vector,
             top_k=top_k,
+            filters=filters,
         )
         # If vector retrieval returns no results, fallback to BM25
         if not search_results:
             search_results = await self.vector_store.sparse_search(
                 query_text=query,
                 top_k=top_k,
-                filters=None,
+                filters=filters,
             )
 
         return search_results

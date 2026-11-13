@@ -15,6 +15,7 @@ import numpy as np
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
 from openjiuwen.core.retrieval.retriever.base import Retriever
@@ -32,6 +33,7 @@ class TripleBeamSearch:
         max_length: int = 2,
         encoder_batch_size: int = 256,
         retrieve_mode: Optional[str] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> None:
         if max_length < 1:
@@ -48,6 +50,9 @@ class TripleBeamSearch:
         self.embed_model = retriever.embed_model if hasattr(retriever, "embed_model") else None
         # HybridRetriever / VectorRetriever from get_retriever_for_mode lack index_type; graph passes this.
         self.retrieve_mode = retrieve_mode
+        # Expansion candidates must stay inside the caller's filter scope, otherwise
+        # the beam search pulls triples no query asked for.
+        self.filters = filters
 
     @staticmethod
     def _cosine_scores(query_vec, cand_vecs):
@@ -203,6 +208,7 @@ class TripleBeamSearch:
             query=query_str,
             top_k=self.num_candidates_per_beam,
             mode=mode,
+            filters=self.filters,
         )
 
         ret = []
@@ -383,6 +389,7 @@ class GraphRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -393,6 +400,7 @@ class GraphRetriever(Retriever):
             top_k: Number of results to return
             score_threshold: Score threshold
             mode: Retrieval mode (must be compatible with index_type)
+            filters: Metadata filter conditions, forwarded to every chunk fetch
             **kwargs: Additional parameters (may include graph_hops, etc.)
 
         Returns:
@@ -417,6 +425,7 @@ class GraphRetriever(Retriever):
             top_k=top_k,
             score_threshold=effective_threshold,
             mode=mode,
+            filters=filters,
         )
 
         logger.info(
@@ -429,6 +438,7 @@ class GraphRetriever(Retriever):
             topk=top_k,
             mode=mode,
             max_length=graph_hops,
+            filters=filters,
         )
         return expanded_results
 
@@ -439,6 +449,7 @@ class GraphRetriever(Retriever):
         triples: Optional[List[RetrievalResult]] = None,
         topk: Optional[int] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs,
     ) -> List[RetrievalResult]:
         """
@@ -450,6 +461,7 @@ class GraphRetriever(Retriever):
             triples: Optional pre-fetched triples (if None, will fetch from chunks)
             topk: Final return count
             mode: Retrieval mode
+            filters: Metadata filter conditions, forwarded to every chunk fetch
 
         Returns:
             List of expanded retrieval results
@@ -463,6 +475,7 @@ class GraphRetriever(Retriever):
                     query=query,
                     top_k=topk or 5,
                     mode="sparse",
+                    filters=filters,
                 )
                 return fallback[:topk] if topk else fallback
             return []
@@ -489,6 +502,7 @@ class GraphRetriever(Retriever):
             triple_beam_search = TripleBeamSearch(
                 retriever=triple_retriever,
                 retrieve_mode=mode,
+                filters=filters,
                 **kwargs,
             )
             beams = await triple_beam_search.beam_search(query, triples)
