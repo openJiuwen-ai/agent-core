@@ -814,15 +814,36 @@ class OtelAgentHandler(TraceExtAgentHandler):
             session_logger.warning("otel agent handler: on_chain_error failed: %s", exc)
 
     # ================================================================
-    # Retriever events — SpanKind.INTERNAL
+    # Retriever events — SpanKind.INTERNAL, gen_ai.operation.name="retrieval"
     # ================================================================
+    #
+    # Long-dormant first-class family (declared on the handler interface,
+    # implemented by the built-in trace-schema handler) with no emitter until
+    # TracerAgentUtils.trace_retriever_start/end/error wired retrieval tool
+    # bodies to it.  The emitted span carries no parent_invoke_id:
+    # _resolve_parent_context falls back to the ambient OTel context, which
+    # during tool execution is the execute_tool span attached by
+    # _start_and_push — so the retrieval span nests under the tool call that
+    # performed it.  Typed as a retrieval operation per OTel GenAI semantic
+    # conventions, mirroring the workflow-side retrieval component spans.
 
     async def on_retriever_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            self._start_non_llm_span(span, inputs, instance_info, InvokeType.RETRIEVER.value, "retriever")
+            self._start_non_llm_span(
+                span,
+                inputs,
+                instance_info,
+                InvokeType.RETRIEVER.value,
+                "retrieval",
+                span_name="retrieval",
+                extra_attrs={GEN_AI_OPERATION_NAME: _OPERATION_NAME_RETRIEVAL},
+            )
             state = self._span_manager.get(span.invoke_id)
             if state is None or not state.recorded:
                 return
+            query = _extract_retrieval_query(inputs)
+            if query is not None:
+                state.span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
             normalized = _normalize_llm_payload(inputs)
             if isinstance(normalized, dict):
                 top_k = normalized.get("top_k") or normalized.get("k")
@@ -836,6 +857,16 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_retriever_end(self, span: TraceAgentSpan, outputs, **kwargs):
         try:
+            state = self._span_manager.get(span.invoke_id)
+            if state is not None and state.recorded:
+                documents = _extract_retrieval_documents(outputs)
+                if documents is not None:
+                    # Same policy as the workflow side: hash under
+                    # redaction, truncate otherwise — never raw text.
+                    state.span.set_attribute(
+                        GEN_AI_RETRIEVAL_DOCUMENTS,
+                        [redact(doc, self._config) for doc in documents],
+                    )
             self._end_non_llm_span(span, outputs)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_retriever_end failed: %s", exc)
