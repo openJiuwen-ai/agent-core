@@ -81,6 +81,35 @@ READ_IMAGE_MAX_BYTES = 3_600_000
 READ_IMAGE_MAX_DIMENSION = 2048
 
 
+# Cap concurrent PIL/shrink/base64 work offloaded via asyncio.to_thread so a
+# burst of read_file(image) calls cannot saturate the default executor shared
+# with PDF/Office/history offloads. Excess callers await the semaphore on the
+# event loop (non-blocking) before entering the thread pool.
+def _read_image_cpu_concurrency() -> int:
+    raw = os.environ.get("OPENJIUWEN_READ_IMAGE_CPU_CONCURRENCY", "4")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 4
+
+
+READ_IMAGE_CPU_CONCURRENCY = _read_image_cpu_concurrency()
+_read_image_cpu_sema: Optional[asyncio.Semaphore] = None
+_read_image_cpu_sema_loop: Optional[asyncio.AbstractEventLoop] = None
+_read_image_cpu_sema_guard = threading.Lock()
+
+
+def _get_read_image_cpu_semaphore() -> asyncio.Semaphore:
+    """Return a per-event-loop semaphore limiting concurrent image CPU work."""
+    global _read_image_cpu_sema, _read_image_cpu_sema_loop
+    loop = asyncio.get_running_loop()
+    with _read_image_cpu_sema_guard:
+        if _read_image_cpu_sema is None or _read_image_cpu_sema_loop is not loop:
+            _read_image_cpu_sema = asyncio.Semaphore(READ_IMAGE_CPU_CONCURRENCY)
+            _read_image_cpu_sema_loop = loop
+        return _read_image_cpu_sema
+
+
 def _is_office_doc_path(file_path: str) -> bool:
     _, ext = os.path.splitext(file_path.lower())
     return ext in _OFFICE_DOC_EXTENSIONS
@@ -1437,17 +1466,17 @@ class ReadFileTool(Tool):
             "multimodal": [],
         }
 
-    async def _read_image(self, file_path: str, model_name: str) -> Dict[str, Any]:
-
-        res = await self.operation.fs().read_file(file_path, mode="bytes")
-        if res.code != StatusCode.SUCCESS.code:
-            raise RuntimeError(res.message)
-        raw = res.data.content or b""
-        if not isinstance(raw, bytes):
-            raise RuntimeError("Image content is not bytes")
-        if not raw:
-            raise RuntimeError(f"Image file is empty: {file_path}")
-
+    @classmethod
+    def _prepare_image_read_result(
+        cls,
+        file_path: str,
+        raw: bytes,
+        *,
+        enable_image_multimodal: bool,
+        max_bytes: int,
+        max_dimension: int,
+    ) -> Dict[str, Any]:
+        """CPU-bound image prepare (PIL / shrink / base64); safe to run in a worker thread."""
         from openjiuwen.harness.tools.multimodal.image_shrink import (
             detect_mime_type,
             shrink_image_bytes,
@@ -1462,7 +1491,11 @@ class ReadFileTool(Tool):
         try:
             from PIL import Image
         except ImportError as exc:
-            logger.debug("Pillow is unavailable for image metadata extraction (%s): %s", file_path, exc)
+            logger.debug(
+                "Pillow is unavailable for image metadata extraction (%s): %s",
+                file_path,
+                exc,
+            )
         else:
             try:
                 with Image.open(io.BytesIO(raw)) as img:
@@ -1472,8 +1505,8 @@ class ReadFileTool(Tool):
 
         # 先判定本次调用是否需要像素，再决定是否走缩小：模型不支持原生看图时
         # 装像素没有意义，白缩一次会浪费 CPU / 内存（缩放在下面单独执行）。
-        if not self._image_multimodal_enabled():
-            return self._image_text_only_result(
+        if not enable_image_multimodal:
+            return cls._image_text_only_result(
                 file_path,
                 mime_type,
                 raw,
@@ -1488,14 +1521,17 @@ class ReadFileTool(Tool):
         fitted = shrink_image_bytes(
             raw,
             mime_type,
-            max_bytes=self.READ_IMAGE_MAX_BYTES,
-            max_dimension=self.READ_IMAGE_MAX_DIMENSION,
+            max_bytes=max_bytes,
+            max_dimension=max_dimension,
         )
         if fitted is None:
             # 预算内无法编码时绝不能退回原始字节：那会把未受预算约束的
             # payload base64 后塞进上下文（正是 review 指出的问题）。
-            logger.debug("Image payload cannot be fitted within the read_file budget: %s", file_path)
-            return self._image_text_only_result(
+            logger.debug(
+                "Image payload cannot be fitted within the read_file budget: %s",
+                file_path,
+            )
+            return cls._image_text_only_result(
                 file_path,
                 mime_type,
                 raw,
@@ -1519,7 +1555,9 @@ class ReadFileTool(Tool):
 
         encoded = base64.b64encode(resized).decode("ascii")
         data_url = f"data:{mime_type};base64,{encoded}"
-        parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
+        parts.append(
+            "Image bytes are attached as multimodal input and omitted from this tool result."
+        )
         return {
             "content": "\n".join(parts),
             "multimodal": [
@@ -1532,6 +1570,30 @@ class ReadFileTool(Tool):
                 }
             ],
         }
+
+    async def _read_image(self, file_path: str, model_name: str) -> Dict[str, Any]:
+        del model_name  # kept for call-site compatibility; prepare path does not use it
+        res = await self.operation.fs().read_file(file_path, mode="bytes")
+        if res.code != StatusCode.SUCCESS.code:
+            raise RuntimeError(res.message)
+        raw = res.data.content or b""
+        if not isinstance(raw, bytes):
+            raise RuntimeError("Image content is not bytes")
+        if not raw:
+            raise RuntimeError(f"Image file is empty: {file_path}")
+
+        # Resolve multimodal policy on the event loop (may touch context/config),
+        # then offload PIL/shrink/base64 so the loop can still serve /health.
+        enable_image_multimodal = self._image_multimodal_enabled()
+        async with _get_read_image_cpu_semaphore():
+            return await asyncio.to_thread(
+                self._prepare_image_read_result,
+                file_path,
+                raw,
+                enable_image_multimodal=enable_image_multimodal,
+                max_bytes=self.READ_IMAGE_MAX_BYTES,
+                max_dimension=self.READ_IMAGE_MAX_DIMENSION,
+            )
 
     # ------------------------------------------------------------------
     # invoke / stream
