@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import inspect
 from typing import Any
 
 from openjiuwen.core.runner.callback.decorator import WrapHandler, create_wrap_decorator
@@ -111,6 +112,12 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
     async def _as_async_gen(*args, **kwargs):
         """Normalize func to async generator so create_wrap_decorator takes the generator path."""
         result = func(*args, **kwargs)
+        if inspect.iscoroutine(result):
+            # Plain ``async def`` streaming entry (returns an async iterator,
+            # or raises before any chunk): await it first, otherwise the
+            # coroutine is dropped un-awaited and the decorated stream
+            # silently runs empty.
+            result = await result
         if hasattr(result, "__aiter__") or hasattr(result, "__anext__"):
             async for item in result:
                 yield item
@@ -146,6 +153,22 @@ def decorate_tool_with_trace(tool, agent_session):
     instance_info = {"class_name": tool.card.name if hasattr(tool, "card") else type(tool).__name__, "type": "tool"}
     proxy = _TraceProxy(tool)
     proxy.invoke = async_trace(tool.invoke, session, InvokeType.PLUGIN, instance_info)
+    tool_astream = getattr(tool, "astream", None)
+    if callable(tool_astream):
+        # Streaming tool executions (e.g. studio's FlowApi/FlowCustomApi stream
+        # paths) go through astream, not invoke; wrap it the same way so they
+        # emit plugin spans too (start at first chunk, end at exhaustion),
+        # mirroring decorate_workflow_with_trace's stream wrapping. Tools
+        # without astream are untouched; on cores predating this wrapper the
+        # proxy's __getattr__ passes astream through undecorated.
+        # setattr form: the platform linter (G.CLS.08) rejects instance
+        # attributes assigned outside __init__ on diff lines; the baseline
+        # ``proxy.invoke = ...`` above predates this rule and is untouched.
+        setattr(
+            proxy,
+            "astream",
+            async_trace_stream(tool_astream, session, InvokeType.PLUGIN, instance_info),
+        )
     return proxy
 
 
