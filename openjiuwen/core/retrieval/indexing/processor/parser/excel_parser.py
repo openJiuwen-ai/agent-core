@@ -48,9 +48,7 @@ def _rows_to_documents(
     if not rows_iter:
         return docs
 
-    headers = [_cell_str(v) for v in rows_iter[0]]
-    if not headers:
-        headers = [f"Column {i+1}" for i in range(len(rows_iter[0]) or 0)]
+    headers = [_cell_str(v) or f"Column {i + 1}" for i, v in enumerate(rows_iter[0])]
     data_rows = rows_iter[1:]
 
     for row_idx, row in enumerate(data_rows, start=2):
@@ -78,8 +76,6 @@ def _rows_to_documents(
         docs.append(doc)
 
     for col_idx, col_name in enumerate(headers):
-        if not col_name:
-            col_name = f"Column {col_idx + 1}"
         values = []
         for row in data_rows:
             if col_idx < len(row):
