@@ -21,6 +21,16 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionTarget
 from openjiuwen.agent_evolving.experience.types import EvolutionContext
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal import SignalDetector
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID, TRAJECTORY_SOURCE
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, write_llm_exchange
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
+from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
+    SkillEvolutionRail,
+    _SkillPreparedEvolutionInput,
+)
 
 
 def _prepare_skill(root: Path, name: str, content: str) -> Path:
@@ -28,6 +38,116 @@ def _prepare_skill(root: Path, name: str, content: str) -> Path:
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
     return skill_dir
+
+
+def _trajectory(messages: list[dict]) -> Trajectory:
+    """Wrap messages as the OTLP trajectory the rail drains after an invoke."""
+    spans = []
+    call_names = {
+        call["id"]: call["function"]["name"] for message in messages for call in message.get("tool_calls", [])
+    }
+    for index, message in enumerate(messages):
+        attrs: dict = {}
+        if message["role"] == "tool":
+            tool_name = call_names[message["tool_call_id"]]
+            attrs[semconv.GEN_AI_TOOL_NAME] = tool_name
+            attrs[semconv.GEN_AI_TOOL_CALL_RESULT] = json.dumps(message["content"], ensure_ascii=False)
+            attrs[semconv.GEN_AI_TOOL_CALL_ID] = message["tool_call_id"]
+            span_name = f"tool.{tool_name}"
+        else:
+            flat = {key: message[key] for key in ("role", "content", "tool_calls") if key in message}
+            prompts, completions = ([], [flat]) if message["role"] == "assistant" else ([flat], [])
+            attrs.update(write_llm_exchange(prompts, completions))
+            attrs[semconv.GEN_AI_OPERATION_NAME] = "chat"
+            span_name = "llm.call"
+        spans.append({
+            "name": span_name,
+            "traceId": "trace-e2e",
+            "spanId": f"span-{index}",
+            "startTimeUnixNano": index * 10,
+            "endTimeUnixNano": index * 10 + 1,
+            "attributes": attributes_from_map(attrs),
+        })
+    resource = attributes_from_map({TRAJECTORY_ID: "e2e-task", TRAJECTORY_SOURCE: "online"})
+    return Trajectory.from_otlp({
+        "resourceSpans": [{"resource": {"attributes": resource}, "scopeSpans": [{"scope": {}, "spans": spans}]}]
+    })
+
+
+# A skill whose own text is full of failure words, as real skills are.
+_SPREADSHEET_SKILL = (
+    "---\nname: spreadsheet\ndescription: Edit .xlsx workbooks.\n---\n\n"
+    "# Spreadsheet\n\n## Troubleshooting\n"
+    "- If recalculation failed, read the error log; a #REF! error means a deleted range.\n"
+    "- Timeout while saving: retry once.\n"
+)
+
+
+def _harness_tool_result(data: dict) -> str:
+    """Tool result as the harness renders it into the conversation."""
+    return f"success=True data={data!r} error=None"
+
+
+def _shell(command: str, stdout: str, stderr: str, exit_code: int) -> str:
+    """Shell tool output (harness/tools/shell/bash/_output.py)."""
+    return _harness_tool_result(
+        {"content": f"Command: {command}\nStdout: {stdout}\n\nStderr: {stderr}\nExit Code: {exit_code}"}
+    )
+
+
+def _task_with_shell_result(skills_root: Path, command: str, shell_output: str) -> list[dict]:
+    """Load the skill with skill_tool, then run one shell command."""
+    return [
+        {"role": "user", "content": "Check /workspace/budget.xlsx for broken formulas."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "tc_load",
+                "type": "function",
+                "function": {"name": "skill_tool", "arguments": json.dumps({"skill_name": "spreadsheet"})},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "tc_load",
+            "content": _harness_tool_result(
+                {"skill_directory": str(skills_root / "spreadsheet"), "skill_content": _SPREADSHEET_SKILL}
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc_run", "type": "function",
+                            "function": {"name": "bash", "arguments": json.dumps({"command": command})}}],
+        },
+        {"role": "tool", "tool_call_id": "tc_run", "content": shell_output},
+        {"role": "assistant", "content": "Done."},
+    ]
+
+
+def _passive_rail(skills_root: Path, llm) -> SkillEvolutionRail:
+    return SkillEvolutionRail(
+        skills_dir=str(skills_root),
+        llm=llm,
+        model="mock-model",
+        signal_trigger=True,
+        auto_save=True,
+        language="en",
+        review_runtime=EvolutionReviewRuntime(),
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        async_evolution=False,
+    )
+
+
+async def _run_task(rail: SkillEvolutionRail, messages: list[dict]) -> None:
+    await rail.run_evolution(
+        _SkillPreparedEvolutionInput(
+            trajectory=_trajectory(messages),
+            messages=tuple(messages),
+            skill_name="skill-evolution",
+        )
+    )
 
 
 def _build_conversation_with_script() -> list[dict]:
@@ -369,3 +489,57 @@ class TestOnlineEvolutionE2E:
         final_log = await store.load_evolution_log(skill_name)
         assert len(final_log.entries) == 1
         assert "v2 content" in final_log.entries[0].change.content
+
+
+class TestPassiveEvolutionOnSuccessfulToolResults:
+    """Passive evolution must not learn from tool results that succeeded."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_clean_task_leaves_the_skill_unchanged(tmp_path: Path):
+        """Loading a skill whose text mentions failures, then a command that exits 0
+        while printing "0 errors", gives the optimizer nothing to learn from."""
+        skills_root = tmp_path / "skills"
+        skill_dir = _prepare_skill(skills_root, "spreadsheet", _SPREADSHEET_SKILL)
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
+            "action": "append", "target": "body", "section": "Troubleshooting",
+            "content": "### Recalculation failed\n- Read the error log.", "summary": "Read the error log",
+        }])))
+
+        messages = _task_with_shell_result(
+            skills_root, "make check", _shell("make check", "0 errors, 0 failed checks", "(empty)", 0),
+        )
+        await _run_task(_passive_rail(skills_root, llm), messages)
+
+        llm.invoke.assert_not_awaited()
+        assert not (skill_dir / "evolutions.json").exists()
+        assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == _SPREADSHEET_SKILL
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_failed_command_still_evolves_the_loaded_skill(tmp_path: Path):
+        """A real crash after the same skill load reaches the optimizer as the only
+        execution_failure, credited to the loaded skill, and becomes a record."""
+        skills_root = tmp_path / "skills"
+        skill_dir = _prepare_skill(skills_root, "spreadsheet", _SPREADSHEET_SKILL)
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
+            "action": "append", "target": "body", "section": "Troubleshooting",
+            "content": "### Check sheet names\n- List wb.sheetnames before wb[name].",
+            "summary": "List wb.sheetnames before indexing",
+        }])))
+
+        messages = _task_with_shell_result(
+            skills_root,
+            "make check",
+            _shell("make check", "", "Traceback (most recent call last):\nKeyError: 'Worksheet Sheet1'", 1),
+        )
+        await _run_task(_passive_rail(skills_root, llm), messages)
+
+        assert llm.invoke.await_count == 1
+        prompt = llm.invoke.await_args.kwargs["messages"][0]["content"]
+        assert prompt.count('"type": "execution_failure"') == 1
+        assert "KeyError" in prompt
+        entries = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))["entries"]
+        assert [entry["source"] for entry in entries] == ["execution_failure"]
