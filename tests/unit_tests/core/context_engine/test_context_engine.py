@@ -719,6 +719,36 @@ class TestContextEngine:
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_create_context_rejects_processor_config_given_as_dict(self, engine, session):
+        """A dict config is not converted, so it must fail loudly instead of reaching the processor (#1849)."""
+        with pytest.raises(BaseError) as exc_info:
+            await engine.create_context(
+                context_id="ctx",
+                session=session,
+                processors=[("MessageSummaryOffloader", {"marker": "from-dict"})],
+            )
+        assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
+        assert "MessageSummaryOffloader" in str(exc_info.value)
+        assert "dict" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_create_context_rejects_dict_config_emptied_by_react_agent_config(self, engine, session):
+        """ReActAgentConfig turns a dict config into a bare BaseModel; that must not be passed on silently (#1849)."""
+        from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
+
+        config = ReActAgentConfig(context_processors=[("MessageSummaryOffloader", {"marker": "from-dict"})])
+        with pytest.raises(BaseError) as exc_info:
+            await engine.create_context(
+                context_id="ctx",
+                session=session,
+                processors=config.context_processors,
+            )
+        assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
+        assert "MessageSummaryOffloader" in str(exc_info.value)
+
+    @pytest.mark.asyncio
     async def test_create_context_attaches_processors_to_context_seeded_without_them(self, engine, session):
         seeded = await engine.create_context(
             context_id="ctx",
