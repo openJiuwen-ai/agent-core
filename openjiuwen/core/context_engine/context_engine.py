@@ -62,6 +62,9 @@ class ContextEngine:
         "prompt too long",
         "input is too long",
         "input too long",
+        # Alibaba Cloud Bailian (DashScope) OpenAI-compatible endpoint:
+        # "Range of input length should be [1, 1000000]".
+        "range of input length",
     )
     _CONTEXT_OVERFLOW_FIELDS = (
         "message",
@@ -291,6 +294,17 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
+            if processors and isinstance(context, SessionModelContext) and not context.has_processors():
+                # The context was first created without processors (e.g. to seed
+                # history); without this the caller's processors are silently lost.
+                context.attach_processors([
+                    self._create_processor(processor_type, processor_config)
+                    for processor_type, processor_config in processors
+                ])
+                context_engine_logger.info(
+                    "attached %d processor(s) to cached context %s, which was created without processors",
+                    len(processors), full_context_id,
+                )
             context.set_session_ref(session)
             self._load_state_from_session(context, session, history_messages)
             return context
@@ -631,7 +645,18 @@ class ContextEngine:
                 continue
             yield from cls._iter_exception_texts(nested_value, depth=depth + 1, seen=seen)
 
-    async def clear_context(self, context_id: str = None, session_id: str = None):
+    def list_context_ids(self, session_id: str) -> list[str]:
+        """Return ids of live contexts owned by one session without saving state."""
+        return [
+            context.context_id() for context in self._context_pool.values()
+            if context.session_id() == session_id
+        ]
+
+    async def clear_context(
+            self,
+            context_id: str = None,
+            session_id: str = None
+    ):
         """
         Remove contexts from the internal pool.
 
