@@ -166,6 +166,10 @@ class _FileReadState:
     #              partial reads — at which point write_file is allowed.
     total_lines: int = 0
     read_ranges: list = None  # list of (start, end) tuples; None == not yet tracking
+    # True when a read confirmed the file is 0 bytes (0 lines). An empty file is
+    # fully read by definition — read_file returns a placeholder warning instead
+    # of lines, so no coverage interval can ever accumulate for it.
+    is_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -843,18 +847,37 @@ class ReadFileTool(Tool):
             raw_state = await self._read_raw_text_for_edit_state(file_path)
             total_lines = raw_state.line_count if raw_state else 0
 
+        # A confirmed 0-line file (0 bytes) is fully read by definition — there is
+        # no unread content, and read_file reports a placeholder warning instead
+        # of real lines, so no coverage interval can ever accumulate for it.
+        # Without this, write_file on an empty file deadlocks: the guard reports
+        # "read 1 of 0 lines" (the placeholder counts as one line) that no read
+        # can ever satisfy. Fail safe: require BOTH the raw read to succeed and
+        # the stat snapshot that started this read to have seen 0 bytes. If a
+        # non-empty file is truncated externally between the stat and this raw
+        # re-read (registration window race), the snapshot would otherwise claim
+        # "empty" while carrying the old size/mtime — and the write guard's stale
+        # re-check would accept it because the current content is also "".
+        is_empty = (
+            raw_state is not None
+            and total_lines == 0
+            and record.size_bytes == 0
+        )
+
         # Map this read to a 1-indexed closed interval [start_line, end_line].
         # offset is 0-based lines-skipped, so the first line returned is line
         # (offset + 1); end is offset + line_count. A zero-row read (e.g. offset
-        # past EOF) is skipped — it contributes no coverage.
+        # past EOF) is skipped — it contributes no coverage. The placeholder
+        # warning returned for an empty file must not be counted as a line.
         start_line = max(1, record.offset + 1)
         end_line = start_line + max(0, record.line_count) - 1
         read_ranges = list(existing.read_ranges) if (existing and existing.read_ranges) else []
-        if record.line_count > 0:
+        if record.line_count > 0 and not is_empty:
             read_ranges = _merge_range(read_ranges, (start_line, end_line))
 
         is_logically_complete = (
-            total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
+            is_empty
+            or (total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines))
         )
 
         # Full-file content snapshot for stale re-check: only keep it once the
@@ -870,6 +893,7 @@ class ReadFileTool(Tool):
             content=raw_state.content if raw_state else None,
             total_lines=total_lines,
             read_ranges=read_ranges,
+            is_empty=is_empty,
         )
 
     # ------------------------------------------------------------------
@@ -1536,9 +1560,14 @@ class WriteFileTool(Tool):
                     ranges = read_state.read_ranges if read_state else None
                     is_logically_complete = (
                         read_state is not None
-                        and read_state.total_lines > 0
-                        and ranges is not None
-                        and _ranges_cover(ranges, 1, read_state.total_lines)
+                        and (
+                            read_state.is_empty
+                            or (
+                                read_state.total_lines > 0
+                                and ranges is not None
+                                and _ranges_cover(ranges, 1, read_state.total_lines)
+                            )
+                        )
                     )
                     if read_state is None or not is_logically_complete:
                         if read_state is None:
@@ -1555,8 +1584,8 @@ class WriteFileTool(Tool):
                             msg = (
                                 f"Error: File has not been fully read yet. "
                                 f"You have read {lines_read} of {read_state.total_lines} lines. "
-                                f"Continue with read_file offset={resume_offset} before writing."
-                                f"until the whole file is covered, then write. "
+                                f"Continue with read_file offset={resume_offset} before writing. "
+                                f"Continue reading until the whole file is covered, then write. "
                                 f"A full-file overwrite cannot use partial reads — "
                                 f"it would lose the unread content."
                             )

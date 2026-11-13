@@ -30,6 +30,8 @@ from openjiuwen.harness.tools import (
 from openjiuwen.harness.tools import filesystem as filesystem_module
 from openjiuwen.harness.tools.filesystem import (
     _FILE_READ_REGISTRY,
+    _RawTextState,
+    _ReadStateRecord,
     _TokenBudget,
     _coerce_file_tool_inputs,
     _extract_json_object,
@@ -1538,6 +1540,108 @@ async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, t
 
     res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
     assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_write_file_allows_overwrite_of_read_empty_file(sys_op, temp_dir):
+    # Regression: a 0-byte file read once returns the placeholder warning
+    # ("the file exists but the contents are empty") instead of real lines, so
+    # no coverage interval could ever accumulate and write_file deadlocked with
+    # "read 1 of 0 lines" that no read could satisfy. A confirmed empty file
+    # must be treated as fully read after the first read.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "empty_repro.txt")
+    with open(file_path, "w", encoding="utf-8"):
+        pass  # create a 0-byte file
+
+    # Not read yet -> still refused.
+    res_before = await write_tool.invoke({"file_path": file_path, "content": "hello"})
+    assert res_before.success is False
+    assert "has not been read yet" in res_before.error
+
+    await read_tool.invoke({"file_path": file_path})
+    state = _FILE_READ_REGISTRY[file_path]
+    assert state.is_empty is True
+    assert not state.read_ranges  # placeholder warning must not count as a line
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "hello workswarm"})
+    assert res.success is True
+    with open(file_path, encoding="utf-8") as fh:
+        assert fh.read() == "hello workswarm"
+
+
+@pytest.mark.asyncio
+async def test_write_file_empty_file_refused_after_external_fill(sys_op, temp_dir):
+    # Safety boundary for the is_empty fast path: after the (read) empty file is
+    # filled externally, the stale mtime/size re-check must still fire — the
+    # cached "" snapshot no longer matches, so the overwrite is refused instead
+    # of silently discarding the externally added content.
+    write_tool = WriteFileTool(sys_op, enable_conditional_writes=True)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "empty_then_filled.txt")
+    with open(file_path, "w", encoding="utf-8"):
+        pass
+
+    await read_tool.invoke({"file_path": file_path})
+    assert _FILE_READ_REGISTRY[file_path].is_empty is True
+
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("external content\n")
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
+    assert res.success is False
+    assert "modified since read" in res.error
+    # The externally added content must be untouched.
+    with open(file_path, encoding="utf-8") as fh:
+        assert fh.read() == "external content\n"
+
+
+@pytest.mark.asyncio
+async def test_empty_snapshot_from_nonempty_stat_is_not_marked_empty(sys_op, temp_dir):
+    # Registration-window race: stat saw a NON-empty file (size_bytes > 0) but
+    # the raw re-read performed inside _record_read_state landed after an
+    # external truncation, so it reports 0 lines. Such a snapshot must not be
+    # marked is_empty: the coverage guard would pass, and the stale re-check
+    # would accept it because the observed content is also "" — silently
+    # overwriting a file that changed after the read.
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "race_truncated.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("a\nb\nc\n")
+    stat = os.stat(file_path)
+
+    calls: list[str] = []
+
+    async def _empty_raw(_path):
+        calls.append(_path)
+        return _RawTextState(content="", line_count=0)
+
+    original = read_tool._read_raw_text_for_edit_state
+    read_tool._read_raw_text_for_edit_state = _empty_raw
+    try:
+        await read_tool._record_read_state(
+            file_path,
+            _ReadStateRecord(
+                mtime_ns=stat.st_mtime_ns,
+                size_bytes=stat.st_size,
+                is_partial=False,
+            ),
+        )
+    finally:
+        read_tool._read_raw_text_for_edit_state = original
+
+    # The stub must actually have been exercised, otherwise the scenario above
+    # would silently degrade to a plain non-empty-file read and lose its point.
+    assert calls == [file_path]
+
+    state = _FILE_READ_REGISTRY[file_path]
+    assert state.is_empty is False
+
+    res = await WriteFileTool(sys_op).invoke({"file_path": file_path, "content": "overwrite"})
+    assert res.success is False
+    with open(file_path, encoding="utf-8") as fh:
+        assert fh.read() == "a\nb\nc\n"
 
 
 def test_extract_json_object_strips_trailing_tool_xml() -> None:
