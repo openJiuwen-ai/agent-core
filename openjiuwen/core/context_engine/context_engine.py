@@ -1,28 +1,32 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
+import asyncio
+import copy
 import functools
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import context_engine_logger, LogEventType
-from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.common.logging import LogEventType, context_engine_logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
-from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
-from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
+from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import ContextEvents
+from openjiuwen.core.session.agent import Session
 
 
 class ContextEngine:
@@ -90,6 +94,7 @@ class ContextEngine:
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
+        self._log_ptl_fallback_state()
 
     def register_window_mutator(
             self,
@@ -423,6 +428,53 @@ class ContextEngine:
                 await effective_session.commit()
         return result
 
+    @property
+    def config(self) -> ContextEngineConfig:
+        """Return the active engine configuration.
+
+        Read-only by contract: callers may inspect policy switches (for
+        example the PTL fallback retry budget) but must not mutate the engine
+        through this reference.
+        """
+        return self._config
+
+    def ptl_fallback_state(self) -> str:
+        """Return ``absent``, ``disabled`` or ``enabled`` for Phase B.
+
+        ``absent`` and ``disabled`` both run only Phase A; this helper exists
+        so callers and logs can distinguish the two "off" states.
+        """
+        ptl = getattr(self._config, "ptl_fallback_config", None)
+        if ptl is None:
+            return "absent"
+        return "enabled" if getattr(ptl, "enable_pure_code_truncate", False) else "disabled"
+
+    def model_recovery_max_attempts(self) -> int:
+        """Return how many recovery retries one agent round may use."""
+        ptl = getattr(self._config, "ptl_fallback_config", None)
+        if ptl is None or not getattr(ptl, "enable_pure_code_truncate", False):
+            return 1
+        retries = getattr(ptl, "max_retries", 1)
+        if isinstance(retries, bool) or not isinstance(retries, int):
+            return 1
+        return max(1, retries)
+
+    def _log_ptl_fallback_state(self) -> None:
+        state = self.ptl_fallback_state()
+        if state == "enabled":
+            ptl = self._config.ptl_fallback_config
+            context_engine_logger.info(
+                "PTL fallback enabled: phase=phase_b phase_a_timeout_s=%s "
+                "max_retries=%s truncate_target_ratio=%s",
+                getattr(ptl, "phase_a_timeout_s", 0.0),
+                getattr(ptl, "max_retries", 1),
+                getattr(ptl, "truncate_target_ratio", 0.8),
+            )
+        elif state == "disabled":
+            context_engine_logger.debug("PTL fallback configured but Phase B disabled; using Phase A only")
+        else:
+            context_engine_logger.debug("PTL fallback not configured; using Phase A only")
+
     async def recover_from_model_exception(
             self,
             *,
@@ -432,18 +484,49 @@ class ContextEngine:
             exception: Exception = None,
             streaming: bool = False,
             stream_chunks_emitted: int = 0,
+            messages: Optional[List[BaseMessage]] = None,
+            tools: Optional[List[ToolInfo]] = None,
+            attempt: int = 1,
+            attempted_recoveries: Optional[List[str]] = None,
             **kwargs,
     ) -> bool:
-        """Recover from a model context-window rejection by compressing once.
+        """Recover from a model context-window (PTL) rejection.
 
         ReAct agents call this hook after model-call rail retries are
-        exhausted. A retry is requested when the provider error clearly
-        describes an input/context limit and ``compress_context`` returns
-        ``"compressed"``. A missing or ineffective processor preserves the
-        original model exception.
-        """
-        del context
+        exhausted. A retry is requested only when the provider error clearly
+        describes an input/context limit and a recovery phase actually changed
+        the context. Otherwise the original model exception is preserved.
 
+        Recovery always starts with Phase A, which reuses the configured LLM
+        compressors and is the historical behaviour. Phase B is a pure-code
+        truncation that drops the oldest complete dialogue turns without
+        calling a model; it is opt-in through
+        :attr:`PtlFallbackConfig.enable_pure_code_truncate`.
+
+        With Phase B disabled, a PTL rejection is handled exactly as before:
+        one compression attempt, then the original exception is raised. With
+        Phase B enabled, a Phase A no-op, failure, or timeout falls through to
+        truncation; Phase A is attempted at most once per agent round, so a
+        later retry that still overflows goes straight to Phase B.
+
+        Args:
+            context_id: Context to shrink.
+            session: Session used by Phase A and to persist Phase B results.
+            context: Live context instance. When omitted it is resolved from
+                the engine pool by ``context_id``.
+            exception: Provider exception that triggered recovery.
+            streaming: Whether the failed call was streaming.
+            stream_chunks_emitted: Chunks already sent. Recovery is skipped
+                when non-zero because a retry would duplicate the prefix.
+            messages: Exact payload messages of the rejected request, when
+                available. Used to estimate fixed prompt/tool overhead.
+            tools: Exact payload tools of the rejected request.
+            attempt: 1-based recovery attempt for this agent round.
+            attempted_recoveries: Trace shared by the caller across attempts.
+                When Phase B is enabled, Phase A is recorded and skipped once
+                attempted; the phases attempted by this hook are appended.
+            **kwargs: Extra compressor arguments for Phase A.
+        """
         # A streaming response may already have been sent to the caller when
         # the provider reports an overflow. Retrying after compression would
         # emit the already-sent prefix again, so only recover before the first
@@ -459,15 +542,123 @@ class ContextEngine:
         if not self.is_context_overflow_error(exception):
             return False
 
+        ptl_config = getattr(self._config, "ptl_fallback_config", None)
+        phase_b_enabled = bool(ptl_config is not None and getattr(ptl_config, "enable_pure_code_truncate", False))
+        attempted = attempted_recoveries if isinstance(attempted_recoveries, list) else None
+        phase_a_done = phase_b_enabled and attempted is not None and "phase_a_compress" in attempted
+
+        if not phase_a_done:
+            if phase_b_enabled and attempted is not None:
+                attempted.append("phase_a_compress")
+            recovery_context = context
+            snapshot: Optional[List[BaseMessage]] = None
+            if phase_b_enabled:
+                # Phase A runs processors sequentially and each successful
+                # processor mutates the context immediately. A failure or
+                # timeout in a later processor therefore leaves a partially
+                # compressed context. Snapshot first so Phase B (and its
+                # persistence step) always starts from a consistent state.
+                recovery_context = context or self._resolve_recovery_context(context_id, session)
+                snapshot = self._snapshot_recovery_context(recovery_context)
+            try:
+                compressed = await self._recover_with_compressors(
+                    context_id=context_id,
+                    session=session,
+                    timeout_s=getattr(ptl_config, "phase_a_timeout_s", 0.0) if phase_b_enabled else 0.0,
+                    swallow_errors=phase_b_enabled,
+                    kwargs=kwargs,
+                )
+            except asyncio.CancelledError:
+                self._restore_recovery_snapshot(recovery_context, snapshot)
+                raise
+            if compressed:
+                return True
+            self._restore_recovery_snapshot(recovery_context, snapshot)
+
+        if not phase_b_enabled:
+            return False
+
+        # Imported lazily: the recovery package is the removable part of this
+        # capability. Removing it leaves Phase A above untouched.
+        from openjiuwen.core.context_engine.recovery import recover_phase_b
+
+        truncated = await recover_phase_b(
+            self,
+            context_id=context_id,
+            session=session,
+            context=context,
+            error_texts=list(self._iter_exception_texts(exception)),
+            messages=messages,
+            tools=tools,
+            attempt=attempt,
+            config=ptl_config,
+        )
+        if truncated and attempted is not None and "phase_b_truncate" not in attempted:
+            attempted.append("phase_b_truncate")
+        return truncated
+
+    async def _recover_with_compressors(
+            self,
+            *,
+            context_id: str,
+            session: Session,
+            timeout_s: float,
+            swallow_errors: bool,
+            kwargs: Dict[str, Any],
+    ) -> bool:
+        """Phase A: let the configured compressors rewrite the context.
+
+        Always called first on a PTL rejection. ``swallow_errors`` is true
+        only when Phase B is enabled: a compression failure or timeout then
+        falls through to truncation. With Phase B disabled the historical
+        behaviour is preserved and compression errors propagate.
+        """
         compression_kwargs = dict(kwargs)
         compression_kwargs.setdefault(
             "compression_trigger", "model_context_overflow"
         )
-        result = await self.compress_context(
-            context_id=context_id,
-            session=session,
-            **compression_kwargs,
-        )
+        try:
+            if timeout_s and timeout_s > 0:
+                async with asyncio.timeout(timeout_s):
+                    result = await self.compress_context(
+                        context_id=context_id,
+                        session=session,
+                        **compression_kwargs,
+                    )
+            else:
+                result = await self.compress_context(
+                    context_id=context_id,
+                    session=session,
+                    **compression_kwargs,
+                )
+        except TimeoutError:
+            if not swallow_errors:
+                # Legacy callers never installed a timeout; a TimeoutError here
+                # came from the compressor itself and must stay visible.
+                raise
+            if timeout_s and timeout_s > 0:
+                context_engine_logger.warning(
+                    "model context recovery compression timed out after %.1fs; "
+                    "falling back to pure-code truncation",
+                    timeout_s,
+                )
+            else:
+                context_engine_logger.warning(
+                    "model context recovery compression failed; "
+                    "falling back to pure-code truncation",
+                    exc_info=True,
+                )
+            return False
+        except Exception:  # noqa: BLE001 - Phase B is the fallback for a broken compressor
+            if not swallow_errors:
+                raise
+            context_engine_logger.warning(
+                "model context recovery compression failed; "
+                "falling back to pure-code truncation",
+                exc_info=True,
+            )
+            return False
+
         result_code = result.get("result") if isinstance(result, dict) else result
         if result_code != "compressed":
             context_engine_logger.info(
@@ -478,6 +669,41 @@ class ContextEngine:
 
         context_engine_logger.info("model context recovery compressed context")
         return True
+
+    def _resolve_recovery_context(self, context_id: str, session: Session) -> Optional[ModelContext]:
+        resolved_session_id = session.get_session_id() if session else "default_session_id"
+        return self.get_context(context_id=context_id, session_id=resolved_session_id)
+
+    @staticmethod
+    def _snapshot_recovery_context(context: Optional[ModelContext]) -> Optional[List[BaseMessage]]:
+        if context is None:
+            return None
+        try:
+            return copy.deepcopy(context.get_messages())
+        except Exception:  # noqa: BLE001 - a missing snapshot must not block recovery
+            context_engine_logger.warning(
+                "failed to snapshot context before Phase A compression",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _restore_recovery_snapshot(
+        context: Optional[ModelContext],
+        snapshot: Optional[List[BaseMessage]],
+    ) -> None:
+        if context is None or snapshot is None:
+            return
+        try:
+            if context.get_messages() == snapshot:
+                return
+            context.set_messages(snapshot)
+            context_engine_logger.warning("restored context after incomplete Phase A compression before Phase B")
+        except Exception:  # noqa: BLE001 - restore is best-effort; Phase B still runs
+            context_engine_logger.warning(
+                "failed to restore context after incomplete Phase A compression",
+                exc_info=True,
+            )
 
     @classmethod
     def is_context_overflow_error(cls, exception: Exception) -> bool:

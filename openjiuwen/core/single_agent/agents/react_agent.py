@@ -1081,39 +1081,46 @@ class ReActAgent(BaseAgent):
 
         finalizing = bool(ctx.extra.get("_finalizing_max_iterations"))
         rail_attempt_cap = {"_rail_max_attempts": 1} if finalizing else {}
-        try:
-            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
-        except Exception as exc:
-            if ctx.extra.get("_model_exception_recovery_attempted"):
-                raise
 
+        recovery_budget = self._model_recovery_budget()
+        attempts = self._model_recovery_attempts(ctx)
+        ai_message = None
+        while True:
             try:
-                recovered = await self._recover_from_model_exception(
-                    ctx,
-                    context=context,
-                    exception=exc,
-                )
-            except Exception as recovery_exc:
-                logger.warning(
-                    "Model exception recovery hook failed; preserving the original model exception: %s",
-                    recovery_exc,
-                    exc_info=True,
-                )
-                raise exc from recovery_exc
+                ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
+                break
+            except Exception as exc:
+                if attempts >= recovery_budget:
+                    raise
 
-            if not recovered:
-                raise
+                try:
+                    recovered = await self._recover_from_model_exception(
+                        ctx,
+                        context=context,
+                        exception=exc,
+                    )
+                except Exception as recovery_exc:
+                    logger.warning(
+                        "Model exception recovery hook failed; preserving the original model exception: %s",
+                        recovery_exc,
+                        exc_info=True,
+                    )
+                    raise exc from recovery_exc
 
-            # The recovery hook is allowed to mutate the context. Rebuild the
-            # preview before running BEFORE_MODEL_CALL rails for the retry.
-            ctx.extra["_model_exception_recovery_attempted"] = True
-            ctx.inputs = ModelCallInputs(
-                messages=self._build_preview_messages(context),
-                tools=list(tools) if tools else None,
-                model_context=context,
-                react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
-            )
-            ai_message = await self._railed_model_call(ctx, **rail_attempt_cap)
+                if not recovered:
+                    raise
+
+                attempts += 1
+                ctx.extra["_model_exception_recovery_attempted"] = True
+                ctx.extra["_model_exception_recovery_attempts"] = attempts
+                # The recovery hook is allowed to mutate the context. Rebuild
+                # the preview before running BEFORE_MODEL_CALL rails again.
+                ctx.inputs = ModelCallInputs(
+                    messages=self._build_preview_messages(context),
+                    tools=list(tools) if tools else None,
+                    model_context=context,
+                    react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
+                )
 
         if not isinstance(ai_message, AssistantMessage):
             return ai_message
@@ -1121,6 +1128,38 @@ class ReActAgent(BaseAgent):
         log_llm_response(logger, ai_message)
 
         return ai_message
+
+    def _model_recovery_budget(self) -> int:
+        """Return how many recovery retries this agent round may use.
+
+        The historical behaviour is one retry. The context engine owns the
+        PTL policy and exposes the budget, so this method never inspects the
+        engine's config shape directly.
+        """
+        engine = self.context_engine
+        budget = getattr(engine, "model_recovery_max_attempts", None)
+        if not callable(budget):
+            return 1
+        try:
+            value = budget()
+        except Exception:  # noqa: BLE001 - fall back to legacy behaviour
+            return 1
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return 1
+        return value
+
+    @staticmethod
+    def _model_recovery_attempts(ctx: AgentCallbackContext) -> int:
+        """Return the recovery attempts already spent in this agent round."""
+        attempts = ctx.extra.get("_model_exception_recovery_attempts", 0)
+        try:
+            attempts = int(attempts or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts <= 0 and ctx.extra.get("_model_exception_recovery_attempted"):
+            # Older checkpoints only carry the boolean flag.
+            attempts = 1
+        return max(attempts, 0)
 
     async def _recover_from_model_exception(
         self,
@@ -1132,8 +1171,8 @@ class ReActAgent(BaseAgent):
         """Extension point for context-aware recovery before one model retry.
 
         ContextEngine recognizes provider context-window errors, actively
-        compresses the context when a configured processor can change it, and
-        returns ``True`` to retry the same ReAct model step. Returning
+        compresses or truncates the context when a configured path can change
+        it, and returns ``True`` to retry the same ReAct model step. Returning
         ``False`` leaves the original exception untouched.
         """
         # Inspect the instance without triggering dynamic ``__getattr__`` hooks
@@ -1151,6 +1190,14 @@ class ReActAgent(BaseAgent):
         if not callable(recover):
             return False
 
+        attempted = ctx.extra.get("_model_exception_recovery_types")
+        if not isinstance(attempted, list):
+            attempted = []
+            ctx.extra["_model_exception_recovery_types"] = attempted
+
+        model_messages = getattr(ctx.inputs, "messages", None)
+        model_tools = getattr(ctx.inputs, "tools", None)
+
         return bool(
             await recover(
                 context_id=context.context_id(),
@@ -1159,6 +1206,10 @@ class ReActAgent(BaseAgent):
                 exception=exception,
                 streaming=bool(ctx.extra.get("_streaming")),
                 stream_chunks_emitted=int(ctx.extra.get("_stream_chunks_emitted", 0) or 0),
+                messages=list(model_messages) if model_messages else None,
+                tools=list(model_tools) if model_tools else None,
+                attempt=self._model_recovery_attempts(ctx) + 1,
+                attempted_recoveries=attempted,
             )
         )
 
