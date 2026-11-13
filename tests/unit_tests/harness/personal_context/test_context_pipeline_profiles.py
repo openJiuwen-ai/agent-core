@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -7051,6 +7052,66 @@ async def test_materialized_source_is_copied_once_and_not_exposed_to_balanced_fa
     assert copy_calls == 1
     assert observed_contents == [b"candidate source"] * 2
     assert (sandbox / "materialized-source" / "README.md").read_bytes() == b"candidate source"
+
+
+@pytest.mark.asyncio
+async def test_materialized_source_is_copied_off_the_event_loop_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "workspace" / "sandboxes" / "local" / "run-1"
+    sandbox.mkdir(parents=True)
+    candidate = tmp_path / "workspace" / "materialized-sources" / "github" / "service" / "candidate"
+    candidate.mkdir(parents=True)
+    (candidate / "README.md").write_text("candidate source", encoding="utf-8")
+    processed = {
+        "documents": [
+            {
+                "logical_id": "notes/one",
+                "revision_id": "rev-1",
+                "title": "One",
+                "markdown": "Processed text.\n",
+                "original_ref": "file:///notes/one",
+                "metadata": {},
+                "raw_snapshot": None,
+                "actual_profile": "agent",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+        "actual_profile": "agent",
+    }
+    batch = _batch(materialized_source_path=str(candidate), materialized_revision="rev-1")
+    real_materialize = context_pipeline._materialize_candidate_source
+    loop_thread = threading.get_ident()
+    copy_threads: list[int] = []
+
+    def record_thread(source_value: str | None, *, sandbox: Path, home: Path) -> str | None:
+        copy_threads.append(threading.get_ident())
+        return real_materialize(source_value, sandbox=sandbox, home=home)
+
+    async def agent_reads_copy(**kwargs: object) -> str:
+        sandbox_path = Path(str(kwargs["sandbox_path"]))
+        assert (sandbox_path / "materialized-source" / "README.md").read_bytes() == b"candidate source"
+        raise RuntimeError("model output remained invalid")
+
+    async def balanced_success(**kwargs: object) -> tuple[set[str], int]:
+        return set(), 0
+
+    monkeypatch.setattr(context_pipeline, "_materialize_candidate_source", record_thread)
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", agent_reads_copy)
+    monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", balanced_success)
+
+    await service._filesystem_with_fallback(
+        run_id="run-progress",
+        processed=processed,
+        sandbox=sandbox,
+        batch=batch,
+    )
+
+    assert len(copy_threads) == 1
+    assert copy_threads[0] != loop_thread
 
 
 @pytest.mark.asyncio
