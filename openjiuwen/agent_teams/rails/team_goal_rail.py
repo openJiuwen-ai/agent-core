@@ -100,6 +100,12 @@ class TeamGoalRail(DeepAgentRail):
         if assessment is None or assessment.status is GoalAssessmentStatus.COMPLETE:
             self._accepted.add(task_id)
             return
+        # The assessor awaits a model call, during which the goal can be
+        # released (round-end sync, task reassignment). ``peek`` is lock-free
+        # and returns None once cleared, so re-check before dereferencing and
+        # leave the foreign hand-in to the task board.
+        if not is_active_task_goal(manager, session, task_id):
+            return
         record = manager.peek()
         await manager.apply_assessment(
             goal_id=record.goal_id,

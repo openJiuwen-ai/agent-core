@@ -325,6 +325,34 @@ async def test_rejected_hand_in_never_reaches_the_task_board() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_goal_released_during_assessment_does_not_crash_the_hand_in() -> None:
+    """A goal cleared while the assessor awaits must not crash the hand-in hook.
+
+    The round-end sync can release the goal while the completion assessment is
+    still awaiting its model call; the rejection path peeks a lock-free
+    snapshot afterwards and must not dereference None.
+    """
+    async with _GoalHarness() as harness:
+        board = _TaskBoard(_in_progress())
+        rail = TeamGoalRail(task_manager=board)
+        rail._harness = harness
+        await bind_task_goal(harness.goal_manager, harness.session, board, "t1")
+        verdict = GoalAssessment(status=GoalAssessmentStatus.CONTINUE, evidence="late", remaining_work="redo")
+
+        async def assess_and_release(*_args: Any, **_kwargs: Any) -> GoalAssessment:
+            await release_task_goal(harness.goal_manager, harness.session, "t1")
+            return verdict
+
+        harness._task_completion_rail.assess_completion_claim = AsyncMock(side_effect=assess_and_release)
+
+        ctx = _tool_ctx("member_complete_task", {"task_id": "t1"})
+        await rail.before_tool_call(ctx)
+
+        assert "_skip_tool_calls" not in ctx.extra
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_hand_in_passes_when_no_verdict_is_available() -> None:
     """An assessor that cannot produce a verdict does not block the hand-in."""
