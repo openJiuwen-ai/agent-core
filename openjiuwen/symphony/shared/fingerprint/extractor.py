@@ -13,8 +13,11 @@ from typing import Any
 
 from json_repair import loads as repair_json_loads
 
-from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.symphony.interfaces import SymphonyLLM
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
+from openjiuwen.symphony.interfaces import ModelResponseObserver, SymphonyLLM
 from openjiuwen.symphony.models import (
     CapabilityDescriptor,
     CapabilityFingerprint,
@@ -78,9 +81,16 @@ class ExtractionOutcome:
 class CapabilityFingerprintExtractor:
     """Build semantic fingerprints while isolating per-capability failures."""
 
-    def __init__(self, settings: FingerprintSettings, llm: SymphonyLLM | None = None) -> None:
+    def __init__(
+        self,
+        settings: FingerprintSettings,
+        llm: SymphonyLLM | None = None,
+        *,
+        model_response_observer: ModelResponseObserver | None = None,
+    ) -> None:
         self._settings = settings
         self._llm = llm
+        self._model_response_observer = model_response_observer
 
     async def extract_many(
         self,
@@ -308,15 +318,38 @@ class CapabilityFingerprintExtractor:
             "definition_truncated": len(semantic_definition) > max(0, self._settings.body_limit),
         }
         safe_context = redact_sensitive_json(context)
-        return await llm.invoke(
-            [
-                {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(safe_context, ensure_ascii=False, separators=(",", ":"))},
-            ],
-            temperature=0.0,
-            max_tokens=self._settings.llm_max_tokens,
-            timeout=self._settings.llm_timeout,
+        invoke_kwargs: dict[str, Any] = {"temperature": 0.0, "timeout": self._settings.llm_timeout}
+        if self._settings.llm_max_tokens is not None:
+            invoke_kwargs["max_tokens"] = self._settings.llm_max_tokens
+        with disabled_thinking_fallback_scope():
+            response = await llm.invoke(
+                [
+                    {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(safe_context, ensure_ascii=False, separators=(",", ":"))},
+                ],
+                **invoke_kwargs,
+            )
+        await self._observe_response(response)
+        finish_reason = (
+            response.get("finish_reason") if isinstance(response, Mapping) else getattr(response, "finish_reason", None)
         )
+        if finish_reason == "length":
+            raise_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg="capability fingerprint extraction response was truncated (finish_reason=length)",
+            )
+        return response
+
+    async def _observe_response(self, response: object) -> None:
+        observer = self._model_response_observer
+        if observer is None:
+            return
+        try:
+            observed = observer(response, "fingerprint_extraction", "capability_extraction")
+            if inspect.isawaitable(observed):
+                await observed
+        except Exception:  # noqa: BLE001 -- observation must not change extraction outcomes.
+            logger.warning("Symphony fingerprint model response observer failed.", exc_info=True)
 
 
 def _without_frontmatter(value: str) -> str:

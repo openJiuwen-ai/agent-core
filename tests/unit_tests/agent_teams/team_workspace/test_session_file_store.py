@@ -9,6 +9,9 @@ and the DAOs dereference placeholder rows transparently (design-v5
 30-block-b, §13 acceptance matrix).
 """
 
+import threading
+from contextlib import asynccontextmanager
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -129,8 +132,69 @@ async def db(tmp_path):
         reset_openjiuwen_home()
 
 
+def _track_reads(monkeypatch, sessions) -> dict:
+    """Count open ``read()`` blocks so a deref can assert none is held."""
+    state = {"open": 0}
+    original = sessions.read
+
+    @asynccontextmanager
+    async def tracked():
+        async with original() as session:
+            state["open"] += 1
+            try:
+                yield session
+            finally:
+                state["open"] -= 1
+
+    monkeypatch.setattr(sessions, "read", tracked)
+    return state
+
+
 class TestDaoPlaceholderIntegration:
     """DAO-level behavior: DB keeps ``#file#``, reads dereference it."""
+
+    @pytest.mark.asyncio
+    async def test_deref_runs_off_loop_after_read_session_closes(self, db, monkeypatch):
+        await db.team.create_team(team_name="T7", display_name="T7", leader_member_name="lead")
+        assert await db.task.create_task("t7", "T7", "title", "task body", "pending")
+        assert await db.message.create_message(
+            message_id="m7", team_name="T7", from_member_name="lead",
+            content="msg body", to_member_name="worker-a",
+        )
+        reads = _track_reads(monkeypatch, db.task._sessions)
+        loop_thread = threading.get_ident()
+        seen: list[tuple[int, int]] = []
+        store = db.task._file_store
+        original_get = store.get
+
+        def recording_get(address):
+            seen.append((threading.get_ident(), reads["open"]))
+            return original_get(address)
+
+        monkeypatch.setattr(store, "get", recording_get)
+
+        assert (await db.task.get_task("t7")).content == "task body"
+        assert [t.content for t in await db.task.get_team_tasks("T7")] == ["task body"]
+        assert (await db.message.get_message("m7")).content == "msg body"
+        inbox = await db.message.get_messages(team_name="T7", to_member_name="worker-a")
+        assert [m.content for m in inbox] == ["msg body"]
+
+        assert len(seen) == 4
+        for thread_id, open_reads in seen:
+            assert thread_id != loop_thread, "file IO must not run on the event loop"
+            assert open_reads == 0, "file IO must not hold a reader connection"
+
+    @pytest.mark.asyncio
+    async def test_get_team_tasks_without_hydrate_keeps_placeholder(self, db, monkeypatch):
+        await db.team.create_team(team_name="T8", display_name="T8", leader_member_name="lead")
+        assert await db.task.create_task("t8", "T8", "title", "task body", "pending")
+
+        def forbidden(_address):
+            raise AssertionError("hydrate=False must not read session files")
+
+        monkeypatch.setattr(db.task._file_store, "get", forbidden)
+        rows = await db.task.get_team_tasks("T8", hydrate=False)
+        assert [row.content for row in rows] == [CONTENT_IN_FILE]
 
     @pytest.mark.asyncio
     async def test_message_roundtrip_keeps_placeholder(self, db):

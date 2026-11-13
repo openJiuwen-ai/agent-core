@@ -6,7 +6,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 上层结构（EventBus / dispatcher / kernel 三者的接线、三条铁律）见
 [`../AGENTS.md`](../AGENTS.md)；跨子模块的协议契约与不变量编号见
-[`docs/specs/S_03_coordination-protocol.md`](../../../docs/specs/S_03_coordination-protocol.md)。
+[`.agents/agent-docs/specs/agent_teams/S_03_coordination-protocol.md`](../../../../../.agents/agent-docs/specs/agent_teams/S_03_coordination-protocol.md)。
 本文件只讲**这些 handler 各自的决策规则**，以及它们共用的那套判断维度。
 
 ## 类契约
@@ -110,6 +110,9 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 - **未读按发送时间升序投递**（`_read_all_unread`，[[B_04]]）：单播与广播两次查询各自有序，
   合并后必须再按 `timestamp` 升序排。投递顺序就是成员读到的顺序——第一条开启这一轮、其余
   steer 进去，倒序会让被新消息唤醒的成员先读到最新那条、再以 `[STEERING]` 读到更早的。
+- **投递后记下执行者已看到的版本**（F_129）：模板渲染了 `task.content` 时 `ExpandedMessage.shown_revision` 带上
+  `(task_id, revision)`，投递成功后 `_observe_shown_revision` 交给 `task_manager.observe_revision`（DAO 只对当前
+  assignee 生效）。`on_task_claimed` 的自身指派通知同理。
 - **投递前先 `_expand`**（`message_template.expand_message`，F_63）：普通消息原样过；框架
   模板消息（`content` 空 + `meta`）在**投递这一刻**按当前任务行渲染正文，所以排队很久的交接
   不会投出过期简报。**四个消费点都必须展开**：`_format_message`、`_notify_human_agent_inbound`
@@ -127,14 +130,14 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 
 按"事件指向谁"分成三组：
 
-**A. 定向所有权变更** —— 指向自己就 `deliver_input(use_steer=True)` 打断：
+**A. 定向所有权变更** —— 指向自己就 `deliver_input(use_steer=True)` 打断（`TASK_UPDATED` 例外，见表）：
 
 | 事件 | 自身分支 | 非自身 |
 |---|---|---|
 | `TASK_CLAIMED` | 被指派：steer 通知（**跳过看板兜底**，定向消息已点名任务） | fall-through 看板（实际只 leader 会被喂） |
 | `TASK_REVOKED` | 改派走人：**停手** | 直接忽略 |
 | `TASK_CANCELLED` | 任务取消：**停手** | fall-through 看板 |
-| `TASK_UPDATED` | 内容被编辑：重看后继续，**任务仍归你** | fall-through 看板 |
+| `TASK_UPDATED` | 内容被编辑：**只触发** `announce_task_revisions()`（TeamAgent 转给实现了 `TaskNoticeAwareRuntime` 的 runtime），由成员的 `TaskRevisionTracker` 产出告知（带修改说明、重看后继续、任务仍归你），handler 自己不出文案（F_129） | fall-through 看板 |
 
 改派经 DAO 原子 CAS 交换 assignee，**不发 `TASK_RELEASED`**（任务从没回到公共池）。见 F_54 / F_56。
 
@@ -255,8 +258,9 @@ run_id**——人工交互靠 `correlation_id` 路由，设计如此）。`deliv
   leader 身份邮箱消息，再自反应就是双投递；leader 的感知走调度器的摘要/升级）。
   `on_initial_task_poll` 覆写为 no-op（同理：调度器的 handoff 是邮箱里的持久行，首启邮箱
   sweep 会 drain 它；改派到手的活跃任务也不例外——调度器的交接补发扫描会给没有开工行的
-  新 owner 补一封，B_06）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` / `UPDATED` 的定向
-  steer——`update_task` 在两个模式下同义。
+  新 owner 补一封，B_06）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` 的定向 steer——改派 / 取消在两个
+  模式下同义；`TASK_UPDATED` 例外，也路由到 `on_task_board_event`（F_129）：编辑由调度器的修改推送邮件把最新内容
+  送到执行者手上，再 steer "重看后继续" 就是双投递，对挂起中的父任务还会把执行者叫回去做父任务。
 - `ScheduledStaleTaskHandler`：`on_poll_task` 只扫自己的 stale 活跃任务（漏投递的兜底），
   **不做 leader stale-pending 自催**（调度模式下排队中的 `PENDING(assignee)` 是常态，调度器
   会 `start_task`）。它还覆写 `_check_stale_claimed_tasks` / `_self_nudge_stale_claim`

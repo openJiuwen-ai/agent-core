@@ -529,7 +529,7 @@ def test_runtime_rewrites_single_target_click_to_official_primitive() -> None:
             )
         )
     )
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=click_tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=click_tool)
 
     result = _run(
         runtime.batch_interact(
@@ -546,12 +546,14 @@ def test_runtime_rewrites_single_target_click_to_official_primitive() -> None:
             "index": 0,
             "op": "click",
             "ok": True,
+            "executed": True,
+            "execution_state": "acknowledged",
             "status": "completed",
             "elapsed_ms": result["steps"][0]["elapsed_ms"],
         }
     ]
     assert "_runtime_page" not in result
-    runtime._get_playwright_mcp_tool.assert_awaited_once_with("browser_click")
+    runtime.resolve_playwright_tool.assert_awaited_once_with("browser_click")
     assert click_tool.invoke.await_args.args[0]["target"] == "#search"
 
 
@@ -575,7 +577,7 @@ def test_runtime_rewrites_single_card_click_to_direct_navigation() -> None:
     }
     runtime.ensure_page_state().register_cards(payload)
     navigate_tool = SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None, data={})))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=navigate_tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=navigate_tool)
 
     result = _run(
         runtime.batch_interact(
@@ -593,7 +595,7 @@ def test_runtime_rewrites_single_card_click_to_direct_navigation() -> None:
 
 def test_single_step_uses_compact_rpc_fallback_when_primitive_is_unavailable() -> None:
     runtime = _make_bare_runtime()
-    runtime._get_playwright_mcp_tool = AsyncMock(side_effect=RuntimeError("not registered"))
+    runtime.resolve_playwright_tool = AsyncMock(side_effect=RuntimeError("not registered"))
 
     result = _run(runtime._run_single_batch_primitive({"op": "click", "selector": "#search"}))
 
@@ -604,7 +606,7 @@ def test_runtime_materializes_native_ax_ref_inside_runtime() -> None:
     runtime = _make_bare_runtime()
     runtime.ensure_page_state().register_ax_snapshot('- tab "Sales" [ref=f1e174]')
     evaluate_tool = SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None)))
-    runtime._get_playwright_mcp_tool = AsyncMock(return_value=evaluate_tool)
+    runtime.resolve_playwright_tool = AsyncMock(return_value=evaluate_tool)
 
     resolved = _run(
         runtime._resolve_batch_steps(
@@ -618,7 +620,7 @@ def test_runtime_materializes_native_ax_ref_inside_runtime() -> None:
 
     assert resolved[0]["selector"].startswith('[data-openjiuwen-target-id="t_g0_')
     assert "ref" not in resolved[0]
-    runtime._get_playwright_mcp_tool.assert_awaited_once_with("browser_evaluate")
+    runtime.resolve_playwright_tool.assert_awaited_once_with("browser_evaluate")
     assert evaluate_tool.invoke.await_args.args[0]["target"] == "f1e174"
 
 

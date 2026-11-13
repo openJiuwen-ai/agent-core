@@ -3,12 +3,16 @@
 
 """Dependency graph helper functions and constants."""
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
 
 TASK_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value})
+
+# Statuses in which the assignee is working the task (planning or executing):
+# an edit made then changes work already under way (F_129).
+TASK_WORKING_STATUSES = frozenset({TaskStatus.PLANNING.value, TaskStatus.IN_PROGRESS.value})
 
 # Statuses that forbid a task from gaining a *new* prerequisite dependency —
 # it is either terminal or already in flight (planning / executing / under
@@ -23,6 +27,25 @@ TASK_DEPENDENCY_REJECT_STATUSES = frozenset(
         TaskStatus.IN_REVIEW.value,
     }
 )
+
+
+def stale_against(task: Any, parent_revision: int | None) -> tuple[int, int] | None:
+    """``(parent revision, based-on revision)`` when an open subtask lags its parent (F_129).
+
+    Args:
+        task: A task row (``parent_task_id`` / ``status`` / ``parent_revision``).
+        parent_revision: The parent's current revision, ``None`` when unknown.
+
+    Returns:
+        The two revisions, or ``None`` when the task is top-level, finished,
+        or based on the parent's current revision.
+    """
+    if not task.parent_task_id or task.status in TASK_TERMINAL_STATUSES or parent_revision is None:
+        return None
+    based_on = int(task.parent_revision or 0)
+    if based_on >= parent_revision:
+        return None
+    return parent_revision, based_on
 
 
 def detect_cycle_in_adjacency(

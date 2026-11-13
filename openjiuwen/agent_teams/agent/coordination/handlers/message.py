@@ -18,6 +18,7 @@ and a member that is already SHUTDOWN is never fed at all.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, ClassVar
 
@@ -26,6 +27,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
@@ -33,7 +35,12 @@ from openjiuwen.agent_teams.inbound_render import (
     render_event,
     render_inbound,
 )
-from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message, task_links
+from openjiuwen.agent_teams.message_template import (
+    ExpandedMessage,
+    expand_message,
+    revision_getters,
+    task_links,
+)
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
@@ -41,6 +48,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.session import InteractiveInput
 
 
 class MessageHandler(BaseCoordinationHandler):
@@ -83,6 +91,7 @@ class MessageHandler(BaseCoordinationHandler):
         if self._blueprint.role == TeamRole.LEADER:
             if event.event_type == TeamEvent.MESSAGE:
                 await self._ack_user_bound_message(event)
+            await self._wake_peer_recipients(event)
             await self._notify_human_agent_inbound(event)
         await self._poll.resume_polls()
         await self._process_unread_messages(member_name)
@@ -247,26 +256,83 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
-                    if self._round.has_pending_interrupt():
-                        # Approval messages are admitted to resume_interrupt;
-                        # all other messages are deferred until the interrupt clears.
-                        approval_data = self._try_parse_approval_payload(msg)
+                    approval_data = self._try_parse_approval_payload(msg)
+                    if approval_data is not None:
+                        approval_data = self._validate_approval_payload(approval_data)
+                        leader = None
                         if approval_data is not None:
+                            if backend is not None:
+                                leader = await backend.resolve_leader_member_name()
+                            elif self._blueprint.team_spec is not None:
+                                leader = self._blueprint.team_spec.leader_member_name
+                            if not leader:
+                                team_logger.debug(
+                                    "[{}] deferring approval message {} until the team leader is available",
+                                    member_name,
+                                    msg.message_id,
+                                )
+                                return
+                        if approval_data is None or msg.from_member_name != leader:
+                            team_logger.debug(
+                                "[{}] discarding invalid or unauthorized approval message {}",
+                                member_name,
+                                msg.message_id,
+                            )
+                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            continue
+                        # Resume clears session state while the round is still
+                        # running. Keep other replies until that round settles.
+                        if self._round.has_in_flight_round():
+                            interrupted = True
+                            continue
+                        if self._round.has_pending_interrupt():
                             team_logger.info(
                                 "[{}] admitting approval message {} to resume interrupt",
                                 member_name,
                                 msg.message_id,
                             )
+                            reply = InteractiveInput()
+                            reply.update(
+                                approval_data["tool_call_id"],
+                                {key: approval_data[key] for key in ("approved", "feedback", "auto_confirm")},
+                            )
+                            try:
+                                await self._round.resume_interrupt(reply)
+                            except asyncio.CancelledError:
+                                team_logger.debug(
+                                    "[{}] approval message {} admission cancelled; keeping it unread",
+                                    member_name,
+                                    msg.message_id,
+                                )
+                                raise
+                            except Exception:
+                                team_logger.error(
+                                    "[{}] approval message {} admission failed; keeping it unread",
+                                    member_name,
+                                    msg.message_id,
+                                    exc_info=True,
+                                )
+                                raise
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(approval_data)
-                            continue
+                            return
+                        # A settled runtime with no interrupt cannot use this
+                        # reply. Never feed stale control data as a new query.
+                        team_logger.debug(
+                            "[{}] discarding settled approval message {} for tool_call_id={}",
+                            member_name,
+                            msg.message_id,
+                            approval_data["tool_call_id"],
+                        )
+                        await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                        continue
+                    if interrupted or self._round.has_pending_interrupt():
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",
                             member_name,
                             msg.message_id,
                         )
                         interrupted = True
-                        break
+                        continue
                     # An external_runtime_failed JSON message is rendered as a
                     # <team-event> and never falls through to plain
                     # member-message rendering, so the leader sees a
@@ -294,11 +360,26 @@ class MessageHandler(BaseCoordinationHandler):
 
                     await self._round.deliver_input(text, use_steer=use_steer)
                     delivered.append(msg)
+                    await self._observe_shown_revision(expanded)
             finally:
                 if delivered:
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
+
+    async def _observe_shown_revision(self, expanded: ExpandedMessage) -> None:
+        """Record the task revision a delivered handoff showed as seen (F_129).
+
+        The handoff rendered the task row as it stood at delivery, so its
+        revision is exactly what the assignee now has in front of it. The DAO
+        records it only for the task's current assignee.
+        """
+        task_manager = getattr(self._infra, "task_manager", None)
+        shown = getattr(expanded, "shown_revision", None)
+        if shown is None or task_manager is None:
+            return
+        task_id, revision = shown
+        await task_manager.observe_revision(task_id, revision)
 
     def _language(self) -> str:
         """Team language for delivery-time template rendering."""
@@ -342,6 +423,7 @@ class MessageHandler(BaseCoordinationHandler):
         async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
             return await task_links(db, task_id) if db is not None else ([], [])
 
+        snapshot_getter, subtasks_getter = revision_getters(db, backend.team_name) if db is not None else (None, None)
         return await expand_message(
             msg,
             task_getter=_get_task,
@@ -349,6 +431,8 @@ class MessageHandler(BaseCoordinationHandler):
             language=self._language(),
             loader=self._template_loader,
             task_links_getter=_get_links,
+            revision_snapshot_getter=snapshot_getter,
+            subtasks_getter=subtasks_getter,
         )
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:
@@ -573,6 +657,42 @@ class MessageHandler(BaseCoordinationHandler):
                     exc,
                 )
 
+    async def _wake_peer_recipients(self, event: CoordinationEvent) -> None:
+        """Bring up the recipients of a member-to-member message (leader only).
+
+        Only the leader owns spawning, so a member's ``send_message`` writes
+        the row and publishes the event but cannot start a peer that never
+        ran, nor wake a DORMANT / ERROR one; the message would sit unread
+        until something else started that peer. The leader sees every team
+        message event, so it applies the rules of its own ``send_message``
+        here: a direct (or multicast) recipient is started or recovered, a
+        broadcast starts UNSTARTED members only and leaves DORMANT / ERROR
+        ones asleep. The woken runtime drains its mailbox on start.
+
+        Messages the leader sent itself are skipped — its tool already did
+        this, and its framework handoffs keep their own wake rules.
+        """
+        backend = self._infra.team_backend
+        if backend is None:
+            return
+        payload = event.get_payload()
+        sender = getattr(payload, "from_member_name", None)
+        if sender == self._blueprint.member_name:
+            return
+        try:
+            if event.event_type == TeamEvent.BROADCAST:
+                started = await backend.autostart_unstarted(include_idle_task_scoped=True)
+                if started:
+                    team_logger.info("Started members for a broadcast from {}: {}", sender, started)
+                return
+            recipient = getattr(payload, "to_member_name", None)
+            if not recipient or recipient in (USER_PSEUDO_MEMBER_NAME, self._blueprint.member_name):
+                return
+            if await backend.wake_member(recipient):
+                team_logger.info("Woke member {} for a message from {}", recipient, sender)
+        except Exception as exc:
+            team_logger.error("Failed to wake recipients of a message from {}: {}", sender, exc)
+
     async def _ack_user_bound_message(self, event: CoordinationEvent) -> None:
         """Mark a teammate→user direct message as read on the user's behalf.
 
@@ -667,23 +787,38 @@ class MessageHandler(BaseCoordinationHandler):
             note_text=note_text,
         )
 
-    @staticmethod
-    def _try_parse_approval_payload(msg: Any) -> dict | None:
-        """Try to parse a tool-approval result from a message.
-
-        Returns the parsed approval dict if the message is a
-        ``protocol="json"` message with ``type == "tool_approval_result"``,
-        or ``None`` otherwise.  Parses JSON only once.
-        """
-        if msg.protocol != "json" or not msg.content:
+    def _try_parse_approval_payload(self, msg: Any) -> dict | None:
+        """Recognize control mail independently of its validity and sender."""
+        if msg.protocol != "json" or not msg.content or msg.broadcast:
             return None
         try:
             data = json.loads(msg.content)
         except (json.JSONDecodeError, TypeError):
             return None
-        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
-            return data
-        return None
+        if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
+            return None
+        return data
+
+    @staticmethod
+    def _validate_approval_payload(data: dict) -> dict | None:
+        """Keep historical optional nulls compatible without coercing decisions."""
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip() or not isinstance(data.get("approved"), bool):
+            return None
+        feedback = data.get("feedback", "")
+        auto_confirm = data.get("auto_confirm", False)
+        if feedback is None:
+            feedback = ""
+        if auto_confirm is None:
+            auto_confirm = False
+        if not isinstance(feedback, str) or not isinstance(auto_confirm, bool):
+            return None
+        return {
+            "tool_call_id": tool_call_id,
+            "approved": data["approved"],
+            "feedback": feedback,
+            "auto_confirm": auto_confirm,
+        }
 
     @staticmethod
     def _render_external_runtime_failed(msg: Any) -> str | None:

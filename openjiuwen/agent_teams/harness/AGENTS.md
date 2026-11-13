@@ -11,7 +11,7 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 harness/
 ├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs
 ├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
-├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
+├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）；实现 TaskNoticeAwareRuntime：运行周期内用当前子 session 与 configurator 经 `build(task_event_tracker=...)` 交给它的任务告知 tracker 发修改告知（F_129）
 ├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
 ├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
 ├── turn.py            # MemberTurn + resolve_member_turn：成员轨迹 turn 身份（持久化在 session state，无 OTel 依赖）
@@ -44,6 +44,17 @@ harness/
 才拼成一条 user message。拼早了 rail 就只能对着正文做字符串解析——team 侧正是靠这个整条剔除
 被后来者覆盖的任务看板。
 
+## Goal round
+
+`enable_goal(stop_config, ready=None)` 之后 harness 在 `start()` 里构造 `GoalManager`（状态仍独占于它，
+harness `S_11`）。收尾优先级变成 **排队输入 > goal 续跑 > task-plan 续跑 > IDLE**：goal 未完成时不进
+IDLE，而是起一轮 `run_kind=GOAL` 的 round，评估回路原样复用 `TaskCompletionRail`。`ready` 让宿主把
+goal round 压到自己的前提成立之后，`nudge_goal()` 请求 supervisor 重查（只有 IDLE 才会起轮）。
+BLOCKED 的 goal 只在一轮**外部输入**收尾时被重新打开，goal round 收尾不会——goal 不能自己解除阻塞。
+`DeepAgent` 的事件管理器只被当作 goal 队列用：round 由本 supervisor 串行，出队即清掉它的
+in-flight 记账，否则同一代 goal 永远排不进续跑。未调用 `enable_goal` 时以上路径全部不可达。
+细则见 `S_18` 的 Goal round 段与 F_20261110_1922。
+
 ## pause / abort / resume（两个正交动词）
 
 停止点一律落在 **inner ReAct iteration 边界**。`abort` 丢弃当前 round（→ IDLE，下次 `send` 起
@@ -56,8 +67,8 @@ user turn）。
 `await`）。tool 阶段的 pause 经 `PAUSING` 过渡态等待边界，ack 延迟到 `_on_round_done` resolve。
 
 该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
-TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
-与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
+TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../../../.agents/agent-docs/specs/agent_teams/S_18_harness-interaction-contract.md)
+与 [`F_60`](../../../.agents/agent-docs/features/agent_teams/F_60_native-harness-pause-abort-resume.md)。
 
 ## 轨迹 turn（`turn.py`）
 
@@ -75,11 +86,14 @@ round 在跑之前 `session.commit()` 一次，进程中途死掉也不会复用
 v2 event 再从 span 父链继承。外部 CLI 成员（`external/member_runtime.py`）每个 provider turn 开一个
 新 turn，经 `start_turn(turn=...)` 交给 claude/codex bridge 打到 turn span 及其子 span 上。
 
+团队开启进程内 fork 时，原生队友在 Turn 正常结束、进入空闲或切换到下一个 Turn 前保存 fork 快照。
+运行中、已暂停或等待交互的队友拒绝被 fork。中止和中断保留上一次正常结束的快照。
+
 ## 异步工具框架（`async_tools.py`）
 
 照搬 Claude Code 两段式范式的通用异步后台工具框架，**限定在 NativeHarness 范围、零
-TeamAgent 依赖**。详见 `docs/features/F_35`（起步版）、`F_41`（统一 ID + 管控工具 + 磁盘溢写）
-与 `docs/specs/S_20`。
+TeamAgent 依赖**。详见 `.agents/agent-docs/features/agent_teams/F_35`（起步版）、`F_41`（统一 ID + 管控工具 + 磁盘溢写）
+与 `.agents/agent-docs/specs/agent_teams/S_20`。
 
 **两段式（强约束下的唯一可行解）**：openjiuwen 工具循环与 Anthropic API 一样强配对——
 每个 `tool_call` 必产生紧随的 `ToolMessage`，`invoke` 同步阻塞、不可挂起 `tool_result`。
@@ -151,4 +165,10 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 恢复后 start 保持 IDLE、resume 延续原 Turn 和 queued receipt；不序列化活跃后台执行。
 统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
 装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
-见 [F_97](../docs/features/F_97_native-harness-protocol-adapter.md)。
+见 [F_97](../../../.agents/agent-docs/features/agent_teams/F_97_native-harness-protocol-adapter.md)。
+
+## 成员工具环境
+
+NativeHarness 装配绑定成员 BuildContext 的 `resolve_execution_environment`，由 AbilityManager
+在每次工具调用开始时解析。team 会话设置由 `TeamDatabase.session_settings` 保存版本，
+平台可按调用读取，因此冷恢复和跨进程成员不依赖首轮请求上下文。见 `F_20261104_1721_session-execution-settings`。

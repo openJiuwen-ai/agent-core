@@ -307,7 +307,8 @@ def _record_exception(
     return last
 
 
-def _cooldown_remaining(router: Any, deployment_id: str, now: float) -> float | None:
+def cooldown_remaining(router: Any, deployment_id: str, now: float) -> float | None:
+    """Seconds a deployment's cooldown still runs for, or None when selectable."""
     state = getattr(router, "state", None)
     if state is None:
         return None
@@ -333,12 +334,15 @@ def _release_cooldown(router: Any, deployment_id: str) -> None:
         reset(deployment_id)
 
 
-def _pinned_tag(router: Any) -> str | None:
+def pinned_route_tag(router: Any) -> str | None:
+    """The tag a tag-filtered router is pinned to, or None for unified routing."""
     tag = getattr(getattr(router, "strategy", None), "fallback_tag", None)
     return str(tag) if tag else None
 
 
-def _candidates(router: Any, tag: str | None, model_name: str | None) -> list[Any]:
+def routing_candidates(router: Any, tag: str | None, model_name: str | None) -> list[Any]:
+    """Deployments a router can route this call to, in group order."""
+
     deployments = list(getattr(router, "deployments", None) or [])
     if model_name and model_name != "*":
         deployments = [d for d in deployments if getattr(d, "model_name", None) == model_name]
@@ -430,15 +434,15 @@ def to_model_error(
     now = time.time()
     group_id = getattr(router, "model_group_id", None)
     trigger_id, trigger = _record_exception(group_id, exc, output_emitted)
-    tag = _pinned_tag(router)
+    tag = pinned_route_tag(router)
     candidates = [
         _Candidate(
             deployment=d,
             failure=_load_failure(group_id, str(getattr(d, "id", ""))),
-            cooldown_remaining=_cooldown_remaining(router, str(getattr(d, "id", "")), now),
+            cooldown_remaining=cooldown_remaining(router, str(getattr(d, "id", "")), now),
             position=_position(router, d),
         )
-        for d in _candidates(router, tag, model_name)
+        for d in routing_candidates(router, tag, model_name)
     ]
     # The deployment that raised this error comes first, so consumers that
     # report one reason (the reliability notice) report the right one.
@@ -451,10 +455,14 @@ def to_model_error(
         (d for d in getattr(router, "deployments", None) or [] if str(getattr(d, "id", "")) == trigger_id),
         None,
     )
+    # "*" is the logical "any model in the group" name: never show it to users.
+    requested = tag or (model_name if model_name and model_name != "*" else None)
     if trigger_deployment is not None and trigger is not None:
         what_happened = f"The model {_label(trigger_deployment)} {trigger.message}."
+    elif requested:
+        what_happened = f"The model '{requested}' failed."
     else:
-        what_happened = f"The model '{tag or model_name or '*'}' failed."
+        what_happened = "A model in the model group failed."
     pin_note = f"This member is set to use '{tag}' only, so no other model was tried." if tag else ""
 
     def build(status: StatusCode, route_case: str, reason: str, message: str,
@@ -485,10 +493,14 @@ def to_model_error(
         return build_error(status, msg=message, details=details, cause=exc)
 
     if not candidates:
-        missing = tag or model_name or "*"
+        if not requested:
+            return build(
+                StatusCode.MODEL_GROUP_NO_AVAILABLE_ROUTE, ROUTE_CASE_EXHAUSTED_USER_ACTION, REASON_TAG_NOT_FOUND,
+                "The selected model group has no model. Please add a model to the model group.",
+            )
         return build(
             StatusCode.MODEL_GROUP_NO_AVAILABLE_ROUTE, ROUTE_CASE_EXHAUSTED_USER_ACTION, REASON_TAG_NOT_FOUND,
-            f"The model '{missing}' is not in the selected model group. "
+            f"The model '{requested}' is not in the selected model group. "
             "Please choose another model or add it back to the model group.",
         )
 

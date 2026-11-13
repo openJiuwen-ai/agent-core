@@ -39,33 +39,6 @@ def _subjects() -> list[SubjectRef]:
     return [SubjectRef(id="main", display_name="Main Agent", kind="main_agent")]
 
 
-def test_build_trajectory_summary_prompts() -> None:
-    from openjiuwen.agent_evolving.attribution.agent import (
-        build_trajectory_summary_initial_prompt,
-        build_trajectory_summary_system_prompt,
-    )
-
-    zh = build_trajectory_summary_system_prompt("zh")
-    en = build_trajectory_summary_system_prompt("en")
-    assert "轨迹摘要 Agent" in zh
-    assert "300" in zh and "main:0" in zh
-    assert "trajectory summary agent" in en
-    assert "300" in en and "main:0" in en
-    assert "输出语言：中文" in zh
-    assert "Output language: English" in en
-
-    initial_zh = build_trajectory_summary_initial_prompt(
-        task_hint="写报告", subjects=_subjects(), language="zh"
-    )
-    initial_en = build_trajectory_summary_initial_prompt(
-        task_hint="write report", subjects=_subjects(), language="en"
-    )
-    assert "任务线索" in initial_zh and "main | Main Agent" in initial_zh
-    assert "300" in initial_zh and "节点 id" in initial_zh
-    assert "Task Hint" in initial_en and "main | Main Agent" in initial_en
-    assert "300" in initial_en and "node ids" in initial_en
-
-
 def test_build_attribution_system_prompt_languages_and_swarm() -> None:
     zh = build_attribution_system_prompt("zh")
     en = build_attribution_system_prompt("en")
@@ -73,6 +46,10 @@ def test_build_attribution_system_prompt_languages_and_swarm() -> None:
     assert "trajectory attribution agent" in en
     assert "输出语言：中文" in zh
     assert "Output language: English" in en
+    assert "分层轨迹摘要使用说明" in zh
+    assert "Using the Hierarchical Trajectory Summary" in en
+    assert "submit_trajectory_summary" not in zh
+    assert "submit_trajectory_summary" not in en
     assert "swarm" not in zh
     swarm_zh = build_attribution_system_prompt("zh", swarm_mode=True)
     assert "多 Agent 协作" in swarm_zh
@@ -86,17 +63,17 @@ def test_build_attribution_system_prompt_without_skill_evolution() -> None:
     en = build_attribution_system_prompt("en", skill_evolution=False)
     assert "submit_skill_evolution" not in zh
     assert "submit_skill_evolution" not in en
-    # only the experience block is optional here: check becomes item four
-    assert "\n4. 调用 check_attribution_complete" in zh
-    assert "\n4. Call check_attribution_complete" in en
+    # only the experience block is optional here: check becomes item three
+    assert "\n3. 调用 check_attribution_complete" in zh
+    assert "\n3. Call check_attribution_complete" in en
     # other numbered lists are untouched
     assert "\n1. 已有明确文本线索" in zh
     both_off_zh = build_attribution_system_prompt("zh", skill_evolution=False, ttse_advice=False)
     both_off_en = build_attribution_system_prompt("en", skill_evolution=False, ttse_advice=False)
     assert "submit_experience" not in both_off_zh
     assert "submit_experience" not in both_off_en
-    assert "\n3. 调用 check_attribution_complete" in both_off_zh
-    assert "\n3. Call check_attribution_complete" in both_off_en
+    assert "\n2. 调用 check_attribution_complete" in both_off_zh
+    assert "\n2. Call check_attribution_complete" in both_off_en
 
 
 def test_filter_skill_evolution_tool_drops_only_skill_tool() -> None:
@@ -141,6 +118,29 @@ def test_build_initial_prompt_zh_and_en() -> None:
     )
     assert "## Task Description" in en
     assert "Total score: 87" in en
+
+
+def test_build_initial_prompt_with_summary_context() -> None:
+    zh = build_attribution_initial_prompt(
+        task_description="写报告",
+        reward_overall=None,
+        signals=[_signal()],
+        subjects=_subjects(),
+        language="zh",
+        summary_context="## 分层轨迹摘要\n- main | M | main_agent",
+    )
+    assert "## 分层轨迹摘要" in zh
+    assert zh.index("## 分层轨迹摘要") < zh.index("## 信号路由与工作顺序")
+    en = build_attribution_initial_prompt(
+        task_description="write report",
+        reward_overall=None,
+        signals=[_signal()],
+        subjects=_subjects(),
+        language="en",
+        summary_context="## Hierarchical Trajectory Summary",
+    )
+    assert "## Hierarchical Trajectory Summary" in en
+    assert en.index("## Hierarchical Trajectory Summary") < en.index("## Routing and order")
 
 
 def test_build_initial_prompt_without_reward() -> None:
@@ -196,14 +196,15 @@ def test_build_wake_text_contains_check_json() -> None:
         "pending_experience_cause_signal_ids": [],
         "missing_skill_globals": [],
         "missing_experience_evolution": False,
-        "missing_trajectory_summary": True,
     }
     zh = build_wake_text(check, "zh")
     assert '"pending_reward_signal_ids": ["diag-a"]' in zh
     assert "原样复述" in zh
+    assert "submit_trajectory_summary" not in zh
     en = build_wake_text(check, "en")
     assert "pending_reward_signal_ids" in en
     assert "echo that" in en
+    assert "submit_trajectory_summary" not in en
 
 
 def test_build_initial_prompt_skill_section_and_premarks() -> None:

@@ -11,12 +11,12 @@
 - **成员不会自主认领**：没有 assignee 的任务永远不会有人执行。每个任务都必须有明确的承担者
 - 执行中发现能力缺口时，同样先 `spawn_teammate` 建人再 `create_task`（或 `update_task(assignee=...)` 改派已有任务）
 - `send_message` 仍用于下发上下文、回答疑问、裁决冲突——只是不再承担交接职责
-- **成员之间不能直接通信**：成员的 `send_message` 只能发给 `leader` / `user`，不能私聊其他成员、不能广播。不要给成员派「向全队广播」「通知某成员」这类任务——需要全队周知的内容由你 `send_message(to="*")` 发出；成员间要传递的信息由你转达，或让上游写进完成说明 / 产物文件供下游读取
-- **有先后关系的任务在创建时就用 `depends_on` 声明**：被依赖的任务未完成时，下游任务不会开工。任务一旦开工（`in_progress`）就无法再补依赖，只能取消重建
+{{member_messaging}}
+- **有先后关系的任务在创建时就用 `depends_on` 声明**：被依赖的任务未完成时，下游任务不会开工。任务一旦开工（`in_progress`）就无法再补依赖，只能取消重建{{member_subtasks}}
 
 {{inline_member}}## 验证者类型与分配
 
-`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于 build_team 的 `enable_task_verification` 参数（详见 build_team 的工具说明）。每项两个字段——`type` 和 `instruction`：
+`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于团队配置的任务验证开关（`enable_task_verification`）。每项两个字段——`type` 和 `instruction`：
 
 | 字段 | 必填 | 说明 |
 |------|:---:|------|
@@ -64,7 +64,7 @@
 
 ### 分配原则
 
-如果 build_team 时 `enable_task_verification=false`，跳过本节——系统已关闭评审，你不需要分配 reviewer。
+如果团队的任务验证开关（`enable_task_verification`）为关，跳过本节——系统已关闭评审，你不需要分配 reviewer。
 
 没有固定公式。根据任务特点，从三种 reviewer 中挑选你觉得有价值的组合：
 

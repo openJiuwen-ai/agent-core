@@ -23,6 +23,11 @@ INTERRUPT_AUTO_CONFIRM_KEY = "__interrupt_auto_confirm__"
 RESUME_START_ITERATION_KEY = "_resume_start_iteration"
 # ctx.extra key holding ``{tool_call_id: {interrupt_owner: InterruptAnswer}}`` during a resume.
 RESUME_INTERRUPT_ANSWERS_KEY = "_resume_interrupt_answers"
+# ctx.extra key holding tool-result image items whose message waits until every
+# call of the assistant turn has its tool message.
+DEFERRED_TOOL_IMAGES_KEY = "_deferred_tool_images"
+# ctx.extra flag: some calls of the turn stay paused without being replayed.
+TOOL_CALLS_STILL_PAUSED_KEY = "_tool_calls_still_paused"
 
 
 class InterruptAnswer(BaseModel):
@@ -33,9 +38,12 @@ class InterruptAnswer(BaseModel):
             receives the answer.
         kind: ``interrupt_kind`` of the answered interrupt.
         value: The answer as the host sent it.
-        request: The answered request.
+        request: The answered request (e.g. the ``ClientToolRequest`` with the
+            arguments the client ran).
         carried: True when the answer was given, and acted on, in an earlier
             resume round of the same, still paused call.
+        unaddressed: True when the resume input was plain text addressed to
+            no interrupt (offered to the interrupt pending on every call).
     """
 
     owner: str
@@ -43,6 +51,7 @@ class InterruptAnswer(BaseModel):
     value: Any
     request: InterruptRequest
     carried: bool = False
+    unaddressed: bool = False
 
 
 class BaseInterruptionState(BaseModel):
@@ -59,6 +68,9 @@ class ToolInterruptEntry(RestoreFieldDefaultsOnUnpickle, BaseModel):
     # inner tool_call_id -> {interrupt_owner: answer} already given for this
     # still-paused call; they stay visible to their rails in later resume rounds.
     carried_answers: Dict[str, Dict[str, InterruptAnswer]] = Field(default_factory=dict)
+    # The (inner) call a rail or client tool interrupt was raised for; a call
+    # held for its client pauses again with it. None for a sub-agent call.
+    paused_call: Optional[ToolCall] = None
 
     def __setstate__(self, state: Dict[Any, Any]) -> None:
         super().__setstate__(state)
@@ -69,10 +81,13 @@ class ToolInterruptEntry(RestoreFieldDefaultsOnUnpickle, BaseModel):
                 request.interrupt_id = f"intr_{call_id}"
 
 
-class ToolInterruptionState(BaseInterruptionState):
+class ToolInterruptionState(RestoreFieldDefaultsOnUnpickle, BaseInterruptionState):
     """Tool interruption state for resume support.
     """
     interrupted_tools: Dict[str, ToolInterruptEntry] = Field(default_factory=dict)
+    # Image items of finished calls of this turn, sent to the model once no
+    # call of the turn is paused any more (tool messages must stay together).
+    deferred_tool_images: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def issue_interrupt_id(

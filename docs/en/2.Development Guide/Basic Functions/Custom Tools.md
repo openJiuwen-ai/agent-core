@@ -132,8 +132,15 @@ After developers implement and deploy custom MCP services, they can use the `MCP
 import asyncio
 
 from openjiuwen.core.foundation.tool import MCPTool, SseClient
+from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig
 
-mcp_client = SseClient(server_path="your weather mcp url", name="MockSseClient")
+mcp_client = SseClient(
+    McpServerConfig(
+        server_name="MockSseClient",
+        server_path="your weather mcp url",
+        client_type="sse",
+    )
+)
 asyncio.run(mcp_client.connect(timeout=10))
 tool_info_list = asyncio.run(mcp_client.list_tools())
 for tool_info in tool_info_list:

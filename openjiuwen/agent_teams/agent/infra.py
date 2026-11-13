@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.agent_teams.tools.team import TeamBackend
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
 
 
 @dataclass
@@ -52,6 +53,13 @@ class TeamInfra:
     # team-scoped tiny agents by name, disposed when the team stops.
     tiny_agent_model_resolver: Optional[Callable[[str], Any]] = None
     tiny_agents: dict[str, "TinyAgent"] = field(default_factory=dict)
+    # Team-level swarmflow live handles (the "seven-piece" singleton set:
+    # model resolver / worker + human base specs / concurrency governor /
+    # budget ledger / external-CLI allowlist / expert table). Constructed
+    # once by the leader (``enable_swarmflow``) and adopted by reference by
+    # in-process teammates via ``share_swarmflow_with``; per-process
+    # scope, like every other TeamInfra field.
+    swarmflow: Optional["SwarmflowInfra"] = None
 
 
 __all__ = ["TeamInfra"]

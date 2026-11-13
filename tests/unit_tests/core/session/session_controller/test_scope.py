@@ -243,3 +243,25 @@ class TestSessionScopeKey:
         key2 = SessionScopeKey(agent_id="a1", session_scope=scope)
         assert hash(key1) == hash(key2)
         assert len({key1, key2}) == 1
+# Legacy persisted keys must retain their literal identity across upgrades.
+@pytest.mark.parametrize("group_id,user_id", [
+    ("team%2Fblue", "user%41"),
+    ("team%3A", "user%25"),
+    ("team/a b", "中文%user"),
+])
+def test_group_user_legacy_percent_identity(group_id: str, user_id: str) -> None:
+    key = f"group:{group_id}:user:{user_id}"
+    subject = GroupUserSubject.from_string(key)
+    assert subject.group_id == group_id
+    assert subject.user_id == user_id
+    assert str(subject) == key
+    assert str(SessionScope.from_string(f"main:{key}")) == f"main:{key}"
+
+
+def test_group_user_versioned_identity_does_not_collide_with_legacy() -> None:
+    encoded = GroupUserSubject("team:a", "user:b")
+    literal = GroupUserSubject("team%3Aa", "user%3Ab")
+    assert str(encoded) != str(literal)
+    assert GroupUserSubject.from_string(str(encoded)) == encoded
+    assert SessionScope.from_string(str(SessionScope(MainScope(), encoded))).subject == encoded
+

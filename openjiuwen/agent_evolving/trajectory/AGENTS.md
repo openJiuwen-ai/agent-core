@@ -42,7 +42,8 @@ subscribe(scope) → on_end(span) → drain(scope) → clean Trajectory
   依据：每次请求贡献其窗口，已出现过的消息按 `message_id` 识别，**绝不按文本比较合并 prompt**。
   completion 在后续窗口中重现时保留模型原始输出；tool 结果以窗口内容（模型实际看到的）为准、
   名称取自 tool span。无窗口的请求原样贡献 prompt 并报告 `missing_context_window`，不做启发式回退。
-  compaction 请求（`openjiuwen.request.purpose=compaction`）不贡献消息。
+  compaction 与独立 Goal 评估请求（`openjiuwen.request.purpose=compaction/goal_assessment`）不贡献消息；
+  评估保留原始 span，但不进入执行 Agent 的上下文窗口或演进消息。
   TTSE detect/induce 传 `invoke_local=True`：无窗口 prompt / 窗口从最后一条真实 `user`
   切开（跳过 `<system-reminder>` prompt-attachment user），后续 span 不再把整段 prompt
   追加进去；这是切片，不是 overlap merge。

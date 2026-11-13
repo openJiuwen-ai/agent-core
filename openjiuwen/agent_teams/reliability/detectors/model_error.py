@@ -24,7 +24,9 @@ _NOTICE_REASONS = {"deterministic", _REASON_STREAM_INTERRUPTED}
 
 def _model_label(entry: dict[str, Any]) -> str:
     """Render a ``failures`` / ``usable`` entry as "#N name (provider, endpoint)"."""
-    name = str(entry.get("model_name") or "*")
+    # A deployment without a model name is still a model in the group; never
+    # show the logical "*" name to the leader.
+    name = str(entry.get("model_name") or entry.get("deployment_id") or t("reliability.model_route_other"))
     where = ", ".join(str(part) for part in (entry.get("provider"), entry.get("endpoint")) if part)
     position = entry.get("position")
     if position:
@@ -149,7 +151,9 @@ class ModelStreamErrorDetector(ErrorBurstDetector):
             severity=Severity.CRITICAL,
             member_name=signal.member_name,
             summary=t(
-                "reliability.model_unavailable", model=model or "*", reason=reason,
+                "reliability.model_unavailable",
+                model=model or verdict.get("model_group_id") or t("reliability.model_route_other"),
+                reason=reason,
                 no_substitute=no_substitute,
             ),
             evidence={"model_failure": verdict, "last_error": signal.error},
@@ -161,6 +165,10 @@ class ModelStreamErrorDetector(ErrorBurstDetector):
         Only switches caused by a deterministic error or an interrupted stream
         are reported; a transient failure the router is already working around
         needs no attention. ``failures[0]`` is the deployment that raised.
+
+        The replacement model is deliberately not named: the router picks one
+        per call and an earlier position may have recovered by then, so the
+        notice only says the group switched.
         """
         reason = verdict.get("reason")
         if reason not in _NOTICE_REASONS:
@@ -173,9 +181,6 @@ class ModelStreamErrorDetector(ErrorBurstDetector):
         if key in self._noticed:
             return None
         self._noticed.add(key)
-        usable = [u for u in verdict.get("usable") or [] if isinstance(u, dict)]
-        # Group order: the deployment the router takes next.
-        alternatives = _model_label(usable[0]) if usable else t("reliability.model_route_other")
         template = (
             "reliability.model_route_interrupted"
             if reason == _REASON_STREAM_INTERRUPTED
@@ -183,7 +188,6 @@ class ModelStreamErrorDetector(ErrorBurstDetector):
         )
         summary = t(
             template, model=_model_label(trigger), reason=_reason_text(trigger),
-            alternatives=alternatives,
         )
         return Anomaly(
             detector=self.name,

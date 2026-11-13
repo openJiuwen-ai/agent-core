@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
@@ -65,6 +66,7 @@ BROWSER_AGENT_FACTORY_NAME = "browser_agent"
 BROWSER_AGENT_CARD_ID = "openjiuwen.browser_agent"
 DEFAULT_BROWSER_AGENT_TEMPERATURE = 0.4
 DEFAULT_BROWSER_AGENT_MAX_ITERATIONS = 100
+DEFAULT_BROWSER_AGENT_MAX_OUTPUT_TOKENS = 8192
 _BROWSER_MODEL_TEMPERATURE_MARKER = "_browser_agent_temperature"
 _BROWSER_PARENT_MODEL_MARKER = "_browser_agent_parent_model"
 
@@ -77,24 +79,21 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "goal and source observations. Optional phase conditions and counters do not add user requirements. "
     "A fresh browser capture occurs initially and after a recognized page mutation; otherwise the cached "
     "observation is reused. When the runtime directive requires replanning, change the strategy materially.\n"
-    "browser_phase is optional: use set with objective when a local intent or observed field binding helps "
-    "handover; ordinary actions need no phase configuration. For a complex goal, prepare only the current "
-    "executable fragment once: a short objective, resolved values bound to observed objects, and known completion "
-    "constraints. Refresh it when the intent or binding changes, not before every action. "
-    "Set always includes op=set and objective, with no phase_version; that version belongs to verify. "
-    "Bind only current phase_bindings controls; navigation-only cards remain source objects/URLs, not control IDs. "
-    "On an action-head uncertain_choice during complex recovery, use that existing LLM turn to prepare "
-    "a remaining local objective with browser_phase set when helpful; do not repeat the full task or already "
-    "completed navigation/search. Conditions are not required. Bound values name observed fields. "
-    "In normal interpretation/recovery too, once you select an object, reuse browser_phase target_ids and "
-    "allowed_operations for the remaining local work. If only reading remains, set allowed_operations to "
-    "[read_text,find,extract_text,extract_value,snapshot] instead of leaving unrelated clicks as candidates. "
-    "Update only when intent changes; "
-    "do not add a phase call to each simple step. If source observations already answer the goal, answer directly. "
-    "Bind the observed operation control, not just a matching object-title link: remove/edit/confirm needs its "
-    "actual control. If missing, inspect nearby controls or use a native snapshot and an ordinary LLM action; "
-    "do not leave all mutations available under a broad objective. "
+    "Use ordinary browser tools directly for search, reading and clear individual steps. browser_phase is an "
+    "optional handoff for a prepared local fragment, not a prerequisite for recovery. Set uses op=set and a "
+    "short objective; include only current phase_bindings target_ids/allowed_operations and needed input values. "
+    "read_queries may carry resolved text literals for fixed readers; "
+    "bound_values are field inputs, not button labels. "
+    "A candidate visit is not selection for a business write. Only hand a business/unknown-effect action to Jev "
+    "after selecting the object/variant and binding its actual operation control. Ordinary LLM tools remain "
+    "available with the same execution guards. Preserve > versus >=, budgets and the authorized endpoint. "
+    "A stale fragment is historical. Continue on the selected object with ordinary tools; update the optional "
+    "handoff only when useful for remaining work. A rejected set does not dispatch an action: use a targeted "
+    "probe for missing identity or continue directly, instead of repeating management calls. Never rebind by name. "
+    "Do not restart completed searches or alternate sorting/navigation/scrolling merely to collect another sample. "
+    "Reuse retained facts or read a specific missing range. If the facts answer the goal, answer directly. "
     "After DOM rerendering, use fresh read bindings; a failed extract never asks you to repeat an ACKed fill. "
+    "When submitting a field, bind press to that same current field rather than relying on implicit focus. "
     "Keep the current page/object when handing back to Jev. An acknowledged action is not business success, "
     "but lack of visible feedback alone is not a reason to click it again: inspect or change the binding first. "
     "Reuse retained source text/cards even when their old bindings are stale; do not repeat reads just to "
@@ -102,7 +101,7 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "range/object. No explanation schema is needed. Use browser_page_action read_text/find for page text, "
     "batch extract_text/extract_value for a current target, and viewport_only=true to read cards after scrolling. "
     "A capped full-page card probe is not the next viewport or the entire result list. "
-    "Conditions are optional reader aids. Use verify only when the next decision needs a fresh observation. "
+    "Request a fixed reader only when the next decision needs a fresh observation. "
     "Do not toggle completed sorts. "
     "Use the original goal and source observations to judge completion; adapter gaps alone do not require more "
     "reads. Matching a search query does not prove sort order; product and shop ratings remain distinct. "
@@ -110,6 +109,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "user goal needs. An uncertain business effect must not be blindly replayed through another tool. "
     "Fixed reads and other known local UI actions remain available. Report genuinely unresolved work as partial.\n"
     "Preserve acknowledged steps and observed Added feedback in partial answers, without claiming verified SKU deltas. "
+    "Treat parent search/source suggestions as preferences unless they are explicit user requirements. "
+    "Prefer an available direct answer or inline widget; if absent or insufficient, inspect another suitable "
+    "source while respecting the user's site constraints. Do not repeat a search to satisfy an invented widget rule. "
+    "Preserve the chronology and scope of observations; a later page cannot rewrite earlier facts. "
+    "An unexplained difference remains unknown, and a limited search cannot prove no suitable object exists. "
     "Distinguish source observations, execution limits and hypotheses. Empty blocker lists are not evidence "
     "that no obstacle exists. Do not infer a failure cause from coincident page text "
     "or contradict source restrictions.\n"
@@ -138,6 +142,8 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "does not contain the needed evidence; recalled targets are not executable after navigation.\n"
     "Read source text directly; structured extraction is optional unless the caller requests a fixed output shape. "
     "Keep the source and object of each observation; do not reread merely to populate field slots. "
+    "Keep selected-variant facts distinct from the page's family title or recommendations. Opening a "
+    "confirmation dialog is not confirmation of its action; preserve each receipt and observation in time order. "
     "For answer lookups, AI/knowledge/weather panels are usable with source and any displayed date; no traditional "
     "widget or independent cross-check is required. They do not count as natural search results or replace "
     "a requested detail visit. Do not add reverse conversions, dates/weekdays, or verification not requested. "
@@ -169,28 +175,30 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "执行回执说明派发与 ACK；业务完成应结合原始目标和来源观察判断。可选阶段条件和计数不增加用户要求。"
     "系统仅在初始调用和已识别的"
     "页面变更后重新观察；runtime 要求重新规划时，应实质改变策略。\n"
-    "browser_phase 是可选入口：需要交接局部目标或已观察字段值时，用 set 提供 objective 即可；"
-    "复杂目标只为当前可执行片段一次准备简短 objective、已解析值及观察对象绑定、已知完成条件；"
-    "set 必须带 op=set 和 objective，不带仅 verify 接受的 phase_version。target_ids 只用当前 phase_bindings "
-    "控件；导航型卡片保留为来源对象/URL，不冒充当前控件绑定。"
-    "正常解释/恢复时也应交接已选对象：复用 target_ids 和 allowed_operations 限定剩余局部工作；"
-    "只剩读取时可设 allowed_operations=[read_text,find,snapshot]，避免把无关点击继续作为候选。"
-    "仅在意图或绑定改变时更新，不为每个简单步骤加 phase；来源观察足够回答时直接回答。"
-    "target_ids 应绑定当前操作控件，而不只是同名对象链接；删除、编辑、确认需要各自的真实控件。"
-    "缺控件时先读附近控件或原生 snapshot，再用普通 LLM 工具恢复，不要只给宽泛 objective 并放开全部修改操作。"
+    "搜索、读取和明确单步直接使用普通浏览器工具；browser_phase 只是已准备局部片段的可选交接，"
+    "不是恢复前置条件。set 使用 op=set、简短 objective，仅按需带当前 phase_bindings 的 target_ids、"
+    "allowed_operations 和字段输入值；read_queries 是固定 reader 的已解析文本词，bound_values 不是按钮标签。"
+    "访问候选不等于选定业务对象。LLM 解释约束、确认对象及实际所选规格后，才向 Jev 交接真实操作控件与操作；"
+    "业务或未知效果动作仍需精确绑定，普通 LLM 工具仍可在相同执行守卫下直接使用。保留 > 与 >=、预算和授权终点。"
+    "旧片段退出后只作历史，先在当前对象继续普通工具，仅在有助于剩余工作时更新可选交接。"
+    "set 被拒不代表网页动作已执行：缺身份时用返回的定向 probe 或普通工具恢复，不循环维护 phase、不按同名重绑。"
+    "不要为再次采样重启已完成搜索或往返排序、跳页、滚动；复用原文或明确补读缺失范围，事实足够时直接回答。"
     "动作引发 DOM 重渲染后使用新观察的读取绑定，extract 失败不要求重做已 ACK 的填写。"
-    "复杂恢复中遇到 action head 的 uncertain_choice，可在当前 LLM 轮次用 browser_phase set 交接剩余局部目标；"
-    "不要重复整段任务或已完成的导航搜索，conditions 不必提供，bound_values 必须对应已观察字段。"
+    "提交字段时 press 绑定同一个当前字段，不默认依赖隐式焦点。"
     "交回 Jev 时保留当前页面和对象。工具 ACK 不等于业务成功，但缺少反馈也不等于可以再次点击；先读取诊断或调整绑定。"
-    "意图或绑定变化时再更新，不要每个动作前重设。固定文本读取优先 browser_page_action 的 read_text/find，"
+    "固定文本读取优先 browser_page_action 的 read_text/find，"
     "结果供两种模型共享。"
-    "普通动作不需要阶段配置；条件只是可选读取辅助，下一步确需新观察时才主动 verify。"
+    "普通动作不需要阶段配置，下一步确需新观察时再调用固定 reader。"
     "不切回已完成的排序，部分 Batch 只继续未完成步骤。"
     "按原始目标与实际观察判断完成，不为填满适配器字段而重复读取。查询词匹配不证明排序，"
     "商品评分和店铺评分不能混用。购物车 reader 是可选辅助，不是点击或收尾前置条件；"
     "只核对用户目标真正需要的事实。真实未知业务效果禁止换工具盲重放，固定读取及其他已知局部 UI "
     "仍可继续。确有未完成工作时报告 partial。\n"
     "partial 答复仍保留已确认步骤和 Added 等已观察反馈，但反馈不等于 SKU 增量通过。"
+    "父委托中的查找路径和来源偏好若不是用户硬性要求，就按建议处理。可优先现成答案或内置卡片；"
+    "缺失或不足时，在用户站点约束内查看其他合适来源，不为自行增加的组件要求反复搜索。"
+    "保留观察的时间和范围，后来的页面不能改写先前事实；差异原因不明就说明未知，有限搜索不能证明对象不存在。"
+    "实际所选规格与页面总标题、推荐内容分开；打开确认框不等于已确认执行，按时间保留每步回执和观察。"
     "区分页面观察、执行限制和原因推测。阻断列表为空不代表页面没有障碍；不要把同时出现的页面文字当作失败原因，"
     "也不要给出与来源限制冲突的建议。\n"
     "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
@@ -307,6 +315,20 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
     else:
         browser_model_config = copy.copy(model_config)
         setattr(browser_model_config, "temperature", resolved_temperature)
+
+    # Use the existing provider request budget, never a second runtime timer.
+    # Explicit caller/provider limits take precedence, including their native aliases.
+    limit_keys = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+    output_limits = [getattr(browser_model_config, key, None) for key in limit_keys]
+    extra_body = getattr(browser_model_config, "extra_body", None)
+    if isinstance(extra_body, Mapping):
+        output_limits.extend(extra_body.get(key) for key in limit_keys)
+    if all(value is None for value in output_limits):
+        reasoning = getattr(browser_model_config, "reasoning", None)
+        budget = (reasoning.get("budget_tokens", reasoning.get("max_tokens")) if isinstance(reasoning, dict)
+                  else getattr(reasoning, "budget_tokens", None))
+        requested = budget + 1024 if type(budget) is int and budget > 0 else 0
+        browser_model_config.max_tokens = max(DEFAULT_BROWSER_AGENT_MAX_OUTPUT_TOKENS, requested)
 
     model_client_config = getattr(model, "model_client_config", None)
     if model_client_config is not None:

@@ -48,14 +48,22 @@ class AsyncStreamQueue:
 
         for attempt in range(0, max_retries):
             try:
-                await asyncio.wait_for(self._stream_queue.put(data),
-                                       attempt_timeout)
+                async with asyncio.timeout(attempt_timeout):
+                    await self._stream_queue.put(data)
                 self._sent_count += 1
                 log_stream_chunk(
                     "Stream data sent successfully",
                     timeout=attempt_timeout,
                     attempt=attempt + 1,
                 )
+                # ``put`` on a non-full queue never suspends, so without an
+                # explicit yield the producer would run to completion and the
+                # consumer would only drain everything afterwards. That inverts
+                # the visible event order (model.completed before reply.delta)
+                # for stream pipelines that record events on the consumer side.
+                # ``wait_for`` used to provide this yield implicitly via its
+                # inner task; ``asyncio.timeout`` does not.
+                await asyncio.sleep(0)
                 return
             except asyncio.TimeoutError:
                 session_logger.error(
@@ -69,6 +77,13 @@ class AsyncStreamQueue:
             "Failed to send stream data after max retries",
             event_type=LogEventType.SESSION_STREAM_ERROR,
             metadata={"max_retries": max_retries, "timeout": attempt_timeout}
+        )
+        # Silently returning would make emit()/write() report success while
+        # the chunk (or END_FRAME) was never queued; the consumer would wait
+        # forever and the caller could not retry or observe the loss.
+        raise TimeoutError(
+            f"failed to send stream data after {max_retries} attempts "
+            f"(attempt_timeout={attempt_timeout}s)"
         )
 
     async def receive(self, timeout: float = DEFAULT_RECEIVE_TIMEOUT) -> Optional[Any]:

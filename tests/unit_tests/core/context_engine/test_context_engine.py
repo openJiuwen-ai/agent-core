@@ -186,6 +186,30 @@ class TestContextEngine:
 
         assert ContextEngine.is_context_overflow_error(wrapped_error) is True
 
+    def test_context_overflow_matcher_reads_dashscope_input_length_error(self):
+        """Bailian/DashScope reports overflow as an input length range error (#1810)."""
+        httpx = pytest.importorskip("httpx")
+        openai = pytest.importorskip("openai")
+        body = {
+            "error": {
+                "code": "invalid_parameter_error",
+                "param": None,
+                "message": "Range of input length should be [1, 1000000]",
+                "type": "invalid_request_error",
+            }
+        }
+        request = httpx.Request("POST", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+        provider_error = openai.BadRequestError(
+            f"Error code: 400 - {body}",
+            response=httpx.Response(400, request=request, json=body),
+            body=body,
+        )
+        wrapped_error = RuntimeError("[181001] model call failed")
+        wrapped_error.__cause__ = provider_error
+
+        assert ContextEngine.is_context_overflow_error(provider_error) is True
+        assert ContextEngine.is_context_overflow_error(wrapped_error) is True
+
     @pytest.mark.parametrize(
         "message",
         [
@@ -693,6 +717,42 @@ class TestContextEngine:
                     processors=[("MessageSummaryOffloader", MessageSummaryOffloaderConfig())],
                 )
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
+
+    @pytest.mark.asyncio
+    async def test_create_context_attaches_processors_to_context_seeded_without_them(self, engine, session):
+        seeded = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            history_messages=[UserMessage(content="earlier turn")],
+        )
+
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
+            )],
+        )
+        result = await engine.compress_context(context_id="ctx", session=session)
+
+        assert context is seeded
+        assert result == "compressed"
+        assert context.get_messages()[0].content == "[COMPRESSED]"
+
+    @pytest.mark.asyncio
+    async def test_create_context_keeps_processors_of_cached_context(self, engine, session):
+        processors = [(
+            "ActiveCompactingCompressor",
+            ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
+        )]
+        context = await engine.create_context(context_id="ctx", session=session, processors=processors)
+        original = list(getattr(context, "_processors"))
+
+        cached = await engine.create_context(context_id="ctx", session=session, processors=processors)
+
+        assert cached is context
+        assert getattr(cached, "_processors") == original
 
     @pytest.mark.asyncio
     async def test_compress_context_force_executes_registered_compressor_ignoring_threshold(self, engine, session):

@@ -65,6 +65,11 @@ def _console() -> Console:
     ("kind", "typed", "expected"),
     [
         (InterruptKind.PERMISSION, "y", {"approved": True, "feedback": "", "auto_confirm": False}),
+        (InterruptKind.SKILL_AUTHORIZATION, "y", {"action": "approve_once"}),
+        (InterruptKind.SKILL_AUTHORIZATION, "a", {"action": "approve_session"}),
+        (InterruptKind.SKILL_AUTHORIZATION, "n", {"action": "reject"}),
+        (InterruptKind.SKILL_AUTHORIZATION, "", {"action": "reject"}),
+        (InterruptKind.SKILL_AUTHORIZATION, "continue_without_overlay", {"action": "continue_without_overlay"}),
         (InterruptKind.PERMISSION, "", {"approved": True, "feedback": "", "auto_confirm": False}),
         (InterruptKind.PERMISSION, "ok", {"approved": True, "feedback": "", "auto_confirm": False}),
         (InterruptKind.PERMISSION, "approve", {"approved": True, "feedback": "", "auto_confirm": False}),

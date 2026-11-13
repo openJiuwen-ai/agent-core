@@ -183,6 +183,16 @@ class AsyncProcessHandler:
             self._kill_process_tree()
             # Killing closes the pipes; collect whatever was written before the kill.
             await _finish_readers(30)
+            # Reap the killed child so it leaves no zombie and reports its exit
+            # code: pipe EOF can arrive before the child watcher records the exit.
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                sys_operation_logger.warning(
+                    "Killed process did not exit within the reap grace period",
+                    event_type=LogEventType.SYS_OP_ERROR,
+                    metadata={"pid": self._process.pid},
+                )
             return InvokeData(
                 stdout=_decode(stdout_buf),
                 stderr=_decode(stderr_buf),
@@ -482,7 +492,7 @@ class OperationUtils:
         return await asyncio.to_thread(_sync_delete_tmp)
 
     @staticmethod
-    def prepare_environment(custom_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    def prepare_environment(custom_env: dict[str, str | None] | None = None) -> Dict[str, str]:
         """Create a merged environment dictionary for subprocess execution.
 
         Args:
@@ -491,10 +501,12 @@ class OperationUtils:
         Returns:
             Merged environment dictionary (OS env + custom env)
         """
-        env = os.environ.copy()
-        if custom_env:
-            env.update(custom_env)
-        return env
+        from openjiuwen.core.sys_operation.execution_environment import (
+            apply_environment_overlay,
+            execution_environment_overlay,
+        )
+
+        return apply_environment_overlay(os.environ, execution_environment_overlay(custom_env))
 
     @staticmethod
     def create_handler(process: asyncio.subprocess.Process,

@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from openjiuwen.agent_teams.extensions.models import TeamPolicyBuildInput, TeamPolicyContext
 from openjiuwen.agent_teams.prompts import (
-    build_leader_bootstrap_section,
-    build_team_extra_section,
+    build_leader_static_sections,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
@@ -73,6 +72,8 @@ def build_default_policy_sections(
             teammate_mode=context.teammate_mode,
             team_mode=context.team_mode,
             dispatch_mode=context.dispatch_mode,
+            member_messaging=context.member_messaging,
+            member_subtasks=context.member_subtasks,
             base_prompt=context.base_prompt,
             language=context.language,
             hitt_enabled=context.hitt_enabled,
@@ -104,13 +105,14 @@ def _build_leader_sections(
     split this set are :func:`select_policy_prefix_sections` and
     :func:`select_policy_disclosure_sections`.
     """
-    sections = [
-        build_leader_bootstrap_section(
-            swarmflow_enabled=context.swarmflow_enabled,
-            language=context.language,
-            loader=loader,
-        ),
-    ]
+    sections = build_leader_static_sections(
+        bootstrap_mode=context.bootstrap_mode,
+        swarmflow_enabled=context.swarmflow_enabled,
+        bound_group_name=(context.bound_group_name if context.dispatch_mode == "scheduled" else None),
+        base_prompt=context.base_prompt,
+        language=context.language,
+        loader=loader,
+    )
     sections.extend(
         build_team_static_sections(
             role=TeamRole.LEADER,
@@ -119,15 +121,14 @@ def _build_leader_sections(
             teammate_mode=context.teammate_mode,
             team_mode=context.team_mode,
             dispatch_mode=context.dispatch_mode,
+            member_messaging=context.member_messaging,
+            member_subtasks=context.member_subtasks,
             base_prompt=None,
             language=context.language,
             hitt_enabled=context.hitt_enabled,
             loader=loader,
         ),
     )
-    extra = build_team_extra_section(base_prompt=context.base_prompt, language=context.language)
-    if extra is not None:
-        sections.append(extra)
     return sections
 
 
@@ -140,7 +141,12 @@ def select_policy_prefix_sections(sections: "tuple[PromptSection, ...]") -> tupl
     prefix. Extension-appended sections therefore land in the disclosure
     view, not here — the prefix stays minimal.
     """
-    prefix_names = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA}
+    prefix_names = {
+        TeamSectionName.BOOTSTRAP,
+        TeamSectionName.PREBUILT,
+        TeamSectionName.BOUND_GROUP,
+        TeamSectionName.EXTRA,
+    }
     return tuple(section for section in sections if section.name in prefix_names)
 
 
@@ -153,7 +159,12 @@ def select_policy_disclosure_sections(sections: "tuple[PromptSection, ...]") -> 
     here. Extension-appended sections are kept: they are collaboration
     material, exactly what disclosure exists to deliver.
     """
-    excluded = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA}
+    excluded = {
+        TeamSectionName.BOOTSTRAP,
+        TeamSectionName.PREBUILT,
+        TeamSectionName.BOUND_GROUP,
+        TeamSectionName.EXTRA,
+    }
     return tuple(section for section in sections if section.name not in excluded)
 
 

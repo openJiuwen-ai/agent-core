@@ -340,3 +340,59 @@ class TestMessageMigrator:
 
         assert result is False
         mock_message_store.delete_messages.assert_awaited()
+
+    # ==================== Large Store Backup Tests ====================
+
+    @staticmethod
+    def _stored_messages(count: int):
+        from datetime import datetime, timedelta, timezone
+
+        from openjiuwen.core.foundation.llm.schema.message import BaseMessage
+        from openjiuwen.core.foundation.store.base_message_store import MessageMetadata
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return [
+            (
+                BaseMessage(content=f"m{i}", role="user"),
+                MessageMetadata(
+                    message_id=f"msg_{i}", user_id="u1", scope_id="s1", session_id="sess1",
+                    timestamp=start + timedelta(seconds=i), message_type="user",
+                ),
+            )
+            for i in range(count)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_restore_keeps_messages_beyond_first_1000(self, migrator, mock_message_store):
+        """A failed migration on a store with >1000 messages restores all of them (#1985)."""
+        stored = self._stored_messages(1500)
+        mock_message_store.count_messages = AsyncMock(return_value=len(stored))
+        mock_message_store.get_messages = AsyncMock(
+            side_effect=lambda message_filter, limit, **kwargs: stored[:limit]
+        )
+        failing_func = AsyncMock(side_effect=RuntimeError("migration failed"))
+
+        result = await migrator.try_migrate(MESSAGE_ENTITY_KEY, [make_update_op(1, failing_func)])
+
+        assert result is False
+        mock_message_store.delete_messages.assert_awaited_once()
+        restored = [call.args[0]["message"].content for call in mock_message_store.add_message.await_args_list]
+        assert len(restored) == 1500
+        assert restored[-1] == "m1499"
+
+    @pytest.mark.asyncio
+    async def test_restore_skips_delete_when_backup_is_incomplete(self, migrator, mock_message_store):
+        """If the backup misses messages, restore must not delete what it cannot put back."""
+        stored = self._stored_messages(1500)
+        mock_message_store.count_messages = AsyncMock(return_value=len(stored))
+        # A store that caps every read at 1000 rows.
+        mock_message_store.get_messages = AsyncMock(
+            side_effect=lambda message_filter, limit, **kwargs: stored[:min(limit, 1000)]
+        )
+        failing_func = AsyncMock(side_effect=RuntimeError("migration failed"))
+
+        result = await migrator.try_migrate(MESSAGE_ENTITY_KEY, [make_update_op(1, failing_func)])
+
+        assert result is False
+        mock_message_store.delete_messages.assert_not_awaited()
+        mock_message_store.add_message.assert_not_awaited()

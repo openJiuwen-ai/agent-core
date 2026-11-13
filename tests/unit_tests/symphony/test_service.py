@@ -4,12 +4,17 @@ import asyncio
 import json
 import threading
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.foundation.llm.request_context import (
+    disabled_thinking_fallback_scope,
+    is_disabled_thinking_fallback_allowed,
+)
 from openjiuwen.symphony.models import (
     CapabilityDescriptor,
     CapabilityFingerprint,
@@ -961,6 +966,217 @@ async def test_framework_model_failure_aborts_and_preserves_published_artifact(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_tokens", [2048, 4096, None])
+async def test_extraction_token_limit_can_inherit_injected_model_default(tmp_path, max_tokens) -> None:
+    calls = []
+
+    class Model(CountingLLM):
+        async def invoke(self, messages, **kwargs):
+            calls.append(kwargs)
+            return await super().invoke(messages, **kwargs)
+
+    settings = FingerprintSettings(enable_llm_extraction=True)
+    if max_tokens != 2048:
+        settings = FingerprintSettings(enable_llm_extraction=True, llm_max_tokens=max_tokens)
+    await FingerprintService(
+        FakeProvider("snapshot-1", _descriptors()[:1]),
+        tmp_path,
+        llm=Model(),
+        settings=settings,
+        evaluation_suite=NoopEvaluationSuite(),
+    ).build()
+
+    assert len(calls) == 1
+    if max_tokens is None:
+        assert "max_tokens" not in calls[0]
+    else:
+        assert calls[0]["max_tokens"] == max_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_observer", [False, True])
+@pytest.mark.parametrize("observer_signature", ["named", "renamed", "positional_only"])
+async def test_extraction_response_observer_runs_after_request_context_exits(
+    tmp_path, async_observer, observer_signature,
+) -> None:
+    response = SimpleNamespace(content='{"semantic_profile": {"summary": "Observed profile"}}', finish_reason="stop")
+    observed = []
+
+    class Model:
+        async def invoke(self, messages, **kwargs):
+            assert is_disabled_thinking_fallback_allowed()
+            return response
+
+    def observe(value, stage, operation):
+        assert not is_disabled_thinking_fallback_allowed()
+        observed.append((value, stage, operation))
+
+    async def observe_async(value, stage, operation):
+        await asyncio.sleep(0)
+        observe(value, stage, operation)
+
+    def observe_renamed(value, phase, action):
+        observe(value, phase, action)
+
+    async def observe_renamed_async(value, phase, action):
+        await observe_async(value, phase, action)
+
+    def observe_positional_only(value, phase, action, /):
+        observe(value, phase, action)
+
+    async def observe_positional_only_async(value, phase, action, /):
+        await observe_async(value, phase, action)
+
+    observers = {
+        "named": (observe, observe_async),
+        "renamed": (observe_renamed, observe_renamed_async),
+        "positional_only": (observe_positional_only, observe_positional_only_async),
+    }
+    sync_observer, awaitable_observer = observers[observer_signature]
+
+    artifact = await FingerprintService(
+        FakeProvider("snapshot-1", _descriptors()[:1]),
+        tmp_path,
+        llm=Model(),
+        settings=FingerprintSettings(enable_llm_extraction=True),
+        evaluation_suite=NoopEvaluationSuite(),
+        model_response_observer=awaitable_observer if async_observer else sync_observer,
+    ).build()
+
+    assert observed == [(response, "fingerprint_extraction", "capability_extraction")]
+    assert artifact.fingerprints[0].semantic_profile.summary == "Observed profile"
+    assert not is_disabled_thinking_fallback_allowed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+async def test_extraction_observer_failure_does_not_change_model_outcome(tmp_path, finish_reason) -> None:
+    observed = []
+
+    class Model:
+        async def invoke(self, messages, **kwargs):
+            return SimpleNamespace(content='{"description": "Observed"}', finish_reason=finish_reason)
+
+    async def observe(_response, stage, operation):
+        assert (stage, operation) == ("fingerprint_extraction", "capability_extraction")
+        observed.append((stage, operation))
+        raise RuntimeError("observer unavailable")
+
+    service = FingerprintService(
+        FakeProvider("snapshot-1", _descriptors()[:1]),
+        tmp_path,
+        llm=Model(),
+        settings=FingerprintSettings(enable_llm_extraction=True),
+        model_response_observer=observe,
+    )
+    if finish_reason == "length":
+        with pytest.raises(BaseError) as exc_info:
+            await service.build()
+        assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    else:
+        assert (await service.build()).fingerprints
+    assert observed == [("fingerprint_extraction", "capability_extraction")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["object", "mapping"])
+async def test_truncated_extraction_is_observed_before_failure_and_never_parsed_or_published(
+    tmp_path, monkeypatch, response_kind,
+) -> None:
+    settings = FingerprintSettings(enable_llm_extraction=True)
+    provider = FakeProvider("snapshot-1", _descriptors()[:1])
+    await FingerprintService(
+        provider, tmp_path, llm=CountingLLM(), settings=settings, evaluation_suite=NoopEvaluationSuite(),
+    ).build()
+    artifact_path = tmp_path / "fingerprint.json"
+    cache_path = tmp_path / ".fingerprint-cache.json"
+    previous_artifact = artifact_path.read_bytes()
+    previous_cache = cache_path.read_bytes()
+    raw = {"content": '{"description": "Looks parseable"}', "finish_reason": "length"}
+    response = raw if response_kind == "mapping" else SimpleNamespace(**raw)
+    observed = []
+    evaluation = NoopEvaluationSuite()
+
+    class Model:
+        async def invoke(self, messages, **kwargs):
+            return response
+
+    async def observe(value, stage, operation):
+        assert not is_disabled_thinking_fallback_allowed()
+        await asyncio.sleep(0)
+        observed.append((value, stage, operation))
+
+    def reject_parsing(_response):
+        pytest.fail("truncated responses must fail before JSON parsing or repair")
+
+    monkeypatch.setattr("openjiuwen.symphony.shared.fingerprint.extractor._response_payload", reject_parsing)
+    service = FingerprintService(
+        provider, tmp_path, llm=Model(), settings=settings, evaluation_suite=evaluation,
+        model_response_observer=observe,
+    )
+    with pytest.raises(BaseError) as exc_info:
+        await service.build(force=True)
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert observed == [(response, "fingerprint_extraction", "capability_extraction")]
+    assert evaluation.calls == 0
+    assert artifact_path.read_bytes() == previous_artifact
+    assert cache_path.read_bytes() == previous_cache
+    assert not is_disabled_thinking_fallback_allowed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "provider", "framework", "cancelled"])
+async def test_extraction_thinking_context_is_task_local_and_restored_on_every_exit(failure) -> None:
+    invocation_started = asyncio.Event()
+    peer_finished = asyncio.Event()
+    observed = []
+    error = {
+        None: None,
+        "provider": RuntimeError("provider unavailable"),
+        "framework": build_error(StatusCode.MODEL_CALL_FAILED, error_msg="model unavailable"),
+        "cancelled": asyncio.CancelledError(),
+    }[failure]
+
+    class Model:
+        async def invoke(self, messages, **kwargs):
+            assert is_disabled_thinking_fallback_allowed()
+            invocation_started.set()
+            await peer_finished.wait()
+            if error is not None:
+                raise error
+            return '{}'
+
+    extractor = CapabilityFingerprintExtractor(FingerprintSettings(enable_llm_extraction=True), Model())
+
+    async def extract():
+        try:
+            if failure in {"framework", "cancelled"}:
+                with pytest.raises(type(error)):
+                    await extractor.extract(_descriptors()[0])
+            else:
+                await extractor.extract(_descriptors()[0])
+        finally:
+            observed.append(("after", is_disabled_thinking_fallback_allowed()))
+
+    async def peer():
+        await invocation_started.wait()
+        observed.append(("peer", is_disabled_thinking_fallback_allowed()))
+        peer_finished.set()
+
+    await asyncio.gather(extract(), peer())
+    assert observed == [("peer", False), ("after", False)]
+    with disabled_thinking_fallback_scope():
+        if failure in {"framework", "cancelled"}:
+            with pytest.raises(type(error)):
+                await extractor.extract(_descriptors()[0])
+        else:
+            await extractor.extract(_descriptors()[0])
+        assert is_disabled_thinking_fallback_allowed()
+    assert not is_disabled_thinking_fallback_allowed()
+
+
+@pytest.mark.asyncio
 async def test_force_build_invalidates_incremental_reuse(tmp_path) -> None:
     llm = CountingLLM()
     service = FingerprintService(
@@ -985,7 +1201,10 @@ async def test_protocol_signature_change_invalidates_incremental_reuse(tmp_path)
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(enable_llm_extraction=True),
+        settings=FingerprintSettings(
+            enable_llm_extraction=True,
+            extraction_protocol_version="symphony-capability-extraction-v2",
+        ),
         evaluation_suite=NoopEvaluationSuite(),
     )
     await first_service.build()
@@ -993,10 +1212,7 @@ async def test_protocol_signature_change_invalidates_incremental_reuse(tmp_path)
         provider,
         tmp_path,
         llm=llm,
-        settings=FingerprintSettings(
-            enable_llm_extraction=True,
-            extraction_protocol_version="symphony-capability-extraction-v3",
-        ),
+        settings=FingerprintSettings(enable_llm_extraction=True),
         evaluation_suite=NoopEvaluationSuite(),
     )
 
@@ -1063,6 +1279,10 @@ async def test_trace_model_copy_cannot_bypass_message_validation(tmp_path) -> No
     [
         FingerprintSettings(batch_size=True),
         FingerprintSettings(max_concurrency=0),
+        FingerprintSettings(llm_max_tokens=True),
+        FingerprintSettings(llm_max_tokens=0),
+        FingerprintSettings(llm_max_tokens=-1),
+        FingerprintSettings(llm_max_tokens=cast(Any, 1.5)),
         FingerprintSettings(body_limit=-1),
         FingerprintSettings(llm_timeout=float("inf")),
         FingerprintSettings(cache_enabled=cast(Any, 1)),

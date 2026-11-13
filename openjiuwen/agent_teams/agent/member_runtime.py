@@ -153,6 +153,11 @@ class MemberRuntime(Protocol):
         """
         ...
 
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Read side of the attach above, or None when none was attached."""
+        ...
+
     # ---- config snapshots ----
 
     @property
@@ -166,4 +171,22 @@ class MemberRuntime(Protocol):
         ...
 
 
-__all__ = ["MemberRuntime"]
+@runtime_checkable
+class TaskNoticeAwareRuntime(Protocol):
+    """A runtime that can tell its member about task edits right away (F_129).
+
+    Kept apart from :class:`MemberRuntime` and from the roster protocol: a
+    runtime without it simply gets no early task notice, and nothing else
+    about it changes.
+    """
+
+    async def announce_task_revisions(self) -> None:
+        """Deliver the member's pending task edit notice now, if it has one.
+
+        The member's task notice tracker decides what to say, so this is a
+        no-op when it is up to date.
+        """
+        ...
+
+
+__all__ = ["MemberRuntime", "TaskNoticeAwareRuntime"]

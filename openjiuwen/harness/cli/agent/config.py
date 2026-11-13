@@ -125,6 +125,19 @@ class CLIConfig:
             )
 
 
+def _int_setting(value: object, *, option: str) -> int:
+    """Coerce a settings/env value to int, reporting bad types as ValueError.
+
+    The Click commands turn ``ValueError`` into one ``Error: ...`` line; a
+    bare ``TypeError`` from ``int()`` (e.g. a settings.json object where a
+    number belongs) escaped them and printed a traceback instead.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{option} must be an integer, got {value!r}") from exc
+
+
 def load_config(
     *,
     provider: Optional[str] = None,
@@ -184,15 +197,17 @@ def load_config(
             or settings.get("apiBase")
             or "https://api.openai.com/v1"
         ),
-        max_iterations=int(
+        max_iterations=_int_setting(
             os.getenv("OPENJIUWEN_MAX_ITERATIONS")
             or settings.get("maxIterations")
-            or 30
+            or 30,
+            option="max_iterations",
         ),
-        max_tokens=int(
+        max_tokens=_int_setting(
             os.getenv("OPENJIUWEN_MAX_TOKENS")
             or settings.get("maxTokens")
-            or 8192
+            or 8192,
+            option="max_tokens",
         ),
         server_url=(
             server_url

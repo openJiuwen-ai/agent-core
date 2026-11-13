@@ -27,6 +27,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Optional,
 )
@@ -49,8 +50,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TaskRevisionTracker
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.goal.schema import GoalStopConfig
     from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
@@ -66,14 +69,25 @@ class TeamHarness:
         role: "TeamRole",
         member_name: Optional[str],
         initial_plan_mode: bool = False,
+        task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> None:
         self._agent_spec = agent_spec
+        # Goal mode, applied to every native this harness builds (a stopped
+        # native is terminal, so each run cycle gets a fresh one).
+        self._goal = goal
+        self._goal_ready: Callable[[], Awaitable[bool]] | None = None
+        self._on_goal: Callable[..., Any] | None = None
         self._build_context = build_context
         self._native: Optional[NativeHarness] = native
         self._role = role
         self._member_name = member_name
         self._initial_plan_mode = initial_plan_mode
         self._initial_plan_mode_seeded = False
+        # The member's task notice tracker, owned by its TeamAgent (F_129).
+        self._task_event_tracker = task_event_tracker
+        self._track_completed_turn_fork = track_completed_turn_fork
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
@@ -95,6 +109,9 @@ class TeamHarness:
         member_name: Optional[str],
         initial_plan_mode: bool = False,
         build_context: "BuildContext | None" = None,
+        task_event_tracker: "TaskOutcomeTracker | TaskRevisionTracker | None" = None,
+        goal: "GoalStopConfig | None" = None,
+        track_completed_turn_fork: bool = False,
     ) -> "TeamHarness":
         """Construct the native via forward construction and configure it.
 
@@ -105,6 +122,8 @@ class TeamHarness:
         every other rail — no hand-mounting here. The native configures itself
         synchronously in its constructor, so the configurator can read
         ``workspace`` / ``sys_operation`` right after construction.
+
+        Set ``track_completed_turn_fork`` for members that can serve as a fork source.
         """
         native = NativeHarness(agent_spec, build_context)
         return cls(
@@ -114,6 +133,9 @@ class TeamHarness:
             role=role,
             member_name=member_name,
             initial_plan_mode=initial_plan_mode,
+            task_event_tracker=task_event_tracker,
+            goal=goal,
+            track_completed_turn_fork=track_completed_turn_fork,
         )
 
     # ------------------------------------------------------------------
@@ -140,12 +162,17 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
+        if self._goal is not None:
+            self._native.enable_goal(self._goal, ready=self._goal_ready)
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
+        self._native.track_completed_turn_fork = self._track_completed_turn_fork
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
+        if self._on_goal is not None:
+            await self._native.subscribe(on_goal=self._on_goal)
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child
         self._seed_initial_plan_mode(child)
@@ -154,7 +181,11 @@ class TeamHarness:
         """Stop the native supervisor; keep the (terminated) native for config reads.
 
         The terminated native still answers ``workspace`` / ``sys_operation`` /
-        ``deep_config``; :meth:`start` rebuilds a fresh one next cycle.
+        ``deep_config``; :meth:`start` rebuilds a fresh one next cycle. Owned
+        swarmflow runs are left running: they are hosted by the member runtime
+        and the team-level controller, not by this cycle's native, so the
+        round recycle must not stop them (only :meth:`dispose` does, for
+        permanent teardown).
         """
         if self._native is not None and self._native.state is not HarnessState.TERMINATED:
             await self._native.stop()
@@ -190,6 +221,11 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
             self._remount_dynamic_tools()
+            # Unlike ``start`` (:meth:`start` re-pushes ``_bg_controller`` onto
+            # the rebuilt native), run_once callers (workers, scheduler,
+            # tiny_agent) never hold a background task controller, so no
+            # re-push happens here. A future controller-holding run_once
+            # caller must add it.
         child = self._make_child_session(team_session)
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
@@ -220,10 +256,34 @@ class TeamHarness:
         (idempotent) and drops its ``sys_operation`` so a discarded
         member/session does not leak it. No-op when no native was ever built.
         """
+        await self._stop_owned_swarmflow_runs(include_paused=True)
         if self._active_agent_session is not None:
             await self._active_agent_session.commit()
         if self._native is not None:
             await self._native.dispose()
+
+    async def _stop_owned_swarmflow_runs(self, *, include_paused: bool = False) -> None:
+        """Gracefully stop this member's swarmflow runs before harness teardown.
+
+        The native's ``stop`` cancels in-flight async tools as a bare cancel:
+        the swarmflow task dies with no terminal progress event and no journal
+        record, leaving the embedder's workflow card stuck on running. Stopping
+        through the controller first unwinds each run properly (abort →
+        terminal event → journal record). Best-effort: a controller failure
+        only logs — teardown must proceed regardless. No controller attached
+        (teammates today, leader-less embedders) or no member name: no-op.
+        """
+        controller = self._bg_controller
+        if controller is None or not self._member_name:
+            return
+        try:
+            await controller.stop_by_owner(self._member_name, include_paused=include_paused)
+        except Exception:
+            logger.warning(
+                "[TeamHarness] stop_by_owner failed for member %s; continuing teardown",
+                self._member_name,
+                exc_info=True,
+            )
 
     @staticmethod
     def _session_id_of(team_session: Optional[Any]) -> Optional[str]:
@@ -248,6 +308,21 @@ class TeamHarness:
         from openjiuwen.core.session.agent import create_agent_session
 
         return create_agent_session(card=card)
+
+    async def announce_task_revisions(self) -> None:
+        """Deliver the member's pending task edit notice now, if it has one (F_129).
+
+        The member's task notice tracker (its TeamAgent's, the same instance
+        the policy rail borrows) is the only source of the notice. Outside a
+        run cycle there is no session to claim against, so nothing is claimed:
+        the rail tells the member on its next input. The notice steers a busy
+        member and starts a round for an idle one.
+        """
+        tracker = self._task_event_tracker
+        session = self.current_session()
+        if tracker is None or session is None:
+            return
+        await tracker.announce(session, lambda text: self.send(text, immediate=True))
 
     def current_session(self) -> Any | None:
         """Return the active child Session, if this harness is running."""
@@ -370,6 +445,48 @@ class TeamHarness:
         """Register phase/round callbacks on the native (no-op before start)."""
         if self._native is not None:
             await self._native.subscribe(on_state=on_state, on_round=on_round)
+
+    # ------------------------------------------------------------------
+    # Goal mode
+    # ------------------------------------------------------------------
+
+    @property
+    def goal_enabled(self) -> bool:
+        """Whether this harness was built with goal mode on."""
+        return self._goal is not None
+
+    @property
+    def goal_manager(self) -> Any | None:
+        """The running native's goal manager; None when goal mode is off or not started."""
+        return self._native.goal_manager if self._native is not None else None
+
+    @property
+    def goal_session(self) -> Any | None:
+        """The session the running native keeps its goal on; None before start."""
+        return self._native.session if self._native is not None else None
+
+    def set_goal_hooks(
+        self,
+        *,
+        ready: Callable[[], Awaitable[bool]] | None = None,
+        on_goal: Callable[..., Any] | None = None,
+    ) -> None:
+        """Install the team's goal hooks; they apply from the next ``start``.
+
+        Args:
+            ready: Precondition a goal attempt waits for (the leader waits for
+                the team to go quiet). None lets an attempt start whenever
+                the member would otherwise go idle.
+            on_goal: Called with ``goal`` (the record as a dict, or None once
+                cleared) whenever the goal record changes.
+        """
+        self._goal_ready = ready
+        self._on_goal = on_goal
+
+    def nudge_goal(self) -> None:
+        """Ask the native to re-check whether a goal attempt should start."""
+        if self._native is not None and self._native.state is not HarnessState.TERMINATED:
+            self._native.nudge_goal()
 
     # ------------------------------------------------------------------
     # Interrupt-resume helpers
@@ -505,6 +622,18 @@ class TeamHarness:
         """Inject loaded memory into the agent's system prompt."""
         if self._native is not None:
             await memory_manager.load_and_inject(self._native, query=query)
+
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's attached background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller`: the session-level
+        controller the embedder attached (None before attach / for embedders
+        that hold none). The spawn path reads it off the leader to hand the
+        SAME instance to an in-process teammate, so every member's runs
+        register in one session registry.
+        """
+        return self._bg_controller
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller (pause/resume surface).

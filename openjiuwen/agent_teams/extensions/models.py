@@ -98,6 +98,9 @@ class TeamPolicyContext:
     dispatch_mode: str = "autonomous"
     teammate_mode: str = "build_mode"
     bootstrap_mode: str = "leader"
+    member_messaging: bool = False
+    member_subtasks: bool = False
+    bound_group_name: str | None = None
     hitt_enabled: bool = False
     base_prompt: str | None = None
     swarmflow_enabled: bool = False

@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Data models for session version control (vcs).
 
 All persisted records are pydantic models serialized as JSON (never pickle).
@@ -10,7 +10,7 @@ pitfalls and keep the on-disk form portable.
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 
 class MessageDelta(BaseModel):
@@ -35,13 +35,23 @@ class StateDelta(BaseModel):
     """KV state change expressed without None ambiguity.
 
     Attributes:
-        set: Nested dict merged via ``update_dict(ignore_delete=True)``; None
-            values are written literally, not treated as deletions.
+        set: Flat dotted paths to values; None is written literally.
         removed: Nested key paths to delete (e.g. ``"global_state.foo.bar"``).
+        path_encoding: Version 1 uses legacy literal segments; version 2 escapes
+            dots and tildes. Omitted version fields retain legacy WAL/CRC semantics.
     """
 
     set: dict = Field(default_factory=dict)
     removed: list[str] = Field(default_factory=list)
+    path_encoding: Literal[1, 2] = 1
+
+    @model_serializer(mode="wrap")
+    def _serialize_paths(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Keep legacy records byte-compatible with their original CRC input."""
+        data = handler(self)
+        if self.path_encoding == 1:
+            data.pop("path_encoding", None)
+        return data
 
 
 class LogEntry(BaseModel):

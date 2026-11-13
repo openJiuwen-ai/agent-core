@@ -299,13 +299,16 @@ class AsyncToolRuntime:
         tool_name: str,
         result: Any,
     ) -> None:
-        """Report a completed background run: mark, spill, wake waiters, inject."""
-        if record is not None:
-            record.status = "completed"
-            record.result = result
+        """Report a completed background run: spill, mark, wake waiters, inject.
+
+        The record turns ``completed`` only after the spill settled, so a reader
+        that sees the terminal status also sees ``output_file``.
+        """
         result_text = render_result_text(result)
         if record is not None:
             result_text = await self._maybe_spill(task_id, record, result_text)
+            record.status = "completed"
+            record.result = result
         self._signal(task_id)
         completion_text = (
             record.format_completed(result) if record is not None and record.format_completed else None

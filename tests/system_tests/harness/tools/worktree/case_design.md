@@ -17,7 +17,7 @@ spawn、远端 backend——这些已有专门的单元测试覆盖。
 
 | 资产 | 说明 |
 |---|---|
-| 临时 git 仓库 | `pytest tmp_path/<repo>`，含一个 README.md 初始 commit；origin/main 指向 HEAD（满足 `GitBackend._resolve_base`） |
+| 临时 git 仓库 | `pytest tmp_path/<repo>`，含一个 README.md 初始 commit；当前本地分支 main 即 worktree 基线（`GitBackend._resolve_base` 本地优先）；origin/main 指向 HEAD，供远端优先解析（`remote_base=True`）使用 |
 | Workspace | `repo/<wkspc>` 子目录；让 `find_canonical_git_root(workspace)` 能向上找到仓库 |
 | Mock LLM | `MockLLMModel` 预置工具调用序列，固定每个用例的执行路径 |
 | Tool Trace Rail | `AgentRail` 子类，`after_tool_call` 钩子里捕获 `(tool_name, tool_args, tool_result)`，供断言 |

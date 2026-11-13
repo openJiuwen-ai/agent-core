@@ -1113,6 +1113,40 @@ def test_openrouter_uses_effort_none_for_disabled_reasoning() -> None:
     assert plan.extra_body == {"reasoning": {"effort": "none"}}
 
 
+def test_openrouter_unlisted_models_keep_gateway_reasoning_wire() -> None:
+    for model in ("deepseek/deepseek-v4.1-flash", "openai/future-reasoning-model"):
+        for endpoint_profile in (None, "openrouter"):
+            config = ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="sk-test",
+                api_base="https://openrouter.ai/api/v1",
+                endpoint_profile=endpoint_profile,
+            )
+            plan = resolve_reasoning_plan(
+                config,
+                ModelRequestConfig(model=model),
+                explicit_kwargs={"reasoning": ReasoningConfig(mode="disabled")},
+            )
+
+            assert plan.sdk_params == {}
+            assert plan.extra_body == {"reasoning": {"effort": "none"}}
+
+
+def test_openrouter_unlisted_model_preserves_explicit_reasoning_effort() -> None:
+    plan = resolve_reasoning_plan(
+        ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test",
+            api_base="https://openrouter.ai/api/v1",
+        ),
+        ModelRequestConfig(model="deepseek/unlisted-model"),
+        explicit_kwargs={"reasoning": ReasoningConfig(mode="enabled", effort="low")},
+    )
+
+    assert plan.sdk_params == {}
+    assert plan.extra_body == {"reasoning": {"enabled": True, "effort": "low"}}
+
+
 def test_openrouter_anthropic_mode_uses_gateway_reasoning_shape() -> None:
     plan = resolve_reasoning_plan(
         ModelClientConfig(

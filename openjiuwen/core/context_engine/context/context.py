@@ -15,8 +15,12 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
-from openjiuwen.core.context_engine.context.compression_scope import context_compression_operation
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    resolve_cancellation_cause,
+)
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.compression_scope import context_compression_operation
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateInput,
@@ -170,6 +174,25 @@ class SessionModelContext(ModelContext):
             fallback_context_window_tokens=self._context_window_tokens,
             model_context_window_tokens=self._model_context_window_tokens,
         )
+
+    def has_processors(self) -> bool:
+        """Whether this context has any processors."""
+        return bool(self._processors)
+
+    def attach_processors(self, processors: List[ContextProcessor]) -> bool:
+        """Give a context created without processors the ones a later caller configures.
+
+        ``ContextEngine`` caches contexts by session/context ID, so a context
+        first created to seed history (with no processors) is the one an agent
+        later receives. Processors already present are kept: they carry state.
+
+        Returns:
+            Whether the processors were attached.
+        """
+        if self._processors or not processors:
+            return False
+        self._processors = list(processors)
+        return True
 
     def rebind_model(
         self,
@@ -1698,6 +1721,20 @@ class SessionModelContext(ModelContext):
         state = self._processor_state_recorder.build_state(state_input)
         await self._processor_state_recorder.emit(self, state)
 
+    def _resolve_cancelled_state(self) -> tuple[str, str, Optional[str]]:
+        """Map a cancellation origin to ``(status, reason, error)``.
+
+        A host or SDK entry point marks pause/cancel before cancelling; an
+        unmarked cancellation keeps the legacy ``failed`` state so existing
+        consumers see no behaviour change.
+        """
+        cause = resolve_cancellation_cause(self.session_id())
+        if cause is CancellationCause.PAUSE:
+            return "paused", "user_pause", None
+        if cause is CancellationCause.CANCEL:
+            return "cancelled", "user_cancel", None
+        return "failed", "processor_cancelled", "cancelled"
+
     async def _build_and_emit_processor_cancelled_state(
         self,
         *,
@@ -1711,19 +1748,20 @@ class SessionModelContext(ModelContext):
         force: bool,
         context_max: Optional[int],
     ) -> None:
+        status, reason, error = self._resolve_cancelled_state()
         await self._build_and_emit_compression_state(
             ContextProcessorStateInput(
                 operation_id=operation_id,
-                status="failed",
+                status=status,
                 phase=phase,
                 trigger=trigger,
                 processor=processor,
-                reason="processor_cancelled",
+                reason=reason,
                 before_messages=before_messages,
                 after_messages=after_messages,
                 started_at=started_at,
                 ended_at=time.time(),
-                error="cancelled",
+                error=error,
                 messages_to_modify=[],
                 force=force,
                 context_max=context_max,

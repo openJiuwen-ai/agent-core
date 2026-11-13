@@ -53,6 +53,17 @@ Symphony 不隐式猜测或扫描应用目录、不读取应用配置、不注�
 `SkillFolderScanner` 只扫描调用方显式传入的根目录。以 JiuwenSwarm 为例，应用 Adapter 负责把内部能力标识
 转换为公共领域的 `capability_id`，并把应用侧配置、默认模型、禁用项和动态关系映射为 Symphony 输入。
 
+### SkillPack 沉淀
+
+宿主把 `SkillPackAdapter()` 传给 `SymphonyFlowEngine` 时，执行证据中的每个成员必须同时具有
+`metadata.capability_type: skill` 和由宿主根据本地文件确认的 `metadata.skill_type: skill`。
+第二个字段用于区分普通单 Agent Skill、SwarmSkill 和嵌套 SkillPack；不能由模型填写或从能力名称推断。
+类型随证据、配方和评审材料保留，缺少类型的历史记录不进入 SkillPack 候选。
+
+根文档保留适用条件、禁用条件、输入、权限与副作用、成员执行顺序、失败处理和最终产物等稳定段落。
+如果配方名称与成员重名，渲染的根名称追加 `-pack`，避免成员目录覆盖或自引用。
+Core 只评审和生成临时产物，用户确认、实时成员状态重验及安装由宿主完成。
+
 ## 架构总览
 
 Symphony 的核心结构是“检索用树，编排用图”。能力指纹作为检索和编排共享的语义视图：
@@ -284,6 +295,15 @@ symlink、junction 或其他 reparse point，并排除凭据、版本控制和�
 额外模型调用默认关闭。打开 `FingerprintSettings.enable_llm_extraction` 或
 `enable_llm_evaluation` 时，调用方必须显式注入实现 `SymphonyLLM.invoke(...)` 的对象；缺少模型时返回
 明确配置错误，不会默认判定通过。
+
+`FingerprintSettings.llm_max_tokens` 默认是 `2048`，允许设置正整数或 `None`；`None` 表示提取调用
+不传 `max_tokens`，沿用注入模型的配置。`FingerprintService` 和 `CapabilityFingerprintExtractor` 可传入
+`model_response_observer`。同步或异步 observer 在模型调用结束、请求的 thinking 兼容作用域恢复后接收
+`observer(response, "fingerprint_extraction", "capability_extraction")`；与编排一致，三个参数按位置传入，
+不要求回调形参使用特定名称；observer 异常只记日志。
+若响应的 `finish_reason` 为 `length`，会先通知 observer，再以 `MODEL_CALL_FAILED` 中止构建，
+不会解析或修复截断内容，也不会替换已有指纹、提取缓存或关联构图产物。默认提取协议为
+`symphony-capability-extraction-v3`，旧协议的提取缓存会重新计算。
 
 ### 能力评估
 

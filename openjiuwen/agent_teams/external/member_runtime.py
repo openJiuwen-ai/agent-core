@@ -33,12 +33,17 @@ from typing import (
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
 from openjiuwen.agent_teams.inbound_render import render_clock
-from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.team_context import (
+    TaskOutcomeTracker,
+    TaskRevisionTracker,
+    TeamContextTracker,
+)
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.harness.execution_subject import ExecutionSubject
 from openjiuwen.harness_protocol import (
     AUTH_FALLBACK_EVENT_TYPE,
     AUTH_FALLBACK_REQUEST_TYPE,
@@ -192,6 +197,43 @@ def read_member_checkpoint(member_session: Any, *, backend: str) -> HarnessCheck
     return checkpoint_from_dict(state.get(_EXTERNAL_CHECKPOINT_KEY))
 
 
+def _bind_harness_trajectory_recorder(
+    runtime: Any,
+    *,
+    subject: ExecutionSubject,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Bind the protocol event recorder under the host-assigned member identity."""
+    if not subject.session_id:
+        return
+    try:
+        from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+    except ImportError:
+        return
+
+    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
+
+    try:
+        recorder = HarnessTrajectoryRecorder.create(
+            subject=subject,
+            agent_name=subject.display_name,
+            agent_mode="team",
+            attributes={
+                AT_TEAM_NAME: team_name,
+                AT_MEMBER_NAME: member_name,
+                "agentteam.backend": runtime.provider_name,
+            },
+        )
+    except ValueError:
+        team_logger.warning(
+            "External trajectory disabled for member {}: incomplete subject",
+            member_name,
+        )
+        return
+    runtime.bind_trajectory_recorder(recorder)
+
+
 class ExternalHarnessMemberRuntime:
     """Project ``HarnessProtocol`` onto the internal team runtime seam.
 
@@ -214,6 +256,14 @@ class ExternalHarnessMemberRuntime:
             fresh session — for hosts that know the member already has history.
         agent_kind: Reliability vocabulary for this member (``claude`` /
             ``codex``); ``None`` disables the external-runtime reliability loop.
+        member_agent_id: The member's stable agent id, for a ``context``
+            factory. Knowing it up front lets ``start`` open the member's own
+            session before the factory and the startup hooks run, so both can
+            read what that session holds. A ready ``context`` carries its own.
+        surface_turn_failures: Put a failed turn on the output stream as a
+            ``task_failed`` frame. A teammate reports its failures to the
+            leader's mailbox (``bind_reliability_context``); a leader has
+            nobody above it, so its stream is the only place left.
         inject_mcp: Whether the spawn path should mount the team MCP server.
         mcp_server_name: Logical name of the team MCP server.
     """
@@ -232,13 +282,15 @@ class ExternalHarnessMemberRuntime:
         cli_path: str | None = None,
         inject_mcp: bool = False,
         mcp_server_name: str = TEAM_MCP_SERVER_NAME,
+        member_agent_id: str | None = None,
+        surface_turn_failures: bool = False,
     ) -> None:
         self._harness = harness
         self._context_source = context
         self._team_context_tracker = team_context_tracker
         # Scheduled dispatch only (F_119): review passes folded into the next
         # message. Bound after construction, like the team-context tracker.
-        self._task_outcome_tracker: TaskOutcomeTracker | None = None
+        self._task_outcome_tracker: TaskOutcomeTracker | TaskRevisionTracker | None = None
         self._resume_external_backend = resume_external_backend
         self._require_checkpoint = require_checkpoint
         self._seed_checkpoint = seed_checkpoint
@@ -249,16 +301,19 @@ class ExternalHarnessMemberRuntime:
         self._adapter = HarnessIOAdapter(
             harness,
             event_observer=self._on_event,
+            emit_turn_failure=surface_turn_failures,
             auto_approve_tools=True,
             stop_on_unsupported_force_abort=stop_on_unsupported_force_abort,
             provider_interaction_handler=self._on_provider_interaction,
         )
+        # A context factory names the member only once it is resolved.
+        self._member_name_known = isinstance(context, HarnessContext)
         if isinstance(context, HarnessContext):
             self._member_name = context.agent_name
             self._member_agent_id: str | None = context.agent_id
         else:
             self._member_name = harness.card.name
-            self._member_agent_id = None
+            self._member_agent_id = member_agent_id
         self._member_session: Any = None
         self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
         self._stopped = True
@@ -270,6 +325,8 @@ class ExternalHarnessMemberRuntime:
         self._trajectory: HarnessTrajectoryRecorder | None = None
         self._promote_fallback_model: PromoteFallbackModel | None = None
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._startup_hooks: list[Callable[[Any], Awaitable[None]]] = []
+        self._background_task_controller: Any = None
         self._round_seq = 0
         self._current_round_id: int | None = None
         self._reported_model: str | None = None
@@ -339,8 +396,8 @@ class ExternalHarnessMemberRuntime:
     def bind_team_context_tracker(self, tracker: TeamContextTracker | None) -> None:
         self._team_context_tracker = tracker
 
-    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | None) -> None:
-        """Bind the tracker that folds untold review passes into the next message."""
+    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | TaskRevisionTracker | None) -> None:
+        """Bind the tracker that folds untold task facts (review passes / missed edits) into the next message."""
         self._task_outcome_tracker = tracker
 
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
@@ -386,6 +443,34 @@ class ExternalHarnessMemberRuntime:
         """
         self._activity_sink = sink
         self._activity_identity = (agent_id, phase, label, correlation_id)
+
+    def reset_tool_bindings(self) -> None:
+        """Drop the MCP servers and native tools bound for the next ``start``.
+
+        For a runtime that outlives one run cycle and rebinds its tools on
+        every ``start``: ``bind_mcp_servers`` appends, so the previous cycle's
+        servers would otherwise be mounted a second time.
+        """
+        self._extra_mcp_servers.clear()
+        self._bound_tools = None
+
+    def add_startup_hook(self, hook: Callable[[Any], Awaitable[None]]) -> None:
+        """Run ``hook(team_session)`` on every ``start``, before the provider starts.
+
+        The counterpart of :meth:`add_teardown_hook` for a runtime built before
+        its session is known: the hook binds whatever depends on the session
+        (team tools, trajectory recorder). It runs after the member's own
+        session is open -- when the agent id was known at construction -- and
+        before the start context is resolved.
+        """
+        self._startup_hooks.append(hook)
+
+    def has_stored_checkpoint(self) -> bool:
+        """Whether the member's open session holds a checkpoint of this backend."""
+        member_session = self._member_session
+        if member_session is None:
+            return False
+        return read_member_checkpoint(member_session, backend=self._harness.card.name) is not None
 
     def add_teardown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run ``hook`` after the harness stopped (observability receivers...)."""
@@ -433,10 +518,20 @@ class ExternalHarnessMemberRuntime:
             raise HarnessStateError("external harness member runtime is already started")
         async with self._context_delivery_lock:
             await self._finalize_member_session()
-        context = await self._resolve_context(team_session)
-        self._member_name = context.agent_name
-        self._member_agent_id = context.agent_id
-        await self._ensure_member_session(team_session)
+        try:
+            if self._member_agent_id is not None:
+                await self._ensure_member_session(team_session)
+            for hook in self._startup_hooks:
+                await hook(team_session)
+            context = await self._resolve_context(team_session)
+            self._member_name = context.agent_name
+            self._member_name_known = True
+            self._member_agent_id = context.agent_id
+            await self._ensure_member_session(team_session)
+        except BaseException:
+            async with self._context_delivery_lock:
+                await self._finalize_member_session()
+            raise
         if self._seed_checkpoint is not None and self._member_session is not None:
             await self._write_seed_checkpoint(context)
             self._seed_checkpoint = None
@@ -548,6 +643,22 @@ class ExternalHarnessMemberRuntime:
                 await self._finalize_member_session()
 
     async def dispose(self) -> None:
+        """Stop for good: this member's background runs first, then the provider.
+
+        Stopping the runs through the session controller unwinds each one
+        properly (terminal event, journal record); a bare teardown would leave
+        them reported as running. Best-effort -- teardown proceeds regardless.
+        """
+        controller = self._background_task_controller
+        if controller is not None and self._member_name_known:
+            try:
+                await controller.stop_by_owner(self._member_name, include_paused=True)
+            except Exception:
+                team_logger.warning(
+                    "[external-cli] stopping background runs of member {} failed; continuing teardown",
+                    self._member_name,
+                    exc_info=True,
+                )
         await self.stop()
 
     def outputs(self) -> AsyncIterator[Any]:
@@ -570,22 +681,28 @@ class ExternalHarnessMemberRuntime:
             # an in-process member.
             clock = render_clock(now=format_absolute_time(get_current_time()))
             external_input = _prepend_context(external_input, clock)
-            pending_outcome = await self._pending_task_outcome()
-            if pending_outcome:
-                external_input = _prepend_context(external_input, pending_outcome)
+            tracker = self._task_outcome_tracker
+            pending_outcome = await tracker.claim(self._member_session) if tracker is not None else None
+            if pending_outcome is not None:
+                external_input = _prepend_context(external_input, pending_outcome.text)
             pending_context = await self._pending_team_context()
             if pending_context:
                 external_input = _prepend_context(external_input, pending_context)
-            receipt = await self._adapter.send(external_input, immediate=immediate)
+            try:
+                receipt = await self._adapter.send(external_input, immediate=immediate)
+            except BaseException:
+                if pending_outcome is not None:
+                    tracker.release(pending_outcome)
+                raise
             # Every part is recorded, and the message first so it is the one
             # the turn states as its input. A provider splits the delivery into
             # a message per block, so the combined text would match none of
             # them and the turn would read as if nobody had said anything.
             self._record_input(receipt, delivered_text)
             self._record_input(receipt, clock)
-            if pending_outcome:
-                self._record_input(receipt, pending_outcome)
-                await self._commit_task_outcome()
+            if pending_outcome is not None:
+                self._record_input(receipt, pending_outcome.text)
+                await tracker.persist(self._member_session)
             if pending_context:
                 self._record_input(receipt, pending_context)
                 await self._commit_team_context()
@@ -600,11 +717,48 @@ class ExternalHarnessMemberRuntime:
             self._record_input(receipt, pending)
             await self._commit_team_context()
 
+    async def announce_task_revisions(self) -> None:
+        """Send the pending task edit notice as a message of its own (F_129).
+
+        Steers a busy member, like the edit would; a no-op when the tracker
+        has nothing new.
+        """
+        if self._task_outcome_tracker is None:
+            return
+        delivered: tuple[Any, str] | None = None
+
+        async def _send(text: str) -> None:
+            # Delivery only: what is raised here gives the claim back.
+            nonlocal delivered
+            delivered = (await self._adapter.send(text, immediate=True), text)
+
+        async with self._context_delivery_lock:
+            try:
+                await self._task_outcome_tracker.announce(self._member_session, _send)
+            finally:
+                # A delivered notice is the turn's input, whatever failed after it.
+                if delivered is not None:
+                    self._record_input(*delivered)
+
     async def abort(self, *, immediate: bool = False) -> None:
         await self._adapter.abort(immediate=immediate)
 
     async def pause(self) -> None:
-        await self._adapter.pause()
+        """Pause the in-flight turn, or end it gracefully when the provider cannot pause.
+
+        A provider without ``PAUSE_RESUME`` keeps its conversation on its own
+        side, so a graceful abort loses nothing but the turn's continuation:
+        the next input starts a new turn on the same history.
+        """
+        card = self._harness.card
+        can_abort = card.supports(HarnessCapability.GRACEFUL_ABORT) or card.supports(HarnessCapability.FORCE_ABORT)
+        if card.supports(HarnessCapability.PAUSE_RESUME) or not can_abort:
+            # Nothing to fall back on either: the adapter reports the missing capability.
+            await self._adapter.pause()
+            return
+        if self._harness.state is not HarnessState.RUNNING:
+            return
+        await self._adapter.abort(immediate=False)
 
     async def resume(self, *, query: Any | None = None) -> None:
         await self._adapter.resume(query=query)
@@ -939,16 +1093,6 @@ class ExternalHarnessMemberRuntime:
             return
         await self._team_context_tracker.commit(self._member_session)
 
-    async def _pending_task_outcome(self) -> str | None:
-        if self._task_outcome_tracker is None or self._member_session is None:
-            return None
-        return await self._task_outcome_tracker.pending_text(self._member_session)
-
-    async def _commit_task_outcome(self) -> None:
-        if self._task_outcome_tracker is None or self._member_session is None:
-            return
-        await self._task_outcome_tracker.commit(self._member_session)
-
     # ------------------------------------------------------------------
     # MemberRuntime: interrupt helpers and no-op hooks
     # ------------------------------------------------------------------
@@ -982,9 +1126,18 @@ class ExternalHarnessMemberRuntime:
     async def inject_member_memory(self, memory_manager: Any, query: str) -> None:
         _ = memory_manager, query
 
-    @staticmethod
-    def set_background_task_controller(controller: Any) -> None:
-        _ = controller
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Keep the embedder's session-level background task controller.
+
+        Only a leader is handed one. Its swarmflow host registers runs there,
+        and the spawn path reads it back to give every member the same one.
+        """
+        self._background_task_controller = controller
+
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """The attached controller, or None for a member that was handed none."""
+        return self._background_task_controller
 
     @property
     def workspace(self) -> Optional[Any]:

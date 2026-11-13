@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import hashlib
 import os
 import random
 import shutil
@@ -879,8 +880,8 @@ def test_read_lock_supports_sqlite_without_schema_alias(work_dir, monkeypatch):
     """Read locking falls back to sqlite_master on SQLite versions before 3.33."""
     lock_file = Path(work_dir) / "legacy_sqlite_lock.db"
 
-    def legacy_configure(lock, mode, _timeout, *, blocking, start_time):
-        del blocking, start_time
+    def legacy_configure(lock, mode, _timeout, **kwargs):
+        del kwargs
         assert mode == "read"
         lock._con.execute("BEGIN TRANSACTION;").close()
         raise sqlite3.OperationalError("no such table: sqlite_schema")
@@ -1319,6 +1320,88 @@ async def test_concurrent_write_file(sys_op, work_dir):
 
 
 @pytest.mark.asyncio
+async def test_conditional_write_rejects_stale_or_missing_content_without_modifying_file(sys_op, work_dir):
+    file_path = "conditional_update.txt"
+    original = b"observed bytes"
+    await sys_op.fs().write_file(file_path, original, mode="bytes", prepend_newline=False)
+    expected_hash = hashlib.sha256(original).hexdigest()
+
+    result = await sys_op.fs().write_file(
+        file_path,
+        b"new bytes",
+        mode="bytes",
+        prepend_newline=False,
+        options={"expected_content_sha256": "0" * 64},
+    )
+
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert result.code == conflict_code.code
+    assert (Path(work_dir) / file_path).read_bytes() == original
+
+    (Path(work_dir) / file_path).unlink()
+    deleted_target = await sys_op.fs().write_file(
+        file_path,
+        b"must not recreate",
+        mode="bytes",
+        prepend_newline=False,
+        options={"expected_content_sha256": expected_hash},
+    )
+    assert deleted_target.code == conflict_code.code
+    assert not (Path(work_dir) / file_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_create_if_absent_distinguishes_empty_file_from_missing_file(sys_op, work_dir):
+    file_path = "create_if_absent.txt"
+    create_options = {"create_if_absent": True}
+
+    created = await sys_op.fs().write_file(
+        file_path, b"winner", mode="bytes", prepend_newline=False, options=create_options
+    )
+    assert created.code == StatusCode.SUCCESS.code
+    assert (Path(work_dir) / file_path).read_bytes() == b"winner"
+
+    existing = await sys_op.fs().write_file(
+        file_path, b"loser", mode="bytes", prepend_newline=False, options=create_options
+    )
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert existing.code == conflict_code.code
+    assert (Path(work_dir) / file_path).read_bytes() == b"winner"
+
+    empty_path = "existing_empty_file.txt"
+    (Path(work_dir) / empty_path).write_bytes(b"")
+    empty_target = await sys_op.fs().write_file(
+        empty_path, b"not empty now", mode="bytes", prepend_newline=False, options=create_options
+    )
+    assert empty_target.code == conflict_code.code
+    assert (Path(work_dir) / empty_path).read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_competing_create_if_absent_writes_do_not_overwrite_winner(sys_op, work_dir):
+    file_path = "competing_create.txt"
+    options = {"create_if_absent": True}
+
+    first, second = await asyncio.gather(
+        sys_op.fs().write_file(file_path, b"first", mode="bytes", prepend_newline=False, options=options),
+        sys_op.fs().write_file(file_path, b"second", mode="bytes", prepend_newline=False, options=options),
+    )
+
+    conflict_code = getattr(StatusCode, "SYS_OPERATION_FILE_VERSION_CONFLICT", None)
+    assert conflict_code is not None, "filesystem version conflict needs a stable status code"
+    assert sorted((first.code, second.code)) == sorted((StatusCode.SUCCESS.code, conflict_code.code))
+    winner = b"first" if first.code == StatusCode.SUCCESS.code else b"second"
+    assert (Path(work_dir) / file_path).read_bytes() == winner
+
+
+@pytest.mark.asyncio
+async def test_local_filesystem_advertises_conditional_write_support(sys_op):
+    assert sys_op.fs().supports_conditional_write is True
+
+
+@pytest.mark.asyncio
 async def test_concurrent_read_write_mixed(sys_op, work_dir):
     """Test mixed concurrent read/write (verify lock mechanism ensures data correctness)"""
     # Define test file path and task counts
@@ -1551,3 +1634,79 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_gbk_text(sys_op, work_dir):
+    """encoding='auto' decodes GBK/ANSI text without changing the default."""
+    file_path = os.path.join(work_dir, "gbk_auto.csv")
+    expected = "id,客户名称,授信金额\n1,中国工商银行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("gbk"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+    selected = await sys_op.fs().read_file(
+        path=file_path, encoding="auto", line_range=(2, 2)
+    )
+    assert selected.code == StatusCode.SUCCESS.code
+    assert "中国工商银行" in selected.data.content
+    assert "客户名称" not in selected.data.content
+
+    head = await sys_op.fs().read_file(path=file_path, encoding="auto", head=1)
+    assert head.code == StatusCode.SUCCESS.code
+    assert "客户名称" in head.data.content
+    assert "中国工商银行" not in head.data.content
+
+    tail = await sys_op.fs().read_file(path=file_path, encoding="auto", tail=1)
+    assert tail.code == StatusCode.SUCCESS.code
+    assert "中国工商银行" in tail.data.content
+    assert "客户名称" not in tail.data.content
+
+    chunks = []
+    async for chunk in sys_op.fs().read_file_stream(path=file_path, encoding="auto"):
+        assert chunk.code == StatusCode.SUCCESS.code
+        chunks.append(chunk.data.chunk_content)
+    assert "".join(chunks) == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_big5_text(sys_op, work_dir):
+    """encoding='auto' distinguishes Big5 from the wider GB18030 byte space."""
+    file_path = os.path.join(work_dir, "big5_auto.csv")
+    expected = "id,客戶名稱,授信金額\n1,中國工商銀行,1000\n"
+    with open(file_path, "wb") as file:
+        file.write(expected.encode("big5"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_auto_encoding_utf8_bom(sys_op, work_dir):
+    """encoding='auto' strips a UTF-8 BOM and leaves UTF-8 content unchanged."""
+    import codecs
+
+    file_path = os.path.join(work_dir, "utf8_bom_auto.txt")
+    expected = "第一行\n第二行\n"
+    with open(file_path, "wb") as file:
+        file.write(codecs.BOM_UTF8 + expected.encode("utf-8"))
+
+    result = await sys_op.fs().read_file(path=file_path, encoding="auto")
+    assert result.code == StatusCode.SUCCESS.code
+    assert result.data.content == expected
+
+
+@pytest.mark.asyncio
+async def test_fs_read_default_encoding_stays_utf8(sys_op, work_dir):
+    """The existing UTF-8 default is preserved for callers that do not opt in."""
+    file_path = os.path.join(work_dir, "gbk_default.csv")
+    with open(file_path, "wb") as file:
+        file.write("中文内容".encode("gbk"))
+
+    result = await sys_op.fs().read_file(path=file_path)
+    assert result.code != StatusCode.SUCCESS.code
+    assert "utf-8" in result.message.lower()

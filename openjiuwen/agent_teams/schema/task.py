@@ -93,13 +93,23 @@ class TaskSummary(BaseModel):
     lightweight routing/identity field (one int, like status/assignee), not
     a heavy field like content — it lets the list view render a relative
     time so an idle member can tell which task has been stalling.
+
+    ``assignee_status`` is the assignee's current ``MemberStatus`` value, set
+    only while the task is open (non-terminal) and the assignee is still on
+    the roster. It tells the reader whether a stalled task has a working
+    owner or a dead one — the difference between waiting and stepping in.
     """
 
     task_id: str
     title: str
     status: str
     assignee: Optional[str] = None
+    assignee_status: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
+    parent_task_id: Optional[str] = None
+    # Set when this subtask was derived from an older revision of its parent
+    # (F_129): ``(parent revision now, revision it was based on)``.
+    stale_against: Optional[tuple[int, int]] = None
     updated_at: Optional[int] = None
 
 
@@ -117,6 +127,7 @@ class TaskDetail(BaseModel):
     content: str
     status: str
     assignee: Optional[str] = None
+    assignee_status: Optional[str] = None
     reviewer: list[str] = Field(default_factory=list)
     review_round: int = 0
     max_review_rounds: Optional[int] = None
@@ -124,6 +135,11 @@ class TaskDetail(BaseModel):
     note: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
+    parent_task_id: Optional[str] = None
+    subtasks: list[str] = Field(default_factory=list)
+    # Subtasks derived from an older revision of this task (F_129).
+    stale_subtasks: list[str] = Field(default_factory=list)
+    revision: int = 0
     updated_at: Optional[int] = None
 
 
@@ -132,6 +148,12 @@ class TaskListResult(BaseModel):
 
     tasks: list[TaskSummary]
     count: int
+
+
+# Task bodies at or above this length get a line diff next to the full text
+# when a revision is pushed (F_129 / D9), and keep a snapshot of the revision
+# their assignee last saw. Short bodies are re-read whole at no real cost.
+REVISION_DIFF_MIN_CHARS = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +189,12 @@ class TaskGraphSpec:
     # Per-task review-round ceiling (F_62, scheduled dispatch); None uses the
     # team default. Meaningful only when ``reviewer`` is non-empty.
     max_review_rounds: int | None = None
+    # Member subtasks (F_128): the creator's executing task and the creator.
+    # Set by the member ``create_task`` variant only; None for leader tasks.
+    parent_task_id: str | None = None
+    created_by: str | None = None
+    # The parent's revision the subtask was derived from (F_129).
+    parent_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +249,10 @@ class NewTaskSpec:
     # Per-task review-round ceiling (F_62); None falls back to the team-level
     # ``TeamAgentSpec.default_max_review_rounds`` at judgement time.
     max_review_rounds: int | None = None
+    # Member subtasks (F_128); written verbatim to the matching columns.
+    parent_task_id: str | None = None
+    created_by: str | None = None
+    parent_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)

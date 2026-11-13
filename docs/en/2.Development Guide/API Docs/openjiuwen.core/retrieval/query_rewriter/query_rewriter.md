@@ -65,9 +65,9 @@ Rewrite query according to prompt combined with past messages. When the history 
 ...     #Set the chat history
 ...     context.add_messages([
 ...         UserMessage(content="Please recommend me some resource to learn about AI"),
-...         AssistantMessage(content="Of course! Resources of AI are devided into 'Foundamental Theories' and 'Practical Projects' two classes, which one you prefer?"),
+...         AssistantMessage(content="Of course! Resources of AI are divided into 'Fundamental Theories' and 'Practical Projects' two classes, which one you prefer?"),
 ...         UserMessage(content="I think it's 'Practical Projects'. And it will be better if it is related to Python"),
-...         AssistantMessage(content="Recommendations of practical projects of AI in Python ：1. 《Python深度学习》(Author: Chollet); 2. AI competition for beginners from Kaggle; 3. Tutorial of Transformer of HuggingFace. Do you need me to guid you to learn?"),
+...         AssistantMessage(content="Recommendations of practical projects of AI in Python ：1. 《Python深度学习》(Author: Chollet); 2. AI competition for beginners from Kaggle; 3. Tutorial of Transformer of HuggingFace. Do you need me to guide you to learn?"),
 ...     ])
 ...     # Create rewriter instance
 ...     rewriter = QueryRewriter(cfg=config, ctx=context,)
@@ -83,6 +83,6 @@ Rewrite query according to prompt combined with past messages. When the history 
   "missing": [],
   "typo": [],
   "gibberish": ["@#￥%……&*（"],
-  "from_history": "Recommendations of practical projects of AI in Python ：1. 《Python深度学习》(Author: Chollet); 2. AI competition for beginners from Kaggle; 3. Tutorial of Transformer of HuggingFace. Do you need me to guid you to learn?"
+  "from_history": "Recommendations of practical projects of AI in Python ：1. 《Python深度学习》(Author: Chollet); 2. AI competition for beginners from Kaggle; 3. Tutorial of Transformer of HuggingFace. Do you need me to guide you to learn?"
 }
 ```

@@ -43,6 +43,8 @@ from openjiuwen.harness.manifest.builtin_elements import (
 )
 from openjiuwen.agent_teams.rails.team_context import (
     get_extension_bus,
+    get_expert_binding,
+    get_expert_catalog,
     get_messager,
     get_reliability_components,
     get_swarmflow_budget,
@@ -50,6 +52,7 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_swarmflow_human_base_spec,
     get_swarmflow_model_resolver,
     get_swarmflow_worker_base_spec,
+    get_task_event_tracker,
     get_team_backend,
     get_workspace_manager,
 )
@@ -64,6 +67,7 @@ TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
+TEAM_GOAL = "core.team.goal"
 TEAM_RELIABILITY = "core.team.reliability"
 TEAM_SKILL_USE = "core.team.skill_use"
 TEAM_OBSERVABILITY = "core.team.observability"
@@ -84,6 +88,7 @@ class TeamToolInput(ConstructionInput):
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
     team_mode: str = param_field(default="default", description="Team operating mode.")
+    bootstrap_mode: str = param_field(default="leader", description="Who materializes the team (leader / framework).")
     exclude_tools: list[str] = param_field(default_factory=list, description="Tool names to exclude.")
     qualify_ids: bool = param_field(default=False, description="Suffix tool ids per member (inprocess spawn).")
     team_name: str = param_field(default="default", description="Team name.")
@@ -114,6 +119,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         dispatch_mode=inp.dispatch_mode,
         lifecycle=inp.lifecycle,
         team_mode=inp.team_mode,
+        bootstrap_mode=inp.bootstrap_mode,
         language=inp.language,
         model_config_allocator=backend.allocate_model,
         exclude_tools=set(inp.exclude_tools) or None,
@@ -129,6 +135,8 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
         extension_bus=get_extension_bus(context),
+        expert_catalog=get_expert_catalog(context),
+        expert_binding=get_expert_binding(context),
     )
 
 
@@ -153,6 +161,7 @@ class TeamPolicyInput(ConstructionInput):
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     team_mode: str = param_field(default="default", description="Team operating mode.")
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
+    bootstrap_mode: str = param_field(default="leader", description="Who materializes the team (leader / framework).")
     base_prompt: Optional[str] = param_field(default=None, description="User-supplied base system prompt.")
     team_workspace_path: Optional[str] = param_field(default=None, description="Team workspace root path.")
     team_outputs_dir: Optional[str] = param_field(
@@ -200,6 +209,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         language=inp.language,
         team_mode=inp.team_mode,
         dispatch_mode=inp.dispatch_mode,
+        bootstrap_mode=inp.bootstrap_mode,
         base_prompt=inp.base_prompt,
         team_workspace_path=inp.team_workspace_path,
         team_outputs_dir=inp.team_outputs_dir,
@@ -217,7 +227,20 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         # first model call (the policy build extension chain); None builds
         # locally right here.
         extension_bus=get_extension_bus(context),
+        # The bound-group section names the expert tools, so it rides the same
+        # signal they are wired on: an injected expert catalog.
+        bound_group_name=_expert_scope_group(context),
+        task_event_tracker=get_task_event_tracker(context),
     )
+
+
+def _expert_scope_group(context: Any) -> str | None:
+    """The bound AgentGroup's name when the expert tools are wired, else ``None``."""
+    if get_expert_catalog(context) is None:
+        return None
+    binding = get_expert_binding(context)
+    bound = binding.bound_group if binding is not None else None
+    return bound.name if bound is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +352,31 @@ def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
         # through this loader.
         loader=make_template_loader(backend.workspace_cache if backend is not None else None),
     )
+
+
+# ---------------------------------------------------------------------------
+# team.goal — TeamGoalRail
+# ---------------------------------------------------------------------------
+
+
+class TeamGoalInput(ConstructionInput):
+    """Construction inputs for the member goal rail (it takes none)."""
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_GOAL,
+    description="Goal mode for a member's task tools: claim opens the goal, hand-in is assessed first.",
+    input_model=TeamGoalInput,
+)
+def build_team_goal_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the member goal rail (needs the member's task manager)."""
+    backend = get_team_backend(context)
+    if backend is None:
+        return None
+    from openjiuwen.agent_teams.rails.team_goal_rail import TeamGoalRail
+
+    return TeamGoalRail(task_manager=backend.task_manager)
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +551,7 @@ __all__ = [
     "TEAM_WORKSPACE",
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
+    "TEAM_GOAL",
     "TEAM_RELIABILITY",
     "TEAM_SKILL_USE",
     "TEAM_OBSERVABILITY",

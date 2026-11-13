@@ -22,7 +22,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.symphony.evaluation import EvaluationSuite
-from openjiuwen.symphony.interfaces import CapabilityProvider, SymphonyLLM
+from openjiuwen.symphony.interfaces import CapabilityProvider, ModelResponseObserver, SymphonyLLM
 from openjiuwen.symphony.models import (
     CapabilityDescriptor,
     CapabilityFingerprint,
@@ -88,13 +88,16 @@ class FingerprintService:
         llm: SymphonyLLM | None = None,
         settings: FingerprintSettings | None = None,
         evaluation_suite: QualityEvaluationSuite | None = None,
+        model_response_observer: ModelResponseObserver | None = None,
     ) -> None:
         self._provider = capability_provider
         self._llm = llm
         self._settings = settings or FingerprintSettings()
         self._store = FingerprintArtifactStore(artifact_root)
         self._cache = FingerprintCache(self._store.root)
-        self._extractor = CapabilityFingerprintExtractor(self._settings, llm)
+        self._extractor = CapabilityFingerprintExtractor(
+            self._settings, llm, model_response_observer=model_response_observer,
+        )
         self._evaluation = evaluation_suite or EvaluationSuite.default(
             llm=llm,
             enable_llm=self._settings.enable_llm_evaluation,
@@ -429,13 +432,17 @@ class FingerprintService:
         positive_integers = (
             settings.batch_size,
             settings.max_concurrency,
-            settings.llm_max_tokens,
             settings.evidence_text_limit,
         )
         if any(not _is_positive_integer(value) for value in positive_integers):
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
-                reason="batch, concurrency, token, and evidence limits must be positive integers",
+                reason="batch, concurrency, and evidence limits must be positive integers",
+            )
+        if settings.llm_max_tokens is not None and not _is_positive_integer(settings.llm_max_tokens):
+            raise_error(
+                StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR,
+                reason="llm_max_tokens must be a positive integer or None",
             )
         if not _is_nonnegative_integer(settings.body_limit):
             raise_error(

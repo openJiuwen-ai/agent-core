@@ -155,8 +155,10 @@ class RosterDelta:
 
 # Fields whose change is worth announcing. ``member_name`` is the identity, so
 # it is the diff key rather than a tracked field; runtime status is deliberately
-# excluded — it churns constantly and is not roster membership.
-_TRACKED_MEMBER_FIELDS = ("display_name", "desc", "role")
+# excluded — it churns constantly and is not roster membership. ``models_used``
+# is only present in a model-group leader's roster and changes only when the
+# group routes a member to a different model.
+_TRACKED_MEMBER_FIELDS = ("display_name", "desc", "role", "models_used")
 
 
 def diff_roster(
@@ -202,7 +204,10 @@ def format_member_line(
 
     Args:
         member: Member mapping with ``member_name`` / ``display_name`` and
-            optional ``desc`` / ``role``.
+            optional ``desc`` / ``role``. A model-group leader's roster also
+            carries ``model_group`` (the group's name) and ``models_used``
+            (the models the group routed the member to, newest marked as
+            the one of its latest call).
         mark_humans: When True, append ``[human]`` to human members
             (avatar or passive).
         prefix: Optional bracketed marker placed before the fields, used by the
@@ -216,6 +221,10 @@ def format_member_line(
     desc = member.get("desc", "")
     head = f"- [{prefix}] " if prefix else "- "
     line = f"{head}member_name={member_name} display_name={display_name}"
+    if member.get("model_group"):
+        line += f" model_group={member['model_group']}"
+    if member.get("models_used"):
+        line += f" models_used={member['models_used']}"
     # Both human flavors are real people — peers must know to pace
     # communication accordingly (and that tools may act on their behalf).
     if mark_humans and member.get("role") in (

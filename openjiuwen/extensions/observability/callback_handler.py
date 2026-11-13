@@ -106,10 +106,13 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
+    OJ_MODEL_GROUP_ID,
+    OJ_MODEL_GROUP_ROUTE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_MESSAGE_COUNT,
     OJ_REQUEST_NUMBER,
     OJ_REQUEST_PURPOSE,
+    OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER, OJ_GOAL_ASSESSMENT_ID, OJ_GOAL_STRATEGY,
     OJ_REQUEST_RETRY_COUNT,
     OJ_RUN_ID,
     OJ_SPAN_INPUT,
@@ -164,7 +167,12 @@ from openjiuwen.core.foundation.llm.schema.message import (
     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import (
+    fill_routed_model,
+    has_routed_model_placeholder,
+)
 from openjiuwen.core.foundation.llm.call_scope import (
+    current_llm_observation_context,
     expects_unified_llm_completion,
     get_current_llm_call_id,
     is_llm_observation_suppressed,
@@ -617,6 +625,64 @@ class OtelCallbackHandler:
         except Exception as exc:
             logger.warning("otel: on_llm_response_started failed: {}", exc)
 
+    async def on_llm_route(self, *args: Any, route_metadata: dict | None = None, **kwargs: Any) -> None:
+        """Name the model a model-group request was routed to on its open span.
+
+        The span opens before the router picks a deployment, so it starts out
+        as the logical ``"*"`` model and records an input whose prompt still
+        holds the routed-model placeholder. Two events name the route, both
+        inside the same call: ``LLM_ROUTE_ATTEMPT`` when a request is sent to
+        a route (``status="sending"``, success or not) and ``LLM_ROUTE`` once
+        a route answered. Rename the span and its request model to the route,
+        record the group and route, and fill the placeholder in the recorded
+        input exactly as that request received it -- so a request that failed
+        before answering, and every failover attempt, shows the model it
+        actually went to.
+        """
+        try:
+            span = get_current_llm_span()
+            state = getattr(span, "otel_llm_state", None) if span else None
+            if state is None or not state.span.is_recording() or not isinstance(route_metadata, dict):
+                return
+            group_id = str(route_metadata.get("model_group_id") or "").strip()
+            if group_id:
+                state.span.set_attribute(OJ_MODEL_GROUP_ID, group_id)
+            model_name = str(route_metadata.get("model_name") or "").strip()
+            if not model_name:
+                return
+            state.span.update_name(f"chat {model_name}")
+            state.span.set_attribute(GEN_AI_REQUEST_MODEL, model_name)
+            route_id = str(route_metadata.get("route_id") or "").strip()
+            if route_id:
+                state.span.set_attribute(OJ_MODEL_GROUP_ROUTE_ID, route_id)
+            routed_model = str(route_metadata.get("routed_model") or "").strip()
+            if not routed_model:
+                return
+            self._fill_routed_model_in_input(state, routed_model)
+        except Exception as exc:
+            logger.warning("otel: on_llm_route failed: {}", exc)
+
+    @staticmethod
+    def _fill_routed_model_in_input(state: LlmSpanState, routed_model: str) -> None:
+        """Fill the routed-model placeholder in the span's recorded input.
+
+        Covers both places a prompt is recorded: the input messages and, for
+        providers that send dynamic context as system text, the system
+        instructions; exporters (e.g. Langfuse) derive their input from these.
+        Always fills from the input as first recorded, so each attempt states
+        what that attempt's request said.
+        """
+        if state.routed_input_original is None:
+            attributes = getattr(state.span, "attributes", None) or {}
+            recorded = {key: attributes.get(key) for key in (GEN_AI_INPUT_MESSAGES, GEN_AI_SYSTEM_INSTRUCTIONS)}
+            state.routed_input_original = {
+                key: value
+                for key, value in recorded.items()
+                if isinstance(value, str) and has_routed_model_placeholder(value)
+            }
+        for key, value in state.routed_input_original.items():
+            state.span.set_attribute(key, fill_routed_model(value, routed_model))
+
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         """Apply provider output facts and preserve the legacy terminal event.
 
@@ -1052,11 +1118,11 @@ class OtelCallbackHandler:
         self._record_standard_structured_input(span, messages)
 
         span.set_attribute(OJ_REQUEST_NUMBER, self._next_request_number())
-        request_purpose = kwargs.get("request_purpose")
-        if request_purpose not in ("assistant", "compaction"):
+        observation = current_llm_observation_context()
+        request_purpose = observation.purpose if observation is not None else kwargs.get("request_purpose")
+        if request_purpose not in ("assistant", "compaction", "goal_assessment"):
             request_purpose = "assistant"
-        if request_purpose in ("assistant", "compaction"):
-            span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
+        span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
 
         # The message count is a display fact, kept on the agent span that
         # owns this call as well as on the call itself.
@@ -1074,6 +1140,8 @@ class OtelCallbackHandler:
             span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
 
         self._propagate_session_context(span, include_additive=True)
+        if observation is not None:
+            span.set_attributes(observation.attributes)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
         session_id = str(
             span.attributes.get(GEN_AI_CONVERSATION_ID)
@@ -2136,6 +2204,7 @@ class OtelCallbackHandler:
                     OJ_RUN_ID,
                     OJ_TURN_ID,
                     OJ_TURN_NUMBER,
+                    OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER,
                     OJ_EXECUTION_SUBJECT_ID,
                     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
                     OJ_EXECUTION_SUBJECT_KIND,
@@ -2192,6 +2261,11 @@ class OtelCallbackHandler:
             OJ_STEP_ID,
             OJ_STEP_NUMBER,
             OJ_REQUEST_NUMBER,
+            OJ_REQUEST_PURPOSE,
+            OJ_GOAL_ID,
+            OJ_GOAL_ATTEMPT_NUMBER,
+            OJ_GOAL_ASSESSMENT_ID,
+            OJ_GOAL_STRATEGY,
         ):
             value = source.attributes.get(key)
             if value is not None:

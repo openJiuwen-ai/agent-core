@@ -9,8 +9,12 @@ from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 class _FakeController:
     def __init__(self):
         self.calls = []
+        self.resume_via = []
     async def pause(self, run_id): self.calls.append(("pause", run_id)); return True
-    async def resume(self, run_id): self.calls.append(("resume", run_id)); return True
+    async def resume(self, run_id, *, via=None):
+        self.calls.append(("resume", run_id))
+        self.resume_via.append(via)
+        return True
     async def stop(self, run_id): self.calls.append(("stop", run_id)); return True
     def is_paused(self, run_id=None): return False
 
@@ -31,10 +35,13 @@ async def test_pause_action_calls_controller():
 
 @pytest.mark.asyncio
 async def test_resume_action_calls_controller():
+    """Resume routes through the invoking tool (``via``): narration and the
+    completion injection of the resumed run land on the resuming member."""
     ctl = _FakeController()
     tool = _make_tool(ctl)
     out = await tool.invoke({"resume_id": "wf_1", "action": "resume"})
     assert out.success and ctl.calls == [("resume", "wf_1")]
+    assert ctl.resume_via == [tool]
 
 
 @pytest.mark.asyncio
@@ -122,13 +129,29 @@ async def test_stop_on_unregistered_run_announces_stopped_without_seal():
 async def test_resume_on_unregistered_run_still_reports_not_found():
     """Only stop has the close-the-card fallback; resume needs a real ticket."""
     class _Ctl(_FakeController):
-        async def resume(self, run_id): return False
+        async def resume(self, run_id, *, via=None): return False
     tool = _make_tool(_Ctl())
     tool._messager = _RecMessager()
     tool._team_name = "t"
     out = await tool.invoke({"resume_id": "wf_cold", "action": "resume"})
     assert not out.success and out.data["status"] == "not_found"
     assert tool._messager.published == []
+
+
+@pytest.mark.asyncio
+async def test_control_miss_error_is_readable():
+    """A control miss renders its own reason, not the generic async-tool
+    fallback. The losing caller of a double resume must be able to tell what
+    happened instead of seeing "Failed to launch async tool"."""
+    class _Ctl(_FakeController):
+        async def resume(self, run_id, *, via=None): return False
+    tool = _make_tool(_Ctl())
+    out = await tool.invoke({"resume_id": "wf_cold", "action": "resume"})
+    assert not out.success
+    assert "no live control handle" in out.error
+    rendered = tool.render_for_llm(out)
+    assert rendered == out.error
+    assert "Failed to launch async tool" not in rendered
 
 
 @pytest.mark.asyncio

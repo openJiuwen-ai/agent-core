@@ -18,6 +18,11 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.context_engine.context.cancellation import (
+    CancellationCause,
+    reset_cancellation_causes,
+    resolve_cancellation_cause,
+)
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
@@ -69,6 +74,43 @@ async def test_pause_in_model_phase_interrupts_and_rewinds_to_boundary() -> None
         finally:
             await harness.stop()
             await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_during_paused_clears_pause_cause() -> None:
+    """Warm resume via ``send`` bypasses ``resume`` and must drop the mark.
+
+    The parked round is resumed in place by the new message; the PAUSE mark's
+    purpose ends there, or a later internal failure in the resumed round
+    would be misreported as ``user_pause``.
+    """
+    await Runner.start()
+    try:
+        reset_cancellation_causes()
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=3, sleep_seconds=5.0)
+        fake.sleep_from_iteration = 1  # iteration 0 is fast, iteration 1 parks
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("first")
+            assert await wait_completed_iterations(fake, 1)
+            await wait_invoke_running(fake)  # iteration 1 is inside its model call
+
+            await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+            assert resolve_cancellation_cause(harness.session_id) is CancellationCause.PAUSE
+
+            await harness.send("second")
+            assert await wait_for_state(harness, HarnessState.RUNNING)
+            assert resolve_cancellation_cause(harness.session_id) is None
+        finally:
+            await harness.stop()
+            await consumer
+            reset_cancellation_causes()
     finally:
         await Runner.stop()
 

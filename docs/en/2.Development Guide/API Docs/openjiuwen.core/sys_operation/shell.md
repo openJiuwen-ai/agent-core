@@ -10,6 +10,10 @@ class BaseShellOperation()
 
 ### abstractmethod async execute_cmd
 
+The local implementation honors the supplied `timeout` without a secondary
+`JW_EXECUTE_CMD_MAX_TIMEOUT` cap. Omitted or `None` values use 300 seconds;
+callers are responsible for validating and limiting the execution budget.
+
 ```python
 abstractmethod async execute_cmd(
     command: str,
@@ -35,6 +39,9 @@ Asynchronously execute Shell command.
 **[ExecuteCmdResult](./result.md#class-executecmdresult)**, command execution result.
 
 ### abstractmethod async execute_cmd_stream
+
+The local implementation uses the same timeout rules as `execute_cmd` and
+preserves the caller's execution budget.
 
 ```python
 abstractmethod async execute_cmd_stream(

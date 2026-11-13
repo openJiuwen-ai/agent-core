@@ -235,7 +235,7 @@ def test_card_only_answer_uses_same_sourced_observation_completion_path():
     assert not payload["evidence"]  # Observations are not invented typed fields.
 
 
-def test_navigation_card_cannot_supply_hotel_evidence_or_answer_observation():
+def test_navigation_card_keeps_raw_source_without_supplying_hotel_fields():
     state = _state("查询酒店价格", ["title", "price"])
     result = normalize_card_probe_payload({"url": "https://hotels.ctrip.com/", "cards": [{
         "title": "Flights", "primary_link": "https://flights.ctrip.com/", "price": "100",
@@ -244,7 +244,11 @@ def test_navigation_card_cannot_supply_hotel_evidence_or_answer_observation():
     state["last_page"]["url"] = result["url"]
     BrowserRuntimeRail._record_structured_evidence(state, result, tool_name="browser_probe_cards", tool_args={})
     assert not state.get("evidence_slots")
-    assert not BrowserRuntimeRail._task_observations(state)
+    observations = BrowserRuntimeRail._task_observations(state)
+    assert len(observations) == 1
+    assert observations[0]["source"] == "https://hotels.ctrip.com/"
+    assert "Flights" in observations[0]["raw_text"] and "navigation" in observations[0]["raw_text"]
+    assert state.get("observed_result_count", 0) == 0
 
 
 def test_early_empty_lookup_is_not_confirmed_absence_and_real_rating_absence_stays_partial():
