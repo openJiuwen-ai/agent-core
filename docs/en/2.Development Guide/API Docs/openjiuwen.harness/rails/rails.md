@@ -11,6 +11,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `SysOperationRail` | Enforces file-system access boundaries (e.g. restrict to workspace). |
 | `HeartbeatRail` | Emits periodic heartbeat events during long-running loops. |
 | `MemoryRail` | Integrates long-term memory read/write into the agent loop. |
+| `JiuwenMemoryRail` | Integrates a host-provided memory provider and combines interrupted requests with user answers before syncing a turn. |
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
 | `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
@@ -39,6 +40,19 @@ Each rail can implement one or more of the following hooks:
 - **on_complete**: Called when the task loop finishes.
 
 Rails are executed in registration order. A rail may short-circuit by returning a signal (e.g. force-finish, interrupt) that prevents subsequent rails and the round itself from running.
+
+## External Memory for Interactive Turns
+
+When mounted with `AskUserRail`, `JiuwenMemoryRail` combines the original request, user follow-ups,
+and accepted answers into one logical turn. It submits one `sync_turn` after the final reply, buffering
+across intermediate interrupts. Resume with the same Session or `conversation_id`.
+New tasks do not inherit material from completed turns.
+
+Buffered user text is limited to 16,000 characters. Truncation retains the ends of the original request
+and recent complete answers that fit, with an explicit truncation marker. Each rail buffers up to
+128 sessions; entries inactive for 30 minutes are evicted on subsequent foreground invocations.
+Buffers are not persisted and cannot be recovered after rail reconstruction, process restart, or
+`end_session()`. Existing provider extraction, timeout, and failure handling still apply.
 
 ## Online Skill Evolution
 
