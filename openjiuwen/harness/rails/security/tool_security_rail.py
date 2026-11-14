@@ -387,9 +387,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return ""
 
         shell_ast_result = parse_shell_for_permission(text)
-        if shell_ast_result.kind != "simple":
-            return ""
-        if shell_ast_result.flags.has_risky_structure():
+        # Remember when AST yields a single leaf. Do not gate on structure flags —
+        # agent_shield owns ASK; user remember is honored as-is.
+        if shell_ast_result.kind != "ok":
             return ""
         if len(shell_ast_result.subcommands) != 1:
             return ""

@@ -489,47 +489,6 @@ def _finalize_hits(hits: list[tuple[PermissionLevel, str]], prefix: str) -> tupl
     return final, matched
 
 
-def _shell_ast_floor(
-    shell_parse: ShellAstParseResult | None,
-) -> tuple[PermissionLevel | None, str | None]:
-    if shell_parse is None:
-        return None, None
-    flags = shell_parse.flags
-    if shell_parse.kind == "too_complex":
-        reason = shell_parse.reason or "unsupported_complex_structure"
-        return PermissionLevel.ASK, f"{_MR}:shell_ast:too_complex:{reason}"
-    if shell_parse.kind == "parse_unavailable" and flags.has_risky_structure():
-        reason = shell_parse.reason or "conservative_fallback"
-        return PermissionLevel.ASK, f"{_MR}:shell_ast:parse_unavailable:{reason}"
-    if any(
-        (
-            flags.has_input_redirection,
-            flags.has_output_redirection,
-            flags.has_command_substitution,
-            flags.has_process_substitution,
-            flags.has_heredoc,
-        )
-    ):
-        return PermissionLevel.ASK, f"{_MR}:shell_ast:structure_guard"
-    return None, None
-
-
-def _apply_shell_ast_floor(
-    permission: PermissionLevel,
-    matched_rule: str,
-    shell_floor: PermissionLevel | None,
-    shell_floor_rule: str | None,
-) -> tuple[PermissionLevel, str]:
-    if shell_floor is None:
-        return permission, matched_rule
-    final = strictest(permission, shell_floor)
-    if final == permission:
-        return permission, matched_rule
-    if matched_rule and shell_floor_rule:
-        return final, f"{shell_floor_rule}|{matched_rule}"
-    return final, shell_floor_rule or matched_rule
-
-
 def _with_shell_command(tool_args: dict[str, Any], command: str) -> dict[str, Any]:
     sub_args = dict(tool_args)
     if "command" in sub_args or "cmd" not in sub_args:
@@ -654,7 +613,6 @@ def _evaluate_tiered_policy_legacy(
     shell_parse: ShellAstParseResult | None = None
     if _tool_category(tool_name) == "shell":
         shell_parse = parse_shell_for_permission(_command_text(tool_args))
-    shell_floor, shell_floor_rule = _shell_ast_floor(shell_parse)
     builtin_rules = get_builtin_security_rules()
     invocation_ctx = _TieredInvocationContext(
         mode=mode,
@@ -666,7 +624,8 @@ def _evaluate_tiered_policy_legacy(
         defaults_cfg=defaults_cfg,
     )
 
-    if _tool_category(tool_name) == "shell" and shell_parse is not None and shell_parse.kind == "simple":
+    # Leaf split only — do not re-escalate after agent_shield / rule evaluation.
+    if _tool_category(tool_name) == "shell" and shell_parse is not None and shell_parse.kind == "ok":
         subcommand_results: list[tuple[str, PermissionLevel, str]] = []
         for subcommand in shell_parse.subcommands:
             if not subcommand.text:
@@ -681,15 +640,13 @@ def _evaluate_tiered_policy_legacy(
             if sub_permission == PermissionLevel.DENY:
                 break
 
-        aggregated = _aggregate_subcommand_results(subcommand_results)
-        return _apply_shell_ast_floor(*aggregated, shell_floor, shell_floor_rule)
+        return _aggregate_subcommand_results(subcommand_results)
 
-    result = _evaluate_single_invocation(
+    return _evaluate_single_invocation(
         tool_name,
         tool_args,
         invocation_ctx,
     )
-    return _apply_shell_ast_floor(*result, shell_floor, shell_floor_rule)
 
 
 def maybe_escalate_shell_operators(

@@ -54,9 +54,6 @@ from openjiuwen.harness.security.tiered_compat import (
     _aggregate_subcommand_results as _aggregate_subcommand_results,
 )
 from openjiuwen.harness.security.tiered_compat import (
-    _apply_shell_ast_floor as _apply_shell_ast_floor,
-)
-from openjiuwen.harness.security.tiered_compat import (
     _baseline_level as _baseline_level,
 )
 from openjiuwen.harness.security.tiered_compat import (
@@ -97,9 +94,6 @@ from openjiuwen.harness.security.tiered_compat import (
 )
 from openjiuwen.harness.security.tiered_compat import (
     _resolve_builtin_rules_yaml_path as _resolve_builtin_rules_yaml_path,
-)
-from openjiuwen.harness.security.tiered_compat import (
-    _shell_ast_floor as _shell_ast_floor,
 )
 from openjiuwen.harness.security.tiered_compat import (
     _shell_pattern_matches as _shell_pattern_matches,
