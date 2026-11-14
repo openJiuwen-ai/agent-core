@@ -680,11 +680,12 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
             TodoItem(id="cur", content="current task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
         ])
         self.mock_session.get_state.return_value = "gen-1"
-        with self.assertRaises(FrameworkError):
+        with self.assertRaises(ValidationError) as caught:
             await self.modify_tool.invoke({
                 "action": "append",
                 "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
             }, session=self.mock_session)
+        self.assertEqual(caught.exception.code, 182503)
         self.modify_tool._save_todos.assert_not_awaited()
 
     async def test_modify_append_without_token_keeps_legacy_behavior(self):
@@ -694,11 +695,12 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
             TodoItem(id="old", content="unstamped task", status=TodoStatus.IN_PROGRESS, generation_token=None),
         ])
         self.mock_session.get_state.return_value = None
-        with self.assertRaises(FrameworkError):
+        with self.assertRaises(ValidationError) as caught:
             await self.modify_tool.invoke({
                 "action": "append",
                 "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
             }, session=self.mock_session)
+        self.assertEqual(caught.exception.code, 182503)
         self.modify_tool._save_todos.assert_not_awaited()
 
 

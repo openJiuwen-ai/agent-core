@@ -11,10 +11,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.harness.schema.task import TodoItem
 
 MAX_REVISION = 2**53 - 1
+_UNKNOWN_PUBLICATION_HINT = (
+    "The save outcome is unknown; the Todo file may already have changed. "
+    "Read the current Todo list before deciding what to do next. Do not blindly retry the same write."
+)
 _UNRESOLVED = object()
 _BINDING = ContextVar("todo_plan_binding", default=None)
 _TRANSACTION = ContextVar("todo_transaction", default=None)
@@ -35,6 +40,8 @@ class TodoSnapshot:
     content_sha256: str | None = None
     versioned: bool = True
     backend_id: str | None = None
+    read_only_backend: bool = False
+    read_authoritative: bool = True
 
     def document(self):
         return {"plan_id": self.plan_id, "revision": self.revision, "todos": copy.deepcopy(self.todos)}
@@ -42,7 +49,7 @@ class TodoSnapshot:
 
 def decode_snapshot(content, *, exists=True, content_sha256=None):
     if not exists:
-        return TodoSnapshot([], None, 0, False, content_sha256)
+        return TodoSnapshot([], None, 0, False, content_sha256, read_authoritative=False)
     data = content if isinstance(content, (dict, list)) else json.loads(content)
     if isinstance(data, list):
         snapshot = TodoSnapshot(data, "legacy", 0, True, content_sha256, False)
@@ -66,14 +73,23 @@ def decode_snapshot(content, *, exists=True, content_sha256=None):
 
 class TodoResult(dict):
     """Keep framework metadata out of the model-visible JSON tool result."""
-    def __init__(self, result, snapshot):
+    def __init__(self, result, snapshot=None, *, outcome="success", counts=None, commit_state="not_needed"):
         super().__init__(result)
-        self.todo_snapshot = snapshot.document()
+        self.tool_execution_status = outcome
+        self.tool_item_counts = counts or {}
+        self.tool_commit_state = commit_state
+        if snapshot is not None and snapshot.exists and not snapshot.read_only_backend:
+            self.todo_snapshot = snapshot.document()
+            self.todo_snapshot_versioned = snapshot.versioned
+            self.todo_read_authoritative = snapshot.read_authoritative
 
 
 def snapshot_from_result(result):
-    if isinstance(result, TodoResult):
-        return decode_snapshot(result.todo_snapshot)
+    if isinstance(result, TodoResult) and hasattr(result, "todo_snapshot"):
+        snapshot = decode_snapshot(result.todo_snapshot)
+        snapshot.versioned = getattr(result, "todo_snapshot_versioned", True)
+        snapshot.read_authoritative = getattr(result, "todo_read_authoritative", True)
+        return snapshot
     return None
 
 
@@ -106,6 +122,7 @@ class Transaction:
     new_plan: str | None = None
     created: bool = False
     write_options: dict = field(default_factory=dict)
+    counts: dict = field(default_factory=dict)
 
 
 def prepare_todo_batch(ctx):
@@ -156,22 +173,120 @@ def current_transaction(tool, session_id):
     return current if current is not None and current.key == key else None
 
 
-async def read_snapshot(fs, path):
-    result = await fs.read_file(path, mode="text", options={"snapshot": True, "missing_ok": True})
+async def read_snapshot(fs, path, *, allow_read_only=False):
+    try:
+        result = await fs.read_file(path, mode="text", options={"snapshot": True, "missing_ok": True})
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED, reason=str(exc), cause=exc,
+                          details={"reason": "snapshot_read_failed"}) from exc
     if result.code != 0 or result.data is None:
-        raise RuntimeError(f"Todo snapshot read failed: {result.message}")
-    supports_snapshot = isinstance(result.data.exists, bool) and isinstance(result.data.content_sha256, str)
+        raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED,
+                          reason=f"Todo snapshot read failed: {result.message}",
+                          details={"reason": "snapshot_read_failed"})
+    exists = getattr(result.data, "exists", None)
+    digest = getattr(result.data, "content_sha256", None)
+    supports_snapshot = isinstance(exists, bool) and isinstance(digest, str)
+    invalid_exists = exists is not None and not isinstance(exists, bool)
+    invalid_digest = digest is not None and (
+        not isinstance(digest, str) or not digest.strip()
+    )
+    if invalid_exists or invalid_digest:
+        raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED,
+                          reason="Todo backend returned invalid snapshot metadata",
+                          details={"reason": "invalid_snapshot_metadata"})
     if not supports_snapshot:
-        raise RuntimeError(
-            f"Todo backend does not support snapshot reads ({type(fs).__name__}): "
-            "read_file must return exists and content_sha256; "
-            "use a backend with Todo snapshot/conditional atomic replacement support"
-        )
-    snapshot = decode_snapshot(
+        if allow_read_only:
+            snapshot = _decode_read_result(result.data.content)
+            snapshot.read_only_backend = True
+            snapshot.read_authoritative = False
+            return snapshot
+        raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED,
+                          reason=f"Todo backend does not support snapshot reads ({type(fs).__name__}): "
+                          "read_file must return exists and content_sha256; "
+                          "use a backend with Todo snapshot/conditional atomic replacement support",
+                          details={"reason": "unsupported_snapshot_backend"})
+    snapshot = _decode_read_result(
         result.data.content, exists=result.data.exists, content_sha256=result.data.content_sha256
     )
     snapshot.backend_id = getattr(result.data, "backend_id", None)
     return snapshot
+
+
+def _decode_read_result(content, **kwargs):
+    try:
+        return decode_snapshot(content, **kwargs)
+    except (ValueError, TypeError) as exc:
+        raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED, reason=str(exc), cause=exc,
+                          details={"reason": "invalid_snapshot"}) from exc
+
+
+def validate_published_todos(snapshot, records):
+    """按即将发布的格式校验，不能把旧代过滤当作新快照的写入资格。"""
+    active = [row["id"] for row in records if row.get("status", "pending") == "in_progress"]
+    invalid = [row["id"] for row in records
+               if row.get("status", "pending") not in ("pending", "in_progress", "completed", "cancelled")]
+    if invalid or len(active) > 1:
+        reason = "migration_conflict" if snapshot.exists and not snapshot.versioned else "state_conflict"
+        message = ("Invalid Todo status" if invalid else
+                   "More than one task is marked as 'in_progress' (only one allowed)")
+        message += f". Candidate conflicting task IDs: {invalid or active}. The update was not committed."
+        if reason == "migration_conflict":
+            message += " This update would migrate the legacy Todo file to the versioned format."
+        message += (" Read existing conflicting tasks with todo_get and explicitly correct their statuses using "
+                    "todo_modify(action=update), then retry. Keep at most one task in_progress; "
+                    "never mark unfinished work completed.")
+        raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason=message,
+                          details={"reason": reason, "conflicting_ids": invalid or active, "committed": False})
+
+
+def _publication_error(reason, counts, cause=None):
+    error = build_error(
+        StatusCode.TOOL_TODOS_SAVE_FAILED, reason=f"{reason}. {_UNKNOWN_PUBLICATION_HINT}", cause=cause,
+        details={"reason": "publication_unknown", "commit_state": "unknown"},
+    )
+    error.tool_commit_state = "unknown"
+    error.tool_item_counts = {**counts, "applied_count": None}
+    return error
+
+
+def _result_metadata(tx, committed, changed):
+    before = {row["id"]: row for row in tx.snapshot.todos}
+    after = {row["id"]: row for row in committed.todos}
+    applied = sum(before.get(key) != after.get(key) for key in before.keys() | after.keys())
+    counts = {**tx.counts, "applied_count": applied}
+    accepted, failed = counts.get("accepted_count", 0), counts.get("failed_count", 0)
+    if failed:
+        outcome = "partial" if accepted else "failure"
+    elif "returned_count" in counts:
+        outcome = "success"
+    else:
+        outcome = "success" if changed else "noop"
+    return outcome, counts, "committed" if changed else "not_needed"
+
+
+def _record_counts(tool, inputs, result, tx):
+    kind = getattr(tool, "_todo_action", None)
+    action = inputs.get("action") if kind == "modify" else kind
+    if action in ("list", "get"):
+        tx.counts = {"returned_count": len(result.get("tasks", [])) if action == "list" else 1}
+        return
+    group = (inputs.get("tasks", []) if action == "create" else
+             inputs.get("ids", []) if action in ("delete", "cancel") else
+             inputs.get("todo_data", {}).get("items", []) if action in ("insert_before", "insert_after") else
+             inputs.get("todos", []))
+    ids = {row["id"] for row in tx.snapshot.todos}
+    accepted = len(group)
+    failed = unmatched = 0
+    if action == "update":
+        accepted = sum(bool(item.get("id")) and item["id"] in ids for item in group)
+        failed = len(group) - accepted
+    elif action in ("delete", "cancel"):
+        accepted = sum(ident in ids for ident in group)
+        unmatched = len(group) - accepted
+    tx.counts = {"requested_count": len(group), "accepted_count": accepted,
+                 "failed_count": failed, "unmatched_count": unmatched}
 
 
 async def check_snapshot_lifecycle(tool, session_id, snapshot, *, committing=False):
@@ -226,7 +341,9 @@ async def transact(
         for _ in range(3):
             if check_active is not None:
                 check_active()
-            snapshot = await read_snapshot(tool.fs, path)
+            allow_read_only = (getattr(tool, "_allow_legacy_reads", False)
+                               and getattr(tool, "snapshot_guard", None) is None)
+            snapshot = await read_snapshot(tool.fs, path, allow_read_only=allow_read_only)
             await check_snapshot_lifecycle(tool, session_id, snapshot)
             if reference.value is _UNRESOLVED:
                 reference.value = snapshot.plan_id
@@ -240,7 +357,10 @@ async def transact(
                 _TRANSACTION.reset(token)
             if tx.pending is None or (tx.new_plan is None and tx.pending == snapshot.todos):
                 committed = snapshot
+                changed = False
             else:
+                if snapshot.read_only_backend:
+                    raise RuntimeError("Todo backend does not support conditional writes")
                 if snapshot.revision >= MAX_REVISION:
                     raise ValueError("Todo revision exceeds safe integer range")
                 ids = [row.get("id") for row in tx.pending]
@@ -249,13 +369,14 @@ async def transact(
                 committed = TodoSnapshot(
                     tx.pending, tx.new_plan or snapshot.plan_id or uuid.uuid4().hex, snapshot.revision + 1
                 )
+                validate_published_todos(snapshot, committed.todos)
                 # The owner can expire while awaiting the lock/read or retrying.
                 if check_active is not None:
                     check_active()
                 await check_snapshot_lifecycle(tool, session_id, snapshot, committing=True)
                 if check_active is not None:
                     check_active()
-                response = await tool.fs.write_file(
+                publication = tool.fs.write_file(
                     path,
                     json.dumps(committed.document(), ensure_ascii=False),
                     mode="text",
@@ -268,18 +389,31 @@ async def transact(
                         **tx.write_options,
                     },
                 )
+                try:
+                    response = await publication
+                except (asyncio.CancelledError, BaseError) as exc:
+                    # 保留异常类型；请求发出后，取消或报错都不代表未写入。
+                    if isinstance(exc, BaseError) and _UNKNOWN_PUBLICATION_HINT not in exc.message:
+                        exc.message = f"{exc.message}. {_UNKNOWN_PUBLICATION_HINT}"
+                    exc.tool_commit_state = "unknown"
+                    exc.tool_item_counts = {**tx.counts, "applied_count": None}
+                    raise
+                except Exception as exc:
+                    raise _publication_error(str(exc), tx.counts, exc) from exc
                 if response.data is not None and response.data.conflict:
                     continue
                 if response.code != 0 or response.data is None:
-                    raise RuntimeError(f"Todo commit failed or outcome unknown: {response.message}")
+                    raise _publication_error(f"Todo commit failed or was not confirmed: {response.message}", tx.counts)
                 if not response.data.atomic_replace:
-                    raise RuntimeError("Todo backend did not confirm conditional publication")
+                    raise _publication_error("Todo backend did not confirm conditional publication", tx.counts)
+                changed = True
             if tx.created:
                 tool.mark_created_in_invoke(session_id)
             if binding is not None:
                 binding[1][key] = committed.plan_id
-            if isinstance(result, dict) and committed.exists:
-                result = TodoResult(result, committed)
+            if isinstance(result, dict):
+                outcome, counts, commit_state = _result_metadata(tx, committed, changed)
+                result = TodoResult(result, committed, outcome=outcome, counts=counts, commit_state=commit_state)
             return result
     raise RuntimeError("Todo update conflicted in all three attempts; read the current plan and retry")
 
@@ -289,6 +423,9 @@ def todo_operation(method):
 
     @wraps(method)
     async def invoke(self, inputs, **kwargs):
+        validator = getattr(self, "_validate_inputs", None)
+        if validator is not None:
+            validator(inputs)
         session = kwargs.get("session")
         if session is None:
             return await method(self, inputs, **kwargs)
@@ -310,13 +447,16 @@ def todo_operation(method):
                         if not str(item.get("id") or "").strip():
                             item["id"] = uuid.uuid4().hex
         try:
-            return await transact(self, session.get_session_id(), lambda: method(self, data, **kwargs))
+            async def apply():
+                result = await method(self, data, **kwargs)
+                tx = current_transaction(self, session.get_session_id())
+                if tx is not None and isinstance(result, dict):
+                    _record_counts(self, data, result, tx)
+                return result
+            return await transact(self, session.get_session_id(), apply)
         except BaseError:
             raise
         except Exception as exc:
-            from openjiuwen.core.common.exception.codes import StatusCode
-            from openjiuwen.core.common.exception.errors import build_error
-
             raise build_error(StatusCode.TOOL_TODOS_INVOKE_FAILED, reason=str(exc)) from exc
 
     return invoke

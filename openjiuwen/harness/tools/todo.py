@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, List, Optional, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import tool_logger, LogEventType
+from openjiuwen.core.common.logging.events import EventStatus
 from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
@@ -83,6 +84,53 @@ class TodoLockManager:
 class TodoTool(Tool):
     """Base class for Todo tools with common persistence operations"""
 
+    _log_execution_status = True
+
+    def _validate_inputs(self, inputs):
+        """先检查纯输入形状，计划与状态竞争仍在同对象事务内判断。"""
+        def invalid(field, reason, index=None):
+            raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                              reason=f"{field}: {reason}",
+                              details={"reason": "invalid_input", "field": field,
+                                       "item_index": index, "committed": False})
+
+        if not isinstance(inputs, dict):
+            invalid("inputs", "must be a JSON object")
+        action = getattr(self, "_todo_action", None)
+        if action == "modify":
+            action = inputs.get("action")
+            if action not in ("update", "append", "delete", "cancel", "insert_before", "insert_after"):
+                invalid("action", "must select update/append/delete/cancel/insert_before/insert_after")
+        if action in ("list", None):
+            return
+        if action == "get":
+            if not inputs.get("id"):
+                invalid("id", "Task ID is required")
+            return
+        field = "tasks" if action == "create" else "ids" if action in ("delete", "cancel") else "todos"
+        data = inputs
+        if action in ("insert_before", "insert_after"):
+            data = inputs.get("todo_data")
+            if not isinstance(data, dict) or not isinstance(data.get("target_id"), str) or not data["target_id"]:
+                invalid("todo_data", "must contain a nonempty target_id and items array")
+            field = "items"
+        if field not in data:
+            invalid(field, "is required and must be a JSON array")
+        group = data[field]
+        if not isinstance(group, list):
+            invalid(field, "must be a JSON array")
+        if not group and action != "update":
+            invalid(field, "must be a non-empty JSON array")
+        for index, item in enumerate(group):
+            if action in ("delete", "cancel"):
+                if not isinstance(item, str) or not item:
+                    invalid(field, "each task ID must be a nonempty string", index)
+                continue
+            if not isinstance(item, dict):
+                invalid(field, "each item must be a JSON object", index)
+            if action == "create" and (not isinstance(item.get("content"), str) or not item["content"].strip()):
+                invalid(field, "each task requires nonempty content", index)
+
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         pass
 
@@ -147,9 +195,14 @@ class TodoTool(Tool):
                 return TodoItems(replace(tx.snapshot, todos=tx.pending))
             return tx.items
         try:
-            snapshot = await read_snapshot(self.fs, os.path.abspath(self._get_file_path(session_id)))
+            snapshot = await read_snapshot(
+                self.fs, os.path.abspath(self._get_file_path(session_id)),
+                allow_read_only=self.snapshot_guard is None,
+            )
             from openjiuwen.harness.tools.todo_store import check_snapshot_lifecycle
             await check_snapshot_lifecycle(self, session_id, snapshot)
+        except BaseError:
+            raise
         except Exception as exc:
             raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED, reason=str(exc)) from exc
         if not snapshot.exists:
@@ -197,6 +250,8 @@ class TodoTool(Tool):
             current.pending = merged
         try:
             await transact(self, session_id, apply, expected_plan=todos.snapshot.plan_id)
+        except BaseError:
+            raise
         except Exception as exc:
             raise build_error(StatusCode.TOOL_TODOS_SAVE_FAILED, reason=str(exc)) from exc
 
@@ -253,6 +308,8 @@ class TodoTool(Tool):
 class TodoCreateTool(TodoTool):
     """Todo Create Tool - Create new todo items with session."""
 
+    _todo_action = "create"
+
     def __init__(
         self,
         operation: SysOperation,
@@ -267,6 +324,8 @@ class TodoCreateTool(TodoTool):
             workspace,
             lock_manager,
         )
+        # A host may require explicit intent before replacing an active plan.
+        self.require_explicit_plan_action = False
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
@@ -306,10 +365,13 @@ class TodoCreateTool(TodoTool):
                 reason="'tasks' parameter is required and must be a JSON array"
             )
 
+        except BaseError:
+            raise
         except Exception as e:
             tool_logger.error(
                 "Todo create tool invocation failed",
                 event_type=LogEventType.TOOL_CALL_ERROR,
+                status=EventStatus.FAILURE,
                 exception=str(e)
             )
             raise build_error(
@@ -382,8 +444,9 @@ class TodoCreateTool(TodoTool):
         if plan_action not in (None, "new", "rebuild"):
             raise ValueError("plan_action must be new or rebuild")
         await self._reject_recreate_within_invoke(session_id)
-        if plan_action is None and any(t.get("status", "pending") not in ("completed", "cancelled")
-                                       for t in tx.snapshot.todos):
+        if (getattr(self, "require_explicit_plan_action", False) and plan_action is None
+                and any(t.get("status", "pending") not in ("completed", "cancelled")
+                        for t in tx.snapshot.todos)):
             raise ValueError("An active plan exists; use todo_modify or explicitly choose plan_action=new/rebuild")
         new_todos = []
         seen_ids: set = set()
@@ -422,12 +485,15 @@ class TodoCreateTool(TodoTool):
         await self._save_todos(session_id, new_todos)
         tx.new_plan = _uuid.uuid4().hex
         tx.created = True
-        tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
+        tool_logger.info("Prepared todo items from JSON array", event_type=LogEventType.TOOL_CALL_END,
+                         status=EventStatus.PENDING, metadata={"event_role": "staging"})
         return self._format_create_result(new_todos)
 
 
 class TodoListTool(TodoTool):
     """Todo List Tool - Returns active (non-completed, non-cancelled) todo items."""
+
+    _todo_action = "list"
 
     def __init__(
         self,
@@ -443,6 +509,7 @@ class TodoListTool(TodoTool):
             workspace,
             lock_manager,
         )
+        self._allow_legacy_reads = True
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
@@ -491,10 +558,13 @@ class TodoListTool(TodoTool):
                 for t in active_tasks
             ]
             return {"tasks": simplified}
+        except BaseError:
+            raise
         except Exception as e:
             tool_logger.error(
                 "Todo list tool invocation failed",
                 event_type=LogEventType.TOOL_CALL_ERROR,
+                status=EventStatus.FAILURE,
                 exception=str(e)
             )
             raise build_error(
@@ -510,6 +580,8 @@ class TodoListTool(TodoTool):
 class TodoGetTool(TodoTool):
     """Todo Get Tool - Returns full details of a single task by ID."""
 
+    _todo_action = "get"
+
     def __init__(
         self,
         operation: SysOperation,
@@ -524,6 +596,7 @@ class TodoGetTool(TodoTool):
             workspace,
             lock_manager,
         )
+        self._allow_legacy_reads = True
 
     @todo_operation
     async def invoke(self, inputs: Input, **kwargs) -> Output:
@@ -551,10 +624,13 @@ class TodoGetTool(TodoTool):
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
                 reason=f"Task with id '{task_id}' not found"
             )
+        except BaseError:
+            raise
         except Exception as e:
             tool_logger.error(
                 "Todo get tool invocation failed",
                 event_type=LogEventType.TOOL_CALL_ERROR,
+                status=EventStatus.FAILURE,
                 exception=str(e)
             )
             raise build_error(
@@ -572,6 +648,8 @@ class TodoModifyTool(TodoTool):
 
     update/delete/cancel/append/insert_after/insert_before action operations todo items with session
     """
+
+    _todo_action = "modify"
 
     def __init__(
         self,
@@ -660,10 +738,13 @@ class TodoModifyTool(TodoTool):
                     reason=f"Invalid action: {action}"
                 )
             return results
+        except BaseError:
+            raise
         except Exception as e:
             tool_logger.error(
                 "Todo modify tool invocation failed",
                 event_type=LogEventType.TOOL_CALL_ERROR,
+                status=EventStatus.FAILURE,
                 exception=str(e)
             )
             raise build_error(
@@ -749,7 +830,10 @@ class TodoModifyTool(TodoTool):
         if in_progress_count > 1:
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="More than one task is marked as 'in_progress' (only one allowed)"
+                reason="More than one task is marked as 'in_progress' (only one allowed)",
+                details={"reason": "multiple_in_progress", "committed": False,
+                         "conflicting_ids": [todo.id for todo in visible_todos
+                                             if todo.status == TodoStatus.IN_PROGRESS]},
             )
 
     def _validate_single_todo_item(self, todo_data: Dict):
@@ -952,6 +1036,10 @@ def create_todos_tool(
 ) -> List[TodoTool]:
     """Create a set of todo tools that share the same lock manager.
 
+    The creator defaults to require_explicit_plan_action=False: an active plan
+    may be replaced. Hosts requiring explicit plan_action=new/rebuild must set
+    require_explicit_plan_action=True on the returned TodoCreateTool before
+    registration. The same-invoke recreation guard applies in either case.
 
     Args:
         operation: System operation for file system access.

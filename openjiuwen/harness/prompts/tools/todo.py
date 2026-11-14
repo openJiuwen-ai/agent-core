@@ -26,7 +26,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 - 第一个任务自动设为 in_progress，其余为 pending
 - 同一时间只能有一个 in_progress 任务
 - 任务描述必须具体、可执行、清晰明确
-- 活动计划默认不允许覆盖；追加/继续使用 todo_modify，明确新建或重建时传 plan_action=new/rebuild
+- 本工具用于创建或替换计划；宿主启用活动计划保护时，替换未完成计划须显式传 plan_action=new/rebuild；继续或追加请使用 todo_modify
 - 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID
 """
 
@@ -44,7 +44,8 @@ Input is a JSON array (each task must include an id field):
 - First task is automatically set to in_progress, others to pending
 - Only one task can be in_progress at a time
 - Task descriptions must be specific, actionable, and clear
-- An active plan is preserved by default; use todo_modify to append/continue, or explicitly pass plan_action=new/rebuild
+- Creates or replaces a plan. If the host protects active plans, explicitly pass plan_action=new/rebuild
+  to replace an unfinished plan. Use todo_modify to continue or append tasks.
 - When the currently available model information is not obtained, the selected_model_id field should not be added; otherwise, selected_model_id must be added to specify the model ID for executing the task.
 """
 
@@ -386,15 +387,16 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "plan_action": {"type": "string", "enum": ["new", "rebuild"],
-                            "description": "Explicitly start a new plan or rebuild; omit to preserve an active plan."},
+                            "description": "Explicitly start a new plan or rebuild when required by the host."},
             "tasks": {
                 "type": "array",
+                "minItems": 1,
                 "description": tasks_desc,
                 "items": {
                     "type": "object",
                     "properties": {
                         "id": item_props["id"],
-                        "content": item_props["content"],
+                        "content": {**item_props["content"], "minLength": 1},
                         "activeForm": item_props["activeForm"],
                         "description": item_props["description"],
                         "selected_model_id": item_props["selected_model_id"],
@@ -447,23 +449,28 @@ def get_todo_modify_input_params(language: str = "cn") -> Dict[str, Any]:
             },
             "ids": {
                 "type": "array",
+                "minItems": 1,
                 "description": _d("ids"),
-                "items": {"type": "string"},
+                "items": {"type": "string", "minLength": 1},
             },
             "todos": {
                 "type": "array",
-                "description": _d("todos"),
+                "description": _d("todos") + (
+                    " update: id plus changed fields; append: nonempty array, each item requires id/content/status."
+                ),
                 "items": todo_item_schema,
             },
             "todo_data": {
                 "type": "object",
                 "description": _d("todo_data"),
                 "properties": {
-                    "target_id": {"type": "string", "description": _d("todo_data_target_id")},
+                    "target_id": {"type": "string", "minLength": 1,
+                                  "description": _d("todo_data_target_id")},
                     "items": {
                         "type": "array",
+                        "minItems": 1,
                         "description": _d("todo_data_items"),
-                        "items": todo_item_schema,
+                        "items": {**todo_item_schema, "required": ["id", "content", "status"]},
                     },
                 },
                 "required": ["target_id", "items"],
