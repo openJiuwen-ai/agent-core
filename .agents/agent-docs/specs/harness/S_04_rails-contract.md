@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-10-27 |
+| 最近一次修订日期 | 2026-11-14 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
@@ -153,6 +153,25 @@ author_email: yangzequ1@huawei.com
       `after_tool_call`（带结果）；答复后的调用不再经过 `before_tool_call`。
     - 宿主可用 `pending_interrupts(state)` 列出暂停的中断，用 `match_answers(user_input, pending)`
       按处理器同一规则换算 `InteractiveInput` 并找出过期答复。
+15. **JiuwenMemoryRail 按逻辑轮次沉淀交互输入**：
+    - 以实际 `Session.get_session_id()` 隔离暂存，缺失时退到 `InvokeInputs.conversation_id`；
+      provider 的 `session_id=""` 仍表示跨会话共享，不作暂存键。无标识时普通轮次照常沉淀，
+      中断轮次不暂存。
+    - 保存用户原始请求；存在待处理中断时普通文本属于续接，追加而不覆盖原请求。
+      无待处理中断的新文本开启新轮次。已完成的 `ask_user` 回调只收集实际归属给
+      ASK_USER 的新回答；不收集权限批准、过期回答或 carried 回答。
+    - 明确中断、以及空流式结果且会话仍有中断状态时只暂存。正常结束后把原始请求、
+      补充文本和问答与最终回复提交一次 `sync_turn`，提交前取出暂存；执行异常、task 取消、错误结果
+      或无中断状态的空输出清理本次暂存，不沉淀。
+      宿主以普通答案文本表达的“取消问答”或“跳过”仍按已接受的问答传给抽取器，
+      不等于 task 取消；本 rail 不改写宿主的交互控制语义，也不保证抽取器总能排除这些标记。
+    - 用户侧聚合文本上限 16,000 字符（含截断标记）。超长原请求保留首尾；
+      加入问答需腾出空间时原请求最多占剩余预算的一半，补充按完整条目保留最近内容，
+      单条放不下则跳过。缓存最多 128 个会话、每轮最多记住最近 128 个回答标识，
+      30 分钟未活动的暂存于下一次前台调用时淘汰。后台心跳和 cron 不读写暂存；
+      熔断期间仍维护轮次，结束后清理，仅跳过提交。
+    - 暂存仅属于 rail 实例，不进入 checkpoint；`end_session()` 和 `uninit()` 清空该 rail
+      的暂存。既有超时、失败处理及 provider 接口不变，不承诺外部写入成功或重启续接。
 
 ## 接口契约
 
