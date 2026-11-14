@@ -181,6 +181,36 @@ async def test_read_file_image_resolver_failure_falls_back_to_init_flag(
     assert read_res.data["multimodal"][0]["type"] == "image"
 
 
+@pytest.mark.asyncio
+async def test_read_file_image_cpu_work_goes_through_to_thread(
+    sys_op, temp_dir, monkeypatch
+):
+    """PIL/shrink/base64 must leave the event loop via asyncio.to_thread."""
+
+    file_path = os.path.join(temp_dir, "offload_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    seen = {"to_thread": False}
+
+    async def _tracking_to_thread(func, /, *args, **kwargs):
+        seen["to_thread"] = True
+        return await asyncio.get_running_loop().run_in_executor(
+            None, lambda: func(*args, **kwargs)
+        )
+
+    monkeypatch.setattr(filesystem_module.asyncio, "to_thread", _tracking_to_thread)
+    read_tool = ReadFileTool(sys_op, enable_image_multimodal=True)
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    assert seen["to_thread"] is True
+    assert read_res.success is True
+    assert read_res.data["multimodal"][0]["type"] == "image"
+
+
 def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir):
     """Slide→layout→master inheritance：版式/母版上的图片要归属到使用它们的页。"""
     import zipfile as _zipfile
