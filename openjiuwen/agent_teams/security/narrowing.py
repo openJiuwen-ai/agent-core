@@ -12,8 +12,11 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
+    _baseline_level,
     _parse_level,
     strictest,
 )
@@ -37,6 +40,9 @@ def narrow_permissions(
 
     Args:
         base_config: Full permission config dict (as consumed by PermissionEngine).
+            Tool baselines support scalar levels and legacy dictionaries with
+            a valid string "*" level. Invalid explicit baselines are rejected;
+            only missing or None baselines use the existing defaults fallback.
         tools_override: Flat ``{tool_name: level_string}`` dict.
             Only ``"allow"`` / ``"ask"`` / ``"deny"`` are valid values.
 
@@ -52,7 +58,12 @@ def narrow_permissions(
         base_level_str = base_tools.get(tool_name)
 
         if base_level_str is not None:
-            base_level = _parse_level(base_level_str)
+            base_level, _ = _baseline_level(base_tools, tool_name)
+            if base_level is None:
+                raise_error(
+                    StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                    reason=f"Invalid base permission level for tool {tool_name}",
+                )
             narrowed_level = strictest(base_level, override_level)
         else:
             # Resolve effective base level from defaults.
