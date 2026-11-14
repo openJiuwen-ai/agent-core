@@ -761,7 +761,8 @@ class AgentConfigurator:
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
-                    "team_permissions_enabled": spec.enable_permissions,
+                    # This tool-only flag also retains replies to legacy member requests.
+                    "team_permissions_enabled": spec.enable_permissions or self._requires_legacy_approval(spec),
                 },
             ),
             RailSpec(
@@ -1113,6 +1114,31 @@ class AgentConfigurator:
             timezone_offset_hours=spec.memory.timezone_offset_hours,
         )
         return TeamMemoryManager(params)
+
+    @classmethod
+    def _requires_legacy_approval(cls, spec: TeamAgentSpec) -> bool:
+        """Derive reply capability from specs usable by coordinated members."""
+        candidates = [
+            cls.resolve_agent_spec(spec, member.role_type, member.member_name)
+            for member in spec.predefined_members
+            if member.role_type.is_coordinated_member
+        ]
+        if _resolve_team_mode(spec) != "predefined":
+            candidates.extend(cls.resolve_agent_spec(spec, role) for role in TeamRole if role.is_coordinated_member)
+            from openjiuwen.agent_teams.constants import RESERVED_MEMBER_NAMES
+            from openjiuwen.agent_teams.tools.tool_member import validate_member_name
+
+            reserved = RESERVED_MEMBER_NAMES | {spec.leader.member_name}
+            other_members = {
+                member.member_name for member in spec.predefined_members
+                if not member.role_type.is_coordinated_member
+            }
+            candidates.extend(
+                cls.resolve_agent_spec(spec, TeamRole.TEAMMATE, name)
+                for name in spec.agents
+                if name not in reserved and name not in other_members and validate_member_name(name) is None
+            )
+        return any(agent_spec.approval_required_tools for agent_spec in candidates)
 
     @staticmethod
     def resolve_agent_spec(

@@ -10,6 +10,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.stale_task import ScheduledStaleTaskHandler, StaleTaskHandler
+from openjiuwen.agent_teams.interaction.payload import DeliverResult
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.session import InteractiveInput
@@ -52,7 +53,7 @@ def mailbox_handler(messages, host=None):
     host = host or NS(
         has_pending_interrupt=lambda: True,
         has_in_flight_round=lambda: False,
-        resume_interrupt=AsyncMock(),
+        resume_interrupt=AsyncMock(return_value=DeliverResult.success()),
         deliver_input=AsyncMock(),
     )
     mailbox = Mailbox(messages)
@@ -96,6 +97,32 @@ async def test_only_one_approval_is_submitted_per_drain():
     await handler._process_unread_messages("worker")
     host.resume_interrupt.assert_awaited_once()
     assert mailbox.read == ["1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["interrupt_resume_busy", "interrupt_resume_unavailable", "gate_closed", "not_active"],
+)
+async def test_actual_non_admission_keeps_durable_reply_unread(reason):
+    handler, mailbox, host = mailbox_handler([mail("1", approval=True), mail("2", approval=True)])
+    host.resume_interrupt.return_value = DeliverResult.failure(reason)
+    await handler._process_unread_messages("worker")
+    assert mailbox.read == []
+    host.resume_interrupt.assert_awaited_once()
+    host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stale_receipt_terminates_control_row_then_admits_next_valid_reply():
+    handler, mailbox, host = mailbox_handler([mail("1", approval=True), mail("2", approval=True)])
+    host.resume_interrupt.side_effect = [
+        DeliverResult.failure("unsupported_interactive_input"), DeliverResult.success(),
+    ]
+    await handler._process_unread_messages("worker")
+    assert mailbox.read == ["1", "2"]
+    assert host.resume_interrupt.await_count == 2
+    host.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -181,14 +208,14 @@ async def test_stale_control_mail_is_consumed_without_becoming_a_query():
     host = NS(
         has_pending_interrupt=lambda: False,
         has_in_flight_round=lambda: False,
-        resume_interrupt=AsyncMock(),
+        resume_interrupt=AsyncMock(return_value=DeliverResult.failure("unsupported_interactive_input")),
         deliver_input=AsyncMock(),
     )
     handler, mailbox, _ = mailbox_handler([mail("1", approval=True)], host)
     await handler._process_unread_messages("worker")
     assert mailbox.read == ["1"]
     host.deliver_input.assert_not_awaited()
-    host.resume_interrupt.assert_not_awaited()
+    host.resume_interrupt.assert_awaited_once()
 
 
 @pytest.mark.asyncio

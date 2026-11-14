@@ -126,20 +126,23 @@ def test_task_and_message_managers_are_stored():
 
 
 @pytest.mark.level1
-def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
+@pytest.mark.parametrize("approval_key", ["teammate", "worker"])
+def test_teammate_registers_tool_approval_rail_from_deep_agent_spec(approval_key):
     """Configured teammate approval tools should attach TeamToolApprovalRail."""
     leader = TeamAgentSpec(
         agents={
             "leader": DeepAgentSpec(),
-            "teammate": DeepAgentSpec(approval_required_tools=["send_message"]),
+            approval_key: DeepAgentSpec(approval_required_tools=["send_message"]),
         },
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
     ).build()
+    assert "approve_tool" in _tool_names(leader)
+    member_name = "worker" if approval_key == "worker" else "dev-1"
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
-        member_id="dev-1",
-        name="Dev",
+        member_name=member_name,
+        display_name="Dev",
         desc="dev",
         team_spec=leader._configurator.ctx.team_spec,
         messager_config=leader._configurator.ctx.messager_config,
@@ -147,7 +150,7 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     )
     card = leader.card.model_copy(
         update={
-            "id": "dev-1",
+            "id": member_name,
             "name": "Dev",
             "description": "Teammate: dev",
         }
@@ -157,3 +160,74 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
 
     rail_names = {type(r).__name__ for r in teammate.harness.inner_agent._pending_rails}
     assert "TeamToolApprovalRail" in rail_names
+
+
+@pytest.mark.parametrize("key, expected", [
+    ("teammate", True), ("external_cli", True), ("named-worker", True),
+    ("human_agent", False), ("passive_human", False), ("worker", True), ("bridge_agent", False),
+])
+def test_legacy_reply_capability_uses_only_coordinated_specs(key, expected):
+    from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec(), key: DeepAgentSpec(
+        approval_required_tools=["send_message"]
+    )})
+    assert AgentConfigurator._requires_legacy_approval(spec) is expected
+    assert spec.enable_permissions is False
+
+
+@pytest.mark.parametrize("coordinated", [False, True])
+def test_predefined_roster_limits_legacy_reply_capability(coordinated):
+    from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+    from openjiuwen.agent_teams.schema.team import TeamMemberSpec
+
+    role = TeamRole.TEAMMATE if coordinated else TeamRole.PASSIVE_HUMAN
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec(approval_required_tools=["send_message"])},
+        team_mode="predefined",
+        predefined_members=[TeamMemberSpec(member_name="member", display_name="Member", role_type=role)],
+    )
+    assert AgentConfigurator._requires_legacy_approval(spec) is coordinated
+
+
+@pytest.mark.parametrize("source", ["teammate", "external_cli", "leader", "named-worker"])
+def test_public_legacy_team_retains_leader_reply_without_enabling_permissions(source):
+    spec = TeamAgentSpec(
+        agents={**_dummy_agents(), source: DeepAgentSpec(approval_required_tools=["send_message"])},
+        team_name="legacy-replies",
+        teammate_mode="build_mode",
+        enable_permissions=False,
+        transport=_PYZMQ_TRANSPORT,
+    )
+    leader = spec.build()
+    assert "approve_tool" in _tool_names(leader)
+    assert spec.enable_permissions is False
+
+
+def test_default_build_mode_does_not_gain_legacy_reply_tool():
+    spec = TeamAgentSpec(agents=_dummy_agents(), teammate_mode="build_mode", transport=_PYZMQ_TRANSPORT)
+    assert "approve_tool" not in _tool_names(spec.build())
+
+
+@pytest.mark.parametrize("name", ["team_leader", "user", "custom-leader", "invalid.name"])
+def test_non_member_names_cannot_grant_legacy_reply_capability(name):
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec(), "teammate": DeepAgentSpec(),
+                name: DeepAgentSpec(approval_required_tools=["send_message"])},
+        leader=LeaderSpec(member_name="custom-leader" if name == "custom-leader" else "team_leader"),
+        teammate_mode="build_mode",
+        transport=_PYZMQ_TRANSPORT,
+    )
+    assert "approve_tool" not in _tool_names(spec.build())
+
+
+def test_worker_only_spec_in_fixed_roster_does_not_grant_reply_tool():
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec(), "worker": DeepAgentSpec(approval_required_tools=["send_message"])},
+        team_mode="predefined",
+        teammate_mode="build_mode",
+        transport=_PYZMQ_TRANSPORT,
+    )
+    assert "approve_tool" not in _tool_names(spec.build())

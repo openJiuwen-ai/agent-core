@@ -93,7 +93,7 @@ class TeamToolInput(ConstructionInput):
     team_name: str = param_field(default="default", description="Team name.")
     team_permissions_enabled: bool = param_field(
         default=False,
-        description="Team permission toggle (enable_permissions from TeamAgentSpec).",
+        description="Keep Leader approval replies for team permissions or legacy member requests.",
     )
 
 
