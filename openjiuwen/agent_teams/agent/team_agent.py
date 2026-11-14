@@ -39,7 +39,7 @@ from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+from openjiuwen.agent_teams.interaction.payload import DeliverResult, GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
@@ -55,7 +55,7 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
@@ -69,7 +69,7 @@ from openjiuwen.harness.execution_subject import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
-    from openjiuwen.agent_teams.interaction.payload import DeliverResult, InteractPayload
+    from openjiuwen.agent_teams.interaction.payload import InteractPayload
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
@@ -171,6 +171,17 @@ def team_reviewer_execution_subject(
 
 
 # pylint: disable=too-many-public-methods
+
+
+def _interrupt_runtime_unavailable(exc: BaseError) -> bool:
+    """Return whether a resume failed because the runtime cannot accept it yet."""
+    params = getattr(exc, "params", None)
+    error_msg = str(params.get("error_msg") or "") if isinstance(params, dict) else ""
+    if exc.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR and "before start" in error_msg:
+        return True
+    return exc.status == StatusCode.DEEPAGENT_RUNTIME_ERROR and (
+        "already stopped" in error_msg or "not started" in error_msg
+    )
 
 
 class TeamAgent(BaseAgent):
@@ -658,6 +669,14 @@ class TeamAgent(BaseAgent):
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
+    def owns_pending_interrupt_answer(self, user_input: Any) -> bool:
+        """Return whether this member's pending interrupt fully matches the answer.
+
+        The check only chooses which existing ``resume_interrupt`` to call.
+        Admission is still decided by that call's ``DeliverResult``.
+        """
+        return self._stream_controller.is_valid_interrupt_resume(user_input)
+
     async def start_agent(self, content: str) -> None:
         await self._start_agent(content)
 
@@ -743,18 +762,51 @@ class TeamAgent(BaseAgent):
         user_input: Any,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        if not self._stream_controller.is_valid_interrupt_resume(user_input):
-            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
-            return
-        # The supervisor serialises the resume: send() either starts the resume
-        # round (idle) or steers it into the active one — no pending queue.
+    ) -> DeliverResult:
+        """Report actual answer admission, not completion of the resumed tool."""
+        from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
         harness = self.harness
-        if harness is not None:
+        if harness is None:
+            return DeliverResult.failure("interrupt_resume_unavailable")
+        if isinstance(harness, TeamHarness):
+            try:
+                await harness._resume_interrupt(user_input, run_context=run_context)
+            except BaseError as exc:
+                details = exc.details
+                admission_reasons = {
+                    "interrupt_resume_busy",
+                    "interrupt_resume_unavailable",
+                    "unsupported_interactive_input",
+                }
+                if (
+                    exc.status == StatusCode.DEEPAGENT_RUNTIME_ERROR
+                    and isinstance(details, dict)
+                    and details.get("operation") == "interrupt_admission"
+                    and details.get("reason") in admission_reasons
+                ):
+                    return DeliverResult.failure(details["reason"])
+                if _interrupt_runtime_unavailable(exc):
+                    return DeliverResult.failure("interrupt_resume_unavailable")
+                raise
+        else:
+            # External providers retain their own matching and running-input semantics.
+            if not self._stream_controller.is_valid_interrupt_resume(user_input):
+                return DeliverResult.failure("unsupported_interactive_input")
             if run_context is None:
                 await harness.send(user_input)
             else:
                 await harness.send(user_input, run_context=run_context)
+        return DeliverResult.success()
+
+    async def _resume_plan_interrupt(self, user_input: Any) -> None:
+        """Preserve plan-event delivery, which has no durable approval-mail retry."""
+        if not self._stream_controller.is_valid_interrupt_resume(user_input):
+            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
+            return
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure

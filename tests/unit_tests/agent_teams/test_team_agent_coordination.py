@@ -1172,25 +1172,21 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_resume_interrupt_forwards_to_runtime_send():
-    """A valid interrupt resume is forwarded to the runtime via send.
-
-    The single-supervisor runtime serialises the resume — starting the resume
-    round when idle, or steering it into the active one — so there is no
-    controller-side pending queue. The controller only validates the resume
-    against the pending interrupt and forwards it.
-    """
+async def test_resume_interrupt_forwards_to_native_admission():
+    """The Native adapter, not a caller-side pending snapshot, admits answers."""
     agent = _make_leader()
-    # Make the resume validate against a pending interrupt.
-    agent._stream_controller.is_valid_interrupt_resume = lambda _: True
+    agent._stream_controller.is_valid_interrupt_resume = lambda _: False
     agent._configurator.harness.send = AsyncMock()
+    agent._configurator.harness._resume_interrupt = AsyncMock(return_value=1)
 
     interactive_input = InteractiveInput()
     interactive_input.update("call-1", {"approved": True, "feedback": "ok", "auto_confirm": False})
 
-    await agent.resume_interrupt(interactive_input)
+    result = await agent.resume_interrupt(interactive_input)
 
-    agent._configurator.harness.send.assert_awaited_once_with(interactive_input)
+    assert result.ok
+    agent._configurator.harness._resume_interrupt.assert_awaited_once_with(interactive_input, run_context=None)
+    agent._configurator.harness.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

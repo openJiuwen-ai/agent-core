@@ -46,6 +46,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
+from openjiuwen.agent_teams.interaction.payload import DeliverResult
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -121,8 +122,12 @@ class AgentRoundController(Protocol):
         user_input: Any,
         *,
         run_context: RunContext | None = None,
-    ) -> None:
-        """Resume a pending HITL interrupt with structured input."""
+    ) -> DeliverResult:
+        """Return whether a structured interrupt answer was actually admitted."""
+        ...
+
+    async def _resume_plan_interrupt(self, user_input: Any) -> None:
+        """Deliver an internal plan response using its existing runtime contract."""
         ...
 
 

@@ -390,6 +390,17 @@ class TeamHarness:
             run_context=run_context,
         )
 
+    async def _resume_interrupt(
+        self, content: Any, *, run_context: RunContext | None = None,
+    ) -> Any:
+        """Forward Team-directed answers without falling back to ordinary send."""
+        if self._native is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg="TeamHarness interrupt resume before start().",
+            )
+        return await self._native._resume_interrupt(content, run_context=run_context)
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).
 
