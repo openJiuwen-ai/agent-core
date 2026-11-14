@@ -419,11 +419,12 @@ class TTSERecordStore:
             "retired": [dict(record) for record in self.retired],
         }
 
-    async def save(self) -> None:
+    async def save(self, *, strict: bool = False) -> None:
+        """Persist atomically; strict callers require a successful write."""
         async with self._persist_lock:
             self._cancel_inject_timer()
             payload = self._bank_snapshot()
-            await asyncio.to_thread(self._save_blocking, payload)
+            await asyncio.to_thread(self._save_blocking, payload, strict=strict)
 
     async def flush_inject_metadata(self) -> bool:
         """Persist dirty consult-inject clocks if any.
@@ -467,7 +468,7 @@ class TTSERecordStore:
         except RuntimeError:
             pass
 
-    def _save_blocking(self, data: Optional[Dict[str, Any]] = None) -> None:
+    def _save_blocking(self, data: Optional[Dict[str, Any]] = None, *, strict: bool = False) -> None:
         path = self._config.store_path
         if not path:
             return
@@ -486,13 +487,15 @@ class TTSERecordStore:
             self._inject_unsaved_hits = 0
             self._last_persist_mono = time.monotonic()
         except (OSError, TypeError, ValueError) as exc:
-            # json.dump raises TypeError/ValueError for non-JSON values; persist
-            # is best-effort so induction/dream must not crash on a bad record.
+            # Ordinary writes remain best-effort. Dream must not acknowledge
+            # an uncommitted bank, including serialization failures.
             logger.warning("[TTSERail] bank save failed at %s: %s", path, exc)
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+            if strict:
+                raise
 
     def _capture_inject_clocks(self) -> Dict[Tuple[str, str], Tuple[Any, int]]:
         """Map ``(rtype, normalized text)`` to ``(last_injected_at, inject_hits)``."""

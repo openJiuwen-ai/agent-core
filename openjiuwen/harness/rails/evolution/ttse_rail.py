@@ -842,7 +842,7 @@ class TTSERail(EvolutionRail):
             self._ttse_config.resolved_dream_state_path(),
             interval,
         )
-        self._dream_non_followup_count = 0 if reached else count
+        self._dream_non_followup_count = count
         logger.info(
             "[TTSERail] dream session count=%s/%s session_id=%s",
             count,
@@ -911,8 +911,8 @@ class TTSERail(EvolutionRail):
                 len(names),
                 self._ttse_store.stats(),
             )
-            state = load_dream_state(self._ttse_config.resolved_dream_state_path())
             async with self._evolution_lock:
+                state = load_dream_state(self._ttse_config.resolved_dream_state_path())
                 self._ttse_store.reload_if_disk_newer()
                 result, _ = await run_dream_pass(
                     self._ttse_store,
@@ -924,6 +924,7 @@ class TTSERail(EvolutionRail):
                     state=state,
                 )
                 if not result.skipped:
+                    self._dream_non_followup_count = 0
                     # Dream MERGE/REWRITE inherits the cluster category; only
                     # reclassify bank rules that still lack a closed-set id.
                     need_classify = [
