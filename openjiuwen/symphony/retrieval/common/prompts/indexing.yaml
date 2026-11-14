@@ -149,7 +149,8 @@ equivalence_grouping: |-
 
   Aim for at most {max_groups} candidate groups, but prioritize recall over that soft target. A candidate group may
   be broad when several leaves plausibly share a core capability, because this is not yet the final grouping.
-  Every provided leaf id must appear in at least one candidate group.
+  Every provided leaf ref must appear in at least one candidate group. Copy the short ref exactly; never use a
+  leaf name, skill id, translated label, or newly invented value in its place.
 
   Respond as JSON:
   {
@@ -159,7 +160,7 @@ equivalence_grouping: |-
         "description": "What these leaves have in common for routing.",
         "select_when": "Route here when ...",
         "dont_select_when": "Do not route here when ...",
-        "leaf_ids": ["leaf-a", "leaf-b"]
+        "leaf_refs": ["l0001", "l0002"]
       }
     }
   }

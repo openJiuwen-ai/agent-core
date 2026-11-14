@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 from openjiuwen.symphony.orchestration.planning.beam import (
     BidirectionalBeamPlanner,
@@ -65,6 +67,12 @@ class _FakeBeamLLM:
     @property
     def rerank_calls(self):
         return [call for call in self.calls if "candidate_plans" in json.loads(call["user_content"])]
+
+
+class _FrameworkFailingBeamLLM:
+    async def invoke(self, messages, **kwargs):
+        del messages, kwargs
+        raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg="model unavailable")
 
 
 @pytest.mark.asyncio
@@ -459,6 +467,25 @@ async def test_beam_final_rerank_malformed_response_falls_back(tmp_path):
     assert _plan_signatures(result) == {("skill-a", "skill-b")}
     assert result["decision"]["final_rerank"]["applied"] is False
     assert result["decision"]["final_rerank"]["error"] == "Final rerank returned non-object JSON."
+
+
+@pytest.mark.asyncio
+async def test_beam_propagates_framework_model_failure(tmp_path):
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[_edge("skill-a", "skill-b", confidence=0.91)],
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        await _planner(
+            artifacts,
+            _FrameworkFailingBeamLLM(),
+            top_k=1,
+            max_depth=2,
+            candidate_skill_ids=["skill-a"],
+        ).plan("compose a plan")
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
 
 
 @pytest.mark.asyncio

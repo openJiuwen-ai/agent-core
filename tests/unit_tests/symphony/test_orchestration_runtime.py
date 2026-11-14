@@ -176,6 +176,30 @@ async def test_service_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) ->
 
 
 @pytest.mark.asyncio
+async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp_path: Path) -> None:
+    llm = _FakeLLM()
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=llm,
+        config=OrchestrationConfig(mode="fast"),
+    )
+    await service.build()
+
+    await service.plan("extract and summarize", language="en")
+
+    planning_call = next(
+        call
+        for call in llm.calls
+        if set(json.loads(call["messages"][-1]["content"])) == {"query", "skills", "can_feed_edges"}
+    )
+    system_prompt = planning_call["messages"][0]["content"]
+    assert "Prioritize low latency" in system_prompt
+    assert "minimum internal reasoning" in system_prompt
+    assert planning_call["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
 async def test_artifact_status_read_schema_and_atomic_failed_build(tmp_path: Path) -> None:
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
