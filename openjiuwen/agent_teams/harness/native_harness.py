@@ -85,6 +85,7 @@ from openjiuwen.agent_teams.harness.state import (
     HarnessState,
     InboxMessage,
     SafeStateSnapshot,
+    SystemText,
 )
 
 if TYPE_CHECKING:
@@ -118,6 +119,35 @@ def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
     if isinstance(query, list):
         return "\n".join(query)
     return None
+
+
+def _is_user_direct_text(content: Any) -> bool:
+    """用户直接输入的纯文本——区别于系统注入。
+
+    判定优先级：
+    1. ``SystemText`` 显式标记（异步工具完成/spawn 摘要/重试重驱）→ 系统；
+    2. 非 str（``DeferredInput``/``GodViewMessage`` 等类型化输入）→ 系统；
+    3. ``<team-event`` 包装（看板事件）→ 系统；
+    4. ``<team-inbound`` 包装按发件人分化（``inbound_render.render_inbound``
+       的信封）：``from="user"``（用户经邮箱直发）→ 用户，其余 → 系统；
+    5. 其余裸 str → 用户。
+    """
+    if isinstance(content, SystemText):
+        return False
+    if not isinstance(content, str):
+        return False
+    head = content.lstrip()[:160]
+    if head.startswith("<team-event"):
+        return False
+    if head.startswith("<team-inbound"):
+        # 属性在前 ~160 字符内必现（render_inbound 的信头顺序
+        # from/message_id/type/time，from 为首个属性）
+        from_idx = head.find('from="')
+        if from_idx >= 0:
+            value = head[from_idx + 6: head.find('"', from_idx + 6)]
+            return value == "user"
+        return False
+    return True
 
 
 class NativeHarness(DeepAgent):
@@ -248,6 +278,16 @@ class NativeHarness(DeepAgent):
         summary the leader has already produced. None until the first round.
         """
         return self._st.last_round_started_ms
+
+    @property
+    def paused_at_idle(self) -> bool:
+        """PM-72：pause 落定在 IDLE（无在跑回合、挂起中断待答）的显式标记。
+
+        kernel 的 pending_resume 冷恢复标记据此区分「无回合可续」（跳过
+        resume 等用户输入）与「II 起轮的暂停回合」（同样空 query 但应照常
+        续跑）。
+        """
+        return self._st.paused_at_idle
 
     @property
     def paused_query(self) -> str | None:
@@ -672,7 +712,7 @@ class NativeHarness(DeepAgent):
             return
 
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        msg = InboxMessage(seq=0, content=query, immediate=False)
+        msg = InboxMessage(seq=0, content=SystemText(query), immediate=False)
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         try:
             await ack
@@ -696,8 +736,12 @@ class NativeHarness(DeepAgent):
         return self._async_tool_runtime
 
     async def _inject_async_completion(self, text: str) -> None:
-        """Feed an async tool's completion text back as a non-immediate send."""
-        await self.send(text, immediate=False)
+        """Feed an async tool's completion text back as a non-immediate send.
+
+        包 SystemText 显式标记：挂起工具中断期间该注入与用户直接文本同形
+        （裸 str），准入闸据此推迟而非误当 resume 答复。
+        """
+        await self.send(SystemText(text), immediate=False)
 
     def launch_async_tool(
         self,
@@ -856,6 +900,21 @@ class NativeHarness(DeepAgent):
             logger.warning("[NativeHarness] pending-interrupt probe failed: %s", exc)
             return False
 
+    def _should_defer_during_pending_interrupt(self, content: Any) -> bool:
+        """挂起工具中断待答期间的准入判定（_on_send 的 IDLE/PAUSED 分支共用）。
+
+        defer（返回 True）当且仅当：有挂起中断 ∧ 输入非 InteractiveInput
+        ∧ 输入非用户直接文本。用户直接文本放行——invoke 层把它当 resume
+        答复回填恢复；系统注入（SystemText / DeferredInput /
+        GodViewMessage / <team-event> / 非 user 发件的 <team-inbound>）
+        推迟到回合收尾 drain。
+        """
+        if isinstance(content, InteractiveInput):
+            return False
+        if not self._has_pending_tool_interrupt():
+            return False
+        return not _is_user_direct_text(content)
+
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
@@ -865,11 +924,10 @@ class NativeHarness(DeepAgent):
         # 开轮：其余输入（看板 nudge/成员消息/godview）若直开新轮，invoke
         # 入口会无条件清 INTERRUPTION_KEY 并把该输入当 resume 答复喂给挂起
         # 工具（react_agent._inner_invoke -> _handle_resume
-        if (
-            phase is HarnessState.IDLE
-            and not isinstance(content, InteractiveInput)
-            and self._has_pending_tool_interrupt()
-        ):
+        # 用户直接文本（str 且非 <team-inbound>/<team-event> 系统
+        # 包装）不在此列——它本就该被当 resume 答复（「用 Vue」=回答、
+        # 「不用问了按默认做」=带意图的回答），放行开轮即回填恢复。
+        if phase in (HarnessState.IDLE, HarnessState.PAUSED) and self._should_defer_during_pending_interrupt(content):
             if self.loop_controller is not None:
                 self.loop_controller.enqueue_follow_up(content)
                 logger.info(
@@ -934,6 +992,18 @@ class NativeHarness(DeepAgent):
                 # cannot be steered into a continuation.
                 self._st.paused_query = None
                 active = self._start_round(msg.content)
+            elif self._st.paused_at_idle:
+                # pause 落定在 IDLE（无在跑回合）——无回合可续，用户
+                # 文本直接开新轮；invoke 层 _handle_resume 会把它作为挂起
+                # 中断的答复消解（续轮+steer 会把空 query 当答复）。读显式
+                # 标记而非 paused_query 为空——II 起轮的暂停回合同样空
+                # paused_query，但应走下方续轮+steer。
+                self._st.paused_query = None
+                active = self._start_round(msg.content)
+                logger.debug(
+                    "[NativeHarness] fresh round from paused-at-IDLE: round_id=%s",
+                    active.round_id,
+                )
             else:
                 # Warm resume + inject: continue the paused round in place and
                 # steer the new content into it (the inner loop drains steering
@@ -1022,6 +1092,26 @@ class NativeHarness(DeepAgent):
         """
         phase = self._st.phase
         if phase is not HarnessState.RUNNING:
+            if (
+                phase is HarnessState.IDLE
+                and self._st.active is None
+                and self._has_pending_tool_interrupt()
+            ):
+                # 挂起工具中断待答的 IDLE——pause 落定 PAUSED，
+                # 否则「团队已暂停」回执与内部状态割裂，且 kernel 的
+                # pending_resume 冷恢复标记（认 PAUSED）写不下来。
+                # paused_query 留空 + paused_at_idle 显式置位：无在跑回合
+                # 可续，恢复由用户下一条输入驱动（_on_resume/_on_send 读
+                # 本标记，不起空轮——不能用 paused_query 为空代理：
+                # InteractiveInput 起轮的回合经正常 pause 后 paused_query
+                # 同样为空）。
+                self._st.paused_query = ""
+                self._st.paused_at_idle = True
+                await self._transition(HarnessState.PAUSED)
+                logger.info(
+                    "[NativeHarness] pause settled at IDLE with pending "
+                    "tool interrupt"
+                )
             # PAUSING: a cooperative pause is already in flight. PAUSED / IDLE /
             # TERMINATED: nothing to pause.
             self._ack(cmd.ack, None)
@@ -1040,6 +1130,7 @@ class NativeHarness(DeepAgent):
         # An InteractiveInput resume payload is single-round and not replayable,
         # so it is not cached.
         self._st.paused_query = _query_text(active.original_query)
+        self._st.paused_at_idle = False
 
         # Arm the cooperative stop first — it is the correctness authority; the
         # hard-cancel below is only a promptness optimisation.
@@ -1080,6 +1171,16 @@ class NativeHarness(DeepAgent):
         """
         phase = self._st.phase
         if phase is HarnessState.PAUSED:
+            if self._st.paused_at_idle:
+                # pause 落定在 IDLE（无在跑回合）——续轮会把空串当挂起中断
+                # 的答复喂给工具（_handle_resume）。留在 PAUSED 等用户输入
+                #（_on_send 的 PAUSED 分支）。
+                logger.info(
+                    "[NativeHarness] resume skipped: paused at IDLE, "
+                    "awaiting user input"
+                )
+                self._ack(cmd.ack, None)
+                return
             query = self._st.paused_query or ""
         elif phase is HarnessState.IDLE and cmd.query is not None:
             query = cmd.query
@@ -1335,6 +1436,9 @@ class NativeHarness(DeepAgent):
         # 供 all-done 渲染的时间戳见证抑制。渲染发生在 drain/_on_send 的
         # 本轮起跑之前，读到的一定是「上一轮」的戳，语义天然正确。
         self._st.last_round_started_ms = int(time.time() * 1000)
+        # 任何新轮起跑即脱离 paused-at-IDLE 态（标记只在无在跑回合
+        # 的 PAUSED 窗口内有意义）。
+        self._st.paused_at_idle = False
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
 
