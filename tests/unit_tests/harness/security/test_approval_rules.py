@@ -220,12 +220,25 @@ def test_merge_skips_when_current_permission_is_not_ask() -> None:
     assert merged.get("approval_overrides") in (None, [])
 
 
-def test_merge_shell_without_safe_suggestion_is_not_applied() -> None:
+def test_merge_shell_without_command_is_not_applied() -> None:
+    cfg = {"enabled": True, "tools": {"bash": "ask"}}
+    merged, applied = merge_permission_allow_rule_into_permissions(
+        cfg,
+        "bash",
+        {},
+    )
+    assert applied is False
+    assert merged.get("approval_overrides") in (None, [])
+
+
+def test_merge_shell_redirect_suggestion_is_applied() -> None:
+    """User remember is not blocked by structure; redirect still gets a suggestion."""
     cfg = {"enabled": True, "tools": {"bash": "ask"}}
     merged, applied = merge_permission_allow_rule_into_permissions(
         cfg,
         "bash",
         {"command": "git status > /tmp/out"},
     )
-    assert applied is False
-    assert merged.get("approval_overrides") in (None, [])
+    assert applied is True
+    overrides = merged.get("approval_overrides") or []
+    assert any("git status > /tmp/out" in str(item.get("pattern", "")) for item in overrides)

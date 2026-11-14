@@ -86,28 +86,14 @@ def build_shell_permission_suggestions(
     *,
     shell_ast_result: ShellAstParseResult | None = None,
 ) -> list[PermissionSuggestion]:
+    """Build always-allow proposals from a shell command.
+
+    Core does not suppress suggestions based on shell structure: after
+    agent_shield decides ASK and the user chooses remember, remember proceeds.
+    """
     shell_ast_result = shell_ast_result or parse_shell_for_permission(command)
-    flags = shell_ast_result.flags
 
-    if shell_ast_result.kind == "too_complex":
-        return []
-    if shell_ast_result.kind == "parse_unavailable" and flags.has_risky_structure():
-        return []
-    if any(
-        (
-            flags.has_input_redirection,
-            flags.has_output_redirection,
-            flags.has_command_substitution,
-            flags.has_process_substitution,
-            flags.has_heredoc,
-            flags.has_subshell,
-            flags.has_command_group,
-            flags.has_parameter_expansion,
-        )
-    ):
-        return []
-
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) > 1:
+    if shell_ast_result.kind == "ok" and len(shell_ast_result.subcommands) > 1:
         suggestions: list[PermissionSuggestion] = []
         for subcommand in shell_ast_result.subcommands:
             suggestion = _build_single_shell_suggestion(tool_name, subcommand.text)
@@ -115,7 +101,7 @@ def build_shell_permission_suggestions(
                 suggestions.append(suggestion)
         return _dedupe_suggestions(suggestions)
 
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) == 1:
+    if shell_ast_result.kind == "ok" and len(shell_ast_result.subcommands) == 1:
         suggestion = _build_single_shell_suggestion(tool_name, shell_ast_result.subcommands[0].text)
         return [suggestion] if suggestion is not None else []
 
