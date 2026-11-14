@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.harness.state import SystemText
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.reliability.anomaly import Anomaly, Severity
 from openjiuwen.agent_teams.reliability.detectors.pingpong import PingPongDetector
@@ -84,11 +85,13 @@ class ReliabilityHandler(BaseCoordinationHandler):
 
     async def _route(self, severity: Severity, summary: str) -> None:
         """Deliver a report or escalation into the leader's own loop."""
+        # SystemText 显式标记：挂起工具中断期间本注入与用户直接文本同形
+        # （裸 str），准入闸据此推迟而非误当 resume 答复。
         actions = self._policy.actions_for(severity)
         if RemediationAction.ESCALATE_USER in actions:
-            await self._round.deliver_input(t("reliability.escalate_user", summary=summary))
+            await self._round.deliver_input(SystemText(t("reliability.escalate_user", summary=summary)))
         elif RemediationAction.REPORT_LEADER in actions:
-            await self._round.deliver_input(t("reliability.report_leader", summary=summary))
+            await self._round.deliver_input(SystemText(t("reliability.report_leader", summary=summary)))
 
     async def handle_local_anomaly(self, anomaly: Anomaly) -> None:
         """Route a leader-local anomaly straight into the leader loop.
