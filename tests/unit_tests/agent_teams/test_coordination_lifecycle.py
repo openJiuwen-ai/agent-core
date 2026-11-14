@@ -234,7 +234,10 @@ async def test_pause_persists_pending_resume_for_a_later_cold_start():
 
     await kernel.pause()
 
-    assert read_pending_resume(session, "test-team") == {"query": "the original task"}
+    assert read_pending_resume(session, "test-team") == {
+        "query": "the original task",
+        "paused_at_idle": False,
+    }
 
 
 @pytest.mark.asyncio

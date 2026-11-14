@@ -234,13 +234,20 @@ class MessageHandler(BaseCoordinationHandler):
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
                             await self._round.resume_interrupt(approval_data)
                             continue
-                        team_logger.info(
-                            "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                            member_name,
-                            msg.message_id,
-                        )
-                        interrupted = True
-                        break
+                        if msg.from_member_name == "user":
+                            # 用户经邮箱直发的文本是「用户直接
+                            # 输入」——挂起中断下应放行投递（下游 harness 闸按
+                            # from="user" 判别放行开轮回填），不是系统注入。
+                            # 不置 interrupted、不中断本批投递。
+                            pass
+                        else:
+                            team_logger.info(
+                                "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                                member_name,
+                                msg.message_id,
+                            )
+                            interrupted = True
+                            break
                     expanded = await self._expand(msg)
                     if is_bridge:
                         text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
