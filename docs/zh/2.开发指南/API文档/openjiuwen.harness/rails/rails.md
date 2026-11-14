@@ -25,6 +25,7 @@ class DeepAgentRail(AgentRail): ...
 | `TaskCompletionRail` | 任务完成护栏，构建 `StopConditionEvaluator` 链，决定外层任务循环何时停止 |
 | `ContextEvolutionRail` | 任务记忆护栏，在迭代后总结轨迹并写入长期记忆 |
 | `MemoryRail` | 记忆护栏，管理工作区内的记忆读写和日常记忆归档 |
+| `JiuwenMemoryRail` | 对接宿主提供的外部记忆 provider，将中断前的请求与交互回答合并后沉淀 |
 | `SubagentRail` | 子智能体护栏，通过 `enable_async_subagent` 参数区分同步/异步模式；同步模式注册 `TaskTool`，异步模式注册 `session` 工具|
 | `SkillUseRail` | 技能使用护栏，在模型调用前注入可用技能列表到提示词；不生成、不审批、不持久化演进记录 |
 | `SkillEvolutionRail` | 普通技能演进护栏，从轨迹或用户请求中生成已有普通 skill 的经验记录，并可在审批后通过 `EvolutionStore` 持久化；主动 review 通过 Rail 自有的 `evolve_review_task` 运行 |
@@ -53,6 +54,17 @@ Rails 的回调根据事件类型自动路由：
 | `BEFORE_TOOL_CALL`、`AFTER_TOOL_CALL`、`ON_TOOL_EXCEPTION` | 内层 ReActAgent |
 | `BEFORE_INVOKE`、`AFTER_INVOKE` | 外层 DeepAgent |
 | `BEFORE_TASK_ITERATION`、`AFTER_TASK_ITERATION` | 外层 DeepAgent |
+
+## 交互式对话的外部记忆
+
+`JiuwenMemoryRail` 与 `AskUserRail` 一起挂载时，将原始请求、用户补充和已接受的提问回答
+作为一个逻辑轮次，在最终回复后提交一次 `sync_turn`。连续中断期间只暂存；恢复调用需沿用
+同一个 Session 或 `conversation_id`。普通新任务不会继承已结束轮次的材料。
+
+暂存用户文本最多 16,000 字符，超限保留原请求首尾和最近能放入的完整问答，并标记截断。
+每个 rail 最多缓存 128 个会话；30 分钟未活动的记录在后续前台调用中淘汰。
+暂存不持久化，rail 重建、进程重启或调用 `end_session()` 后无法续接此前未完成轮次。
+记忆服务的抽取、超时和失败处理仍由既有 provider 链路负责。
 
 ## 在线 Skill 演进
 
