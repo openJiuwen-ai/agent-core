@@ -1008,6 +1008,21 @@ async def _render_delivery(agent) -> str:
     return content
 
 
+def _stub_no_reports_in_flight(agent) -> None:
+    """Quiet the all-done in-flight-report gate: no unread messages,
+    no member rows — the gate passes. Tests exercising the gate itself
+    override these stubs."""
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.has_unread_messages = AsyncMock(return_value=False)
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.db.member.get_team_members = AsyncMock(return_value=[])
+    agent._configurator.team_backend = backend
+    # 运行时起点锚归零：测试里任务行的固定时间戳（2023）一律先于真实 init
+    # 时刻，不归零会被「上生命周期旧板」闸误压。测旧板闸本身的用例外溢。
+    agent._coordination.dispatcher.task_board._runtime_started_ms = 0
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
@@ -2148,12 +2163,7 @@ def _stub_inprogress_sweep(
         tasks: list,
         sender_activity: dict | None = None,
 ) -> None:
-    """Wire the stale-inprogress sweep's infra: sweep probe + task list.
-
-    PM-77 D1/D2 后 sweep 的输入经 ``TeamDatabase.fetch_stale_sweep_probe``
-    单连接探针（miss）或 ``task_manager.list_tasks``（witness 缓存 hit）——
-    探针直接桩在内存 db 实例上；list_tasks 桩保留给缓存命中路径。
-    """
+    """Wire the stale-inprogress sweep's infra: sweep probe + task list."""
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=list(tasks))
     agent._configurator.message_manager = MagicMock()
@@ -3482,9 +3492,9 @@ async def test_task_completed_nudges_leader_with_all_done_when_idle():
     completed_task.content = "Done"
     completed_task.status = "completed"
     completed_task.assignee = "member-5"
-    # PM-69 方案A：完成时刻必须新于上一轮起跑，否则按回声抑制。
+    # 渲染锚（从未渲染过）+ 运行时起点锚（stub 归零）双通过即放行。
     completed_task.updated_at = 1_700_000_100_000
-    agent.last_round_started_ms = lambda: 1_700_000_000_000
+    _stub_no_reports_in_flight(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed_task])
@@ -3525,9 +3535,9 @@ async def test_task_completed_nudges_leader_via_steer_when_busy():
     completed_task.content = "Done"
     completed_task.status = "completed"
     completed_task.assignee = "member-5"
-    # 完成时刻必须新于上一轮起跑，否则按回声抑制。
+    # 渲染锚（从未渲染过）+ 运行时起点锚（stub 归零）双通过即放行。
     completed_task.updated_at = 1_700_000_100_000
-    agent.last_round_started_ms = lambda: 1_700_000_000_000
+    _stub_no_reports_in_flight(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed_task])
@@ -3833,7 +3843,7 @@ async def test_leader_nudged_on_task_updated_despite_filter():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_board_nudge_renders_current_state_at_drain_time():
-    """PM-64 regression: a board queued while tasks were incomplete renders
+    """regression: a board queued while tasks were incomplete renders
     as the all-done prompt when everything completed before the drain — the
     leader never reads a survey that went stale inside its own long round."""
     agent = _make_leader(lifecycle="persistent")
@@ -3851,8 +3861,7 @@ async def test_board_nudge_renders_current_state_at_drain_time():
     completed.status = "completed"
     completed.assignee = "dev-1"
     completed.updated_at = 1_700_000_100_000
-    # PM-69 方案A：完成时刻新于上一轮起跑 → 放行渲染。
-    agent.last_round_started_ms = lambda: 1_700_000_000_000
+    _stub_no_reports_in_flight(agent)
 
     agent._configurator.task_manager = MagicMock()
     # Event-time state (pre-deferral this was what got rendered)…
@@ -3879,11 +3888,12 @@ async def test_board_nudge_renders_current_state_at_drain_time():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_all_done_suppressed_when_completions_predate_last_round():
-    """Echo guard: every terminal transition is older than the last round
-    start, so the previous round already saw the full completion picture
-    (and per leader_policy summarized it) — re-rendering all-done would only
-    produce an echo summary that steals the result slot."""
+async def test_all_done_suppressed_when_completions_predate_last_render():
+    """Echo guard (re-anchored): suppression keys on the last all-done
+    RENDER time, not the last round start. A report round that merely saw the
+    completion (thin ack per the division of labor) must NOT suppress the
+    summary; once an all-done render has fired for a board generation, further
+    events for the same generation are echoes."""
     agent = _make_leader(lifecycle="persistent")
     completed = MagicMock()
     completed.task_id = "task-old"
@@ -3892,8 +3902,7 @@ async def test_all_done_suppressed_when_completions_predate_last_round():
     completed.status = "completed"
     completed.assignee = "dev-1"
     completed.updated_at = 1_700_000_000_000
-    # 上一轮起跑晚于完成时刻 → 上轮已见证全部完成 → 抑制
-    agent.last_round_started_ms = lambda: 1_700_000_100_000
+    _stub_no_reports_in_flight(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
@@ -3905,20 +3914,31 @@ async def test_all_done_suppressed_when_completions_predate_last_round():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
+    # First render: the completion predates the last round start, but no
+    # all-done has been rendered yet — it MUST fire (a report round seeing
+    # the completion is no longer a summary under the division of labor).
     agent.deliver_input.assert_awaited_once()
     deferred = agent.deliver_input.await_args.args[0]
     assert isinstance(deferred, DeferredInput)
-    assert await deferred.renderer() is None
+    content = await deferred.renderer()
+    assert content is not None
+    assert "完成" in content or "complete" in content.lower()
+
+    # Second event for the same board generation (no newer terminal
+    # transition): suppressed as an echo of the already-rendered summary.
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+    deferred2 = agent.deliver_input.await_args.args[0]
+    assert isinstance(deferred2, DeferredInput)
+    assert await deferred2.renderer() is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_all_done_suppressed_on_fresh_runtime_with_stale_board():
-    """Resume guard: a leader runtime that has run zero rounds
-    (last_round_started_ms=None — pause/resume, recover) must not re-announce
-    an all-terminal board left over from a previous lifetime; that is exactly
-    the resume echo of an already-delivered summary. Undelivered result
-    reports still arrive via the startup mailbox sweep."""
+    """Resume guard (re-anchored): a rebuilt runtime must not re-announce
+    an all-terminal board whose latest transition predates the runtime's own
+    start — that is the resume echo of an already-delivered summary.
+    Undelivered result reports still arrive via the startup mailbox sweep."""
     agent = _make_leader(lifecycle="persistent")
     completed = MagicMock()
     completed.task_id = "task-stale"
@@ -3927,7 +3947,8 @@ async def test_all_done_suppressed_on_fresh_runtime_with_stale_board():
     completed.status = "completed"
     completed.assignee = "dev-1"
     completed.updated_at = 1_700_000_100_000
-    # 不 shadow last_round_started_ms：无 harness 的 leader 真实返回 None。
+    # 不 shadow 运行时起点锚：handler 真实 init 时刻（now）晚于 2023 的
+    # 任务时间戳 → 命中「上生命周期旧板」抑制。
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
@@ -3943,6 +3964,44 @@ async def test_all_done_suppressed_on_fresh_runtime_with_stale_board():
     deferred = agent.deliver_input.await_args.args[0]
     assert isinstance(deferred, DeferredInput)
     assert await deferred.renderer() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_all_done_fires_for_this_lifetime_completion_on_fresh_runtime():
+    """Termination audit: a recovered runtime whose leader has
+    run ZERO rounds must still summarize work that completed during THIS
+    lifetime (members finishing after recover) — the old zero-rounds
+    suppression would have swallowed it, and thin report rounds never
+    summarize under the division of labor."""
+    from openjiuwen.agent_teams.tools.database.engine import get_current_time
+
+    agent = _make_leader(lifecycle="persistent")
+    completed = MagicMock()
+    completed.task_id = "task-new"
+    completed.title = "Recovered work"
+    completed.content = "Done"
+    completed.status = "completed"
+    completed.assignee = "dev-1"
+    # 完成时刻新于 handler init（本运行时起点）→ 本生命周期的成果 → 必须放行
+    completed.updated_at = get_current_time() + 10_000
+    _stub_no_reports_in_flight(agent)
+    # 锚归零只是放宽旧板闸；本用例的完成时间戳晚于真实 init，无需归零。
+    agent._coordination.dispatcher.task_board._runtime_started_ms = get_current_time()
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-new")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = await _render_delivery(agent)
+    assert "完成" in content or "complete" in content.lower()
 
 
 @pytest.mark.asyncio
@@ -3988,8 +4047,8 @@ async def test_all_done_renders_when_completion_newer_than_last_round():
     fresh.status = "completed"
     fresh.assignee = "dev-2"
     fresh.updated_at = 1_700_000_200_000
-    # 上一轮起跑夹在两次完成之间 → 最新完成未被见证 → 放行
-    agent.last_round_started_ms = lambda: 1_700_000_100_000
+    # 从未渲染过 all-done → 本生命周期首次完成 → 放行
+    _stub_no_reports_in_flight(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[old, fresh])
@@ -4003,6 +4062,208 @@ async def test_all_done_renders_when_completion_newer_than_last_round():
 
     agent.deliver_input.assert_awaited_once()
     content = await _render_delivery(agent)
+    assert "完成" in content or "complete" in content.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_all_done_fires_again_for_new_completion_generation():
+    """The render anchor re-arms per generation: a newer terminal transition
+    after the last all-done render must fire again (next task batch), while
+    same-generation events stay suppressed."""
+    agent = _make_leader(lifecycle="persistent")
+    # 任务时间戳用真实时刻的相对值：渲染锚=本代 sig（最新 updated_at），
+    # 第二代的 updated_at 必须严格更新才会再放行。
+    from openjiuwen.agent_teams.tools.database.engine import get_current_time
+
+    now = get_current_time()
+    first = MagicMock()
+    first.task_id = "task-1"
+    first.title = "Batch one"
+    first.content = "Done"
+    first.status = "completed"
+    first.assignee = "dev-1"
+    first.updated_at = now - 10_000
+    second = MagicMock()
+    second.task_id = "task-2"
+    second.title = "Batch two"
+    second.content = "Done"
+    second.status = "completed"
+    second.assignee = "dev-2"
+    second.updated_at = now + 10_000
+    _stub_no_reports_in_flight(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[first])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    async def fire(task_id: str):
+        event = EventMessage.from_event(
+            TaskCompletedEvent(team_name="test-team", task_id=task_id)
+        )
+        await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+        deferred = agent.deliver_input.await_args.args[0]
+        assert isinstance(deferred, DeferredInput)
+        return await deferred.renderer()
+
+    # Generation 1 renders…
+    assert await fire("task-1") is not None
+    # …same generation echoes are suppressed…
+    assert await fire("task-1") is None
+    # …and a newer completion re-arms the all-done render.
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[first, second])
+    assert await fire("task-2") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_all_done_defers_while_report_unread_then_fires(monkeypatch):
+    """In-flight-report gate (R9 timer): an unread direct message defers
+    the render WITHOUT an immediate re-queue (on an idle leader that would
+    fail-open within microseconds); the bounded retry re-delivers the
+    board after the window, and with the report read by then it renders."""
+    from openjiuwen.agent_teams.agent.coordination.handlers import task_board as tb_mod
+
+    monkeypatch.setattr(tb_mod, "_ALL_DONE_DEFER_RETRY_SECONDS", 0.0)
+    agent = _make_leader(lifecycle="persistent")
+    completed = MagicMock()
+    completed.task_id = "task-1"
+    completed.title = "Done task"
+    completed.content = "Done"
+    completed.status = "completed"
+    completed.assignee = "dev-1"
+    completed.updated_at = 1_700_000_100_000
+
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.has_unread_messages = AsyncMock(return_value=True)
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.db.member.get_team_members = AsyncMock(return_value=[])
+    agent._configurator.team_backend = backend
+    agent._coordination.dispatcher.task_board._runtime_started_ms = 0
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-1")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    # First render defers: no all-done text, NO immediate re-queue — a
+    # bounded retry timer is scheduled instead (an immediate re-queue would
+    # fail-open within microseconds on an idle leader).
+    handler = agent._coordination.dispatcher.task_board
+    deferred = agent.deliver_input.await_args_list[0].args[0]
+    assert await deferred.renderer() is None
+    assert agent.deliver_input.await_count == 1
+    assert handler._all_done_defer_retry_task is not None
+
+    # Report consumed before the retry fires → the retried board renders.
+    agent._configurator.message_manager.has_unread_messages = AsyncMock(return_value=False)
+    await handler._all_done_defer_retry_task
+    assert agent.deliver_input.await_count == 2
+    requeued = agent.deliver_input.await_args.args[0]
+    assert isinstance(requeued, DeferredInput)
+    content = await requeued.renderer()
+    assert content is not None
+    assert "完成" in content or "complete" in content.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_all_done_defer_fail_open_on_retry_with_report_still_in_flight(monkeypatch):
+    """The defer bound: if the report is STILL in flight when the bounded
+    retry re-renders (dead member's letter, stuck RUNNING), the retry
+    fires anyway — a stuck gate must never swallow the summary forever."""
+    from openjiuwen.agent_teams.agent.coordination.handlers import task_board as tb_mod
+
+    monkeypatch.setattr(tb_mod, "_ALL_DONE_DEFER_RETRY_SECONDS", 0.0)
+    agent = _make_leader(lifecycle="persistent")
+    completed = MagicMock()
+    completed.task_id = "task-1"
+    completed.title = "Done task"
+    completed.content = "Done"
+    completed.status = "completed"
+    completed.assignee = "dev-1"
+    completed.updated_at = 1_700_000_100_000
+
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.has_unread_messages = AsyncMock(return_value=True)
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.db.member.get_team_members = AsyncMock(return_value=[])
+    agent._configurator.team_backend = backend
+    agent._coordination.dispatcher.task_board._runtime_started_ms = 0
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-1")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    handler = agent._coordination.dispatcher.task_board
+    deferred = agent.deliver_input.await_args_list[0].args[0]
+    assert await deferred.renderer() is None  # first render defers
+    await handler._all_done_defer_retry_task  # retry window elapses
+    requeued = agent.deliver_input.await_args.args[0]
+    # Same board generation, still unread → fail-open: render anyway.
+    content = await requeued.renderer()
+    assert content is not None
+    assert "完成" in content or "complete" in content.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_all_done_defers_while_member_running(monkeypatch):
+    """The member leg of the gate: a member still RUNNING (e.g. writing its
+    report after completing the task) defers the render even with no unread
+    messages; once it goes idle, the bounded-retry redelivery renders."""
+    from openjiuwen.agent_teams.agent.coordination.handlers import task_board as tb_mod
+
+    monkeypatch.setattr(tb_mod, "_ALL_DONE_DEFER_RETRY_SECONDS", 0.0)
+    agent = _make_leader(lifecycle="persistent")
+    completed = MagicMock()
+    completed.task_id = "task-1"
+    completed.title = "Done task"
+    completed.content = "Done"
+    completed.status = "completed"
+    completed.assignee = "dev-1"
+    completed.updated_at = 1_700_000_100_000
+    _stub_no_reports_in_flight(agent)
+
+    busy_member = MagicMock()
+    busy_member.member_name = "dev-1"
+    busy_member.execution_status = "running"
+    agent._configurator.team_backend.db.member.get_team_members = AsyncMock(
+        return_value=[busy_member]
+    )
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-1")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    handler = agent._coordination.dispatcher.task_board
+    deferred = agent.deliver_input.await_args_list[0].args[0]
+    assert await deferred.renderer() is None
+    assert handler._all_done_defer_retry_task is not None
+
+    busy_member.execution_status = "idle"
+    await handler._all_done_defer_retry_task
+    requeued = agent.deliver_input.await_args.args[0]
+    assert isinstance(requeued, DeferredInput)
+    content = await requeued.renderer()
+    assert content is not None
     assert "完成" in content or "complete" in content.lower()
 
 

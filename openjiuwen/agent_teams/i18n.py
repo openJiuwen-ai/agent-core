@@ -172,9 +172,22 @@ STRINGS: dict[str, dict[str, str]] = {
             "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
         ),
         # agent/dispatcher.py — idle-agent nudges
-        "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
+        "dispatcher.all_done_persistent": (
+            "所有任务已完成。请输出本轮工作的**最终呈现**——这是面向用户的完整答复："
+            "用户看不到团队内部过程，只读这段答复就要能完整理解结果。"
+            "要求：复述关键结果（各任务终态与原因、成员结论要点、重要发现）；"
+            "交付文件给路径加一两句摘要（路径不能替代摘要）；"
+            "用户问题有多个部分时逐条回应、无法解决的明确标记；"
+            "失败与异常如实说明，不得只说「已完成」；聚合提炼，禁止原文倾倒。"
+            "若你刚才的答复已经完整交付了本轮成果，把那份完整答复原样重发一遍作为最终答复"
+            "（早前内容会被折叠，重复不可见）。"
+            "团队继续保持运行，等待新的任务指令。"
+        ),
         "dispatcher.all_done_temporary": (
-            "所有任务已完成。请汇总团队工作成果，"
+            "所有任务已完成。请输出本轮工作的**最终呈现**——面向用户的完整答复："
+            "复述关键结果（各任务终态与原因、成员结论要点）；交付文件给路径加一两句摘要；"
+            "用户问题有多个部分时逐条回应；失败与异常如实说明；聚合提炼，禁止原文倾倒。"
+            "若你刚才的答复已经完整交付了本轮成果，把那份完整答复原样重发一遍作为最终答复。"
             "然后依次调用 shutdown_member 关闭所有成员，"
             "等待所有成员状态转为 shutdown 后，"
             "调用 clean_team 解散团队。"
@@ -464,12 +477,30 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
-            "All tasks are complete. Please summarize this round's results. "
+            "All tasks are complete. Produce the **final presentation** of this "
+            "round's work — the complete answer to the user: they cannot see "
+            "the team's inner process, so this answer alone must let them "
+            "fully understand the outcome. Requirements: restate key results "
+            "(each task's terminal state and why, members' key conclusions, "
+            "important findings); give artifact paths with a one- or "
+            "two-sentence summary (a path is not a substitute for a summary); "
+            "answer every part of a multi-part question, marking anything "
+            "unresolved; report failures and anomalies honestly, never just "
+            "say \"done\"; synthesize and distill — never dump raw reports. "
+            "If your reply just now already delivered this round's results in "
+            "full, re-send that complete answer verbatim as the final answer "
+            "(earlier rounds are collapsed, so repetition is invisible). "
             "The team remains running and awaits new task instructions."
         ),
         "dispatcher.all_done_temporary": (
-            "All tasks are complete. Summarize the team's work, "
-            "then call shutdown_member for each member in turn, "
+            "All tasks are complete. Produce the **final presentation** — the "
+            "complete user-facing answer: restate key results (each task's "
+            "terminal state and why, members' key conclusions); give artifact "
+            "paths with a one- or two-sentence summary; answer every part of a "
+            "multi-part question; report failures honestly; synthesize, never "
+            "dump raw reports. If you already delivered the results in full, "
+            "re-send that complete answer verbatim as the final answer. "
+            "Then call shutdown_member for each member in turn, "
             "wait until all members reach status shutdown, "
             "and finally call clean_team to disband the team."
         ),
