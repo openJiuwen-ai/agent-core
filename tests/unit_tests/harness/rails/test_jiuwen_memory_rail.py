@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """单元测试：JiuwenMemoryRail。
 
-契约依据（与 ``ExternalMemoryRail`` 的 4 处差异 + 原样继承的生命周期行为）：
+契约依据（基础装配差异与生命周期行为；交互恢复另见 test_jiuwen_memory_interrupts.py）：
 ``agent-memory:jiuwen_memory_adapter/jiuwenswarm/jiuwen_memory_rail_design.md`` §6.1。
 mock 风格对齐同目录 ``test_external_memory_rail.py``。
 """
@@ -18,7 +18,7 @@ import pytest
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
-from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail
+from openjiuwen.harness.rails.memory.jiuwen_memory_rail import JiuwenMemoryRail, _MemoryTurn
 
 
 class MockInputs:
@@ -172,7 +172,9 @@ class TestInitUninit:
         assert card.id == "jiuwen_memory_memory_search"
         assert agent.system_prompt_builder.added_sections, "provider 提示词段应注入"
 
+        rail._memory_turns["pending"] = _MemoryTurn("未结束的请求")
         rail.uninit(agent)
+        assert rail._memory_turns == {}
         assert agent.ability_manager.names() == set()
         assert agent.system_prompt_builder.removed_sections
         assert provider.shutdown_called
