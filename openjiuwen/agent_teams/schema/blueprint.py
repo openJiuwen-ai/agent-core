@@ -42,6 +42,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    ExternalCliMemberSpec,
     MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
@@ -146,7 +147,7 @@ class StorageSpec(BaseModel):
 # does the dispatch when both arms declare the discriminator as ``Literal``
 # (already wired in ``schema/team.py``).
 PredefinedMemberSpec = Annotated[
-    Union[BridgeMemberSpec, TeamMemberSpec],
+    Union[BridgeMemberSpec, ExternalCliMemberSpec, TeamMemberSpec],
     Field(discriminator="role_type"),
 ]
 
@@ -509,6 +510,13 @@ class TeamAgentSpec(BaseModel):
     (a spectator) which narrates it to the user. False (default) hides the
     tool. Workers reuse the leader's model; no separate worker spec is required
     for the MVP. See ``openjiuwen/agent_teams/workflow``.
+    """
+    progressive_tool: bool = False
+    """Opt swarmflow worker avatars into progressive tool exposure.
+
+    True writes ``ProgressiveToolSpec(enabled=True)`` into the worker base spec
+    so each worker mounts the harness ``ProgressiveToolRail``. Only meaningful
+    when ``enable_swarmflow`` is True; ignored otherwise.
     """
     swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
     """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""

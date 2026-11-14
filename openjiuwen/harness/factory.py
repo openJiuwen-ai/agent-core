@@ -43,6 +43,7 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.subagent_runtime.binding import runtime_rail_required
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
@@ -208,6 +209,7 @@ def _inject_general_purpose_subagent(
         workspace=workspace,
         sys_operation=sys_operation,
         restrict_to_work_dir=False,
+        can_delegate=True,
     ))
     return effective_subagents
 
@@ -309,14 +311,6 @@ def resolve_deep_agent_parts(
     resolved_language = resolve_language(language)
     vision_tools_enabled = is_vision_model_config_complete(vision_model_config)
 
-    # Vision tools only take over in auto mode (None). An explicit
-    # enable_read_image_multimodal=True means the main model is confirmed
-    # image-capable and must keep native inline despite vision tools.
-    if enable_read_image_multimodal is None and vision_tools_enabled:
-        effective_enable_read_image_multimodal = False
-    else:
-        effective_enable_read_image_multimodal = enable_read_image_multimodal
-
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
     elif isinstance(workspace, (str, PathLike)):
@@ -405,7 +399,12 @@ def resolve_deep_agent_parts(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
-        enable_read_image_multimodal=effective_enable_read_image_multimodal,
+        # Keep the auto state (None) intact so rails/_multimodal.py stays the
+        # only decision point: explicit flag > per-model supports_vision
+        # declaration > vision tools. Freezing auto to False here would discard
+        # a declared image-capable main model whenever vision tools are also
+        # configured; an undeclared model still falls back to metadata-only.
+        enable_read_image_multimodal=enable_read_image_multimodal,
         max_image_bytes_per_request=max_image_bytes_per_request,
         max_images_per_request=max_images_per_request,
         enable_async_subagent=enable_async_subagent,
@@ -476,7 +475,7 @@ def resolve_deep_agent_parts(
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SubagentRail, bool(effective_subagents),
+        (SubagentRail, runtime_rail_required(enable_subagent_runtime, bool(effective_subagents)),
          lambda: SubagentRail(
              enable_async_subagent=enable_async_subagent,
              enable_subagent_runtime=enable_subagent_runtime,
@@ -617,7 +616,8 @@ def create_deep_agent(
             configuration injected into all audio
             tools registered by DeepAgent rails.
         enable_read_image_multimodal: Controls read_file native image attachment.
-            None (default): probe the agent model once during lazy init.
+            None (default): use the model entry's ``supports_vision`` declaration
+            when present, otherwise probe the agent model once during lazy init.
             True: always attach image bytes as multimodal input.
             False: return image metadata only and suggest vision tools.
         enable_task_planning: Enable task_planning_rail.

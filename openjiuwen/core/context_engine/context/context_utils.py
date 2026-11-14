@@ -82,6 +82,7 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # DeepSeek
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
+    "deepseek-v4-flash-0731": 1048576,
     "deepseek-v4.1-flash-1017": 1048576,
     "deepseek-v4.1-flash": 1048576,
     "deepseek-v3.2": 163840,
@@ -141,6 +142,7 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "qwen-long": 1000000,
     # Moonshot Kimi
     "kimi-k3": 1048576,
+    "kimi-k3.1-pro-highspeed": 1048576,
     "kimi-k2.7-code": 262144,
     "kimi-k2.6": 262144,
     "kimi-k2.5": 262144,

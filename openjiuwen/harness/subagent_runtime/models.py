@@ -129,6 +129,9 @@ class SubagentMetadata:
     updated_at_ms: float = 0.0
     closed_at_ms: float | None = None
     create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
+    parent_id: str = ""
+    depth: int = 1
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,9 @@ class SubagentMetadataBuildParams:
     role: str
     task_description: str
     create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
+    parent_id: str = ""
+    depth: int = 1
+    kind: str = ""
 
     def to_metadata(self, *, parent_session_id: str) -> SubagentMetadata:
         now_mono = time.monotonic()
@@ -159,6 +165,9 @@ class SubagentMetadataBuildParams:
             created_at_ms=now_ms,
             updated_at_ms=now_ms,
             create_options=self.create_options,
+            parent_id=self.parent_id,
+            depth=self.depth,
+            kind=self.kind or self.subagent_type,
         )
 
 
@@ -226,6 +235,9 @@ class SubagentRecord:
     closed_at_ms: float | None = None
     closed_reason: str | None = None
     create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
+    parent_id: str = ""
+    depth: int = 1
+    kind: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -238,6 +250,9 @@ class SubagentRecord:
             "updated_at_ms": self.updated_at_ms,
             "closed_at_ms": self.closed_at_ms,
             "closed_reason": self.closed_reason,
+            "parent_id": self.parent_id,
+            "depth": self.depth,
+            "kind": self.kind,
         }
         create_options = self.create_options.to_dict()
         if create_options:
@@ -257,6 +272,15 @@ class SubagentRecord:
             closed_at_ms=_optional_float(raw.get("closed_at_ms")),
             closed_reason=_optional_str(raw.get("closed_reason")),
             create_options=SubagentCreateOptions.from_dict(raw.get("create_options")),
+            parent_id=str(raw.get("parent_id") or ""),
+            depth=int(raw.get("depth") or 1),
+            kind=(
+                str(raw.get("kind"))
+                if raw.get("kind")
+                else str(raw.get("subagent_type") or "")
+                if "kind" not in raw
+                else ""
+            ),
         )
 
     @property

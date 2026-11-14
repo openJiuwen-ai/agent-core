@@ -1,0 +1,165 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Model config loading helpers for member optimization agents."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
+
+
+def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
+    """RSI disables reasoning irrespective of model selection's frontend settings."""
+    data = deepcopy(config_data)
+    model = data.get("model", data)
+    if not isinstance(model, dict):
+        return data
+    request = model.setdefault("model_request_config", {})
+    if request is None:
+        request = model["model_request_config"] = {}
+    if not isinstance(request, dict):
+        return data
+    # Remove conflicting wire controls; Core maps the neutral policy to each provider.
+    keys = ("reasoning", "reasoning_effort", "thinking", "enable_thinking",
+            "thinking_budget", "thinking_strategy", "reasoning_level")
+    for values in (request, request.get("extra_body")):
+        if not isinstance(values, dict):
+            continue
+        for key in keys:
+            values.pop(key, None)
+        template = values.get("chat_template_kwargs")
+        if isinstance(template, dict):
+            template["enable_thinking"] = False
+    # Stable clients accept provider wire options, not the new neutral reasoning schema.
+    client = model.get("model_client_config", {})
+    endpoint = str(client.get("api_base", "")).lower()
+    model_name = str(request.get("model", request.get("model_name", ""))).lower()
+    if "deepseek" in endpoint or model_name.startswith("deepseek"):
+        request.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
+    elif "dashscope" in endpoint or model_name.startswith("qwen"):
+        request.setdefault("extra_body", {})["enable_thinking"] = False
+    template = request.pop("chat_template_kwargs", None)
+    if isinstance(template, dict):
+        extra = request.setdefault("extra_body", {})
+        if isinstance(extra, dict):
+            extra["chat_template_kwargs"] = template
+    return data
+
+
+def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
+    """Copy RSI configuration while preserving explicitly configured output limits.
+
+    A missing or None limit remains provider-controlled; RSI must not erase a
+    configured max_tokens or max_completion_tokens, including extra_body.
+    """
+    data = deepcopy(config_data)
+    model_data = data.get("model", data)
+    if isinstance(model_data, dict) and isinstance(model_data.get("model_request_config"), dict):
+        model_data["model_request_config"] = rsi_output_options(model_data["model_request_config"])
+    return data
+
+
+def rsi_output_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Preserve explicit token limits and omit None controls on the wire."""
+    data = dict(options)
+    for values in (data, data.get("extra_body")):
+        if not isinstance(values, dict):
+            continue
+        if values is not data:
+            values = data["extra_body"] = dict(values)
+        for key in ("max_tokens", "max_completion_tokens"):
+            if key in values and values[key] is None:
+                values.pop(key)
+    return data
+
+
+def load_model_config_ref(model_config_ref: str) -> dict[str, Any]:
+    """Load a YAML/JSON model config and expand ``${VAR}`` placeholders."""
+    path = Path(model_config_ref).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"model_config_ref not found: {model_config_ref}")
+    with open(path, encoding="utf-8") as file:
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            data = yaml.safe_load(file) or {}
+        else:
+            data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"model_config_ref must decode to a mapping: {path}")
+    return with_rsi_reasoning_policy(with_rsi_output_budget(_expand_env_vars(data)))
+
+
+def build_deep_agent_from_model_config(config_data: dict[str, Any]) -> Any:
+    """Build a DeepAgent from a loaded member-optimizer model config."""
+    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.schema.config import DeepAgentConfig
+    from openjiuwen.harness.workspace.workspace import Workspace
+    from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
+
+    config_data = with_rsi_reasoning_policy(with_rsi_output_budget(config_data))
+    model = None
+    if "model" in config_data:
+        built = TeamModelConfig.model_validate(without_inner_sdk_retries(config_data["model"])).build()
+        model = BudgetedRsiModel(model_client_config=built.model_client_config, model_config=built.model_config)
+
+    workspace = Workspace(root_path="./", language="en")
+    if "workspace" in config_data and isinstance(config_data["workspace"], dict):
+        workspace_config = config_data["workspace"]
+        workspace = Workspace(
+            root_path=workspace_config.get("root_path", "./"),
+            language=workspace_config.get("language", "en"),
+        )
+
+    return DeepAgent(
+        config=DeepAgentConfig(
+            model=model,
+            workspace=workspace,
+        ),
+    )
+
+
+def without_inner_sdk_retries(config_data: dict[str, Any]) -> dict[str, Any]:
+    """Return a model config copy with SDK-level retries disabled.
+
+    Auto coordinating harness owns its retry budget through
+    ``run_model_call_with_retries``. Letting the OpenAI-compatible SDK retry
+    internally makes a single visible attempt block for many timeout windows, so
+    ACH-loaded model configs always enter the lower client with
+    ``max_retries=0``.
+    """
+    data = deepcopy(config_data)
+    if not isinstance(data, dict):
+        return data
+
+    _disable_client_retries(data)
+    model_data = data.get("model")
+    if isinstance(model_data, dict):
+        _disable_client_retries(model_data)
+    return data
+
+
+def _disable_client_retries(model_data: dict[str, Any]) -> None:
+    client_data = model_data.get("model_client_config")
+    if isinstance(client_data, dict):
+        client_data["max_retries"] = 0
+
+
+def _expand_env_vars(value: Any) -> Any:
+    if isinstance(value, str):
+        return _ENV_VAR_RE.sub(
+            lambda match: os.environ.get(match.group(1), match.group(0)),
+            value,
+        )
+    if isinstance(value, dict):
+        return {key: _expand_env_vars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value

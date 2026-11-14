@@ -2,16 +2,21 @@
 
 """PermissionInterruptRail - tool permission guardrail using ConfirmInterruptRail.
 
-Implements permission checks via PermissionEngine and triggers HITL interrupts
+Implements permission checks via the agent_shield permission manager and triggers HITL interrupts
 for ASK decisions using the built-in interrupt rail flow.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import weakref
 from copy import deepcopy
-
+from pathlib import Path
 from typing import Any, Iterable, Optional, cast
+
+from agent_shield.tool_permission import get_permission_manager
+
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import (
@@ -23,9 +28,6 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
     ConfirmPayload,
 )
-
-from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.host import (
     PermissionConfirmationRequest,
     PermissionSceneHookInput,
@@ -35,14 +37,18 @@ from openjiuwen.harness.security.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
-from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
 )
+from openjiuwen.harness.security.permission_key import DEFAULT_KEY
+from openjiuwen.harness.security.permission_checks import fail_closed_permission_callback
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
+_MISSING = object()
+_PERMISSION_WARNINGS_PREFIX = "_permission_warnings:"
 
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -132,45 +138,236 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def __init__(
         self,
         config: Optional[PermissionsSection | dict[str, Any]] = None,
-        engine: Optional[PermissionEngine] = None,
         tool_names: Optional[Iterable[str]] = None,
         llm: Any = None,
         model_name: str | None = None,
         host: ToolPermissionHost | None = None,
+        permission_key: str | None = None,
     ) -> None:
+        """Create the rail and register ``config`` under ``permission_key``.
+
+        Lifecycle is Agent-scoped on this rail instance: construct (or
+        :meth:`update_config`) publishes to the permission manager.  The first
+        :meth:`init` records the owning Agent (parent runs before inherited
+        subagents); :meth:`uninit` releases only when that owner drops the
+        rail.  Pass ``config`` whenever the rail is first created with a real
+        policy; omit it only in tests that stub the manager.
+        """
         super().__init__(tool_names=tool_names)
-        self._static_config = cast(dict[str, Any], config or {})
+        if permission_key is not None and (not isinstance(permission_key, str) or not permission_key.strip()):
+            raise ValueError("permission_key must be a non-empty string")
         self._host = host or ToolPermissionHost()
-        if engine is not None:
-            self._engine = engine
-        else:
-            workspace_root = None
-            if self._host.resolve_workspace_dir is not None:
-                try:
-                    workspace_root = self._host.resolve_workspace_dir()
-                except Exception:
-                    logger.debug(
-                        "[PermissionEngine] permission.rail.workspace_resolve_failed",
-                        exc_info=True,
-                    )
-            trusted_dirs = []
-            self._engine = PermissionEngine(
-                config=self._static_config,
-                llm=llm,
-                model_name=model_name,
-                workspace_root=workspace_root,
-                trusted_dirs=trusted_dirs,
-            )
-        if self._host.tool_permission_checks_active is not None:
-            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
+        self._key = permission_key if permission_key is not None else DEFAULT_KEY
+        self._registration_released = False
+        self._owner_ref: weakref.ref[Any] | None = None
+        # Local mirror of the last published policy (incl. ``runtime``); hosts and
+        # Flash fingerprint / suspend paths still read ``_static_config``.
+        self._static_config: dict[str, Any] = {}
+        if config is not None:
+            self.update_config(config)
         logger.info(
-            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s "
-            "tools_keys=%s llm_enabled=%s model_name=%s",
+            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s key=%s registered=%s",
             sorted(self._tool_names),
-            list((self._static_config.get("tools") or {}).keys()),
-            self._engine._llm is not None,
-            self._engine._model_name,
+            self._key,
+            config is not None,
         )
+
+    @property
+    def permission_key(self) -> str:
+        """The key of the permission config this rail decides with."""
+        return self._key
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the published policy currently enables permission checks."""
+        return bool(self._static_config.get("enabled", False))
+
+    def update_config(
+        self,
+        config: PermissionsSection | dict[str, Any],
+        tool_names: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Publish ``config`` under this rail's key (create or replace).
+
+        Preserves a previously published ``runtime`` section when the incoming
+        dict omits it (HITL persist / yaml snapshots often lack runtime fields).
+        """
+        if not isinstance(config, dict):
+            raise TypeError("config must be a dict")
+        merged = dict(config)
+        if "runtime" not in merged:
+            existing_runtime = self._static_config.get("runtime")
+            if existing_runtime is None:
+                try:
+                    existing_runtime = get_permission_manager().get_config(self._key).get(
+                        "runtime"
+                    )
+                except KeyError:
+                    existing_runtime = None
+            if existing_runtime is not None:
+                merged["runtime"] = deepcopy(existing_runtime)
+        # Hot patches (trusted_dirs / workspace_root) and sparse YAML snapshots
+        # often omit these keys. Missing shell_allowlist re-enables default-30;
+        # dropping host_guard disables HostGuard. Preserve from the last publish.
+        for keep_key in ("shell_allowlist", "host_guard", "package_builtin_rules"):
+            if keep_key in merged:
+                continue
+            existing_val = self._static_config.get(keep_key, _MISSING)
+            if existing_val is _MISSING:
+                try:
+                    existing_val = get_permission_manager().get_config(self._key).get(
+                        keep_key, _MISSING
+                    )
+                except KeyError:
+                    existing_val = _MISSING
+            if existing_val is not _MISSING:
+                merged[keep_key] = deepcopy(existing_val)
+        get_permission_manager().update_config(merged, self._key)
+        self._static_config = deepcopy(merged)
+        self._registration_released = False
+        if tool_names is not None:
+            self._tool_names = {str(x).strip() for x in tool_names if str(x).strip()}
+        logger.info(
+            "[PermissionEngine] permission.rail.config_updated intercept=all_tools "
+            "optional_tool_tags=%s key=%s",
+            sorted(self._tool_names),
+            self._key,
+        )
+
+    def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
+        """Per-request hot update of trusted directories via ``runtime.trusted_dirs``.
+
+        Hosts (e.g. JiuWenSwarm adapter) call this when ``trusted_dirs`` arrives
+        with each request so file_guard treats these subtrees as trusted.
+        ``None``/empty clears the list.
+        """
+        normalized: list[str] = []
+        if trusted_dirs:
+            for d in trusted_dirs:
+                if not d:
+                    continue
+                try:
+                    normalized.append(str(Path(str(d)).expanduser().resolve(strict=False)))
+                except (OSError, RuntimeError):
+                    continue
+        cfg = self._config_for_runtime_patch()
+        runtime = dict(cfg.get("runtime") or {})
+        runtime["trusted_dirs"] = normalized
+        cfg["runtime"] = runtime
+        self.update_config(cfg)
+        logger.info(
+            "[PermissionEngine] permission.rail.trusted_dirs_updated count=%d key=%s",
+            len(normalized),
+            self._key,
+        )
+
+    def set_workspace_root(self, workspace: Any | None) -> None:
+        """Bind ``runtime.workspace_root`` for file_guard (Agent workspace sync)."""
+        cfg = self._config_for_runtime_patch()
+        runtime = dict(cfg.get("runtime") or {})
+        if workspace is None:
+            runtime.pop("workspace_root", None)
+        else:
+            runtime["workspace_root"] = str(Path(workspace))
+        cfg["runtime"] = runtime
+        self.update_config(cfg)
+
+    def _config_for_runtime_patch(self) -> dict[str, Any]:
+        """Baseline dict for runtime-only patches (trusted_dirs / workspace_root)."""
+        if self._static_config:
+            return deepcopy(self._static_config)
+        try:
+            return self._registered_config()
+        except KeyError:
+            return {}
+
+    def init(self, agent: Any) -> None:
+        """Bind the owning Agent on first call; later shared inits are ignored."""
+        if self._owner_ref is not None or getattr(self, "_owner_fallback", None) is not None:
+            return
+        if agent is None:
+            return
+        try:
+            self._owner_ref = weakref.ref(agent)
+        except TypeError:
+            # Non-weakrefable owner: strong ref so identity checks still work.
+            self._owner_fallback = agent
+        logger.debug(
+            "[PermissionEngine] permission.rail.owner_bound key=%s owner=%s",
+            self._key,
+            type(agent).__name__,
+        )
+
+    def uninit(self, agent: Any) -> None:
+        """Release only when the owning Agent drops this rail."""
+        owner = self._owner()
+        if owner is not None and agent is not owner:
+            logger.debug(
+                "[PermissionEngine] permission.rail.uninit_ignored key=%s reason=not_owner",
+                self._key,
+            )
+            return
+        self._release_registration()
+
+    def _owner(self) -> Any | None:
+        fallback = getattr(self, "_owner_fallback", None)
+        if fallback is not None:
+            return fallback
+        if self._owner_ref is None:
+            return None
+        return self._owner_ref()
+
+    def _release_registration(self) -> None:
+        if self._registration_released:
+            return
+        self._registration_released = True
+        manager = get_permission_manager()
+        if self._key == DEFAULT_KEY:
+            # ``default`` cannot be removed; clear it to an empty policy instead.
+            manager.update_config({}, self._key)
+            logger.info(
+                "[PermissionEngine] permission.rail.released key=%s mode=reset_default",
+                self._key,
+            )
+            return
+        removed = manager.remove_config(self._key)
+        logger.info(
+            "[PermissionEngine] permission.rail.released key=%s removed=%s",
+            self._key,
+            removed,
+        )
+
+    async def _check_tool_permission(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        ctx: AgentCallbackContext,
+    ) -> PermissionResult:
+        """Decide via the manager using only the selected published key."""
+        from openjiuwen.harness.security.permission_checks import check_tool_permission
+
+        return await check_tool_permission(tool_name, tool_args, self.permission_key_for(ctx))
+
+    def permission_key_for(self, ctx: AgentCallbackContext) -> str:
+        """Select a published key; hosts may override routing without reading configs."""
+        return self._key
+
+    def permission_baseline_key_for(self, ctx: AgentCallbackContext) -> str:
+        """Default host selector when a rail has no derived session policies."""
+        return self._key
+
+    def projection_config_for(self, ctx: AgentCallbackContext) -> dict[str, Any]:
+        """Return the published local mirror for host routing/projection metadata."""
+        return deepcopy(self._static_config)
+
+    def permission_persist_context(self, ctx: AgentCallbackContext):
+        """Hosts may bind trusted write identity without changing decision calls."""
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def outbound_checks_enabled(self, ctx: AgentCallbackContext) -> bool:
+        return self.enabled and bool(self._static_config.get("net_guard", {}).get("enabled", False))
 
     def _normalize_tool_name(self, tool_name: str) -> str:
         """Normalize tool name using aliases.
@@ -178,25 +375,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         Maps tool names from openjiuwen.harness.tools to mcp_* names used in config.
         """
         return TOOL_NAME_ALIASES.get(tool_name, tool_name)
-
-    def _get_permissions_snapshot(self, ctx: AgentCallbackContext) -> dict[str, Any] | None:
-        """Return the permissions snapshot for this tool call.
-
-        Product adapters may override this hook to compose request-scoped policy
-        overlays. Persistence continues to read the host's unmodified baseline.
-        """
-        if self._host.get_permissions_snapshot is None:
-            return None
-        snapshot = self._host.get_permissions_snapshot()
-        return snapshot if isinstance(snapshot, dict) else None
-
-    def _refresh_permissions_for_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Refresh the engine policy used by the current tool call."""
-        snapshot = self._get_permissions_snapshot(ctx)
-        if snapshot is not None:
-            self.update_config(snapshot)
-            return
-        self._engine.update_config(self._static_config)
 
     def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
         """Generate a conservative session auto-confirm key for the tool call."""
@@ -245,6 +423,51 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         """
         return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
 
+    @staticmethod
+    def _warnings_key(tool_call: Optional[ToolCall]) -> str:
+        """Per-call key; tool callback contexts may share ``extra`` with siblings."""
+        call_id = getattr(tool_call, "id", "") or ""
+        return f"{_PERMISSION_WARNINGS_PREFIX}{call_id}"
+
+    @classmethod
+    def _remember_warnings(
+        cls,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        warnings: Iterable[str] | None,
+    ) -> None:
+        """Keep informational warnings for ``after_tool_call``; never gate a call."""
+        items = tuple(str(warning) for warning in (warnings or ()) if warning)
+        extra = getattr(ctx, "extra", None)
+        if items and isinstance(extra, dict):
+            extra[cls._warnings_key(tool_call)] = items
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Prepend permission warnings (e.g. destructive command) to tool output."""
+        try:
+            extra = getattr(ctx, "extra", None)
+            inputs = getattr(ctx, "inputs", None)
+            if not isinstance(extra, dict) or inputs is None:
+                return
+            warnings = extra.pop(
+                self._warnings_key(getattr(inputs, "tool_call", None)), None
+            )
+            text = "\n".join(str(warning) for warning in (warnings or ()) if warning)
+            if not text:
+                return
+            message = getattr(inputs, "tool_msg", None)
+            content = getattr(message, "content", None)
+            if isinstance(content, str):
+                message.content = f"{text}\n{content}" if content else text
+            data = getattr(getattr(inputs, "tool_result", None), "data", None)
+            if isinstance(data, dict) and isinstance(data.get("content"), str):
+                data["content"] = f"{text}\n{data['content']}" if data["content"] else text
+        except Exception:  # noqa: BLE001 — warnings are advisory; never fail a tool call
+            logger.debug(
+                "[PermissionEngine] permission.warnings.apply_failed", exc_info=True
+            )
+
+    @fail_closed_permission_callback
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
         tool_call = ctx.inputs.tool_call
@@ -273,100 +496,32 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         )
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
+        from openjiuwen.core.common.security.outbound import OUTBOUND_PERMISSION_KEY
 
-    def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
-        """Per-request hot update of trusted directories.
+        # Tool callback contexts can share extra with siblings. Never leak a
+        # selected key into another concurrent call or into an unguarded tool.
+        ctx.extra = dict(ctx.extra)
+        ctx.extra.pop(OUTBOUND_PERMISSION_KEY, None)
+        if self.outbound_checks_enabled(ctx):
+            ctx.extra[OUTBOUND_PERMISSION_KEY] = self.permission_key_for(ctx)
 
-        Hosts (e.g. JiuWenSwarm adapter) call this when ``trusted_dirs`` arrives
-        with each request so that the external_directory check treats these
-        subtrees as internal and skips ask/deny for them.
+    def _registered_config(self) -> dict[str, Any]:
+        """Deep copy of the config registered under this rail's key."""
+        return deepcopy(dict(get_permission_manager().get_config(self._key)))
 
-        Accepts raw strings (resolved to absolute ``Path``); ``None``/empty
-        clears the list. ``Path`` objects are passed through as-is.
-        """
-        from pathlib import Path as _Path
-
-        normalized: list[_Path] = []
-        if trusted_dirs:
-            for d in trusted_dirs:
-                if not d:
-                    continue
-                try:
-                    normalized.append(_Path(str(d)).expanduser().resolve(strict=False))
-                except (OSError, RuntimeError):
-                    continue
-        self._engine.update_trusted_dirs(normalized)
-        logger.info(
-            "[PermissionEngine] permission.rail.trusted_dirs_updated count=%d",
-            len(normalized),
-        )
-
-    def update_config(
-        self,
-        config: PermissionsSection | dict[str, Any],
-        tool_names: Optional[Iterable[str]] = None,
-    ) -> None:
-        """Hot-update static permission config；可选 ``tool_names`` 仅更新基类标签集合。"""
-        cfg_dict = cast(dict[str, Any], config)
-        self._static_config = cfg_dict
-        self._engine.update_config(cfg_dict)
-        if self._host.tool_permission_checks_active is not None:
-            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
-        if tool_names is not None:
-            self._tool_names = {str(x).strip() for x in tool_names if str(x).strip()}
-        logger.info(
-            "[PermissionEngine] permission.rail.config_updated intercept=all_tools optional_tool_tags=%s",
-            sorted(self._tool_names),
-        )
-
-    def _collect_file_guard_persist_accesses(
+    def _persist_allow_always(
         self,
         normalized_name: str,
         tool_args: dict,
-        permissions_cfg: dict[str, Any] | PermissionsSection,
-    ) -> list[tuple[str, str]]:
-        """若本次调用路径层为 ASK，返回 ``(path, action)`` 供按轴写入 file_guard。"""
-        from openjiuwen.harness.security.file_guard import build_file_guard_checker
-
-        if self._host.resolve_workspace_dir is None:
-            return []
-        try:
-            workspace = self._host.resolve_workspace_dir()
-        except Exception:
-            logger.debug(
-                "[PermissionEngine] permission.persist.external.workspace_resolve_failed",
-                exc_info=True,
-            )
-            return []
-        # Use the engine's per-request trusted_dirs (set via set_trusted_dirs)
-        # so persist-time external-path detection matches the runtime check.
-        trusted_dirs = list(self._engine.trusted_dirs)
-        try:
-            checker = build_file_guard_checker(
-                permissions_cfg,
-                workspace_root=workspace,
-                trusted_dirs=trusted_dirs,
-            )
-            if checker is None:
-                return []
-            return list(checker.collect_ask_accesses(normalized_name, tool_args))
-        except Exception:
-            logger.warning(
-                "[PermissionEngine] permission.persist.external.check_failed",
-                exc_info=True,
-            )
-            return []
-
-    def _persist_allow_always(
-        self, normalized_name: str, tool_args: dict
+        ask_accesses: list[tuple[str, str]] | None = None,
     ) -> bool:
         """工具级「始终允许」与 file_guard 路径白名单：先合并磁盘，再写盘。"""
         from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
 
         # Read from on-disk snapshot first (via host callback) so that
         # entries the user already deleted from config.yaml are NOT
-        # restored.  Fall back to engine.config only when snapshot is
-        # unavailable.
+        # restored.  Fall back to the registered config only when the snapshot
+        # is unavailable.
         base_cfg: PermissionsSection | None = None
         if self._host.get_permissions_snapshot is not None:
             try:
@@ -379,23 +534,21 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     exc_info=True,
                 )
         if base_cfg is None:
-            base_cfg = cast(PermissionsSection, deepcopy(self._engine.config))
+            base_cfg = cast(PermissionsSection, self._registered_config())
 
         cfg, ok_tool = merge_permission_allow_rule_into_permissions(
             base_cfg, normalized_name, tool_args
         )
-        accesses = self._collect_file_guard_persist_accesses(
-            normalized_name, tool_args, cfg
-        )
+        accesses = list(ask_accesses or ())
         ok_ext = False
         if accesses:
             cfg, ok_ext = merge_file_guard_access_allows(cfg, accesses)
         if not ok_tool and not ok_ext:
             return False
 
-        prev_cfg = deepcopy(self._engine.config)
-        self.update_config(cfg)
-
+        # 1B: whoever persists also refreshes the manager.  Host callback must
+        # call ``rail.update_config`` itself on success; the built-in yaml path
+        # is persisted by this rail, so we publish here after a successful write.
         if self._host.persist_allow_rule is not None:
             try:
                 persisted = bool(
@@ -407,18 +560,24 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     exc_info=True,
                 )
                 persisted = False
-            if not persisted:
-                self.update_config(prev_cfg)
         else:
-            if not write_permissions_section_to_agent_config_yaml(
-                self._host.permission_yaml_path,
-                cfg,
-            ):
-                self.update_config(prev_cfg)
-                persisted = False
-            else:
-                persisted = True
+            persisted = bool(
+                write_permissions_section_to_agent_config_yaml(
+                    self._host.permission_yaml_path,
+                    cfg,
+                )
+            )
+            if persisted:
+                self._publish_persisted(cast(dict[str, Any], cfg))
         return persisted
+
+    def _publish_persisted(self, cfg: dict[str, Any]) -> None:
+        """Publish persisted cfg under this rail's key (keeps ``runtime`` via update_config)."""
+        merged = dict(cfg)
+        runtime = self._static_config.get("runtime")
+        if runtime is not None and "runtime" not in merged:
+            merged["runtime"] = deepcopy(runtime)
+        self.update_config(merged)
 
     async def resolve_interrupt(
         self,
@@ -448,7 +607,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         user_input=user_input,
                         normalized_tool_name=normalized_name,
                         tool_args=tool_args,
-                        engine=self._engine,
+                        permission_key=self.permission_key_for(ctx),
                     ),
                 )
             except Exception:
@@ -456,7 +615,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     "[PermissionEngine] permission.scene_hook.failed",
                     exc_info=True,
                 )
-                scene_out = None
+                from openjiuwen.core.runner.callback.errors import AbortError
+
+                raise AbortError("Permission scene validation failed; tool execution stopped") from None
             if scene_out is not None:
                 if scene_out[0] == "approve":
                     return self.approve()
@@ -469,44 +630,53 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
             )
-            # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
-            # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
+            checks_active = self._host.tool_permission_checks_active
+            if checks_active is not None and not checks_active():
+                return self.approve()
             try:
-                self._refresh_permissions_for_tool_call(ctx)
-            except Exception:
-                logger.debug(
-                    "[PermissionEngine] permission.rail.snapshot_failed",
-                    exc_info=True,
-                )
-                self._engine.update_config(self._static_config)
-            try:
-                result = await self._engine.check_permission(
-                    tool_name=normalized_name,
-                    tool_args=tool_args,
+                result = await self._check_tool_permission(
+                    normalized_name,
+                    tool_args,
+                    ctx,
                 )
             except Exception:
                 logger.error(
-                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
+                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s key=%s",
                     tool_name,
                     normalized_name,
+                    self._key,
                 )
                 raise
 
+            self._remember_warnings(ctx, tool_call, result.warnings)
+
+            # 无论 allow / ask / deny，先落一条对称的裁决日志（进 permissions.log）。
+            decision_text = (
+                "allow"
+                if result.permission == PermissionLevel.ALLOW
+                else "deny"
+                if result.permission == PermissionLevel.DENY
+                else "ask"
+            )
+            _result_log = (
+                logger.warning if result.permission == PermissionLevel.DENY else logger.info
+            )
+            _result_log(
+                "[PermissionEngine] permission.rail.result tool=%s decision=%s "
+                "matched_rule=%s key=%s",
+                tool_name,
+                decision_text,
+                result.matched_rule,
+                self._key,
+            )
+
             if result.permission == PermissionLevel.ALLOW:
-                logger.info(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=allow matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
-                )
                 return self.approve()
 
             if result.permission == PermissionLevel.DENY:
-                logger.warning(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=deny matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
+                return self.reject(
+                    tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}"
                 )
-                return self.reject(tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}")
 
             if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
                 logger.info(
@@ -568,7 +738,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     confirm_payload = ext_out
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm and confirm_payload.persist_allow:
-                        persisted = self._persist_allow_always(normalized_name, tool_args)
+                        with self.permission_persist_context(ctx):
+                            persisted = self._persist_allow_always(
+                                normalized_name, tool_args, result.ask_accesses
+                            )
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s "
                         "confirm_path=hosted persisted=%s persist_allow=%s",
@@ -632,9 +805,32 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 payload_schema=ConfirmPayload.to_schema(),
             ))
 
+        approved_result: PermissionResult | None = None
+        if payload.approved:
+            try:
+                approved_result = await self._check_tool_permission(
+                    normalized_name, tool_args, ctx
+                )
+            except Exception:  # noqa: BLE001 — warnings are best-effort; never block execution
+                logger.warning(
+                    "[PermissionEngine] permission.warnings.recheck_failed tool=%s",
+                    tool_name,
+                    exc_info=True,
+                )
+            else:
+                self._remember_warnings(ctx, tool_call, approved_result.warnings)
+
         persisted = False
         if payload.approved and payload.auto_confirm and payload.persist_allow:
-            persisted = self._persist_allow_always(normalized_name, tool_args)
+            with self.permission_persist_context(ctx):
+                ask_accesses: list[tuple[str, str]] = (
+                    list(approved_result.ask_accesses or ())
+                    if approved_result is not None
+                    else []
+                )
+                persisted = self._persist_allow_always(
+                    normalized_name, tool_args, ask_accesses
+                )
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s persist_allow=%s",
                 tool_name,

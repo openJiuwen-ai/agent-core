@@ -74,6 +74,11 @@ class TeamWorkspaceManager:
         self.team_name = team_name
         self.mode = mode
         self.publish_event = publish_event
+        # The resident evolvable-workspace cache, attached once at assembly.
+        # Every read-side consumer (rails, backend delegation, worker backend,
+        # tiny agent, scheduler) takes the same instance through this property.
+        # Remains None until assembly attaches a WorkspaceCache (or equivalent).
+        self._workspace_cache: Any | None = None
 
         # Local lock state (LOCAL mode, or leader's authority in DISTRIBUTED)
         self._locks: dict[str, WorkspaceFileLock] = {}
@@ -84,6 +89,21 @@ class TeamWorkspaceManager:
         self._leader_id = leader_id
         self._node_id = node_id
         self._pending_lock_requests: dict[str, asyncio.Future[WorkspaceLockResponseEvent]] = {}
+
+    @property
+    def workspace_cache(self) -> Any | None:
+        """The resident evolvable-workspace cache.
+
+        One instance per manager, built explicitly at assembly time and
+        attached here once; every read-side consumer (rails, worker backend,
+        tiny agent, scheduler) and the team backend's overlay take the same
+        instance through this property. ``None`` until assembly attaches it.
+        """
+        return self._workspace_cache
+
+    def attach_workspace_cache(self, cache: Any) -> None:
+        """Attach the assembled evolvable-workspace cache (spawn-time, once)."""
+        self._workspace_cache = cache
 
     # ── Initialization ───────────────────────────────────────
 

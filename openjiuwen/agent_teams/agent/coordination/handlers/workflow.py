@@ -1,20 +1,23 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Swarmflow progress handler — narrate orchestration progress to the leader.
+"""Swarmflow progress handler — narrate orchestration progress to the executor.
 
-A swarmflow run (launched by the ``swarmflow()`` tool, executing in the leader's
-process) publishes ``WORKFLOW_PROGRESS`` events on the team topic with a
-non-leader ``sender_id`` so the leader's own coordination loop receives them
-(``kernel`` only self-filters events whose ``sender_id`` equals the local
-member name). This handler turns the phase / start / completion milestones into
-a short narration line and feeds it to the leader via ``deliver_input`` — the
-spectator leader then streams a user-facing report. Per-agent progress is
-intentionally NOT narrated (too chatty); it lives in the 4-layer ``WorkflowRun``
-the observer accumulates.
+A swarmflow run publishes ``WORKFLOW_PROGRESS`` events on the team topic with
+a non-member ``sender_id``, so no kernel self-filter drops them and every
+coordination loop sees them. This handler keeps exactly one of those loops
+talking: the one whose member is the event's ``executor`` (the current host,
+leader included). ``executor=None`` means no team context (legacy events
+included) — the leader loop narrates as the fallback.
+It turns the phase / start / human-input milestones into a short narration
+line and feeds it to that member via ``deliver_input``: the executor is the
+spectator who streams a user-facing report and can speak to a pending human
+prompt. Per-agent progress is intentionally NOT narrated (too chatty); it
+lives in the 4-layer ``WorkflowRun`` the observer accumulates.
 
 Mirrors the established TaskBoard / Message handler pattern: the event only
-reaches the leader's DeepAgent as input — coordination makes no decision here.
+reaches the executing member's DeepAgent as input — coordination makes no
+decision here.
 """
 from __future__ import annotations
 
@@ -36,7 +39,11 @@ if TYPE_CHECKING:
 # the workflow engine package (one-way dependency: workflow -> agent_teams core).
 # Completion is NOT narrated here: the final result (and failures) are fed back
 # by the NativeHarness async-tool framework. Mid-run milestones (start / phase)
-# and the human-input wait (human_prompt / human_replied) are narrated.
+# and the human-input wait (human_prompt / human_replied) are narrated. Pause
+# and resume are NOT narrated: a parked run waits silently for the user's
+# decision, and telling the launcher its run paused only invited spontaneous
+# resumes. The run card flips from the raw WORKFLOW_PAUSED / WORKFLOW_STARTED
+# progress events — workflow_state consumes the events, not the narration.
 _KIND_WORKFLOW_STARTED = "workflow_started"
 _KIND_PHASE = "phase"
 _KIND_HUMAN_PROMPT = "human_prompt"
@@ -44,28 +51,39 @@ _KIND_HUMAN_REPLIED = "human_replied"
 
 
 class WorkflowHandler(BaseCoordinationHandler):
-    """Narrate swarmflow phase/lifecycle milestones to the spectator leader."""
+    """Narrate swarmflow phase/lifecycle milestones to the run's current executor."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
         TeamEvent.WORKFLOW_PROGRESS: "on_workflow_progress",
     }
 
     async def on_workflow_progress(self, event: CoordinationEvent) -> None:
-        """Render a phase/lifecycle milestone and deliver it to the leader."""
-        if self._blueprint.role != TeamRole.LEADER:
-            return
+        """Render a phase/lifecycle milestone and deliver it to the executor."""
         try:
             payload = event.get_payload()
         except Exception as exc:
             team_logger.debug("workflow progress payload decode failed: %s", exc)
             return
+        # Narration follows the current host: only the member loop matching
+        # ``executor`` narrates (leader runs name the leader too) — everyone
+        # else stays out. The two names cannot disagree: both read the
+        # member's TeamRuntimeContext.member_name (the event's executor via
+        # the hosting harness's BuildContext, this loop via its blueprint),
+        # so an in-team event matches exactly one loop. ``executor=None``
+        # (no team context / legacy events) falls back to the leader loop.
+        if payload.executor is None:
+            if self._blueprint.role != TeamRole.LEADER:
+                return
+        elif payload.executor != self._blueprint.member_name:
+            return
         line = self._render(payload)
         if line is None:
             return
         # Wrap the milestone narration in <team-event kind="workflow"> so the
-        # leader reads it through the same inbound-XML contract as task / message
-        # events (F_46). The body already distinguishes started / phase /
-        # human_prompt / human_replied in prose, so one stable kind suffices.
+        # launcher reads it through the same inbound-XML contract as task /
+        # message events (F_46). The body already distinguishes started /
+        # phase / human_prompt / human_replied in prose, so one stable kind
+        # suffices.
         await self._round.deliver_input(render_event(kind="workflow", body=line), use_steer=True)
 
     @staticmethod

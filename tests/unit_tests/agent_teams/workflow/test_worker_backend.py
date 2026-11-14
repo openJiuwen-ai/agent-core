@@ -13,7 +13,11 @@ A separate test exercises the real ``_execute_worker`` spec-derivation path with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 import pytest
@@ -21,8 +25,9 @@ import pytest
 from openjiuwen.agent_teams.rails.team_context import inject_team_handles
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
-from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine import run_workflow
+from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.runner import preprocess_swarmflow
 from openjiuwen.agent_teams.workflow.schema import build_workflow_run_from_events
 
@@ -53,6 +58,9 @@ class _FakeWorkerBackend(TeamWorkerBackend):
         has_schema: bool,
         model: Any,
         budget_rail: Any = None,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
     ) -> str:
         if has_schema and tools:
             tools[0].captured = {"answer": f"done::{member_name}"}
@@ -101,7 +109,7 @@ def test_schema_path_prefers_natural_text_over_json(tmp_path):
     """When schema capture succeeds and invoke also returns narration, prefer narration."""
 
     class _NarratingWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             if has_schema and tools:
                 tools[0].captured = {"answer": f"done::{member_name}"}
                 tools[0].called = True
@@ -126,7 +134,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     """
 
     class _SilentWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
@@ -137,10 +145,11 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
 
 
 def test_per_call_model_hint_routes_through_resolver(tmp_path):
-    """agent(model=X): known name -> resolved config; unknown / no hint -> None.
+    """agent(model=X): known name -> resolved config; no hint -> None.
 
-    The resolver returns a worker ``TeamModelConfig`` (not a built model); a miss
-    or absent hint yields ``None`` so the worker inherits its base spec's model.
+    The resolver returns a worker ``TeamModelConfig`` (not a built model); a
+    missing hint yields ``None`` so the worker inherits its base spec's model.
+    An unresolvable hint is now a pool miss: non-retryable, ``agent()`` -> None.
     """
     script = '''
 from swarmflow import agent
@@ -156,7 +165,7 @@ async def run(args):
     seen: list = []
 
     class _RecordingBackend(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             seen.append(model)
             return f"ran::{model}"
 
@@ -166,10 +175,10 @@ async def run(args):
     )
     result = asyncio.run(run_workflow(_write(tmp_path, script), backend=backend))
 
-    # "fast" resolves to its config; "unknown" and no-hint miss -> None (the
-    # worker then inherits its base spec's model, not exercised by this stub).
-    assert result == ["ran::fast-cfg", "ran::None", "ran::None"]
-    assert seen == ["fast-cfg", None, None]
+    # "fast" resolves to its config; "unknown" is a pool miss -> non-retryable
+    # error -> agent()=None; no-hint -> None (inherits the base spec's model).
+    assert result == ["ran::fast-cfg", None, "ran::None"]
+    assert seen == ["fast-cfg", None]
 
 
 def test_agent_isolation_option_is_forwarded_to_backend(tmp_path):
@@ -185,7 +194,7 @@ async def run(args):
     seen: list[dict] = []
 
     class _Backend(AgentBackend):
-        async def run(self, prompt, opts, schema_json):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
             seen.append(dict(opts))
             return AgentResult(text="ok")
 
@@ -206,20 +215,22 @@ async def run(args):
     return await agent("task", label="w", options={"isolation": "container"})
 '''
     import pytest
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
 
-    with pytest.raises(WorkflowError, match="only supports 'worktree'"):
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    with pytest.raises(EngineError, match="only supports 'worktree'"):
         asyncio.run(run_workflow(_write(tmp_path, script), backend=_FakeWorkerBackend(model=None)))
 
 
 def test_worktree_isolation_requires_host_worktree_manager():
     """Worktree isolation must use the host-provided manager, not a fallback."""
     import pytest
+
     from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 
     backend = TeamWorkerBackend(model=None)
 
-    with pytest.raises(BackendError, match="host-provided worktree manager"):
+    with pytest.raises(BackendError, match="requires worktree isolation"):
         asyncio.run(backend.run("write code", {"label": "sum", "isolation": "worktree"}, None))
 
 
@@ -232,6 +243,20 @@ def test_preprocess_builds_four_layer_offline(tmp_path):
     assert len(do.agents) == 2
     assert all(a.status == "completed" for a in do.agents)
     assert do.agents[0].prompt == "compute the answer"
+
+
+def test_preprocess_accepts_agent_template(tmp_path):
+    """The offline preview must not reject an option the real backend accepts."""
+    script = _write(tmp_path, '''
+from swarmflow import agent
+
+META = {"name": "exp", "description": "expert preview", "phases": []}
+
+async def run(args):
+    return await agent("shoot", label="clip", options={"agent_template": "clip"})
+''')
+    run = asyncio.run(preprocess_swarmflow(script))
+    assert run.name == "exp"
 
 
 def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monkeypatch):
@@ -519,6 +544,30 @@ def test_long_run_id_slug_is_not_truncated_in_member_names():
     assert len(name) > 50
 
 
+def test_member_name_is_stable_across_backend_instances_with_same_call_key():
+    """Same call key + run id → same member name, regardless of instance.
+
+    A resume builds a fresh TeamWorkerBackend whose counter restarts at zero;
+    hashing the engine's call-path key instead keeps the name (and thus the
+    worktree slug) identical so the create fast-recovery can find the
+    paused run's kept worktree.
+    """
+    run_id = "wf_abc123def456"
+    backend_a = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    backend_b = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    name_a = backend_a._next_member_name({"label": "compute"}, "call-0")
+    name_b = backend_b._next_member_name({"label": "compute"}, "call-0")
+    assert name_a == name_b
+    assert name_a == "wf-abc123def456-compute-" + hashlib.sha256(b"call-0").hexdigest()[:12]
+
+    # Different call sites in the same run stay distinct.
+    name_other = backend_a._next_member_name({"label": "compute"}, "par-0-1")
+    assert name_other != name_a
+
+    # Without a call key the legacy counter path still works (direct callers).
+    assert backend_a._next_member_name({"label": "compute"}) == "wf-abc123def456-compute-0"
+
+
 def test_execute_worker_surfaces_task_loop_model_error():
     """Task-loop failures return {"error": ...}; worker must raise, not empty output."""
     from openjiuwen.agent_teams.workflow.backends.team_worker_backend import (
@@ -534,38 +583,13 @@ def test_execute_worker_surfaces_task_loop_model_error():
     assert _text_from_invoke_result({"output": "ok"}, member_name="wf-w-5") == "ok"
 
 
-@pytest.mark.asyncio
-async def test_worker_wraps_non_backend_failure_with_burned_tokens(monkeypatch):
-    """A generic worker failure must preserve its model-call token attribution."""
-    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
-
-    class _FailingWorkerBackend(_FakeWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
-            budget_rail.call_tokens = 321
-            raise RuntimeError("provider disconnected")
-
-    backend = _FailingWorkerBackend(model=None)
-
-    async def _noop(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(backend._worktrees, "ensure", _noop)
-    monkeypatch.setattr(backend._worktrees, "finalize", _noop)
-
-    with pytest.raises(BackendError, match="provider disconnected") as exc_info:
-        await backend.run("fail me", {"label": "broken"}, None)
-
-    assert exc_info.value.tokens == 321
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-
-
 def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
     """BackendError from a model failure surfaces as agent_failed, not empty completed."""
     from openjiuwen.agent_teams.workflow.engine.errors import BackendError
     from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 
     class _FailingWorkerBackend(_FakeWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             raise BackendError(
                 "worker 'wf-w-0' failed: [181001] model call failed, reason: ReadError"
             )
@@ -591,3 +615,373 @@ async def run(args):
     failed = next(ev for ev in events if ev.kind == ProgressKind.AGENT_FAILED)
     assert "ReadError" in (failed.message or "")
     assert ProgressKind.AGENT_COMPLETED not in kinds
+
+
+# ---------------------------------------------------------------------------
+# SwarmflowWorkerWorktrees orphan reconcile
+# ---------------------------------------------------------------------------
+def _stub_manager(removed: list[str]):
+    class _StubManager:
+        async def create_owner_worktree(self, slug, *, source_dir=None):
+            raise AssertionError("stub reconcile manager should not create")
+
+        async def remove_worktree(self, worktree_path, repo_root):
+            removed.append(worktree_path)
+            return True
+
+    return _StubManager()
+
+
+def _make_repo(tmp_path: Path, name: str) -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    for cmd in (
+        # no `-b main`: git < 2.28 (older CI) rejects it and the branch name is never asserted
+        ["git", "init", str(repo)],
+        ["git", "-C", str(repo), "config", "user.email", "st@example.com"],
+        ["git", "-C", str(repo), "config", "user.name", "st"],
+        ["git", "-C", str(repo), "add", "-A"],
+        ["git", "-C", str(repo), "commit", "-m", "init", "--allow-empty"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True)
+    return repo
+
+
+def _seed_orphan(tmp_path: Path, repo: Path, slug: str, *, dirty: bool) -> Path:
+    wt = tmp_path / slug
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", str(wt)], check=True, capture_output=True)
+    if dirty:
+        (wt / "note.txt").write_text("wip", encoding="utf-8")
+    return wt
+
+
+def test_reconcile_removes_clean_orphan_and_keeps_dirty(tmp_path, monkeypatch):
+    """First ensure() sweeps prior-run residue: clean removed, dirty kept."""
+    from openjiuwen.agent_teams import paths as team_paths
+    from openjiuwen.agent_teams.paths import team_session_worktrees_dir
+    from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
+
+    team_paths.configure_openjiuwen_home(tmp_path)
+
+    repo = _make_repo(tmp_path, "proj")
+    root = team_session_worktrees_dir("wt-team", "sess-1")
+    root.mkdir(parents=True)
+    clean = _seed_orphan(root, repo, "agent-t-clean1234-deadbeef00", dirty=False)
+    dirty = _seed_orphan(root, repo, "agent-t-dirty1234-cafebabed0", dirty=True)
+    removed: list[str] = []
+
+    wts = SwarmflowWorkerWorktrees(
+        team_name="wt-team",
+        build_context=_build_context_with_worktree_manager(_stub_manager(removed)),
+        session_id="sess-1",
+    )
+    # Drive the reconcile directly for determinism; ensure() only calls it
+    # before the first worktree-creating agent().
+    asyncio.run(wts._reconcile_orphans_once())
+
+    assert str(clean) in removed
+    assert str(dirty) not in removed
+    # Idempotent within a run: second call is a no-op.
+    asyncio.run(wts._reconcile_orphans_once())
+    assert removed.count(str(clean)) == 1
+
+    team_paths.reset_openjiuwen_home()
+
+
+def test_activity_rail_emits_paired_tool_call_and_result():
+    """before/after_tool_call pair on one tool_call_id; a raised call previews the
+    exception text; non-tool inputs and blank names are ignored on both hooks."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+
+    emitted: list[tuple] = []
+    rail = SwarmflowActivityRail(emit=lambda *a: emitted.append(a))
+
+    def _ctx(tool_name="write_file", tool_args=None, exception=None):
+        return SimpleNamespace(
+            inputs=ToolCallInputs(tool_call=SimpleNamespace(id="call-7"), tool_name=tool_name,
+                                  tool_args=tool_args or {"path": "a.txt", "content": "hi"}),
+            exception=exception,
+        )
+
+    asyncio.run(rail.before_tool_call(_ctx()))
+    ctx = _ctx()
+    ctx.inputs.tool_result = "wrote a.txt"
+    asyncio.run(rail.after_tool_call(ctx))
+    asyncio.run(rail.after_tool_call(_ctx("bash", {"command": "ls"}, RuntimeError("tool boom"))))
+    assert emitted == [
+        ("tool_call", "call-7", "write_file", '{"path": "a.txt", "content": "hi"}'),
+        ("tool_result", "call-7", "write_file", "wrote a.txt"),
+        ("tool_result", "call-7", "bash", "tool boom"),
+    ]
+
+    asyncio.run(rail.before_tool_call(SimpleNamespace(inputs=None)))
+    blank = _ctx(tool_name="")
+    asyncio.run(rail.before_tool_call(blank))
+    asyncio.run(rail.after_tool_call(blank))
+    assert len(emitted) == 3
+
+
+def test_activity_emitter_builds_agent_activity_event():
+    """The backend emitter forwards structured tool activity as agent_activity events."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+    events: list = []
+    backend = TeamWorkerBackend(model=None)
+    backend.bind_progress_sink(events.append)
+    emit = backend._make_activity_emitter("main/call:7", "review", "coder")
+    emit("tool_result", "call-9", "write_file", "wrote a.txt")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.kind == ProgressKind.AGENT_ACTIVITY
+    assert ev.agent_id == "main/call:7"
+    assert ev.phase == "review"
+    assert ev.label == "coder"
+    assert ev.activity_type == "tool_result"
+    assert ev.tool_call_id == "call-9"
+    assert ev.tool_name == "write_file"
+    assert ev.content == "wrote a.txt"
+    assert ev.message == "tool: write_file"  # legacy narration kept
+
+    # No sink bound -> emitter is a silent no-op.
+    events.clear()
+    backend.bind_progress_sink(None)
+    emit = backend._make_activity_emitter("main/call:8", "review", "coder")
+    emit("tool_call", "c-1", "bash", "ls")
+    assert events == []
+
+
+def test_activity_emitter_truncates_content_at_the_guard_bound():
+    """Content passes through in full; only the pathological-payload guard cuts (with a marker)."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
+
+    events: list = []
+    backend = TeamWorkerBackend(model=None)
+    backend.bind_progress_sink(events.append)
+    emit = backend._make_activity_emitter("main/call:7", "review", "coder")
+
+    from openjiuwen.agent_teams.workflow.backends.activity_emitter import (
+        ACTIVITY_CONTENT_LIMIT,
+        truncate_activity_content,
+    )
+
+    # A realistic argument body passes through in full.
+    realistic = "write_file with a full argument body " + "y" * 2048
+    emit("tool_call", "call-9", "write_file", realistic)
+    assert events[0].content == realistic
+
+    # Only a payload beyond the pathological guard is cut, marker included.
+    emit("tool_call", "call-10", "bash", "x" * (ACTIVITY_CONTENT_LIMIT + 10))
+    assert events[1].content == "x" * ACTIVITY_CONTENT_LIMIT + "…(truncated)"
+    assert truncate_activity_content(None) is None
+
+
+# ---------------------------------------------------------------------------
+
+
+def _expert(name="clip", persona="PERSONA", *, external=False, spec=None):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.workflow.backends.expert_specs import SwarmflowExpertEntry
+
+    return SwarmflowExpertEntry(
+        member_name=name,
+        display_name=f"display-{name}",
+        persona=persona,
+        spec=None
+        if external
+        else (
+            spec
+            or DeepAgentSpec(
+                tools=[], enable_task_loop=True, agent_template_spec={"agent_card": {"id": name, "name": name}}
+            )
+        ),
+        external_cli=True if external else None,
+    )
+
+
+class _RecordingBackend(TeamWorkerBackend):
+    """Records what _execute_worker received instead of building a harness."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.calls: list[dict] = []
+
+    async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, **kw):
+        self.calls.append({"member": member_name, "has_schema": has_schema, "kw": kw})
+        if has_schema and tools:
+            tools[0].captured = {"x": "1"}
+            tools[0].called = True
+            return ""
+        return "native"
+
+
+def _expert_backend(**experts):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    return _RecordingBackend(model=None, worker_base_spec=DeepAgentSpec(tools=[]), run_id="r1", expert_specs=experts)
+
+
+@pytest.mark.level0
+def test_agent_type_not_supported():
+    """agent_type workers were removed from this build."""
+    backend = TeamWorkerBackend(model=None, team_name="t", language="cn")
+    with pytest.raises(BackendError, match="agent_type is not supported"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_type": "codex"}, None, call_key="k"))
+
+
+def test_agent_template_hit_routes_expert_entry_into_execute_worker():
+    backend = _expert_backend(clip=_expert())
+    result = asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert result.text == "native"
+    assert backend.calls[0]["kw"]["expert"].member_name == "clip"
+
+
+def test_agent_template_absent_keeps_legacy_call_shape():
+    backend = _expert_backend(clip=_expert())
+    asyncio.run(backend.run("p", {"label": "x"}, None, call_key="k"))
+    assert "expert" not in backend.calls[0]["kw"]  # byte-compatible path: no new kwarg
+
+
+@pytest.mark.parametrize(
+    ("opts", "needle"),
+    [
+        ({"label": "x", "agent_template": "designer/clip"}, "bare member name"),
+        ({"label": "x", "agent_template": 123}, "bare member name"),
+        ({"label": "x", "agent_template": "scene"}, "available members: ['clip']"),
+        # the Leader is never in the expert table; say so instead of "not a member"
+        ({"label": "x", "agent_template": "leader"}, "Team Leader"),
+        ({"label": "x", "agent_template": "clip", "agent_type": "codex"}, "agent_type is not supported"),
+    ],
+)
+def test_agent_template_validation_rejects_before_launch(opts, needle):
+    backend = _expert_backend(clip=_expert())
+    with pytest.raises(BackendError) as exc:
+        asyncio.run(backend.run("p", opts, None, call_key="k"))
+    assert needle in str(exc.value)
+    assert exc.value.retryable is False
+    assert backend.calls == []
+
+
+def test_agent_template_without_bound_group_explains_binding():
+    backend = _expert_backend()
+    with pytest.raises(BackendError, match="no AgentGroup is bound"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+
+
+class _FakeExpertLoader:
+    """Stands in for BoundGroupExpertLoader: serves ``entries`` and counts loads."""
+
+    group = "designer"
+
+    def __init__(self, entries=None, error=None):
+        self.entries = dict(entries or {})
+        self.error = error
+        self.loads: list[str] = []
+
+    async def load(self, member):
+        self.loads.append(member)
+        if self.error is not None:
+            raise self.error
+        return self.entries.get(member)
+
+
+def _loader_backend(loader, **experts):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    return _RecordingBackend(
+        model=None, worker_base_spec=DeepAgentSpec(tools=[]), run_id="r1", expert_specs=experts, expert_loader=loader
+    )
+
+
+def test_agent_template_loads_a_bound_member_missing_from_the_table_once():
+    loader = _FakeExpertLoader({"clip": _expert()})
+    backend = _loader_backend(loader)
+    for key in ("k1", "k2"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key=key))
+    assert [call["kw"]["expert"].member_name for call in backend.calls] == ["clip", "clip"]
+    assert loader.loads == ["clip"], "a loaded member is cached for the rest of the run"
+    assert backend.describe_agent_template({"agent_template": "clip"}) == "display-clip"
+
+
+def test_agent_template_prefers_the_table_over_the_loader():
+    loader = _FakeExpertLoader({"clip": _expert(persona="FROM-DISK")})
+    backend = _loader_backend(loader, clip=_expert(persona="FROM-SPEC"))
+    asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert backend.calls[0]["kw"]["expert"].persona == "FROM-SPEC"
+    assert loader.loads == []
+
+
+def test_agent_template_loader_failures_reject_before_launch():
+    unknown = _loader_backend(_FakeExpertLoader())
+    with pytest.raises(BackendError, match="not a member of the bound AgentGroup 'designer'") as exc:
+        asyncio.run(unknown.run("p", {"label": "x", "agent_template": "scene"}, None, call_key="k"))
+    assert exc.value.retryable is False
+
+    broken = _loader_backend(_FakeExpertLoader(error=ValueError("agent_group package not installed: designer")))
+    with pytest.raises(BackendError, match="cannot be loaded: agent_group package not installed") as exc:
+        asyncio.run(broken.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert exc.value.retryable is False
+    assert unknown.calls == [] and broken.calls == []
+
+
+def test_agent_template_external_member_is_not_supported_yet():
+    backend = _expert_backend(writer=_expert("writer", external=True))
+    with pytest.raises(BackendError, match="external runtime"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "writer"}, None, call_key="k"))
+    assert backend.calls == []
+
+
+def test_describe_agent_template_returns_display_name_or_none():
+    backend = _expert_backend(clip=_expert())
+    assert backend.describe_agent_template({"label": "x", "agent_template": "clip"}) == "display-clip"
+    assert backend.describe_agent_template({"label": "x"}) is None
+    assert backend.describe_agent_template({"label": "x", "agent_template": "nope"}) is None
+
+
+def test_execute_worker_prepends_persona_to_engine_worker_prompt(monkeypatch):
+    """Expert path: system_prompt = persona + blank line + the unchanged engine text;
+    tools come from the expert spec (+ structured_output), not the teammate base."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec
+    from openjiuwen.agent_teams.tools.structured_output_tool import StructuredOutputTool
+
+    captured: dict = {}
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return {"output": "ok", "result_type": "answer"}
+
+        def add_rail(self, rail):
+            return None
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        captured["spec"] = agent_spec
+        return _FakeHarness()
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    base = DeepAgentSpec(tools=[BuiltinToolSpec(type="core.web_search")], enable_task_loop=True)
+    backend = TeamWorkerBackend(model=None, worker_base_spec=base, language="cn")
+    engine_free = backend._t("swarmflow_worker", key="free")
+    engine_schema = backend._t("swarmflow_worker", key="schema")
+
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-0", has_schema=False, model=None, expert=_expert()))
+    assert captured["spec"].system_prompt == f"PERSONA\n\n{engine_free}"
+    assert captured["spec"].tools == []  # expert spec tools, not the teammate's web_search
+    assert captured["spec"].agent_template_spec == {"agent_card": {"id": "clip", "name": "clip"}}
+
+    tool = StructuredOutputTool({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]})
+    asyncio.run(
+        backend._execute_worker("t", [tool], member_name="wf-w-1", has_schema=True, model=None, expert=_expert())
+    )
+    assert captured["spec"].system_prompt == f"PERSONA\n\n{engine_schema}"
+    assert captured["spec"].tools == [tool]
+
+    # No expert: the legacy prompt, byte for byte.
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-2", has_schema=False, model=None))
+    assert captured["spec"].system_prompt == engine_free

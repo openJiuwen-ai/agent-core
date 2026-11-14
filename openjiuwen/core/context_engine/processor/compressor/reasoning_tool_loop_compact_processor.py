@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import context_engine_logger
 from openjiuwen.core.common.schema.ignored_tool_call import (
     IgnoredToolCallRule,
     matches_ignored_tool_call,
@@ -246,7 +246,7 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
 
         context.set_messages(compacted)
         self._record_bailout_signal(context, kind)
-        logger.info(
+        context_engine_logger.info(
             "[ReasoningToolLoopCompact] compacted consecutive identical "
             "%s rounds on ADD path: before=%d after=%d",
             kind,
@@ -283,7 +283,7 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
             current = int(session.get_state(state_key) or 0)
             session.update_state({state_key: current + 1})
         except Exception as exc:  # best-effort signal; never break compaction
-            logger.warning(
+            context_engine_logger.warning(
                 "[ReasoningToolLoopCompact] failed to record bail-out signal: %s",
                 exc,
             )

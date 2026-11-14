@@ -65,7 +65,7 @@ description: 给修改 openjiuwen/harness（及被 spec 点名的 openjiuwen/cor
 | `openjiuwen/harness/security/skill_authorization/` | Grant store / generation / `is_skill_authorization_enabled` | S_13 |
 | `openjiuwen/harness/rails/skills/skill_authorization_rail.py` | 模板钩子 / `MAIN_AGENT_SCOPE_ID` / `_resolve_session_id` | S_13 |
 | `openjiuwen/harness/rails/skills/skill_lifecycle_events.py` | 指纹清理挂点 | S_13 |
-| `openjiuwen/harness/security/core.py` | `PermissionEngine` 判定序（S_16）；S_13 N10 手工合成引擎的模板 | S_13 / S_16 |
+| `agent-security: agent_shield/tool_permission/engine.py` | `PermissionEngine` 判定序（S_16）；S_13 N10 手工合成引擎的模板 | S_13 / S_16 |
 
 ### 中断交互域（S_15~S_19）
 

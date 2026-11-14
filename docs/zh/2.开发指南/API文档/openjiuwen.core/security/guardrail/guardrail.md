@@ -212,20 +212,24 @@ class openjiuwen.core.security.guardrail.GuardrailResult(
     is_safe: bool,
     risk_level: RiskLevel,
     risk_type: Optional[str] = None,
+    confidence: float = 0.0,
     details: Optional[Dict[str, Any]] = None,
-    modified_data: Optional[Dict[str, Any]] = None
+    modified_data: Optional[Dict[str, Any]] = None,
+    event: Optional[str] = None
 )
 ```
 
-护栏检测结果数据类。
+护栏检测结果数据类。定义在检测公共库，这里再导出，是同一个类。
 
 **参数**：
 
-* **is_safe**(bool)：检测是否通过。
+* **is_safe**(bool)：`False` 表示检出风险，不表示调用被拦截。
 * **risk_level**(RiskLevel)：检测到的风险等级。
 * **risk_type**(str, 可选)：风险类型标识符。默认值：`None`。
+* **confidence**(float)：与 backend 的 `RiskAssessment.confidence` 一致。默认值：`0.0`。
 * **details**(Dict[str, Any], 可选)：检测详细信息。默认值：`None`。
-* **modified_data**(Dict[str, Any], 可选)：脱敏后的数据。默认值：`None`。
+* **modified_data**(Dict[str, Any], 可选)：脱敏后的数据。默认值：`None`。本期不写、不消费。
+* **event**(str, 可选)：触发本次检测的事件名。转换函数不填，由回调写入。默认值：`None`。
 
 ### pass_
 
@@ -254,7 +258,7 @@ class method block(
 ) -> GuardrailResult
 ```
 
-创建检测拦截的便捷方法。
+创建 `is_safe=False` 的结果。这是结果对象，不执行拦截。
 
 **参数**：
 
@@ -311,13 +315,13 @@ class openjiuwen.core.security.guardrail.RiskLevel
 
 | 风险等级 | 处理方式 |
 |---------|---------|
-| SAFE | 正常通过 |
-| LOW | 抛出 `GuardrailError` |
-| MEDIUM | 抛出 `GuardrailError` |
-| HIGH | 抛出 `GuardrailError` |
-| CRITICAL | 抛出 `AbortError`，阻断执行 |
+| SAFE | 回调返回 `is_safe=True`，调用继续 |
+| LOW | 回调返回 `is_safe=False`，调用继续 |
+| MEDIUM | 回调返回 `is_safe=False`，调用继续 |
+| HIGH | 回调返回 `is_safe=False`，调用继续 |
+| CRITICAL | 回调返回 `is_safe=False`，调用继续。不抛 `AbortError` |
 
-> **说明**：`CRITICAL` 等级会抛出 `AbortError` 终止回调执行，其他危险等级抛出 `GuardrailError`。
+> **说明**：回调不再抛 `GuardrailError` 或 `AbortError`。直接调用 `detect()` 时，未配置 backend 仍抛 `ValueError`，backend 的 `RuntimeError` 仍向外传。只有回调路径把这些异常收成 `pass_(details={"error": ...})`。
 
 ---
 
@@ -327,16 +331,12 @@ class openjiuwen.core.security.guardrail.RiskLevel
 class openjiuwen.core.common.exception.errors.GuardrailError
 ```
 
-护栏检测到风险时抛出的异常。继承自框架异常体系。
+异常类仍保留。内容检测回调不再抛出它。直接调用 `detect()` 也不会把它当作风险出口，风险写在返回的 `GuardrailResult` 上。
 
 **示例**：
 
 ```python
-from openjiuwen.core.common.exception.errors import GuardrailError
-
-try:
-    # 触发护栏检测
-    result = await guardrail.detect("user_input", text=malicious_input)
-except GuardrailError as e:
-    print(f"检测到风险: {e.details}")
+result = await guardrail.detect("user_input", text=malicious_input)
+if not result.is_safe:
+    print(result.risk_type, result.risk_level, result.confidence)
 ```
