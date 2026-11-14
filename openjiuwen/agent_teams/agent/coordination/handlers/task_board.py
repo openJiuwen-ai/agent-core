@@ -13,6 +13,7 @@ Stale-task sweeping on poll ticks lives in :class:`StaleTaskHandler`.
 
 from __future__ import annotations
 
+import asyncio
 from typing import ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -24,11 +25,16 @@ from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
+from openjiuwen.agent_teams.schema.status import ExecutionStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.task_loop.loop_queues import DeferredInput
+
+# defer 的有界重试窗口（秒）：报告在途闸 defer 后多久重投看板再评。
+# 取值权衡：正常消息投递是毫秒级，5s 覆盖事件循环饱和下的投递乱序；对死信/卡死场景只是把总结推迟 5s，可忽略。
+_ALL_DONE_DEFER_RETRY_SECONDS = 5.0
 
 
 class TaskBoardHandler(BaseCoordinationHandler):
@@ -75,6 +81,26 @@ class TaskBoardHandler(BaseCoordinationHandler):
     _TEAMMATE_NUDGE_EVENTS: ClassVar[frozenset[str]] = frozenset(
         {TeamEvent.TASK_CREATED, TeamEvent.TASK_UNBLOCKED, TeamEvent.TASK_RELEASED}
     )
+
+    def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
+        super().__init__(host, blueprint, infra, poll_ctrl)
+        # 上一次 all-done 实际渲染时刻（wall ms，与任务行 updated_at 同源）。
+        # 这是「总结过」锚而非「见过」锚：报告轮只薄回执（提示词分工），
+        # 见过不再意味总结过。None=本运行时还没渲染过 all-done。
+        self._last_all_done_rendered_ms: int | None = None
+        # 本运行时的起点（handler 随 dispatcher 在 kernel start 时重建）。
+        # 板面最新终态早于此 = 上个生命周期的旧板（恢复回声），与本运行时
+        # 有无轮次无关——终止性审计：「零轮次即抑制」会把
+        # 恢复后本生命周期内的新完成一并压死（薄回执分工下再无总结），
+        # 故改用运行时起点做旧板判据。
+        self._runtime_started_ms: int = get_current_time()
+        # 报告在途闸的 defer 代数签名（= 当时的 max(terminal updated_at)）。
+        # 同一代板面只 defer 一次，第二次渲染放行（fail-open）——防成员死亡/
+        # 未启动死信导致的永不总结。
+        self._all_done_deferred_for: int | None = None
+        # defer 的有界重试定时器：None=无挂起重试；一次性任务，
+        # 渲染成功时取消、随 dispatcher 重建自然消亡。
+        self._all_done_defer_retry_task: asyncio.Task | None = None
 
     async def on_task_claimed(self, event: EventMessage) -> None:
         """Directed assignment from another node.
@@ -476,23 +502,35 @@ class TaskBoardHandler(BaseCoordinationHandler):
                     if not all_tasks:
                         # 零任务空板（新团首巡 / 任务行被删光）：无成果可汇总。
                         return None
-                    # 时间戳见证：最新终态迁移不新于上一轮起跑 →
-                    # 上一轮已掌握全部完成事实（leader_policy 要求当场自足总结），
-                    # 再渲染 all-done 只会得到回声总结并抢结果槽。
-                    # last_round_started_ms=None（本运行时零轮次：pause/resume
-                    # 或 recover 恢复）→ 板上终态全是上个生命周期的旧事，同样抑制
-                    # ——未送达的成果汇报由邮箱首扫兜底。
+                    # 见证锚=总结过而非见过：报告轮只薄回执，
+                    # 见过不再意味总结过。两道时间闸：
+                    # - 已渲染过 all-done 且之后无更新的终态迁移 → 回声/滞后
+                    #   事件，抑制；
+                    # - 板面最新终态早于本运行时起点（handler 随 kernel start
+                    #   重建）→ 上个生命周期的旧板（恢复回声），抑制——未送达
+                    #   的成果汇报由邮箱首扫兜底。注意不能用「零轮次」做判据：
+                    #   恢复后本生命周期内的新完成（leader 尚无轮次）必须放行，
+                    #   否则薄回执分工下该批成果永无总结。
                     terminal_ms = [
                         tk.updated_at for tk in all_tasks if tk.updated_at is not None
                     ]
-                    last_started = self._round.last_round_started_ms()
-                    if last_started is None or (
-                            terminal_ms and max(terminal_ms) <= last_started):
+                    sig = max(terminal_ms) if terminal_ms else None
+                    last_rendered = self._last_all_done_rendered_ms
+                    if last_rendered is not None and sig is not None and (
+                            sig <= last_rendered):
                         team_logger.info(
                             "[{}] all-done suppressed: no terminal transition newer "
-                            "than last round start (last_started={})",
+                            "than last all-done render (last_rendered={})",
                             member_name,
-                            last_started,
+                            last_rendered,
+                        )
+                        return None
+                    if sig is not None and sig <= self._runtime_started_ms:
+                        team_logger.info(
+                            "[{}] all-done suppressed: board drained before this "
+                            "runtime started (runtime_started={})",
+                            member_name,
+                            self._runtime_started_ms,
                         )
                         return None
                     if not terminal_ms:
@@ -501,6 +539,63 @@ class TaskBoardHandler(BaseCoordinationHandler):
                             "[{}] all-done witness skipped: tasks missing updated_at",
                             member_name,
                         )
+                    # 报告在途闸：交付物可能还在消息通道里
+                    # （成员先完成后报告）或尚未被消费——本轮不渲染，改为挂一个
+                    # 有界定时器，N 秒后重投看板再评（直接重排在 leader 空闲
+                    # 时会被立即消费，同代 fail-open 微秒级触发，闸形同虚设；
+                    # 定时窗口给消息投递留出到达时间）。同一代板面（同一
+                    # max(updated_at)）只 defer 一次，重试渲染仍命中闸即
+                    # fail-open——防成员死亡/未启动死信导致的永不总结。
+                    if await self._reports_in_flight(member_name):
+                        if self._all_done_deferred_for != sig:
+                            self._all_done_deferred_for = sig
+                            if (
+                                    self._all_done_defer_retry_task is not None
+                                    and not self._all_done_defer_retry_task.done()
+                            ):
+                                # 新代板面：继续沿用旧定时器会把本代应得的完整
+                                # 重试窗口压缩到上一代剩下的时间——取消重排，
+                                # 每一代都拿到完整窗口。
+                                self._all_done_defer_retry_task.cancel()
+                                self._all_done_defer_retry_task = None
+                            if self._all_done_defer_retry_task is None:
+                                self._all_done_defer_retry_task = asyncio.create_task(
+                                    self._retry_all_done_after_defer(
+                                        member_name, render_board
+                                    )
+                                )
+                            team_logger.info(
+                                "[{}] all-done deferred: report in flight "
+                                "(unread message or member busy), retry in {}s",
+                                member_name,
+                                _ALL_DONE_DEFER_RETRY_SECONDS,
+                            )
+                            return None
+                        team_logger.warning(
+                            "[{}] all-done defer fail-open: report still in "
+                            "flight on second render (sig={})",
+                            member_name,
+                            sig,
+                        )
+                    self._all_done_deferred_for = None
+                    if self._all_done_defer_retry_task is not None:
+                        # 渲染成功即清掉挂起的重试。本次渲染多半就是重试定时
+                        # 器自己投递的——但它投递前已把字段清为 None（见
+                        # _retry_all_done_after_defer），走到这里只可能是另
+                        # 一条路径先放行了渲染；只取消仍在睡眠的定时器，不碰
+                        # 已完成的。
+                        retry_task = self._all_done_defer_retry_task
+                        self._all_done_defer_retry_task = None
+                        if not retry_task.done():
+                            retry_task.cancel()
+                    # 渲染锚=本代签名 sig（最新终态迁移的 updated_at），不是
+                    # 打锚时刻的壁钟：快照（list_tasks）与打锚之间发生的完成
+                    # 若用壁钟锚会被误判为「已总结的回声」而永失总结；
+                    # sig 锚只放行严格更新的终态迁移，语义与
+                    # _all_done_deferred_for 的代际一致。
+                    self._last_all_done_rendered_ms = (
+                        sig if sig is not None else get_current_time()
+                    )
                     lifecycle = self._blueprint.lifecycle
                     if lifecycle == "persistent":
                         prompt = t("dispatcher.all_done_persistent")
@@ -544,6 +639,74 @@ class TaskBoardHandler(BaseCoordinationHandler):
             ),
             use_steer=False,
         )
+
+    async def _reports_in_flight(self, member_name: str) -> bool:
+        """是否有交付物尚在消息通道/成员手中：未读消息 ∨ 成员执行中。
+
+        供 all-done 渲染前的报告在途闸使用：未读消息判定复用
+        message_manager.has_unread_messages（不含广播——广播是频道语义，
+        不携带定向交付物）；成员在途判定读成员行的 execution_status（排除
+        调用者自己——leader 的忙闲不是报告信号）。all-done 渲染每代板面
+        至多一次，这两个读取的稳态增量可忽略。fail-open：读失败按无在途
+        放行并 WARNING——一次瞬时读失败不该永久压住总结。
+        """
+        try:
+            mm = self._infra.message_manager
+            if mm is not None and await mm.has_unread_messages(include_broadcast=False):
+                return True
+            backend = self._infra.team_backend
+            if backend is None:
+                return False
+            members = await backend.db.member.get_team_members(backend.team_name)
+            return any(
+                m.member_name != member_name
+                and m.execution_status == ExecutionStatus.RUNNING.value
+                for m in members
+            )
+        except Exception:
+            team_logger.warning(
+                "[{}] all-done in-flight probe failed; rendering unsuppressed",
+                member_name,
+                exc_info=True,
+            )
+            return False
+
+    async def _retry_all_done_after_defer(self, member_name, renderer) -> None:
+        """有界定时器重试：defer 后 N 秒重投看板，让闸在报告投递后重评。
+
+        不直接重排的原因：leader 空闲时重排的 DeferredInput 会被立即消费，
+        同代 fail-open 微秒级触发，闸形同虚设。重投的渲染若仍命中闸，按
+        同代 fail-open 放行——死信/卡死最多把总结推迟一个窗口。重试失败
+        不向上抛：渲染会随后续任务事件自然再评，一次定时器故障不该吃掉
+        总结链路。
+        """
+        try:
+            await asyncio.sleep(_ALL_DONE_DEFER_RETRY_SECONDS)
+            # 投递前清字段：本次重投触发的渲染在成功路径会看到字段已空，
+            # 不会回头取消正在 await 投递返回的本任务自身。
+            if self._all_done_defer_retry_task is asyncio.current_task():
+                self._all_done_defer_retry_task = None
+            await self._round.deliver_input(
+                DeferredInput(
+                    kind="task-board",
+                    collapse_key="task-board",
+                    renderer=renderer,
+                ),
+                use_steer=False,
+            )
+        except asyncio.CancelledError:
+            # 本任务的取消只有两个来源：渲染成功路径的主动清理、新代板面
+            # defer 的重排——都是我们自己的刻意中止，不是外部关停语义。
+            # 无人 await 本任务的终态（done() 两种结局都为真），静默返回
+            # 即可；重新抛出只会让任务落 cancelled 态制造噪音。
+            # 注意这是本任务专用的收窄豁免，不代表别处可以吞 CancelledError。
+            return
+        except Exception:
+            team_logger.warning(
+                "[{}] all-done defer retry failed",
+                member_name,
+                exc_info=True,
+            )
 
 
 class ScheduledTaskBoardHandler(TaskBoardHandler):
