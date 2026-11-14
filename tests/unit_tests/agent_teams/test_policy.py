@@ -29,6 +29,30 @@ def test_leader_policy_mentions_key_responsibilities():
     assert "create_task" in policy
 
 
+@pytest.mark.level0
+def test_all_done_prompts_carry_full_presentation_spec():
+    """all-done 提示词内嵌最终呈现规范（不再引用 leader_policy 节）+
+    已交付则原样重发的兜底。"""
+    from openjiuwen.agent_teams import i18n
+
+    original = i18n.get_language()
+    try:
+        i18n.set_language("cn")
+        for key in ("dispatcher.all_done_persistent", "dispatcher.all_done_temporary"):
+            text = i18n.t(key)
+            assert "最终呈现" in text
+            assert "复述关键结果" in text
+            assert "原样重发一遍作为最终答复" in text
+        i18n.set_language("en")
+        for key in ("dispatcher.all_done_persistent", "dispatcher.all_done_temporary"):
+            text = i18n.t(key)
+            assert "final presentation" in text
+            assert "restate key results" in text
+            assert "re-send that complete answer verbatim" in text
+    finally:
+        i18n.set_language(original)
+
+
 @pytest.mark.level1
 def test_leader_policy_forbids_manual_worktree_creation():
     policy = _leader_policy("en")
