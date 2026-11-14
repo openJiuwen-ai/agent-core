@@ -11,6 +11,10 @@ from typing import List, Optional, Sequence, Tuple
 
 from openjiuwen.agent_evolving.skill_train.llm_client import ChatLLMClient
 from openjiuwen.agent_evolving.skill_train.sleep.backend_base import Backend, ReflectRequest
+from openjiuwen.agent_evolving.skill_train.sleep.mine import (
+    correction_kinds_from_task,
+    exclude_targets_from_task,
+)
 from openjiuwen.agent_evolving.skill_train.sleep.prompts import render
 from openjiuwen.agent_evolving.skill_train.sleep.scoring import (
     keyword_soft_score,
@@ -22,6 +26,11 @@ from openjiuwen.core.common.logging import logger
 
 # Transport / decode failures from the optimizer client; programming bugs propagate.
 _OPTIMIZER_CALL_ERRORS = (OSError, RuntimeError, TimeoutError, ValueError, TypeError)
+_META_EXCLUDE_ADD_RE = re.compile(
+    r"(当用户|用户明确).{0,24}(删除|不要|不包含|省略|排除)"
+    r"|when the user (asks to )?(delete|omit|exclude|remove)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,12 @@ def _edits_from_payload(raw: str, *, budget: int, target: str) -> List[EditRecor
 
 def _format_failure_block(task: TaskRecord, result: ReplayResult) -> str:
     parts = [f"- intent: {task.intent}"]
+    kinds = correction_kinds_from_task(task)
+    if kinds:
+        parts.append(f"  correction: {', '.join(kinds)}")
+    targets = exclude_targets_from_task(task)
+    if targets:
+        parts.append(f"  exclude_target: {', '.join(targets[:4])}")
     follow_ups = _follow_ups_text(task)
     if follow_ups:
         joined = " | ".join(line[2:] for line in follow_ups.splitlines())
@@ -89,6 +104,109 @@ def _format_failure_block(task: TaskRecord, result: ReplayResult) -> str:
     parts.append(f"  response: {(result.response or '')[:300]}")
     parts.append(f"  why: {why}")
     return "\n".join(parts)
+
+
+def _term_tokens(term: str) -> List[str]:
+    text = (term or "").strip()
+    if not text:
+        return []
+    tokens = [text]
+    # Drop common trailing nouns so "空气质量数据" also matches "空气质量".
+    for suffix in ("数据", "字段", "信息", "内容", "指数", " data", " field", " info"):
+        if text.lower().endswith(suffix.lower()) and len(text) > len(suffix) + 1:
+            tokens.append(text[: -len(suffix)].strip())
+            break
+    return list(dict.fromkeys(t for t in tokens if t))
+
+
+def _candidate_delete_lines(doc: str, term: str) -> List[str]:
+    """Skill/memory lines that still force including an excluded term."""
+    tokens = _term_tokens(term)
+    if not tokens:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in (doc or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") and len(line) < 4:
+            continue
+        folded = line.lower()
+        if not any(token.lower() in folded for token in tokens):
+            continue
+        # Prefer actionable bullets / numbered items over bare section titles.
+        if not (
+            line.startswith(("-", "*", "•"))
+            or re.match(r"^\d+[\.、)]\s*", line)
+            or "必须" in line
+            or "%" in line
+            or "curl" in folded
+        ):
+            if line.startswith("#"):
+                continue
+        key = folded
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out[:8]
+
+
+def _failures_have_exclude(failures: Sequence[Tuple[TaskRecord, ReplayResult]]) -> bool:
+    for task, _result in failures:
+        if "exclude" in correction_kinds_from_task(task) or exclude_targets_from_task(task):
+            return True
+    return False
+
+
+def _supplement_exclude_deletes(
+    doc: str,
+    failures: Sequence[Tuple[TaskRecord, ReplayResult]],
+    edits: List[EditRecord],
+    *,
+    budget: int,
+    target: str,
+) -> List[EditRecord]:
+    """Drop exclude meta-adds and ensure delete edits for excluded skill lines."""
+    if not _failures_have_exclude(failures):
+        return edits
+
+    targets: List[str] = []
+    for task, _result in failures:
+        targets.extend(exclude_targets_from_task(task))
+    targets = list(dict.fromkeys(targets))
+
+    kept: List[EditRecord] = []
+    for edit in edits:
+        op = (edit.op or "add").lower()
+        if op == "add" and _META_EXCLUDE_ADD_RE.search(edit.content or ""):
+            logger.info(
+                "[skill_sleep] drop meta exclude add edit content=%r",
+                (edit.content or "")[:80],
+            )
+            continue
+        kept.append(edit)
+
+    deletes = [edit for edit in kept if (edit.op or "").lower() == "delete"]
+    others = [edit for edit in kept if (edit.op or "").lower() != "delete"]
+
+    # Always synthesize deletes for every exclude target; dedupe against model
+    # deletes so a partial model reply still covers the remaining targets.
+    # Prefer synthesized deletes over soft replace/add so budget cannot drop them.
+    for term in targets:
+        for line in _candidate_delete_lines(doc, term):
+            if any((edit.anchor or "").strip() == line for edit in deletes):
+                continue
+            deletes.append(
+                EditRecord(
+                    target=target,
+                    op="delete",
+                    content=line,
+                    anchor=line,
+                    rationale=f"exclude:{term}",
+                )
+            )
+    remaining = max(0, budget - len(deletes))
+    return (deletes + others[:remaining])[:budget]
 
 
 class ModelBackend(Backend):
@@ -238,15 +356,28 @@ class ModelBackend(Backend):
                 "__FAILURES__": "\n".join(blocks) or "(none)",
             },
         )
+        system = (
+            "You propose bounded skill edits as JSON only. "
+            "Match the natural language of the current skill/memory document "
+            "for content, anchor, and rationale."
+        )
+        if _failures_have_exclude(list(request.failures)[:12]):
+            system += (
+                " When failure blocks say correction: exclude, delete the "
+                "conflicting skill lines; do not add meta-rules about user delete requests."
+            )
         raw, _meta = self._clients.optimizer.chat(
-            system=(
-                "You propose bounded skill edits as JSON only. "
-                "Match the natural language of the current skill/memory document "
-                "for content, anchor, and rationale."
-            ),
+            system=system,
             user=prompt,
             stage="sleep_reflect",
             max_completion_tokens=16384,
         )
         self._charge(prompt, raw)
-        return _edits_from_payload(raw, budget=request.edit_budget, target=target)
+        edits = _edits_from_payload(raw, budget=request.edit_budget, target=target)
+        return _supplement_exclude_deletes(
+            cur_doc or "",
+            list(request.failures)[:12],
+            edits,
+            budget=request.edit_budget,
+            target=target,
+        )

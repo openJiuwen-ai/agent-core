@@ -241,7 +241,6 @@ def test_harvest_jiuwenswarm_traces_by_session(tmp_path: Path) -> None:
     assert tasks[0].skill_hint == "weather-zh"
 
 
-
 def test_harvest_groups_by_trace_id_not_session_attr(tmp_path: Path) -> None:
     """Same session.id across two traceIds → two digests (one conversation each)."""
     traces = tmp_path / "traces-2026-09-17.jsonl"
@@ -709,6 +708,58 @@ def test_harvest_packed_trace_id_filter_and_max_sessions(tmp_path: Path) -> None
 
     recent_first = load_jiuwenswarm_session_digests(tmp_path, project="demo", max_sessions=1)
     assert [d.trace_id for d in recent_first] == ["2" * 32]
+
+
+def test_harvest_since_ns_drops_older_traces(tmp_path: Path) -> None:
+    """since_ns keeps only digests with max_start_ns strictly after the watermark."""
+    traces = tmp_path / "traces-2026-11-10.jsonl"
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id="web_old",
+            span_id="1",
+            start=10,
+            prompt=[{"role": "user", "content": _envelope("旧轨迹")}],
+            completion={"role": "assistant", "content": "旧回复"},
+            trace_id="1" * 32,
+        ),
+        _jiuwenswarm_llm_record(
+            session_id="web_new",
+            span_id="2",
+            start=50,
+            prompt=[{"role": "user", "content": _envelope("新轨迹")}],
+            completion={"role": "assistant", "content": "新回复"},
+            trace_id="2" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    all_digests = load_jiuwenswarm_session_digests(tmp_path, project="demo")
+    by_id = {d.trace_id: d for d in all_digests}
+    assert by_id["1" * 32].max_start_ns == 10
+    assert by_id["2" * 32].max_start_ns == 50
+
+    newer = load_jiuwenswarm_session_digests(tmp_path, project="demo", since_ns=10)
+    assert [d.trace_id for d in newer] == ["2" * 32]
+
+    none_left = load_jiuwenswarm_session_digests(tmp_path, project="demo", since_ns=50)
+    assert none_left == []
+
+
+def test_sleep_state_skill_harvest_watermark_roundtrip(tmp_path: Path) -> None:
+    from openjiuwen.agent_evolving.skill_train.sleep.state import SleepState
+
+    path = tmp_path / "state.json"
+    state = SleepState.load(path)
+    assert state.get_skill_harvest_ns("tianqi") == 0
+    state.set_skill_harvest_ns("tianqi", 1_700_000_000_000_000_000)
+    state.save()
+
+    reloaded = SleepState.load(path)
+    assert reloaded.get_skill_harvest_ns("tianqi") == 1_700_000_000_000_000_000
+    assert reloaded.get_skill_harvest_ns("weather-china") == 0
+    assert "tianqi" in (reloaded.data.get("last_harvest_by_skill") or {})
 
 
 def test_harvest_packed_logs_drop_reason(tmp_path: Path, caplog) -> None:
@@ -1715,10 +1766,28 @@ def test_classify_user_turn() -> None:
     assert classify_user_turn("好的没问题") == "task"
     assert classify_user_turn("这个不对，缺少紫外线指数") == "correction"
     assert classify_user_turn("需要") == "correction"
+    assert classify_user_turn("删除UV指数数据") == "correction"
+    assert classify_user_turn("删除空气质量数据") == "correction"
+    assert classify_user_turn("去掉空气质量") == "correction"
+    assert classify_user_turn("不要紫外线指数") == "correction"
+    assert classify_user_turn("隐去PM2.5") == "correction"
+    assert classify_user_turn("补充湿度") == "correction"
+    assert classify_user_turn("增加日出日落") == "correction"
+    assert classify_user_turn("添加空气质量") == "correction"
+    assert classify_user_turn("改成表格") == "correction"
+    assert classify_user_turn("换成英文") == "correction"
+    assert classify_user_turn("把UV改成空气质量") == "correction"
     assert classify_user_turn("查天气用的什么skill") == "meta"
     assert classify_user_turn("那明天呢") == "followup"
     assert classify_user_turn("郑州的天气") == "task"
     assert classify_user_turn("帮我写一个读取 CSV 并统计列均值的脚本") == "task"
+    # Long standalone delete-style requests stay tasks (over revision length gate).
+    assert (
+        classify_user_turn(
+            "帮我删除服务器上的所有历史日志文件并且重启服务进程然后通知运维同学"
+        )
+        == "task"
+    )
 
 
 def test_segment_mine_skips_greeting_and_uses_real_request() -> None:
@@ -1785,6 +1854,71 @@ def test_segment_mine_builds_rubric_from_follow_ups() -> None:
     assert "缺少紫外线指数" in task.context_excerpt
     assert task.attempted_solution == "好的"
     assert task.skill_hint == "weather-zh"
+
+
+def test_segment_mine_builds_exclude_rubric_from_delete_revision() -> None:
+    digest = SessionDigest(
+        trace_id="s2-del",
+        project="p",
+        user_prompts=["杭州的天气", "删除UV指数数据", "删除空气质量数据"],
+        assistant_finals=["杭州：晴 含UV与空气质量", "已去掉UV", "已去掉空气质量"],
+        skills_used=["tianqi"],
+        n_user_turns=3,
+        n_assistant_turns=3,
+        turns=[
+            _turn("user", "杭州的天气"),
+            _turn("tool", "skill_tool", ["tianqi"]),
+            _turn("assistant", "杭州：晴 含UV与空气质量"),
+            _turn("user", "删除UV指数数据"),
+            _turn("assistant", "已去掉UV"),
+            _turn("user", "删除空气质量数据"),
+            _turn("assistant", "已去掉空气质量"),
+        ],
+    )
+    tasks = mine([digest], max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.intent == "杭州的天气"
+    assert task.outcome == "fail"
+    assert task.reference_kind == "rubric"
+    assert "必须不包含：UV指数数据" in task.reference
+    assert "必须不包含：空气质量数据" in task.reference
+    assert task.skill_hint == "tianqi"
+    assert "correction:exclude" in task.tags
+    assert "exclude:UV指数数据" in task.tags
+    assert "exclude:空气质量数据" in task.tags
+
+
+def test_segment_mine_builds_add_replace_rubric_from_crud_revisions() -> None:
+    digest = SessionDigest(
+        trace_id="s2-crud",
+        project="p",
+        user_prompts=["杭州的天气", "补充湿度", "改成表格", "把气温改成华氏度"],
+        assistant_finals=["杭州：晴", "已补湿度", "已改表格", "已改华氏"],
+        skills_used=["tianqi"],
+        n_user_turns=4,
+        n_assistant_turns=4,
+        turns=[
+            _turn("user", "杭州的天气"),
+            _turn("tool", "skill_tool", ["tianqi"]),
+            _turn("assistant", "杭州：晴"),
+            _turn("user", "补充湿度"),
+            _turn("assistant", "已补湿度"),
+            _turn("user", "改成表格"),
+            _turn("assistant", "已改表格"),
+            _turn("user", "把气温改成华氏度"),
+            _turn("assistant", "已改华氏"),
+        ],
+    )
+    tasks = mine([digest], max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.intent == "杭州的天气"
+    assert task.outcome == "fail"
+    assert "必须包含：湿度" in task.reference
+    assert "必须改为：表格" in task.reference
+    assert "必须将：气温 改为 华氏度" in task.reference
+    assert task.skill_hint == "tianqi"
 
 
 def test_segment_mine_splits_multiple_requests_and_prefers_segment_skill() -> None:
