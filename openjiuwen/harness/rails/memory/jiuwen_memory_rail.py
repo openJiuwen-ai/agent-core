@@ -2,8 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """JiuwenMemoryRail — AgentMemory 外接记忆 rail。
 
-行为基线 = 同目录的 ``ExternalMemoryRail``，差异只在与 AgentMemory
-（agent-memory 仓库的 ``jiuwen_memory`` 引擎）语义对齐的 4 处（见下）；
+行为基线 = 同目录的 ``ExternalMemoryRail``，与 AgentMemory
+（agent-memory 仓库的 ``jiuwen_memory`` 引擎）语义对齐的差异见下；
 provider 由宿主注入——典型为 agent-memory 适配包的
 ``AgentMemoryMemoryProvider``（``jiuwen_memory_adapter/jiuwenswarm/agent_memory_provider.py``，
 经 PYTHONPATH 以顶层模块引入），本 rail 只依赖 ``MemoryProvider`` ABC，
@@ -26,6 +26,9 @@ provider 由宿主注入——典型为 agent-memory 适配包的
    缺省空串让"跨会话共享"成为显式契约，要隔离时由宿主显式传入。
 4. **工具 id 前缀** ``jiuwen_memory_<tool_name>``（基线为
    ``external_memory_<provider.name>_<tool_name>``）。
+5. **交互轮次聚合**：按真实会话暂存原始请求和已接受的 ask_user 回答，
+   最终回复后提交一次 sync_turn；暂存最多 16,000 字符、128 个会话，
+   30 分钟未活动后在后续前台调用中淘汰，不持久化。
 
 部署：宿主自备 provider（agent-memory 适配包或任意 ``MemoryProvider`` 实现），
 ``JiuwenMemoryRail(provider, user_id=..., scope_id=..., session_id=...)`` 挂载。
@@ -35,12 +38,19 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.memory.external.provider import MemoryProvider
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    RESUME_INTERRUPT_ANSWERS_KEY,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -59,6 +69,53 @@ _SYNC_BREAKER_COOLDOWN = 120.0
 # infer=true 抽取里的多轮 LLM 调用留余量；只兜 SDK 无 asyncio 超时的整体路径。
 # 超时即 cancel（不 shield），对齐 F02-jiuwenswarm-rail-sync-turn-timeout.md。
 _SYNC_TURN_TIMEOUT = 130.0
+
+_TURN_MAX_CHARS = 16_000
+_TURN_MAX_SESSIONS = 128
+_TURN_TTL = 1800.0
+_TURN_TRUNCATION = "\n[交互轮次内容已截断]\n"
+_TURN_CONTEXT_KEY = "_jiuwen_memory_turn"
+
+
+@dataclass
+class _MemoryTurn:
+    """Bounded user-side material for one logical turn, never a chat history."""
+
+    original: str
+    additions: list[str] = field(default_factory=list)
+    seen_answers: dict[str, None] = field(default_factory=dict)
+    updated: float = field(default_factory=time.monotonic)
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        self.original = self._clip(self.original, _TURN_MAX_CHARS - len(_TURN_TRUNCATION))
+
+    def _clip(self, text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        self.truncated = True
+        return text[:limit // 2] + text[-(limit - limit // 2):]
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self.updated = time.monotonic()
+        budget = _TURN_MAX_CHARS - len(_TURN_TRUNCATION)
+        # Reserve room for recent complete answers while retaining both ends
+        # of an unusually large original request.
+        if len(self.original) + len(text) + 2 > budget:
+            self.original = self._clip(self.original, budget // 2)
+        if len(self.original) + len(text) + 2 > budget:
+            self.truncated = True
+            return
+        self.additions.append(text)
+        while self.additions and len("\n\n".join([self.original, *self.additions])) > budget:
+            self.additions.pop(0)
+            self.truncated = True
+
+    def render(self) -> str:
+        text = "\n\n".join([self.original, *self.additions])
+        return text + _TURN_TRUNCATION if self.truncated else text
 
 
 class JiuwenMemoryRail(DeepAgentRail):
@@ -114,6 +171,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         # Project resolved from the current invoke context; injected into
         # provider tool calls (mem2_add/mem2_search) as routing coords.
         self._current_project: Optional[str] = None
+        self._memory_turns: dict[str, _MemoryTurn] = {}
 
     def init(self, agent) -> None:
         super().init(agent)
@@ -148,6 +206,7 @@ class JiuwenMemoryRail(DeepAgentRail):
                     self.system_prompt_builder.add_section(section)
 
     def uninit(self, agent) -> None:
+        self._memory_turns.clear()
         # Unregister tools owned by this rail from the agent
         if hasattr(agent, "ability_manager"):
             for tool_name, tool_card in list(self._owned_tool_cards.items()):
@@ -209,6 +268,7 @@ class JiuwenMemoryRail(DeepAgentRail):
         与 ``session_end_extract`` 开关无关——开关只管 ``uninit`` 的隐式触发，
         这里是宿主的显式意图。provider 内部自捕获异常，失败不影响后续 shutdown。
         """
+        self._memory_turns.clear()
         if not self._initialized:
             return
         try:
@@ -224,6 +284,8 @@ class JiuwenMemoryRail(DeepAgentRail):
 
         if not self._available:
             return
+
+        self._begin_memory_turn(ctx)
 
         if not self._initialized:
             try:
@@ -310,23 +372,84 @@ class JiuwenMemoryRail(DeepAgentRail):
         except ValueError as exc:
             logger.warning("[JiuwenMemoryRail] skip clearing prefetch prompt attachment: %s", exc)
 
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Capture accepted ask_user results, after interrupt ownership routing."""
+        if not self._initialized or not self._available or self._is_background_run(ctx):
+            return
+        if (
+            getattr(ctx.inputs, "tool_name", "") != "ask_user"
+            or getattr(ctx, "exception", None) is not None
+            or getattr(ctx, "is_paused", False)
+        ):
+            return
+        turn = self._memory_turns.get(self._turn_session_id(ctx))
+        result = getattr(ctx.inputs, "tool_result", None)
+        if turn is None or not isinstance(result, str) or not result:
+            return
+        call_id = getattr(getattr(ctx.inputs, "tool_call", None), "id", "")
+        answers = ctx.extra.get(RESUME_INTERRUPT_ANSWERS_KEY, {}).get(call_id, {})
+        for answer in answers.values():
+            if answer.kind != InterruptKind.ASK_USER or answer.carried:
+                continue
+            answer_id = answer.request.interrupt_id
+            if answer_id in turn.seen_answers:
+                continue
+            # Replace a plain-text supplement with the accepted question/answer
+            # so values such as an authorization code retain their meaning.
+            if answer.unaddressed and isinstance(answer.value, str):
+                text = self._unwrap_jiuwenswarm_envelope(answer.value.strip())
+                if turn.additions and turn.additions[-1] == text:
+                    turn.additions.pop()
+            turn.append("用户交互回答：\n" + result)
+            turn.seen_answers[answer_id] = None
+            if len(turn.seen_answers) > 128:
+                turn.seen_answers.pop(next(iter(turn.seen_answers)))
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized or not self._available:
             return
         if self._is_background_run(ctx):
             return
 
+        session_id = self._turn_session_id(ctx)
+        turn = ctx.extra.pop(_TURN_CONTEXT_KEY, None)
+        result = getattr(ctx.inputs, "result", None)
+        interrupted = isinstance(result, dict) and result.get("result_type") == "interrupt"
+        output = "" if interrupted else self._extract_assistant_output(ctx)
+        task = asyncio.current_task()
+        cancelled = task is not None and task.cancelling() > 0
+        has_pending_interrupt = (
+            not output
+            and self._interruption_state(ctx) is not None
+            and getattr(ctx, "exception", None) is None
+        )
+        # Streaming interrupts carry no terminal answer. An empty output alone
+        # is insufficient: errors and cancelled streams must not become turns.
+        if not cancelled and (interrupted or has_pending_interrupt):
+            if turn is not None:
+                turn.updated = time.monotonic()
+            return
+        if self._memory_turns.get(session_id) is turn:
+            self._memory_turns.pop(session_id, None)
+        has_invocation_error = getattr(ctx, "exception", None) is not None
+        has_error_result = isinstance(result, dict) and result.get("result_type") == "error"
+        if cancelled or has_invocation_error or has_error_result:
+            return
+
+        query = turn.render() if turn is not None else (
+            "" if isinstance(getattr(ctx.inputs, "query", None), InteractiveInput)
+            else self._resolve_user_text_for_memory(ctx)
+        )
+        if not query or not output:
+            return
+        # Capture routing before awaiting the previous task: the host may
+        # refresh its project binding for the next invocation meanwhile.
+        project = self._resolve_project(ctx)
+
         if self._sync_consecutive_failures >= _SYNC_BREAKER_THRESHOLD:
             if time.monotonic() < self._sync_breaker_until:
                 return
             self._sync_consecutive_failures = 0
-
-        # Unified user-text resolution keeps prefetch and sync_turn consistent
-        query = self._resolve_user_text_for_memory(ctx)
-        output = self._extract_assistant_output(ctx)
-
-        if not query or not output:
-            return
 
         # Serialize: wait for previous sync_turn to complete
         if self._sync_task and not self._sync_task.done():
@@ -353,7 +476,7 @@ class JiuwenMemoryRail(DeepAgentRail):
                         scope_id=self._scope_id,
                         agent_id=self._agent_id,
                         session_id=self._session_id,
-                        project=self._resolve_project(ctx),
+                        project=project,
                     ),
                     timeout=_SYNC_TURN_TIMEOUT,
                 )
@@ -456,6 +579,50 @@ class JiuwenMemoryRail(DeepAgentRail):
     # ---- Helper methods ----
 
     @staticmethod
+    def _turn_session_id(ctx: AgentCallbackContext) -> str:
+        session = getattr(ctx, "session", None)
+        if session is not None:
+            session_id = session.get_session_id()
+            if isinstance(session_id, str) and session_id:
+                return session_id
+        conversation_id = getattr(ctx.inputs, "conversation_id", None)
+        return conversation_id if isinstance(conversation_id, str) else ""
+
+    @staticmethod
+    def _interruption_state(ctx: AgentCallbackContext):
+        get_state = getattr(getattr(ctx, "session", None), "get_state", None)
+        return get_state(INTERRUPTION_KEY) if callable(get_state) else None
+
+    def _begin_memory_turn(self, ctx: AgentCallbackContext) -> None:
+        if self._is_background_run(ctx):
+            return
+        now = time.monotonic()
+        for key, turn in list(self._memory_turns.items()):
+            if now - turn.updated >= _TURN_TTL:
+                self._memory_turns.pop(key, None)
+        session_id = self._turn_session_id(ctx)
+        if not session_id:
+            return
+        query = getattr(ctx.inputs, "query", None)
+        resume = isinstance(query, InteractiveInput) or self._interruption_state(ctx) is not None
+        turn = self._memory_turns.get(session_id) if resume else None
+        if not isinstance(query, InteractiveInput):
+            text = self._resolve_user_text_for_memory(ctx)
+            if turn is None and text:
+                turn = _MemoryTurn(text)
+            elif turn is not None:
+                turn.append(text)
+        if turn is None:
+            self._memory_turns.pop(session_id, None)
+            return
+        self._memory_turns.pop(session_id, None)
+        if len(self._memory_turns) >= _TURN_MAX_SESSIONS:
+            self._memory_turns.pop(next(iter(self._memory_turns)))
+        turn.updated = now
+        self._memory_turns[session_id] = turn
+        ctx.extra[_TURN_CONTEXT_KEY] = turn
+
+    @staticmethod
     def _is_background_run(ctx: AgentCallbackContext) -> bool:
         inputs = ctx.inputs
         for method_name in ("is_heartbeat", "is_cron"):
@@ -463,7 +630,7 @@ class JiuwenMemoryRail(DeepAgentRail):
             if callable(method) and method():
                 return True
 
-        run_kind = getattr(inputs, "run_kind", None)
+        run_kind = getattr(inputs, "run_kind", None) or getattr(ctx, "extra", {}).get("run_kind")
         if run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
             return True
         if isinstance(run_kind, str):
