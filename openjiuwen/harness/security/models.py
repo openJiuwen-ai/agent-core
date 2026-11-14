@@ -5,47 +5,18 @@
 运行时代码仍以 ``dict[str, Any]`` 承载 YAML/JSON 中的 ``permissions``；TypedDict 仅用于静态检查与文档。
 
 典型挂载：:attr:`openjiuwen.harness.schema.config.DeepAgentConfig.permissions`、
-:func:`openjiuwen.harness.security.factory.build_permission_interrupt_rail` 的 ``permissions``、
-引擎 ``PermissionEngine.config`` 等。工具级策略由 ``tiered_policy.evaluate_tiered_policy`` 评估。
+:func:`openjiuwen.harness.security.factory.build_permission_interrupt_rail` 的 ``permissions`` 等。
+实际判定由 agent-security 的 ``PermissionManager`` 负责。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, NotRequired, TypedDict
 
+from agent_shield.tool_permission import PermissionLevel, PermissionResult
 
-class PermissionLevel(str, Enum):
-    """权限级别.
-
-    - ALLOW: 直接执行，无需确认
-    - ASK:   弹出确认框，用户决定
-    - DENY:  拒绝执行，返回错误
-    """
-    ALLOW = "allow"
-    ASK = "ask"
-    DENY = "deny"
-
-
-@dataclass
-class PermissionResult:
-    permission: PermissionLevel
-    matched_rule: str | None = None
-    reason: str | None = None
-    external_paths: list[str] | None = None
-
-    @property
-    def is_allowed(self) -> bool:
-        return self.permission == PermissionLevel.ALLOW
-
-    @property
-    def is_denied(self) -> bool:
-        return self.permission == PermissionLevel.DENY
-
-    @property
-    def needs_approval(self) -> bool:
-        return self.permission == PermissionLevel.ASK
+# 判定结果类型由 agent_shield 定义；这里转出，保持原有导入路径可用。
 
 
 @dataclass(frozen=True)
@@ -67,13 +38,7 @@ class PermissionConfirmResponse:
 
 
 class ApprovalOverrideEntry(TypedDict, total=False):
-    """``permissions.approval_overrides`` 中单条用户/CLI 覆盖。
-
-    ``match_type`` 表示 ``pattern`` 作用在哪种输入上（如 ``path`` 对路径参数、``command`` 对命令
-    文本）；``pattern`` 则是该维度上的具体表达式（``re:…`` 正则或路径/通配写法），二者分工不同。
-
-    引擎匹配与合并仅依赖上述字段；历史 YAML 中若存在其它键（如旧版 ``source``），会被忽略。
-    """
+    """``permissions.approval_overrides`` 中单条用户/CLI 覆盖。"""
 
     id: str
     tools: list[str]
@@ -108,37 +73,19 @@ class FileGuardSection(TypedDict, total=False):
     paths: NotRequired[list[FileGuardPathEntry]]
 
 
+class SoftDeleteSection(TypedDict, total=False):
+    """Windows 软删除与批量删除审批。只有布尔 ``enabled: true`` 才开启。"""
+
+    enabled: bool
+    archive_dir: NotRequired[str]
+    batch_delete_threshold: NotRequired[int]
+
+
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
-    常见键包括 ``tools``、``defaults``、``rules``、``approval_overrides``、
-    ``file_guard``、``external_directory``（deprecated）等。
-
-    - 工具级策略由 :func:`openjiuwen.harness.security.tiered_policy.evaluate_tiered_policy` 评估。
-    - 路径防护由 :mod:`openjiuwen.harness.security.file_guard` 评估（可独立关闭）。
-
-    ``schema``（可选）：建议写 ``tiered_policy`` 等，便于人类阅读或与旧文档对齐；
-    引擎**不**根据该字段切换实现路径。例如::
-
-        permissions:
-          enabled: true
-          schema: tiered_policy
-          tools:
-            read_file: ask
-          file_guard:
-            enabled: true
-            defaults: {read: ask, write: ask, exec: ask}
-            paths:
-              - path: "/data/public"
-                read: allow
-                write: ask
-                exec: deny
-          # deprecated：加载期投影进 file_guard（Legacy）
-          external_directory:
-            "*": ask
-
-    其它键（例如产品层在 ``permissions`` 下自用的配置）可继续出现在 YAML 中；本 TypedDict
-    不枚举 harness 之外的扩展字段。
+    工具级策略与路径防护均由 agent-security 的 ``PermissionManager`` 评估。
+    ``schema`` 仅用于说明配置，不用于切换实现路径。
     """
 
     enabled: bool
@@ -148,6 +95,7 @@ class PermissionsSection(TypedDict, total=False):
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
     file_guard: NotRequired[FileGuardSection]
+    soft_delete: NotRequired[SoftDeleteSection]
     external_directory: NotRequired[dict[str, str]]  # deprecated → file_guard
 
 
@@ -156,6 +104,7 @@ __all__ = [
     "FileGuardDefaults",
     "FileGuardPathEntry",
     "FileGuardSection",
+    "SoftDeleteSection",
     "PermissionConfirmResponse",
     "PermissionLevel",
     "PermissionResult",

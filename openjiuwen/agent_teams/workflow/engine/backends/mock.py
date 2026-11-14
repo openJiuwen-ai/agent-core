@@ -27,6 +27,7 @@ Two override hooks, both optional:
 A hook may return :data:`SKIP` to make the call behave as a user-skip
 (``agent()`` -> ``None``).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -145,6 +146,10 @@ class _MockSession:
 
 
 class MockBackend(AgentBackend):
+    #: The offline preview must accept every option the team backend accepts,
+    #: or a script that runs fine is rejected before it is ever previewed.
+    KNOWN_OPTIONS = frozenset({"agent_template"})
+
     def __init__(
         self,
         fixtures: dict[str, Any] | None = None,
@@ -155,7 +160,9 @@ class MockBackend(AgentBackend):
         self.responder = responder
         self._sessions: dict[str, _MockSession] = {}
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         rng = random.Random(_seed(prompt, opts, schema_json))
         raw = self._pick_raw(prompt, opts, schema_json, rng)
         return self._report(self._result(prompt, opts.get("label"), raw, schema_json, rng))
@@ -164,8 +171,25 @@ class MockBackend(AgentBackend):
     # Stateful sessions (deterministic; a "human" session answers like an agent)
     # ------------------------------------------------------------------
 
-    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
-        sid = f"mock-sess-{len(self._sessions)}"  # deterministic by open order
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Mock sessions have no context to snapshot; forks degrade to the history mirror."""
+        return None
+
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Deterministic mock member identity (no avatar, no counter drift)."""
+        label = str(opts.get("label") or kind)
+        return f"mock-{label}"
+
+    async def open_session(
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
+    ) -> str:
+        sid = member_name or f"mock-sess-{len(self._sessions)}"  # deterministic by open order
         self._sessions[sid] = _MockSession(kind=kind, instructions=instructions)
         return sid
 

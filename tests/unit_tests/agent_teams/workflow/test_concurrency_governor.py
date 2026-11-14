@@ -86,8 +86,8 @@ def test_build_rejects_l3_below_l1():
 
 
 def test_resolve_agents_per_run_cap_matches_runtime():
-    from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
     from openjiuwen.agent_teams.workflow.engine.journal import Journal
+    from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
 
     rt = Runtime(backend=MockBackend(), journal=Journal())
     rt.cap_override = 7
@@ -150,13 +150,13 @@ async def test_agent_gate_limits_per_run_parallelism(tmp_path):
     lock = asyncio.Lock()
 
     class _CountingBackend(MockBackend):
-        async def run(self, prompt, opts, schema_json=None):  # type: ignore[override]
+        async def run(self, prompt, opts, schema_json=None, *, call_key=None):  # type: ignore[override]
             nonlocal active, peak
             async with lock:
                 active += 1
                 peak = max(peak, active)
             try:
-                return await super().run(prompt, opts, schema_json)
+                return await super().run(prompt, opts, schema_json, call_key=call_key)
             finally:
                 async with lock:
                     active -= 1

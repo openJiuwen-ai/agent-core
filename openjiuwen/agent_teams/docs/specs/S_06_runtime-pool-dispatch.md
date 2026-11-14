@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/runtime/`、`openjiuwen/core/runner/team_runner.py`（`_resolve_team_agent_spec` 入参归一化） |
-| 最近一次修订日期 | 2026-10-22 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md`、`F_75_idle-trigger-interrupt-resume-deadlock.md` |
+| 最近一次修订日期 | 2026-11-10 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md`、`F_75_idle-trigger-interrupt-resume-deadlock.md`、`F_84_apply-runtime-capabilities.md` |
 
 ## 范围 / 边界
 
@@ -43,7 +43,7 @@
    - `delete_team(force=False)`：pool 里有 entry 直接报 `AGENT_TEAM_BUSY_INVALID`。
    - `release_session(force=False)`：该 session 上有任何 entry 直接报 `AGENT_TEAM_BUSY_INVALID`。
    - `force=True` 等价于"先 stop_team 再做"，没有第三种语义。
-9. **gate 与 run cycle 对齐**：每个 `ActiveTeam` 自带一个 `InteractGate`；`run_agent_team*` 退出 `finally` 先调 `finalize`（pause vs stop 决策 + pool 状态同步），再调 `_close_team_interact_gate`（manager 暴露 pool 让 Runner 直接拿 gate 调 `close_and_drain`）；`RESUME_FROM_PAUSE` 在 `_apply_action` 中调 `gate.reset()` 让下个 cycle 重新放行。
+9. **gate 与 run cycle 对齐**：每个 `ActiveTeam` 自带一个 `InteractGate`；`run_agent_team*` 退出 `finally` 先调 `finalize`（pause vs stop 决策 + pool 状态同步），再调 `_close_team_interact_gate`（manager 暴露 pool 让 Runner 直接拿 gate 调 `close_and_drain`）；`RESUME_FROM_PAUSE` 在 `_apply_action` 中先对 live agent 调 `apply_runtime_capabilities(tip)`（刷新 mounted spec / allocator / `member_model`，供后续 spawn·configure 使用；**不**重建已在跑的 DeepAgent/harness，见 F_84），再调 `gate.reset()` 让下个 cycle 重新放行。
 10. **gate 状态机单调**：`InteractGate` 在一个 cycle 内只能 `OPEN → CLOSING → DRAINED`；`reset()` 只在新 cycle 开始时调用，调用前必须确保上一 cycle 的 ticket 不再被持有。
 11. **interact 必经 gate**：普通消息和 `InteractiveInput` 都必须先 `admit` 拿 ticket，后 `consume_done` 释放；structured resume 的 ticket 持有到 `resume_interrupt()` 完成。gate closed 时两类输入都返回 `gate_closed`。ticket 与 gate 的引用绑定，跨 gate 的 ticket 静默忽略，避免误释放。
 12. **finalize 决策权归 manager**：leader run cycle 的 pause vs stop 决策由 `TeamRuntimeManager.finalize` 拥有（`shutdown_requested or lifecycle != "persistent"` → stop+`pool.remove`；否则 pause+`state=PAUSED`）。`CoordinationKernel.finalize_round` 不再做该决策——外部 `stop_team` 不会被 stream finally 路径上的隐式 re-pause 静默盖掉。
@@ -201,7 +201,7 @@ def decide_run_action(
 | 4 | * | * | — | present | RUNNING / STOPPING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` / 稍后重试 |
 | 5 | T | F | — | None | — | `NEW_TEAM_IN_SESSION` | `pre_run(inputs)` → `spec.build()` → `agent.resume_for_new_session(session)` → 入 pool |
 | 6 | T | T | — | None | — | `COLD_RECOVER` | `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` → `agent.recover_team()` → 入 pool |
-| 7 | * | * | — | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
+| 7 | * | * | — | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `agent.apply_runtime_capabilities(spec)`（mounted/allocator/`member_model`；不重建 live harness）→ `entry.state = RUNNING` → `gate.reset()` |
 
 注：
 

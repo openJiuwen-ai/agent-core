@@ -1,10 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import logging
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union, Literal
 
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class LocalWorkConfig(BaseModel):
@@ -20,6 +23,20 @@ class LocalWorkConfig(BaseModel):
                  "ps", "df", "ping"],
         description="List of allowed command prefixes. If None, all commands are allowed (warning: insecure).")
 
+    dangerous_patterns: Optional[List[str]] = Field(
+        default=None,
+        description="Deprecated: command blocking moved to PermissionManager; this value is ignored.",
+    )
+
+    @model_validator(mode="after")
+    def _warn_deprecated_dangerous_patterns(self) -> "LocalWorkConfig":
+        if self.dangerous_patterns:
+            logger.warning(
+                "[LocalWorkConfig] dangerous_patterns is deprecated and ignored; "
+                "use PermissionManager.check_permission instead"
+            )
+        return self
+
     sandbox_root: Optional[List[str]] = Field(
         default=None,
         description="Security boundary for fs operations.  Paths outside every entry are "
@@ -32,11 +49,6 @@ class LocalWorkConfig(BaseModel):
         default=False,
         description="When True, fs operations reject paths outside every sandbox_root entry. "
                     "If sandbox_root is None, falls back to [workspace, project_root] defaults.")
-
-    dangerous_patterns: Optional[List[str]] = Field(
-        default=None,
-        description="List of regex patterns for dangerous commands to block. "
-                    "If None, uses built-in default patterns.")
 
 
 class ContainerScope(str, Enum):

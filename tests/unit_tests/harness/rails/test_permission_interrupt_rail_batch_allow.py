@@ -13,7 +13,7 @@ tests red.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -42,15 +42,23 @@ def _tool_call(name: str, args: dict, call_id: str = "call-1") -> ToolCall:
     )
 
 
-def _ask_rail() -> PermissionInterruptRail:
-    """Rail with a stubbed engine that always decides ASK."""
-    engine = MagicMock()
-    engine.check_permission = AsyncMock(return_value=PermissionResult(
+@pytest.fixture(autouse=True)
+def _stub_manager_ask():
+    """Stub the permission manager so every decision is ASK (tests may override)."""
+    manager = MagicMock()
+    manager.check_permission = AsyncMock(return_value=PermissionResult(
         permission=PermissionLevel.ASK,
         matched_rule=None,
         reason="unit-test ASK",
     ))
-    return PermissionInterruptRail(config={}, engine=engine)
+    with patch("openjiuwen.harness.security.permission_checks.get_permission_manager",
+               return_value=manager):
+        yield manager
+
+
+def _ask_rail() -> PermissionInterruptRail:
+    """Rail whose decisions come from the stubbed manager (ASK)."""
+    return PermissionInterruptRail()
 
 
 def _ctx(extra: dict | None = None) -> AgentCallbackContext:
@@ -188,16 +196,15 @@ async def test_batch_allow_empty_set_or_missing_or_mismatched_key_interrupts() -
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_batch_allow_does_not_override_engine_deny() -> None:
+async def test_batch_allow_does_not_override_engine_deny(_stub_manager_ask) -> None:
     """Engine decisions short-circuit before batch keys: an explicit DENY is
     rejected even when an identical sibling was previously approved."""
-    engine = MagicMock()
-    engine.check_permission = AsyncMock(return_value=PermissionResult(
+    _stub_manager_ask.check_permission = AsyncMock(return_value=PermissionResult(
         permission=PermissionLevel.DENY,
         matched_rule=None,
         reason="denied by policy",
     ))
-    rail = PermissionInterruptRail(config={}, engine=engine)
+    rail = PermissionInterruptRail()
     call = _tool_call("write_file", {"path": "/tmp/a"})
     ctx = _ctx({RESUME_BATCH_ALLOW_KEYS: {compute_batch_allow_key(call)}})
 

@@ -57,8 +57,61 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.agent_teams.workflow.swarmflow_infra import SwarmflowInfra
     from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
+
+
+def team_member_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    member_name: str,
+    display_name: str,
+    is_leader: bool = False,
+) -> "ExecutionSubject":
+    """Build the trajectory owner identity of one Team member execution.
+
+    Shared by long-lived members, swarmflow workers and avatars so they land
+    in the same trajectory lane.
+    """
+    from openjiuwen.harness.execution_subject import ExecutionSubject
+
+    return ExecutionSubject(
+        subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+        display_name=display_name,
+        kind="team_leader" if is_leader else "team_member",
+        parent_subject_id="",
+        session_id=session_id,
+    )
+
+
+def team_reviewer_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    task_id: str,
+    reviewer: str,
+    review_round: int,
+    attempt: int = 0,
+    assignee: str | None = None,
+) -> "ExecutionSubject":
+    """Build the trajectory owner identity of one temp reviewer harness run."""
+    from openjiuwen.harness.execution_subject import ExecutionSubject
+
+    parent = (
+        f"team-member:{session_id}:{team_name}:{assignee}" if assignee else ""
+    )
+    return ExecutionSubject(
+        subject_id=(
+            f"team-reviewer:{session_id}:{team_name}:{task_id}:"
+            f"{reviewer}:r{review_round}:a{attempt}"
+        ),
+        display_name=reviewer,
+        kind="team_reviewer",
+        parent_subject_id=parent,
+        session_id=session_id,
+    )
 
 
 # pylint: disable=too-many-public-methods
@@ -446,6 +499,19 @@ class TeamAgent(BaseAgent):
             return
         await harness.send(content, immediate=use_steer)
 
+    @property
+    def background_task_controller(self) -> Optional[Any]:
+        """Return the embedder's background task controller, or None.
+
+        Read side of :meth:`set_background_task_controller` — the spawn path
+        reads it off the leader to attach the SAME session-level controller to
+        an in-process teammate after its configure, so every member's
+        swarmflow runs register in one registry. None before any attach (or
+        when no runtime is built yet).
+        """
+        harness = self.harness
+        return harness.background_task_controller if harness is not None else None
+
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
 
@@ -456,6 +522,54 @@ class TeamAgent(BaseAgent):
         harness = self.harness
         if harness is not None:
             harness.set_background_task_controller(controller)
+
+    def share_workspace_cache_with(self, other: "TeamAgent") -> None:
+        """Share the team-level workspace manager with an in-process teammate.
+
+        Must run **before** ``teammate.configure(...)``.
+        """
+        own = self._configurator.workspace_manager
+        if own is not None:
+            other.attach_workspace_manager(own)
+
+    def attach_workspace_manager(self, manager: "TeamWorkspaceManager | None") -> None:
+        """Adopt a shared workspace manager (in-process member share)."""
+        self._configurator.workspace_manager = manager
+
+    def share_checkpoints_with(self, other: "TeamAgent") -> None:
+        """Share the leader's checkpoint namespace with another agent.
+
+        No-op until this tree grows a shared named-checkpoint store; the
+        spawn path still calls this so hosts / tests can observe ordering.
+        """
+        named = getattr(self, "_named_checkpoints", None)
+        setter = getattr(other, "set_checkpoints_from", None)
+        if named is not None and callable(setter):
+            setter(named)
+
+    def share_swarmflow_with(self, other: "TeamAgent") -> None:
+        """Share the team-level swarmflow infrastructure with an in-process teammate.
+
+        The leader constructs the shared swarmflow objects (governor /
+        budget ledger / model resolver / base specs / expert table) once at
+        its setup; in-process teammates reuse the same instance by reference
+        so concurrent runs from any member draw down one budget pool under
+        one L1/L3 authority. Must run **before** ``teammate.configure(...)``:
+        afterwards the teammate's setup has already run without it.
+        """
+        own = self._configurator.swarmflow
+        if own is not None:
+            other.attach_swarmflow(own)
+
+    def attach_swarmflow(self, infra: "SwarmflowInfra | None") -> None:
+        """Adopt the shared team-level swarmflow infrastructure (in-process member share).
+
+        Called by the leader's ``share_swarmflow_with`` — the
+        teammate's ``setup_agent`` reads the injected instance instead of
+        constructing its own (construction is leader-only; a member without
+        injection keeps every field empty).
+        """
+        self._configurator.swarmflow = infra
 
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
@@ -681,6 +795,96 @@ class TeamAgent(BaseAgent):
         if team_session is None:
             return
         self._recovery_manager.persist_leader_config(team_session)
+
+    @staticmethod
+    def _refresh_context_member_model_from_pool(context: TeamRuntimeContext) -> None:
+        """Re-bind ``context.member_model`` to the live pool, or clear it.
+
+        ``configure`` / ``_setup_agent`` prefer ``ctx.member_model`` over
+        ``agent_spec.model``. After a tip overlay refreshes the flat pool (or
+        clears it), a checkpoint-era ``member_model`` would keep the leader on
+        stale api_key / endpoint even when ``agents['leader'].model`` and
+        teammate resolve paths already see the tip. Re-resolve by the previous
+        ``model_name`` when the pool is non-empty; otherwise clear so the
+        overlaid per-agent model wins.
+        """
+        team_spec = context.team_spec
+        if team_spec is None:
+            return
+        if not team_spec.model_pool:
+            context.member_model = None
+            return
+        from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+        model_name = None
+        member_model = context.member_model
+        if member_model is not None and member_model.model_client_config is not None:
+            model_name = member_model.model_client_config.model_name
+        context.member_model = resolve_member_model(
+            team_spec,
+            model_name=model_name,
+            model_index=None,
+        )
+
+    def apply_runtime_capabilities(self, runtime_spec: TeamAgentSpec) -> None:
+        """Overlay tip model / skills / pool onto the mounted spec + allocator.
+
+        Mutates the mounted ``TeamAgentSpec`` in place (shared with in-process
+        teammates configured from the same object) and rebuilds the leader
+        model allocator from the tip's effective pool (expanding
+        ``model_router`` / ``model_intelli_router`` the same way ``build()``
+        does). ``update_model_pool`` keeps live ``model_id`` values via
+        ``inherit_pool_ids``. Also refreshes ``runtime_context.member_model``
+        so metadata matches the tip pool.
+
+        This does **not** rebuild the already-running DeepAgent / harness
+        model client or skill rails on the pause-reuse path — those stay on
+        the first-mount instance until the next ``configure`` / spawn. New
+        teammates and cold-recover ``configure`` read the refreshed mounted
+        spec. Identity, workspace, and spawn layout stay untouched — see
+        :func:`openjiuwen.agent_teams.schema.runtime_capabilities.apply_runtime_capabilities`.
+
+        Args:
+            runtime_spec: Tip produced for the current request (e.g. swarm
+                ``get_swarm_enriched_team_spec``).
+        """
+        from openjiuwen.agent_teams.schema.runtime_capabilities import (
+            apply_runtime_capabilities_inplace,
+            resolve_effective_model_pool,
+        )
+
+        mounted = self.spec
+        if mounted is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="apply_runtime_capabilities requires a configured TeamAgent",
+            )
+        apply_runtime_capabilities_inplace(mounted, runtime_spec)
+
+        if self.role != TeamRole.LEADER:
+            return
+
+        pool, strategy = resolve_effective_model_pool(mounted)
+        ctx = self.runtime_context
+        team_spec = ctx.team_spec if ctx is not None else None
+        if team_spec is not None:
+            team_spec.model_pool_strategy = strategy
+        if pool:
+            # Do not clobber team_spec.model_pool first — update_model_pool
+            # inherits live model_ids from the current pool onto the tip entries.
+            self.update_model_pool(pool)
+        else:
+            # Tip cleared every sourcing path — fall back to per-agent models.
+            self._configurator.model_allocator = None
+            if team_spec is not None:
+                team_spec.model_pool = []
+        if ctx is not None:
+            self._refresh_context_member_model_from_pool(ctx)
+        team_logger.info(
+            "[{}] apply_runtime_capabilities: mounted spec/pool refreshed; "
+            "live DeepAgent/harness model and skills stay until next configure/spawn",
+            self._member_name() or mounted.team_name,
+        )
 
     def attach_model_allocator(
         self,
@@ -1228,11 +1432,14 @@ class TeamAgent(BaseAgent):
                 restored via ``pre_run``.
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
-            runtime_spec: Optional live spec from the current process. Used to
-                reinject ``build_context`` and ``memory.embedding_config``, which
-                are ``Field(exclude=True)`` and never survive the checkpoint
-                round-trip. When omitted the recovered spec is used as-is
-                (rebuilding context from its seed).
+            runtime_spec: Optional live tip from the current process. When
+                provided, overlays ``model`` / ``skills`` / team model sourcing
+                onto the checkpoint spec, reinjects ``build_context`` and
+                ``memory.embedding_config`` (``Field(exclude=True)``), and
+                syncs ``context.team_spec``'s flat pool from the tip (expanding
+                routers, inheriting checkpoint ``model_id`` values) before
+                ``configure``. When omitted the recovered spec / context are
+                used as-is (rebuilding context from its seed).
 
         Raises:
             ValueError: When the session has no bucket for ``team_name`` or
@@ -1248,6 +1455,16 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        # Capability fields (model / skills / pool) are serializable but still
+        # go stale when the platform tip moves after the checkpoint was written.
+        # Overlay them from the live tip before configure so recover_team /
+        # spawn(configure(leader.spec)) see current values.
+        if runtime_spec is not None:
+            from openjiuwen.agent_teams.schema.runtime_capabilities import (
+                apply_runtime_capabilities,
+            )
+
+            spec = apply_runtime_capabilities(spec, runtime_spec)
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
@@ -1261,6 +1478,26 @@ class TeamAgent(BaseAgent):
                 spec.memory.embedding_config = runtime_spec.memory.embedding_config
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
+        # Allocator reads TeamSpec.model_pool (the expanded flat view), not the
+        # tip's mutually-exclusive router fields. Sync that view from the
+        # overlaid TeamAgentSpec before configure, inheriting checkpoint
+        # model_ids so restore_allocator_state can still correlate.
+        if runtime_spec is not None and context.team_spec is not None:
+            from openjiuwen.agent_teams.models import inherit_pool_ids
+            from openjiuwen.agent_teams.schema.runtime_capabilities import (
+                resolve_effective_model_pool,
+            )
+
+            tip_pool, tip_strategy = resolve_effective_model_pool(spec)
+            context.team_spec.model_pool = inherit_pool_ids(
+                context.team_spec.model_pool,
+                tip_pool,
+            )
+            context.team_spec.model_pool_strategy = tip_strategy
+            # configure() prefers ctx.member_model over agents['leader'].model;
+            # refresh (or clear) so the leader does not keep checkpoint
+            # credentials while teammates resolve against the tip pool.
+            cls._refresh_context_member_model_from_pool(context)
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
@@ -1287,4 +1524,4 @@ class TeamAgent(BaseAgent):
         return agent
 
 
-__all__ = ["TeamAgent"]
+__all__ = ["TeamAgent", "team_member_execution_subject", "team_reviewer_execution_subject"]

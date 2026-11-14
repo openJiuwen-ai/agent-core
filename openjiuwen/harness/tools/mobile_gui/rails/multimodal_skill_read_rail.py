@@ -199,9 +199,16 @@ def _merge_skill_read_file_user_messages(run: List[UserMessage]) -> UserMessage:
                 merged_blocks.append({"type": "text", "text": note})
         merged_blocks.extend(image_blocks)
 
+    # The merged message is written back into the stored context (see
+    # ``before_model_call``), so provenance markers stamped on the source
+    # bridge messages must survive the rebuild: without the harness_internal
+    # origin marker the compressors' round-boundary check would treat the
+    # merged multimodal message as a genuine user turn.
+    first = run[0]
     return UserMessage(
         content=merged_blocks,
         name=MULTIMODAL_SKILL_USER_MESSAGE_NAME,
+        metadata=dict(getattr(first, "metadata", None) or {}),
     )
 
 

@@ -304,4 +304,4 @@ abstractmethod async search_files(
 - `write_file(..., prepend_newline=False, options={"atomic_replace": True, "expected_exists": ..., "expected_content_sha256": ...})`：在文件端锁内比较前置条件并原子替换，不支持 append。成功时 `data.atomic_replace=True`；明确冲突时返回非零 code 且 `data.conflict=True`。其他失败不得当成冲突自动重放。
 - 沙箱快照额外返回现有 `backend_id`；条件写通过 `expected_backend_id` 检查读取与提交仍使用同一沙箱，无额外网络查询。
 
-原子替换保持已有文件的写权限、owner/group 和 ACL；取消会等待在途替换收尾。该保证不包括断电持久性。未支持此接口的沙箱不能回退为普通覆盖写。
+原子替换保持已有文件的写权限、owner/group 和 ACL；取消会等待在途替换收尾。该保证不包括断电持久性。未支持此接口的沙箱不能回退为普通覆盖写。Windows 上优先使用系统原生替换，无需额外权限即可保留目标的 owner/group/DACL；原生替换不可用时退化为只复制 DACL（owner/group 可能归一为执行写入的进程），并在无法证明 DACL 等价时拒绝发布。

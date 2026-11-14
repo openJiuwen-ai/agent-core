@@ -61,6 +61,7 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
 - Verify the work is fully done (e.g., run tests to confirm)
 - Never mark completed if: partially implemented, tests failing, unresolved errors
 - After completing, check if new follow-up tasks were discovered and append them via todo_modify
+- Mark completed promptly when the work is done; do not leave hanging in_progress items
 """
 
 TODO_SYSTEM_PROMPT_CN = """
@@ -103,6 +104,7 @@ TODO_SYSTEM_PROMPT_CN = """
 - 必须仔细验证工作已全部完成（如运行测试用例）
 - 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等
 - 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加
+- 任务完成后及时更新为 completed，不要留下悬挂的 in_progress
 """
 
 TODO_SYSTEM_PROMPT: Dict[str, str] = {

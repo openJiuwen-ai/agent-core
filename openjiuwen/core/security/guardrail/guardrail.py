@@ -25,17 +25,13 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.security.guardrail.context import GuardrailContext
-from openjiuwen.core.security.guardrail.backends import GuardrailBackend
-from openjiuwen.core.security.guardrail.enums import RiskLevel
-from openjiuwen.core.security.guardrail.models import (
+from agent_shield.detection import (
+    GuardrailBackend,
+    GuardrailContext,
     GuardrailResult,
-    RiskAssessment,
+    to_guardrail_result,
 )
-from openjiuwen.core.runner.callback.enums import HookType
-from openjiuwen.core.runner.callback.errors import AbortError
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import GuardrailError
+
 from openjiuwen.core.common.logging import logger
 
 
@@ -238,26 +234,7 @@ class BaseGuardrail(ABC):
             )
 
         assessment = await self._backend.analyze(ctx)
-
-        if self.enable_logging:
-            if assessment.has_risk:
-                logger.warning(
-                    "Guardrail detected risk: %s (level: %s) for event '%s'",
-                    assessment.risk_type,
-                    assessment.risk_level,
-                    event
-                )
-            else:
-                logger.info(
-                    "Guardrail passed for event '%s'", event
-                )
-
-        return GuardrailResult(
-            is_safe=not assessment.has_risk,
-            risk_level=assessment.risk_level,
-            risk_type=assessment.risk_type,
-            details=assessment.details
-        )
+        return to_guardrail_result(assessment)
 
     async def register(self, framework: Any) -> None:
         """Register this guardrail with the callback framework.
@@ -335,53 +312,52 @@ class BaseGuardrail(ABC):
         self._registered_events.clear()
         self._registered_callbacks.clear()
 
-    async def _detect_callback(self, event: Any, *args, **kwargs) -> None:
-        """Internal callback wrapper for the callback framework.
+    async def _detect_callback(self, event: Any, *args, **kwargs) -> GuardrailResult:
+        """Run detection for one callback and always return a GuardrailResult.
 
-        This method is called by the callback framework when a subscribed event
-        is triggered. It performs security detection and raises GuardrailError
-        or AbortError if a risk is detected.
+        A hit, including CRITICAL, is a result object. This callback does not
+        raise. Detection failures are returned as a pass result whose details
+        contain the error. The event name is written here, not by conversion.
 
         Args:
             event: Event that triggered this callback.
             *args: Positional arguments from callback framework.
             **kwargs: Event data from callback framework.
 
-        Raises:
-            GuardrailError: If detection result indicates a security risk (non-critical).
-            AbortError: If detection result indicates a critical security risk.
+        Returns:
+            GuardrailResult for this event. is_safe=False does not stop the call.
         """
         if self.enable_logging:
             logger.info(
                 "Guardrail callback triggered for event '%s'", event
             )
 
-        result = await self.detect(event, *args, **kwargs)
-
-        if not result.is_safe:
-            risk_info = {
-                "risk_type": result.risk_type or "unknown",
-                "risk_level": result.risk_level.name if result.risk_level else "UNKNOWN",
-                "event": str(event),
-            }
-            if result.details:
-                risk_info.update(result.details)
-
+        try:
+            result = await self.detect(event, *args, **kwargs)
+        except Exception as exc:
             if self.enable_logging:
-                logger.warning(
-                    "Guardrail blocked event '%s': %s risk detected",
+                logger.error(
+                    "Guardrail detection failed for event '%s': %s",
                     event,
-                    result.risk_type or "unknown"
+                    exc,
+                    exc_info=exc,
                 )
-
-            if result.risk_level == RiskLevel.CRITICAL:
-                raise AbortError(
-                    reason=f"Critical security risk detected: {result.risk_type or 'unknown'}",
-                    details=risk_info
-                )
-
-            raise GuardrailError(
-                StatusCode.GUARDRAIL_BLOCKED,
-                msg=f"Guardrail blocked: {result.risk_type or 'unknown'} risk detected",
-                details=risk_info
+            result = GuardrailResult.pass_(
+                details={"error": f"{type(exc).__name__}: {exc}"}
             )
+
+        event_name = event if isinstance(event, str) else str(event)
+        result.event = event_name
+
+        if self.enable_logging:
+            if result.is_safe:
+                logger.info("Guardrail passed for event '%s'", event_name)
+            else:
+                logger.warning(
+                    "Guardrail detected risk: event=%s risk_type=%s risk_level=%s confidence=%s",
+                    event_name,
+                    result.risk_type,
+                    result.risk_level.value if result.risk_level is not None else None,
+                    result.confidence,
+                )
+        return result

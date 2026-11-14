@@ -1,0 +1,170 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Load existing evaluation dataset cases from disk."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator, Mapping
+from json import JSONDecodeError
+from pathlib import Path
+
+from openjiuwen.rsi.harness_rsi.config import DataLoaderConfig
+from openjiuwen.rsi.harness_rsi.data_loader.batch_planner import BatchPlanner
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import validate_dataset_files
+from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
+from openjiuwen.rsi.harness_rsi.data_loader.plan_store import BatchPlanStore
+from openjiuwen.rsi.harness_rsi.data_loader.profiler import DatasetProfiler
+from openjiuwen.rsi.harness_rsi.data_loader.reference_adapter import adapt_reference
+from openjiuwen.rsi.harness_rsi.schema import CaseMapping
+
+
+class DataLoader:
+    """Load a dataset directory as batches of case mappings."""
+
+    def __init__(self, config: DataLoaderConfig) -> None:
+        if config.batch_size < 1:
+            raise ValueError("data_loader.batch_size must be greater than or equal to 1")
+        self.config = config
+        self.batch_plan_path = ""
+        self.dataset_profile_path = ""
+        self._profiler = DatasetProfiler()
+        self._batch_planner = BatchPlanner()
+        self._plan_store = BatchPlanStore()
+
+    def load(self, dataset_dir: str, epoch: int = 1) -> Iterator[list[CaseMapping]]:
+        """Load dataset cases from JSON files and yield batches.
+
+        Supported dataset file shapes:
+        - a single case object: ``{"case_id": "...", ...}``
+        - a list of case objects: ``[{...}, {...}]``
+        - an object with a ``cases`` list: ``{"cases": [{...}]}``
+        - a benchmark suite with one ``validation`` or ``evaluation`` list
+
+        Returns a one-shot iterator; call ``load()`` again for a fresh traversal.
+        """
+        root = Path(dataset_dir).expanduser().resolve()
+
+        if not root.is_dir():
+            raise FileNotFoundError(f"dataset directory not found: {root}")
+
+        dataset_files = sorted(path for path in root.glob(self.config.file_pattern) if path.is_file())
+        if not dataset_files:
+            raise FileNotFoundError(f"dataset json files not found: {root / self.config.file_pattern}")
+
+        yield from self._load_and_plan(root=root, dataset_files=dataset_files, epoch=epoch)
+
+    def load_files(self, dataset_files: list[str], epoch: int = 1) -> Iterator[list[CaseMapping]]:
+        """Load only the explicitly frozen dataset files.
+
+        This keeps an optimization request isolated when its directory also
+        contains another split or an earlier generated subset.
+        """
+        paths = [Path(value).expanduser().resolve() for value in dataset_files]
+        if not paths:
+            raise ValueError("dataset_files must not be empty")
+        missing = [str(path) for path in paths if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"dataset json files not found: {missing}")
+        roots = {path.parent for path in paths}
+        if len(roots) != 1:
+            raise ValueError("explicit dataset files must share one directory")
+        yield from self._load_and_plan(root=next(iter(roots)), dataset_files=paths, epoch=epoch)
+
+    def _load_and_plan(
+        self,
+        *,
+        root: Path,
+        dataset_files: list[Path],
+        epoch: int,
+    ) -> Iterator[list[CaseMapping]]:
+        """Materialize cases and persist one deterministic batch plan."""
+
+        cases: list[CaseMapping] = []
+        for dataset_file in dataset_files:
+            for case_index, case in enumerate(load_json_cases(dataset_file), start=1):
+                loaded_case: CaseMapping = dict(case)
+                loaded_case["case_path"] = str(dataset_file)
+                loaded_case.setdefault("case_index", case_index)
+                cases.append(loaded_case)
+
+        profile = self._profiler.profile(cases, self.config.batch_balance_keys)
+        batches = self._batch_planner.plan(cases, self.config.batch_size)
+        self.dataset_profile_path = self._plan_store.write_dataset_profile(root, profile)
+        self.batch_plan_path = self._plan_store.write_batch_plan(
+            root=root,
+            epoch=epoch,
+            batch_size=self.config.batch_size,
+            balance_keys=self.config.batch_balance_keys,
+            profile=profile,
+            batches=batches,
+        )
+        for batch in batches:
+            yield batch
+
+
+def load_json_cases(path: Path) -> list[CaseMapping]:
+    """Load one or more case mappings from a JSON file."""
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except JSONDecodeError as exc:
+        raise ValueError(f"dataset json is invalid: {path}") from exc
+
+    suite_shape = False
+    if isinstance(data, dict):
+        if isinstance(data.get("cases"), list):
+            raw_cases = data["cases"]
+        elif "cases" in data:
+            raise ValueError(f"dataset cases must be a list: {path}")
+        elif any(key in data for key in ("validation", "evaluation")):
+            split_keys = [key for key in ("validation", "evaluation") if key in data]
+            invalid = [key for key in split_keys if not isinstance(data[key], list)]
+            if invalid:
+                raise ValueError(f"dataset suite splits must be lists: {path}: {invalid}")
+            populated = [key for key in split_keys if data[key]]
+            if len(populated) > 1:
+                raise ValueError(
+                    f"dataset suite must select exactly one populated split: {path}: {populated}"
+                )
+            raw_cases = data[populated[0]] if populated else []
+            suite_shape = True
+        else:
+            raw_cases = [data]
+    elif isinstance(data, list):
+        raw_cases = data
+    else:
+        raise ValueError(f"dataset json must be a case object, case list, or object with cases: {path}")
+
+    cases: list[CaseMapping] = []
+    for index, case in enumerate(raw_cases, start=1):
+        if not isinstance(case, dict):
+            raise ValueError(f"dataset case must be a mapping: {path}#{index}")
+        normalized = _normalize_suite_case(case, path=path, index=index) if suite_shape else case
+        cases.append(normalize_grading_case(normalized))
+    if not cases:
+        raise ValueError(f"dataset cases must not be empty: {path}")
+    # Metadata-only cases remain usable by the dataset profiler. Execution and
+    # service admission require an explicit task input instead of exposing a case.
+    validate_dataset_files(cases, path.resolve().parent, require_input=False)
+    return [adapt_reference(case, path.resolve()) for case in cases]
+
+
+def _normalize_suite_case(case: Mapping[str, object], *, path: Path, index: int) -> CaseMapping:
+    """Add the engine aliases required by a benchmark task without dropping its contract."""
+
+    normalized: CaseMapping = dict(case)
+    case_id = str(case.get("case_id") or case.get("task_id") or case.get("id") or "").strip()
+    if not case_id:
+        raise ValueError(f"dataset suite task must have a non-empty id: {path}#{index}")
+    normalized.setdefault("case_id", case_id)
+    normalized.setdefault("task_id", case_id)
+    if "input" not in normalized:
+        normalized["input"] = str(case.get("prompt") or "")
+    return normalized
+
+
+__all__ = [
+    "DataLoader",
+    "load_json_cases",
+]
