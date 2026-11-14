@@ -567,6 +567,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                auto_confirm_key=auto_confirm_key,
                 metadata=self._build_interrupt_metadata(tool_call, result),
             ))
 
@@ -582,6 +583,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                auto_confirm_key=auto_confirm_key,
                 metadata=self._build_interrupt_metadata(tool_call, invalid),
             ))
 

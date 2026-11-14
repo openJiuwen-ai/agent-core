@@ -181,6 +181,61 @@ async def test_each_interrupt_gets_a_unique_id_and_a_later_one_on_the_call_a_new
     assert second.seen == [None, None], "the second rail must not receive the confirm approvals"
 
 
+class KeyedPermissionRail(BaseInterruptRail):
+    """Permission rail whose session remember key is the command text."""
+
+    interrupt_kind = InterruptKind.PERMISSION
+
+    def __init__(self) -> None:
+        super().__init__(tool_names=["bash"])
+        self.seen: List[str] = []
+
+    async def resolve_interrupt(self, ctx, tool_call, user_input, auto_confirm_config=None):
+        self.seen.append(tool_call.id)
+        key = f"bash:{tool_call.arguments}"
+        if user_input is None:
+            if auto_confirm_config and auto_confirm_config.get(key):
+                return self.approve()
+            return self.interrupt(InterruptRequest(message="allow this command?", auto_confirm_key=key))
+        if isinstance(user_input, dict) and user_input.get("approved"):
+            return self.approve()
+        return self.reject(tool_result="denied")
+
+
+def _bash(call_id: str, command: str) -> ToolCall:
+    return ToolCall(id=call_id, type="function", name="bash", arguments=command)
+
+
+@pytest.mark.asyncio
+async def test_unanswered_permission_call_stays_on_its_card():
+    rail = KeyedPermissionRail()
+    rounds = Rounds(rail, session=Session())
+    state, payloads = await rounds.start(_bash("call_a", "datong"), _bash("call_b", "taiyuan"))
+    rail.seen.clear()
+
+    answer = _answer(payloads["call_a"].interrupt_id, {"approved": True, "auto_confirm": True})
+    await rounds.resume(state, answer)
+
+    assert rounds.ran == ["call_a"]
+    assert rail.seen == ["call_a"]
+    kept = state.interrupted_tools["call_b"].interrupt_requests["call_b"]
+    assert kept.interrupt_id == payloads["call_b"].interrupt_id
+
+
+@pytest.mark.asyncio
+async def test_session_remember_still_runs_the_sibling_with_the_same_key():
+    rail = KeyedPermissionRail()
+    rounds = Rounds(rail, session=Session())
+    state, payloads = await rounds.start(_bash("call_a", "fetch"), _bash("call_b", "fetch"))
+    rail.seen.clear()
+
+    answer = _answer(payloads["call_a"].interrupt_id, {"approved": True, "auto_confirm": True})
+    await rounds.resume(state, answer)
+
+    assert rounds.ran == ["call_a", "call_b"]
+    assert state.interrupted_tools == {}
+
+
 @pytest.mark.asyncio
 async def test_update_by_call_id_answers_the_interrupt_pending_on_that_call():
     confirm, recorder = ConfirmInterruptRail(tool_names=["demo_tool"]), RecordingRail(["demo_tool"])

@@ -98,6 +98,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Periodic task-board sweep: flag stale CLAIMED + leader stale PENDING."""
+        if self._round.has_pending_interrupt():
+            return
         member_name = self._blueprint.member_name
         team_logger.debug("poll task: member_name={}, agent_running={}", member_name, self._round.is_agent_running())
         if member_name and self._infra.task_manager:
@@ -166,6 +168,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
             return
 
         relevant = await self._own_stalled_tasks(task_manager)
+        if self._round.has_pending_interrupt():
+            return
 
         # GC bookkeeping for tasks that left the swept set — completed,
         # reassigned, sent to review, cancelled, or a queued assignment
@@ -187,6 +191,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
 
         now = time.time()
         for task in relevant:
+            if self._round.has_pending_interrupt():
+                return
             last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
             if now - last_nudge < self._idle_claim_seconds:
                 continue
@@ -194,6 +200,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
             streak = self._stale_claim_streak.get(task.task_id, 0) + 1
             self._stale_claim_streak[task.task_id] = streak
             await self._self_nudge_idle_claim(task, idle)
+            if self._round.has_pending_interrupt():
+                return
             if streak >= self._STALE_CLAIM_ESCALATE_STREAK and task.task_id not in self._escalated_claims:
                 self._escalated_claims.add(task.task_id)
                 await self._escalate_stale_claim(task, idle)
@@ -307,6 +315,8 @@ class StaleTaskHandler(BaseCoordinationHandler):
         # ``list_member_roster`` already drops the caller, so the leader's own
         # READY status never counts as a free worker here.
         roster = await team_backend.list_member_roster()
+        if self._round.has_pending_interrupt():
+            return
         if not any(entry.status == MemberStatus.READY.value for entry in roster):
             return
 
@@ -360,6 +370,8 @@ class ScheduledStaleTaskHandler(StaleTaskHandler):
 
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Periodic sweep: flag own stale active tasks only."""
+        if self._round.has_pending_interrupt():
+            return
         member_name = self._blueprint.member_name
         team_logger.debug(
             "poll task (scheduled): member_name={}, agent_running={}",
@@ -395,6 +407,8 @@ class ScheduledStaleTaskHandler(StaleTaskHandler):
         ):
             active.extend(await task_manager.list_tasks(status=status))
         relevant = [tk for tk in active if tk.assignee and tk.assignee == own_name]
+        if self._round.has_pending_interrupt():
+            return
 
         current_ids = {tk.task_id for tk in relevant}
         for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
@@ -410,6 +424,8 @@ class ScheduledStaleTaskHandler(StaleTaskHandler):
         now_ms = get_current_time()
         threshold_ms = self._STALE_CLAIM_SECONDS * 1000
         for task in relevant:
+            if self._round.has_pending_interrupt():
+                return
             if task.updated_at is None:
                 continue
             elapsed_ms = now * 1000 - task.updated_at

@@ -417,6 +417,30 @@ def test_is_pending_interrupt_resume_valid_accepts_answers_by_interrupt_id() -> 
     assert harness.is_pending_interrupt_resume_valid(stale) is False
 
 
+def test_is_pending_interrupt_resume_valid_accepts_the_only_stale_permission_card() -> None:
+    call = ToolCall(id="call-coal", type="function", name="bash", arguments="{}")
+    state = ToolInterruptionState(
+        ai_message=AssistantMessage(content="", tool_calls=[call]),
+        iteration=0,
+        interrupted_tools={
+            call.id: ToolInterruptEntry(
+                tool_call=call,
+                interrupt_requests={
+                    call.id: InterruptRequest(interrupt_id="intr-new", interrupt_kind="permission"),
+                },
+            ),
+        },
+    )
+    session = MagicMock(name="LoopSession")
+    session.get_state.return_value = state
+    harness = _make_harness(_stub_native(loop_session=session))
+
+    stale = InteractiveInput()
+    stale.answer("intr-old", {"approved": True, "auto_confirm": True})
+    assert harness.is_pending_interrupt_resume_valid(stale) is True
+    assert stale.interrupt_answers == {"intr-old": {"approved": True, "auto_confirm": True}}
+
+
 def test_init_cwd_for_round_no_op_without_workspace() -> None:
     """Workspace is None should short-circuit init_cwd_for_round so the
     harness doesn't reach into a non-existent cwd setup.
