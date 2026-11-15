@@ -35,6 +35,8 @@ from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperati
 from openjiuwen.harness.schema.build_context import (
     PARENT_SYS_OPERATION_EXTRAS_KEY,
     BuildContext,
+)
+from openjiuwen.harness.schema.build_context import (
     extension_bus as get_extension_bus,
 )
 from openjiuwen.harness.schema.config import (
@@ -330,10 +332,7 @@ class BuiltinToolSpec(BaseModel):
         ensure_builtin_elements_registered()
         factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
         if factory is None:
-            raise ValueError(
-                f"Unknown tool type '{self.type}'. "
-                f"Registered types: {list(_TOOL_PROVIDER_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown tool type '{self.type}'. Registered types: {list(_TOOL_PROVIDER_REGISTRY)}")
         if context is None:
             context = BuildContext(language=language)
         return factory(dict(self.params), context)
@@ -599,10 +598,10 @@ class DeepAgentSpec(BaseModel):
         return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
-            extension_bus=get_extension_bus(build_ctx),
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
+            extension_bus=get_extension_bus(build_ctx),
             subagents=subagents,
             rails=rails,
             enable_task_loop=self.enable_task_loop,

@@ -125,6 +125,7 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     dispatch_mode: str = "autonomous",
+    extension_bus: Any = None,
     lifecycle: str = "temporary",
     team_mode: str = "default",
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
@@ -139,7 +140,6 @@ def create_team_tools(
     concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
-    extension_bus: Any = None,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 

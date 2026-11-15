@@ -195,6 +195,8 @@ async def _build_member_system_prompt(
                     teammate_mode=spec.teammate_mode,
                     hitt_enabled=hitt_enabled,
                     expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
+                    member_messaging=getattr(spec, "enable_member_messaging", False) is True,
+                    member_subtasks=getattr(spec, "max_subtask_depth", 0) > 0,
                 ),
                 loader=loader,
                 bus=extension_bus,

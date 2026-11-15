@@ -10,12 +10,12 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncContextManager, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
+import openjiuwen.core.context_engine.compaction as compaction
+import openjiuwen.core.context_engine.context.compression_scope as compression_scope
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
-from openjiuwen.core.context_engine.compaction import CompactionCandidate, CompactionError
-from openjiuwen.core.context_engine.context.compression_scope import context_compression_operation
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
@@ -31,6 +31,11 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.kv_cache.kv_cache_metadata import first_changed_index
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
+
+# Preserve the context module's existing hook names and patch points.
+CompactionCandidate = compaction.CompactionCandidate
+CompactionError = compaction.CompactionError
+context_compression_operation = compression_scope.context_compression_operation
 
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"

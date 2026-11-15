@@ -69,6 +69,9 @@ class BuildContext:
     """Opaque runtime carrier handed to capability providers at build time.
 
     Attributes:
+        extension_bus: Optional host-provided extension event bus. It is a live
+            runtime handle and is not serialized; ``None`` keeps prompt
+            attachment processing on its original no-extension path.
         language: Resolved language code (e.g. "cn" / "en").
         member_name: Team member name, when building a team member.
         role: Team role value (e.g. "leader" / "teammate"), when applicable.
@@ -84,9 +87,6 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
-        extension_bus: Optional host-provided extension event bus. It is a live
-            runtime handle and is not serialized; ``None`` keeps prompt
-            attachment processing on its original no-extension path.
         moa: Invocation policy for this root agent only; not inherited by
             capability providers or serialized as part of a spec.
     """

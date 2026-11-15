@@ -7,8 +7,8 @@
 | 类型 | feature |
 | 日期 | 2026-11-07 |
 | 范围 | `PromptAttachmentManager`、`DeepAgent`、factory、`BuildContext`、`DeepAgentSpec` |
-| 关联 spec | [S_06 Prompts 与 i18n](../specs/S_06_prompts-and-l10n.md) |
-| Core 契约 | [F_16 `prompt.attachment`](../../core/events/docs/features/F_16_prompt-attachment-event.md) |
+| 关联 spec | `S_06_prompts-and-l10n.md`（Harness Prompts 与 i18n 规约） |
+| Core 契约 | [F_16 `prompt.attachment`](../../../../openjiuwen/core/events/docs/features/F_16_prompt-attachment-event.md) |
 | 设计依据 | `2026-11-03-openjiuwen-prompt-attachment-event-agent-loop-plan` |
 
 ## 背景

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """External CLI members: the system prompt runs through the build entry."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -44,6 +45,8 @@ def _stub_spec(bus: ExtensionEventBus | None) -> Any:
         team_mode="default",
         predefined_members=[],
         expose_human_agents_to_teammates=False,
+        enable_member_messaging=False,
+        max_subtask_depth=0,
     )
 
 

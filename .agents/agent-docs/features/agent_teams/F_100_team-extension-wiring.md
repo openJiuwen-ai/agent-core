@@ -3,7 +3,7 @@
 - 日期：2026-10-24
 - 范围：`agent_teams/extensions/`（新包）、`extensions/ops_build_handlers/`（平台目录）、`agent_teams/rails/`、`agent_teams/runtime/`、`agent_teams/tools/`、`agent_teams/spawn/`
 - 需求来源：接入统一扩展框架（`core/events` 的 ExtensionEventBus + `core/extension` 的 Registry）的 Team 扩展机制——两个业务事件（`team.monitor_event` 监控事件通知、`team.build_policy` 协作规则构建）+ 只读 Team Ops 查询，并把各成员的构建与消费接到真实链路；工具扩展复用通用 `tool.call`（harness 侧尚不存在），本仓库无 Team 工具事件
-- 事件契约文档：两个事件的插件侧契约手册（含使用方式与验证）见 core events 侧 [F_07 team.monitor_event](../../../core/events/docs/features/F_07_team-monitor-event.md) 与 [F_08 team.build_policy](../../../core/events/docs/features/F_08_team-build-policy.md)
+- 事件契约文档：两个事件的插件侧契约手册（含使用方式与验证）见 core events 侧 [F_07 team.monitor_event](../../../../openjiuwen/core/events/docs/features/F_07_team-monitor-event.md) 与 [F_08 team.build_policy](../../../../openjiuwen/core/events/docs/features/F_08_team-build-policy.md)
 
 ## 背景 / Why
 
@@ -138,3 +138,24 @@ CORE 默认实现，提供只读 Team Ops 查询能力，并把各成员的 Poli
 - **跨 session 只读行为变化**：读取层统一数据库路径后，跨 session 只读从报错（"not accessible in
   this session"）变为可查（capability 语义），宿主文档需知情。
 - 平台侧设计仓的实现记录回填随该仓自行同步（本仓库不引用其文档编号）。
+
+
+## 策略构建的兼容入口
+
+团队 rail 的状态投递与策略构建分开维护：共享基类保留恢复、任务跟踪和消息投递行为，
+导出的 `TeamPolicyRail` 通过扩展层组装实际 section 集合。
+`extensions/policy.py` 的 `build_default_policy_sections` 是默认 CORE 构建器；
+接入总线时必须经过 `build_team_policy_sections`，在首次模型调用前完成异步构建。
+
+`member_messaging`、`member_subtasks` 取运行时实际能力开关；`bootstrap_mode` 和
+`bound_group_name` 一并进入只读的 `TeamPolicyContext`，由扩展处理器和默认构建器共用。
+leader 的前缀白名单包括 bootstrap、prebuilt、bound-group 与调用方 extra；
+披露视图必须排除这些前缀，保留扩展处理器追加的协同约定。
+framework 模式的内联策略同样取扩展链输出，不走另一条直接构建路径。
+该模式在构造期同时检查内联 renderer 和 tracker 的策略投递能力；旧版缺少任一端时明确拒绝，
+不把策略写入无人消费的字段。旧版 backend 未提供成员消息或子任务 getter 时省略对应快照参数；
+新版提供这些接口后，两条策略构建路径统一读取实际生效值。
+
+`build_team` 披露只发生在成功路径。HITT 读本次建队实际生效值；有总线时披露在
+异步 `invoke` 中构建并写入 `data["policy_disclosure"]`，同步渲染不再重建默认策略。
+其他角色在 spawn 时确定全量静态集合，外部 CLI 接收同一构建链的结果。

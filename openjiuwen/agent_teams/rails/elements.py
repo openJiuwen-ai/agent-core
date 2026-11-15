@@ -25,6 +25,7 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -36,13 +37,8 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
-from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
-from openjiuwen.harness.manifest.builtin_elements import (
-    OBSERVABILITY,
-    observability_dependency_installed,
-)
+from openjiuwen.agent_teams.rails import team_context as team_context_handles
 from openjiuwen.agent_teams.rails.team_context import (
-    get_extension_bus,
     get_messager,
     get_reliability_components,
     get_swarmflow_budget,
@@ -52,6 +48,11 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_swarmflow_worker_base_spec,
     get_team_backend,
     get_workspace_manager,
+)
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+from openjiuwen.harness.manifest.builtin_elements import (
+    OBSERVABILITY,
+    observability_dependency_installed,
 )
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
@@ -109,6 +110,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamToolInput.resolve(params, context)
     return TeamToolRail(
         team_backend=backend,
+        extension_bus=team_context_handles.get_extension_bus(context),
         role=inp.role,
         teammate_mode=inp.teammate_mode,
         dispatch_mode=inp.dispatch_mode,
@@ -128,7 +130,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
         swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
-        extension_bus=get_extension_bus(context),
     )
 
 
@@ -191,6 +192,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     backend = get_team_backend(context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
+        extension_bus=team_context_handles.get_extension_bus(context),
         member_prompt=inp.prompt,
         member_name=inp.member_name or None,
         display_name=inp.display_name,
@@ -213,10 +215,6 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         # prompt that describes the mechanism and the tool that runs it appear
         # and disappear together.
         swarmflow_enabled=get_swarmflow_model_resolver(context) is not None,
-        # Host extension wiring: a bound bus defers section building to the
-        # first model call (the policy build extension chain); None builds
-        # locally right here.
-        extension_bus=get_extension_bus(context),
     )
 
 

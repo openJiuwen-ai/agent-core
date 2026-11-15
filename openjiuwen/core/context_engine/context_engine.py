@@ -631,7 +631,11 @@ class ContextEngine:
                 continue
             yield from cls._iter_exception_texts(nested_value, depth=depth + 1, seen=seen)
 
-    async def clear_context(self, context_id: str = None, session_id: str = None):
+    async def clear_context(
+        self,
+        context_id: str = None,
+        session_id: str = None,
+    ):
         """
         Remove contexts from the internal pool.
 

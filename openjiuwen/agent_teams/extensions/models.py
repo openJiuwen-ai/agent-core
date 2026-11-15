@@ -102,6 +102,9 @@ class TeamPolicyContext:
     base_prompt: str | None = None
     swarmflow_enabled: bool = False
     expose_human_agents_to_teammates: bool = False
+    member_messaging: bool = False
+    member_subtasks: bool = False
+    bound_group_name: str | None = None
 
 
 __all__ = [
