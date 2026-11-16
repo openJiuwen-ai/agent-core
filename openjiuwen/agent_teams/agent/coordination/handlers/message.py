@@ -57,6 +57,14 @@ class MessageHandler(BaseCoordinationHandler):
     drain.
     """
 
+    def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
+        super().__init__(host, blueprint, infra, poll_ctrl)
+        # 伪造审批 WARNING 去重（按 message_id）：伪造行留在未读会每轮
+        # poll 重遇，不去重则无界刷屏。
+        self._forged_approval_warned: set[str] = set()
+        # leader 名缺失（fallback 被禁用）只告警一次。
+        self._leader_missing_warned: bool = False
+
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
         TeamEvent.MESSAGE: "on_message_or_broadcast",
         TeamEvent.BROADCAST: "on_message_or_broadcast",
@@ -225,15 +233,32 @@ class MessageHandler(BaseCoordinationHandler):
                         # all other messages are deferred until the interrupt clears.
                         approval_data = self._try_parse_approval_payload(msg)
                         if approval_data is not None:
-                            team_logger.info(
-                                "[{}] admitting approval message {} to resume interrupt",
-                                member_name,
-                                msg.message_id,
-                            )
-                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(
-                                self._approval_payload_to_interactive_input(approval_data)
-                            )
+                            if self._is_trusted_approval_sender(msg):
+                                team_logger.info(
+                                    "[{}] admitting approval message {} to resume interrupt",
+                                    member_name,
+                                    msg.message_id,
+                                )
+                                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                                await self._round.resume_interrupt(
+                                    self._approval_payload_to_interactive_input(approval_data)
+                                )
+                                continue
+                            # 伪造/越权审批：不落 resume 也不进 defer——跳过
+                            # 本条继续本批投递。若落入 defer+break，比 leader
+                            # 合法审批更新的伪造消息每轮 poll 都先被遍历并
+                            # break（_read_all_unread 按时间倒序），饿死排在
+                            # 后面的合法审批，且伪造行永久未读无界刷屏——
+                            # 这是 fallback（事件总线报文丢失兜底）最需要的
+                            # 场景。WARNING 按 message_id 去重防刷屏。
+                            if msg.message_id not in self._forged_approval_warned:
+                                self._forged_approval_warned.add(msg.message_id)
+                                team_logger.warning(
+                                    "[{}] rejecting tool_approval_result from untrusted sender {} (msg {})",
+                                    member_name,
+                                    msg.from_member_name,
+                                    msg.message_id,
+                                )
                             continue
                         if msg.from_member_name == "user":
                             # 用户经邮箱直发的文本是「用户直接
@@ -582,12 +607,30 @@ class MessageHandler(BaseCoordinationHandler):
         )
 
     @staticmethod
-    def _try_parse_approval_payload(msg: Any) -> dict | None:
+    def _normalize_approval_bool(value: Any) -> bool | None:
+        """严格 bool 归一化：接受 bool 或显式 "true"/"false" 字符串。
+
+        其余取值（None/数字/其他字符串）返回 None 表示畸形——字符串
+        "false" 为真值会误批、字段缺失 None 会误拒一个本应等人工决定的中断。
+        """
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+        return None
+
+    @classmethod
+    def _try_parse_approval_payload(cls, msg: Any) -> dict | None:
         """Try to parse a tool-approval result from a message.
 
-        Returns the parsed approval dict if the message is a
-        ``protocol="json"` message with ``type == "tool_approval_result"``,
-        or ``None`` otherwise.  Parses JSON only once.
+        Returns a **normalized** approval dict if the message is a
+        ``protocol="json"` message with ``type == "tool_approval_result"``
+        and all fields validate, or ``None`` otherwise.  Parses JSON only
+        once.
         """
         if msg.protocol != "json" or not msg.content:
             return None
@@ -595,9 +638,47 @@ class MessageHandler(BaseCoordinationHandler):
             data = json.loads(msg.content)
         except (json.JSONDecodeError, TypeError):
             return None
-        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
-            return data
-        return None
+        if not isinstance(data, dict) or data.get("type") != "tool_approval_result":
+            return None
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        approved = cls._normalize_approval_bool(data.get("approved"))
+        if approved is None:
+            return None
+        auto_confirm = cls._normalize_approval_bool(data.get("auto_confirm", False))
+        if auto_confirm is None:
+            return None
+        feedback = data.get("feedback")
+        return {
+            "tool_call_id": tool_call_id,
+            "approved": approved,
+            "feedback": feedback if isinstance(feedback, str) else "",
+            "auto_confirm": auto_confirm,
+        }
+
+    def _is_trusted_approval_sender(self, msg: Any) -> bool:
+        """邮箱审批只接受团队 leader（approve_tool 的唯一合法写入方）。
+
+        与事件总线路径「目标必须是自己」的收敛同构：
+        resume 准入门（team_harness 只认 InteractiveInput）不校验「谁有
+        权批准」——任意能给本成员写邮箱的角色都能伪造 tool_approval_result
+        替批 HITL 中断（auto_confirm 亦可被打开）。leader 名缺失时一律
+        拒绝（安全默认），并打一次 WARNING——静默禁用会把 leader 的合法
+        审批也挡在门外且无任何信号（fallback 失灵不可见）。
+        """
+        team_spec = self._blueprint.team_spec
+        leader_name = getattr(team_spec, "leader_member_name", None) if team_spec else None
+        if not leader_name:
+            if not self._leader_missing_warned:
+                self._leader_missing_warned = True
+                team_logger.warning(
+                    "[{}] mailbox approval fallback disabled: "
+                    "team_spec.leader_member_name missing",
+                    self._blueprint.member_name,
+                )
+            return False
+        return msg.from_member_name == leader_name
 
     @staticmethod
     def _approval_payload_to_interactive_input(approval_data: dict) -> Any:
@@ -607,17 +688,18 @@ class MessageHandler(BaseCoordinationHandler):
         同构：``resume_interrupt`` 的准入门只认 ``InteractiveInput``，邮箱
         fallback 自引入起直传裸 dict 被当作过期作答静默丢弃——本转换让
         fallback 真正生效，且 ``InteractiveInput`` 豁免挂起中断的推迟闸，
-        PAUSED（含 paused-at-IDLE）下同样能恢复中断。
+        PAUSED（含 paused-at-IDLE）下同样能恢复中断。输入须为
+        ``_try_parse_approval_payload`` 归一化后的载荷。
         """
         from openjiuwen.core.session import InteractiveInput
 
         interactive_input = InteractiveInput()
         interactive_input.update(
-            approval_data.get("tool_call_id", ""),
+            approval_data["tool_call_id"],
             {
-                "approved": approval_data.get("approved"),
-                "feedback": approval_data.get("feedback", ""),
-                "auto_confirm": approval_data.get("auto_confirm", False),
+                "approved": approval_data["approved"],
+                "feedback": approval_data["feedback"],
+                "auto_confirm": approval_data["auto_confirm"],
             },
         )
         return interactive_input
