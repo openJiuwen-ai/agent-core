@@ -1,3 +1,16 @@
+---
+title: Concurrent session cleanup can break another session's bind
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: B_09_session-db-bind-delete-race
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Concurrent session cleanup can break another session's bind
 
 ## Metadata

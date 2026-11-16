@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
     from openjiuwen.harness.moa.config import MoAConfig
     from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -85,6 +86,12 @@ class BuildContext:
     tool_owner_id: str | None = None
     """Optional invocation owner for stateful tools; None preserves Card ownership."""
     moa: MoAConfig | None = None
+
+    async def resolve_execution_environment(self) -> "ExecutionEnvironment":
+        """Resolve a fresh tool environment; platforms may supply session policy."""
+        from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
+
+        return ExecutionEnvironment()
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.

@@ -104,6 +104,16 @@ class _CmdResume:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdGoalWork:
+    """A request to re-check whether a goal attempt should start.
+
+    Carries no payload and no ack: the supervisor reads the goal state itself,
+    and a request that arrives while a round is running is simply dropped —
+    that round's settlement makes the same check.
+    """
+
+
 ControlEvent = Union[
     _CmdSend,
     _CmdAbort,
@@ -111,4 +121,5 @@ ControlEvent = Union[
     _CmdResume,
     _CmdRoundFinished,
     _CmdStop,
+    _CmdGoalWork,
 ]

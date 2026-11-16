@@ -158,6 +158,12 @@ class BaseOperation:
             kwargs["module_name"] = "sys_operation"
         if "status" not in kwargs and event_type == LogEventType.SYS_OP_START:
             kwargs["status"] = EventStatus.PENDING
+        if isinstance(method_params, dict) and "environment" in method_params:
+            method_params = dict(method_params)
+            environment = method_params["environment"]
+            method_params["environment"] = (
+                {key: "[REDACTED]" for key in environment} if environment else environment
+            )
         event = create_log_event(
             event_type=event_type,
             operation_name=self.name,

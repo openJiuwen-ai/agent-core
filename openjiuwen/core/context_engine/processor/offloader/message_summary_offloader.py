@@ -6,22 +6,33 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.foundation.llm import (
-    AssistantMessage, BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
-)
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.budget_guard import (
     count_messages_tokens,
     effective_context_budget,
     truncate_message_content_to_fixed_head_tail_if_over_token_limit,
 )
+from openjiuwen.core.context_engine.processor.compression_events import (
+    content_chars,
+    log_compression_applied,
+    resolve_session_id,
+)
+from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    BaseMessage,
+    Model,
+    ModelClientConfig,
+    ModelRequestConfig,
+    UserMessage,
+)
 
 # Kept for compatibility with callers that imported the old keyword list.
 # Actual matching is centralized in ContextEngine so wrapped provider errors
@@ -364,6 +375,16 @@ class MessageSummaryOffloader(MessageOffloader):
         if offload_message is None:
             return message
         self._truncate_offload_placeholder_preview_if_large(offload_message, context)
+        log_compression_applied(
+            logger,
+            session_id=resolve_session_id(context),
+            processor=self.processor_type() or type(self).__name__,
+            strategy="adaptive_summary",
+            trigger="offload_threshold",
+            before_chars=content_chars(message.content),
+            after_chars=content_chars(final_content),
+            tool_call_id=str(getattr(message, "tool_call_id", "") or "") or None,
+        )
         return offload_message
 
     def _should_offload_message(

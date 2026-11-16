@@ -837,8 +837,14 @@ class AIOShellProvider(BaseShellProvider):
         if cwd:
             inner_parts.append(f"cd {_quote_shell_value(cwd)}")
         if environment:
-            env_prefix = " ".join(f"{key}={_quote_shell_value(value)}" for key, value in environment.items())
-            inner_parts.append(f"export {env_prefix}")
+            env_prefix = " ".join(
+                f"{key}={_quote_shell_value(value)}" for key, value in environment.items() if value is not None
+            )
+            if env_prefix:
+                inner_parts.append(f"export {env_prefix}")
+            for key, value in environment.items():
+                if value is None:
+                    inner_parts.append(f"unset -- {_quote_shell_value(key)}")
         inner_parts.append(f"{{ {command}; }} 2> >(sed 's/^/__OJW_STDERR__:/')")
         inner_command = " && ".join(inner_parts)
         shell_command = f"/bin/bash -lc {_quote_shell_value(inner_command)}"

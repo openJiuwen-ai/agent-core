@@ -169,6 +169,13 @@ if await self.team.rejects_rebuild():   # _history_restored and 团队行仍在
 
 信号在 `TeamAgent.recover_from_session` 里置位（`backend.mark_history_restored()`）——那个方法**就是**
 冷恢复入口，开头强制要求 session 里有该团队的 bucket，语义与 `COLD_RECOVER` 完全重合。
+`RESUME_FROM_PAUSE` 同样置位：同一 agent、同一 session，对话是延续的。
+
+**只拒绝还不够，提示词也要一致**。`leader_bootstrap` 写着"都调这一次"，续跑的 leader 照做就会白烧一轮。
+所以 `TeamPolicyRail` 在模型调用前检查：标记已置位、对话里确有准则（成功的 `build_team` 结果或
+`[TEAM_POLICY]` 重注入块）且团队行仍在时，把同名 section 换成 `leader_bootstrap_recovered`。
+对话里没有准则（宿主直接调 `backend.build_team` 建的团队，leader 还没跑过一轮）则清掉标记，
+`build_team` 照常接管并下发准则。在 before_invoke 清空本次判定，第一次 before_model_call 检查历史与团队存在性后缓存结果，后续模型轮次复用，不重复扫描历史或查询数据库。下一次调用重新判断；显式调用 clean_team 后使缓存失效，允许本轮真实解散后的重建。正常情况下切换发生在调用边界，不破坏一轮内的前缀 KV cache 稳定。
 
 **两个条件缺一不可**。只看"是不是冷恢复"会误伤一种真实情况：恢复出来的 leader 若在本轮中途被
 `CoordinationKernel.start` 判定为"上次清理没做完"（全部 teammate 都是 SHUTDOWN）而执行了
@@ -221,7 +228,7 @@ core 层按工具名 `build_team` 匹配，不 import `agent_teams`——与既�
 
 1. **接管路径依赖 leader 真的会去调 `build_team`**。这由 bootstrap 提示词保证（"无论团队是否已经存在
    都调这一次"），不是由代码强制的——没有任何东西拦住一个 leader 跳过它直接 `create_task`。同 session
-   的 cold recovery 里它本来也不该再调（准则还在历史里，压缩掉则由 `team_policy` 重注入复原），所以
+   的 cold recovery 与暂停恢复里它本来也不该再调（准则还在历史里，压缩掉则由 `team_policy` 重注入复原），所以
    这条只在"新 session 接手同一团队"时真正吃紧。要更硬的保障，得在 leader 的第一个非 `build_team`
    团队工具调用上加一道闸，代价是每个工具都要认识这条规则。
 2. **`create_task` 的 autonomous 形态没有对称的偷传拒绝**。它靠"schema 里就没有 `reviewer` 字段"挡住
@@ -230,3 +237,11 @@ core 层按工具名 `build_team` 匹配，不 import `agent_teams`——与既�
    只是 MCP 客户端偷传时不会得到"这个模式没有验证闸"的反馈。要补的话是在 `TaskCreateTool.invoke`
    加一条与 `UpdateTaskTool` 同形的 guard。
 3. **external CLI leader 未覆盖**。`build_team_member_system_prompt` 仍渲染全量静态 section；当前 external CLI 成员都是 teammate，暂不构成问题。
+
+
+## 2026-11-09 检视修复验证
+
+本地 HEAD f3260e9b3 加工作区：恢复判断只在每次调用的首个模型轮次执行，clean_team 后重新判定。
+新增回归覆盖同次调用两轮仅扫描/查库一次、下一次调用重查，以及解散后恢复正常 bootstrap。
+显式从源码运行恢复 bootstrap、claim_task completion、group conversation、team policy rail、runtime manager
+五组定向测试，共 168 项通过；未进行真实模型与跨进程联调，未更新 swarm 环境内安装的 core 包。

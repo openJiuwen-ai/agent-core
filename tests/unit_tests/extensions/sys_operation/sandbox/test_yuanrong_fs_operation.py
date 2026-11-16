@@ -29,12 +29,12 @@ SANDBOX_BASE_PATH = "/tmp"
 
 
 def _base_url() -> str:
-    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:8080")
+    return os.environ.get("YUANRONG_TEST_BASE_URL", "http://127.0.0.1:18093")
 
 
 def _executor() -> str:
-    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "default").strip().lower()
-    return value if value in {"default", "docker"} else "default"
+    value = os.environ.get("YUANRONG_TEST_EXECUTOR", "supervisor").strip().lower().strip("'\"")
+    return value if value in {"supervisor", "docker"} else "supervisor"
 
 
 def _extra_params() -> dict:
@@ -185,19 +185,109 @@ async def test_fs_upload_download(sys_op, tmp_path: Path):
     assert local_dst.read_text(encoding="utf-8") == payload
 
 
-def test_build_wrapped_command_includes_cwd_env_timeout():
-    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import _build_wrapped_command
+def test_adx_create_body_matches_sdk_kwargs():
+    import json
 
-    cmd = _build_wrapped_command(
-        "echo hi",
-        cwd="/tmp",
-        timeout=3,
-        environment={"FOO": "bar"},
+    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import (
+        _adx_create_body,
+        _decode_read_payload,
+        _exec_args,
+        _item_from_payload,
+        _list_depth,
+        _normalize_exec_result,
+        _normalize_list_items,
     )
-    assert "cd /tmp" in cmd
-    assert "FOO=bar" in cmd or "FOO='bar'" in cmd
-    assert "timeout 3s" in cmd
-    assert "echo hi" in cmd
+
+    body = _adx_create_body(
+        {
+            "image": "ubuntu:22.04",
+            "user": " 1000 ",
+            "workdir": "/ws",
+            "mounts": [{"source": "/host", "target": "/ws"}],
+        },
+        "docker",
+    )
+    assert body["runtime"] == "docker"
+    assert body["cpu"] == 1000
+    assert body["memory"] == 1024
+    assert body["idleTimeoutSeconds"] == 0
+    assert body["extra_config"] == {"user": "1000"}
+    assert json.loads(body["rootfs"]) == {
+        "type": "image",
+        "imageurl": "ubuntu:22.04",
+        "workdir": "/ws",
+        "mounts": [{"source": "/host", "target": "/ws"}],
+    }
+    assert "image" not in body
+    assert "mounts" not in body
+    assert "workdir" not in body
+
+    overridden = _adx_create_body(
+        {"cpu": "2000", "memory": 4096, "idle_timeout": -1, "user": "  "},
+        "conch",
+    )
+    assert overridden["runtime"] == "conch"
+    assert overridden["cpu"] == 2000
+    assert overridden["memory"] == 4096
+    assert overridden["idleTimeoutSeconds"] == 0
+    positive = _adx_create_body({"idleTimeoutSeconds": 30}, "docker")
+    assert positive["idleTimeoutSeconds"] == 30
+    assert "extra_config" not in overridden
+    aliased = json.loads(_adx_create_body({"rootfs": {"image": "ubuntu:22.04"}}, "docker")["rootfs"])
+    assert aliased == {"imageurl": "ubuntu:22.04"}
+    plain = _adx_create_body({}, "supervisor")
+    assert plain["runtime"] == "supervisor"
+    quoted = _adx_create_body({}, "docker'")
+    assert quoted["runtime"] == "docker"
+
+    args = _exec_args("echo hi", cwd="/tmp", timeout=3, environment={"FOO": "bar"})
+    assert args["cwd"] == "/tmp"
+    assert args["timeout"] == 3
+    assert args["cmd"].startswith("export FOO=bar && ")
+    assert args["cmd"].endswith("echo hi")
+    assert "/bin/sh" not in args["cmd"]
+    assert _list_depth(False, 9) == 1
+    assert _list_depth(True, None) == 21
+    assert _list_depth(True, 1) == 2
+
+    assert _normalize_exec_result(
+        {"stdout": "ok", "stderr": "", "exit_code": 0}
+    )["returncode"] == 0
+    assert _decode_read_payload({"data": "6869", "error": None}, binary=True) == b"hi"
+    try:
+        _decode_read_payload({"data": None, "error": "No such file or directory"}, binary=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("missing file should raise FileNotFoundError")
+
+    items = _normalize_list_items(
+        {
+            "entries": [
+                {
+                    "name": "a.py",
+                    "path": "/ws/a.py",
+                    "type": "file",
+                    "size": 4,
+                    "permissions": None,
+                    "modified_time": 1695441203.5,
+                }
+            ],
+            "error": None,
+        }
+    )
+    item = _item_from_payload(items[0])
+    assert item.is_directory is False
+    assert item.type is None
+    assert item.modified_time == "1695441203.5"
+    try:
+        _normalize_list_items(
+            {"entries": [], "error_code": "FILESYSTEM_ERROR", "error": "search files failed"}
+        )
+    except OSError as exc:
+        assert "FILESYSTEM_ERROR" in str(exc)
+    else:
+        raise AssertionError("search error envelope should raise")
 
 
 @pytest.mark.asyncio
@@ -216,9 +306,9 @@ async def test_launcher_delete_dispatches_yuanrong(monkeypatch):
     await launcher.delete(
         "",
         sandbox_type="yuanrong",
-        base_url="http://127.0.0.1:8080",
+        base_url="http://127.0.0.1:18093",
         isolation_key="custom_pre_deploy_yuanrong_agent1",
     )
     assert len(calls) == 1
-    assert calls[0]["shared_key"] == "http://127.0.0.1:8080|custom_pre_deploy_yuanrong_agent1"
+    assert calls[0]["shared_key"] == "http://127.0.0.1:18093|custom_pre_deploy_yuanrong_agent1"
     assert calls[0]["reason"] == "teardown"

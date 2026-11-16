@@ -240,3 +240,32 @@ async def test_stream_completed_event_preserves_falsy_parser_content(
     assert len(completed) == 1
     assert type(completed[0].parser_content) is type(parser_content)
     assert completed[0].parser_content == parser_content
+
+
+@pytest.mark.asyncio
+async def test_observation_scope_is_task_local_and_restored_after_cancellation() -> None:
+    from openjiuwen.core.foundation.llm.call_scope import (
+        current_llm_observation_context, llm_observation_scope,
+    )
+    ready = asyncio.Event()
+    wait = asyncio.Event()
+
+    async def assess() -> None:
+        with llm_observation_scope("goal_assessment", attributes={"goal": "g1"}):
+            ready.set()
+            await wait.wait()
+
+    task = asyncio.create_task(assess())
+    await ready.wait()
+    assert current_llm_observation_context() is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert current_llm_observation_context() is None
+    with llm_observation_scope("assistant", attributes={"goal": "g2"}):
+        with pytest.raises(RuntimeError):
+            with llm_observation_scope("goal_assessment", attributes={"goal": "g3"}):
+                raise RuntimeError("assessment failed")
+        assert current_llm_observation_context().purpose == "assistant"
+        assert current_llm_observation_context().attributes["goal"] == "g2"
+    assert current_llm_observation_context() is None

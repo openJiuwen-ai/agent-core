@@ -20,7 +20,7 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-10-26 |
+| 最近一次修订日期 | 2026-11-10 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md`、`F_120_autonomous-completion-summary-and-note.md`、`F_121_autonomous-leader-quiet-board-events.md`、`F_129_task-revision-and-staleness.md`（调度模式 `TASK_UPDATED` 不再 steer、自主模式只触发任务修改告知；投递与指派通知记下执行者已看到的任务版本） |
 
 ## 范围 / 边界
@@ -491,6 +491,22 @@ EventBus 自身的运行态：
 | `_polls_paused` | `bool` | poll task 是否暂停；`stop()` 进入时复位 |
 | `_event_queue` | `asyncio.Queue[CoordinationEvent]` | 单生产/单消费的事件队列 |
 | `_loop_task / _mailbox_poll_task / _task_poll_task` | `asyncio.Task | None` | 三条后台 task；`stop()` 与 `pause_polls()` 各自负责回收 |
+
+## Goal 模式对完成判定的约束
+
+Leader 开启 goal（`LeaderSpec.goal`）后，团队完成判定多一个条件，见
+`F_20261110_1922_team-goal-mode`：
+
+- `TeamCompletionHandler.on_poll_task` 在 `is_team_completed` 的三个条件成立之后，再问宿主
+  `goal_holds_completion()`。Leader 的 goal 为 ACTIVE 时返回 True：本次不发 `TEAM_COMPLETED`、不关流，
+  且该调用同时请求 Leader 起一轮 goal round（对照用户请求核对任务板）。goal 为 COMPLETED / BLOCKED /
+  不存在时不拦截。
+- `is_team_completed` 本身不变，仍只回答任务、成员、消息三件事。
+- Leader 的 goal round 只在其它成员全部静止时才启动（`MemberActivityRegistry.others_idle()`）。触发点
+  有三个：Leader 自己一轮收尾、上述完成闸、以及 `team.idle` 去抖窗口到点（无论任务板是否已收敛）。
+- 用户输入经 `AgentLifecycleHandler.on_user_input` 到达时，先调宿主 `open_user_goal(content)` 再投递：
+  没有未结束的 goal 则以该输入立项；已有 ACTIVE goal 则保持；BLOCKED 的 goal 被重新打开。
+- Leader goal 转 BLOCKED 时，流上出现 `team.goal.blocked` 标记（`payload.reason`），不关流。
 
 ## 与其它 spec 的关系
 
