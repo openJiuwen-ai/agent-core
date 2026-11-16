@@ -63,6 +63,7 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
+    PlanningInput,
     PrepareArtifactHook,
 )
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
@@ -145,6 +146,7 @@ __all__ = [
     "OrchestrationService",
     "ObservationReceipt",
     "ParameterSpec",
+    "PlanningInput",
     "PrepareArtifactHook",
     "QualityConfidence",
     "QualityResult",

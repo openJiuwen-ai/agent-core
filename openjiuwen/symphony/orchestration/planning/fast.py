@@ -9,11 +9,13 @@ from typing import Any, Sequence
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
+from openjiuwen.symphony.orchestration.contracts import PlanningInput
 from openjiuwen.symphony.orchestration.language import (
     default_fast_no_plan_title,
     planner_language_instruction,
 )
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.planning.input_matching import artifact_matches, supplied_input_keys
 from openjiuwen.symphony.orchestration.planning.plan_builder import edge_plan_item
 from openjiuwen.symphony.orchestration.planning.runtime import RuntimeEdgeResolver, edge_weight
 from openjiuwen.symphony.orchestration.planning.utils import (
@@ -29,6 +31,7 @@ necessary. Do not perform or output step-by-step analysis or chain-of-thought.
 
 You receive:
 - The user's query.
+- Optional named task data in inputs. File entries refer to the host workspace.
 - Candidate Skills with id, name, and description only.
 - Candidate can_feed relationships between those Skills.
 
@@ -45,6 +48,7 @@ Task:
 - missing_inputs does not describe a Skill I/O schema. Use it only for information the
   user must provide when that need can be determined from the query and Skill
   descriptions.
+- Use the supplied inputs as reference data when deciding what is already available.
 - Do not invent Skills, inputs, or outputs.
 - Prefer the shortest path that satisfies the user's intent.
 - When runtime_weight and planner_weight are present, use them only as tie-breakers
@@ -96,6 +100,7 @@ class FastOneShotPlanner:
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
         layer: str = "skill",
+        inputs: Sequence[PlanningInput] = (),
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -106,6 +111,8 @@ class FastOneShotPlanner:
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
         self.layer = layer
+        self.inputs = [item.model_dump(exclude_none=True) for item in inputs]
+        self.supplied_input_keys = supplied_input_keys(inputs)
         self._runtime_summary: dict[str, Any] = {
             "available": bool(self._overlay_edges()),
             "applied_edges": 0,
@@ -123,6 +130,8 @@ class FastOneShotPlanner:
             "skills": subgraph["skills"],
             "can_feed_edges": subgraph["edges"],
         }
+        if self.inputs:
+            prompt_payload["inputs"] = self.inputs
         system_prompt = EXPERT_FAST_PLANNER_SYSTEM_PROMPT if self.layer == "expert" else FAST_PLANNER_SYSTEM_PROMPT
         with model_usage_context("orchestration", "one_shot_fast_planning"):
             raw = await invoke_json(
@@ -561,10 +570,14 @@ class FastOneShotPlanner:
                 "plan": {"status": "no_plan", "steps": [], "reason": "No published expert handoff supports this plan."},
             }
 
-        missing_inputs = self._normalize_missing_inputs(
+        reported_missing = self._normalize_missing_inputs(
             selection.get("missing_inputs") or [],
             set(step_ids),
         )
+        missing_inputs = [
+            item for item in reported_missing
+            if not artifact_matches((item["name"], item["type"]), self.supplied_input_keys)
+        ]
         missing_by_skill: dict[str, list[dict[str, Any]]] = {}
         for item in missing_inputs:
             missing_by_skill.setdefault(str(item.get("skill_id") or ""), []).append(item)
@@ -615,6 +628,8 @@ class FastOneShotPlanner:
             )
         if missing_inputs:
             status = "needs_input"
+        elif reported_missing:
+            status = "ready"
         return {
             "valid": True,
             "detail": "",

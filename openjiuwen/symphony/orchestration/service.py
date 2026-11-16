@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
 from openjiuwen.core.foundation.llm import Model
@@ -33,6 +33,7 @@ from openjiuwen.symphony.orchestration.contracts import (
     GraphMutationResult,
     OrchestrationPlan,
     OrchestrationProgress,
+    PlanningInput,
 )
 from openjiuwen.symphony.orchestration.planned_graph import build_planned_graph
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
@@ -341,12 +342,14 @@ class OrchestrationService:
         task_cluster_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
         callback = _resolve_progress_callback(progress, progress_callback)
         if type not in {"skill", "expert"}:
             raise ValueError(f"Unsupported orchestration type: {type}")
         if self.model is None:
             raise ValueError("Symphony planning requires a model.")
+        planning_inputs = PlanningInput.validate_many(inputs)
         await _emit(callback, "plan_started", query=query)
         if type == "expert" and self.expert_inventory is None:
             artifacts = GraphArtifacts(self.graph_artifact_root, {}, [], {}, {})
@@ -391,6 +394,7 @@ class OrchestrationService:
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
                 layer=type,
+                inputs=planning_inputs,
             )
         else:
             planner = FastOneShotPlanner(
@@ -404,6 +408,7 @@ class OrchestrationService:
                 dynamic_overlay=effective_overlay,
                 task_cluster_id=task_cluster_id,
                 layer=type,
+                inputs=planning_inputs,
             )
         result = await planner.plan(query)
         if result.get("success") is False:
@@ -426,6 +431,7 @@ class OrchestrationService:
         language: str = "cn",
         progress: ProgressCallback | None = None,
         mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
         """Plan task instances for visible installed experts and inline roles."""
         if not query.strip():
@@ -435,6 +441,7 @@ class OrchestrationService:
         planning_mode = mode or self.config.plan.mode
         if planning_mode not in {"fast", "beam"}:
             raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
+        planning_inputs = PlanningInput.validate_many(inputs)
         await _emit(progress, "plan_started", query=query)
         artifacts = await asyncio.to_thread(self._load_expert_task_artifacts, expert_manifest_paths)
         planned_graph = await build_expert_task_plan(
@@ -446,6 +453,7 @@ class OrchestrationService:
             language=resolve_orchestration_language(language),
             candidate_ids=candidate_ids,
             model_response_observer=self.model_response_observer,
+            inputs=planning_inputs,
         )
         await _emit(progress, "plan_completed", plan_id=planned_graph["graph"]["id"])
         return OrchestrationPlan({"planned_graph": planned_graph})
