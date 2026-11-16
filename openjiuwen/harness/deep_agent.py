@@ -4002,9 +4002,20 @@ class DeepAgent(BaseAgent):
             await self.prepare_interaction_task_loop(session)
             goal_language = self._goal_prompt_language()
             if self._task_completion_rail is None:
-                await self.register_rail(
-                    TaskCompletionRail(goal_language=goal_language)
+                queued = next(
+                    (rail for rail in self._pending_rails if isinstance(rail, TaskCompletionRail)),
+                    None,
                 )
+                # Drop every queued instance, not just the reused one: a leftover
+                # would be registered again by _ensure_initialized() and split the
+                # GoalReportSink again.
+                self._pending_rails = [
+                    rail for rail in self._pending_rails
+                    if not isinstance(rail, TaskCompletionRail)
+                ]
+                if queued is None:
+                    queued = TaskCompletionRail(goal_language=goal_language)
+                await self.register_rail(queued)
 
             from openjiuwen.harness.goal.store import SessionGoalStore
 
