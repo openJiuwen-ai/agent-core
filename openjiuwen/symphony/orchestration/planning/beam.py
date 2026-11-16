@@ -366,7 +366,15 @@ class BidirectionalBeamPlanner:
         self._current_expansions: dict[str, NeighborExpansion] = {}
         self._current_expansion_aliases: dict[str, list[str]] = {}
 
-    async def plan(self, query: str) -> dict[str, Any]:
+    async def candidate_ids_for_query(self, query: str) -> tuple[str, ...]:
+        """Collect candidates reached by the search before final plan selection."""
+        states, seeds, _ = await self._search(query)
+        candidates = list(seeds)
+        for state in states:
+            candidates.extend(state.skill_ids)
+        return tuple(dict.fromkeys(candidates))
+
+    async def _search(self, query: str) -> tuple[list[BeamState], tuple[str, ...], int]:
         self._reset_beam_progress()
         self._final_rerank_call_count = 0
         self.required_output_types = _required_output_types_from_query(query)
@@ -427,6 +435,10 @@ class BidirectionalBeamPlanner:
                 graph=self._beam_graph.snapshot(),
             )
 
+        return all_states, seed_skill_ids, round_index
+
+    async def plan(self, query: str) -> dict[str, Any]:
+        all_states, seed_skill_ids, round_index = await self._search(query)
         final_states = self._merge_converged_states(all_states)
         plans = self._plans_from_states(final_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]

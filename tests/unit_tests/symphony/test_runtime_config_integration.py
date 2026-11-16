@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -270,10 +269,8 @@ async def test_graph_build_binds_root_with_catalog_fingerprints_and_finder_metad
 
         built = await runtime.orchestration.build(force=True)
         assert runtime.orchestration.status().version == built.version
-        assert runtime.orchestration.read()["schema_version"] == "1.0"
+        assert runtime.orchestration.read()["schema_version"] == "2.0"
         assert (root / "runtime.json").is_file()
-        assert not (taxonomy_root / "runtime.json").exists()
-        assert (await runtime.retrieval.build())["success"]
         assert (taxonomy_root / "runtime.json").is_file()
         assert all(path.read_text() == "{}" for path in catalog_files)
         assert all(path.read_bytes() == b"finder metadata" for path in finder_files)
@@ -420,8 +417,12 @@ async def test_retrieval_build_and_graph_share_fingerprint_extraction(tmp_path):
     config["orchestration"]["enabled"] = True
     runtime = SymphonyRuntime(model, SymphonyConfig.model_validate(config))
     try:
-        await runtime.orchestration.build()
+        graph = await runtime.orchestration.build()
+        assert graph.counts["reused_count"] == 1
         assert model.extractions == 1
+        published = graph.graph_path.with_name("fingerprint.json")
+        shared = tmp_path / "runtime" / "cache" / "fingerprints" / "fingerprint.json"
+        assert published.read_bytes() == shared.read_bytes()
         runtime.retrieval.bind_search(disabled_capability_ids=lambda: disabled)
         disabled.add("alpha")
         hidden = await runtime.retrieval.search("escrowreconciliation", type="skill")
