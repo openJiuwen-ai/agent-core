@@ -246,8 +246,13 @@ class TestSubWorkflowComp:
 
         Before the fix, Workflow._sub_stream referenced `sub_end_ability` outside
         the `if self._is_streaming:` block, so this legal combination always
-        crashed with `UnboundLocalError`. The sub workflow's batched output must
-        be delivered as a single frame instead of raising.
+        crashed with `UnboundLocalError`.
+
+        Review follow-up: the batched end-node output `{'output': [chunks...]}` is
+        split into per-frame deliveries `{'output': chunk}`, so downstream
+        per-frame templates (e.g. `${sub_workflow_comp.output.out}`) resolve the
+        same values as with a streaming sub workflow instead of silently
+        producing None.
         """
         sub_workflow = Workflow()
         sub_workflow.set_start_comp("sub_start", Start())
@@ -274,12 +279,18 @@ class TestSubWorkflowComp:
                                                 stream_modes=[BaseStreamMode.OUTPUT]):
             chunks.append(chunk)
 
-        # The batched end-node output is delivered once, not per stream frame
-        assert len(sub_workflow_comp.frames) == 1
-        assert sub_workflow_comp.frames[0] == {
-            'output': [
-                {'out': 'transform_stream_1'},
-                {'out': 'transform_stream_2'},
-                {'out': 'transform_stream_3'},
-            ]
-        }
+        # The batched end-node output is split into per-frame deliveries with the
+        # same shape as streaming sub-workflow frames
+        assert sub_workflow_comp.frames == [
+            {'output': {'out': 'transform_stream_1'}},
+            {'output': {'out': 'transform_stream_2'}},
+            {'output': {'out': 'transform_stream_3'}},
+        ]
+
+        # Downstream output is identical to the streaming sub-workflow case
+        # (test_workflow's expectation), not silently None
+        expect_chunks = [
+            OutputSchema(type='end node stream', index=0, payload={'output': {'result': 'transform_stream_1'}}),
+            OutputSchema(type='end node stream', index=1, payload={'output': {'result': 'transform_stream_2'}}),
+            OutputSchema(type='end node stream', index=2, payload={'output': {'result': 'transform_stream_3'}})]
+        assert chunks == expect_chunks

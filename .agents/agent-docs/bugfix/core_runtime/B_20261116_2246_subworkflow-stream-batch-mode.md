@@ -47,19 +47,30 @@ with a value in enclosing scope`）。错误信息指向内部变量名，用户
 2. 新增 `else` 分支：批式子流 yield 一次结束组件批式输出，语义与 `_sub_invoke` 回退一致；
 3. 删除只累加不使用的残留变量 `frame_count`。
 
-考虑过的备选：在 `else` 分支把批式输出拆成逐帧流式形状（使父图流式边行为与流式子流一致）。
-拒绝原因：需要依赖 End 组件 collect 输出的具体形状做形状分支，超出本次崩溃修复范围，
-且未与批式输出过流式模板的既有语义对齐，登记为遗留待确认。
+评审跟进（同一提交范围内的二次修复）：
+首版 `else` 分支把聚合输出 `{'output': [chunks...]}`（End 组件 collect 的 list 形状）整块
+作为单帧下发，下游按帧模板 `${sub_comp.output.out}` 经
+`get_value_by_nested_path`（`openjiuwen/core/session/utils.py`）解析时容器为 list、
+`int('out')` 抛 ValueError 被吞掉返回 None——崩溃修掉了但数据静默丢失
+（父图 end 无 OUTPUT 帧）。评审意见（Medium）指出后采纳"逐元素 yield"方案：
+`outputs` 为 dict 且 `output` 为 list 时，逐元素 yield `{'output': item}`，形状与流式帧
+完全一致；其余形状不猜测、保持整块 yield。
+
+考虑过的备选：统一把批式输出规整成流式 dict 形状（无论是否 list）。拒绝原因：非 list
+形状（如模板型 End 或批式 invoke 路径的 dict 形状）没有流式对应关系，强行规整属于猜测，
+超出本缺陷范围，保持窄守卫。
 
 ## 回归证据与适用范围
 
 - 候选版本：`fix/subworkflow-stream-batch-mode` 分支（基于 `develop@1071f4564`），2026-11-16。
-- 复现脚本修复后实测：对照组成功 16 帧（不变）；复现组成功完成（14 帧），不再抛错。
+- 复现脚本修复后实测：对照组成功 16 帧（不变）；复现组成功完成且产出与流式组完全相同的
+  end 节点 OUTPUT 帧（`result: 1` / `result: 2`，共 16 帧），数据不再静默丢失。
 - 目标单测：`tests/unit_tests/core/component/test_sub_workflow_comp.py` 6 passed
-  （含新增回归用例 `test_workflow_with_batch_sub_workflow_on_stream_edge`，
-  以 `RecordingSubWorkflowComp` 记录帧，断言批式子流输出按单帧交付且不抛错）。
-- 回归范围：`tests/unit_tests/core/workflow` + `tests/unit_tests/core/component`
-  228 passed, 14 skipped，无回归。
+  （含新增回归用例 `test_workflow_with_batch_sub_workflow_on_stream_edge`：
+  断言批式子流按 3 帧 `{'output': {'out': ...}}` 逐帧交付，且父图 end OUTPUT chunks 与
+  流式子流场景（`test_workflow` 期望）完全一致）。
+- 回归范围：`tests/unit_tests/core/component`（117 passed, 14 skipped）、
+  `tests/unit_tests/core/workflow`（117 passed），无回归。
 - 未验证范围：真实 LLM 组件子流、模板型 End 组件（`response_template`）组合未覆盖；
   重验条件为上述构造的最小复现与目标单测。
 
@@ -73,9 +84,8 @@ with a value in enclosing scope`）。错误信息指向内部变量名，用户
 
 ## 遗留与后续
 
-- 批式子流经父图流式边交付的单帧形状为 `{'output': [chunks...]}`（list），父图 end 节点按帧
-  模板路径（如 `${sub_comp.output.out}`）取不到值，该组合"能跑完但不产出 OUTPUT 帧"。
-  属批式输出过流式模板的既有形状语义，非本次引入。若需要"批式子流在流式边上表现得与
-  流式子流一致（逐帧拆分）"，需另行评估并确认后实施（PR.md 待确认决策点已登记）。
+- ~~批式子流经父图流式边交付的单帧形状为 `{'output': [chunks...]}`（list），父图 end 节点
+  按帧模板路径取不到值，该组合"能跑完但不产出 OUTPUT 帧"。~~ 已在评审跟进修复中解决：
+  批式 list 输出逐元素拆分为与流式一致的帧形状下发，父图下游解析恢复正常。
 - `_sub_stream` 的 `while` 循环中 `receive` 持续返回 `None` 时存在理论上的无限循环风险，
   属既有行为，未在本次处理。

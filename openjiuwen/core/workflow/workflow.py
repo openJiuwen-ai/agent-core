@@ -646,7 +646,15 @@ class Workflow(metaclass=_WorkflowMeta):
                     yield frame
             else:
                 node_session = NodeSession(sub_workflow_session, self._end_comp_id)
-                yield node_session.state().get_outputs(self._end_comp_id)
+                outputs = node_session.state().get_outputs(self._end_comp_id)
+                if isinstance(outputs, dict) and isinstance(outputs.get("output"), list):
+                    # Split the batched end-node output into per-frame deliveries
+                    # so downstream per-frame templates see the same shape as
+                    # streaming sub-workflows produce.
+                    for item in outputs["output"]:
+                        yield {"output": item}
+                else:
+                    yield outputs
         finally:
             await asyncio.shield(sub_workflow_session.close())
             await asyncio.shield(self._internal.reset())
