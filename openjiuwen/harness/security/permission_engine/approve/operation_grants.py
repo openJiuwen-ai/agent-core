@@ -400,7 +400,10 @@ def has_operation_grant(config: Mapping, tool: str, args: dict, workspace: Path 
         if not allow_semantic and subject.get("command_identity"):
             try:
                 approved = json.loads(grant["pattern"])["subject"]
-                if approved.get("command_identity") or approved.get("command") != subject["command"]:
+                # Batch-delete approval permits literal replay of the complete
+                # approved command, but never identity-based aliases/rewrites.
+                # matches_operation_grant already binds its tool, CWD and shell.
+                if approved.get("command") != subject["command"]:
                     continue
             except (KeyError, TypeError, ValueError):
                 continue

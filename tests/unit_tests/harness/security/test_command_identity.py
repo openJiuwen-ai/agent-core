@@ -11,6 +11,7 @@ import pytest
 from openjiuwen.harness.security.permission_engine.approve import command_identity as identities
 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
     build_operation_grants,
+    has_operation_grant,
     matches_operation_grant,
     operation_subject,
 )
@@ -29,6 +30,23 @@ def config():
         "tools": {"bash": "ask", "powershell": "ask"},
         "file_guard": {"enabled": True, "defaults": {"read": "allow", "write": "allow", "exec": "allow"}},
     }
+
+
+def test_batch_grant_matches_literal_replay_without_semantic_aliases(tmp_path):
+    cfg = config()
+    original = args(tmp_path, "rm -f A B")
+    cfg["approval_overrides"] = build_operation_grants("bash", original, cfg)
+    assert has_operation_grant(cfg, "bash", original, allow_semantic=False)
+    for changed in [
+        args(tmp_path, "rm -f ./A ./B"),
+        args(tmp_path, "rm A B"),
+        args(tmp_path, "rm -f A B C"),
+        args(tmp_path, "rm -f A B && echo done"),
+        args(tmp_path.parent, "rm -f A B"),
+        args(tmp_path, "rm -f A B", "sh"),
+    ]:
+        assert not has_operation_grant(cfg, "bash", changed, allow_semantic=False)
+    assert not has_operation_grant(cfg, "powershell", original, allow_semantic=False)
 
 
 @pytest.mark.parametrize("tool", ["powershell", "pwsh", "core.powershell"])

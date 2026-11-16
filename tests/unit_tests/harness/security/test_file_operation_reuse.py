@@ -67,16 +67,21 @@ async def test_rm_receipt_normalizes_only_the_same_single_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_shared_receipt_does_not_override_batch_delete_or_tool_deny(tmp_path):
+@pytest.mark.parametrize("denied_guard", ["tool", "file"])
+async def test_exact_command_receipt_allows_batch_replay_but_not_aliases_or_denies(tmp_path, denied_guard):
     cfg = configuration()
     cfg["approval_overrides"] = build_operation_grants("bash", arguments(tmp_path, "rm A"), cfg)
     engine = PermissionEngine(cfg, workspace_root=tmp_path)
     engine._deletion_guard = SimpleNamespace(
         evaluate=lambda *_: PermissionResult(PermissionLevel.ASK, "del_guard:batch_delete")
     )
-    assert (await engine.check_permission("bash", arguments(tmp_path, "rm A"))).needs_approval
+    assert (await engine.check_permission("bash", arguments(tmp_path, "rm A"))).is_allowed
+    assert (await engine.check_permission("bash", arguments(tmp_path, "rm ./A"))).needs_approval
     assert (await engine.check_permission("bash", arguments(tmp_path, "rm -f ./A"))).needs_approval
-    cfg["tools"] = {"bash": "deny"}
+    if denied_guard == "tool":
+        cfg["tools"] = {"bash": "deny"}
+    else:
+        cfg["file_guard"]["paths"] = [{"path": str(tmp_path / "A"), "write": "deny"}]
     engine.update_config(cfg)
     assert (await engine.check_permission("bash", arguments(tmp_path, "rm A"))).is_denied
 
