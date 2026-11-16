@@ -30,10 +30,11 @@ from openjiuwen.core.foundation.tool import ToolInfo
 class OpenAIAccountResponsesError(Exception):
     """Raised when Responses API data cannot be prepared or parsed."""
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None):
+    def __init__(self, message: str, *, status_code: Optional[int] = None, body: Any = None):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.body = body
 
     def __str__(self) -> str:
         return self.message
@@ -390,14 +391,18 @@ def raise_for_http_error(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
 
-    message = _http_error_message(response)
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    message = _http_error_message(payload)
     if not message:
-        body = (response.text or "").strip()
-        if body:
-            message = summarize_provider_error_text(body, status_code=response.status_code)
+        text = (response.text or "").strip()
+        if text:
+            message = summarize_provider_error_text(text, status_code=response.status_code)
     if not message:
         message = f"OpenAI account Responses request failed with status {response.status_code}."
-    raise OpenAIAccountResponsesError(message, status_code=response.status_code)
+    raise OpenAIAccountResponsesError(message, status_code=response.status_code, body=payload)
 
 
 def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> AssistantMessage:
@@ -734,12 +739,7 @@ def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool) -> str:
     return "stop"
 
 
-def _http_error_message(response: httpx.Response) -> Optional[str]:
-    try:
-        payload = response.json()
-    except ValueError:
-        return None
-
+def _http_error_message(payload: Any) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
 

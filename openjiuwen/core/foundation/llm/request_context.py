@@ -15,13 +15,13 @@ _disabled_thinking_fallback_allowed: ContextVar[bool] = ContextVar(
 
 
 def is_disabled_thinking_fallback_allowed() -> bool:
-    """Return whether this request may retry without disabled-thinking fields."""
+    """Return whether this request may fall back to supported model options."""
     return _disabled_thinking_fallback_allowed.get()
 
 
 @contextmanager
 def disabled_thinking_fallback_scope() -> Iterator[None]:
-    """Allow disabled-thinking compatibility fallback in this request context only."""
+    """Allow fallback for rejected thinking and temperature options in this context."""
     token: Token[bool] = _disabled_thinking_fallback_allowed.set(True)
     try:
         yield

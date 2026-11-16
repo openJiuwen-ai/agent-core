@@ -244,6 +244,9 @@ service = OrchestrationService(
 `capability_provider` 可以直接传入能力序列，也可以是返回能力序列的同步或异步函数。
 构造器还可以通过 `model_response_observer` 观测模型响应，通过 `source_snapshot` 补充使用方的构建身份，并通过 `prepare_artifact` 在原子发布前准备版本目录中的附加产物。
 
+使用 Core 的 `Model` 构图时，若 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages
+明确拒绝 `temperature`，构建会省略该字段重试一次，由服务端使用模型默认采样设置。
+
 ### FingerprintService
 
 指纹构建使用带稳定快照的异步 `CapabilityProvider`。推荐通过 `inventory_snapshot()` 原子返回快照与能力集合；
@@ -298,7 +301,7 @@ symlink、junction 或其他 reparse point，并排除凭据、版本控制和�
 
 `FingerprintSettings.llm_max_tokens` 默认是 `2048`，允许设置正整数或 `None`；`None` 表示提取调用
 不传 `max_tokens`，沿用注入模型的配置。`FingerprintService` 和 `CapabilityFingerprintExtractor` 可传入
-`model_response_observer`。同步或异步 observer 在模型调用结束、请求的 thinking 兼容作用域恢复后接收
+`model_response_observer`。同步或异步 observer 在模型调用结束、请求的模型参数兼容作用域恢复后接收
 `observer(response, "fingerprint_extraction", "capability_extraction")`；与编排一致，三个参数按位置传入，
 不要求回调形参使用特定名称；observer 异常只记日志。
 若响应的 `finish_reason` 为 `length`，会先通知 observer，再以 `MODEL_CALL_FAILED` 中止构建，

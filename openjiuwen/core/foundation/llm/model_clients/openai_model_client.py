@@ -29,7 +29,6 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     build_base_headers,
     merge_request_headers,
 )
-from openjiuwen.core.foundation.llm.model_clients._disabled_thinking import DisabledThinkingFallback
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.reasoning import (
@@ -64,6 +63,7 @@ from openjiuwen.core.foundation.llm.utils.provider_error import (
     summarize_provider_error_text,
 )
 from openjiuwen.core.foundation.llm.utils.request_encoding import create_encoding_aware_openai_client
+from openjiuwen.core.foundation.llm.utils.request_parameter_fallback import RequestParameterFallback
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import json_arguments, sanitize_chat_request
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
@@ -431,8 +431,11 @@ class OpenAIModelClient(BaseModelClient):
             OPENROUTER_1H_PROMPT_CACHE_TTL_PROVIDERS,
         )
         self._previous_openrouter_prompt_cache_messages: Optional[list] = None
-        self._disabled_thinking_fallback = DisabledThinkingFallback(
+        self._chat_request_fallback = RequestParameterFallback(
             model_client_config.client_provider, "OpenAI-compatible",
+        )
+        self._responses_request_fallback = RequestParameterFallback(
+            model_client_config.client_provider, "OpenAI Responses",
         )
 
     def _use_shared_client(self) -> bool:
@@ -1338,6 +1341,7 @@ class OpenAIModelClient(BaseModelClient):
             verify=verify,
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
             max_retries=0,
+            request_fallback=self._responses_request_fallback,
         )
 
     async def _parse_responses_content(self, content: str, output_parser: BaseOutputParser) -> Any:
@@ -1636,7 +1640,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        params = self._disabled_thinking_fallback.apply_cached(params)
+        params = self._chat_request_fallback.apply_cached(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1663,7 +1667,7 @@ class OpenAIModelClient(BaseModelClient):
                 params["timeout"] = timeout
 
             # Call API
-            response = await self._disabled_thinking_fallback.call(
+            response = await self._chat_request_fallback.call(
                 async_client.chat.completions.create,
                 params,
                 is_stream=False,
@@ -1827,7 +1831,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        params = self._disabled_thinking_fallback.apply_cached(params)
+        params = self._chat_request_fallback.apply_cached(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1870,7 +1874,7 @@ class OpenAIModelClient(BaseModelClient):
                         final_message = parsed_chunk
                     yield parsed_chunk
             else:
-                response_stream = await self._disabled_thinking_fallback.call(
+                response_stream = await self._chat_request_fallback.call(
                     async_client.chat.completions.create,
                     params,
                     is_stream=True,
