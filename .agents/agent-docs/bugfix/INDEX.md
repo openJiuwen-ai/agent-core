@@ -75,6 +75,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261110_2112_anthropic-disabled-thinking-fallback](core_runtime/B_20261110_2112_anthropic-disabled-thinking-fallback.md) | B | Anthropic Messages 支持图谱关闭思考失败后的回退 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/model_clients/_disabled_thinking.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, tests/unit_tests/core/foundation/llm/test_anthropic_model_client.py | 无独立 D：补齐已有请求级关闭思考回退在 Anthropic 非流式调用中的接入。 |
+| [B_20261116_1708_symphony-temperature-fallback](core_runtime/B_20261116_1708_symphony-temperature-fallback.md) | B | Symphony 构图在模型拒绝温度参数后恢复 | lin-xiaoyu | openjiuwen/core/foundation/llm | openjiuwen/core/foundation/llm/request_context.py, openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_model_client.py, openjiuwen/core/foundation/llm/model_clients/openai_account_model_client.py, openjiuwen/core/foundation/llm/utils/request_parameter_fallback.py, openjiuwen/core/foundation/llm/utils/responses_transport.py, openjiuwen/core/foundation/llm/utils/responses_utils.py, openjiuwen/symphony/README.md, tests/unit_tests/symphony/test_model_temperature_fallback.py | 无独立 D：按已确认的发布线补丁方案扩展已有请求参数回退。 |
 
 <a id="module-5"></a>
 

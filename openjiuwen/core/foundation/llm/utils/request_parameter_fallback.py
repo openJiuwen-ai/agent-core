@@ -1,13 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Scoped retry policy for gateways that reject disabled thinking."""
+"""Scoped retry policy for provider requests that reject specific model options."""
 
 import inspect
+import json
+import re
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
 from typing import Any, Optional
 
 from openjiuwen.core.common.logging import LogEventType, llm_logger
+from openjiuwen.core.foundation.llm.reasoning import reasoning_request_controls
 from openjiuwen.core.foundation.llm.request_context import is_disabled_thinking_fallback_allowed
 
 
@@ -31,25 +35,41 @@ _DISABLED_THINKING_VALUE_MARKERS = (
     "off",
     "关闭",
 )
+_UNSUPPORTED_PARAMETER_CODES = {"unknown_parameter", "unrecognized_parameter", "unsupported_parameter"}
+_MAX_TEMPERATURE_CACHE_ENTRIES = 128
+_TEMPERATURE_FIELD = re.compile(r"\btemperature\b")
+_UNSUPPORTED_TEMPERATURE = re.compile(
+    r"\b(?:unsupported|unknown|unrecognized) (?:parameter|field)[:\s]+['\"`]?temperature\b"
+    r"|\btemperature['\"`]?(?: (?:parameter|field))? "
+    r"(?:is (?:unsupported|not (?:supported|configurable))|cannot be (?:set|changed|specified)|must be omitted)\b"
+    r"(?!\s+(?:to|outside|above|below)\b)"
+    r"|\b(?:does not|doesn't|do not) support (?:setting )?(?:the )?(?:custom )?['\"`]?temperature\b"
+)
+_DEFAULT_TEMPERATURE_ONLY = re.compile(
+    r"\bonly (?:the )?default\b"
+    r"|\b(?:only (?:be (?:set to )?)?|temperature['\"`]? must be (?:set to )?)['\"`]?1(?:\.0+)?['\"`]?"
+    r"(?=\s*(?:is (?:allowed|accepted|supported)\b|(?:for|when|with)\b|[.!)]?$))"
+)
 
 
-class DisabledThinkingFallback:
-    """Remember disabled-thinking rejections on one model client."""
+class RequestParameterFallback:
+    """Remember provider parameter rejections for one client and API."""
 
     def __init__(self, provider: str, api_label: str) -> None:
         self._provider = provider
         self._api_label = api_label
         self._models_rejecting_disabled_thinking: set[str] = set()
+        self._rejected_temperatures: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def apply_cached(self, params: dict[str, Any]) -> dict[str, Any]:
         if not is_disabled_thinking_fallback_allowed():
             return params
-        model_key = self._disabled_thinking_model_key(params)
-        if model_key not in self._models_rejecting_disabled_thinking:
-            return params
-        if not self._has_disabled_thinking_params(params):
-            return params
-        return self._without_disabled_thinking_params(params)
+        model_key = self._model_key(params)
+        if model_key in self._models_rejecting_disabled_thinking and self._has_disabled_thinking_params(params):
+            params = self._without_disabled_thinking_params(params)
+        if self._temperature_cache_key(params) in self._rejected_temperatures:
+            params = self._without_temperature(params)
+        return params
 
     async def call(
         self,
@@ -62,25 +82,80 @@ class DisabledThinkingFallback:
             return await create(**params)
 
         request_params = self.apply_cached(params)
+        model_key = self._model_key(request_params)
+        rejected_temperature = None
+        # Each recovery removes the fields it matches, so it can run only once.
+        while True:
+            try:
+                result = await create(**request_params)
+            except Exception as exc:
+                if self._rejects_temperature(exc):
+                    if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
+                        raise
+                    rejected_temperature = self._temperature_cache_key(request_params)
+                    request_params = self._without_temperature(request_params)
+                    rejected_option = "temperature"
+                elif self._has_disabled_thinking_params(request_params) and self._is_disabled_thinking_rejection(exc):
+                    request_params = self._without_disabled_thinking_params(request_params)
+                    if model_key:
+                        self._models_rejecting_disabled_thinking.add(model_key)
+                    rejected_option = "disabled thinking"
+                else:
+                    raise
+                llm_logger.warning(
+                    f"{self._api_label} model rejected {rejected_option}; retrying with model defaults.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=model_key,
+                    model_provider=self._provider,
+                    is_stream=is_stream,
+                )
+            else:
+                if rejected_temperature is not None:
+                    self._rejected_temperatures[rejected_temperature] = None
+                    if len(self._rejected_temperatures) > _MAX_TEMPERATURE_CACHE_ENTRIES:
+                        self._rejected_temperatures.popitem(last=False)
+                return result
+
+    @staticmethod
+    def _has_temperature(params: Mapping[str, Any]) -> bool:
+        extra_body = params.get("extra_body")
+        return "temperature" in params or (isinstance(extra_body, Mapping) and "temperature" in extra_body)
+
+    @staticmethod
+    def _without_temperature(params: Mapping[str, Any]) -> dict[str, Any]:
+        cleaned = dict(params)
+        cleaned.pop("temperature", None)
+        extra_body = cleaned.get("extra_body")
+        if isinstance(extra_body, Mapping) and "temperature" in extra_body:
+            cleaned_extra = dict(extra_body)
+            cleaned_extra.pop("temperature")
+            if cleaned_extra:
+                cleaned["extra_body"] = cleaned_extra
+            else:
+                cleaned.pop("extra_body")
+        return cleaned
+
+    @classmethod
+    def _temperature_cache_key(cls, params: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+        if not cls._has_temperature(params):
+            return None
+        extra_body = params.get("extra_body")
+        # SDK extra_body keys take precedence in the outgoing JSON payload.
+        wire = dict(params)
+        wire.pop("extra_body", None)
+        if isinstance(extra_body, Mapping):
+            wire.update(extra_body)
+        model = cls._model_key(wire)
+        if model is None:
+            return None
+        controls = reasoning_request_controls(wire)
+        template_kwargs = wire.get("chat_template_kwargs")
+        if isinstance(template_kwargs, Mapping) and "enable_thinking" in template_kwargs:
+            controls["chat_template_kwargs.enable_thinking"] = template_kwargs["enable_thinking"]
         try:
-            return await create(**request_params)
-        except Exception as exc:
-            retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
-            if retry_params is None:
-                raise
-
-            model_key = self._disabled_thinking_model_key(request_params)
-            if model_key:
-                self._models_rejecting_disabled_thinking.add(model_key)
-
-            llm_logger.warning(
-                f"{self._api_label} model rejected disabled thinking; retrying with model defaults.",
-                event_type=LogEventType.LLM_CALL_ERROR,
-                model_name=model_key,
-                model_provider=self._provider,
-                is_stream=is_stream,
-            )
-            return await create(**retry_params)
+            return model, json.dumps([wire["temperature"], controls], sort_keys=True)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _is_disabled_thinking_type(value: Any) -> bool:
@@ -117,7 +192,10 @@ class DisabledThinkingFallback:
             return True
 
         reasoning = value.get("reasoning")
-        if isinstance(reasoning, Mapping) and cls._is_false_flag(reasoning.get("enabled")):
+        if isinstance(reasoning, Mapping) and (
+            cls._is_false_flag(reasoning.get("enabled"))
+            or cls._is_disabled_reasoning_effort(reasoning.get("effort"))
+        ):
             return True
 
         return cls._is_disabled_reasoning_effort(value.get("reasoning_effort"))
@@ -155,13 +233,17 @@ class DisabledThinkingFallback:
                 params.pop("chat_template_kwargs", None)
 
         reasoning = params.get("reasoning")
-        if isinstance(reasoning, Mapping) and cls._is_false_flag(reasoning.get("enabled")):
+        if isinstance(reasoning, Mapping):
             reasoning_params = dict(reasoning)
-            reasoning_params.pop("enabled", None)
-            if reasoning_params:
-                params["reasoning"] = reasoning_params
-            else:
-                params.pop("reasoning", None)
+            if cls._is_false_flag(reasoning.get("enabled")):
+                reasoning_params.pop("enabled")
+            if cls._is_disabled_reasoning_effort(reasoning.get("effort")):
+                reasoning_params.pop("effort")
+            if reasoning_params != reasoning:
+                if reasoning_params:
+                    params["reasoning"] = reasoning_params
+                else:
+                    params.pop("reasoning")
 
         if cls._is_disabled_reasoning_effort(params.get("reasoning_effort")):
             params.pop("reasoning_effort", None)
@@ -182,7 +264,7 @@ class DisabledThinkingFallback:
         return cleaned
 
     @staticmethod
-    def _disabled_thinking_model_key(params: Mapping[str, Any]) -> Optional[str]:
+    def _model_key(params: Mapping[str, Any]) -> Optional[str]:
         model_name = params.get("model")
         if model_name is None:
             return None
@@ -266,6 +348,28 @@ class DisabledThinkingFallback:
         return "\n".join(part for part in parts if part)
 
     @classmethod
+    def _rejects_temperature(cls, exc: BaseException) -> bool:
+        body = cls._exception_attr(exc, "body")
+        if isinstance(body, Mapping):
+            body = body.get("error", body)
+        details = body if isinstance(body, Mapping) else {}
+        param = details.get("param") or cls._exception_attr(exc, "param")
+        field = str(param or "").strip().lower()
+        if field and field != "temperature":
+            return False
+
+        code = details.get("code") or cls._exception_attr(exc, "code")
+        if field == "temperature" and str(code).lower() in _UNSUPPORTED_PARAMETER_CODES:
+            return True
+
+        message = str(details.get("message") or cls._exception_attr(exc, "message") or exc).lower()
+        return bool(
+            _UNSUPPORTED_TEMPERATURE.search(message)
+            or ((field == "temperature" or _TEMPERATURE_FIELD.search(message))
+                and _DEFAULT_TEMPERATURE_ONLY.search(message))
+        )
+
+    @classmethod
     def _is_disabled_thinking_rejection(cls, exc: BaseException) -> bool:
         status_code = cls._exception_status_code(exc)
         if (
@@ -287,15 +391,6 @@ class DisabledThinkingFallback:
             return False
 
         mentions_disable = any(marker in error_text for marker in _DISABLED_THINKING_VALUE_MARKERS)
+        if re.search(r"\breasoning\.effort\b[^\n]*['\"`]none['\"`]", error_text):
+            return True
         return mentions_disable or "parameter" in error_text or "参数" in error_text
-
-    def _retry_params_without_disabled_thinking(
-        self,
-        params: dict[str, Any],
-        exc: BaseException,
-    ) -> Optional[dict[str, Any]]:
-        if not self._has_disabled_thinking_params(params):
-            return None
-        if not self._is_disabled_thinking_rejection(exc):
-            return None
-        return self._without_disabled_thinking_params(params)
