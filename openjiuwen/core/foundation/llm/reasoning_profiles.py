@@ -61,6 +61,10 @@ GLM_52 = ReasoningCapability(
     options=("off", "high", "max"),
     recommended="max",
 )
+GLM_53_FLASH = ReasoningCapability(
+    options=("low", "high", "max"),
+    recommended="max",
+)
 QWEN_38 = ReasoningCapability(
     options=("off", "low", "medium", "xhigh"),
     recommended="xhigh",
@@ -220,6 +224,14 @@ REASONING_PROFILES: tuple[ReasoningProfile, ...] = (
 
     # Zhipu official and Coding Plan.
     ReasoningProfile("zhipu", ("glm-5.2*",), GLM_52, "glm", "glm_anthropic"),
+    ReasoningProfile(
+        "zhipu",
+        ("glm-5.3-flash*",),
+        GLM_53_FLASH,
+        "glm_53_flash",
+        "always_on",
+        anthropic_capability=UNSUPPORTED,
+    ),
     ReasoningProfile(
         "zhipu",
         ("glm-5*", "glm-4.7*"),

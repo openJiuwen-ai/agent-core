@@ -369,10 +369,17 @@ class AsyncProcessHandler:
         while self._process.returncode is None:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return pid, None  # still running after grace period — success
+                # Subprocess exit notification can be queued in the same loop
+                # turn that expires grace. Yield once before declaring success.
+                await asyncio.sleep(0)
+                if self._process.returncode is None:
+                    return pid, None  # still running after grace period — success
+                break
             await asyncio.sleep(min(0.05, remaining))
 
         code = self._process.returncode
+        if code is None:
+            return pid, None
         if code != 0:
             # A descendant may keep the inherited stderr write end open after
             # the direct child exits. Only wait for the grace period's remaining
