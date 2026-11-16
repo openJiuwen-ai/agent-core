@@ -198,7 +198,6 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
@@ -232,15 +231,24 @@ class MessageHandler(BaseCoordinationHandler):
                                 msg.message_id,
                             )
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(approval_data)
+                            await self._round.resume_interrupt(
+                                self._approval_payload_to_interactive_input(approval_data)
+                            )
                             continue
-                        team_logger.info(
-                            "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                            member_name,
-                            msg.message_id,
-                        )
-                        interrupted = True
-                        break
+                        if msg.from_member_name == "user":
+                            # 用户经邮箱直发的文本是「用户直接
+                            # 输入」——挂起中断下应放行投递（下游 harness 闸按
+                            # from="user" 判别放行开轮回填），不是系统注入。
+                            # 不置 interrupted、不中断本批投递。
+                            pass
+                        else:
+                            team_logger.info(
+                                "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                                member_name,
+                                msg.message_id,
+                            )
+                            interrupted = True
+                            break
                     expanded = await self._expand(msg)
                     if is_bridge:
                         text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
@@ -590,3 +598,26 @@ class MessageHandler(BaseCoordinationHandler):
         if isinstance(data, dict) and data.get("type") == "tool_approval_result":
             return data
         return None
+
+    @staticmethod
+    def _approval_payload_to_interactive_input(approval_data: dict) -> Any:
+        """Wrap a mailbox approval payload as an ``InteractiveInput``.
+
+        与 ``AgentLifecycleHandler.on_tool_approval_result``（事件总线路径）
+        同构：``resume_interrupt`` 的准入门只认 ``InteractiveInput``，邮箱
+        fallback 自引入起直传裸 dict 被当作过期作答静默丢弃——本转换让
+        fallback 真正生效，且 ``InteractiveInput`` 豁免挂起中断的推迟闸，
+        PAUSED（含 paused-at-IDLE）下同样能恢复中断。
+        """
+        from openjiuwen.core.session import InteractiveInput
+
+        interactive_input = InteractiveInput()
+        interactive_input.update(
+            approval_data.get("tool_call_id", ""),
+            {
+                "approved": approval_data.get("approved"),
+                "feedback": approval_data.get("feedback", ""),
+                "auto_confirm": approval_data.get("auto_confirm", False),
+            },
+        )
+        return interactive_input

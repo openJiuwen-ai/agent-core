@@ -29,7 +29,7 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.harness.state import HarnessState, SystemText
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -290,7 +290,9 @@ class StreamController:
             )
             self._swallow_failed_round = True
             await self._emit_retry_output(code, text)
-            await harness.send(_RETRY_QUERY)
+            # SystemText 显式标记：挂起工具中断期间重试重驱与用户直接文本
+            # 同形（裸 str），准入闸据此推迟而非误当 resume 答复
+            await harness.send(SystemText(_RETRY_QUERY))
             return True
         team_logger.error(
             "DeepAgent round failed (code=%s, attempts=%d): %s",

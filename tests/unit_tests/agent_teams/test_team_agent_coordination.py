@@ -508,6 +508,85 @@ async def test_tool_approval_event_resumes_interrupt():
     assert interactive_input.user_inputs["call-1"]["auto_confirm"] is True
 
 
+@pytest.mark.level0
+def test_approval_payload_to_interactive_input():
+    """邮箱审批 fallback 的 dict 载荷转成 InteractiveInput（与事件总线路径同构）。
+
+    fallback 自引入起把裸 dict 直传
+    resume_interrupt，被准入门（只认 InteractiveInput）当过期作答静默
+    丢弃——本转换让它真正生效。
+    """
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import (
+        MessageHandler,
+    )
+
+    interactive_input = MessageHandler._approval_payload_to_interactive_input({
+        "type": "tool_approval_result",
+        "tool_call_id": "call-1",
+        "approved": False,
+        "feedback": "换一个方案",
+        "auto_confirm": True,
+    })
+
+    assert interactive_input.user_inputs["call-1"] == {
+        "approved": False,
+        "feedback": "换一个方案",
+        "auto_confirm": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pending_interrupt_mailbox_approval_admitted_as_interactive_input():
+    """挂起中断 + 邮箱审批 fallback 消息：转 InteractiveInput 走 resume_interrupt。
+
+    转换后的 InteractiveInput 天然豁免 harness 挂起中断准入闸的 defer
+    （闸只推迟非 InteractiveInput 输入），PAUSED 下也能恢复中断。
+    """
+    import json as json_
+
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import (
+        MessageHandler,
+    )
+
+    msg = SimpleNamespace(
+        message_id="m-approval",
+        protocol="json",
+        content=json_.dumps({
+            "type": "tool_approval_result",
+            "tool_call_id": "call-1",
+            "approved": True,
+            "feedback": "ok",
+            "auto_confirm": False,
+        }),
+        from_member_name="leader",
+    )
+    host = SimpleNamespace(
+        has_pending_interrupt=lambda: True,
+        resume_interrupt=AsyncMock(),
+    )
+    handler = MessageHandler(
+        host,
+        SimpleNamespace(member_name="dev-1", role=TeamRole.TEAMMATE, team_spec=None),
+        SimpleNamespace(
+            message_manager=SimpleNamespace(
+                mark_message_read=AsyncMock(),
+                mark_messages_read=AsyncMock(),
+            ),
+            team_backend=None,
+        ),
+        SimpleNamespace(),
+    )
+    handler._read_all_unread = AsyncMock(side_effect=[[msg], []])
+
+    await handler._process_unread_messages("dev-1")
+
+    host.resume_interrupt.assert_awaited_once()
+    interactive_input = host.resume_interrupt.await_args.args[0]
+    assert isinstance(interactive_input, InteractiveInput)
+    assert interactive_input.user_inputs["call-1"]["approved"] is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_idle_human_agent_tears_down_on_self_shutdown():

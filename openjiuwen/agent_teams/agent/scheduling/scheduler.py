@@ -40,6 +40,7 @@ from openjiuwen.agent_teams.agent.scheduling.verdict import (
     VERDICT_PASS,
     judge,
 )
+from openjiuwen.agent_teams.harness.state import SystemText
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -444,7 +445,9 @@ class TeamScheduler:
             return
         self._escalated.add(round_key)
         team_logger.info("[scheduler] escalating task %s round %s to the leader", task.task_id, task.review_round)
-        await self._host.deliver_input(content, use_steer=False)
+        # SystemText 显式标记：挂起工具中断期间本注入与用户直接文本同形
+        # （裸 str），准入闸据此推迟而非误当 resume 答复。
+        await self._host.deliver_input(SystemText(content), use_steer=False)
 
     async def _digest_task_done(self, task_manager, task_id: str, title: str, *, verified: bool) -> None:
         """One-line terminal digest to the leader, once per task.
@@ -460,13 +463,13 @@ class TeamScheduler:
         terminal = (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value)
         remaining = sum(1 for task in tasks if task.status not in terminal)
         await self._host.deliver_input(
-            render.render_leader_task_done(task_id, title, verified=verified, remaining=remaining),
+            SystemText(render.render_leader_task_done(task_id, title, verified=verified, remaining=remaining)),
             use_steer=False,
         )
         if remaining == 0 and tasks and not self._all_done_announced:
             self._all_done_announced = True
             await self._host.deliver_input(
-                render.render_leader_all_done(len(tasks)),
+                SystemText(render.render_leader_all_done(len(tasks))),
                 use_steer=False,
             )
 
@@ -496,6 +499,6 @@ class TeamScheduler:
         self._all_done_announced = True
         payload = event.get_payload()
         await self._host.deliver_input(
-            render.render_leader_all_done(payload.task_count),
+            SystemText(render.render_leader_all_done(payload.task_count)),
             use_steer=False,
         )

@@ -53,6 +53,16 @@ class RoundPhase(str, Enum):
     TOOL = "tool"  # executing tool calls for the current iteration
 
 
+class SystemText(str):
+    """系统注入文本的显式标记（str 子类，下游一切按 str 处理）。
+
+    外部检视修订：异步工具完成注入、spawn 完成摘要、瞬态重试重驱等
+    系统来源的注入文本与用户直接输入同为裸 str，挂起工具中断的准入闸无法
+    按内容区分——用显式类型标记替代文本前缀反推。注入点统一包一层本类型，
+    闸据此推迟（defer）；用户直接文本保持裸 str 放行。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class SafeStateSnapshot:
     """Snapshot captured at a task-loop round boundary (AFTER_TASK_ITERATION),
@@ -193,6 +203,11 @@ class HarnessInternalState:
     seq_counter: int = 0
     active: ActiveRound | None = None
     paused_query: str | None = None
+    # pause 落定在 IDLE（无在跑回合、挂起工具中断待答）的显式
+    # 标记。不能用 paused_query 为空代理——InteractiveInput 起轮的回合经正常
+    # RUNNING pause 后 paused_query 同样为空（II 不可重放不缓存），两类状态
+    # 必须分开：只有本标记为真时 warm/cold resume 才不起续轮（等用户输入）。
+    paused_at_idle: bool = False
     output_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     supervisor_task: asyncio.Task | None = None
     round_id_counter: int = 0
