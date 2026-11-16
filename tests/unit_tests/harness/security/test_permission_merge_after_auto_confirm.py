@@ -87,7 +87,7 @@ def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     assert any(
         isinstance(o, dict)
         and o.get("match_type") == "command"
-        and "git" in str(o.get("pattern", "")).lower()
+        and o.get("pattern") == "git status"
         and o.get("action") == "allow"
         for o in overrides
     )

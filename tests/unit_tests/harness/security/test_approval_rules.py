@@ -189,7 +189,7 @@ def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     assert any(
         isinstance(item, dict)
         and item.get("match_type") == "command"
-        and "git" in str(item.get("pattern", "")).lower()
+        and item.get("pattern") == "git status"
         and item.get("action") == "allow"
         for item in overrides
     )
@@ -220,12 +220,20 @@ def test_merge_skips_when_current_permission_is_not_ask() -> None:
     assert merged.get("approval_overrides") in (None, [])
 
 
-def test_merge_shell_without_safe_suggestion_is_not_applied() -> None:
+def test_merge_shell_persists_whole_command_even_with_redirect() -> None:
     cfg = {"enabled": True, "tools": {"bash": "ask"}}
+    tool_args = {"command": "git status > /tmp/out"}
     merged, applied = merge_permission_allow_rule_into_permissions(
         cfg,
         "bash",
-        {"command": "git status > /tmp/out"},
+        tool_args,
     )
-    assert applied is False
-    assert merged.get("approval_overrides") in (None, [])
+    assert applied is True
+    overrides = merged.get("approval_overrides") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("match_type") == "command"
+        and item.get("pattern") == "git status > /tmp/out"
+        and item.get("action") == "allow"
+        for item in overrides
+    )
