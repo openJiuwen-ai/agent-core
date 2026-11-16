@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, cast
 
 from agent_shield.tool_permission import get_permission_manager
+from agent_shield.tool_permission.toolguard.shell_ast import parse_shell_for_permission
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -45,7 +46,6 @@ from openjiuwen.harness.security.patterns import (
 )
 from openjiuwen.harness.security.permission_key import DEFAULT_KEY
 from openjiuwen.harness.security.permission_checks import fail_closed_permission_callback
-from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 _MISSING = object()
 _PERMISSION_WARNINGS_PREFIX = "_permission_warnings:"
