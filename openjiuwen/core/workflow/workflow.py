@@ -632,20 +632,21 @@ class Workflow(metaclass=_WorkflowMeta):
             compiled_graph = self._internal.compile(sub_workflow_session, context=context)
             await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: kwargs.get(CONFIG_KEY)}, sub_workflow_session)
             if self._is_streaming:
-                frame_count = 0
                 stream_timeout = session.get_env(WORKFLOW_EXECUTE_TIMEOUT)
                 sub_end_ability = self._internal.config().spec.comp_configs.get(self._end_comp_id).abilities
-            required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
-            stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
-            while stream_ability_count > 0:
-                frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
-                if frame is None:
-                    continue
-                if frame == StreamEmitter.END_FRAME:
-                    stream_ability_count -= 1
-                    continue
-                frame_count += 1
-                yield frame
+                required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
+                stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
+                while stream_ability_count > 0:
+                    frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
+                    if frame is None:
+                        continue
+                    if frame == StreamEmitter.END_FRAME:
+                        stream_ability_count -= 1
+                        continue
+                    yield frame
+            else:
+                node_session = NodeSession(sub_workflow_session, self._end_comp_id)
+                yield node_session.state().get_outputs(self._end_comp_id)
         finally:
             await asyncio.shield(sub_workflow_session.close())
             await asyncio.shield(self._internal.reset())

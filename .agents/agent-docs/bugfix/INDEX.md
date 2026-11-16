@@ -1,7 +1,7 @@
 ---
 title: 故障修复 B索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: CharlesWang2030
+author_email: 93426525@qq.com
 generated: true
 ---
 
@@ -22,12 +22,13 @@ generated: true
 | [core/runner/drunner/dmessage_queue](#module-5) |
 | [core/session](#module-6) |
 | [core/sys_operation](#module-7) |
-| [extensions/a2a](#module-8) |
-| [extensions/observability](#module-9) |
-| [harness](#module-10) |
-| [harness/subagents](#module-11) |
-| [harness/tools/browser_move/decision](#module-12) |
-| [harness/tools/subagent](#module-13) |
+| [core/workflow](#module-8) |
+| [extensions/a2a](#module-9) |
+| [extensions/observability](#module-10) |
+| [harness](#module-11) |
+| [harness/subagents](#module-12) |
+| [harness/tools/browser_move/decision](#module-13) |
+| [harness/tools/subagent](#module-14) |
 
 <a id="module-1"></a>
 
@@ -104,13 +105,21 @@ generated: true
 
 <a id="module-8"></a>
 
+## core/workflow
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261116_2246_subworkflow-stream-batch-mode](core_runtime/B_20261116_2246_subworkflow-stream-batch-mode.md) | B | 子工作流默认批式配置被流式边调用时 _sub_stream 必崩的缩进缺陷 | CharlesWang2030 | openjiuwen/core/workflow | openjiuwen/core/workflow/workflow.py, tests/unit_tests/core/component/test_sub_workflow_comp.py | 无独立 D：常规缺陷修复，未归档独立设计；修复方案在 CORE-02 问题分析归档中确认（缩进修正 + 批式回退），沿用 _sub_invoke 既有批式返回契约，无新增公开 API。 |
+
+<a id="module-9"></a>
+
 ## extensions/a2a
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261103_1050_grandocean-review-feedback](core_runtime/B_20261103_1050_grandocean-review-feedback.md) | B | grandocean 七项检视意见的兼容性修复 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | 无独立 D：用户明确要求按已有七条检视意见直接开发并补测试，无独立设计文档。 |
 
-<a id="module-9"></a>
+<a id="module-10"></a>
 
 ## extensions/observability
 
@@ -118,7 +127,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1120_avatar-child-session-trace-root](agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | openjiuwen/agent_teams/workflow, openjiuwen/extensions/observability | openjiuwen/agent_teams/workflow/backends/avatar_session_backend.py, openjiuwen/extensions/observability/span_context.py, tests/unit_tests/agent_teams/workflow/test_avatar_session_backend.py, tests/unit_tests/extensions/observability/test_span_context.py | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
 
-<a id="module-10"></a>
+<a id="module-11"></a>
 
 ## harness
 
@@ -127,7 +136,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | openjiuwen/core/context_engine, openjiuwen/harness, openjiuwen/agent_teams | openjiuwen/core/context_engine/context/cancellation.py, openjiuwen/core/context_engine/context/context.py, openjiuwen/core/context_engine/context/processor_state_recorder.py, openjiuwen/core/context_engine/context/context_state.py, openjiuwen/core/context_engine/context_engine/__init__.py, openjiuwen/harness/deep_agent.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/runtime/manager.py, openjiuwen/extensions/observability/runtime.py, tests/unit_tests/core/context_engine/test_cancellation_cause.py, tests/unit_tests/core/context_engine/test_context_compression_state_stream.py, tests/unit_tests/harness/test_deep_agent_abort_cancellation_cause.py, tests/unit_tests/agent_teams/runtime/test_manager.py, tests/unit_tests/agent_teams/harness/test_abort.py | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261114_1107_interactive-memory-turn](harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | openjiuwen/harness | openjiuwen/harness/rails/memory/jiuwen_memory_rail.py, tests/unit_tests/harness/rails/test_jiuwen_memory_rail.py, tests/unit_tests/harness/rails/test_jiuwen_memory_interrupts.py | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
 
-<a id="module-11"></a>
+<a id="module-12"></a>
 
 ## harness/subagents
 
@@ -135,7 +144,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-12"></a>
+<a id="module-13"></a>
 
 ## harness/tools/browser_move/decision
 
@@ -143,7 +152,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [B_20261102_1733_browser-pr-contract-review](harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/test_deep_agent_terminal_stream.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
-<a id="module-13"></a>
+<a id="module-14"></a>
 
 ## harness/tools/subagent
 
