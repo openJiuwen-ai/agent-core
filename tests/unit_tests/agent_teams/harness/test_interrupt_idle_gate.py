@@ -483,3 +483,84 @@ async def test_ii_started_round_pause_resume_continues() -> None:
         assert len(fake.invocations) == 2, fake.invocations
     finally:
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduler_leader_injections_are_system_text() -> None:
+    """调度器给 leader 的升级/终态摘要/all-done 注入全部包 SystemText。
+
+    这些注入与用户直接文本同为裸 str，
+    挂起工具中断期间会被准入闸误当 resume 答复放行开轮回填——显式
+    打标后闸按类型推迟。
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler
+    from openjiuwen.agent_teams.harness.state import SystemText
+    from openjiuwen.agent_teams.schema.status import TaskStatus
+
+    host = SimpleNamespace(deliver_input=AsyncMock())
+    blueprint = SimpleNamespace(
+        spec=SimpleNamespace(
+            verify_vote_threshold=0.6,
+            default_max_review_rounds=3,
+            review_stall_timeout=600,
+        )
+    )
+    scheduler = TeamScheduler(host, blueprint=blueprint, infra=SimpleNamespace())
+
+    await scheduler._escalate(
+        SimpleNamespace(task_id="t1", review_round=3), "escalation text"
+    )
+    task_manager = SimpleNamespace(
+        list_tasks=AsyncMock(
+            return_value=[SimpleNamespace(status=TaskStatus.COMPLETED.value)]
+        )
+    )
+    # remaining == 0 且 tasks 非空 → 终态摘要 + all-done 兜底两条注入
+    await scheduler._digest_task_done(task_manager, "t1", "标题", verified=True)
+    # all-done 一次性标记已被上一调用置位——用新实例覆盖 _announce_all_done 点位
+    scheduler2 = TeamScheduler(host, blueprint=blueprint, infra=SimpleNamespace())
+    await scheduler2._announce_all_done(
+        SimpleNamespace(get_payload=lambda: SimpleNamespace(task_count=1))
+    )
+
+    payloads = [call.args[0] for call in host.deliver_input.await_args_list]
+    assert len(payloads) == 4
+    assert all(isinstance(p, SystemText) for p in payloads)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reliability_leader_injections_are_system_text() -> None:
+    """可靠性通报/升级注入包 SystemText（同上调度器，挂起中断闸据此 defer）。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.agent_teams.harness.state import SystemText
+    from openjiuwen.agent_teams.reliability.anomaly import Severity
+    from openjiuwen.agent_teams.reliability.handler import ReliabilityHandler
+    from openjiuwen.agent_teams.reliability.remediation.action import (
+        RemediationAction,
+    )
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    host = SimpleNamespace(deliver_input=AsyncMock())
+    handler = ReliabilityHandler(
+        host,
+        SimpleNamespace(role=TeamRole.LEADER),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        policy=SimpleNamespace(
+            actions_for=lambda severity: {RemediationAction.ESCALATE_USER}
+        ),
+        pingpong=SimpleNamespace(),
+    )
+
+    await handler._route(Severity.HIGH, "m1 疑似卡死")
+
+    payload = host.deliver_input.await_args.args[0]
+    assert isinstance(payload, SystemText)
+    assert "m1 疑似卡死" in payload
