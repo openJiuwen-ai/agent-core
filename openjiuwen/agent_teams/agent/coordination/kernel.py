@@ -455,7 +455,17 @@ class CoordinationKernel:
         from openjiuwen.agent_teams.runtime.metadata import merge_pending_resume
 
         try:
-            merge_pending_resume(session, team_name, {"query": harness.paused_query or ""})
+            merge_pending_resume(
+                session,
+                team_name,
+                {
+                    "query": harness.paused_query or "",
+                    # 区分「pause 落定在 IDLE（无回合可续）」与
+                    #「II 起轮的暂停回合」（同样空 query 但应照常续跑）——
+                    # 冷恢复只在前者跳过 resume。
+                    "paused_at_idle": bool(getattr(harness, "paused_at_idle", False)),
+                },
+            )
         except Exception as e:
             team_logger.warning(
                 "[{}] failed to persist pending resume: {}",
@@ -743,13 +753,24 @@ class CoordinationKernel:
         pending = self._read_pending_resume()
         if pending is None:
             return
+        query = str(pending.get("query") or "")
+        if not query.strip() and pending.get("paused_at_idle"):
+            # pause 落定在 IDLE（无在跑回合）写下的标记——无回合可续，
+            # 空续轮会把空串当挂起中断的答复。清标记、留在 IDLE 等用户输入
+            #（挂起中断态由 checkpoint 保留，文本经 _on_send 放行开轮回填）。
+            # 空 query 但非 paused_at_idle（II 起轮的暂停回合）不在此列，
+            # 照常走下方 resume_agent(query="") 续跑。
+            team_logger.info(
+                "[{}] pending resume marker paused at IDLE; awaiting user input",
+                self._host.member_name or "?",
+            )
+            self._clear_pending_resume()
+            return
         team_logger.info(
             "[{}] resuming the paused round from the session checkpoint",
             self._host.member_name or "?",
         )
-        await self._host.stream_controller.resume_agent(
-            query=str(pending.get("query") or ""),
-        )
+        await self._host.stream_controller.resume_agent(query=query)
         self._clear_pending_resume()
 
     def close_stream(self) -> None:
