@@ -270,11 +270,21 @@ class DbSessions:
                 raise
 
 
+def team_storage_gone(exc: BaseException) -> bool:
+    """判定异常是否为「团队底层存储已被删除」（session.delete 删表后僵尸轮询的指纹）。
+
+    双条件防误杀：必须是 sqlalchemy OperationalError 且消息含 "no such table"——
+    锁库/连接抖动等其它 OperationalError 不算（那些是可恢复故障，停轮询反而有害）。
+    """
+    return isinstance(exc, OperationalError) and "no such table" in str(exc)
+
+
 async def retry_on_locked(
     op: Callable[[], Awaitable[_T]],
     *,
     on_locked_result: _T,
     label: str,
+    passthrough: Callable[[BaseException], bool] | None = None,
 ) -> _T:
     """Run a write ``op`` with exponential back-off on transient DB errors.
 
@@ -303,6 +313,12 @@ async def retry_on_locked(
         op: Zero-arg coroutine factory performing one write attempt.
         on_locked_result: Value returned after the final failed attempt.
         label: Human-readable operation name for logs.
+        passthrough: Optional predicate over the caught transient error;
+            when it returns True the error is re-raised immediately instead
+            of being retried/absorbed — for errors that only *look* transient
+            (e.g. ``team_storage_gone``: a deleted team's tables also surface
+            as ``OperationalError``, and retrying those just delays the
+            caller's teardown path).
 
     Returns:
         The ``op`` result, or ``on_locked_result`` when every attempt hit
@@ -312,6 +328,8 @@ async def retry_on_locked(
         try:
             return await op()
         except (OperationalError, SATimeoutError) as e:
+            if passthrough is not None and passthrough(e):
+                raise
             if attempt >= _DB_RETRY_ATTEMPTS - 1:
                 team_logger.error("%s failed after %d attempts: %s", label, _DB_RETRY_ATTEMPTS, e)
                 return on_locked_result

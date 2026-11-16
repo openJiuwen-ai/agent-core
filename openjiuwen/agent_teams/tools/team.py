@@ -848,9 +848,9 @@ class TeamBackend:
                 TaskStatus.IN_REVIEW.value,
             }
             owned_tasks = await self.task_manager.get_tasks_by_assignee(member_name=member_name)
-            active_tasks = [t for t in owned_tasks if t.status in active_statuses]
+            active_tasks = [_ for _ in owned_tasks if _.status in active_statuses]
             if active_tasks:
-                task_ids = ", ".join(t.task_id for t in active_tasks)
+                task_ids = ", ".join(_.task_id for _ in active_tasks)
                 return MemberOpResult.fail(
                     t("team.shutdown_human_active_tasks",
                       member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
@@ -1222,6 +1222,21 @@ class TeamBackend:
             bump this value -- only roster mutations do.
         """
         return await self.db.member.get_members_max_updated_at(self.team_name)
+
+    async def get_team_activity_probe(self) -> tuple[int, int] | None:
+        """单连接取 team_info 与成员花名册的两个 mtime 探针。
+
+        替代「``get_team_updated_at`` + ``get_members_max_updated_at`` 两次
+        独立 checkout」——team-context 提示词段每成员每轮都要探一次，合并
+        后读连接占用减半。瞬时失败（锁竞争/读池超时）经重试后返回
+        ``None``——调用方按 fail-open 跳过本轮刷新，不让一次瞬时读失败
+        炸掉成员回合。
+
+        Returns:
+            ``(team_updated_at_ms, members_max_updated_at_ms)``；重试耗尽
+            返回 ``None``。
+        """
+        return await self.db.get_team_activity_probe(self.team_name)
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a task and notify assignee if claimed
