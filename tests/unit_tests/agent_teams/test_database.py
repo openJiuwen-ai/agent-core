@@ -2007,6 +2007,36 @@ class TestMessageOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_probes_passthrough_team_storage_gone(self, db, monkeypatch):
+        """"no such table"（团队存储已删除）虽同为 OperationalError，但不可
+        恢复——passthrough 直接上抛、不重试不吸收（调用方据此自停僵尸轮询）。"""
+        from sqlalchemy.exc import OperationalError as _OperationalError
+
+        read_calls = 0
+
+        def gone_read():
+            nonlocal read_calls
+            read_calls += 1
+            raise _OperationalError("SELECT 1", {}, Exception("no such table: team_task_x"))
+
+        monkeypatch.setattr(db._sessions, "read", gone_read)
+        monkeypatch.setattr(
+            "openjiuwen.agent_teams.tools.database.engine.asyncio.sleep",
+            AsyncMock(),
+        )
+
+        with pytest.raises(_OperationalError):
+            await db.fetch_stale_sweep_probe(
+                "team-x", task_status="in_progress", exclude_assignee=None
+            )
+        assert read_calls == 1  # passthrough：零重试
+
+        with pytest.raises(_OperationalError):
+            await db.get_team_activity_probe("team-x")
+        assert read_calls == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_messages_for_member(self, db):
         """Test getting messages for a specific member"""
         set_session_id("session_id")  # 夹具绑定对用例体不可见（pytest-asyncio Context 隔离），体内绑定

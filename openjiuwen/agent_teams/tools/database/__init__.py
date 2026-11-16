@@ -30,6 +30,9 @@ from openjiuwen.agent_teams.tools.database.engine import (
     retry_on_locked as _retry_on_locked,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    team_storage_gone as _team_storage_gone,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
@@ -311,6 +314,10 @@ class TeamDatabase:
         瞬时失败（``database is locked`` / 读池 checkout 超时）经
         ``retry_on_locked`` 退避重试；预算耗尽返回 ``None``——调用方
         （stale-inprogress sweep）据此冻结本 tick 的沉默钟。
+        团队存储已删除（session.delete 删表）的 "no such table" 虽同为
+        ``OperationalError``，但不可恢复——经 ``passthrough`` 直接上抛，
+        供调用方走僵尸轮询自停（``_retire_polls_if_storage_gone``），
+        不被重试吸收成永久冻结。
 
         Args:
             team_name: 团队标识。
@@ -360,7 +367,10 @@ class TeamDatabase:
             return tasks, witness
 
         return await _retry_on_locked(
-            _op, on_locked_result=None, label=f"fetch_stale_sweep_probe {team_name}"
+            _op,
+            on_locked_result=None,
+            label=f"fetch_stale_sweep_probe {team_name}",
+            passthrough=_team_storage_gone,
         )
 
     async def get_team_activity_probe(self, team_name: str) -> tuple[int, int] | None:
@@ -395,7 +405,10 @@ class TeamDatabase:
             )
 
         return await _retry_on_locked(
-            _op, on_locked_result=None, label=f"get_team_activity_probe {team_name}"
+            _op,
+            on_locked_result=None,
+            label=f"get_team_activity_probe {team_name}",
+            passthrough=_team_storage_gone,
         )
 
     async def close(self) -> None:
