@@ -28,6 +28,8 @@ DEFAULT_READ_STREAM_CHUNK_SIZE = 8192  # 8KB
 class BaseFsProtocal(ABC):
     """Unified FS method signatures shared by Operation and Provider layers."""
 
+    supports_conditional_write: bool = False
+
     @abstractmethod
     async def read_file(
             self,

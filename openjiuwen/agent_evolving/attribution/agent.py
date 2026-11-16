@@ -291,6 +291,15 @@ class AttributionAgentRuntime(Protocol):
         """Render a character window of one node field."""
         ...
 
+    def view_summary(
+        self,
+        agent_id: str = "",
+        turn_id: str = "",
+        segment_id: str = "",
+    ) -> dict[str, Any]:
+        """Read one scope of the precomputed hierarchical summary."""
+        ...
+
     def mark_signal_topic(
         self,
         signal_id: str,
@@ -434,6 +443,7 @@ def build_attribution_system_prompt(
     prompt = _load_prompt(f"{lang}.md")
     if swarm_mode:
         prompt = f"{prompt}\n\n{_load_prompt(f'swarm_{lang}.md')}"
+    prompt = f"{prompt}\n\n{_load_prompt(f'summary_{lang}.md')}"
     disabled: set[str] = set()
     if not skill_evolution:
         disabled.add("skill_evolution")
@@ -482,15 +492,18 @@ def build_attribution_initial_prompt(
     ttse_advice: bool = True,
     skill_usages: list[Any] | None = None,
     premarks: dict[str, list[str]] | None = None,
+    summary_context: str = "",
 ) -> str:
     """Assemble the initial user prompt (task, reward, signals, subjects, Skill list).
 
     ``skill_usages`` (rule-detected, optional) adds the Skill list section and
     the constraint that global skill advice must come from it.  ``premarks``
-    append per-signal hints only.  Disabled switches drop their sections.
+    append per-signal hints only.  ``summary_context`` is the rendered
+    hierarchical summary block.  Disabled switches drop their sections.
     """
     lang = _normalize_language(language)
     usages = list(skill_usages or ()) if skill_evolution else []
+    summary_section = f"\n\n{summary_context.strip()}" if summary_context.strip() else ""
     if lang == "en":
         reward_block = (
             f"- Total score: {reward_overall.total_score}\n- Comment: {reward_overall.comment}"
@@ -519,17 +532,17 @@ def build_attribution_initial_prompt(
         marked = skill_evolution or ttse_advice
         route_extra = (
             "- Signal marked skill/experience -> its `submit_*_cause` tool; unmarked rule signals are "
-            "not submitted (their conclusion goes into `submit_trajectory_summary`).\n"
+            "not submitted.\n"
             if marked
             else ""
         )
         order = (
             "Work order: read with `view_*` -> judge and `mark_signal_topic` -> directed cause tools -> "
-            "global advice tools -> `submit_trajectory_summary` -> `check_attribution_complete` until it "
-            "returns all_done=true. The mark of a signal must precede its cause; interleaving is fine."
+            "global advice tools -> `check_attribution_complete` until it returns all_done=true. The mark "
+            "of a signal must precede its cause; interleaving is fine."
             if marked
-            else "Work order: read with `view_*` -> directed cause tools -> `submit_trajectory_summary` -> "
-            "`check_attribution_complete` until it returns all_done=true."
+            else "Work order: read with `view_*` -> directed cause tools -> `check_attribution_complete` "
+            "until it returns all_done=true."
         )
         return (
             "## Task Description\n"
@@ -541,7 +554,8 @@ def build_attribution_initial_prompt(
             "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
             f"{render_subjects_block(subjects)}"
             f"{skill_section}"
-            f"{experience_section}\n\n"
+            f"{experience_section}"
+            f"{summary_section}\n\n"
             "## Routing and order\n"
             "Route every signal exactly as follows:\n"
             "- Reward-source signal -> `submit_reward_failure` (or `mark_signal_invalid`);\n"
@@ -580,18 +594,17 @@ def build_attribution_initial_prompt(
     )
     marked = skill_evolution or ttse_advice
     route_extra = (
-        "- 被标 skill/experience 的信号 → 对应的 `submit_*_cause` 工具；未标记的规则信号不提交，"
-        "结论写进 `submit_trajectory_summary`。\n"
+        "- 被标 skill/experience 的信号 → 对应的 `submit_*_cause` 工具；未标记的规则信号不提交。\n"
         if marked
         else ""
     )
     order = (
         "工作顺序：`view_*` 读轨迹 → 判定并 `mark_signal_topic` → 定向归因工具 → 全局演进工具 → "
-        "`submit_trajectory_summary` → `check_attribution_complete`，直到返回 all_done=true。每个信号的"
-        "标记必须先于其定向提交；允许边判边标边提。"
+        "`check_attribution_complete`，直到返回 all_done=true。每个信号的标记必须先于其定向提交；"
+        "允许边判边标边提。"
         if marked
-        else "工作顺序：`view_*` 读轨迹 → 定向归因工具 → `submit_trajectory_summary` → "
-        "`check_attribution_complete`，直到返回 all_done=true。"
+        else "工作顺序：`view_*` 读轨迹 → 定向归因工具 → `check_attribution_complete`，直到返回 "
+        "all_done=true。"
     )
     return (
         "## 任务描述\n"
@@ -603,7 +616,8 @@ def build_attribution_initial_prompt(
         "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
         f"{render_subjects_block(subjects)}"
         f"{skill_section}"
-        f"{experience_section}\n\n"
+        f"{experience_section}"
+        f"{summary_section}\n\n"
         "## 信号路由与工作顺序\n"
         "按以下规则逐条路由：\n"
         "- reward 源信号 → `submit_reward_failure`（或 `mark_signal_invalid`）；\n"
@@ -631,7 +645,6 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
             "matching submit_*_cause tool;\n"
             "- missing_skill_globals: submit_skill_evolution for each listed skill;\n"
             "- missing_experience_evolution=true: submit_experience_evolution;\n"
-            "- missing_trajectory_summary=true: submit_trajectory_summary;\n"
             "- Then call check_attribution_complete again until all_done=true; at the end, echo that "
             "JSON verbatim."
         )
@@ -643,102 +656,8 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
         "- pending_skill_cause_signal_ids / pending_experience_cause_signal_ids：调用对应的 submit_*_cause 工具；\n"
         "- missing_skill_globals：为列出的每个 skill 调用 submit_skill_evolution；\n"
         "- missing_experience_evolution=true：调用 submit_experience_evolution；\n"
-        "- missing_trajectory_summary=true：调用 submit_trajectory_summary；\n"
         "- 完成后再次调用 check_attribution_complete，直到 all_done=true；结束时原样复述该 JSON。"
     )
-
-
-def build_trajectory_summary_system_prompt(language: str = "zh") -> str:
-    """System prompt of the summary-only agent (no signals, no findings)."""
-    lang = _normalize_language(language)
-    return f"{_load_prompt(f'summary_{lang}.md')}\n\n{output_language_directive(lang)}"
-
-
-def build_trajectory_summary_initial_prompt(
-    *,
-    task_hint: str,
-    subjects: list[SubjectRef],
-    language: str = "zh",
-) -> str:
-    """Initial user prompt for the summary-only agent."""
-    lang = _normalize_language(language)
-    hint = (task_hint or "").strip()
-    if lang == "en":
-        return (
-            "## Task Hint (may be empty or incomplete)\n"
-            f"{hint or '(none)'}\n\n"
-            "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
-            f"{render_subjects_block(subjects)}\n\n"
-            "Read the selected trajectory, then call submit_trajectory_summary with one paragraph of at "
-            "most 300 characters that contains no concrete node ids."
-        )
-    return (
-        "## 任务线索（可能为空或不完整）\n"
-        f"{hint or '（无）'}\n\n"
-        "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
-        f"{render_subjects_block(subjects)}\n\n"
-        "请阅读选中范围的轨迹，然后调用 submit_trajectory_summary 提交一段不超过 300 字、"
-        "不包含具体节点 id 的摘要。"
-    )
-
-
-def build_trajectory_summary_agent(
-    *,
-    model: "Model",
-    runtime: AttributionAgentRuntime,
-    language: str = "zh",
-    total_token_budget: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS,
-    max_iterations: int = 40,
-    max_context_messages: int = _DEFAULT_MAX_CONTEXT_MESSAGES,
-    status_sink: StatusSink | None = None,
-    model_name: str = "",
-    status_counter: list[int] | None = None,
-) -> tuple["DeepAgent", ContextBudgetRail]:
-    """Build the summary-only agent: read tools + submit_trajectory_summary."""
-    from openjiuwen.agent_evolving.attribution.tools import build_summary_tools
-    from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-    from openjiuwen.harness.factory import create_deep_agent
-
-    rail = ContextBudgetRail(total_token_budget)
-    try:
-        from openjiuwen.harness.observability import maybe_agent_observability_rail
-
-        observability_rail = maybe_agent_observability_rail()
-    except ImportError:
-        observability_rail = None
-        logger.warning("[summary] observability rail unavailable; run spans disabled")
-    rails: list[Any] = [rail]
-    if observability_rail is not None:
-        rails.append(observability_rail)
-    if status_sink is not None:
-        rails.append(
-            LlmStatusRail(
-                status_sink,
-                stage="attribution",
-                agent_id=_AGENT_CARD_ID,
-                model=model_name,
-                counter=status_counter if status_counter is not None else [0],
-            )
-        )
-    agents = create_deep_agent(
-        without_time_limits(model),
-        tool_owner_id=f"{_AGENT_CARD_ID}-summary-{uuid.uuid4().hex[:12]}",
-        card=AgentCard(
-            id=f"{_AGENT_CARD_ID}-summary",
-            name="TrajectorySummaryAgent",
-            description="Trajectory summary agent / 轨迹摘要 Agent",
-        ),
-        system_prompt=build_trajectory_summary_system_prompt(language),
-        tools=build_summary_tools(runtime),
-        rails=rails,
-        max_iterations=max_iterations,
-        context_engine_config=ContextEngineConfig(max_context_message_num=max_context_messages),
-        enable_security_rail=False,
-        enable_model_anomaly_detection_rail=True,
-        enable_sys_operation=False,
-    )
-    return agents, rail
 
 
 def build_attribution_agent(
@@ -830,9 +749,6 @@ __all__ = [
     "build_attribution_agent",
     "build_attribution_initial_prompt",
     "build_attribution_system_prompt",
-    "build_trajectory_summary_agent",
-    "build_trajectory_summary_initial_prompt",
-    "build_trajectory_summary_system_prompt",
     "build_wake_text",
     "filter_attribution_tools",
     "filter_skill_evolution_tool",

@@ -598,6 +598,7 @@ class DeepAgentSpec(BaseModel):
         return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
+            tool_owner_id=build_ctx.tool_owner_id,
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
@@ -650,6 +651,8 @@ class DeepAgentSpec(BaseModel):
         parts = self.resolve_parts(context)
         agent = DeepAgent(parts.config.card)
         apply_deep_agent_parts(agent, parts)
+        if context is not None:
+            agent.ability_manager.execution_environment_resolver = context.resolve_execution_environment
         return agent
 
     def _progressive_tool_kwargs(self) -> dict[str, Any]:

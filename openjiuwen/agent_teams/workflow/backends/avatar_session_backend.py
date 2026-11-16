@@ -1307,6 +1307,21 @@ class AvatarSessionManager:
             )
         except Exception as e:
             raise BackendError(f"external session build failed for {state.member_name}: {e}") from e
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+        from openjiuwen.agent_teams.external.member_runtime import _bind_harness_trajectory_recorder
+
+        subject = team_member_execution_subject(
+            session_id=self._session_id or "",
+            team_name=self._team_name,
+            member_name=state.member_name,
+            display_name=(opts or {}).get("label") or state.member_name,
+        )
+        _bind_harness_trajectory_recorder(
+            runtime,
+            subject=subject,
+            team_name=self._team_name,
+            member_name=state.member_name,
+        )
         # Same lazy-import constraint as plan_external_model above: model_compat
         # lives under agent_teams.external. The pool names back the auth-failure
         # workaround list the two-audience copy needs.

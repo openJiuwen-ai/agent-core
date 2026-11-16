@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
     from openjiuwen.harness.moa.config import MoAConfig
     from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -68,6 +69,8 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
+        tool_owner_id: Optional invocation owner for stateful tools; ``None``
+            preserves Card ownership.
         moa: Invocation policy for this root agent only; not inherited by
             capability providers or serialized as part of a spec.
     """
@@ -80,7 +83,15 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+    tool_owner_id: str | None = None
+    """Optional invocation owner for stateful tools; None preserves Card ownership."""
     moa: MoAConfig | None = None
+
+    async def resolve_execution_environment(self) -> "ExecutionEnvironment":
+        """Resolve a fresh tool environment; platforms may supply session policy."""
+        from openjiuwen.core.sys_operation.execution_environment import ExecutionEnvironment
+
+        return ExecutionEnvironment()
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.

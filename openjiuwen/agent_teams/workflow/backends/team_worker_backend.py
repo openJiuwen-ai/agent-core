@@ -941,6 +941,21 @@ class TeamWorkerBackend(AgentBackend):
         except Exception as e:
             team_logger.exception("external worker build failed for %s", member_name)
             raise BackendError(f"external worker build failed for {member_name}: {e}") from e
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+        from openjiuwen.agent_teams.external.member_runtime import _bind_harness_trajectory_recorder
+
+        subject = team_member_execution_subject(
+            session_id=self._session_id or "",
+            team_name=self._team_name,
+            member_name=member_name,
+            display_name=opts.get("label") or member_name,
+        )
+        _bind_harness_trajectory_recorder(
+            runtime,
+            subject=subject,
+            team_name=self._team_name,
+            member_name=member_name,
+        )
         # Lazy: model_compat lives under agent_teams.external, whose package
         # __init__ re-enters this module mid-init (same reason plan_external_model
         # is deferred). The pool names back the auth-failure workaround list.

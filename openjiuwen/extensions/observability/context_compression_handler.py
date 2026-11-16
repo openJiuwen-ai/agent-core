@@ -95,7 +95,7 @@ class ContextCompressionObservabilityBridge:
         state = kwargs.get("state")
         if not isinstance(state, ContextCompressionState):
             return
-        terminal = state.status in {"completed", "noop", "skipped", "failed"}
+        terminal = state.status in {"completed", "noop", "skipped", "failed", "paused", "cancelled"}
         with self._model_requests_lock:
             model_requests = (
                 self._model_requests_by_operation.pop(state.operation_id, [])

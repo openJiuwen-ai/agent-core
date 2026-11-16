@@ -1010,6 +1010,7 @@ class StatusCode(Enum):
     SYS_OPERATION_SANDBOX_ISOLATION_KEY_ERROR = (
         199010,
         "sandbox isolation key error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_FILE_VERSION_CONFLICT = (199011, "file version conflict")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

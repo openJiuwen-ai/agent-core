@@ -1,6 +1,6 @@
 # openJiuwen Core
 
-[中文版](README.zh.md) | [English Version](README.md)
+[中文版](README.zh.md)
 
 ## Introduction
 
@@ -133,7 +133,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Expected Output
+**Expected Output:**
 ```
 WorkflowAgent output result >>> Workflow output text: The refrigerator went on strike because it felt life was too cold.
 ```
@@ -171,6 +171,36 @@ We welcome all forms of contributions, including but not limited to:
 - Improving documentation
 - Submitting code
 - Sharing usage experiences
+
+### How to Contribute
+
+1. **Fork the repository** to your own account on AtomGit.
+2. **Clone your fork** locally and create a new branch for your change:
+   ```bash
+   git checkout -b <type>/<short-description>
+   ```
+   Common `<type>` values: `feat`, `fix`, `docs`, `chore`, `refactor`.
+3. **Make your changes** and commit them with a clear, conventional message:
+   ```bash
+   git commit -m "<type>(<scope>): <subject>"
+   ```
+4. **Push your branch** to your fork and open a Pull Request targeting the `develop` branch of this repository.
+5. **Sign the CLA**. Every commit author email must be covered by a signed Contributor License Agreement. You can sign it through the link the CLA bot posts on your PR. After signing (or fixing your email), comment `/check-cla` on the PR to re-check.
+6. **Address review feedback**. Maintainers may request changes; please update your branch and push again.
+
+### Contribution Guidelines
+
+- Keep PRs small and focused — one logical change per PR is preferred.
+- Documentation-only PRs (README, examples, docstrings) are warmly welcomed and typically reviewed quickly.
+- For code changes, add or update tests as appropriate and ensure existing tests pass locally before submitting.
+- Follow the existing code style; run the formatter configured in this repo if one is provided.
+- Do not commit secrets, credentials, or any personally sensitive data.
+
+### Community
+
+- Official site: <https://www.openjiuwen.com>
+- Contribution guide: <https://www.openjiuwen.com/contribute>
+- Contact email: <contact@openjiuwen.com>
 
 ## Open Source License
 

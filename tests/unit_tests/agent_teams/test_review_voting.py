@@ -199,6 +199,25 @@ async def test_tally_collects_fail_feedback(db, bus):
     assert tally["fail_feedback"] == {"rev-1": "broken tests", "rev-2": "missing docs"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_tally_collects_inspector_feedback(db, bus):
+    """The inspector's report body is returned next to its score."""
+    await _seed_in_review(
+        db,
+        bus,
+        reviewer=({"type": "verifier", "reviewer_id": "rev-1"}, {"type": "inspector", "reviewer_id": "rev-2"}),
+    )
+    assert (await _mgr(db, bus, "rev-1").verify_task("t1", "pass")).ok
+    assert (await _mgr(db, bus, "rev-2").verify_task("t1", "0.81", "加权总分 0.81：接口设计弱")).ok
+
+    task = await db.task.get_task("t1")
+    tally = await _mgr(db, bus, "leader").get_review_tally(task)
+    assert tally["inspector_scores"] == {"rev-2": 0.81}
+    assert tally["inspector_feedback"] == {"rev-2": "加权总分 0.81：接口设计弱"}
+    assert tally["fail_feedback"] == {}
+
+
 # ---------------------------------------------------------------------------
 # settle_review (framework verdict application)
 # ---------------------------------------------------------------------------

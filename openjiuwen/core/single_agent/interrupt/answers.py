@@ -12,6 +12,8 @@ team_tool_approval,      (``auto_confirm`` + ``"persist_allow": False`` = rememb
 undeclared (``""``)      for this session)
 skill_evolution_approval ``{"action": "allow_once" | "allow_always" | "reject",
                          "feedback": str}``
+skill_authorization      ``{"action": "approve_once" | "approve_session" |
+                         "continue_without_overlay" | "reject"}``
 ask_user                 ``{"answers": {question: answer}}`` or the answer text
 client_tool              a ``ClientToolResult`` (or its dict form) or the result text
 ======================== ==========================================================
@@ -52,7 +54,9 @@ APPROVED_ANSWER_KINDS = frozenset({
 })
 
 #: Kinds these helpers answer as an approve / reject decision (an undeclared kind included).
-APPROVAL_INTERRUPT_KINDS = APPROVED_ANSWER_KINDS | {InterruptKind.SKILL_EVOLUTION_APPROVAL}
+APPROVAL_INTERRUPT_KINDS = APPROVED_ANSWER_KINDS | {
+    InterruptKind.SKILL_AUTHORIZATION, InterruptKind.SKILL_EVOLUTION_APPROVAL,
+}
 
 #: Choices a text-only host can offer for an approval.
 APPROVAL_CHOICES = ("allow", "allow_always", "deny")
@@ -111,6 +115,15 @@ def interrupt_answer(
         raise ValueError("pass approved= or text=")
     if not is_approval_kind(kind):
         return text
+    if kind == InterruptKind.SKILL_AUTHORIZATION:
+        if approved is None:
+            action = text.strip().lower()
+            if action in {"approve_once", "approve_session", "continue_without_overlay"}:
+                return {"action": action}
+            approved, remember, _ = _parse_approval_text(text)
+        if not approved:
+            return {"action": "reject"}
+        return {"action": "approve_session" if remember else "approve_once"}
     if approved is None:
         approved, remember, parsed_feedback = _parse_approval_text(text)
         feedback = feedback or parsed_feedback

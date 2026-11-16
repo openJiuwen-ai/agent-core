@@ -636,6 +636,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
         conversation_mode="team",
         db=SimpleNamespace(
             initialize=AsyncMock(),
+            create_cur_session_tables=AsyncMock(return_value=True),
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
         )
     )
@@ -698,6 +699,80 @@ async def test_team_runtime_manager_recreates_pending_session_bucket():
     assert activation.action.kind is RunActionKind.CREATE
     build_mock.assert_called_once()
     manager._pool.add.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_activation_builds_session_tables_before_pooling(tmp_path):
+    """CREATE must not pool the agent (and emit runtime_ready) before its tables exist.
+
+    Regression guard for "no such table: team_task_<hash>" in ``on_team_built``:
+    the group roster sync reacts to ``team.runtime_ready`` by calling
+    ``build_team`` on the pooled backend, which ran before the leader's
+    ``bind_session`` had created the per-session tables.
+    """
+    from sqlalchemy import text
+
+    from openjiuwen.agent_teams.context import get_session_id
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
+    from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
+
+    session_id = f"create_tables_{uuid.uuid4().hex}"
+    team_name = "create_tables_team"
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db")))
+    agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+    agent.team_backend = SimpleNamespace(db=db)
+    expected = {
+        f"{prefix}{_sanitize_session_id_for_table(session_id)}"
+        for prefix in ("team_task_", "team_task_dependency_", "team_message_")
+    }
+    tables_at_pool_add: list[set[str]] = []
+
+    async def _record_tables(_entry):
+        async with db.read_session_local() as session:
+            rows = await session.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            tables_at_pool_add.append(set(rows.scalars().all()))
+
+    manager = TeamRuntimeManager()
+    manager._pool.add = AsyncMock(side_effect=_record_tables)
+    # No session bound here, so only the static schema exists up front.
+    await db.initialize()
+    try:
+        with (
+            patch.object(TeamRuntimeManager, "_inspect_session", AsyncMock(return_value=(False, False, None))),
+            patch.object(TeamAgentSpec, "build", return_value=agent),
+        ):
+            activation = await manager.activate(_runtime_spec(team_name), session_id, {"query": "create"})
+    finally:
+        await db.close()
+
+    assert activation.action.kind is RunActionKind.CREATE
+    assert len(tables_at_pool_add) == 1
+    assert expected <= tables_at_pool_add[0]
+    assert get_session_id() != session_id
+
+
+@pytest.mark.asyncio
+async def test_create_activation_fails_without_pooling_when_tables_cannot_be_created():
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+    team_name = "create_tables_fail_team"
+    agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+    agent.team_backend = SimpleNamespace(
+        db=SimpleNamespace(initialize=AsyncMock(), create_cur_session_tables=AsyncMock(return_value=False))
+    )
+    manager = TeamRuntimeManager()
+    manager._pool.add = AsyncMock()
+
+    with (
+        patch.object(TeamRuntimeManager, "_inspect_session", AsyncMock(return_value=(False, False, None))),
+        patch.object(TeamAgentSpec, "build", return_value=agent),
+        pytest.raises(BaseError, match="team session database initialization failed"),
+    ):
+        await manager.activate(_runtime_spec(team_name), f"create_fail_{uuid.uuid4().hex}", {"query": "create"})
+
+    manager._pool.add.assert_not_awaited()
 
 
 @pytest.mark.asyncio

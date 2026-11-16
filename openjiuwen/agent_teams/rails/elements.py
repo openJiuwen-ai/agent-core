@@ -66,6 +66,7 @@ TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
+TEAM_GOAL = "core.team.goal"
 TEAM_RELIABILITY = "core.team.reliability"
 TEAM_SKILL_USE = "core.team.skill_use"
 TEAM_OBSERVABILITY = "core.team.observability"
@@ -348,6 +349,31 @@ def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# team.goal — TeamGoalRail
+# ---------------------------------------------------------------------------
+
+
+class TeamGoalInput(ConstructionInput):
+    """Construction inputs for the member goal rail (it takes none)."""
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_GOAL,
+    description="Goal mode for a member's task tools: claim opens the goal, hand-in is assessed first.",
+    input_model=TeamGoalInput,
+)
+def build_team_goal_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the member goal rail (needs the member's task manager)."""
+    backend = get_team_backend(context)
+    if backend is None:
+        return None
+    from openjiuwen.agent_teams.rails.team_goal_rail import TeamGoalRail
+
+    return TeamGoalRail(task_manager=backend.task_manager)
+
+
+# ---------------------------------------------------------------------------
 # team.reliability — ReliabilityRail
 # ---------------------------------------------------------------------------
 
@@ -519,6 +545,7 @@ __all__ = [
     "TEAM_WORKSPACE",
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
+    "TEAM_GOAL",
     "TEAM_RELIABILITY",
     "TEAM_SKILL_USE",
     "TEAM_OBSERVABILITY",

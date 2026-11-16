@@ -23,19 +23,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Union,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Optional,
-    Callable,
-    Awaitable,
-    TYPE_CHECKING,
+    Union,
 )
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
-
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
@@ -587,6 +586,7 @@ class AgentCallbackContext:
     _model_continue_requested: bool = field(
         default=False, init=False, repr=False
     )
+    _context_rebuild_requested: bool = field(default=False, init=False, repr=False)
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
@@ -678,6 +678,26 @@ class AgentCallbackContext:
         requested = self._model_continue_requested
         self._model_continue_requested = False
         return requested
+
+    def request_context_rebuild(self) -> None:
+        """Ask the current model-call attempt to rebuild its final context window once.
+
+        Execution-scoped controls use this after replacing ModelContext messages.
+        This keeps request checks, usage reports, cache tracking and provider
+        input aligned; the default call path is unchanged.
+        """
+        self._context_rebuild_requested = True
+
+    def consume_context_rebuild_request(self) -> bool:
+        """Read and clear a requested rebuild of the current final model request."""
+        requested = self._context_rebuild_requested
+        self._context_rebuild_requested = False
+        return requested
+
+    @property
+    def has_context_rebuild_request(self) -> bool:
+        """Check whether a callback requested rebuilding the current final model request."""
+        return self._context_rebuild_requested
 
     @property
     def is_paused(self) -> bool:

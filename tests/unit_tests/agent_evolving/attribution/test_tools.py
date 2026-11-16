@@ -20,6 +20,7 @@ from openjiuwen.agent_evolving.attribution.tools import (
     same_subagent,
     split_node_id,
 )
+from openjiuwen.agent_evolving.attribution.trajectory_summary.models import AgentSummary, Segment, SummaryTree, Turn
 
 pytestmark = pytest.mark.asyncio
 
@@ -66,6 +67,75 @@ def test_split_node_id_and_same_subagent() -> None:
     assert same_subagent("main:1", "main:2")
     assert not same_subagent("main:1", "sub:2")
     assert not same_subagent("bad", "main:1")
+
+
+def _summary_tree() -> SummaryTree:
+    segment = Segment(
+        segment_id="A:segment:1",
+        turn_id="t1",
+        agent_id="A",
+        start_node_id="main:0",
+        end_node_id="main:1",
+        start_ts_ns=0,
+        end_ts_ns=50,
+        narrative="segment narrative",
+        status="completed",
+    )
+    turn = Turn(
+        turn_id="t1",
+        turn_number=1,
+        agent_id="A",
+        start_node_id="main:0",
+        end_node_id="main:1",
+        start_ts_ns=0,
+        end_ts_ns=50,
+        segments=[segment],
+        status="completed",
+    )
+    agent = AgentSummary(
+        agent_id="A",
+        display_name="Main",
+        kind="main_agent",
+        summary="agent summary",
+        start_node_id="main:0",
+        end_node_id="main:1",
+        start_ts_ns=0,
+        end_ts_ns=50,
+        status="completed",
+    )
+    return SummaryTree(
+        trajectory_summary="root summary",
+        agent_summaries={"A": agent},
+        turns={"A": [turn]},
+        status="completed",
+        display_summary="user display",
+    )
+
+
+async def test_view_summary_reads_scopes_without_problem_data() -> None:
+    assert "view_summary" in _tool_map(NodeBackedRuntime(_nodes()))
+    runtime = NodeBackedRuntime(_nodes())
+    runtime.summary_tree = _summary_tree()
+    tools = _tool_map(runtime)
+    tool = tools["view_summary"]
+    assert tool.tool_id == "ViewSummaryTool"
+    assert "problem_id" not in tool.input_schema["properties"]
+    overview = await _invoke(tool)
+    assert overview["trajectory_summary"] == "root summary"
+    assert "display_summary" not in overview and "problems" not in overview
+    agent = await _invoke(tool, agent_id="A")
+    assert agent["agent"]["summary"] == "agent summary" and "problems" not in agent["agent"]
+    assert agent["turns"][0]["turn_id"] == "t1"
+    turn = await _invoke(tool, agent_id="A", turn_id="t1")
+    assert turn["segments"][0]["segment_id"] == "A:segment:1" and "problems" not in turn
+    segment = await _invoke(tool, agent_id="A", turn_id="t1", segment_id="A:segment:1")
+    assert segment["start_node_id"] == "main:0" and "problems" not in segment
+    assert "requires agent_id" in (await _invoke(tool, turn_id="t1"))["error"]
+    assert "requires agent_id and turn_id" in (await _invoke(tool, segment_id="A:segment:1"))["error"]
+    assert "unknown turn_id" in (await _invoke(tool, agent_id="A", turn_id="missing"))["error"]
+    assert "unknown segment_id" in (
+        await _invoke(tool, agent_id="A", turn_id="t1", segment_id="missing")
+    )["error"]
 
 
 async def test_keyword_reg_tool() -> None:
@@ -386,14 +456,6 @@ async def test_experience_evolution_requires_mark_and_overwrites() -> None:
     assert runtime.experience_evolution == {"outcome": "partial", "suggestions": ["tip"]}
 
 
-async def test_trajectory_summary_overwrites() -> None:
-    runtime = _marked_runtime()
-    tools = _marked_tool_map(runtime)
-    assert (await _invoke(tools["submit_trajectory_summary"], summary="v1"))["status"] == "recorded"
-    assert (await _invoke(tools["submit_trajectory_summary"], summary="v2"))["status"] == "updated"
-    assert runtime.trajectory_summary == "v2"
-
-
 async def test_check_complete_pending_and_all_done() -> None:
     signal = _reward_signal()
     runtime = _marked_runtime()
@@ -401,15 +463,11 @@ async def test_check_complete_pending_and_all_done() -> None:
     result = await _invoke(tools["check_attribution_complete"])
     assert result["all_done"] is False
     assert result["pending_reward_signal_ids"] == [signal.signal_id]
-    assert result["missing_trajectory_summary"] is True
     await _invoke(
         tools["submit_reward_failure"],
         diag_signal_id=signal.signal_id,
         results=[{"text_md": "x", "start_node_id": "main:1", "suggestion": "fix it"}],
     )
-    result = await _invoke(tools["check_attribution_complete"])
-    assert result["all_done"] is False and result["missing_trajectory_summary"] is True
-    await _invoke(tools["submit_trajectory_summary"], summary="done")
     result = await _invoke(tools["check_attribution_complete"])
     assert result["all_done"] is True
 
@@ -420,7 +478,6 @@ async def test_check_complete_skill_and_experience_obligations() -> None:
     tools = _marked_tool_map(runtime)
     await _invoke(tools["mark_signal_topic"], diag_signal_id=signal.signal_id, category="skill", skill_key="s1")
     await _invoke(tools["mark_signal_topic"], diag_signal_id=signal.signal_id, category="experience")
-    await _invoke(tools["submit_trajectory_summary"], summary="done")
     state = await _invoke(tools["check_attribution_complete"])
     assert state["pending_skill_cause_signal_ids"] == [signal.signal_id]
     assert state["pending_experience_cause_signal_ids"] == [signal.signal_id]
@@ -445,7 +502,6 @@ async def test_check_complete_all_invalid_counts_as_done() -> None:
     runtime = _marked_runtime()
     tools = _marked_tool_map(runtime)
     await _invoke(tools["mark_signal_invalid"], diag_signal_id=_signals()[0].signal_id)
-    await _invoke(tools["submit_trajectory_summary"], summary="done")
     result = await _invoke(tools["check_attribution_complete"])
     assert result["all_done"] is True
 

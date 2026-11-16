@@ -370,6 +370,28 @@ class OrgTaskManager:
             await session.commit()
             return counts
 
+    async def release_membership(self) -> None:
+        """Drop leader registration and the owner identity.
+
+        Tasks, reviews, summary rows, and stored outputs stay in place. This is
+        the membership half of leaving an organization, not ``dissolve_organization``.
+        """
+
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            await session.execute(
+                delete(OrgLeaderRecord).where(col(OrgLeaderRecord.organization_id) == self.organization_id)
+            )
+            row = await session.get(OrgInfoRecord, self.organization_id)
+            if row is not None:
+                metadata = _json_loads(row.metadata_json, {})
+                metadata.pop("owner_team_id", None)
+                metadata.pop("owner_leader_id", None)
+                row.metadata_json = _json_dumps(metadata)
+                row.updated_at = now
+            await session.commit()
+
     async def register_leader(
         self,
         *,
@@ -1405,6 +1427,68 @@ class OrgTaskManager:
             await session.commit()
         return OrgTaskOpResult(ok=True, task=self._to_task(row))
 
+    async def _stage_root_completion_notice(self, session: Any, row: OrgTaskRecord, now: int) -> str | None:
+        """Keep the result notice and its receipt in the task completion transaction."""
+        if row.status != OrgTaskStatus.COMPLETED.value or not _is_normal_root_task_row(row):
+            return None
+        if not row.creator_team_id or not row.assigned_team_id or row.creator_team_id == row.assigned_team_id:
+            return None
+        aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(row.aggregation_json, {}))
+        if aggregation.mode is not OrgTaskAggregationMode.HIERARCHICAL:
+            return None
+        recipient = await session.get(
+            OrgLeaderRecord, (self.organization_id, row.creator_team_id, row.creator_id),
+        )
+        if recipient is None:
+            return None
+        identity = _json_dumps([self.organization_id, row.task_id])
+        message_id = f"org-root-result-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
+        if await session.get(OrgLeaderMessageRecord, message_id) is not None:
+            return message_id
+        session.add(OrgLeaderMessageRecord(
+            message_id=message_id, organization_id=self.organization_id,
+            from_team_id=row.assigned_team_id,
+            from_leader_id=aggregation.controller_leader_id or row.assigned_team_id,
+            to_team_id=row.creator_team_id, to_leader_id=recipient.leader_id,
+            content=(f"Delegated root task {row.task_id} completed. "
+                     "Read its saved output_abstract/output_context and deliver the verified result."),
+            metadata_json=_json_dumps({"kind": "root_completed", "root_task_id": row.task_id}),
+            created_at=now,
+        ))
+        session.add(OrgLeaderMessageReceiptRecord(
+            message_id=message_id, organization_id=self.organization_id,
+            recipient_team_id=row.creator_team_id, recipient_leader_id=recipient.leader_id,
+            created_at=now,
+        ))
+        return message_id
+
+    async def ensure_root_completion_notices(
+        self, *, team_id: str, task_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Backfill older completed roots without recreating acknowledged notices."""
+        await self.initialize()
+        stmt = select(OrgTaskRecord).where(
+            col(OrgTaskRecord.organization_id) == self.organization_id,
+            col(OrgTaskRecord.creator_team_id) == team_id,
+            col(OrgTaskRecord.status) == OrgTaskStatus.COMPLETED.value,
+            _sql_is_root_parent(),
+        )
+        if task_id is not None:
+            stmt = stmt.where(col(OrgTaskRecord.task_id) == task_id)
+        pending = []
+        async with self._write() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            for row in rows:
+                message_id = await self._stage_root_completion_notice(session, row, get_current_time())
+                if message_id is None:
+                    continue
+                await session.flush()
+                receipt = await session.get(OrgLeaderMessageReceiptRecord, (message_id, team_id))
+                if receipt is not None and receipt.handled_at is None:
+                    pending.append({"root_task_id": row.task_id, "message_id": message_id})
+            await session.commit()
+        return pending
+
     async def complete_task(
         self,
         *,
@@ -1473,6 +1557,7 @@ class OrgTaskManager:
                 )
             row.status = OrgTaskStatus.COMPLETED.value
             row.updated_at = now
+            await self._stage_root_completion_notice(session, row, now)
             if row.task_type == "organization.summary":
                 execution = (
                     (

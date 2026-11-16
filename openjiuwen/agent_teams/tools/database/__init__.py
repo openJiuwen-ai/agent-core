@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.tools.database.session_settings_dao import SessionSettingsDao
 from openjiuwen.agent_teams.tools.database.config import (
     DatabaseConfig as DatabaseConfig,
 )
@@ -88,7 +89,7 @@ class TeamDatabase:
 
     Owns the engine lifecycle and cross-table transactions. Single-table
     operations live on the DAO attributes (``team`` / ``member`` /
-    ``task`` / ``message``) — call them directly.
+    ``task`` / ``message`` / ``session_settings``) — call them directly.
     """
 
     def __init__(self, config: DatabaseConfig):
@@ -113,6 +114,7 @@ class TeamDatabase:
         # Background WAL checkpointer task (file-backed SQLite +
         # wal_checkpoint_interval_s > 0 only); None otherwise.
         self._checkpoint_task: Optional[asyncio.Task] = None
+        self.session_settings: SessionSettingsDao | None = None
         self.team: Optional[TeamDao] = None
         self.member: Optional[MemberDao] = None
         self.task: Optional[TaskDao] = None
@@ -162,7 +164,7 @@ class TeamDatabase:
     async def _wire_up(self, engines: SqlEngines) -> None:
         """Create the shared ``DbSessions`` and DAOs on freshly built engines."""
         # One DbSessions (one write lock) shared by every DAO: SQLite's
-        # write lock is database-wide, so all four tables must serialise
+        # write lock is database-wide, so all DAO tables must serialise
         # writes through the same lock. Reads go to the reader factory
         # (a separate pool for file-backed SQLite) — see DbSessions.
         sessions = DbSessions(engines.write_session_local, engines.read_session_local)
@@ -177,6 +179,7 @@ class TeamDatabase:
         from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
 
         file_store = SessionFileStore()
+        self.session_settings = SessionSettingsDao(sessions)
         self.team = TeamDao(sessions)
         self.member = MemberDao(sessions)
         self.task = TaskDao(sessions, file_store=file_store)
@@ -259,14 +262,14 @@ class TeamDatabase:
         """Drop dynamic tables for current session."""
         if self.engine is None:
             return
-        await _drop_cur_session_tables(self.engine)
+        await _drop_cur_session_tables(self._sessions)
 
     async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
         """Delete all dynamic team tables and clear static team tables."""
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
-        return await _cleanup_all_runtime_state(self.engine)
+        return await _cleanup_all_runtime_state(self._sessions)
 
     async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
         """Drop dynamic tables for a specific session without active context.
@@ -283,7 +286,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return []
-        return await _drop_session_tables_by_id(self.engine, session_id)
+        return await _drop_session_tables_by_id(self._sessions, session_id)
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Delete a team's persisted row and drop current session tables.
@@ -306,7 +309,7 @@ class TeamDatabase:
         await self.team.delete_team(team_name)
 
         try:
-            await _drop_cur_session_tables(self.engine)
+            await _drop_cur_session_tables(self._sessions)
         except Exception as e:
             team_logger.error(
                 "Failed to drop current session tables for team %s: %s",
@@ -361,6 +364,7 @@ class TeamDatabase:
         self.read_session_local = None
         self._sessions = None
         self._initialized = False
+        self.session_settings = None
         self.team = None
         self.member = None
         self.task = None

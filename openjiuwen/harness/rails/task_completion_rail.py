@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Task completion rail with integrated goal lifecycle support.
 
 ``TaskCompletionRail`` unified task-completion strategy Rail.
@@ -28,8 +28,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from openjiuwen.core.foundation.llm.call_scope import llm_observation_scope
+from openjiuwen.extensions.observability.semconv import (
+    OJ_GOAL_ID, OJ_GOAL_ATTEMPT_NUMBER, OJ_GOAL_ASSESSMENT_ID, OJ_GOAL_STRATEGY,
+)
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -54,7 +59,7 @@ from openjiuwen.harness.schema.stop_condition import (
 if TYPE_CHECKING:
     from openjiuwen.harness.goal.evaluation import GoalEvaluator
     from openjiuwen.harness.goal.manager import GoalManager
-    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord, GoalStopConfig
     from openjiuwen.harness.tools.goal import GoalReportSink
 
 logger = logging.getLogger(__name__)
@@ -167,7 +172,10 @@ class TaskCompletionRail(DeepAgentRail):
         return self._resolve_goal_language(builder)
 
     def set_goal_manager(
-        self, goal_manager: GoalManager,
+        self,
+        goal_manager: GoalManager,
+        *,
+        stop_config: Optional["GoalStopConfig"] = None,
     ) -> None:
         """Inject or replace the GoalManager after DeepAgent starts.
 
@@ -176,6 +184,12 @@ class TaskCompletionRail(DeepAgentRail):
         lifecycle without requiring it at construction time.
         Also lazily initialises the report sink and evaluator when
         goal mode is first activated.
+
+        Args:
+            goal_manager: The manager that owns the persistent goal record.
+            stop_config: Stop policy for the evaluator. When given it replaces
+                the evaluator, so a host that owns its own stop policy is not
+                left on the default one; ``None`` keeps the current evaluator.
         """
         self._goal_manager = goal_manager
         if self._goal_report_sink is None:
@@ -184,6 +198,56 @@ class TaskCompletionRail(DeepAgentRail):
 
             self._goal_report_sink = GoalReportSink()
             self._goal_evaluator = GoalEvaluator()
+        if stop_config is not None:
+            from openjiuwen.harness.goal.evaluation import GoalEvaluator
+
+            self._goal_evaluator = GoalEvaluator(stop_config)
+
+    async def assess_completion_claim(
+        self,
+        ctx: AgentCallbackContext,
+        evidence: str,
+    ) -> Optional["GoalAssessment"]:
+        """Judge a claim that the active goal is complete, without applying it.
+
+        For a host that has its own completion step (for example a tool that
+        hands work in): it asks here before letting that step through, and
+        records the outcome itself. The verdict follows the configured stop
+        strategy exactly as a goal attempt's own report would.
+
+        Args:
+            ctx: Callback context of the turn making the claim; supplies the
+                conversation the assessor reads and the model it runs on.
+            evidence: What the agent offers in support of the claim.
+
+        Returns:
+            The assessment, or None when there is no active goal or no
+            reliable verdict could be produced (the assessor was needed but
+            unavailable). None is not a rejection; the caller decides.
+        """
+        from openjiuwen.harness.goal.schema import (
+            GoalAssessment,
+            GoalAssessmentStatus,
+            GoalStatus,
+            GoalStopStrategy,
+        )
+
+        manager = self._goal_manager
+        evaluator = self._goal_evaluator
+        if manager is None or evaluator is None:
+            return None
+        record = manager.peek()
+        if record is None or record.status is not GoalStatus.ACTIVE:
+            return None
+        claim = GoalAssessment(status=GoalAssessmentStatus.COMPLETE, evidence=evidence)
+        transcript_response = await self._maybe_invoke_transcript_assessor(record, claim, ctx)
+        if transcript_response is None and evaluator.strategy is not GoalStopStrategy.AGENT_REPORT:
+            return None
+        return evaluator.assess(
+            record=record,
+            agent_report=claim,
+            transcript_response=transcript_response,
+        )
 
     # -- evaluator builder --
 
@@ -684,18 +748,13 @@ class TaskCompletionRail(DeepAgentRail):
             self._extract_attempt_context(ctx),
             language,
         )
-        try:
-            response = await model.invoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    UserMessage(content=user_prompt),
-                ],
-                tools=[],
-                temperature=0.0,
-                top_p=1.0,
-            )
-        except TypeError:
-            # Some custom model objects accept invoke() without sampling kwargs.
+        attributes = {
+            OJ_GOAL_ID: record.goal_id,
+            OJ_GOAL_ATTEMPT_NUMBER: record.attempt_count,
+            OJ_GOAL_ASSESSMENT_ID: uuid.uuid4().hex,
+            OJ_GOAL_STRATEGY: self._goal_evaluator.strategy.value if self._goal_evaluator is not None else "hybrid",
+        }
+        with llm_observation_scope("goal_assessment", attributes=attributes):
             try:
                 response = await model.invoke(
                     [
@@ -703,18 +762,30 @@ class TaskCompletionRail(DeepAgentRail):
                         UserMessage(content=user_prompt),
                     ],
                     tools=[],
+                    temperature=0.0,
+                    top_p=1.0,
                 )
+            except TypeError:
+                # Some custom model objects accept invoke() without sampling kwargs.
+                try:
+                    response = await model.invoke(
+                        [
+                            SystemMessage(content=system_prompt),
+                            UserMessage(content=user_prompt),
+                        ],
+                        tools=[],
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GoalLifecycle] Transcript assessor invocation failed"
+                    )
+                    return None
             except Exception:
-                logger.exception(
-                    "[GoalLifecycle] Transcript assessor invocation failed"
-                )
+                logger.exception("[GoalLifecycle] Transcript assessor invocation failed")
                 return None
-        except Exception:
-            logger.exception("[GoalLifecycle] Transcript assessor invocation failed")
-            return None
 
-        content = getattr(response, "content", None)
-        return content if isinstance(content, str) else str(content or "")
+            content = getattr(response, "content", None)
+            return content if isinstance(content, str) else str(content or "")
 
     @staticmethod
     def _resolve_transcript_model(ctx: AgentCallbackContext) -> Optional[Any]:
