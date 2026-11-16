@@ -58,6 +58,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
+from openjiuwen.agent_teams.rails.team_policy_extension import TeamPolicyExtensionMixin
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import (
     TaskOutcomeTracker,
@@ -71,11 +72,11 @@ from openjiuwen.core.context_engine.processor.compressor.util import holds_team_
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY,
     PromptAttachmentKind,
 )
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -84,7 +85,9 @@ if TYPE_CHECKING:
 TEAM_CONTEXT_ATTACHMENT_SECTION = "team.context"
 
 
-class TeamPolicyRail(DeepAgentRail):
+# Preserve the shared base layout while the extension mixin owns policy construction.
+# fmt: off
+class _TeamPolicyRailBase(DeepAgentRail):
     """Inject the team's static PromptSections and its evolving team state.
 
     Two lanes, and the split is the point:
@@ -599,3 +602,8 @@ class TeamPolicyRail(DeepAgentRail):
         )
 
 __all__ = ["TeamPolicyRail"]
+# fmt: on
+
+
+class TeamPolicyRail(TeamPolicyExtensionMixin, _TeamPolicyRailBase):
+    """Team state delivery with extension-owned policy construction."""

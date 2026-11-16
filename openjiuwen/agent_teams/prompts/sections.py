@@ -986,6 +986,7 @@ def build_team_member_system_prompt(
     workspace_prompt_variant: Literal["native", "external"] = "native",
     mcp_server_name: str | None = None,
     loader: TemplateLoader = load_template,
+    sections: tuple[PromptSection, ...] | None = None,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -1016,12 +1017,24 @@ def build_team_member_system_prompt(
         mcp_server_name: The MCP server providing the team's tools, when the
             member reaches them through MCP. ``None`` (an in-process member,
             which calls its tools by the bare name) renders the policy alone.
+        sections: Pre-built sections to render instead of assembling the
+            default set here. The extension-wired external-CLI path passes
+            the ``team.build_policy`` chain output this way, so handler
+            rewrites reach the CLI member's prompt; ``None`` (the default)
+            builds the default set from the remaining args.
 
     Other args mirror :func:`build_team_static_sections`.
 
     Returns:
         The rendered system prompt, or ``""`` when no section produced content.
     """
+    if sections is not None:
+        return _render_extension_sections(
+            sections,
+            language=language,
+            mcp_server_name=mcp_server_name,
+            loader=loader,
+        )
     sections = build_team_static_sections(
         role=role,
         member_name=member_name,
@@ -1090,6 +1103,24 @@ def _render_standalone_prompt(
     loader: TemplateLoader,
 ) -> str:
     """Join team sections into one prompt, declaring the tool namespace when there is one."""
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    prompt = builder.build()
+    if not prompt or not mcp_server_name:
+        return prompt
+    note = loader("tool_namespace", language).format({"server": mcp_server_name}).content.strip()
+    return render_team_policy(body=prompt, tools=mcp_server_name, note=note)
+
+
+def _render_extension_sections(
+    sections: tuple[PromptSection, ...],
+    *,
+    language: str,
+    mcp_server_name: str | None,
+    loader: TemplateLoader,
+) -> str:
+    """Render an extension result without running the default section builders."""
     builder = SystemPromptBuilder(language=language)
     for section in sections:
         builder.add_section(section)
