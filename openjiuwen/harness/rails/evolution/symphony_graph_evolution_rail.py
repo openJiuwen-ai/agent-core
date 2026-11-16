@@ -1033,6 +1033,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 if not _is_valid_nonready_planned_graph(payload):
                     self._remember_quality(state, ({"code": "planned_graph_invalid"},))
             return
+        if planned_graph["graph"]["metadata"].get("capability_type") == "expert":
+            return
         with state.lock:
             if state.planned_graph is None:
                 state.planned_graph = planned_graph

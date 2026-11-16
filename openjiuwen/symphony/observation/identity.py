@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from openjiuwen.symphony.observation.contracts import EvolutionGraphEdge
+from openjiuwen.symphony.orchestration.artifacts import project_graph_layer
 
 POINT_EDGE_IDENTITY_SCHEMA = "symphony.point-edge.v1"
 
@@ -111,6 +112,7 @@ def edge_identity_from_observation(
 
 
 def build_static_graph_index(revision: str, payload: Mapping[str, Any]) -> StaticGraphIndex:
+    payload = project_graph_layer(payload, "skill")
     capabilities = [item for item in payload.get("capabilities") or [] if isinstance(item, Mapping)]
     graph_hashes = payload.get("graph_identity_hashes")
     graph_hashes = graph_hashes if isinstance(graph_hashes, Mapping) else {}
