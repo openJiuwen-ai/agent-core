@@ -163,7 +163,7 @@ async def test_agent_loop_rejects_short_circuit_output_for_another_batch() -> No
         bus = await _built_bus()
         bus.register_event_handler(TOOL_CALL, forge, {}, HandlerLevel.USER)
         Runner.set_extension_bus(bus)
-        with patch.object(AbilityManager, "execute", autospec=True) as execute:
+        with patch.object(AbilityManager, "_railed_execute_single_tool_call", autospec=True) as execute:
             with pytest.raises(BaseError):
                 await _run_tool_batch(True)
     finally:
@@ -215,7 +215,7 @@ async def test_short_circuit_output_builds_results_without_execute() -> None:
         bus = await _built_bus()
         bus.register_event_handler(TOOL_CALL, answer, {}, HandlerLevel.USER)
         Runner.set_extension_bus(bus)
-        with patch.object(AbilityManager, "execute", autospec=True) as execute:
+        with patch.object(AbilityManager, "_railed_execute_single_tool_call", autospec=True) as execute:
             _, results, messages = await _run_tool_batch(True)
     finally:
         Runner.set_extension_bus(None)

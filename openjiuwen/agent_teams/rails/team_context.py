@@ -24,7 +24,6 @@ from __future__ import annotations
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
     Optional,
 )
@@ -32,7 +31,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
-    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec  # isort: skip
     from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -42,6 +41,7 @@ if TYPE_CHECKING:
 class TeamHandleKey:
     """extras keys under which team live handles ride on the build context."""
 
+    EXTENSION_BUS = "team.extension_bus"
     TEAM_BACKEND = "team.team_backend"
     WORKSPACE_MANAGER = "team.workspace_manager"
     MODEL_ALLOCATOR = "team.model_allocator"
@@ -56,7 +56,6 @@ class TeamHandleKey:
     WORKTREE_MANAGER = "team.worktree_manager"
     SWARMFLOW_EXTERNAL_CLI_AGENTS = "team.swarmflow_external_cli_agents"
     SWARMFLOW_EXPERT_SPECS = "team.swarmflow_expert_specs"
-    EXTENSION_BUS = "team.extension_bus"
 
 
 def inject_team_handles(

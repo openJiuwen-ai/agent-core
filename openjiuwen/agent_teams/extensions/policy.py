@@ -13,17 +13,35 @@ instead of living in rail internals.
 
 from __future__ import annotations
 
+from inspect import signature
+
 from openjiuwen.agent_teams.extensions.models import TeamPolicyBuildInput, TeamPolicyContext
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
     build_team_extra_section,
     build_team_static_sections,
 )
+from openjiuwen.agent_teams.prompts import sections as prompt_sections
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.prompts.sections import TeamSectionName
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
+
+
+def get_member_capability_context(backend: object | None) -> dict[str, bool]:
+    """Read supported backend gates, leaving unavailable options unspecified.
+
+    Older releases have neither these gates nor the corresponding features.
+    A backend that exposes them supplies its effective values; callers must
+    not manufacture always-false getter implementations for older backends.
+    """
+    capabilities = {}
+    for name in ("member_messaging", "member_subtasks"):
+        getter = getattr(backend, name + "_enabled", None)
+        if callable(getter):
+            capabilities[name] = getter() is True
+    return capabilities
 
 
 def build_default_policy_sections(
@@ -73,6 +91,7 @@ def build_default_policy_sections(
             teammate_mode=context.teammate_mode,
             team_mode=context.team_mode,
             dispatch_mode=context.dispatch_mode,
+            **_member_capability_options(build_team_static_sections, context),
             base_prompt=context.base_prompt,
             language=context.language,
             hitt_enabled=context.hitt_enabled,
@@ -104,13 +123,28 @@ def _build_leader_sections(
     split this set are :func:`select_policy_prefix_sections` and
     :func:`select_policy_disclosure_sections`.
     """
-    sections = [
-        build_leader_bootstrap_section(
+    # develop owns the newer leader prefix builder. Keep this extraction
+    # usable on release without backporting that branch's prompt framework.
+    leader_builder = getattr(prompt_sections, "build_leader_static_sections", None)
+    if leader_builder is not None:
+        sections = leader_builder(
+            bootstrap_mode=context.bootstrap_mode,
             swarmflow_enabled=context.swarmflow_enabled,
+            bound_group_name=context.bound_group_name if context.dispatch_mode == "scheduled" else None,
+            base_prompt=context.base_prompt,
             language=context.language,
             loader=loader,
-        ),
-    ]
+        )
+    else:
+        if context.bootstrap_mode != "leader" or (context.dispatch_mode == "scheduled" and context.bound_group_name):
+            raise ValueError("This prompt builder does not support framework bootstrap or bound groups")
+        sections = [
+            build_leader_bootstrap_section(
+                swarmflow_enabled=context.swarmflow_enabled,
+                language=context.language,
+                loader=loader,
+            ),
+        ]
     sections.extend(
         build_team_static_sections(
             role=TeamRole.LEADER,
@@ -119,41 +153,60 @@ def _build_leader_sections(
             teammate_mode=context.teammate_mode,
             team_mode=context.team_mode,
             dispatch_mode=context.dispatch_mode,
+            **_member_capability_options(build_team_static_sections, context),
             base_prompt=None,
             language=context.language,
             hitt_enabled=context.hitt_enabled,
             loader=loader,
         ),
     )
-    extra = build_team_extra_section(base_prompt=context.base_prompt, language=context.language)
-    if extra is not None:
-        sections.append(extra)
+    if leader_builder is None:
+        extra = build_team_extra_section(base_prompt=context.base_prompt, language=context.language)
+        if extra is not None:
+            sections.append(extra)
     return sections
+
+
+def _member_capability_options(builder, context: TeamPolicyContext) -> dict[str, bool]:
+    """Forward effective gates when the prompt API supports them.
+
+    release has neither gate yet; disabled gates must preserve its existing
+    call shape. An enabled unsupported gate must fail rather than omit policy.
+    """
+    parameters = signature(builder).parameters
+    result = {}
+    for name in ("member_messaging", "member_subtasks"):
+        enabled = getattr(context, name)
+        if name in parameters:
+            result[name] = enabled
+        elif enabled:
+            raise ValueError(f"This prompt builder does not support {name}")
+    return result
 
 
 def select_policy_prefix_sections(sections: "tuple[PromptSection, ...]") -> tuple[PromptSection, ...]:
     """Return the leader's system-prompt view of a full build output.
 
-    A whitelist of ``team_bootstrap`` and ``team_extra``: everything else is
+    A whitelist of bootstrap, prebuilt, bound-group and extra sections: everything else is
     progressive disclosure material that reaches the leader through the
     ``build_team`` result (F_76), so it must not sit in the cache-stable
     prefix. Extension-appended sections therefore land in the disclosure
     view, not here — the prefix stays minimal.
     """
-    prefix_names = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA}
+    prefix_names = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA, "team_prebuilt", "team_bound_group"}
     return tuple(section for section in sections if section.name in prefix_names)
 
 
 def select_policy_disclosure_sections(sections: "tuple[PromptSection, ...]") -> tuple[PromptSection, ...]:
     """Return the ``build_team`` disclosure view of a full build output.
 
-    Everything except the prefix sections (bootstrap / extra — already in
+    Everything except the prefix sections (bootstrap / prebuilt / bound-group / extra — already in
     the system prompt). The per-member identity is team state delivered
     through the conversation, never a section, so it needs no exclusion
     here. Extension-appended sections are kept: they are collaboration
     material, exactly what disclosure exists to deliver.
     """
-    excluded = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA}
+    excluded = {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA, "team_prebuilt", "team_bound_group"}
     return tuple(section for section in sections if section.name not in excluded)
 
 

@@ -9,6 +9,7 @@ from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.extensions.events import build_team_policy_sections
 from openjiuwen.agent_teams.extensions.models import TeamPolicyBuildInput, TeamPolicyContext
 from openjiuwen.agent_teams.extensions.policy import (
+    get_member_capability_context,
     render_policy_sections,
     select_policy_disclosure_sections,
 )
@@ -205,6 +206,7 @@ class BuildTeamTool(TeamTool):
                     dispatch_mode=self._dispatch_mode,
                     teammate_mode=self._teammate_mode,
                     hitt_enabled=bool(data.get("enable_hitt")),
+                    **get_member_capability_context(self.team),
                 ),
                 bus=self._extension_bus,
                 session_id=get_session_id() or None,
@@ -251,19 +253,17 @@ class BuildTeamTool(TeamTool):
         if self._VERIFY_PARAM in d:
             facts += f" task_verification={d[self._VERIFY_PARAM]}"
         policy = d.get("policy_disclosure")
-        if policy is None:
-            # No extension wiring: render the default disclosure here, as
-            # before. With wiring the text was assembled inside ``invoke``
-            # (the build chain is async; this render is not).
-            policy = build_leader_policy_disclosure(
-                lifecycle=self._lifecycle,
-                teammate_mode=self._teammate_mode,
-                team_mode=self._team_mode,
-                dispatch_mode=self._dispatch_mode,
-                language=self._language,
-                hitt_enabled=bool(d.get("enable_hitt")),
-                loader=self._loader,
-            )
+        if policy is not None:
+            return f"{facts}\n\n{policy}" if policy else facts
+        policy = build_leader_policy_disclosure(
+            lifecycle=self._lifecycle,
+            teammate_mode=self._teammate_mode,
+            team_mode=self._team_mode,
+            dispatch_mode=self._dispatch_mode,
+            language=self._language,
+            hitt_enabled=bool(d.get("enable_hitt")),
+            loader=self._loader,
+        )
         if not policy:
             return facts
         return f"{facts}\n\n{policy}"

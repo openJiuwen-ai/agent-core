@@ -836,21 +836,45 @@ def build_team_member_system_prompt(
     Returns:
         The rendered system prompt, or ``""`` when no section produced content.
     """
-    if sections is None:
-        sections = build_team_static_sections(
-            role=role,
-            member_name=member_name,
-            lifecycle=lifecycle,
-            teammate_mode=teammate_mode,
-            team_mode=team_mode,
-            dispatch_mode=dispatch_mode,
-            base_prompt=base_prompt,
+    if sections is not None:
+        return _render_extension_sections(
+            sections,
             language=language,
-            hitt_enabled=hitt_enabled,
-            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-            workspace_prompt_variant=workspace_prompt_variant,
+            mcp_server_name=mcp_server_name,
             loader=loader,
         )
+    sections = build_team_static_sections(
+        role=role,
+        member_name=member_name,
+        lifecycle=lifecycle,
+        teammate_mode=teammate_mode,
+        team_mode=team_mode,
+        dispatch_mode=dispatch_mode,
+        base_prompt=base_prompt,
+        language=language,
+        hitt_enabled=hitt_enabled,
+        expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        workspace_prompt_variant=workspace_prompt_variant,
+        loader=loader,
+    )
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    prompt = builder.build()
+    if not prompt or not mcp_server_name:
+        return prompt
+    note = loader("tool_namespace", language).format({"server": mcp_server_name}).content.strip()
+    return render_team_policy(body=prompt, tools=mcp_server_name, note=note)
+
+
+def _render_extension_sections(
+    sections: tuple[PromptSection, ...],
+    *,
+    language: str,
+    mcp_server_name: str | None,
+    loader: TemplateLoader,
+) -> str:
+    """Render an extension result without running the default section builders."""
     builder = SystemPromptBuilder(language=language)
     for section in sections:
         builder.add_section(section)

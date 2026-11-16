@@ -83,8 +83,8 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams import extensions as team_extensions
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-    from openjiuwen.agent_teams.extensions.monitor_event_bridge import TeamMonitorEventBridge
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
     from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
@@ -188,10 +188,7 @@ class TeamRuntimeManager:
         # and rebuilds it from the current model selection.  A running team is
         # intentionally left alone; its request is rejected by the normal
         # dispatch gate rather than being torn down mid-turn.
-        if (
-            pool_entry is not None
-            and pool_entry.state == RuntimeState.PAUSED
-        ):
+        if pool_entry is not None and pool_entry.state == RuntimeState.PAUSED:
             live_team_spec = pool_entry.agent.runtime_context.team_spec
             live_pool = list(live_team_spec.model_pool or []) if live_team_spec is not None else []
             live_strategy = live_team_spec.model_pool_strategy if live_team_spec is not None else None
@@ -200,8 +197,7 @@ class TeamRuntimeManager:
             live_pool_signature = [_entry_signature(entry) for entry in live_pool]
             requested_pool_signature = [_entry_signature(entry) for entry in requested_pool]
             selection_changed = live_pool_signature != requested_pool_signature or (
-                (live_pool_signature or requested_pool_signature)
-                and live_strategy != requested_strategy
+                (live_pool_signature or requested_pool_signature) and live_strategy != requested_strategy
             )
             if selection_changed:
                 change_reason = "pool" if live_pool_signature != requested_pool_signature else "strategy"
@@ -434,6 +430,7 @@ class TeamRuntimeManager:
         member = agent.team_member
         member_name = getattr(agent, "member_name", "?")
         try:
+
             async def _release_member_kvc() -> None:
                 harness = getattr(getattr(agent, "resources", None), "harness", None)
                 current_session = getattr(harness, "current_session", None)
@@ -1337,7 +1334,7 @@ class TeamRuntimeManager:
         agent: "TeamAgent",
         team_name: str,
         session_id: str,
-    ) -> "TeamMonitorEventBridge | None":
+    ) -> "team_extensions.TeamMonitorEventBridge | None":
         """Mount the extension monitor-event bridge for a freshly built entry.
 
         No bus wiring means no bridge and no listener — the zero-overhead
@@ -1415,8 +1412,8 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
-        self._inject_extension_bus(spec)
         if kind is RunActionKind.COLD_RECOVER:
+            self._inject_extension_bus(spec)
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.
             from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -1437,10 +1434,9 @@ class TeamRuntimeManager:
             await backend.db.initialize()
             await backend.db.member.reset_cold_recovery_execution_status(team_name, (leader_name,))
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
+            self._inject_extension_bus(spec)
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = (
-                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
-            )
+            agent = spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
             await agent.resume_for_new_session(team_session)
             # team_in_db is True at this point — the team row exists, so there
             # may be teammate rows left over from before the stop (status
@@ -1453,22 +1449,20 @@ class TeamRuntimeManager:
             # it has no dependency on teammates being spawned first.
             await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
+            self._inject_extension_bus(spec)
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = (
-                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
-            )
+            agent = spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
             await self._flush_team_manifest(agent, team_session)
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
-        monitor_event_bridge = await self._start_monitor_event_bridge(agent, team_name, session_id)
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,
                 agent=agent,
                 current_session_id=session_id,
                 state=RuntimeState.RUNNING,
-                monitor_event_bridge=monitor_event_bridge,
+                monitor_event_bridge=await self._start_monitor_event_bridge(agent, team_name, session_id),
             )
         )
         return TeamRuntimeActivation(agent=agent, session=team_session, action=action)

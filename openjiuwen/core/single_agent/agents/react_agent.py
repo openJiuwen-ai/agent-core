@@ -60,9 +60,11 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
     SystemMessage,
-    ToolCall,
     ToolMessage,
     UserMessage,
+)
+from openjiuwen.core.foundation.llm import (
+    ToolCall as ToolCall,
 )
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -109,6 +111,7 @@ from openjiuwen.core.single_agent.rail.base import (
     reset_usage_invocation_id,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.tool_call_events import react_tool_call_scope
 
 _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
@@ -1291,9 +1294,7 @@ class ReActAgent(BaseAgent):
             usage_prompt_sections = tuple(self._context_usage_prompt_sections())
         else:
             ctx.extra["_prompt_compose_sections"] = compose_output.sections
-            final_prompt = self.prompt_builder.render_sections(
-                section.text for section in compose_output.sections
-            )
+            final_prompt = self.prompt_builder.render_sections(section.text for section in compose_output.sections)
             usage_prompt_sections = tuple(self._context_usage_prompt_sections(compose_output.sections))
         final_system = [SystemMessage(content=final_prompt)]
         await self._sync_prompt_attachments(ctx, ctx.context)
@@ -2489,6 +2490,7 @@ class ReActAgent(BaseAgent):
             summary["redacted_values"] = redacted_values
         return summary
 
+    @react_tool_call_scope
     async def _execute_tool_call(
         self,
         ctx: AgentCallbackContext,
@@ -2513,18 +2515,12 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
-        from openjiuwen.core.runner import Runner
-
-        bus = Runner.get_extension_bus()
-        if bus is None:
-            results = await self.ability_manager.execute(
-                ctx=ctx,
-                tool_call=tool_calls,
-                session=session,
-                parallel_tool_calls=self._config.parallel_tool_calls,
-            )
-        else:
-            results = await self._execute_tool_call_event(bus, ctx, tool_calls, session)
+        results = await self.ability_manager.execute(
+            ctx=ctx,
+            tool_call=tool_calls,
+            session=session,
+            parallel_tool_calls=self._config.parallel_tool_calls,
+        )
 
         tool_names = {call.id: call.name for call in tool_calls}
         for tool_result, tool_message in results:
@@ -2540,41 +2536,6 @@ class ReActAgent(BaseAgent):
             await context.add_messages(multimodal_message)
 
         return results
-
-    @staticmethod
-    async def _execute_tool_call_event(
-        bus: Any,
-        ctx: AgentCallbackContext,
-        tool_calls: List,
-        session: Optional[Session],
-    ) -> list:
-        """Run one tool batch through ``tool.call``; failures propagate and never replay the direct call."""
-        from openjiuwen.core.events import Event
-        from openjiuwen.core.events.builtins.event_types.tool_call import (
-            TOOL_CALL,
-            ToolCallEventInput,
-            ToolCallTriggerContext,
-            apply_tool_call_outputs,
-        )
-
-        async def invoke_original(final_tool_calls: list[ToolCall]) -> list:
-            return await ctx.agent.ability_manager.execute(
-                ctx=ctx,
-                tool_call=final_tool_calls,
-                session=session,
-                parallel_tool_calls=ctx.agent.config.parallel_tool_calls,
-            )
-
-        trigger_context = ToolCallTriggerContext(
-            tool_calls=tuple(tool_calls),
-            invoke_original=invoke_original,
-        )
-        event_input = tuple(
-            ToolCallEventInput(tool_call_id=call.id, tool_name=call.name, arguments=call.arguments)
-            for call in tool_calls
-        )
-        outputs = await bus.trigger(Event(TOOL_CALL, event_input), session, trigger_context=trigger_context)
-        return apply_tool_call_outputs(trigger_context, outputs)
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -3016,9 +2977,7 @@ class ReActAgent(BaseAgent):
         raw_turn_number = inputs.get("_turn_number") if isinstance(inputs, dict) else None
         turn_number = (
             raw_turn_number
-            if isinstance(raw_turn_number, int)
-            and not isinstance(raw_turn_number, bool)
-            and raw_turn_number > 0
+            if isinstance(raw_turn_number, int) and not isinstance(raw_turn_number, bool) and raw_turn_number > 0
             else None
         )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
@@ -3436,8 +3395,12 @@ class ReActAgent(BaseAgent):
             "finalization_succeeded": False,
         }
         strategy = cast(ReActAgentConfig, self._config).on_max_iterations
-        logger.warning("ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
-                       result["iterations_used"], result["max_iterations"], strategy)
+        logger.warning(
+            "ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
+            result["iterations_used"],
+            result["max_iterations"],
+            strategy,
+        )
         if strategy == "error":
             return result
 
@@ -3528,9 +3491,7 @@ class ReActAgent(BaseAgent):
                     if pending_id is None:
                         await session.write_stream(schema)
                         continue
-                    if (
-                        hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
-                    ):
+                    if hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id:
                         await session.write_stream(schema)
         else:
             await session.write_stream(
