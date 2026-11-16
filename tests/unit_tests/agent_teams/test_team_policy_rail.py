@@ -432,6 +432,9 @@ class _FakeTeamBackend:
     ``list_members`` excludes the caller, as the real backend does.
     """
 
+    def history_restored(self) -> bool:
+        return False
+
     def __init__(
         self,
         team: _StubTeam | None = None,

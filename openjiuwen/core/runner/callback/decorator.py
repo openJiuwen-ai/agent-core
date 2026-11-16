@@ -36,6 +36,7 @@ from typing import (
     Set,
 )
 
+from openjiuwen.core.common.stream_lifecycle import owns_stream_lifecycle
 from openjiuwen.core.runner.callback.filters import EventFilter
 
 # Sentinel value returned by trigger_transform when no transform callbacks are registered.
@@ -630,13 +631,23 @@ def _make_transform_io_decorator(
             )
             _remove_session_if_not_needed(func, call_kwargs)
             source = func(*call_args, **call_kwargs)
-            if output_source_fn is None:
-                async for item in source:
-                    yield item
-            else:
-                iterable = await output_source_fn(source)
-                async for item in iterable:
-                    yield item
+            close_source = owns_stream_lifecycle(func, call_args, call_kwargs)
+            iterable = source
+            try:
+                if output_source_fn is None:
+                    async for item in source:
+                        yield item
+                else:
+                    iterable = await output_source_fn(source)
+                    async for item in iterable:
+                        yield item
+            finally:
+                if close_source:
+                    try:
+                        if iterable is not source and hasattr(iterable, "aclose"):
+                            await iterable.aclose()
+                    finally:
+                        await source.aclose()
 
         return async_gen_wrapper_gen_mode  # type: ignore[return-value]
 

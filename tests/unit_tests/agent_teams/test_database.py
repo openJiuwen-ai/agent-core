@@ -3370,7 +3370,9 @@ class TestRuntimeCleanup:
                 "pending",
             )
 
+            await database.session_settings.initialize("cleanup_session_a", {"enabled": True})
             deleted_tables, cleared_tables = await database.cleanup_all_runtime_state()
+            assert await database.session_settings.get("cleanup_session_a") is None
 
             suffix_a = _sanitize_session_id_for_table("cleanup_session_a")
             suffix_b = _sanitize_session_id_for_table("cleanup_session_b")
@@ -3382,7 +3384,7 @@ class TestRuntimeCleanup:
             assert f"team_message_{suffix_b}" in deleted_tables
             assert f"message_read_status_{suffix_a}" in deleted_tables
             assert f"message_read_status_{suffix_b}" in deleted_tables
-            assert cleared_tables == ["team_info", "team_member"]
+            assert cleared_tables == ["team_session_settings", "team_info", "team_member"]
 
             async with database.engine.begin() as conn:
                 table_names = await conn.run_sync(
@@ -3395,7 +3397,7 @@ class TestRuntimeCleanup:
                     await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
                 ).scalar_one()
 
-            assert sorted(table_names) == ["team_info", "team_member"]
+            assert sorted(table_names) == ["team_info", "team_member", "team_session_settings"]
             assert team_count == 0
             assert member_count == 0
         finally:

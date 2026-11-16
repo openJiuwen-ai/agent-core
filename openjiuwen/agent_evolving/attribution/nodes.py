@@ -12,6 +12,7 @@ unit-testable.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -97,6 +98,8 @@ class TrajectoryNode:
     end_ts_ns: int = 0
     source_kind: str = "msg"
     error: bool = False
+    turn_id: str | None = None
+    turn_number: int | None = None
 
     def with_node_id(self, node_id: str) -> "TrajectoryNode":
         """Return a copy carrying the given node id."""
@@ -118,6 +121,8 @@ class TrajectoryNode:
             end_ts_ns=self.end_ts_ns,
             source_kind=self.source_kind,
             error=self.error,
+            turn_id=self.turn_id,
+            turn_number=self.turn_number,
         )
 
 
@@ -175,8 +180,6 @@ def _truncate_arguments(arguments: Any, limit: int) -> Any:
     """Truncate tool-call arguments, exempting file-name parameter values."""
     if isinstance(arguments, str):
         try:
-            import json
-
             parsed = json.loads(arguments)
         except (json.JSONDecodeError, TypeError):
             return _truncate(arguments, limit)
@@ -225,6 +228,8 @@ def render_summary(nodes: list[TrajectoryNode], language: str) -> dict[str, Any]
             "node_id": node.node_id,
             "role": node.role,
             "ts_ns": node.start_ts_ns,
+            "turn_id": node.turn_id,
+            "turn_number": node.turn_number,
         }
         if node.content is not None:
             row["content"] = _truncate(node.content, limit)
@@ -344,8 +349,6 @@ def _first_file_arg(tool_call: dict[str, Any]) -> str:
     arguments = function.get("arguments") if isinstance(function, Mapping) else tool_call.get("arguments")
     if isinstance(arguments, str):
         try:
-            import json
-
             arguments = json.loads(arguments)
         except (json.JSONDecodeError, TypeError):
             return ""
@@ -366,8 +369,6 @@ def _node_field_text(node: TrajectoryNode, field_name: str) -> str:
     if field_name == "tool_calls":
         if not node.tool_calls:
             return ""
-        import json
-
         return json.dumps(node.tool_calls, ensure_ascii=False)
     return str(node.content) if node.content is not None else ""
 
@@ -408,6 +409,8 @@ def render_node_detail(node: TrajectoryNode) -> dict[str, Any]:
         },
         "start_ts_ns": node.start_ts_ns,
         "end_ts_ns": node.end_ts_ns,
+        "turn_id": node.turn_id,
+        "turn_number": node.turn_number,
     }
     for key, value in (
         ("content", node.content),
@@ -426,8 +429,6 @@ def render_node_detail(node: TrajectoryNode) -> dict[str, Any]:
         else:
             result[key] = text
     if node.tool_calls:
-        import json
-
         rendered = json.dumps(node.tool_calls, ensure_ascii=False)
         if len(rendered) > _DETAIL_FIELD_LIMIT:
             result["tool_calls"] = f"{rendered[:_DETAIL_FIELD_LIMIT]}[truncated]"
@@ -447,8 +448,6 @@ def _node_text(node: TrajectoryNode) -> str:
     if node.content:
         parts.append(str(node.content))
     if node.tool_calls:
-        import json
-
         try:
             parts.append(json.dumps(node.tool_calls, ensure_ascii=False))
         except (TypeError, ValueError):
@@ -460,6 +459,57 @@ _USER_ORIGINS = frozenset({"external_user_authored"})
 _TEAM_MEMBER_KIND = "team_member"
 
 
+def _input_envelope(text: str) -> Mapping[str, Any] | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        envelope, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    if (isinstance(envelope, Mapping) and isinstance(envelope.get("content"), str)
+            and any(key in envelope for key in ("type", "origin_kind", "source"))):
+        return envelope
+    return None
+
+
+def classify_input(node: TrajectoryNode) -> tuple[str, str]:
+    """Classify received input as (source, kind), without changing its role or body."""
+    if node.role == "system":
+        return "system", "system_context"
+    if node.role != "user" or not node.content:
+        return "unknown", "other"
+    text = str(node.content).strip()
+    if re.match(r"^(?:user_inputs|raw_inputs|interrupt_answers)\s*=", text):
+        return "runtime", "approval_response"
+    # Only inspect transport prefixes, not tags quoted inside the user's JSON content.
+    prefix = text.split("{", 1)[0]
+    prefix = re.sub(r"^(?:\[STEERING\]\s*|<team-clock\b[^>]*/>\s*)+", "", prefix).lstrip()
+    if re.match(r"<team-inbound\b", prefix):
+        return "agent", "approval_request" if "approval request" in text.lower() else "message"
+    if re.match(r"<system-reminder\b", prefix):
+        return "system", "system_context"
+    if re.match(r"<team-(?:event|context|note)\b", prefix):
+        return "system", "team_event"
+    envelope = _input_envelope(text)
+    if envelope is None and text.startswith(("[STEERING]", "[可靠性告警]")):
+        return "system", "team_event"
+    if node.kind == _TEAM_MEMBER_KIND:
+        return "unknown", "other"
+    if envelope is not None:
+        origin = envelope.get("origin_kind")
+        if isinstance(origin, str) and origin in _USER_ORIGINS:
+            return "user", "user_input"
+        if origin is None and envelope.get("type") == "user input":
+            return "user", "user_input"
+        return "unknown", "other"
+    if text.startswith(("你收到一条消息：", "You received a message:")):
+        return "unknown", "other"
+    if node.kind in {"main_agent", "main"} and text and not text.startswith(("<", "[", "{")):
+        return "user", "user_input"
+    return "unknown", "other"
+
+
 def user_request_text(node: TrajectoryNode) -> str | None:
     """Return what the user wrote when ``node`` is a message from the user, else ``None``.
 
@@ -469,48 +519,48 @@ def user_request_text(node: TrajectoryNode) -> str | None:
     Rows that only look like user turns are not: a team member's inbound dispatches, system
     reminders, team events and tool results that the runtime replays as user messages.
     """
-    if node.role != "user" or node.kind == _TEAM_MEMBER_KIND or not node.content:
+    if classify_input(node) != ("user", "user_input"):
         return None
     text = str(node.content).strip()
-    start = text.find("{")
-    if start >= 0:
-        import json
-
-        try:
-            envelope, _ = json.JSONDecoder().raw_decode(text[start:])
-        except ValueError:
-            envelope = None
-        if isinstance(envelope, Mapping) and isinstance(envelope.get("content"), str):
-            if envelope.get("type") == "user input" or envelope.get("origin_kind") in _USER_ORIGINS:
-                return envelope["content"].strip() or None
-            return None
-    if node.kind in {"main_agent", "main"} and text and not text.startswith(("<", "[", "{")):
-        return text
-    return None
+    envelope = _input_envelope(text)
+    return (envelope["content"].strip() or None) if envelope is not None else text
 
 
 def user_request_nodes(
     nodes_by_subagent: Mapping[str, list[TrajectoryNode]],
     until_ns: int | None = None,
 ) -> list[TrajectoryNode]:
-    """The user's own messages in time order, at most one row per distinct text.
+    """Keep one preferred view per subject/turn/text, preserving repeated requests across turns.
 
     ``until_ns`` drops messages sent after that time (they ask for later work).
+    With no turn identity, only views sharing a known timestamp are deduplicated;
+    without either, node identity is retained. Explicit envelopes beat plain views.
     """
     found: list[TrajectoryNode] = []
-    seen: set[str] = set()
+    seen: dict[tuple[str, str, str], int] = {}
     rows = sorted(
         (node for nodes in nodes_by_subagent.values() for node in nodes),
         key=lambda node: node.start_ts_ns,
     )
     for node in rows:
         text = user_request_text(node)
-        if text is None or text in seen:
+        if text is None:
             continue
         if until_ns is not None and node.start_ts_ns and node.start_ts_ns > until_ns:
             continue
-        seen.add(text)
-        found.append(node)
+        scope = node.turn_id or (f"time:{node.start_ts_ns}" if node.start_ts_ns > 0 else node.node_id)
+        key = (node.subagent_key, scope, text)
+        if key not in seen:
+            seen[key] = len(found)
+            found.append(node)
+        else:
+            index = seen[key]
+            old = _input_envelope(str(found[index].content))
+            new = _input_envelope(str(node.content))
+            old_rank = 2 if old and old.get("origin_kind") in _USER_ORIGINS else 1 if old else 0
+            new_rank = 2 if new and new.get("origin_kind") in _USER_ORIGINS else 1 if new else 0
+            if new_rank > old_rank:
+                found[index] = node
     return found
 
 
@@ -572,6 +622,7 @@ def _excerpt(text: str, start: int, end: int) -> str:
 __all__ = [
     "FIELD_WINDOW_LIMIT",
     "TrajectoryNode",
+    "classify_input",
     "detect_language",
     "is_error_node",
     "render_node_detail",

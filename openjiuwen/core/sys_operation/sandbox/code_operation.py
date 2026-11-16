@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional, Literal, AsyncIterator
 
 from openjiuwen.core.sys_operation.code import BaseCodeOperation
+from openjiuwen.core.sys_operation.execution_environment import execution_environment_overlay
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
@@ -24,13 +25,14 @@ class CodeOperation(BaseCodeOperation, BaseSandboxMixin):
             *,
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
+        """Execute code with the current tool overlay and explicit environment."""
         raw = await self.invoke(
             "execute_code", code=code, language=language,
-            timeout=timeout, environment=environment, cwd=cwd, options=options
+            timeout=timeout, environment=execution_environment_overlay(environment), cwd=cwd, options=options,
         )
         return raw if isinstance(raw, ExecuteCodeResult) else ExecuteCodeResult(**raw)
 
@@ -40,12 +42,13 @@ class CodeOperation(BaseCodeOperation, BaseSandboxMixin):
             *,
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
+        """Stream code execution with the same environment policy as execute_code."""
         async for item in self.invoke_stream(
             "execute_code_stream", code=code, language=language,
-            timeout=timeout, environment=environment, cwd=cwd, options=options
+            timeout=timeout, environment=execution_environment_overlay(environment), cwd=cwd, options=options,
         ):
             yield ExecuteCodeStreamResult(**item) if isinstance(item, dict) else item

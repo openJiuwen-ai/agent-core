@@ -88,6 +88,10 @@ STRINGS: dict[str, str] = {
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
         "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
     ),
+    "spawn_teammate.goal": (
+        "该 teammate 是否以目标模式工作：开工的任务未提交前不会停下，提交前会被评估是否真的完成。"
+        "省略即跟随团队默认（开启）；仅在该成员只做答疑、待命等无需坚持到底的工作时传 false。"
+    ),
     "spawn_teammate.fork": (
         "从已有成员继承上下文，跳过重复的文件读取和搜索。"
         "true：继承调用者当前全部上下文。"
@@ -226,6 +230,8 @@ STRINGS: dict[str, str] = {
     "view_expert_groups.member": "仅 get 使用，可选：只展开该专家团内这一个成员的详情",
     # ===== spawn_expert ========================================================
     # spawn_expert._desc lives in descs/cn/expert/spawn_expert.md
+    "spawn_expert.fork": "设为 true 时，在本地专家首次启动时注入登记时选定的上下文",
+    "spawn_expert.fork_source": "仅在 fork=true 时可填。省略或指定 Leader 时继承实时对话，指定其他成员时继承空闲原生队友最近完成的 Turn",
     "spawn_expert.expert": (
         "必填。单个专家的包名；给了 group 时是该专家团内的成员名（不能是 leader）"
     ),
@@ -454,6 +460,9 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.error_group_to_user": (
+        "群聊回复必须使用 group_send_message；send_message(to='user') 不是公开群消息入口。"
+    ),
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"

@@ -19,7 +19,7 @@ class BaseShellProtocal(ABC):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCmdResult:
         pass
@@ -31,7 +31,7 @@ class BaseShellProtocal(ABC):
             *,
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
-            environment: Optional[Dict[str, str]] = None,
+            environment: dict[str, str | None] | None = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         pass

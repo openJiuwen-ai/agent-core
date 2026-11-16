@@ -351,6 +351,21 @@ class TestMilvusIndexer:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    async def test_delete_index_primary_key_list(self, mock_client_class):
+        """Milvus Lite returns the deleted primary keys as a list"""
+        mock_client = MagicMock()
+        mock_client.delete.return_value = [101, 102]
+        mock_client_class.return_value = mock_client
+
+        config = VectorStoreConfig(store_provider="milvus", collection_name="test_collection")
+        indexer = MilvusIndexer(config=config, milvus_uri="http://localhost:19530")
+        assert await indexer.delete_index("doc_1", "test_index") is True
+
+        mock_client.delete.return_value = []
+        assert await indexer.delete_index("doc_1", "test_index") is False
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_index_exists_true(self, mock_client_class):
         """Test index exists"""
         mock_client = MagicMock()

@@ -18,8 +18,8 @@ author_email: chengshuo5@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-11-02 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_113_swarmflow-worker-progressive-tool.md`、`F_114_swarmflow-thirdparty-agent.md`、`F_115_external-session-fork.md`、`F_115_swarmflow-model-hint-fail-fast.md`、`F_116_swarmflow-thirdparty-model-source.md`、`F_118_swarmflow-agent-template-expert-worker.md` |
+| 最近一次修订日期 | 2026-11-05 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_113_swarmflow-worker-progressive-tool.md`、`F_114_swarmflow-thirdparty-agent.md`、`F_115_external-session-fork.md`、`F_115_swarmflow-model-hint-fail-fast.md`、`F_116_swarmflow-thirdparty-model-source.md`、`F_118_swarmflow-agent-template-expert-worker.md`、`B_20261105_0911_swarmflow-thirdparty-trajectory.md` |
 
 ## 范围 / 边界
 
@@ -145,6 +145,9 @@ author_email: chengshuo5@huawei.com
    `ExternalHarnessMemberRuntime`（无团队加盟注入、`inject_mcp=False`、swarmflow worker 提示词），
    `ExternalMemberTurns` 驱动一轮后 `stop()`。usage 轮末经 `SwarmflowBudgetRail.bill()` 入两本账；
    schema 走提示词 + JSON 解析；`CancelledError` → `abort(immediate=True)`。成员名 / cwd 规则同 native worker。
+   external runtime `start()` 前绑定 `HarnessTrajectoryRecorder`，轨迹 subject 使用外层 Team session、
+   Team 名及本次 worker 的唯一 member name；operator label 仅用于显示。这只登记成员轨迹归属，不改变
+   worker 的执行、journal 或进度事件契约；span 仍按 recorder 约定各自建立 turn trace root。
    **模型**（`F_116`）：发射前 `plan_external_model` 校验三参数——`model` 命中 pool 且协议兼容 → 端点
    配置；`builtin_model`（+`effort`）命中该 kind 目录 → CLI 自身登录配置；互斥、`effort` 伴随、全空走 CLI
    默认；任一违反 → **非重试** `BackendError`。`AGENT_STARTED.model` 是 best-known（`describe_model` 用同一
@@ -360,6 +363,8 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
     （冷续跑重建）→ `resume_external_backend=True, require_checkpoint=True`，指针缺失抛
     `HarnessProtocolError`。多轮复用同一运行时，`close_session` / `aclose` 时 `stop()`；`abort_all`
     对外部会话调 `abort(immediate=True)`。history 镜像不用于播种（CLI 自有会话记忆）。fork：`capture_fork` 对外部父会话返回**凭据**（provider / 父指针 / 模式 / 切分标记；标记 = Codex `native_turn_id` 或 Claude 本轮最后一条 assistant 消息的转写 uuid，非 API `message_id`），子会话首轮 `reconcile` → `materialise_external_fork`（Claude 离线 `fork_session`，Codex `thread/fork lastTurnId`）→ 以 `seed_checkpoint` + `require_checkpoint` 续接子指针；子会话若已持久化自己的指针则跳过物化直接续接；模式 ∉ `card.fork_modes`（两家均 `{full, before}`）、`keep_rounds` 越界、标记缺失、凭据与父历史不符均 `BackendError`。轮标记与指针随成员子会话持久化（`swarmflow_external_turns`）。见 `F_115`。human 会话不接受 `agent_type`。
+   external runtime 在首次 `start()` 前绑定 recorder；同一有状态会话的后续 turn 复用 runtime 与成员 subject，
+   冷恢复重建 runtime 时仍以同一外层 Team session 和 member name 归属新 turn。
 14. **模型首锁（`F_116`）**：一个 avatar 只跑一个模型，首个 live turn 记录该会话的模型身份锁，后续
     live turn 的 hint 解析结果与锁不一致 → `EngineError`（文案指路 `fork()`：换模型 = 新会话）。解析
     引擎侧 `_session_model_identity`：native 按原始 `model` hint，三方经 `plan_external_model` 归一

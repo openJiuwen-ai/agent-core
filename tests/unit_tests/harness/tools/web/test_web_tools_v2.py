@@ -61,10 +61,25 @@ class _RequestRecorder:
 
 
 @pytest.fixture(autouse=True)
+def search_assessment_replies(scripted_search_model):
+    # Transport/parser tests consume fixed judgments, not lexical production rules.
+    scripted_search_model.labels.update({
+        "亚洲 - 知乎": "rejected",
+    })
+
+
+@pytest.fixture(autouse=True)
 def clear_search_env(monkeypatch):
     for key in (
         "FREE_SEARCH_DDG_ENABLED",
         "FREE_SEARCH_BING_ENABLED",
+        "FREE_SEARCH_BING_MARKET",
+        "FREE_SEARCH_BING_FALLBACK_MARKET",
+        "FREE_SEARCH_DEBUG",
+        "WEB_RESEARCH_SEARCHES_PER_ENGINE",
+        "WEB_RESEARCH_MAX_ENGINES",
+        "WEB_RESEARCH_MAX_FETCHES",
+        "WEB_RESEARCH_TIMEOUT_SECONDS",
         "WEB_PROXY_URL",
         "FREE_SEARCH_PROXY_URL",
         "NO_PROXY",
@@ -140,7 +155,7 @@ async def test_free_invoke_duckduckgo_success(monkeypatch):
     _patch_request(monkeypatch, lambda method, url, body: _resp(200, html.encode("utf-8")))
 
     tool = WebFreeSearchTool(language="cn")
-    result = await tool.invoke({"query": "test query", "max_results": 5})
+    result = await tool.invoke({"query": "Example Title", "max_results": 5})
 
     assert "Free search results (DuckDuckGo)" in result
     assert "Example Title 1" in result
@@ -169,7 +184,7 @@ async def test_free_invoke_bing_fallback_success(monkeypatch):
 
     _patch_request(monkeypatch, handler)
     tool = WebFreeSearchTool(language="cn")
-    result = await tool.invoke({"query": "test query", "max_results": 5})
+    result = await tool.invoke({"query": "Bing Result", "max_results": 5})
 
     assert "Free search results (Bing)" in result
     assert "Bing Result 1" in result
@@ -226,7 +241,7 @@ async def test_free_search_explicit_engines_override_process_defaults(monkeypatc
     """
     recorder = _patch_request(monkeypatch, lambda method, url, body: _resp(200, bing_html.encode("utf-8")))
     tool = WebFreeSearchTool(language="cn", enabled_engines=("bing",))
-    result = await tool.invoke({"query": "test query", "max_results": 5})
+    result = await tool.invoke({"query": "Configured engine", "max_results": 5})
 
     assert "Free search results (Bing)" in result
     assert "Configured engine result" in result
@@ -248,7 +263,7 @@ async def test_free_ddg_toggle_disables_duckduckgo_engines(monkeypatch):
     recorder = _patch_request(monkeypatch, lambda method, url, body: _resp(200, bing_html.encode("utf-8")))
 
     tool = WebFreeSearchTool(language="cn")
-    result = await tool.invoke({"query": "test query", "max_results": 5})
+    result = await tool.invoke({"query": "Bing Result", "max_results": 5})
 
     requested = [call["url"] for call in recorder.calls]
     assert all("duckduckgo.com" not in url for url in requested)
@@ -267,7 +282,7 @@ async def test_free_all_engines_disabled_returns_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_free_best_effort_returns_low_quality_bing_rows(monkeypatch):
+async def test_free_rejects_low_quality_bing_rows_instead_of_best_effort(monkeypatch):
     monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
     monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
     bing_html = """
@@ -290,8 +305,10 @@ async def test_free_best_effort_returns_low_quality_bing_rows(monkeypatch):
     tool = WebFreeSearchTool(language="cn")
     result = await tool.invoke({"query": "亚洲新闻 最新", "max_results": 5})
 
-    assert "Free search results (Bing)" in result
-    assert "亚洲 - 知乎" in result
+    assert "Content status: low_relevance" in result
+    assert "亚洲 - 知乎" not in result
+    assert "https://www.zhihu.com/question/1" not in result
+    assert "Recommended fetch targets" not in result
 
 
 @pytest.mark.asyncio
@@ -304,7 +321,7 @@ async def test_free_invoke_param_coercion(monkeypatch):
     tool = WebFreeSearchTool(language="cn")
     # Float-like and junk values must not raise; they fall back to defaults.
     for bad in ("8.0", "abc", None, 0):
-        result = await tool.invoke({"query": "test", "max_results": bad, "timeout_seconds": bad})
+        result = await tool.invoke({"query": "Title", "max_results": bad, "timeout_seconds": bad})
         assert "Title" in result
 
 
@@ -763,7 +780,7 @@ async def test_fetch_domestic_scope_does_not_fallback_to_external_reader(monkeyp
 
     result = await tool.invoke({"url": "https://kns.cnki.net/kcms2/article/abstract?v=paper-1"})
 
-    assert "reader proxy fallback is disabled" in result
+    assert "Content status: blocked" in result
     assert len(recorder.calls) == 1
     assert "r.jina.ai" not in recorder.calls[0]["url"]
 
@@ -853,7 +870,7 @@ class _FakeSession:
         self._resp = resp
         self.last_kwargs: dict | None = None
 
-    def request(self, method, url, *, headers=None, json=None, proxy=None, proxy_auth=None, timeout=None):
+    def request(self, method, url, *, headers=None, json=None, proxy=None, proxy_auth=None, timeout=None, max_field_size=None):
         self.last_kwargs = {
             "method": method,
             "url": url,
@@ -862,6 +879,7 @@ class _FakeSession:
             "proxy": proxy,
             "proxy_auth": proxy_auth,
             "timeout": timeout,
+            "max_field_size": max_field_size,
         }
         return _FakeReqCM(self._resp)
 
@@ -893,6 +911,7 @@ async def test_request_transport_contract(monkeypatch):
     assert session.last_kwargs["json"] == {"a": 1}
     assert session.last_kwargs["proxy"] is None
     assert isinstance(session.last_kwargs["timeout"], aiohttp.ClientTimeout)
+    assert session.last_kwargs["max_field_size"] == 64 * 1024
 
 
 @pytest.mark.asyncio

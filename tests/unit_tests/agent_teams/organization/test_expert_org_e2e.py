@@ -1,22 +1,29 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""E2E: host Catalog/Launcher injection → create_and_invite expert team joins org."""
+"""Shared core group discovery through invitation, task delivery and review."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.organization.expert_adapters import (
-    ExpertGroupDescriptor,
     LaunchedExpertTeam,
 )
+from openjiuwen.agent_teams.experts import PackageLocation
+from openjiuwen.agent_teams.tools.tool_expert import ViewExpertGroupsTool
+from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.tools import (
+    OrgClaimTaskTool,
     OrgCreateAndInviteExpertTeamTool,
-    OrgListExpertGroupsTool,
+    OrgCreateTaskTool,
+    OrgReviewTaskTool,
+    OrgUpdateTaskTool,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
@@ -81,28 +88,6 @@ class FakeAgent:
         )()
 
 
-class HostCatalog:
-    def list(self, *, capabilities=None):
-        groups = [
-            ExpertGroupDescriptor(
-                agent_group_name="sample-expert-group",
-                display_name="Sample Experts",
-                description="demo group",
-                capabilities=("frontend", "ui"),
-            )
-        ]
-        if not capabilities:
-            return groups
-        required = set(capabilities)
-        return [g for g in groups if required.issubset(set(g.capabilities))]
-
-    def get(self, name: str):
-        for group in self.list():
-            if group.agent_group_name == name:
-                return group
-        raise ValueError(f"expert group not found: {name}")
-
-
 class HostLauncher:
     """Minimal host launcher: activate into the shared TeamRuntimeManager pool."""
 
@@ -157,7 +142,7 @@ class HostLauncher:
 
 
 @pytest_asyncio.fixture
-async def wired_organization():
+async def wired_organization(tmp_path):
     clear_process_org_managers()
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
     team_runtime = TeamRuntimeManager()
@@ -178,9 +163,26 @@ async def wired_organization():
         )
     )
     org_runtime = OrganizationRuntimeManager(team_runtime)
-    org_runtime.set_expert_group_catalog(HostCatalog())
     org_runtime.set_expert_team_launcher(HostLauncher(team_runtime, db))
+    package = tmp_path / "sample-expert-group"
+    package.mkdir()
+    manifest = {"name": package.name, "package_type": "agent_group",
+                "description": "UI specialists", "instruction": "Internal execution rules",
+                "display_name": {"en": "Sample Experts", "zh": "Sample"},
+                "capabilities": ["frontend", "ui"], "agents": ["leader"]}
+    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    member = package / "agents" / "leader"
+    member.mkdir(parents=True)
+    (member / "manifest.json").write_text(
+        json.dumps({"name": "leader", "package_type": "agent_template", "description": "Lead"}),
+        encoding="utf-8",
+    )
+    location = PackageLocation(name=package.name, path=package, source="local")
+    catalog = HostLocator(location)
+    previous = TeamRuntimeManager.expert_catalog()
+    TeamRuntimeManager.set_expert_catalog(catalog)
     yield org_runtime, session_id, team_runtime
+    TeamRuntimeManager.set_expert_catalog(previous)
     await org_runtime.close()
     clear_process_org_managers()
     await db.close()
@@ -190,10 +192,13 @@ async def wired_organization():
 async def test_e2e_list_then_create_and_invite_expert_team(wired_organization):
     org_runtime, session_id, team_runtime = wired_organization
 
-    list_tool = OrgListExpertGroupsTool(org_runtime, team_id="owner-team", session_id=session_id)
+    list_tool = ViewExpertGroupsTool(team_runtime.expert_catalog(), make_translator("en"), language="en")
     listed = await list_tool.invoke({"capabilities": ["frontend"]})
     assert listed.success
-    assert listed.data["expert_groups"][0]["agent_group_name"] == "sample-expert-group"
+    assert listed.data["groups"][0]["name"] == "sample-expert-group"
+    assert listed.data["groups"][0]["display_name"] == "Sample Experts"
+    assert listed.data["groups"][0]["description"] == "UI specialists"
+    assert await team_runtime.pool.get("sample-expert-group") is None
 
     await org_runtime.create_organization(
         organization_id="org-e2e",
@@ -205,7 +210,7 @@ async def test_e2e_list_then_create_and_invite_expert_team(wired_organization):
     created = await create_tool.invoke(
         {
             "organization_id": "org-e2e",
-            "agent_group_name": "sample-expert-group",
+            "agent_group_name": listed.data["groups"][0]["name"],
             "display_name": "Sample Experts",
         }
     )
@@ -223,3 +228,62 @@ async def test_e2e_list_then_create_and_invite_expert_team(wired_organization):
     available = await org_runtime.list_available_teams(session_id=session_id)
     available_ids = {item["team_id"] for item in available}
     assert expert_team_id in available_ids
+
+    owner_entry = await team_runtime.pool.get("owner-team")
+    owner_manager = owner_entry.agent.team_backend.org_task_manager
+    owner_create = OrgCreateTaskTool(owner_manager, "owner-team", "leader-owner")
+    root = await owner_create.invoke({
+        "task_id": "root", "title": "Review", "description": "Review the frontend",
+        "required_capabilities": ["backend"],
+    })
+    assert root.success, root.error
+    claimed = await OrgClaimTaskTool(owner_manager, "owner-team", "leader-owner").invoke({"task_id": "root"})
+    assert claimed.success, claimed.error
+    owner_update = OrgUpdateTaskTool(owner_manager, "owner-team", "leader-owner")
+    mode = await owner_update.invoke({
+        "task_id": "root", "action": "set_aggregation_mode", "aggregation_mode": "HIERARCHICAL",
+    })
+    assert mode.success, mode.error
+    started = await owner_update.invoke({"task_id": "root", "action": "start"})
+    assert started.success, started.error
+    child = await owner_create.invoke({
+        "task_id": "ui-review", "parent_task_id": "root", "title": "UI review",
+        "description": "Report one UI finding", "required_capabilities": ["frontend"],
+        "delegated_to_team_id": expert_team_id,
+    })
+    assert child.success, child.error
+    expert_manager = pooled.agent.team_backend.org_task_manager
+    expert_update = OrgUpdateTaskTool(expert_manager, expert_team_id, pooled.agent.member_name)
+    started = await expert_update.invoke({"task_id": "ui-review", "action": "start"})
+    assert started.success, started.error
+    completed = await expert_update.invoke({
+        "task_id": "ui-review", "action": "complete", "output_abstract": "Add an accessible button label",
+    })
+    assert completed.success, completed.error
+    persisted = await owner_manager.get_task("ui-review")
+    assert persisted.status.value == "COMPLETED"
+    assert persisted.assignment.team_id == expert_team_id
+    assert persisted.output_abstract == "Add an accessible button label"
+    reviewed = await OrgReviewTaskTool(owner_manager, "owner-team", "leader-owner").invoke({
+        "task_id": "ui-review", "review_status": "ACCEPTED", "verdict": "Verified finding",
+    })
+    assert reviewed.success, reviewed.error
+
+
+class HostLocator:
+    def __init__(self, location):
+        self.location = location
+
+    async def list_group_packages(self):
+        return [self.location]
+
+    async def locate_group(self, name):
+        if name != self.location.name:
+            raise ValueError("not installed")
+        return self.location
+
+    async def list_expert_packages(self):
+        return []
+
+    async def locate_expert(self, name):
+        raise ValueError("not installed")

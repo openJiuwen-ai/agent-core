@@ -60,6 +60,10 @@ OJ_INFERENCE_ID = "openjiuwen.inference.id"
 OJ_INFERENCE_INPUT_OBSERVED = "openjiuwen.inference.input_observed"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
+OJ_GOAL_ID = "openjiuwen.goal.id"
+OJ_GOAL_ATTEMPT_NUMBER = "openjiuwen.goal.attempt.number"
+OJ_GOAL_ASSESSMENT_ID = "openjiuwen.goal.assessment.id"
+OJ_GOAL_STRATEGY = "openjiuwen.goal.strategy"
 # Transport-level retries the provider SDK made inside this one LLM request
 # before the response that was streamed (connection errors, 429, 5xx). Their
 # time is part of every request-relative duration, so a reader needs the count

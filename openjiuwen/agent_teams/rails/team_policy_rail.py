@@ -53,10 +53,8 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
-    build_leader_bound_group_section,
     build_leader_policy_disclosure,
-    build_leader_prebuilt_section,
-    build_team_extra_section,
+    build_leader_static_sections,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
@@ -69,6 +67,7 @@ from openjiuwen.agent_teams.team_context import (
 from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.context_engine.processor.compressor.util import holds_team_policy
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -164,6 +163,9 @@ class TeamPolicyRail(DeepAgentRail):
         # framework read-only loader (unit tests /
         # no backend). No second fallback here — the factory owns the wiring.
         self._loader = loader
+        self._team_backend = team_backend
+        self._recovered_bootstrap: PromptSection | None = None
+        self._continued_policy: bool | None = None
 
         # All team sections are static and built once. The HITT contract is
         # gated on the (sync) HITT capability flag rather than the live human
@@ -378,13 +380,55 @@ class TeamPolicyRail(DeepAgentRail):
         )
         parts[:] = kept
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Re-evaluate continuation on the first model call of each invocation."""
+        self._continued_policy = None
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Allow rebuilding after this invocation explicitly disbands its team."""
+        if ctx.inputs.tool_name == "clean_team":
+            self._continued_policy = None
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
                 self.system_prompt_builder.add_section(section)
+            if self._continued_policy is None:
+                self._continued_policy = await self._continues_with_policy(ctx)
+            if self._continued_policy:
+                # Same section name, so this replaces the routing to build_team.
+                self.system_prompt_builder.add_section(self._recovered_bootstrap_section())
 
         await self._announce_unattached_state(ctx)
+
+    async def _continues_with_policy(self, ctx: AgentCallbackContext) -> bool:
+        """Whether this leader must not be routed to ``build_team``.
+
+        Applies to any run continuing the same session, cold recovered or
+        resumed from pause. The switch happens at a run boundary, so the prompt
+        prefix stays stable within a run. The transcript is checked, not just
+        the flag: a history without the policy clears the flag so ``build_team``
+        can still deliver it. Getting this wrong costs at most one round.
+        """
+        backend = self._team_backend
+        if self._role != TeamRole.LEADER or backend is None or not backend.history_restored():
+            return False
+        messages = ctx.context.get_messages() if ctx.context is not None else []
+        if not holds_team_policy(messages):
+            backend.clear_history_restored()
+            return False
+        return await backend.rejects_rebuild()
+
+    def _recovered_bootstrap_section(self) -> PromptSection:
+        if self._recovered_bootstrap is None:
+            self._recovered_bootstrap = build_leader_bootstrap_section(
+                swarmflow_enabled=False,
+                language=self._language,
+                loader=self._loader,
+                recovered=True,
+            )
+        return self._recovered_bootstrap
 
     async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
         """Register this member's team state as one dynamic attachment section.
@@ -544,40 +588,14 @@ class TeamPolicyRail(DeepAgentRail):
         bootstrap_mode: str,
         bound_group_name: str | None,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: an opening section, plus the caller's own prompt.
-
-        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
-        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
-        the policy arrives as a ``<team-policy>`` block). The extra section
-        stays here rather than moving into the policy disclosure because it is
-        not team policy: it is what the SDK caller told *this* leader to do,
-        and it has to be in force before the team exists — it may well be the
-        instruction that decides what team to build.
-        """
-        if bootstrap_mode == "framework":
-            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
-        else:
-            opening = build_leader_bootstrap_section(
-                swarmflow_enabled=swarmflow_enabled,
-                language=self._language,
-                loader=self._loader,
-            )
-        sections = [opening]
-        # Scheduled dispatch with a bound AgentGroup (F_125 decision 14): name
-        # the group so the leader looks for experts there first — the same
-        # signal that scopes ``view_experts`` to it.
-        if bound_group_name is not None:
-            sections.append(
-                build_leader_bound_group_section(
-                    group=bound_group_name,
-                    language=self._language,
-                    loader=self._loader,
-                )
-            )
-        extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
-        if extra is not None:
-            sections.append(extra)
-        return sections
-
+        """Build the leader's prefix: an opening section, plus the caller's own prompt."""
+        return build_leader_static_sections(
+            bootstrap_mode=bootstrap_mode,
+            swarmflow_enabled=swarmflow_enabled,
+            bound_group_name=bound_group_name,
+            base_prompt=base_prompt,
+            language=self._language,
+            loader=self._loader,
+        )
 
 __all__ = ["TeamPolicyRail"]

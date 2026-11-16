@@ -23,8 +23,8 @@ from openjiuwen.agent_evolving.attribution.run import (
     prepare_reward_temp_dir,
     run_attribution,
     run_diagnosis,
-    run_trajectory_summary,
 )
+from openjiuwen.agent_evolving.attribution.trajectory_summary.models import Segment, SummaryTree, Turn
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,6 +47,47 @@ def _nodes() -> dict[str, list[TrajectoryNode]]:
             for index in range(3)
         ]
     }
+
+
+def _summary_tree(nodes: dict[str, list[TrajectoryNode]] | None = None) -> SummaryTree:
+    source = nodes or _nodes()
+    turns: dict[str, list[Turn]] = {}
+    for agent_id, agent_nodes in source.items():
+        first, last = agent_nodes[0], agent_nodes[-1]
+        segment = Segment(
+            segment_id=f"{agent_id}:segment:1",
+            turn_id=f"{agent_id}:turn:1",
+            agent_id=agent_id,
+            start_node_id=first.node_id,
+            end_node_id=last.node_id,
+            start_ts_ns=first.start_ts_ns,
+            end_ts_ns=last.end_ts_ns,
+            narrative="segment",
+            status="completed",
+        )
+        turns[agent_id] = [
+            Turn(
+                turn_id=f"{agent_id}:turn:1",
+                turn_number=1,
+                agent_id=agent_id,
+                start_node_id=first.node_id,
+                end_node_id=last.node_id,
+                start_ts_ns=first.start_ts_ns,
+                end_ts_ns=last.end_ts_ns,
+                segments=[segment],
+                status="completed",
+            )
+        ]
+    return SummaryTree(trajectory_summary="precomputed trajectory summary", turns=turns, status="completed")
+
+
+def _runtime(nodes: dict[str, list[TrajectoryNode]] | None = None) -> NodeBackedRuntime:
+    source = nodes or _nodes()
+    runtime = NodeBackedRuntime(source)
+    tree = _summary_tree(source)
+    runtime.summary_tree = tree
+    runtime.trajectory_summary = tree.trajectory_summary
+    return runtime
 
 
 def _task_parse(with_artifacts: bool = True) -> TaskParseResult:
@@ -514,7 +555,6 @@ class _FakeDeepAgent:
                 self._runtime.record_reward_failure(
                     signal.signal_id, [{"text_md": "cause", "start_node_id": "main:1"}]
                 )
-            self._runtime.record_trajectory_summary("summary")
         return {}
 
 
@@ -541,7 +581,7 @@ class _FakeSession:
 
 
 async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
+    runtime = _runtime()
     signals = [_signal()]
     fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
     _patch_build(monkeypatch, fake_agent, _FakeRail())
@@ -565,8 +605,8 @@ async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
 
 
 async def test_run_attribution_wake_once_then_success(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
-    signals = [_signal()]
+    runtime = _runtime()
+    signals = [_tier_signal("fair")]
     fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=2)
     _patch_build(monkeypatch, fake_agent, _FakeRail())
     monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
@@ -583,12 +623,12 @@ async def test_run_attribution_wake_once_then_success(monkeypatch: Any) -> None:
     assert outcome.wake_attempted is True
     assert fake_agent.invocations == 2
     assert "pending_reward_signal_ids" in fake_agent.prompts[1]
-    assert "missing_trajectory_summary" in fake_agent.prompts[1]
+    assert "submit_trajectory_summary" not in fake_agent.prompts[1]
 
 
 async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
-    signals = [_signal()]
+    runtime = _runtime()
+    signals = [_tier_signal("fair")]
     fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=99)
     _patch_build(monkeypatch, fake_agent, _FakeRail())
     monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
@@ -603,14 +643,55 @@ async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "incomplete"
     assert outcome.wake_attempted is True
-    # an unmarked rule_jev signal has no submission obligation; only the summary is missing
-    assert outcome.pending_signal_ids == []
+    # the rule_jev signal has no direct cause tool, but it stays pending until invalidated
+    assert outcome.pending_signal_ids == [signals[0].signal_id]
     assert outcome.trajectory_summary
     assert fake_agent.invocations == 2
 
 
+async def test_run_attribution_requires_a_valid_precomputed_summary(monkeypatch: Any) -> None:
+    built: list[bool] = []
+
+    def build_marker(**kwargs: Any) -> tuple[Any, _FakeRail]:
+        del kwargs
+        built.append(True)
+        return _FakeDeepAgent(_runtime(), [], rounds_to_finish=1), _FakeRail()
+
+    monkeypatch.setattr(run_module, "build_attribution_agent", build_marker)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert outcome.status == "failed" and outcome.failure_kind == "error"
+    assert "summary_tree" in (outcome.error_detail or "")
+    assert built == []
+
+
+async def test_run_attribution_accepts_a_degraded_precomputed_summary(monkeypatch: Any) -> None:
+    runtime = _runtime()
+    runtime.summary_tree.status = "degraded"
+    signals = [_tier_signal("fair")]
+    fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
+    _patch_build(monkeypatch, fake_agent, _FakeRail())
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=signals,
+        task_description="写报告",
+        runtime=runtime,
+        total_timeout_s=None,
+    )
+    assert outcome.status == "success"
+    assert outcome.trajectory_summary == "precomputed trajectory summary"
+    assert fake_agent.invocations == 1
+
+
 async def test_run_attribution_tokens_exceeded(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
+    runtime = _runtime()
     signals = [_signal()]
     fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=99)
     rail = _FakeRail()
@@ -645,7 +726,7 @@ async def test_run_attribution_timeout(monkeypatch: Any) -> None:
         nodes_by_subagent=_nodes(),
         signals=[_signal()],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
         total_timeout_s=0.05,
     )
     assert outcome.status == "failed"
@@ -665,7 +746,7 @@ async def test_run_attribution_empty_signals_short_circuits() -> None:
 
 
 async def test_run_attribution_skips_perfect_signals(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
+    runtime = _runtime()
     perfect = _tier_signal("perfect")
     fair = _tier_signal("fair")
     weak = _tier_signal("weak")
@@ -697,7 +778,7 @@ async def test_run_attribution_all_perfect_short_circuits(monkeypatch: Any) -> N
     def build_marker(**kwargs: Any) -> tuple[Any, _FakeRail]:
         del kwargs
         built.append(True)
-        return _FakeDeepAgent(NodeBackedRuntime(_nodes()), [], rounds_to_finish=1), _FakeRail()
+        return _FakeDeepAgent(_runtime(), [], rounds_to_finish=1), _FakeRail()
 
     monkeypatch.setattr(run_module, "build_attribution_agent", build_marker)
     perfect = _tier_signal("perfect")
@@ -721,7 +802,7 @@ async def test_run_attribution_agent_error(monkeypatch: Any) -> None:
             raise RuntimeError("model broke")
 
     fake_rail = _FakeRail()
-    runtime = NodeBackedRuntime(_nodes())
+    runtime = _runtime()
     monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (_ExplodingAgent(), fake_rail))
     monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
     outcome = await run_attribution(
@@ -738,7 +819,7 @@ async def test_run_attribution_agent_error(monkeypatch: Any) -> None:
 
 
 async def test_run_attribution_forwards_advice_switches(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
+    runtime = _runtime()
     signals = [_signal()]
     fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
     monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
@@ -818,7 +899,7 @@ async def test_attribution_agents_retry_failed_model_calls_and_wait_for_slow_mod
         build_attribution_agent(
             model=_core_model(),
             signals=[_signal()],
-            runtime=NodeBackedRuntime(_nodes()),
+            runtime=_runtime(),
             task_description="写报告",
             reward_overall=None,
         )
@@ -841,7 +922,7 @@ async def test_run_attribution_has_no_time_limit_by_default(monkeypatch: Any) ->
         nodes_by_subagent=_nodes(),
         signals=[_signal()],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     assert outcome.failure_kind != "timeout"  # the slow agent was waited for
 
@@ -851,7 +932,7 @@ async def test_two_diagnoses_at_once_keep_their_own_attribution_tools() -> None:
     from openjiuwen.core.runner import Runner
 
     def build(task: str) -> tuple[Any, NodeBackedRuntime]:
-        runtime = NodeBackedRuntime(_nodes())
+        runtime = _runtime()
         agent, _ = build_attribution_agent(
             model=_core_model(), signals=[_signal()], runtime=runtime, task_description=task, reward_overall=None
         )
@@ -893,7 +974,7 @@ async def test_run_attribution_releases_its_tools_whatever_the_outcome(monkeypat
         nodes_by_subagent=_nodes(),
         signals=[_signal()],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
         total_timeout_s=0.05,
     )
     assert agent.released == 1  # also after a timeout
@@ -921,9 +1002,9 @@ async def test_the_attribution_agent_is_streamed_so_a_slow_model_keeps_the_conne
     outcome = await run_attribution(
         model=object(),
         nodes_by_subagent=_nodes(),
-        signals=[_signal()],
+        signals=[_tier_signal("fair")],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     assert agent.prompts and outcome.failure_kind == "incomplete"  # streamed to the end, signal still open
 
@@ -946,9 +1027,9 @@ async def test_reaching_the_step_limit_ends_the_round_and_the_wake_round_still_r
     outcome = await run_attribution(
         model=object(),
         nodes_by_subagent=_nodes(),
-        signals=[_signal()],
+        signals=[_tier_signal("fair")],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     assert len(agent.prompts) == 2  # not an error: the wake round ran
     assert outcome.failure_kind == "incomplete" and outcome.wake_attempted
@@ -970,9 +1051,9 @@ async def test_a_host_session_serves_the_first_round_and_the_wake_round_gets_a_n
     await run_attribution(
         model=object(),
         nodes_by_subagent=_nodes(),
-        signals=[_signal()],
+        signals=[_tier_signal("fair")],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
         session=host,
     )
     first, wake = agent.prompts
@@ -997,9 +1078,9 @@ async def test_a_dropped_model_connection_goes_on_to_the_wake_round_instead_of_f
     outcome = await run_attribution(
         model=object(),
         nodes_by_subagent=_nodes(),
-        signals=[_signal()],
+        signals=[_tier_signal("fair")],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     assert len(agent.prompts) == 2 and outcome.wake_attempted
     assert outcome.failure_kind == "incomplete"  # not "error": the signal is just still open
@@ -1026,7 +1107,7 @@ async def test_a_real_attribution_agent_calls_its_model_streaming(monkeypatch: A
         nodes_by_subagent=_nodes(),
         signals=[_signal()],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     # the agent's own turn streamed (an "invoke" here can only be the harness's background image probe)
     assert "stream" in calls
@@ -1047,68 +1128,10 @@ async def test_a_real_attribution_agent_streams_both_rounds_through_one_session(
     outcome = await run_attribution(
         model=_core_model(),
         nodes_by_subagent=_nodes(),
-        signals=[_signal()],
+        signals=[_tier_signal("fair")],
         task_description="写报告",
-        runtime=NodeBackedRuntime(_nodes()),
+        runtime=_runtime(),
     )
     assert len(rounds) >= 2 and outcome.wake_attempted  # the wake round streamed too
     assert "还在看轨迹。" in rounds[-1]  # ... and went on from the first round's conversation
     assert outcome.failure_kind == "incomplete" and not outcome.error_detail  # no "StreamQueue is already closed"
-
-
-class _SummaryAgent:
-    def __init__(self, runtime: NodeBackedRuntime, rounds_to_finish: int = 1) -> None:
-        self._runtime = runtime
-        self._rounds_to_finish = rounds_to_finish
-        self.invocations = 0
-        self.prompts: list[str] = []
-
-    async def invoke(self, prompt: str, session: Any = None) -> dict[str, Any]:
-        del session
-        self.invocations += 1
-        self.prompts.append(prompt)
-        if self.invocations >= self._rounds_to_finish:
-            self._runtime.record_trajectory_summary("选中范围共 3 个步骤，期间一次工具调用失败。")
-        return {}
-
-
-async def test_run_trajectory_summary_returns_the_agent_summary(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
-    agent = _SummaryAgent(runtime)
-    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
-    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
-
-    outcome = await run_trajectory_summary(
-        model=object(),
-        nodes_by_subagent=_nodes(),
-        runtime=runtime,
-        task_hint="写报告",
-        total_timeout_s=None,
-    )
-
-    assert outcome.status == "success" and outcome.completed is True
-    assert outcome.trajectory_summary == "选中范围共 3 个步骤，期间一次工具调用失败。"
-    assert agent.invocations == 1
-    assert "写报告" in agent.prompts[0]
-
-
-async def test_run_trajectory_summary_wakes_once_and_reports_missing_summary(monkeypatch: Any) -> None:
-    runtime = NodeBackedRuntime(_nodes())
-    agent = _SummaryAgent(runtime, rounds_to_finish=2)
-    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
-    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
-
-    outcome = await run_trajectory_summary(
-        model=object(), nodes_by_subagent=_nodes(), runtime=runtime, total_timeout_s=None
-    )
-    assert outcome.status == "success" and outcome.wake_attempted is True
-    assert agent.invocations == 2
-
-    missing_runtime = NodeBackedRuntime(_nodes())
-    missing = _SummaryAgent(missing_runtime, rounds_to_finish=99)
-    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (missing, _FakeRail()))
-    outcome = await run_trajectory_summary(
-        model=object(), nodes_by_subagent=_nodes(), runtime=missing_runtime, total_timeout_s=None
-    )
-    assert outcome.status == "failed" and outcome.failure_kind == "incomplete"
-    assert outcome.trajectory_summary is None
