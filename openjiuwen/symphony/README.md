@@ -111,6 +111,8 @@ storage.artifact_root/
 
 目录按固定能力根和类型绑定，其他集合不能共用。新签名包含对象内容、相关构建策略、协议和模型身份；规划参数、Flow 阈值和展示开关不参与树内容签名。无模型状态查询保留产物模型身份，同时继续检查内容和构建策略，并明确未核验模型身份。
 
+首次构图可以复用已有共用分类树和宿主目录指纹的产物根。宿主指纹按类型存于 `cache/fingerprints/{expert,connector,mcp}/`，与 Core 的 Skill 指纹独立。Finder 生成的普通 `.DS_Store` 文件可以保留。
+
 不兼容旧 Runtime 构造参数、配置别名、旧缓存签名及旧布局。历史目录不自动迁移或删除，请为新配置选择独立产物目录并重新构建。
 
 ## 分层编排
@@ -120,6 +122,10 @@ storage.artifact_root/
 `runtime.orchestration.plan(query, type="expert", candidate_ids=[...])` 使用指定层。旧调用省略 `type` 时使用 Skill。宿主可用 `expert_manifest_paths` 传入实时允许的专家 manifest 路径，SDK 直接调用时默认使用配置内的专家。专家计划的 `fast` 和 `beam` 都使用已发布的交接边，并在 `planned_graph` 节点的 `metadata.type` 中标明 `expert`。专家计划用于描述交接，任务派发由宿主负责。
 
 Skill 增量变更沿用 Skill 来源版本校验，并携带同一份已发布的专家子图。专家来源发生变化时调用 `build()` 刷新图。构建和增量变更均在切换当前版本前复核来源。
+
+`runtime.orchestration.plan_expert_tasks(query, candidate_ids=[...])` 为一个任务规划已安装专家和内联角色。它读取已发布的专家层，可用候选为空时仍可规划内联角色。宿主用 `expert_manifest_paths` 限定实时安装范围，并可沿用会话的规划模式。
+
+结果仍是 `planned_graph`，通过 `graph.metadata.plan_kind=expert_tasks` 标识。节点 ID 对应任务实例，`metadata.type` 区分 `expert` 和 `inline`。节点保存任务指令及输入输出，专家节点记录 `expert_id`，内联节点记录 `role`。每条 `can_feed` 边引用本轮任务声明的 `source_output` 和 `target_input`。专家指纹端口和已发布的交接边供规划参考，专家可声明本轮需要的端口和交接。任务图须无环，纯内联角色之间的交接须通过端口类型检查。任务图用于返回分工和依赖计划，内联角色规格留给后续执行消费。
 
 ## 编排经验与宿主职责
 
