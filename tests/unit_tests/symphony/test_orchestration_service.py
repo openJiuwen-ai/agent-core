@@ -1,7 +1,3 @@
-
-from openjiuwen.symphony.config import OrchestrationConfig
-
-from openjiuwen.symphony.config import FingerprintPolicyConfig, OrchestrationConfig
 import asyncio
 import json
 import logging
@@ -30,7 +26,8 @@ from openjiuwen.symphony import (
     SymphonyRuntime,
     SymphonyConfig,
 )
-from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
+from openjiuwen.symphony.config import FingerprintPolicyConfig
+from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts, load_graph_artifacts
 from openjiuwen.symphony.orchestration.planned_graph import build_planned_graph
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
@@ -149,6 +146,47 @@ class _FailingFastPlanLLM(_PlanLLM):
                 }
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fast", "beam"])
+async def test_skill_planners_use_named_inputs_without_changing_the_task(monkeypatch, tmp_path, mode):
+    requests = []
+    skills = [{
+        "id": "summarize", "name": "Summarize", "description": "Summarize text",
+        "inputs": [{"name": "source", "type": "text"}],
+    }]
+    artifacts = GraphArtifacts(tmp_path, {}, skills, {"edges": []}, {})
+    monkeypatch.setattr("openjiuwen.symphony.orchestration.service.load_graph_artifacts", lambda *a, **k: artifacts)
+
+    class Model:
+        @staticmethod
+        async def invoke(messages, **kwargs):
+            requests.append(json.loads(messages[-1]["content"]))
+            if mode == "fast":
+                response = {
+                    "status": "needs_input",
+                    "steps": [{"skill_id": "summarize"}],
+                    "missing_inputs": [{"skill_id": "summarize", "name": "source", "type": "text"}],
+                }
+            else:
+                response = {"selected_plan_index": 1}
+            return SimpleNamespace(content=json.dumps(response))
+
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path, capability_provider=[], model=Model(),
+        config=OrchestrationConfig(enabled=True),
+    )
+    query = "Summarize the source."
+    source = {"name": "source", "kind": "text", "value": "A confirmed observation."}
+    empty = await service.plan(query, candidate_ids=["summarize"], mode=mode)
+    supplied = await service.plan(query, candidate_ids=["summarize"], mode=mode, inputs=[source])
+
+    assert empty["planned_graph"]["graph"]["metadata"]["missing_inputs"] == ["source"]
+    assert empty["planned_graph"]["graph"]["metadata"]["status"] == "needs_input"
+    assert supplied["planned_graph"]["graph"]["metadata"]["status"] == "ready"
+    assert requests[-1]["query"] == query
+    assert requests[-1]["inputs"] == [source]
 
 
 @pytest.mark.asyncio
@@ -797,19 +835,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
 
     assert len(llm.calls) == 1
     llm_metadata = graph["config"]["llm"]
-    assert {
-        key: llm_metadata[key]
-        for key in (
-            "model",
-            "backend",
-            "temperature",
-            "prompt_version",
-            "batch_size",
-            "max_workers",
-            "require_consensus",
-            "consensus_runs",
-        )
-    } == {
+    expected = {
         "model": None,
         "backend": None,
         "temperature": None,
@@ -819,6 +845,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         "require_consensus": False,
         "consensus_runs": 1,
     }
+    assert {key: llm_metadata[key] for key in expected} == expected
     assert llm_metadata["matcher_version"] == "Symphony-ontology-matcher-v2"
     assert llm_metadata["match_schema_version"] == "Symphony-ontology-match-schema-v1"
     assert llm_metadata["relation_cache"]["resolved_count"] == 1

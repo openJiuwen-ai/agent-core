@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +18,7 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
+    PlanningInput,
     PrepareArtifactHook,
 )
 from openjiuwen.symphony.observation import GraphEvolutionInput, GraphSnapshot, ObservationReceipt
@@ -263,6 +264,7 @@ class SymphonyGraphEngine:
         task_cluster_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
         with self._track_operation():
             self._check()
@@ -295,6 +297,7 @@ class SymphonyGraphEngine:
                 task_cluster_id=task_cluster_id,
                 progress_callback=progress_callback,
                 mode=mode,
+                inputs=inputs,
             )
 
     async def plan_expert_tasks(
@@ -306,6 +309,7 @@ class SymphonyGraphEngine:
         language: str = "cn",
         progress: ProgressCallback | None = None,
         mode: str | None = None,
+        inputs: Sequence[PlanningInput | Mapping[str, Any]] = (),
     ) -> OrchestrationPlan:
         """Plan installed expert tasks and inline roles using any published expert evidence."""
         with self._track_operation():
@@ -317,6 +321,7 @@ class SymphonyGraphEngine:
                 language=language,
                 progress=progress,
                 mode=mode,
+                inputs=inputs,
             )
 
     def submit_observation(self, value: GraphEvolutionInput) -> ObservationReceipt:

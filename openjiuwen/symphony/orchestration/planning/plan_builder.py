@@ -24,8 +24,9 @@ def state_to_plan(
     seed_skill_ids: tuple[str, ...],
     skill_by_id: dict[str, dict[str, Any]],
     can_feed_edges: list[dict[str, Any]],
+    supplied_inputs: frozenset[tuple[str, str]] = frozenset(),
 ) -> OrchestrationPlan:
-    available: set[tuple[str, str]] = set()
+    available = set(supplied_inputs)
     steps: list[PlanStep] = []
     all_missing: list[dict[str, Any]] = []
     produced: set[tuple[str, str]] = set()

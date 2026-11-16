@@ -15,11 +15,13 @@ from typing import Any, Awaitable, Callable, Iterable, Sequence
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
+from openjiuwen.symphony.orchestration.contracts import PlanningInput
 from openjiuwen.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
 )
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.planning.input_matching import supplied_input_keys
 from openjiuwen.symphony.orchestration.planning.models import (
     OrchestrationPlan,
     SearchState,
@@ -71,6 +73,7 @@ Return strict JSON only.
 
 You receive:
 - The user's query.
+- Optional named task data in inputs, including host workspace file references.
 - The current Skill being expanded.
 - A search direction: forward or backward.
 - Candidate Skills already validated by existing can_feed edges.
@@ -92,7 +95,7 @@ Schema:
 BEAM_FINAL_RERANK_SYSTEM_PROMPT = """You are a final task orchestration reranker.
 Return strict JSON only.
 
-You receive the user's query, candidate plans produced by bidirectional beam
+You receive the user's query, optional named task data in inputs, candidate plans produced by bidirectional beam
 search, a candidate Skill pool, and the existing can_feed edges available among
 those Skills.
 
@@ -333,6 +336,7 @@ class BidirectionalBeamPlanner:
         dynamic_overlay: dict[str, Any] | None = None,
         task_cluster_id: str | None = None,
         layer: str = "skill",
+        inputs: Sequence[PlanningInput] = (),
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -349,6 +353,8 @@ class BidirectionalBeamPlanner:
         self.progress_callback = progress_callback
         self.language = language
         self.layer = layer
+        self.inputs = [item.model_dump(exclude_none=True) for item in inputs]
+        self.supplied_input_keys = supplied_input_keys(inputs)
         self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
         self.task_cluster_id = task_cluster_id
         self.eligible_edges = self._sorted_eligible_edges()
@@ -521,6 +527,8 @@ class BidirectionalBeamPlanner:
             "current_skill": skill_payload(current_skill),
             "candidates": [self._candidate_payload(expansion) for expansion in expansions],
         }
+        if self.inputs:
+            payload["inputs"] = self.inputs
         with model_usage_context("orchestration", "bidirectional_beam_judgement"):
             raw = await invoke_json(
                 self.model,
@@ -624,7 +632,7 @@ class BidirectionalBeamPlanner:
         seed_skill_ids: tuple[str, ...],
     ) -> dict[str, Any]:
         candidate_skill_ids = _candidate_plan_skill_ids(recommended_plans)
-        return {
+        payload = {
             "query": query,
             "required_output_types": sorted(self.required_output_types),
             "candidate_skill_pool": self._candidate_skill_pool_for_rerank(
@@ -637,6 +645,9 @@ class BidirectionalBeamPlanner:
                 for index, plan in enumerate(recommended_plans, start=1)
             ],
         }
+        if self.inputs:
+            payload["inputs"] = self.inputs
+        return payload
 
     def _candidate_skill_pool_for_rerank(
         self,
@@ -1151,6 +1162,7 @@ class BidirectionalBeamPlanner:
                     seed_skill_ids=state.seed_skill_ids,
                     skill_by_id=self.skill_by_id,
                     can_feed_edges=self.eligible_edges,
+                    supplied_inputs=self.supplied_input_keys,
                 ),
             )
             for state in states
@@ -1292,6 +1304,7 @@ class BidirectionalBeamPlanner:
             seed_skill_ids=state.seed_skill_ids,
             skill_by_id=self.skill_by_id,
             can_feed_edges=self.eligible_edges,
+            supplied_inputs=self.supplied_input_keys,
         )
 
     def _state_edge_confidence(self, state: BeamState) -> float:

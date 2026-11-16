@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.symphony import OrchestrationConfig, OrchestrationService, SymphonyGraphEngine
+from openjiuwen.symphony import OrchestrationConfig, OrchestrationService, PlanningInput, SymphonyGraphEngine
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 
 
@@ -14,6 +14,7 @@ class _TaskModel:
     def __init__(self, draft):
         self.draft = draft
         self.request = None
+        self.planning_prompts = []
 
     async def invoke(self, messages, **kwargs):
         request = json.loads(messages[-1]["content"])
@@ -25,7 +26,9 @@ class _TaskModel:
                 ],
             }))
         self.request = request
-        return SimpleNamespace(content=json.dumps(self.draft))
+        self.planning_prompts.append(messages[0]["content"])
+        draft = self.draft(request, messages[0]["content"]) if callable(self.draft) else self.draft
+        return SimpleNamespace(content=json.dumps(draft))
 
 
 def _port(name="evidence", port_type="csv"):
@@ -37,9 +40,10 @@ def _task(task_id, *, expert_id=None, inputs=(), outputs=()):
         "id": task_id,
         "title": task_id,
         "task": f"Complete the {task_id} work.",
-        "inputs": list(inputs),
         "outputs": list(outputs) or [_port("result", "text")],
     }
+    if inputs:
+        task["inputs"] = list(inputs)
     if expert_id is not None:
         return {**task, "type": "expert", "expert_id": expert_id}
     return {**task, "type": "inline", "role": {"name": task_id, "description": f"Handle {task_id}."}}
@@ -153,7 +157,7 @@ async def test_expert_task_plan_exposes_published_handoff_hints(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_expert_task_plan_uses_task_local_ports_for_expert_without_published_ports(tmp_path, monkeypatch):
+async def test_expert_task_plan_derives_ports_for_expert_without_published_ports(tmp_path, monkeypatch):
     expert_id = "bilibili-content-strategist"
     artifacts = GraphArtifacts(
         tmp_path, {}, [{"id": expert_id, "name": "Bilibili content strategist", "inputs": [], "outputs": []}], {}, {},
@@ -164,22 +168,25 @@ async def test_expert_task_plan_uses_task_local_ports_for_expert_without_publish
         "status": "ready",
         "tasks": [
             _task("research-rules", outputs=[checklist]),
-            _task("write-script", expert_id=expert_id, inputs=[checklist], outputs=[script]),
-            _task("independent-review", inputs=[script]),
+            _task("write-script", expert_id=expert_id, outputs=[script]),
+            _task("independent-review"),
         ],
         "handoffs": [
-            _handoff("research-rules", "write-script", checklist["name"], checklist["name"]),
-            _handoff("write-script", "independent-review", script["name"], script["name"]),
+            {"source": "research-rules", "target": "write-script", "source_output": checklist["name"]},
+            {"source": "write-script", "target": "independent-review", "source_output": script["name"]},
         ],
     }
-    service, _ = _service(tmp_path, draft, monkeypatch, artifacts)
+    service, model = _service(tmp_path, draft, monkeypatch, artifacts)
 
     result = await service.plan_expert_tasks("Check platform rules, write the script, and review it", [expert_id])
     graph = result["planned_graph"]["graph"]
 
     assert graph["metadata"]["status"] == "ready"
     assert graph["nodes"]["task-2"]["metadata"]["expert_id"] == expert_id
+    assert graph["nodes"]["task-2"]["metadata"]["inputs"] == [checklist]
     assert graph["nodes"]["task-3"]["metadata"]["type"] == "inline"
+    assert graph["nodes"]["task-3"]["metadata"]["inputs"] == [script]
+    assert len(model.planning_prompts) == 1
     assert graph["edges"] == [
         {
             "source": "task-1", "target": "task-2", "relation": "can_feed",
@@ -189,6 +196,70 @@ async def test_expert_task_plan_uses_task_local_ports_for_expert_without_publish
             "source": "task-2", "target": "task-3", "relation": "can_feed",
             "source_output": "bilibili_shooting_script", "target_input": "bilibili_shooting_script",
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expert_task_plan_recovers_legacy_node_ids_in_input_ports(tmp_path, monkeypatch):
+    platform_outputs = {
+        "xhs-final": "xhs_final", "wechat-final": "wechat_final", "bilibili-final": "bilibili_final",
+    }
+    review_outputs = [_port("review_record", "text"), _port("final_copies", "text")]
+    source = "shared-fact-base"
+    review = "independent-review"
+    tasks = [
+        _task(source, outputs=[_port("shared_fact_base", "text")]),
+        *(_task(task, inputs=[source], outputs=[_port(output, "text")]) for task, output in platform_outputs.items()),
+        _task(review, inputs=[source, *platform_outputs], outputs=review_outputs),
+        _task("delivery-html", inputs=[review], outputs=[_port("report_html", "file")]),
+    ]
+    handoffs = [
+        *(_handoff(source, task, "shared_fact_base", source) for task in platform_outputs),
+        *(_handoff(task, review, name, task) for task, name in platform_outputs.items()),
+        *(_handoff(review, "delivery-html", port["name"], review) for port in review_outputs),
+    ]
+    service, model = _service(tmp_path, {"status": "ready", "tasks": tasks, "handoffs": handoffs}, monkeypatch)
+
+    graph = (await service.plan_expert_tasks("Draft three platform launches, review them, and package the result"))[
+        "planned_graph"
+    ]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    assert len(model.planning_prompts) == 1
+    assert len(graph["nodes"]) == 6
+    assert len(graph["edges"]) == 8
+    assert graph["nodes"]["task-5"]["metadata"]["inputs"] == [
+        _port(name, "text") for name in platform_outputs.values()
+    ]
+    assert graph["nodes"]["task-6"]["metadata"]["inputs"] == review_outputs
+    assert [edge["target_input"] for edge in graph["edges"][-2:]] == ["review_record", "final_copies"]
+
+
+@pytest.mark.asyncio
+async def test_expert_task_plan_groups_types_by_target_alias(tmp_path, monkeypatch):
+    draft = {
+        "status": "ready",
+        "tasks": [
+            _task("research", outputs=[_port("notes", "text")]),
+            _task("photograph", outputs=[_port("photo", "image")]),
+            _task("review"),
+            _task("archive", inputs=[_port("research", "text")]),
+        ],
+        "handoffs": [
+            _handoff("research", "review", "notes", "research"),
+            _handoff("photograph", "review", "photo", "Research"),
+            _handoff("research", "archive", "notes", "research"),
+        ],
+    }
+    service, _ = _service(tmp_path, draft, monkeypatch)
+
+    graph = (await service.plan_expert_tasks("Review and archive the evidence"))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["nodes"]["task-3"]["metadata"]["inputs"] == [_port("research", "unknown")]
+    assert graph["nodes"]["task-4"]["metadata"]["inputs"] == [_port("research", "text")]
+    assert [(edge["source_output"], edge["target_input"]) for edge in graph["edges"]] == [
+        ("notes", "research"), ("photo", "research"), ("notes", "research"),
     ]
 
 
@@ -217,12 +288,17 @@ async def test_expert_task_plan_uses_task_local_ports_for_expert_without_publish
         [_handoff("first", "missing")],
         "unknown task or port",
     ),
+    (
+        [_task("first", outputs=[_port()]), _task("second")],
+        [_handoff("first", "second"), {"source": "first", "target": "second", "source_output": "evidence"}],
+        "duplicate handoff",
+    ),
     ([_task("first", expert_id="removed")], [], "visible installed expert"),
 ])
 async def test_expert_task_plan_rejects_invalid_assignments(
     tasks, handoffs, reason, tmp_path, monkeypatch, expert_artifacts,
 ):
-    service, _ = _service(
+    service, model = _service(
         tmp_path, {"status": "ready", "tasks": tasks, "handoffs": handoffs}, monkeypatch, expert_artifacts,
     )
 
@@ -232,6 +308,24 @@ async def test_expert_task_plan_rejects_invalid_assignments(
     assert reason in graph["metadata"]["reason"]
     assert graph["nodes"] == {}
     assert graph["edges"] == []
+    assert len(model.planning_prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_expert_draft_reports_field_without_retry(tmp_path, monkeypatch):
+    draft = {
+        "status": "ready",
+        "tasks": [_task("research", outputs=[{"name": "evidence"}])],
+    }
+    service, model = _service(tmp_path, draft, monkeypatch)
+
+    graph = (await service.plan_expert_tasks("Research the evidence"))["planned_graph"]["graph"]
+
+    assert graph["metadata"]["status"] == "no_plan"
+    assert "tasks.0.outputs.0.type" in graph["metadata"]["reason"]
+    assert graph["nodes"] == {}
+    assert graph["edges"] == []
+    assert len(model.planning_prompts) == 1
 
 
 @pytest.mark.asyncio
@@ -262,15 +356,51 @@ async def test_expert_task_plan_accepts_unpublished_expert_handoff(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_expert_task_plan_returns_missing_inputs_without_tentative_roles(tmp_path, monkeypatch):
+async def test_expert_task_plan_preserves_tasks_with_missing_inputs(tmp_path, monkeypatch):
+    source = PlanningInput(name="facts", kind="file", value="attachment/facts.md", description="Approved facts")
     service, _ = _service(
         tmp_path,
-        {"status": "needs_input", "missing_inputs": ["source document"], "tasks": [_task("verify")]},
+        {
+            "status": "needs_input",
+            "missing_inputs": ["facts", {"name": "price", "kind": "text", "description": "Approved launch price"}],
+            "tasks": [{**_task("verify"), "external_inputs": ["facts", "price"]}],
+        },
         monkeypatch,
     )
 
-    graph = (await service.plan_expert_tasks("Verify the evidence"))["planned_graph"]["graph"]
+    engine = SymphonyGraphEngine(service)
+    graph = (await engine.plan_expert_tasks("Verify the evidence", inputs=[source]))["planned_graph"]["graph"]
 
-    assert graph["metadata"]["status"] == "needs_input"
-    assert graph["metadata"]["missing_inputs"] == ["source document"]
-    assert graph["nodes"] == {}
+    assert graph["metadata"]["status"] == "ready"
+    assert graph["metadata"]["missing_inputs"] == [
+        {"name": "price", "kind": "text", "description": "Approved launch price"},
+    ]
+    assert graph["nodes"]["task-1"]["metadata"]["external_inputs"] == ["facts", "price"]
+    assert source.value not in json.dumps(graph)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [True, False])
+async def test_empty_expert_draft_with_missing_inputs_gets_one_conditional_attempt(tmp_path, monkeypatch, recover):
+    def draft(request, system_prompt):
+        assert request["inputs"] == []
+        assert 'Treat "may consult"' in system_prompt
+        if recover and "The previous draft only reported missing inputs." in system_prompt:
+            return {
+                "status": "ready",
+                "missing_inputs": [{"name": "facts", "kind": "file", "description": "Product fact sheet"}],
+                "tasks": [{**_task("read facts"), "external_inputs": ["facts"]}],
+            }
+        return {"status": "needs_input", "missing_inputs": ["facts"]}
+
+    service, model = _service(tmp_path, draft, monkeypatch)
+    graph = (await service.plan_expert_tasks("Plan a launch. You may consult platform rules."))["planned_graph"]["graph"]
+
+    assert len(model.planning_prompts) == 2
+    assert graph["metadata"]["status"] == ("ready" if recover else "no_plan")
+    if recover:
+        assert graph["nodes"]["task-1"]["metadata"]["external_inputs"] == ["facts"]
+        assert [item["name"] for item in graph["metadata"]["missing_inputs"]] == ["facts"]
+    else:
+        assert graph["nodes"] == {}
+        assert graph["metadata"]["reason"] == "The model did not produce a valid conditional task graph."
