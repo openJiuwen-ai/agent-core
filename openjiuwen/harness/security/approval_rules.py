@@ -14,8 +14,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from .models import PermissionLevel
-
 logger = logging.getLogger(__name__)
 
 _SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
@@ -43,20 +41,6 @@ class _ApprovalOverrideSignature:
     pattern: str
     existing_pattern: str | None
     existing_action: str
-
-
-def _evaluate_current_permission(
-    permissions: PermissionsSection | dict[str, Any],
-    tool_name: str,
-    tool_args: dict[str, Any],
-) -> PermissionLevel:
-    """Evaluate the current decision through core's synchronous compatibility path.
-
-    The allow-always merge only proceeds when the current decision is ASK.
-    """
-    from .tiered_policy import evaluate_tiered_policy
-
-    return evaluate_tiered_policy(permissions, tool_name, tool_args)[0]
 
 
 def _ensure_single_allow_override(
@@ -129,7 +113,7 @@ def _persist_tiered_tool_allow(
     permissions: PermissionsSection,
     tool_name: str,
 ) -> bool:
-    """Persist whole-tool allow for tools without safe parameter suggestions."""
+    """Persist whole-tool allow for non-shell tools."""
     if not tool_name:
         return False
     tools = permissions.get("tools")
@@ -315,18 +299,10 @@ def merge_permission_allow_rule_into_permissions(
     override (exact match). Non-shell tools raise ``tools.<name>`` to allow.
     Path details stay in the rail's ``file_guard`` path, not here.
 
-    ``applied`` is false when nothing changed (e.g. the current decision is not
-    ASK, or the shell command is empty).
+    ``applied`` is false when nothing changed (e.g. empty shell command, or
+    the tool is already allow).
     """
     perms = cast(PermissionsSection, deepcopy(permissions))
-    current_permission = _evaluate_current_permission(perms, tool_name, tool_args)
-    if current_permission != PermissionLevel.ASK:
-        logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
-            tool_name,
-            current_permission.value,
-        )
-        return cast(PermissionsSection, perms), False
 
     if tool_name in _SHELL_APPROVAL_TOOLS:
         command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()

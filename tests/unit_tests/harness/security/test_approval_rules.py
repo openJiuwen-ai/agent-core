@@ -212,7 +212,7 @@ def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
     assert _evaluate(merged, "cron_create_job", tool_args) == PermissionLevel.ALLOW
 
 
-def test_merge_skips_when_current_permission_is_not_ask() -> None:
+def test_merge_skips_when_tool_already_allow() -> None:
     cfg = {"enabled": True, "tools": {"read_file": "allow"}}
     merged, applied = merge_permission_allow_rule_into_permissions(cfg, "read_file", {"file_path": "notes.txt"})
     assert applied is False
