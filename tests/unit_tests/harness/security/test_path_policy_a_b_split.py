@@ -14,52 +14,10 @@ from openjiuwen.harness.security.approval_rules import (
     merge_permission_allow_rule_into_permissions,
 )
 from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
 
 
 def _engine(cfg: dict, workspace_root: Path) -> PermissionEngine:
     return PermissionEngine({**cfg, "runtime": {"workspace_root": str(workspace_root)}})
-
-
-def test_a_ignores_path_approval_override() -> None:
-    cfg = {
-        "enabled": True,
-        "tools": {"write_file": "ask"},
-        "approval_overrides": [
-            {
-                "id": "user_allow_path",
-                "tools": ["write_file"],
-                "match_type": "path",
-                "pattern": "C:/tmp/x.txt",
-                "action": "allow",
-            }
-        ],
-    }
-    level, matched = evaluate_tiered_policy(
-        cfg, "write_file", {"file_path": "C:/tmp/x.txt"},
-    )
-    assert level == PermissionLevel.ASK
-    assert "approval_overrides" not in matched
-
-
-def test_a_ignores_path_rules() -> None:
-    cfg = {
-        "enabled": True,
-        "tools": {"read_file": "allow"},
-        "rules": [
-            {
-                "id": "path_ask_env",
-                "tools": ["read_file"],
-                "pattern": "**/.env*",
-                "severity": "HIGH",
-            }
-        ],
-    }
-    level, matched = evaluate_tiered_policy(
-        cfg, "read_file", {"file_path": "/ws/.env.local"},
-    )
-    assert level == PermissionLevel.ALLOW
-    assert "path_ask_env" not in matched
 
 
 @pytest.mark.asyncio

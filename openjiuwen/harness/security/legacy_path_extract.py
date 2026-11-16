@@ -2,14 +2,10 @@
 
 """Frozen compatibility port of core's ``harness/security/files/extract.py``.
 
-The legacy tiered policy and its path extraction are tightly coupled: the native
-extractor relies on ``tiered_compat._PATH_TOOLS`` /
-``tiered_compat._iter_path_strings`` and on its own shell normalization.
-``agent_shield``'s ``fileguard.path_extract`` is a *different* implementation
-(different shell normalization, literal handling and outbound rules), so this
-module preserves the core implementation verbatim instead of forwarding to it.
-
-Only import paths were rewritten; behaviour is unchanged.
+Path-tool name sets come from :mod:`.tool_catalog`.  ``agent_shield``'s
+``fileguard.path_extract`` is a *different* implementation (different shell
+normalization, literal handling and outbound rules), so this module preserves
+the core implementation instead of forwarding to it.
 """
 
 from __future__ import annotations
@@ -30,7 +26,7 @@ from agent_shield.tool_permission.fileguard.file_tool_specs import (
 from agent_shield.tool_permission.fileguard.unix_bash_literal import is_script_interpreter, parse_literal_shell
 from agent_shield.tool_permission.toolguard.shell_ast import parse_shell_for_permission
 
-from .tiered_compat import _PATH_TOOLS, _iter_path_strings
+from .tool_catalog import _PATH_TOOLS, _iter_path_strings
 
 logger = logging.getLogger(__name__)
 

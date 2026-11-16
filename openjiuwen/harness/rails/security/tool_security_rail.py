@@ -62,9 +62,9 @@ def compute_auto_confirm_key(tool_call: Optional[ToolCall]) -> str:
     """Module-level auto-confirm key computation, shared by the rail and the
     tool-interrupt handler (batch-scoped allow keys).
 
-    Key semantics: bare tool name; shell-like tools use ``tool:subcommand``
-    when the command is simple and single-purpose, else ``""`` (not
-    rememberable). Identical to the rail's historical ``_get_auto_confirm_key``
+    Key semantics: bare tool name; shell-like tools use ``tool:leaf`` when
+    shield split is ``ok`` with exactly one leaf, else ``""`` (not
+    rememberable). Identical to the rail's ``_get_auto_confirm_key``
     behavior — extracted so resume-time batch computation cannot drift from
     rail-time matching.
     """
@@ -382,14 +382,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     @staticmethod
     def build_shell_auto_confirm_key(tool_name: str, command: str) -> str:
+        """Session auto-confirm key for shell tools: single leaf only.
+
+        Uses shield ``parse_shell_for_permission``; remember when split is
+        ``ok`` and there is exactly one non-empty leaf.
+        """
         text = (command or "").strip()
         if not text:
             return ""
 
         shell_ast_result = parse_shell_for_permission(text)
-        if shell_ast_result.kind != "simple":
-            return ""
-        if shell_ast_result.flags.has_risky_structure():
+        if shell_ast_result.kind != "ok":
             return ""
         if len(shell_ast_result.subcommands) != 1:
             return ""

@@ -13,9 +13,6 @@ from agent_shield.tool_permission.toolguard.shell_ast import (
     ShellAstParseResult as ShellAstParseResult,
 )
 from agent_shield.tool_permission.toolguard.shell_ast import (
-    ShellStructureFlags as ShellStructureFlags,
-)
-from agent_shield.tool_permission.toolguard.shell_ast import (
     ShellSubcommand as ShellSubcommand,
 )
 from agent_shield.tool_permission.toolguard.shell_ast import (

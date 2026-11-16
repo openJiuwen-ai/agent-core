@@ -8,7 +8,7 @@
 注意：security 仓的 ``fileguard.path_extract`` 与本实现语义不等价（shell 规范化 /
 literal 处理 / outbound 规则不同），**不可**用其替代本兼容实现。
 
-本模块与 ``tiered_policy`` 共用 core 冻结版的路径工具集合，因此二者需要一起维护。
+路径工具集合见 :mod:`openjiuwen.harness.security.tool_catalog`。
 """
 
 from __future__ import annotations

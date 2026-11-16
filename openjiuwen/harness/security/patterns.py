@@ -273,9 +273,7 @@ def persist_cli_trusted_directory(
         return {"ok": False, "error": "path resolves to empty"}
 
     try:
-        from openjiuwen.harness.security.tiered_policy import (
-            _SHELL_TOOLS,
-        )
+        from openjiuwen.harness.security.tool_catalog import _SHELL_TOOLS
 
         cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
         if cfg_path is None:
