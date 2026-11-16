@@ -33,10 +33,6 @@ from openjiuwen.harness.security.approval_rules import (
     merge_permission_allow_rule_into_permissions as merge_permission_allow_rule_into_permissions,
 )
 from openjiuwen.harness.security.models import PermissionsSection
-from openjiuwen.harness.security.suggestions import PermissionSuggestion as PermissionSuggestion
-from openjiuwen.harness.security.suggestions import (
-    build_permission_suggestions as build_permission_suggestions,
-)
 
 # Restrictive character class: Unicode letters, digits, underscores (including
 # CJK) plus common argument/path characters; shell metacharacters are excluded.
@@ -277,9 +273,7 @@ def persist_cli_trusted_directory(
         return {"ok": False, "error": "path resolves to empty"}
 
     try:
-        from openjiuwen.harness.security.tiered_policy import (
-            _SHELL_TOOLS,
-        )
+        from openjiuwen.harness.security.tool_catalog import _SHELL_TOOLS
 
         cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
         if cfg_path is None:
