@@ -29,15 +29,20 @@
 不含 content — 需要详情请用 action=get 查看单个任务。
 
 ### get
-单个任务完整详情：含 content, summary / note（完成摘要与详情）, blocked_by（前置依赖）, blocks（下游依赖）。
+单个任务完整详情：含 content, assignee, summary / note（完成摘要与详情）, blocked_by（前置依赖）, blocks（下游依赖）。
 
 ### note
 单个任务的完成摘要（summary）与完整完成详情（note），不截断。
+
+### assignee
+任务有负责人时两档都会给出，格式为 `成员名[成员状态]`（list 档写作 `assignee=dev-1[busy]`）。成员名即 send_message 的收件人。
+成员状态只在任务未结束时给出，表示这名成员此刻的状态：`busy` 正在执行，`ready` / `paused` 空闲，`error` 已出错，`unstarted` / `starting` / `restarting` 尚未就绪，`stopped` / `shutdown_requested` / `shut_down` 已停止或已退出。
 
 ## Tips
 
 - list 不返回 content，token 开销低。需要详情时再 get 单个任务。
 - blocked_by 非空的任务不可认领 — 先完成其前置任务。
+- 任务长时间没有进展时，先看它的 assignee：成员 `busy` 说明还在做，不必打扰；成员空闲或 `error` 才需要你用 send_message 联系该成员，或改派任务。
 - 优先处理 ID 序号靠前的任务，前序任务通常为后续任务建立上下文。
 
 ## 成员工作流

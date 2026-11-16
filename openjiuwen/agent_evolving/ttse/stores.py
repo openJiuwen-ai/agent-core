@@ -420,6 +420,7 @@ class TTSERecordStore:
         }
 
     async def save(self) -> None:
+        """Persist the bank atomically, propagating filesystem failures."""
         async with self._persist_lock:
             self._cancel_inject_timer()
             payload = self._bank_snapshot()
@@ -486,13 +487,15 @@ class TTSERecordStore:
             self._inject_unsaved_hits = 0
             self._last_persist_mono = time.monotonic()
         except (OSError, TypeError, ValueError) as exc:
-            # json.dump raises TypeError/ValueError for non-JSON values; persist
-            # is best-effort so induction/dream must not crash on a bad record.
+            # Filesystem failures must not acknowledge an uncommitted dream.
+            # Keep the existing best-effort policy for non-JSON records.
             logger.warning("[TTSERail] bank save failed at %s: %s", path, exc)
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+            if isinstance(exc, OSError):
+                raise
 
     def _capture_inject_clocks(self) -> Dict[Tuple[str, str], Tuple[Any, int]]:
         """Map ``(rtype, normalized text)`` to ``(last_injected_at, inject_hits)``."""

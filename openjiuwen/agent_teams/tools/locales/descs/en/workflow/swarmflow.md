@@ -3,7 +3,7 @@ Run a swarmflow orchestration script (a multi-agent workflow) that orchestrates 
 ## When to call / when not to
 This tool's presence means `enable_swarmflow` is on. Judge top-down by priority — **stop at the first match**:
 
-1. **User names `swarmflow` → force this tool**: however trivial the task, do not fall back to a direct answer or `build_team`. Sole exception: the request plainly cannot be done as a workflow.
+1. **User names `swarmflow` → orchestrate with this tool first**: however trivial the task, do not fall back to a direct answer, unless the request plainly cannot be done as a workflow. To use a certain expert inside the orchestration, use `agent_template`; when the user wants experts / members to **use swarmflow themselves**, take `build_team` so they become real teammates and call this tool on their own; the two can also be mixed. Follow the user's specification; when none is given, judge by the task's complexity and fit yourself.
 2. **Orchestration-intent words → use it directly**: `workflow` / orchestration / fan-out / multi-agent / thorough audit — use this tool unless the request plainly cannot be done as a workflow.
 3. **Trivial one-step request → answer directly**: a single agent can answer in one step and there are no team / multi-member / decomposition semantics (a one-line factual question, a one-line code edit, a single lookup) — orchestration's value is decomposition / parallelism / verification, not wrapping trivia in a workflow.
 4. **Clear result / deliverable → `swarmflow`**: document / report / plan / code / review feedback / research conclusion, etc. — choose this tool by deliverable intent even with no keywords at all. "Simple / single-round / no teammate-to-teammate talk" is no reason to fall back to `build_team`; counting off / relay tasks (**fixed participant count + sequential execution + fixed end condition**) or "create an N-person team" carry multi-member semantics and also go to `swarmflow` — don't let the word "team" pull you back.
@@ -87,7 +87,7 @@ async def run(args):
     - `isolation='worktree'`: run the worker in a fresh git worktree, **EXPENSIVE** (~200-500ms setup + disk per worker), use **ONLY** when workers mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. **Cache-hit replay does not recreate the worktree** — a resume/relaunch hit reuses the journal result and skips worker execution, so files the worker created inside its worktree will not reappear; deliver worker output via the return value (text/schema), never assume worktree files survive a replay. **Same-run_id resume reuses the worktree**: an interrupted `isolation` worker resumed after a pause continues in the very worktree it left behind (including its unfinished changes); adding/removing `isolation` on an already-cached call re-runs that call.
     - `agent_type`: hand this node to a **third-party CLI agent** (`'claude'` / `'codex'`); accepted by both `agent()` and `agent_session()`. The value must be a CLI backend the engine supports **and** be on this team's third-party agent allowlist, otherwise the node fails outright (the error lists both sets). With `schema` it uses "prompt constraint + JSON parse": a CLI that returns no valid JSON counts as not submitted (`None` after retries). Model options follow the `model` / `builtin_model` / `effort` rules above (pool endpoint or the CLI's own login — **no fallback**); third-party turns are billed against the budget at turn end (worst case one turn of overspend). `agent_session` memory is per run: resuming the same run recovers context, a fresh run starts empty.
     - `agent_template`: delegate this node to **a member of the AgentGroup bound to the current session** (bare member name, e.g. `'clip'`; no group prefix). The worker runs with that member's persona, capability snapshot, and access gates, and no longer inherits the teammate's general tools; accepted by both `agent()` and `agent_session()`; the session locks the member on the first real turn — to switch, use `fork()`. A name not in the expert table, `'leader'` (the Team Leader is not a worker), a name with `/`, simultaneous use with `agent_type`, or a member with an external runtime → fails before launch and lists the available member names. Omitting this key leaves all existing behaviour unchanged (a generic worker).
-- `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` — run one **multi-reviewer acceptance round** on a deliverable and return a structured `VerifyResult` (`{verdict: "pass"|"fail"|None, votes, feedback, passed}`). Each reviewer is a parallel structured `agent()`: `verdict`-kind votes pass/fail (one-vote veto), `score`-kind votes 0–1 (the average must reach `threshold`). A reviewer that did not vote → `verdict=None` (undecided); the script decides whether to retry or give up. **Single-shot, no auto-rework** — return `feedback` so the script can have the executor redo the deliverable and `verify()` again. **Recommended: build reviewers with the business helper `build_reviewers(deliverable, specs, ...)`** from a `type` (`verifier` / `inspector` / `challenger`) plus the deliverable (inline text or file paths) — fewer tokens, consistent prompts, automatic type→kind mapping; only construct `Reviewer{kind, prompt, label, options}` directly for a fully custom prompt (see "Verify (verify)").
+- `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` — run one **multi-reviewer acceptance round** on a deliverable and return a structured `VerifyResult` (`{verdict: "pass"|"fail"|None, votes, feedback, passed}`). Each reviewer is a parallel structured `agent()`: `verdict`-kind votes pass/fail (one-vote veto), `score`-kind votes 0–1 (the average must reach `threshold`). A reviewer that did not vote → `verdict=None` (undecided); the script decides whether to retry or give up. **Single-shot, no auto-rework** — return `feedback` so the script can have the executor redo the deliverable and `verify()` again. **Recommended: build reviewers with the business helper `build_reviewers(deliverable, specs, ...)`** from a `type` (`verifier` / `inspector` / `challenger`) plus the deliverable (inline text or file paths) — fewer tokens, consistent prompts, automatic type→kind mapping; only construct `Reviewer{kind, prompt, label, options}` directly for a fully custom prompt (see "Verify (verify)"). Returns `VerifyResult`; `votes` is a list of `VerifyVote` (fields and read pattern in that section's example).
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` — a **stateful** multi-turn agent that remembers across turns; the second turn need not restate the first. `notify=True` pushes one-way, returns `None`. `options.model` takes effect **only on the session's first turn** (resolved and fixed when the avatar opens); passing a different `model` mid-session raises an error — `fork()` a new session to switch models.
 - `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` — derive an **independent branch** from an `agent_session` (`fork_mode` is one of five): `full` inherits everything; `before`/`after` keep the turns before / from the N-th round on; `keep_before_compact_after`/`keep_after_compact_before` keep one side and summarise the other. `keep_rounds` is in **rounds** (each `send()` is one round): **required for every mode but `full`** (omitting it raises — no truncation without a split point); a value beyond the parent's actual round count degrades to full-context with a warning, not an error. The parent's context is frozen at the fork call — the two lines are fully independent afterwards; a child can keep `send`ing and can `fork` again (chained). `human_session` does not support `fork`.
   - **Chained-fork rule**: **do not `fork` a forked child that has not sent a message yet** — it degrades to a mirror fallback (ToolMessage lost). Every session you `fork` must have `send`t at least once; to derive from a parent's earlier state, use that parent's `fork_mode` + `keep_rounds` (e.g. `before`/`after`) instead of forking an unsent child and re-forking it.
@@ -173,14 +173,20 @@ When you need quality gating on your own deliverable, use `verify()` instead of 
 
 Composition baseline: **light gate** = 1 `verifier`; **key deliverable** = `verifier` + `inspector` (multiple inspectors can split dimensions); **open / high-risk design** = `verifier` + `challenger` (add `inspector` if needed). A script may call `verify()` repeatedly with different compositions for deliverables at different stages.
 
-**Per-reviewer model**: every reviewer role is an independent agent and can pin its model via the `"options"` key in its spec (overriding the team teammate model that reviewer inherits, and the `verify()`-level `options`):
+**Per-reviewer model and reading the result**: every reviewer role is an independent agent and can pin its model via the `"options"` key in its spec (overriding the team teammate model that reviewer inherits, and the `verify()`-level `options`). **`build_reviewers` must be imported explicitly** (`verify` / `phase` and the other swarmflow primitives are pre-bound by the loader, so their imports may be omitted):
 
 ```python
+from swarmflow import verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
+
 reviewers = build_reviewers(deliverable, [
     {"type": "verifier",  "options": {"model": "flash-mini"}},
     {"type": "inspector", "options": {"model": "pro"}},
 ])
 r = await verify(reviewers, threshold=0.85)
+# r: VerifyResult{verdict: "pass"|"fail"|None, passed: bool, votes: list[VerifyVote], feedback: str}
+for v in r.votes:   # VerifyVote{kind, decision, score, feedback, role, label}; no `name`
+    log(f"{v.label} role={v.role} decision={v.decision} score={v.score} feedback={v.feedback[:80]}")
 ```
 
 **Two gates**: `verifier` is the **minimum bar** — it only asks "are the acceptance criteria met" (pass/fail). `inspector` is the **quality bar** — it scores each dimension and fails unless the average reaches 0.85, catching deliverables that are **functionally complete but mediocre** (e.g. code that compiles but is unmaintainable). For **key final / downstream-consumed deliverables**, `verifier` alone is not enough — add `inspector` to enforce quality; for one-off, light, disposable intermediate artifacts, `verifier` alone suffices.
@@ -204,8 +210,8 @@ These patterns are **not exhaustive** — compose novel harnesses when the task 
 **Adversarial verify (pipeline by default)** — review several dimensions in parallel ('bugs' / 'perf'); the moment a dimension's review completes, run a `verify()` one-vote-veto round over its findings ('bugs' verifies while 'perf' is still reviewing, no wasted wall-clock). **Build reviewers with `build_reviewers` (recommended)**: a single `challenger` is the adversarial form (any reviewer voting fail drops the finding); for a multi-perspective pass, put several `challenger` specs with different `instruction`s (see the "Multi-perspective review + loop-until-dry" example below):
 
 ```python
-# from swarmflow import agent, parallel, compact, verify
-# from openjiuwen.agent_teams.workflow.review import build_reviewers
+from swarmflow import agent, parallel, compact, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
 
 async def run(args):
     dims = [{"key": "bugs", "prompt": "find bugs"}, {"key": "perf", "prompt": "find perf issues"}]
@@ -314,8 +320,8 @@ async def run(args):
 Quality bar (inspector) — for **key final / downstream-consumed** deliverables, `verifier` (the minimum bar) alone is not enough; add `inspector` to score each dimension and pass only when the average reaches 0.85. Per-dimension scores are in `r.votes[i].score`, the reasons in `r.votes[i].feedback`:
 
 ```python
-# from swarmflow import verify
-# from openjiuwen.agent_teams.workflow.review import build_reviewers
+from swarmflow import verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
 
 async def run(args):
     r = await verify(build_reviewers(

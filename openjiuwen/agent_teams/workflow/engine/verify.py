@@ -74,6 +74,8 @@ class VerifyVote:
     feedback: str = ""  # reason / scoring report / threat list
     #: Display-only business role carried from the reviewer; judgement ignores it.
     role: str | None = None
+    #: Display-only reviewer label carried from ``Reviewer.label``; judgement ignores it.
+    label: str | None = None
 
 
 @dataclass
