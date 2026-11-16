@@ -895,6 +895,47 @@ def test_generic_openai_profile_infers_qianfan_from_api_base_for_glm() -> None:
     assert plan.extra_body == {"thinking": {"type": "disabled"}}
 
 
+def test_zhipu_glm53_flash_exposes_only_intensity_and_never_disables_thinking() -> None:
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="openai",
+        api_key="sk-test",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+    )
+
+    capability = get_reasoning_capability(
+        provider="OpenAI",
+        model="GLM-5.3-Flash",
+        protocol="openai",
+        api_base=client_config.api_base,
+        endpoint_profile=client_config.endpoint_profile,
+    )
+    plan = resolve_reasoning_plan(
+        client_config,
+        ModelRequestConfig(
+            model="GLM-5.3-Flash",
+            reasoning=ReasoningConfig(mode="enabled", effort="low"),
+        ),
+    )
+    disabled = resolve_reasoning_plan(
+        client_config,
+        ModelRequestConfig(
+            model="GLM-5.3-Flash",
+            reasoning=ReasoningConfig(mode="disabled"),
+        ),
+    )
+
+    assert capability.options == ("low", "high", "max")
+    assert capability.recommended == "max"
+    assert plan.sdk_params == {}
+    assert plan.extra_body == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    assert disabled.sdk_params == {}
+    assert disabled.extra_body == {}
+
+
 def test_volcengine_deepseek_model_uses_deepseek_wire_shape_from_api_base() -> None:
     plan = resolve_reasoning_plan(
         ModelClientConfig(

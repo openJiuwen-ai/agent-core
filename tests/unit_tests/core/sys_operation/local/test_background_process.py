@@ -65,3 +65,23 @@ async def test_background_does_not_wait_for_descendant_to_close_stderr():
     assert time.monotonic() - started < 0.8
     assert error == "process exited early with code 11"
     await asyncio.sleep(1.2)
+
+
+@pytest.mark.asyncio
+async def test_background_flushes_exit_status_after_grace(monkeypatch):
+    class ProcessWithQueuedExitStatus:
+        pid = 123
+        stderr = None
+        returncode = None
+
+    process = ProcessWithQueuedExitStatus()
+
+    async def flush_exit_status(delay):
+        assert delay == 0
+        process.returncode = 11
+
+    monkeypatch.setattr(asyncio, "sleep", flush_exit_status)
+
+    _, error = await AsyncProcessHandler(process).background(grace=0)
+
+    assert error == "process exited early with code 11"

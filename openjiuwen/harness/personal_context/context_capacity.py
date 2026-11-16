@@ -54,6 +54,7 @@ _COMMIT_TIMEOUT_SECONDS = 1.0
 COMMIT_LOCK_SECONDS = 0.1
 _WORKER_STARTUP_SECONDS = 15.0
 _MIN_MAINTENANCE_SECONDS = 0.01
+_DEFAULT_MAINTENANCE_SECONDS = 5.0
 
 
 def _forget_worker(home: Path, worker: dict) -> bool:
@@ -481,7 +482,7 @@ def maintain_capacity(
     _cleanup_capacity_temporary(home)
     root = home / "workspace" / "context"
     commit_candidate = commit_candidate or _commit_candidate
-    deadline = deadline if deadline is not None else time.monotonic() + 2.0
+    deadline = deadline if deadline is not None else time.monotonic() + _DEFAULT_MAINTENANCE_SECONDS
     cancelled = cancelled or (lambda: False)
 
     def expired():
@@ -590,10 +591,16 @@ def maintain_capacity(
             outcome = commit_candidate(manifest, deadline=deadline, cancelled=cancelled)
             actually_removed = set(outcome.get("removed", []))
             if outcome["status"] != "succeeded":
-                if outcome["status"] == "failed" or actually_removed:
-                    return {"status": "failed", "reason": outcome.get("reason", "commit_incomplete")}
-                return {**result, "status": outcome["status"], "reason": outcome.get("reason", "time_budget"),
-                        "removed_count": len(actually_removed & set(removed))}
+                result.update(
+                    status=outcome["status"],
+                    reason=outcome.get("reason", "commit_incomplete"),
+                    removed_count=len(actually_removed & set(removed)),
+                    oversized_count=sum(
+                        relative in actually_removed and reason == "page_exceeds_capacity"
+                        for relative, reason in removed.items()
+                    ),
+                )
+                return result
             try:
                 stamp = time.time()
                 for relative, reason in removed.items():

@@ -429,6 +429,21 @@ def test_oversized_removal_still_reclaims_to_sixty_percent(tmp_path):
     assert recent.exists() and not old.exists() and not huge.exists()
 
 
+def test_failed_commit_preserves_capacity_result_shape(tmp_path):
+    page = _page(tmp_path, "page.md", "# Page\n" + "x" * 20_000)
+
+    def fail_commit(*_args, **_kwargs):
+        return {"status": "failed", "reason": "commit_failed", "removed": []}
+
+    result = maintain_capacity(tmp_path, limit_bytes=1000, commit_candidate=fail_commit)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "commit_failed"
+    assert result["removed_count"] == result["oversized_count"] == 0
+    assert result["after_bytes"] == result["before_bytes"]
+    assert page.exists()
+
+
 def test_navigation_above_reclaim_target_does_not_clear_bodies(tmp_path):
     page = _page(tmp_path, "page.md", "# Body\n" + "x" * 5000)
     (tmp_path / "workspace/context/description.md").write_text("# Root\n" + "n" * 7000, encoding="utf-8")
