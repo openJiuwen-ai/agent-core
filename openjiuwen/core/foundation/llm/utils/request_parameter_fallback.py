@@ -91,7 +91,7 @@ class RequestParameterFallback:
             except Exception as exc:
                 if self._rejects_temperature(exc):
                     if self._exception_status_code(exc) != 400 or not self._has_temperature(request_params):
-                        raise
+                        raise exc
                     rejected_temperature = self._temperature_cache_key(request_params)
                     request_params = self._without_temperature(request_params)
                     rejected_option = "temperature"
@@ -101,7 +101,7 @@ class RequestParameterFallback:
                         self._models_rejecting_disabled_thinking.add(model_key)
                     rejected_option = "disabled thinking"
                 else:
-                    raise
+                    raise exc
                 llm_logger.warning(
                     f"{self._api_label} model rejected {rejected_option}; retrying with model defaults.",
                     event_type=LogEventType.LLM_CALL_ERROR,
