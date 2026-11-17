@@ -20,13 +20,18 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
+from sqlalchemy.sql import quoted_name
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, DatabaseType
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
+    TEAM_MESSAGE_LONG_TEXT_SPECS,
+    TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
+    TEAM_STATIC_LONG_TEXT_SPECS,
     TEAM_STATIC_TABLES_TO_CLEAR,
+    TEAM_TASK_LONG_TEXT_SPECS,
     _get_message_model,
     _get_message_read_status_model,
     _get_review_vote_model,
@@ -274,6 +279,108 @@ async def retry_on_transient(
             await asyncio.sleep(delay)
 
 
+def _quote_ident(sync_conn, name: str) -> str:
+    """Quote an identifier with the connection's SQL dialect rules.
+
+    SQLite / PostgreSQL use double quotes; MySQL / MariaDB use backticks.
+    Always quote via ``quoted_name(..., quote=True)`` so safe names still get
+    dialect markers — MySQL rejects hand-written ``"..."`` (error 1064) when
+    ANSI_QUOTES is off.
+    """
+    return sync_conn.dialect.identifier_preparer.quote(quoted_name(name, quote=True))
+
+
+def _is_mysql_family(sync_conn) -> bool:
+    """True for MySQL and MariaDB dialects (same DDL quirks for indexes/text)."""
+    return sync_conn.dialect.name in ("mysql", "mariadb")
+
+
+def _dialect_long_text_ddl(sync_conn) -> str:
+    """DDL type for unbounded text on the current dialect."""
+    if _is_mysql_family(sync_conn):
+        return "LONGTEXT"
+    return "TEXT"
+
+
+def _column_is_bounded_string(col_type) -> bool:
+    """True when the live column is a length-capped string (e.g. VARCHAR(255))."""
+    return getattr(col_type, "length", None) is not None
+
+
+def _widen_text_columns(
+    sync_conn,
+    table_name: str,
+    columns: dict,
+    specs: tuple[tuple[str, bool], ...],
+) -> None:
+    """MODIFY length-capped string columns to LONGTEXT/TEXT on MySQL/MariaDB.
+
+    SQLite affinity already accepts long values; no ALTER is required there.
+    ``specs`` is ``(column_name, nullable)`` pairs matching the model.
+    """
+    if not _is_mysql_family(sync_conn):
+        return
+    q_table = _quote_ident(sync_conn, table_name)
+    text_ddl = _dialect_long_text_ddl(sync_conn)
+    for column_name, nullable in specs:
+        col = columns.get(column_name)
+        if col is None or not _column_is_bounded_string(col.get("type")):
+            continue
+        q_col = _quote_ident(sync_conn, column_name)
+        null_sql = "NULL" if nullable else "NOT NULL"
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {q_table} MODIFY {q_col} {text_ddl} {null_sql}"
+        )
+        team_logger.info(
+            "Migrated %s: widened %s to %s",
+            table_name,
+            column_name,
+            text_ddl,
+        )
+
+
+def _drop_index_if_present(
+    sync_conn,
+    table_name: str,
+    index_name: str,
+    index_names: set[str],
+) -> bool:
+    """Drop ``index_name`` when it appears in ``index_names``.
+
+    MySQL/MariaDB require ``DROP INDEX ... ON table``; SQLite / PostgreSQL
+    accept a bare ``DROP INDEX IF EXISTS``. Returns whether a DROP was issued.
+    """
+    if index_name not in index_names:
+        return False
+    q_idx = _quote_ident(sync_conn, index_name)
+    if _is_mysql_family(sync_conn):
+        q_table = _quote_ident(sync_conn, table_name)
+        sync_conn.exec_driver_sql(f"DROP INDEX {q_idx} ON {q_table}")
+    else:
+        sync_conn.exec_driver_sql(f"DROP INDEX IF EXISTS {q_idx}")
+    return True
+
+
+def _create_index_if_absent(
+    sync_conn,
+    table_name: str,
+    index_name: str,
+    columns_sql: str,
+    index_names: set[str],
+) -> bool:
+    """Create ``index_name`` when it is missing from ``index_names``.
+
+    Avoids ``CREATE INDEX IF NOT EXISTS``, which MySQL does not support.
+    Returns whether a CREATE was issued.
+    """
+    if index_name in index_names:
+        return False
+    q_idx = _quote_ident(sync_conn, index_name)
+    q_table = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"CREATE INDEX {q_idx} ON {q_table} ({columns_sql})")
+    return True
+
+
 def _get_table_names(sync_conn) -> list[str]:
     """Return all table names currently present in the database."""
     return list(inspect(sync_conn).get_table_names())
@@ -291,15 +398,14 @@ def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
 
 def _drop_table(sync_conn, table_name: str) -> None:
     """Drop one table with raw SQL to avoid reflection-order issues."""
-    quoted_name = table_name.replace('"', '""')
-    sync_conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{quoted_name}"')
+    quoted_name = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DROP TABLE IF EXISTS {quoted_name}")
 
 
 def _clear_table(sync_conn, table_name: str) -> None:
     """Delete all rows from one reflected table."""
-    quoted_name = table_name.replace('"', '""')
-    sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
-
+    quoted_name = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DELETE FROM {quoted_name}")
 
 def _create_static_tables(sync_conn) -> None:
     """Create the static team-scoped schema, and only that.
@@ -338,7 +444,11 @@ def _ensure_team_member_role_column(sync_conn) -> None:
     # ``schema.team`` import (which would close a circular dependency).
     # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever changes.
     default_role = "teammate"
-    sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
+    q_table = _quote_ident(sync_conn, "team_member")
+    q_col = _quote_ident(sync_conn, "role")
+    sync_conn.exec_driver_sql(
+        f"ALTER TABLE {q_table} ADD COLUMN {q_col} TEXT NOT NULL DEFAULT '{default_role}'"
+    )
     team_logger.info(
         "Migrated legacy team_member table: added role column with default %s",
         default_role,
@@ -351,8 +461,11 @@ def _ensure_team_member_options_column(sync_conn) -> None:
     if "team_member" not in inspector.get_table_names():
         return
     columns = {col["name"] for col in inspector.get_columns("team_member")}
+    q_table = _quote_ident(sync_conn, "team_member")
     if "options" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE team_member ADD COLUMN options TEXT")
+        q_col = _quote_ident(sync_conn, "options")
+        text_ddl = _dialect_long_text_ddl(sync_conn)
+        sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN {q_col} {text_ddl}")
         team_logger.info("Migrated legacy team_member table: added options column")
 
     if "model_ref_json" not in columns:
@@ -375,7 +488,8 @@ def _ensure_team_member_options_column(sync_conn) -> None:
             (merged, row["member_name"], row["team_name"]),
         )
 
-    sync_conn.exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")
+    q_legacy = _quote_ident(sync_conn, "model_ref_json")
+    sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} DROP COLUMN {q_legacy}")
     team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
 
 
@@ -390,14 +504,38 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
     if "team_info" not in inspector.get_table_names():
         return
     columns = {col["name"] for col in inspector.get_columns("team_info")}
+    q_table = _quote_ident(sync_conn, "team_info")
     if "dispatch_mode" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'")
+        q_col = _quote_ident(sync_conn, "dispatch_mode")
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {q_table} ADD COLUMN {q_col} TEXT NOT NULL DEFAULT 'autonomous'"
+        )
         team_logger.info("Migrated legacy team_info table: added dispatch_mode column")
     if "enable_task_verification" not in columns:
+        q_col = _quote_ident(sync_conn, "enable_task_verification")
         sync_conn.exec_driver_sql(
-            "ALTER TABLE team_info ADD COLUMN enable_task_verification BOOLEAN NOT NULL DEFAULT 0"
+            f"ALTER TABLE {q_table} ADD COLUMN {q_col} BOOLEAN NOT NULL DEFAULT 0"
         )
         team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
+
+
+def _ensure_team_static_long_text_columns(sync_conn) -> None:
+    """Widen static-table body columns that used to be VARCHAR(255).
+
+    Specs live in ``TEAM_STATIC_LONG_TEXT_SPECS`` (models.py). Same widening
+    path as per-session task / message long fields.
+    """
+    inspector = inspect(sync_conn)
+    table_names = set(inspector.get_table_names())
+    for table_name, specs in TEAM_STATIC_LONG_TEXT_SPECS.items():
+        if table_name not in table_names:
+            continue
+        _widen_text_columns(
+            sync_conn,
+            table_name,
+            {c["name"]: c for c in inspector.get_columns(table_name)},
+            specs,
+        )
 
 
 def _has_table(sync_conn, table_name: str) -> bool:
@@ -450,7 +588,11 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         return
     if "protocol" in columns:
         return
-    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'")
+    q_table = _quote_ident(sync_conn, table_name)
+    q_col = _quote_ident(sync_conn, "protocol")
+    sync_conn.exec_driver_sql(
+        f"ALTER TABLE {q_table} ADD COLUMN {q_col} TEXT NOT NULL DEFAULT 'plain'"
+    )
     team_logger.info(
         "Migrated legacy message table %s: added protocol column",
         table_name,
@@ -481,17 +623,19 @@ def _ensure_message_meta_column(sync_conn) -> None:
         return
     if "meta" in columns:
         return
-    sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
+    q_table = _quote_ident(sync_conn, table_name)
+    q_col = _quote_ident(sync_conn, "meta")
+    text_ddl = _dialect_long_text_ddl(sync_conn)
+    sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN {q_col} {text_ddl}")
     team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 
 def _current_session_migration_tables() -> list[str]:
-    """The current session's 3 migration-candidate dynamic table names.
+    """The current session's migration-candidate dynamic table names.
 
-    Only ``team_task_*`` / ``team_task_dependency_*`` / ``team_message_*`` are
-    touched by ``_ensure_dynamic_table_indexes``; ``message_read_status_*`` and
-    ``team_review_vote_*`` have no legacy-structure gap (they are created on the
-    current scheme and never migrated), so they are deliberately excluded.
+    ``team_task_*`` / ``team_task_dependency_*`` / ``team_message_*`` get index
+    rebuilds + long-text widen; ``team_review_vote_*`` only widens ``feedback``.
+    ``message_read_status_*`` has no legacy-structure gap and stays excluded.
 
     Returns an empty list when no session is bound — the migration then becomes
     a no-op, same as before.
@@ -504,6 +648,7 @@ def _current_session_migration_tables() -> list[str]:
         f"team_task_{suffix}",
         f"team_task_dependency_{suffix}",
         f"team_message_{suffix}",
+        f"team_review_vote_{suffix}",
     ]
 
 
@@ -529,8 +674,9 @@ def _ensure_dynamic_table_indexes(
         dead ``updated_at`` index (no query filters/orders by it). ``status``
         keeps its standalone index.
 
-    Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
-    table already on the new scheme is a cheap no-op.
+    Index DROP/CREATE is probe-then-act via ``inspector.get_indexes`` (no
+    ``IF [NOT] EXISTS`` index syntax — MySQL rejects those). Identifiers are
+    dialect-quoted so MySQL gets backticks instead of hard-coded double quotes.
 
     Scope: ``candidates`` are the current session's tables (computed from
     ``get_session_id``). ``existing_before_create`` is the snapshot of which of
@@ -547,18 +693,30 @@ def _ensure_dynamic_table_indexes(
         is_message = table_name.startswith("team_message_")
         is_dependency = table_name.startswith("team_task_dependency_")
         is_task = table_name.startswith("team_task_") and not is_dependency
-        if not (is_message or is_dependency or is_task):
+        is_review_vote = table_name.startswith("team_review_vote_")
+        if not (is_message or is_dependency or is_task or is_review_vote):
             continue
         if table_name not in existing_before_create:
             # Created fresh this bind → already on the current scheme; touching
             # it would only burn a ``get_indexes``/``get_columns`` PRAGMA lock.
             continue
 
+        if is_review_vote:
+            # Widen only — review-vote tables have no legacy index rebuild.
+            vote_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
+            _widen_text_columns(
+                sync_conn,
+                table_name,
+                vote_column_defs,
+                TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
+            )
+            continue
+
+        q_table = _quote_ident(sync_conn, table_name)
         index_names = {idx["name"] for idx in inspector.get_indexes(table_name)}
 
         team_name_index = f"ix_{table_name}_team_name"
-        if team_name_index in index_names:
-            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{team_name_index}"')
+        if _drop_index_if_present(sync_conn, table_name, team_name_index, index_names):
             team_logger.info("Migrated %s: dropped dead team_name index", table_name)
 
         if is_task:
@@ -569,9 +727,13 @@ def _ensure_dynamic_table_indexes(
             )
             if needs_task_migration:
                 for legacy in legacy_task_indexes:
-                    sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
-                sync_conn.exec_driver_sql(
-                    f'CREATE INDEX IF NOT EXISTS "{assignee_status_index}" ON "{table_name}" (assignee, status)'
+                    _drop_index_if_present(sync_conn, table_name, legacy, index_names)
+                _create_index_if_absent(
+                    sync_conn,
+                    table_name,
+                    assignee_status_index,
+                    "assignee, status",
+                    index_names,
                 )
                 team_logger.info(
                     "Migrated task table %s: folded assignee into (assignee, status), dropped dead updated_at index",
@@ -581,39 +743,41 @@ def _ensure_dynamic_table_indexes(
             # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
             task_columns = {c["name"] for c in inspector.get_columns(table_name)}
             if "reviewer" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN reviewer TEXT")
                 team_logger.info("Migrated task table %s: added reviewer column", table_name)
 
             # F_62: review voting — round counter + per-task round ceiling.
             if "review_round" not in task_columns:
                 sync_conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0'
+                    f"ALTER TABLE {q_table} ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0"
                 )
                 team_logger.info("Migrated task table %s: added review_round column", table_name)
             if "max_review_rounds" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN max_review_rounds INTEGER")
                 team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
+
+            text_ddl = _dialect_long_text_ddl(sync_conn)
 
             # F_118: author's completion note, read by handoff briefs / view_task.
             if "note" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN note TEXT')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN note {text_ddl}")
                 team_logger.info("Migrated task table %s: added note column", table_name)
 
             # F_119: author's one-line completion summary, read by digests / briefs.
             if "summary" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN summary TEXT')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN summary {text_ddl}")
                 team_logger.info("Migrated task table %s: added summary column", table_name)
 
             # F_128: member subtasks — parent link + creator.
             if "parent_task_id" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN parent_task_id TEXT')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN parent_task_id TEXT")
                 team_logger.info("Migrated task table %s: added parent_task_id column", table_name)
             if "created_by" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN created_by TEXT')
+                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN created_by TEXT")
                 team_logger.info("Migrated task table %s: added created_by column", table_name)
             if "resume_pending" not in task_columns:
                 sync_conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN resume_pending BOOLEAN NOT NULL DEFAULT 0'
+                    f"ALTER TABLE {q_table} ADD COLUMN resume_pending BOOLEAN NOT NULL DEFAULT 0"
                 )
                 team_logger.info("Migrated task table %s: added resume_pending column", table_name)
 
@@ -621,12 +785,26 @@ def _ensure_dynamic_table_indexes(
             for column in ("revision", "observed_revision", "parent_revision"):
                 if column not in task_columns:
                     sync_conn.exec_driver_sql(
-                        f'ALTER TABLE "{table_name}" ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0'
+                        f"ALTER TABLE {q_table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                     )
                     team_logger.info("Migrated task table %s: added %s column", table_name, column)
             if "change_notes" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN change_notes TEXT')
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {q_table} ADD COLUMN change_notes {text_ddl}"
+                )
                 team_logger.info("Migrated task table %s: added change_notes column", table_name)
+
+            # MySQL/MariaDB create() used to emit VARCHAR(255) for bare str
+            # Fields. Widen existing short columns so long notes/content land.
+            task_column_defs = {
+                c["name"]: c for c in inspector.get_columns(table_name)
+            }
+            _widen_text_columns(
+                sync_conn,
+                table_name,
+                task_column_defs,
+                TEAM_TASK_LONG_TEXT_SPECS,
+            )
 
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
@@ -635,7 +813,7 @@ def _ensure_dynamic_table_indexes(
             # best-effort refinement deferred (rare, and the row is still
             # completable via the normal flow once re-owned).
             legacy_status_result = sync_conn.exec_driver_sql(
-                f"UPDATE \"{table_name}\" SET status='in_progress' "
+                f"UPDATE {q_table} SET status='in_progress' "
                 "WHERE status IN ('claimed', 'started', 'plan_approved')"
             )
             migrated_rows = legacy_status_result.rowcount or 0
@@ -650,6 +828,14 @@ def _ensure_dynamic_table_indexes(
         if not is_message:
             continue
 
+        message_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
+        _widen_text_columns(
+            sync_conn,
+            table_name,
+            message_column_defs,
+            TEAM_MESSAGE_LONG_TEXT_SPECS,
+        )
+
         legacy_message_indexes = [
             f"ix_{table_name}_to_member_name",
             f"ix_{table_name}_timestamp",
@@ -663,12 +849,20 @@ def _ensure_dynamic_table_indexes(
             continue
 
         for legacy in legacy_message_indexes:
-            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
-        sync_conn.exec_driver_sql(
-            f'CREATE INDEX IF NOT EXISTS "{inbox_index}" ON "{table_name}" (to_member_name, is_read, timestamp)'
+            _drop_index_if_present(sync_conn, table_name, legacy, index_names)
+        _create_index_if_absent(
+            sync_conn,
+            table_name,
+            inbox_index,
+            "to_member_name, is_read, timestamp",
+            index_names,
         )
-        sync_conn.exec_driver_sql(
-            f'CREATE INDEX IF NOT EXISTS "{bcast_index}" ON "{table_name}" (broadcast, timestamp)'
+        _create_index_if_absent(
+            sync_conn,
+            table_name,
+            bcast_index,
+            "broadcast, timestamp",
+            index_names,
         )
         team_logger.info("Migrated message table %s: rebuilt to composite indexes", table_name)
 
@@ -917,6 +1111,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             await conn.run_sync(_ensure_team_member_role_column)
             await conn.run_sync(_ensure_team_member_options_column)
             await conn.run_sync(_ensure_team_info_capability_columns)
+            await conn.run_sync(_ensure_team_static_long_text_columns)
     except BaseException:
         # The engines never reach the caller, so nobody else can dispose them:
         # a failed DDL (e.g. ``database is locked``) retried by a poller would
@@ -947,7 +1142,9 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
         await conn.run_sync(model.__table__.create, checkfirst=True)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
-    await conn.run_sync(_ensure_dynamic_table_indexes, candidates, existing_before_create)
+    await conn.run_sync(
+        _ensure_dynamic_table_indexes, candidates, existing_before_create
+    )
 
 
 # Preserve the shared DDL retry/drop layout while develop updates its write protocol.
