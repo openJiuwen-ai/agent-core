@@ -78,6 +78,7 @@ class InboxMessage:
     content: "str | InteractiveInput"
     immediate: bool
     run_context: RunContext | None = None
+    delivery_id: str | None = None
 
 
 @dataclass(slots=True)

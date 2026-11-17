@@ -3,7 +3,8 @@
 """Jev decision-model client facade for diagnostic detection.
 
 A thin facade over the core ``JevSystemOneClient``; settings resolve from
-``JEV_BASE_URL`` / ``JEV_MODEL`` / ``JEV_API_KEY`` / ``JEV_THRESHOLD`` with
+``JEV_BASE_URL`` / ``JEV_MODEL`` / ``JEV_API_KEY`` / ``JEV_THRESHOLD`` /
+``JEV_ENDPOINT_PATH`` with
 in-repo defaults.  The core client's default ``api_base`` points at
 typesafe.ai, so the facade explicitly forwards ``JEV_BASE_URL``.
 """
@@ -22,6 +23,7 @@ DEFAULT_JEV_SETTINGS: dict[str, str] = {
     "JEV_MODEL": "kev-latest",
     "JEV_API_KEY": "",
     "JEV_THRESHOLD": "0.8",
+    "JEV_ENDPOINT_PATH": SYSTEMONE_PATH,
 }
 
 #: Sentinel key accepted by a local kev deployment when no ``JEV_API_KEY`` is configured.
@@ -63,6 +65,7 @@ class JevClient:
             timeout=timeout,
             max_retries=2,
             retry_backoff=0.5,
+            endpoint_path=settings["JEV_ENDPOINT_PATH"],
         )
 
     async def system_one(self, state: Any, questions: Mapping[str, Any]) -> dict[str, Any]:

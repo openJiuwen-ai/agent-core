@@ -7,7 +7,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Iterable, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,6 +175,130 @@ class MessageDao:
             row = result.scalar_one_or_none()
         return await self._hydrate_row_off_loop(row)
 
+    @staticmethod
+    def _feedback_unread(meta, member_name):
+        data = json.loads(meta) if isinstance(meta, str) and meta else (meta or {})
+        if not data.get("receiver_routed") or "delivery_feedback" not in data:
+            return None
+        entry = data["delivery_feedback"].get(member_name)
+        return entry is not None and not entry.get("handled", False) and entry.get("state") not in {
+            "submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged",
+        }
+
+    async def record_delivery(self, message_id: str, member_name: str, state: str, *, mode: str | None = None, **details) -> None:
+        """Persist receiver feedback; use a row lock to preserve concurrent recipients."""
+        model = _get_message_model()
+        async with self._sessions.write() as session:
+            row = (await session.execute(
+                select(model).where(model.message_id == message_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                return
+            meta = json.loads(row.meta) if row.meta else {}
+            feedback = meta.setdefault("delivery_feedback", {})
+            previous = feedback.get(member_name, {})
+            # A retry after runtime acceptance must not make feedback regress.
+            if previous.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged", "merging"}:
+                return
+            feedback[member_name] = {
+                **previous, **details, "state": state, "mode": mode or previous.get("mode"),
+                "updated_at": get_current_time(),
+            }
+            row.meta = json.dumps(meta, ensure_ascii=False)
+            await session.commit()
+
+    async def reserve_merge(self, message_ids, member, token, steer_id, runtime_ids, synthetic_ids):
+        model = _get_message_model()
+        accepted = []
+        async with self._sessions.write() as session:
+            rows = (await session.execute(select(model).where(model.message_id.in_(message_ids)).with_for_update())).scalars().all()
+            for row in rows:
+                meta = json.loads(row.meta) if row.meta else {}
+                entry = meta.get("delivery_feedback", {}).get(member)
+                if entry is None or entry.get("state") not in {"pending", "deferred", "submitted", "merging"}:
+                    continue
+                if entry.get("state") == "submitted" and row.message_id not in runtime_ids:
+                    continue
+                entry.update(state="merging", merge_token=token, merged_into=steer_id,
+                             merge_reserved_at=get_current_time(),
+                             merge_previous_state=entry.get("merge_previous_state", entry.get("state", "pending")),
+                             merge_synthetic=row.message_id in synthetic_ids)
+                if row.message_id in synthetic_ids:
+                    row.is_read = False
+                row.meta = json.dumps(meta, ensure_ascii=False)
+                accepted.append(row.message_id)
+            await session.commit()
+        return [mid for mid in message_ids if mid in accepted]
+
+    async def finish_merge(self, message_ids, member, token, *, accepted):
+        model = _get_message_model()
+        async with self._sessions.write() as session:
+            rows = (await session.execute(select(model).where(model.message_id.in_(message_ids)).with_for_update())).scalars().all()
+            for row in rows:
+                meta = json.loads(row.meta)
+                entry = meta["delivery_feedback"].get(member, {})
+                if entry.get("merge_token") != token:
+                    continue
+                if accepted:
+                    entry.update(state="merged", handled=True, updated_at=get_current_time())
+                    if not row.broadcast:
+                        row.is_read = True
+                else:
+                    entry["state"] = entry.get("merge_previous_state", "pending")
+                    if entry.get("merge_synthetic"):
+                        entry.update(state="withdrawn", handled=True)
+                        row.is_read = True
+                for key in ("merge_token", "merge_previous_state", "merge_synthetic"):
+                    entry.pop(key, None)
+                row.meta = json.dumps(meta, ensure_ascii=False)
+            await session.commit()
+
+    async def withdraw_pending(self, message_id: str, team_name: str, sender: str) -> dict | None:
+        """Withdraw only inputs not yet accepted by a runtime, under the write lock."""
+        model = _get_message_model()
+        async with self._sessions.write() as session:
+            row = (await session.execute(select(model).where(
+                model.message_id == message_id, model.team_name == team_name,
+                model.from_member_name == sender,
+            ).with_for_update())).scalar_one_or_none()
+            if row is None:
+                return None
+            meta = json.loads(row.meta) if row.meta else {}
+            feedback = meta.get("delivery_feedback", {})
+            for entry in feedback.values():
+                if not entry.get("handled") and entry.get("state") not in {"merging", "merged", "dispatching", "submitted", "dropped", "stopped", "cleared", "held"}:
+                    entry.update(state="withdrawn", handled=True, updated_at=get_current_time())
+            if not row.broadcast and feedback.get(row.to_member_name, {}).get("state") == "withdrawn":
+                row.is_read = True
+            row.meta = json.dumps(meta, ensure_ascii=False)
+            await session.commit()
+            return feedback
+
+    async def claim_delivery(self, message_id: str, member_name: str) -> bool:
+        """Serialize withdrawal against the final handoff to the runtime."""
+        model = _get_message_model()
+        async with self._sessions.write() as session:
+            row = (await session.execute(select(model).where(model.message_id == message_id).with_for_update())).scalar_one_or_none()
+            if row is None:
+                return False
+            meta = json.loads(row.meta) if row.meta else {}
+            entry = meta.get("delivery_feedback", {}).get(member_name)
+            if entry is None:
+                return True
+            if entry.get("state") == "merging":
+                if get_current_time() - entry.get("merge_reserved_at", 0) < 30_000:
+                    return False
+                # Recover an abandoned admission after process/DB failure.
+                entry["state"] = "pending"
+                for key in ("merge_token", "merge_previous_state", "merge_synthetic"):
+                    entry.pop(key, None)
+            if entry.get("handled") or entry.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged", "merging"}:
+                return False
+            entry["state"] = "dispatching"
+            row.meta = json.dumps(meta, ensure_ascii=False)
+            await session.commit()
+            return True
+
     async def create_message(
         self,
         message_id: str,
@@ -222,13 +346,16 @@ class MessageDao:
         async def _op() -> bool:
             try:
                 async with self._sessions.write() as session:
+                    latest = (await session.execute(select(func.max(message_model.timestamp)).where(
+                        message_model.team_name == team_name,
+                    ))).scalar_one_or_none() or 0
                     message = message_model(
                         message_id=message_id,
                         team_name=team_name,
                         from_member_name=from_member_name,
                         to_member_name=to_member_name,
                         content=stored_content,
-                        timestamp=get_current_time(),
+                        timestamp=max(get_current_time(), latest + 1),
                         broadcast=broadcast,
                         protocol=protocol,
                         meta=json.dumps(meta, ensure_ascii=False) if meta else None,
@@ -304,6 +431,10 @@ class MessageDao:
         async def _op() -> int:
             try:
                 async with self._sessions.write() as session:
+                    latest = (await session.execute(select(func.max(message_model.timestamp)).where(
+                        message_model.team_name == team_name,
+                    ))).scalar_one_or_none() or 0
+                    timestamp = max(now, latest + 1)
                     for (message_id, to_member_name), stored_content in zip(recipients, stored_contents):
                         session.add(
                             message_model(
@@ -312,7 +443,7 @@ class MessageDao:
                                 from_member_name=from_member_name,
                                 to_member_name=to_member_name,
                                 content=stored_content,
-                                timestamp=now,
+                                timestamp=timestamp,
                                 broadcast=False,
                                 protocol=protocol,
                                 is_read=False,
@@ -358,6 +489,9 @@ class MessageDao:
             result = await session.execute(query)
             rows = result.scalars().all()
 
+        if unread_only:
+            rows = [row for row in rows if (json.loads(row.meta) if row.meta else {}).get(
+                "delivery_feedback", {}).get(to_member_name, {}).get("state") not in {"merged"}]
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_unread_group_members(self, team_name: str) -> List[str]:
@@ -434,7 +568,11 @@ class MessageDao:
             read_status = read_result.scalar_one_or_none()
 
         if unread_only:
-            rows = [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+            rows = [row for row in rows if (
+                self._feedback_unread(row.meta, member_name)
+                if self._feedback_unread(row.meta, member_name) is not None
+                else read_status is None or row.timestamp > read_status.read_at
+            )]
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
@@ -565,13 +703,12 @@ class MessageDao:
             .exists()
         )
         stmt = (
-            select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role)
+            select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role, covered_by_watermark.label("covered"))
             .join(TeamMember, TeamMember.team_name == message_model.team_name)
             .where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
-                ~covered_by_watermark,
             )
         )
         if only is not None:
@@ -580,6 +717,9 @@ class MessageDao:
 
         pending: set[str] = set()
         for row in (await session.execute(stmt)).all():
+            unread = self._feedback_unread(row.meta, row.member_name)
+            if unread is False or (unread is None and row.covered):
+                continue
             meta = group_metadata(row)
             if meta:
                 if row.role != "passive_human" and row.member_name in meta["mentions"]:
@@ -630,6 +770,14 @@ class MessageDao:
             if not member:
                 team_logger.error("Member %s not found", member_name)
                 return False
+
+        if message.broadcast and self._feedback_unread(message.meta, member_name) is not None:
+            meta = json.loads(message.meta)
+            feedback = meta["delivery_feedback"].get(member_name)
+            if feedback is not None:
+                feedback["handled"] = True
+                message.meta = json.dumps(meta, ensure_ascii=False)
+            return True
 
         if message.broadcast:
             read_result = await session.execute(

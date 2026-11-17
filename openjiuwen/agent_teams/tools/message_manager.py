@@ -7,6 +7,7 @@ This module provides messaging functionality for team members and team leader.
 """
 
 import uuid
+import json
 from typing import (
     List,
     Optional,
@@ -57,6 +58,12 @@ class TeamMessageManager:
         self.db = db
         self.messager = messager
 
+    async def withdraw_pending(self, message_id: str) -> dict | None:
+        return await self.db.message.withdraw_pending(message_id, self.team_name, self.member_name)
+
+    async def claim_delivery(self, message_id: str, member_name: str) -> bool:
+        return await self.db.message.claim_delivery(message_id, member_name)
+
     async def send_message(
         self,
         content: str,
@@ -74,12 +81,13 @@ class TeamMessageManager:
             from_member_name: Override sender ID. Defaults to self.member_name.
             protocol: Message format — ``"plain"`` for normal text,
                 ``"json"`` for structured payloads.
-            meta: Framework-only delivery payload (template key + refs +
-                params). Not reachable from the send_message tool — only the
-                framework (scheduler handoffs) sets it. See
-                ``message_template.py``.
+            meta: Framework-owned metadata, e.g. a scheduler template or
+                validated private delivery mode. Callers of the send_message
+                tool cannot provide arbitrary metadata.
         """
         sender = from_member_name or self.member_name
+        meta = dict(meta or {})
+        meta.setdefault("delivery_feedback", {to_member_name: {"state": "pending", "mode": meta.get("private_delivery_mode")}})
         message_id = str(uuid.uuid4())
 
         success = await self.db.message.create_message(
@@ -123,6 +131,8 @@ class TeamMessageManager:
         self,
         content: str,
         from_member_name: str | None = None,
+        *,
+        receiver_routed: bool = False,
     ) -> Optional[str]:
         """Send a broadcast message.
 
@@ -134,6 +144,13 @@ class TeamMessageManager:
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
+        feedback = {}
+        if receiver_routed:
+            members = await self.db.member.get_team_members(self.team_name)
+            feedback = {
+                member.member_name: {"state": "pending", "mode": None}
+                for member in members if member.member_name != sender
+            }
         success = await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
@@ -141,15 +158,21 @@ class TeamMessageManager:
             content=content,
             to_member_name=None,
             broadcast=True,
+            meta={"receiver_routed": True, "delivery_feedback": feedback} if receiver_routed else None,
         )
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
 
-        await self.publish_broadcast(message_id, sender)
+        if receiver_routed:
+            await self.publish_broadcast(message_id, sender, receiver_routed=True)
+        else:
+            await self.publish_broadcast(message_id, sender)
         return message_id
 
-    async def publish_broadcast(self, message_id: str, from_member_name: str) -> None:
+    async def publish_broadcast(
+        self, message_id: str, from_member_name: str, *, receiver_routed: bool = False,
+    ) -> None:
         """Publish an already persisted broadcast (also used after group history sync)."""
         try:
             await self.messager.publish(
@@ -159,6 +182,7 @@ class TeamMessageManager:
                         message_id=message_id,
                         team_name=self.team_name,
                         from_member_name=from_member_name,
+                        receiver_routed=receiver_routed,
                     )
                 ),
             )
@@ -380,8 +404,11 @@ class TeamMessageManager:
             return 0
 
         direct_ids = [m.message_id for m in messages if not m.broadcast]
-        broadcasts = [m for m in messages if m.broadcast]
-        ids = list(direct_ids)
+        tracked = [m for m in messages if m.broadcast and "delivery_feedback" in (
+            json.loads(m.meta) if isinstance(m.meta, str) and m.meta else (m.meta or {})
+        )]
+        broadcasts = [m for m in messages if m.broadcast and m not in tracked]
+        ids = list(direct_ids) + [m.message_id for m in tracked]
         if broadcasts:
             newest_broadcast = max(broadcasts, key=lambda m: m.timestamp)
             ids.append(newest_broadcast.message_id)

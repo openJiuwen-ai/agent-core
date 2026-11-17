@@ -308,6 +308,7 @@ class BroadcastEvent(BaseEventMessage):
     """Event published when a broadcast message is sent"""
     message_id: str = Field(..., description="Message unique identifier")
     from_member_name: str = Field(..., description="Sender member name")
+    receiver_routed: bool = False
 
 
 class TaskCreatedEvent(BaseEventMessage):

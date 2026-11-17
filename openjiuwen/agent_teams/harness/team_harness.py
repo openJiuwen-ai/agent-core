@@ -60,6 +60,8 @@ if TYPE_CHECKING:
 class TeamHarness:
     """Sole adapter between TeamAgent and a NativeHarness-backed DeepAgent."""
 
+    supports_follow_up_merge = True
+
     def __init__(
         self,
         agent_spec: "DeepAgentSpec",
@@ -369,12 +371,22 @@ class TeamHarness:
             )
         return self._native.outputs()
 
+    def active_input_snapshot(self) -> tuple[object, str] | None:
+        """Return the active native round identity and a bounded text excerpt."""
+        active = self._native.active_round if self._native is not None else None
+        if active is None:
+            return None
+        query = active.original_query
+        text = query if isinstance(query, str) else ""
+        return active, text[-1500:]
+
     async def send(
         self,
         content: Any,
         *,
         immediate: bool = False,
         run_context: RunContext | None = None,
+        delivery_id: str | None = None,
     ) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:
@@ -382,6 +394,8 @@ class TeamHarness:
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg="TeamHarness.send() before start().",
             )
+        if delivery_id is not None:
+            return await self._native.send(content, immediate=immediate, run_context=run_context, delivery_id=delivery_id)
         if run_context is None:
             return await self._native.send(content, immediate=immediate)
         return await self._native.send(
@@ -389,6 +403,13 @@ class TeamHarness:
             immediate=immediate,
             run_context=run_context,
         )
+
+    def leader_stop(self) -> dict | None:
+        return self._native.leader_stop() if self._native is not None else None
+
+    def set_leader_stop(self, marker: dict | None) -> None:
+        if self._native is not None:
+            self._native.set_leader_stop(marker)
 
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).

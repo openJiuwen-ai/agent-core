@@ -60,3 +60,14 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 - Proactively monitor upstream/downstream tasks; your delivery reaches dependents through the task's `summary` / `note`, so state where the artifacts are and what the key decisions were
 - When you discover information that other members might need, share it proactively
 - For cross-domain issues, discuss and resolve with relevant members rather than guessing alone
+
+## Changes, acceptance, and message discipline
+- For changes shared by several members, the leader appoints one contract owner. Keep CONTRACT.md in the shared workspace with increasing versions, effective rules, affected tasks, and superseded versions. Put the version and path in each affected task. Broadcast delivery does not prove adoption.
+- Before starting, handing off, or resuming work, compare the task contract version with the shared contract. Report conflicts to the leader and stop writes that depend on disputed rules. Do not declare changes effective or overwrite another member's work unilaterally.
+- Acceptance reports must identify the contract version, commit or file hashes, commands, and pass/fail results. Results for an older file do not validate a changed file. Use an isolated snapshot when reproducibility is required.
+- Abort stops execution. A new leader DM resumes it: send one only for deliberate work or handoff, never a courtesy acknowledgment. Handoff, partial output, and blocker reports do not complete the original task. Mark completed only when its acceptance scope is satisfied.
+- Before replacing a pending instruction, call send_message(action="withdraw", message_id=old_id), then send a replacement naming the old instruction. dispatching/submitted inputs cannot be recalled; send an explicit correction. held inputs remain in history and do not replay automatically.
+- Do not request a receipt for every message. Reply for an artifact, decision, blocker, or conflict; skip thanks, repetition, and repeated confirmations. pending/deferred is not completion; submitted is not proof of reading or acceptance.
+
+## Private-message timing decisions
+For ordinary-team private messages, ask whether receipt only after the current task ends would be too late. Information affecting its correctness, progress or delivery uses steer; only independent requests that do not affect it and remain useful afterwards use follow_up. Do not defer current information because the recipient is busy or it is called a supplement. Only the Leader may abort when execution itself must stop immediately. Follow send_message for parameters, boundaries and examples, and respect its allowed recipients. Broadcast modes remain recipient-selected. Compatibility with omission is not permission to skip selection; do not choose unsuitable modes just to exercise them.

@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+from openjiuwen.agent_teams.private_message import ACTIVE_TASKS, MODES, MODE_KEY
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -82,19 +84,49 @@ class _SendMessageBase(TeamTool, ABC):
         self.t = t
         self._team = team
         properties = {
+            "action": {"type": "string", "enum": ["send", "status", "withdraw"],
+                       "description": "send (default); status queries delivery; withdraw recalls your own not-yet-submitted delivery. Submitted or merged context cannot be recalled."},
+            "message_id": {"type": "string", "description": "Message ID returned by send; required for status."},
             "to": to_schema,
             "content": {"type": "string", "description": t("send_message", "content")},
             "summary": {"type": "string", "description": t("send_message", "summary")},
+
         }
+        if team is not None and team.conversation_mode == "team":
+            properties["mode"] = {
+                "type": "string",
+                "enum": list(MODES if team.is_leader else MODES[:2]),
+                "description": (
+                    "Private messages only. steer: information needed before the current task ends, delivered before the next model decision without stopping the current tool; "
+                    "follow_up: ONLY an independent later request that does not affect the current task and remains useful afterwards; do not defer current guidance, corrections or dependency readiness. abort (leader only): when execution itself must stop immediately, "
+                    "discard queued follow-ups, and wait for a NEW direct leader message. The abort body "
+                    "is NOT executed; send a separate message afterwards for further work or a report. "
+                    "Explicitly choose for every ordinary-team Agent private send. Omission is accepted only for legacy callers. Members request abort via a steer message to the leader."
+                ),
+            }
         if targets_schema is not None:
             properties["targets"] = targets_schema
         self.card.input_params = {
             "type": "object",
             "properties": properties,
-            "required": ["content"] if targets_schema is not None else ["to", "content"],
+            "required": [],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        action = inputs.get("action", "send")
+        if action == "status":
+            return await self._delivery_status(inputs.get("message_id"))
+        if action == "withdraw":
+            message_id = inputs.get("message_id")
+            if not isinstance(message_id, str) or not message_id:
+                return ToolOutput(success=False, error="message_id is required for withdraw")
+            feedback = await self.message_manager.withdraw_pending(message_id)
+            if feedback is None:
+                return ToolOutput(success=False, error="Message not found or not sent by you")
+            return ToolOutput(success=True, data={"type": "withdrawal", "message_id": message_id, "recipients": feedback,
+                "note": "Only pending inputs withdrawn. Submitted inputs cannot be recalled. Send the replacement separately."})
+        if action != "send":
+            return ToolOutput(success=False, error="Unknown message action")
         to_raw = inputs.get("to")
         targets_raw = inputs.get("targets")
         content = inputs.get("content", "").strip()
@@ -106,7 +138,24 @@ class _SendMessageBase(TeamTool, ABC):
         if oversize:
             return oversize
 
+        mode = inputs.get("mode")
+        if mode is not None:
+            if mode not in MODES:
+                return ToolOutput(success=False, error="Invalid private message mode")
+            if self._team is None or self._team.conversation_mode != "team":
+                return ToolOutput(success=False, error="Message modes are only available in ordinary teams")
+            if mode == "abort" and not self._team.is_leader:
+                return ToolOutput(
+                    success=False,
+                    error="Only the leader can abort. Send the leader a private message requesting it.",
+                )
+            if targets_raw is not None or not isinstance(to_raw, str) or to_raw.strip() in {
+                "*", USER_PSEUDO_MEMBER_NAME,
+            }:
+                return ToolOutput(success=False, error="Message mode requires one agent recipient in 'to'")
         try:
+            if mode is not None:
+                return await self._dispatch(to_raw, targets_raw, content, summary, mode=mode)
             return await self._dispatch(to_raw, targets_raw, content, summary)
         except Exception as e:
             team_logger.exception("send_message failed")
@@ -119,6 +168,8 @@ class _SendMessageBase(TeamTool, ABC):
         targets_raw: Any,
         content: str,
         summary: str,
+        *,
+        mode: str | None = None,
     ) -> ToolOutput:
         """Route the request to a delivery primitive based on recipient fields."""
         ...
@@ -152,21 +203,45 @@ class _SendMessageBase(TeamTool, ABC):
             ),
         )
 
+    async def _delivery_status(self, message_id: str | None) -> ToolOutput:
+        if not isinstance(message_id, str) or not message_id:
+            return ToolOutput(success=False, error="message_id is required for status")
+        row = await self.message_manager.db.message.get_message(message_id)
+        if (row is None or row.team_name != self.message_manager.team_name
+                or (row.from_member_name != self.message_manager.member_name
+                    and not (self._team is not None and self._team.is_leader))):
+            return ToolOutput(success=False, error="Message not found or not sent by you")
+        meta = json.loads(row.meta) if row.meta else {}
+        if "delivery_feedback" not in meta:
+            return ToolOutput(success=False, error="Delivery feedback is unavailable for this message")
+        return ToolOutput(success=True, data={
+            "type": "delivery_status", "message_id": message_id,
+            "recipients": meta["delivery_feedback"],
+            "note": "pending=not decided; deferred=waiting; submitted=runtime accepted (follow_up may still be queued), NOT acknowledgment; "
+                    "dropped=Jev chose to ignore; legacy_fallback=original delivery after Jev unavailable; stopped=abort applied; cleared=follow_up removed; held=preserved in history, requires explicit resend after leader review. Do not resend to pending/deferred recipients just because no reply arrived.",
+        })
+
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
-        await self._auto_start_members(include_idle_task_scoped=True)
-        msg_id = await self.message_manager.broadcast_message(content=content)
+        receiver_routed = self._team is not None and self._team.conversation_mode == "team"
+        if receiver_routed:
+            msg_id = await self.message_manager.broadcast_message(content=content, receiver_routed=True)
+        else:
+            await self._auto_start_members(include_idle_task_scoped=True)
+            msg_id = await self.message_manager.broadcast_message(content=content)
         if not msg_id:
             return ToolOutput(success=False, error="Failed to broadcast message")
         return ToolOutput(
             success=True,
             data={
                 "type": "broadcast",
+                "message_id": msg_id,
                 "from": self.message_manager.member_name,
                 "summary": summary or None,
+                **({"note": self.t("send_message", "broadcast_receipt_pending")} if receiver_routed else {}),
             },
         )
 
-    async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
+    async def _send(self, to: str, content: str, summary: str, *, mode: str | None = None) -> ToolOutput:
         if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.conversation_mode == "group_chat":
             return ToolOutput(success=False, error=self.t("send_message", "error_group_to_user"))
         if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.is_leader:
@@ -176,10 +251,17 @@ class _SendMessageBase(TeamTool, ABC):
         if self._team and to != USER_PSEUDO_MEMBER_NAME:
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
+        options = {}
+        if mode is not None:
+            target_tasks = {}
+            if mode in {"follow_up", "abort"} and await self._team.get_member_status(to) == MemberStatus.BUSY.value:
+                tasks = await self._team.task_manager.get_tasks_by_assignee(to)
+                target_tasks = {task.task_id: task.updated_at for task in tasks if task.status in ACTIVE_TASKS}
+            options["meta"] = {MODE_KEY: mode, "target_tasks": target_tasks}
         await self._auto_start_members()
         if to != USER_PSEUDO_MEMBER_NAME:
             await self._wake_recipients([to])
-        msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
+        msg_id = await self.message_manager.send_message(content=content, to_member_name=to, **options)
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
         return ToolOutput(
@@ -189,6 +271,7 @@ class _SendMessageBase(TeamTool, ABC):
                 "from": self.message_manager.member_name,
                 "to": to,
                 "summary": summary or None,
+                "message_id": msg_id, **({"mode": mode} if mode is not None else {}),
             },
         )
 
@@ -324,6 +407,10 @@ class _SendMessageBase(TeamTool, ABC):
             return base
         if d["type"] == "broadcast":
             text = f"Broadcast Already sent from {d['from']} Success"
+            if d.get("message_id"):
+                text += f"\nmessage_id={d['message_id']}; query send_message(action='status', message_id=...) before resending."
+        elif d["type"] in {"delivery_status", "withdrawal"}:
+            return json.dumps(d, ensure_ascii=False)
         elif d["type"] == "multicast":
             return self._format_multicast_text(None, d)
         else:
@@ -388,6 +475,8 @@ class SendMessageTool(_SendMessageBase):
         targets_raw: Any,
         content: str,
         summary: str,
+        *,
+        mode: str | None = None,
     ) -> ToolOutput:
         """Route exactly one separated recipient field.
 
@@ -397,7 +486,7 @@ class SendMessageTool(_SendMessageBase):
         steering the caller back to ``to`` alone.
         """
         if targets_raw is None:
-            return await self._dispatch_to(to_raw, content, summary)
+            return await self._dispatch_to(to_raw, content, summary, **({"mode": mode} if mode else {}))
         if to_raw is None:
             if not isinstance(targets_raw, list):
                 return ToolOutput(success=False, error="'targets' must be an array of strings")
@@ -409,7 +498,7 @@ class SendMessageTool(_SendMessageBase):
             result.data["note"] = _REDUNDANT_TARGETS_NOTE
         return result
 
-    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str, *, mode: str | None = None) -> ToolOutput:
         """Route the ``to`` field: unicast, broadcast, or a shape correction."""
         if isinstance(to_raw, list):
             return ToolOutput(success=False, error="'to' must be a string; use 'targets' for multicast")
@@ -429,7 +518,7 @@ class SendMessageTool(_SendMessageBase):
                     )
             if to == "*":
                 return await self._broadcast(content, summary)
-            return await self._send(to, content, summary)
+            return await self._send(to, content, summary, **({"mode": mode} if mode else {}))
         if to_raw is None:
             return ToolOutput(success=False, error="One of 'to' or 'targets' is required")
         return ToolOutput(success=False, error="'to' must be a string")
@@ -475,6 +564,8 @@ class ReportToLeaderTool(_SendMessageBase):
         targets_raw: Any,
         content: str,
         summary: str,
+        *,
+        mode: str | None = None,
     ) -> ToolOutput:
         """Resolve the role word and deliver; reject anything else.
 
@@ -496,7 +587,7 @@ class ReportToLeaderTool(_SendMessageBase):
                     success=False,
                     error="cannot resolve the team leader to deliver to; the team has no leader on record",
                 )
-            return await self._send(leader, content, summary)
+            return await self._send(leader, content, summary, **({"mode": mode} if mode else {}))
         return ToolOutput(
             success=False,
             error=(
@@ -526,14 +617,14 @@ class ScheduledPeerMessageTool(SendMessageTool):
     ):
         super().__init__(message_manager, t, team, desc_key="send_message_scheduled_peers")
 
-    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str, *, mode: str | None = None) -> ToolOutput:
         """Resolve the ``"leader"`` role word, then route like the full-reach form."""
         if isinstance(to_raw, str) and to_raw.strip() == LEADER_ROLE_RECIPIENT:
             leader = await self._resolve_leader()
             if not leader:
                 return self._unresolved_leader()
-            return await self._send(leader, content, summary)
-        return await super()._dispatch_to(to_raw, content, summary)
+            return await self._send(leader, content, summary, **({"mode": mode} if mode else {}))
+        return await super()._dispatch_to(to_raw, content, summary, **({"mode": mode} if mode else {}))
 
     async def _multicast(
         self,
