@@ -572,7 +572,8 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
         log("evidence model gets no screenshots (text only); the judges get all of them")
     log(f"{len(criteria)} criteria: {', '.join(c['id'] for c in criteria)}; tools: {tools}")
     progress.current().stage("evidence", total=len(criteria))
-    limits = evidence_agent.Limits(rounds=int(config.get("evidence_rounds", evidence_agent.ROUNDS)))
+    rounds = config.get("evidence_rounds", evidence_agent.ROUNDS)
+    limits = evidence_agent.Limits(rounds=int(evidence_agent.ROUNDS if rounds is None else rounds))
     walked = await walk if walk is not None else None
     if walk is not None and walked is None:
         warn("默认浏览没能运行" + (f"（{walk_errors[0]}）" if walk_errors else "")
