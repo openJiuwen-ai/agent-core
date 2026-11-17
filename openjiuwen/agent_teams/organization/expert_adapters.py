@@ -1,31 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Host-injected adapters for on-demand expert-group discovery and launch.
+"""Host-injected launcher for on-demand expert teams.
 
 Organization runtime never scans AgentGroup packages or builds Team specs.
-Hosts (for example JiuwenSwarm) inject concrete Catalog / Launcher implementations.
+Hosts inject the package locator through ExpertCatalog and a concrete Launcher here.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
-
-
-@dataclass(frozen=True)
-class ExpertGroupDescriptor:
-    """Validated AgentGroup template metadata (not a running Team)."""
-
-    agent_group_name: str
-    display_name: str = ""
-    description: str = ""
-    capabilities: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["capabilities"] = list(self.capabilities)
-        return data
 
 
 @dataclass(frozen=True)
@@ -41,16 +26,6 @@ class LaunchedExpertTeam:
         data = asdict(self)
         data["capabilities"] = list(self.capabilities)
         return data
-
-
-class ExpertGroupCatalog(Protocol):
-    """Discover and describe AgentGroup packages without creating Teams."""
-
-    def list(self, *, capabilities: set[str] | None = None) -> list[ExpertGroupDescriptor]:
-        """Return validated expert-group descriptors; never create a Team."""
-
-    def get(self, name: str) -> ExpertGroupDescriptor:
-        """Return one validated descriptor or raise ValueError."""
 
 
 class ExpertTeamLauncher(Protocol):
@@ -76,8 +51,6 @@ class ExpertTeamLauncher(Protocol):
 
 
 __all__ = [
-    "ExpertGroupCatalog",
-    "ExpertGroupDescriptor",
     "ExpertTeamLauncher",
     "LaunchedExpertTeam",
 ]

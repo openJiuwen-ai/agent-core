@@ -13,8 +13,14 @@ import os
 import re
 import shlex
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+
+from openjiuwen.harness.security.literal_shell import (
+    is_script_interpreter,
+    literal_shell_enabled,
+    parse_literal_shell,
+)
 
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
@@ -384,16 +390,51 @@ def extract_path_aware_command_accesses(
     return combined
 
 
+def extract_literal_shell_accesses(
+    command: str, workdir: Path, *, include_cd_reads: bool = True,
+) -> list[tuple[Path, FileAction]] | None:
+    """Return the accesses in a verified POSIX command, or no evidence."""
+    literal = parse_literal_shell(command)
+    if literal is None:
+        return None
+
+    base = workdir
+    results: list[tuple[Path, FileAction]] = []
+    for call in literal.commands:
+        executable = PurePosixPath(call.argv[0]).name
+        if call.argv[0] == "cd":
+            target = Path(call.argv[-1])
+            base = (target if target.is_absolute() else base / target).resolve()
+            if include_cd_reads:
+                results.append((base, "read"))
+            continue
+        accesses, _ = _path_aware_one_segment(call.text, base)
+        results.extend(accesses)
+        if is_script_interpreter(executable) and len(call.argv) > 1 and not call.argv[1].startswith("-"):
+            target = Path(call.argv[1])
+            target = (target if target.is_absolute() else base / target).resolve()
+            results.append((target, "exec"))
+    return results
+
+
 def extract_shell_path_accesses(
     command: str,
     workdir: str | Path,
     *,
     include_cd_reads: bool = True,
+    skill_authorization: bool = False,
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
-    command = canonicalize_shell_command_for_permission(command)
     base = Path(workdir).resolve()
+    if skill_authorization:
+        literal = extract_literal_shell_accesses(command, base, include_cd_reads=include_cd_reads)
+        if literal is not None:
+            return literal
+
+    # The compatibility path unwraps launchers for inspection. The POSIX
+    # parser above must see the original invocation, including its launcher.
+    command = canonicalize_shell_command_for_permission(command)
     results: list[tuple[Path, FileAction]] = []
 
     def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
@@ -498,7 +539,8 @@ def extract_accesses_native(
             except (OSError, RuntimeError):
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved):
+        literal_enabled = literal_shell_enabled(permission_config, tool_name, tool_args)
+        for p, act in extract_shell_path_accesses(cmd, workdir_resolved, skill_authorization=literal_enabled):
             out.append((p, act, "shlex"))
         return out
 

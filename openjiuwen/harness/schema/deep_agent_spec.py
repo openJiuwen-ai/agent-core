@@ -36,6 +36,9 @@ from openjiuwen.harness.schema.build_context import (
     PARENT_SYS_OPERATION_EXTRAS_KEY,
     BuildContext,
 )
+from openjiuwen.harness.schema.build_context import (
+    extension_bus as get_extension_bus,
+)
 from openjiuwen.harness.schema.config import (
     DEFAULT_ACR_BASE_URL,
     DEFAULT_AUDIO_HTTP_TIMEOUT,
@@ -329,10 +332,7 @@ class BuiltinToolSpec(BaseModel):
         ensure_builtin_elements_registered()
         factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
         if factory is None:
-            raise ValueError(
-                f"Unknown tool type '{self.type}'. "
-                f"Registered types: {list(_TOOL_PROVIDER_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown tool type '{self.type}'. Registered types: {list(_TOOL_PROVIDER_REGISTRY)}")
         if context is None:
             context = BuildContext(language=language)
         return factory(dict(self.params), context)
@@ -602,6 +602,7 @@ class DeepAgentSpec(BaseModel):
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
+            extension_bus=get_extension_bus(build_ctx),
             subagents=subagents,
             rails=rails,
             enable_task_loop=self.enable_task_loop,
@@ -651,6 +652,8 @@ class DeepAgentSpec(BaseModel):
         parts = self.resolve_parts(context)
         agent = DeepAgent(parts.config.card)
         apply_deep_agent_parts(agent, parts)
+        if context is not None:
+            agent.ability_manager.execution_environment_resolver = context.resolve_execution_environment
         return agent
 
     def _progressive_tool_kwargs(self) -> dict[str, Any]:

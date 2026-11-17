@@ -198,6 +198,82 @@ class TestOtelAgentHandler:
         # Span should be popped from manager
         assert handler._span_manager.get(agent_span.invoke_id) is None
 
+    async def test_agent_llm_end_finalizes_span_when_usage_is_malformed(self):
+        """Malformed usage values must not keep the span open.
+
+        ``int("N/A")`` used to raise inside ``_set_llm_response_attrs``; the
+        handler swallowed the error and skipped ``_end_and_pop``, so the span
+        never ended and stayed registered in the manager.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hello", instance_info={"class_name": "M"})
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={"usage_metadata": {"input_tokens": "N/A", "output_tokens": None, "total_cost": ""}},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert handler._span_manager.get(agent_span.invoke_id) is None
+        s = finished[0]
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
+
+    async def test_agent_llm_end_skips_moment_shaped_first_token_time(self):
+        """A numeric timestamp is a moment, not a duration, and must not become TTFT."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hello", instance_info={"class_name": "M"})
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={"usage_metadata": {"first_token_time": "1793198938.1"}},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK not in finished[0].attributes
+
+    async def test_agent_llm_end_keeps_relative_first_token_time(self):
+        """A genuine relative latency keeps flowing into time_to_first_chunk."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hello", instance_info={"class_name": "M"})
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={"usage_metadata": {"first_token_time": "0.42"}},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+
+    async def test_agent_llm_end_bounds_ttft_seconds_primary_source(self):
+        """The explicit ``ttft_seconds`` field is bounded by the same sanity range."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hello", instance_info={"class_name": "M"})
+        await handler.on_llm_end(
+            span=agent_span,
+            outputs={"usage_metadata": {"ttft_seconds": 1793198938.1}},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK not in finished[0].attributes
+
     async def test_agent_llm_error_marks_error(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)

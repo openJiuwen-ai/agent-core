@@ -95,6 +95,11 @@ def build_external_team_tool_gateway(
     concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
+    team_mode: str = "default",
+    bootstrap_mode: str = "leader",
+    exclude_tools: frozenset[str] = frozenset(),
+    expert_catalog: Any = None,
+    expert_binding: Any = None,
 ) -> ExternalTeamToolGateway:
     """Build a native gateway over the external member's local backend."""
     tools = create_team_tools(
@@ -109,7 +114,11 @@ def build_external_team_tool_gateway(
         messager=messager,
         team_name=team_name,
         swarmflow_model_resolver=swarmflow_model_resolver,
-        exclude_tools={"checkpoint"},
+        team_mode=team_mode,
+        bootstrap_mode=bootstrap_mode,
+        exclude_tools={"checkpoint", *exclude_tools},
+        expert_catalog=expert_catalog,
+        expert_binding=expert_binding,
         swarmflow_worker_base_spec=swarmflow_worker_base_spec,
         swarmflow_human_base_spec=swarmflow_human_base_spec,
         concurrency_governor=concurrency_governor,

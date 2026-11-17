@@ -297,6 +297,37 @@ def _unwrap_llm_payload(value: Any) -> Any:
     return normalized
 
 
+#: Upper bound for a plausible time-to-first-chunk, in seconds.
+#:
+#: ``first_token_time`` is declared as a *moment* (a timestamp string, same
+#: family as ``request_start_time``), while the attribute it feeds is a
+#: *duration*. A numeric moment such as ``"1793198938.1"`` would otherwise be
+#: stamped as a 56-year TTFT, so anything above this bound is treated as a
+#: mis-typed moment and skipped.
+_MAX_TTFT_SECONDS = 3600.0
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """Best-effort ``int`` for provider usage fields.
+
+    Providers can report ``None``, ``""`` or sentinel strings such as
+    ``"N/A"``. A malformed value must not raise: these calls run inside
+    ``on_llm_end`` before the span is finalized.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort ``float``; mirrors :func:`_as_int` for cost/latency fields."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     """Set GenAI response / usage / cost / latency attributes on the span.
 
@@ -318,33 +349,34 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     if not isinstance(usage, dict):
         return
     otel_span.set_attribute(GEN_AI_RESPONSE_MODEL, str(usage.get("model_name") or ""))
-    otel_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, int(usage.get("input_tokens") or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, int(usage.get("output_tokens") or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, _as_int(usage.get("input_tokens")))
+    otel_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, _as_int(usage.get("output_tokens")))
     # Prefer the explicit cache_read_tokens split; fall back to cache_tokens.
     cache_read = usage.get("cache_read_tokens") or usage.get("cache_tokens")
-    otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, int(cache_read or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, _as_int(cache_read))
     cache_write = usage.get("cache_write_tokens") or usage.get("cache_creation_input_tokens")
-    otel_span.set_attribute(GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, int(cache_write or 0))
-    otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(usage.get("reasoning_tokens") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, float(usage.get("total_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, float(usage.get("input_cost") or 0))
-    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, float(usage.get("output_cost") or 0))
+    otel_span.set_attribute(GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS, _as_int(cache_write))
+    otel_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, _as_int(usage.get("reasoning_tokens")))
+    otel_span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, _as_float(usage.get("total_cost")))
+    otel_span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, _as_float(usage.get("input_cost")))
+    otel_span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, _as_float(usage.get("output_cost")))
     # Streaming / reasoning latency. TTFT comes from the semantically explicit
     # `ttft_seconds` field; `first_token_time` is kept as a **legacy fallback**
     # only — by contract it is a "first token instant" (timestamp string, same
-    # family as `request_start_time`), so a non-numeric value simply skips the
-    # attribute. The *_ms keys are schema-transparent: raw-dict callers and
-    # future UsageMetadata fields flow through unchanged. All parses are
-    # guarded — a malformed value skips its attribute; it must never raise and
-    # abort the span finalization that follows in on_llm_end.
+    # family as `request_start_time`). Because the fallback is a *moment* while
+    # the attribute is a *duration*, a numeric moment must be rejected by range
+    # rather than by type: `float("1793198938.1")` parses fine and used to be
+    # stamped as a 56-year TTFT. The *_ms keys are schema-transparent: raw-dict
+    # callers and future UsageMetadata fields flow through unchanged. All parses
+    # are guarded — a malformed value skips its attribute; it must never raise
+    # and abort the span finalization that follows in on_llm_end.
     ttft_seconds = usage.get("ttft_seconds")
     if ttft_seconds is None:
         ttft_seconds = usage.get("first_token_time") or ""
     if ttft_seconds != "":
-        try:
-            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, float(ttft_seconds))
-        except (TypeError, ValueError):
-            pass
+        ttft_value = _as_float(ttft_seconds, -1.0)
+        if 0.0 <= ttft_value <= _MAX_TTFT_SECONDS:
+            otel_span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, ttft_value)
     inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
         try:
@@ -616,9 +648,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
                         )
                     _set_llm_response_attrs(state.span, outputs)
                 self._set_end_attrs(state.span, span)
-            self._end_and_pop(span.invoke_id)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_end failed: %s", exc)
+        finally:
+            # Finalization must not depend on attribute serialization succeeding:
+            # a skipped _end_and_pop leaks the span, keeps its state in the
+            # manager and never detaches the context token.
+            try:
+                if self._span_manager.get(span.invoke_id) is not None:
+                    self._end_and_pop(span.invoke_id)
+            except Exception as exc:
+                session_logger.warning("otel agent handler: span finalization failed: %s", exc)
 
     async def on_llm_error(self, span: TraceAgentSpan, error, **kwargs):
         try:
