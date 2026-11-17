@@ -163,8 +163,10 @@ async def test_stuck_commit_child_is_killed_and_releases_its_real_lock(tmp_path,
         return child
 
     monkeypatch.setattr(capacity.subprocess, "Popen", slow_worker)
-    # Separate slow CI startup from the production ready/kill window.
+    # Separate slow CI startup from the production ready/kill window. Keep the
+    # post-ready kill window short so this test still proves a sub-second kill.
     monkeypatch.setattr(capacity, "_COMMIT_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(capacity, "COMMIT_LOCK_SECONDS", 0.1)
     stop = threading.Event()
     began = time.monotonic()
     task = asyncio.create_task(asyncio.to_thread(

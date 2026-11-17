@@ -400,7 +400,12 @@ async def test_child_watchdog_releases_write_lock_even_while_parent_loop_is_dela
     root = _tree(tmp_path)
     entered = tmp_path / "commit-lock-held"
     with monkeypatch.context() as patcher:
+        # Parent stage_deadline and the child watchdog both read COMMIT_LOCK.
+        # Pin a short window here and in the injected worker so a 0.25s parent
+        # delay still proves release (production window is longer for CI).
+        patcher.setattr(capacity, "COMMIT_LOCK_SECONDS", 0.1)
         inject_worker(patcher, tmp_path,
+                      "capacity.COMMIT_LOCK_SECONDS = 0.1\n"
                       "from filelock import FileLock\n"
                       "from openjiuwen.harness.personal_context import _capacity_commit as commits\n"
                       "def stuck(plan, *, seconds):\n"
