@@ -420,6 +420,16 @@ class ExperimentExecutionAgent:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self._active_process: subprocess.Popen | None = None
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Signal the agent to abort and kill any running subprocess tree.
+
+        Thread-safe: designed to be called from the asyncio thread while
+        ``run()`` is executing inside ``asyncio.to_thread()``.
+        """
+        self._cancelled = True
+        self._cleanup_active_process()
 
     def _cleanup_active_process(self) -> None:
         """Kill the active subprocess tree if one is still running."""
@@ -439,6 +449,7 @@ class ExperimentExecutionAgent:
                 pass
 
     def run(self, inputs: ExperimentExecutionInput) -> ExperimentExecutionOutput:
+        self._cancelled = False
         load_project_dotenv()
         plan, implementation = inputs.plan, inputs.implementation
         if implementation.status != "ready":
@@ -659,6 +670,8 @@ class ExperimentExecutionAgent:
         attempt = 0
         log_sections: list[str] = []
         while True:
+            if self._cancelled:
+                raise RuntimeError("experiment execution cancelled")
             attempt += 1
             _remove_stale_metrics(metrics_path)
             run, section = self._execute_once(

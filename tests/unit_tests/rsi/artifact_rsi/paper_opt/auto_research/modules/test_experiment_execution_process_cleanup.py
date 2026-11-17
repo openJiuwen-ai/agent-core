@@ -1,11 +1,13 @@
 """Tests that _execute_once kills the entire process tree on timeout,
-and that _cleanup_active_process handles interrupted tasks."""
+and that cancel() / _cleanup_active_process handle interrupted tasks."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,3 +169,50 @@ def test_popen_uses_process_group(tmp_path: Path):
         assert first.get("creationflags", 0) & subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         assert first.get("start_new_session") is True
+
+
+def test_cancel_kills_running_subprocess_from_another_thread(tmp_path: Path):
+    """Simulates the frontend pause scenario: agent.run() is in a worker
+    thread, and cancel() is called from the asyncio thread."""
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "run.py").write_text(_SLEEP_SCRIPT, encoding="utf-8")
+    logs = tmp_path / "logs"
+    results = tmp_path / "results"
+    logs.mkdir()
+    results.mkdir()
+    agent = ExperimentExecutionAgent({})
+    variant = ImplementedVariant(
+        name="proposed",
+        invocation=[sys.executable, "run.py", "--method", "proposed"],
+    )
+    errors: list[Exception] = []
+
+    def run_agent():
+        try:
+            agent._run_variant(
+                variant,
+                code_dir=code_dir,
+                logs=logs,
+                results=results,
+                timeout=300,
+                max_transient_retries=0,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_agent)
+    worker.start()
+    # Wait until the subprocess is actually running
+    deadline = time.monotonic() + 10
+    while agent._active_process is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert agent._active_process is not None, "subprocess never started"
+    pid = agent._active_process.pid
+
+    # Simulate frontend pause: cancel from the main thread
+    agent.cancel()
+    worker.join(timeout=20)
+    assert not worker.is_alive(), "worker thread did not finish"
+    assert agent._cancelled is True
+    assert agent._active_process is None
