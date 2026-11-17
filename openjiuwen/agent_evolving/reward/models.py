@@ -317,12 +317,15 @@ class Model:
         error = None
         for _ in range(2):  # one retry
             try:
-                response = await self._model.invoke(
-                    messages,
-                    extra_body=self.extra or None,
-                    response_format={"type": "json_object"},
-                )
-                text = _answer_text(response)
+                # Streamed: a long non-streamed reply leaves the connection silent and gets cut.
+                text = "".join([
+                    _answer_text(chunk)
+                    async for chunk in self._model.stream(
+                        messages,
+                        extra_body=self.extra or None,
+                        response_format={"type": "json_object"},
+                    )
+                ])
                 return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
             except Exception as failure:  # noqa: BLE001 - retry once
                 error = failure

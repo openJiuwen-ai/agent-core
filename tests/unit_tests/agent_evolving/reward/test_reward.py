@@ -22,8 +22,9 @@ fetch('https://example.com/x').catch(() => {});
 
 
 class _Answer:
-    def __init__(self, content):
+    def __init__(self, content, reasoning_content=None):
         self.content = content
+        self.reasoning_content = reasoning_content
 
 
 def _model(answers):
@@ -31,14 +32,20 @@ def _model(answers):
     model.name, model.extra = "m", {}
     calls = []
 
-    async def invoke(messages, **kwargs):
+    async def stream(messages, **kwargs):
         calls.append((messages, kwargs))
         answer = answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
-        return _Answer(answer)
+        yield _Answer("", reasoning_content="thinking {not the answer}")
+        if isinstance(answer, str):
+            half = len(answer) // 2
+            yield _Answer(answer[:half])
+            yield _Answer(answer[half:])
+        else:
+            yield _Answer(answer)
 
-    model._model = type("Core", (), {"invoke": staticmethod(invoke)})()
+    model._model = type("Core", (), {"stream": staticmethod(stream)})()
     return model, calls
 
 
