@@ -614,6 +614,8 @@ class TeamAgent(BaseAgent):
         self._user_input_delivered = None
 
     def leader_stop(self) -> dict | None:
+        if getattr(self.team_backend, "enable_message_delivery_modes", False) is not True:
+            return None
         getter = getattr(self.harness, "leader_stop", None)
         return getter() if getter is not None else getattr(self, "_leader_stop_marker", None)
 

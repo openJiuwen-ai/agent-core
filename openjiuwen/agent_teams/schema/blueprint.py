@@ -391,6 +391,7 @@ class TeamAgentSpec(BaseModel):
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
     """
+    enable_message_delivery_modes: bool = False
     enable_member_messaging: bool = False
     """Let scheduled-dispatch members message each other directly.
 
@@ -953,6 +954,7 @@ class TeamAgentSpec(BaseModel):
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
+            enable_message_delivery_modes=self.enable_message_delivery_modes,
             enable_member_messaging=self.enable_member_messaging,
             max_subtask_depth=self.max_subtask_depth,
             teammate_mode=str(self.teammate_mode),

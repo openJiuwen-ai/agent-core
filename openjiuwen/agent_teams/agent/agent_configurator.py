@@ -1242,6 +1242,7 @@ class AgentConfigurator:
             enable_bridge=spec.enable_bridge,
             dispatch_mode=spec.dispatch_mode,
             enable_task_verification=spec.enable_task_verification,
+            enable_message_delivery_modes=spec.enable_message_delivery_modes,
             enable_member_messaging=spec.enable_member_messaging,
             max_subtask_depth=spec.max_subtask_depth,
             enable_fork=spec.enable_fork,

@@ -6,12 +6,18 @@ This team runs in **scheduled assignment mode** with **member-to-member messagin
 |---|---|
 | `to="leader"` | Report to the Leader (point-to-point). This is a **role name**, not a concrete member_name — the system delivers it to the real Leader for you. Matters it must know or decide, blockers, and reassignment requests all go here |
 | `to=<member name>` | Point-to-point message (DM), visible only to you and that member. Use it for **coordination** with upstream/downstream members — clarifying an interface, asking for or confirming artifact details. Do not use it to hand out work or to change task ownership behind the Leader's back |
+<!-- delivery:on -->
 | `targets=["m1","m2"]` | Multicast retained for old callers. Ordinary-team Agents send separate private messages with modes; global changes may use broadcast. |
 | `to="*"` | Record a team broadcast. Recipients may receive, defer, or discard it. Success confirms recording only. If a particular member must acknowledge it, message them directly and request a reply. |
+<!-- delivery:else -->
+| `targets=["m1","m2"]` | Multicast — the same content sent separately to each member; cost grows linearly with recipient count, so use it only when several members genuinely need the same content. The array may contain `"leader"` but not `"*"` / `"user"`; when the recipients are exactly every other member, broadcast instead. On partial failure the result lists delivered and failed members — do not resend to the delivered ones |
+| `to="*"` | Broadcast to every member — **one broadcast wakes every member for a full LLM turn, so cost scales with team size; use it sparingly**, only for matters everyone must know |
+<!-- delivery:end -->
 | `to="user"` | When an incoming message's `from` is `user`, you MUST reply through this tool — your plain text output never reaches the user |
 
 Fill exactly one of `to` and `targets`; put a multicast array straight into `targets`, never JSON-encoded into `to`. A message to a member that has not started yet, is dormant or has failed brings that member up to handle it; a broadcast starts members that never ran but does not wake dormant ones.
 
+<!-- delivery:on -->
 ## Ordinary-team private messages: choose by when the information is useful
 
 Apply only to Agent recipients in ordinary teams. Messages to `user`, broadcasts, group chat take no mode. Set `mode` on every private send. Omission is accepted only for old callers, not the current Agent's calling convention. Idle recipients receive directly; do not query whether they are busy first.
@@ -26,6 +32,8 @@ Split current corrections and independent later requests into separate messages 
 
 Within this tool's allowed recipients, contact several specific members separately with `to=<member name>` and choose each mode. Do not bypass selection with targets, even for a single recipient; targets remains for old callers. Global changes may still use `to="*"` without a sender mode; recipients decide delivery.
 
+<!-- delivery:else -->
+<!-- delivery:end -->
 {{artifact_handoff_policy}}
 
 Your plain text output is invisible to the Leader, other members, and the user — you MUST call this tool to communicate. Messages from the Leader and other members are delivered automatically; you don't poll. Refer to members by name, never by internal ID.

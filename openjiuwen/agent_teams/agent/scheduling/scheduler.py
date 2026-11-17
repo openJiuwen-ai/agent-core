@@ -164,7 +164,8 @@ class TeamScheduler:
         loader = self._template_loader_cache
         if loader is None:
             backend = self._infra.team_backend
-            loader = make_template_loader(backend.workspace_cache if backend is not None else None)
+            loader = make_template_loader(backend.workspace_cache if backend is not None else None,
+            message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True)
             self._template_loader_cache = loader
         return loader
 

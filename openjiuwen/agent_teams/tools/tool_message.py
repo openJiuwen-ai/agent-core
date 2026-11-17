@@ -7,6 +7,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
+from openjiuwen.agent_teams.prompts.loader import delivery_mode_text
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -76,7 +77,7 @@ class _SendMessageBase(TeamTool, ABC):
             ToolCard(
                 id="team.send_message",
                 name="send_message",
-                description=t(desc_key),
+                description=delivery_mode_text(t(desc_key), getattr(team, "enable_message_delivery_modes", False) is True),
             )
         )
         self.message_manager = message_manager
@@ -88,7 +89,7 @@ class _SendMessageBase(TeamTool, ABC):
             "summary": {"type": "string", "description": t("send_message", "summary")},
 
         }
-        if team is not None and team.conversation_mode == "team":
+        if getattr(team, "enable_message_delivery_modes", False) is True and team.conversation_mode == "team":
             properties["mode"] = {
                 "type": "string",
                 "enum": list(MODES if team.is_leader else MODES[:2]),
@@ -122,6 +123,8 @@ class _SendMessageBase(TeamTool, ABC):
 
         mode = inputs.get("mode")
         if mode is not None:
+            if not (getattr(self._team, "enable_message_delivery_modes", False) is True):
+                return ToolOutput(success=False, error="Team message delivery modes are disabled")
             if mode not in MODES:
                 return ToolOutput(success=False, error="Invalid private message mode")
             if self._team is None or self._team.conversation_mode != "team":
@@ -184,7 +187,7 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
-        receiver_routed = self._team is not None and self._team.conversation_mode == "team"
+        receiver_routed = getattr(self._team, "enable_message_delivery_modes", False) is True and self._team.conversation_mode == "team"
         if receiver_routed:
             msg_id = await self.message_manager.broadcast_message(content=content, receiver_routed=True)
         else:

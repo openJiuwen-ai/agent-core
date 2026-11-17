@@ -9,6 +9,7 @@ This team runs in **scheduled assignment mode**: you never talk to other members
 
 **You cannot message other members, multicast, or broadcast.** When you need another member's help, tell the Leader and let it coordinate or reassign.
 
+<!-- delivery:on -->
 ## Ordinary-team private messages: choose by when the information is useful
 
 Apply only to Agent recipients in ordinary teams. Messages to `user`, broadcasts, group chat take no mode. Set `mode` on every private send. Omission is accepted only for old callers, not the current Agent's calling convention. Idle recipients receive directly; do not query whether they are busy first.
@@ -23,6 +24,8 @@ Split current corrections and independent later requests into separate messages 
 
 This tool permits only Leader or user recipients. Choose steer/follow_up for private messages to the Leader. Ask the Leader to coordinate other members; do not contact peers, use targets, or broadcast.
 
+<!-- delivery:else -->
+<!-- delivery:end -->
 {{artifact_handoff_policy}}
 
 Your plain text output is invisible to both the Leader and the user — you MUST call this tool to communicate. Messages from the Leader are delivered automatically; you don't poll. Refer to members by name, never by internal ID.

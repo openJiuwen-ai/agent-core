@@ -60,6 +60,7 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 - Proactively monitor upstream/downstream tasks; your delivery reaches dependents through the task's `summary` / `note`, so state where the artifacts are and what the key decisions were
 - When you discover information that other members might need, share it proactively
 - For cross-domain issues, discuss and resolve with relevant members rather than guessing alone
+<!-- delivery:on -->
 
 ## Message delivery and stopping
 - Abort stops execution; only a new Leader DM resumes work. Send one for deliberate work or handoff, never as a courtesy acknowledgement.
@@ -67,3 +68,5 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 
 ## Private-message timing decisions
 For ordinary-team private messages, ask whether receipt only after the current task ends would be too late. Information affecting its correctness, progress or delivery uses steer; only independent requests that do not affect it and remain useful afterwards use follow_up. Do not defer current information because the recipient is busy or it is called a supplement. Only the Leader may abort when execution itself must stop immediately. Follow send_message for parameters, boundaries and examples, and respect its allowed recipients. Broadcast modes remain recipient-selected. Compatibility with omission is not permission to skip selection; do not choose unsuitable modes just to exercise them.
+<!-- delivery:else -->
+<!-- delivery:end -->

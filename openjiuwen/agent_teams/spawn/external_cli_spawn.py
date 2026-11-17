@@ -236,7 +236,7 @@ async def _build_member_system_prompt(
     from openjiuwen.agent_teams.prompts.loader import make_template_loader
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
-    loader = make_template_loader(ws_cache)
+    loader = make_template_loader(ws_cache, message_delivery_modes=spec.enable_message_delivery_modes)
     sections = None
     extension_bus = None
     if spec.build_context is not None:

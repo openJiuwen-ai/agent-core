@@ -19,6 +19,7 @@ lazily from a ``TeamInfra`` (``MessageHandler`` / ``TeamScheduler``) share
 
 from __future__ import annotations
 
+import re
 from functools import cache
 from typing import TYPE_CHECKING, Callable
 
@@ -55,6 +56,12 @@ def _load(name: str, language: str) -> PromptTemplate:
     return PromptTemplate(name=name, content=path.read_text(encoding="utf-8"))
 
 
+def delivery_mode_text(text: str, enabled: bool = False) -> str:
+    """Select optional timing rules in a runtime prompt or tool description."""
+    return re.sub(r"<!-- delivery:on -->\n(.*?)<!-- delivery:else -->\n(.*?)<!-- delivery:end -->\n?",
+                  lambda match: match[1] if enabled else match[2], text, flags=re.DOTALL)
+
+
 def load_template(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplate:
     """Load a language-specific template from ``<lang>/<name>.md``.
 
@@ -62,10 +69,11 @@ def load_template(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplat
     team workspace this is the framework read-only loader (all existing
     callers / UTs stay unchanged).
     """
-    return _load(name, _normalize_language(language))
+    template = _load(name, _normalize_language(language))
+    return PromptTemplate(name=name, content=delivery_mode_text(template.content))
 
 
-def make_template_loader(ws_cache: WorkspaceCache | None = None) -> TemplateLoader:
+def make_template_loader(ws_cache: WorkspaceCache | None = None, *, message_delivery_modes: bool = False) -> TemplateLoader:
     """Bind a per-team ``WorkspaceCache`` into a ``load_template``-signed loader.
 
     The closure checks the workspace's evolved A-class values first and falls
@@ -77,14 +85,11 @@ def make_template_loader(ws_cache: WorkspaceCache | None = None) -> TemplateLoad
             A/B/C classes). ``None`` → the framework read-only loader
             (equivalent to ``load_template`` itself).
     """
-    if ws_cache is None:
-        return load_template
 
     def load(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplate:
-        evolved = ws_cache.get_template(name)
-        if evolved is not None:
-            return evolved
-        return _load(name, _normalize_language(language))
+        template = ws_cache.get_template(name) if ws_cache is not None else None
+        template = template if template is not None else _load(name, _normalize_language(language))
+        return PromptTemplate(name=name, content=delivery_mode_text(template.content, message_delivery_modes))
 
     return load
 
@@ -103,7 +108,7 @@ def bind_template_loader(infra: "TeamInfra") -> TemplateLoader:
     """
     backend = infra.team_backend
     ws_cache = backend.workspace_cache if backend is not None else None
-    return make_template_loader(ws_cache)
+    return make_template_loader(ws_cache, message_delivery_modes=getattr(backend, "enable_message_delivery_modes", False) is True)
 
 
 __all__ = ["TemplateLoader", "bind_template_loader", "load_template", "make_template_loader"]

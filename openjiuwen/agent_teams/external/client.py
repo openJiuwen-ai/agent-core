@@ -224,6 +224,7 @@ class ExternalTeamClient:
             is_leader=self.is_leader,
             db=db,
             messager=self._messager,
+            enable_message_delivery_modes=self._descriptor.enable_message_delivery_modes,
             enable_member_messaging=self._descriptor.enable_member_messaging,
             max_subtask_depth=self._descriptor.max_subtask_depth,
         )

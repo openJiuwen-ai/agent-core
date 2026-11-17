@@ -266,7 +266,7 @@ class MessageHandler(BaseCoordinationHandler):
             all_unread = await self._read_all_unread(member_name)
             # Abort is a control operation, not an input for another model turn.
             # Inspect it before draining older deferred work or calling Jev.
-            if await self._stop_for_abort(member_name, all_unread):
+            if self._delivery_modes_enabled() and await self._stop_for_abort(member_name, all_unread):
                 return
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
 
@@ -288,7 +288,7 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
-                    stopped = getattr(self._round, "leader_stop", lambda: None)()
+                    stopped = getattr(self._round, "leader_stop", lambda: None)() if self._delivery_modes_enabled() else None
                     resumed_by_leader = False
                     if stopped:
                         meta = message_metadata(msg)
@@ -379,13 +379,13 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         continue
-                    mode, target_tasks = read_delivery(msg)
+                    mode, target_tasks = read_delivery(msg) if self._delivery_modes_enabled() else (None, {})
                     if mode == "abort":
                         # Authorized aborts are handled by the prepass, never as text.
                         team_logger.warning("Discarding unauthorized private abort {}", msg.message_id)
                         delivered.append(msg)
                         continue
-                    if is_receiver_routed(msg):
+                    if self._delivery_modes_enabled() and is_receiver_routed(msg):
                         if self._round.has_pending_interrupt():
                             continue
                         mode, target_tasks = await self._broadcast_mode(member_name, msg)
@@ -426,7 +426,7 @@ class MessageHandler(BaseCoordinationHandler):
                     message_steers = mode == "steer" if mode else use_steer
                     merged = []
                     snapshot = getattr(self._round, "active_input_snapshot", lambda: None)()
-                    if message_steers and snapshot is not None and not is_bridge:
+                    if self._delivery_modes_enabled() and message_steers and snapshot is not None and not is_bridge:
                         for old in all_unread:
                             if old in delivered or old.timestamp >= msg.timestamp:
                                 continue
@@ -479,6 +479,9 @@ class MessageHandler(BaseCoordinationHandler):
                              member_name, len(discarded))
             return True
         return False
+
+    def _delivery_modes_enabled(self) -> bool:
+        return getattr(self._infra.team_backend, "enable_message_delivery_modes", False) is True
 
     async def _mailbox_delivery_mode(self, member_name: str, msg: Any) -> str | None:
         """Allow a conversation handler to select the runtime's input mode."""
@@ -840,7 +843,7 @@ class MessageHandler(BaseCoordinationHandler):
             return
         try:
             if event.event_type == TeamEvent.BROADCAST:
-                if getattr(payload, "receiver_routed", False):
+                if self._delivery_modes_enabled() and getattr(payload, "receiver_routed", False):
                     return
                 started = await backend.autostart_unstarted(include_idle_task_scoped=True)
                 if started:

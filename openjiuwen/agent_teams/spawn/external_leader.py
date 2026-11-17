@@ -154,7 +154,7 @@ def build_external_leader_runtime(
             base_prompt=base_prompt,
             language=language,
             mcp_server_name=_tool_namespace(ctx),
-            loader=make_template_loader(team_backend.workspace_cache),
+            loader=make_template_loader(team_backend.workspace_cache, message_delivery_modes=team_backend.enable_message_delivery_modes),
         )
         return HarnessContext(
             agent_name=member_name,
@@ -207,7 +207,7 @@ def _leader_policy_text(spec: "TeamAgentSpec", ctx: "TeamRuntimeContext", team_b
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
 
     language = _language(ctx)
-    loader = make_template_loader(team_backend.workspace_cache)
+    loader = make_template_loader(team_backend.workspace_cache, message_delivery_modes=team_backend.enable_message_delivery_modes)
     body = build_leader_policy_disclosure(
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,

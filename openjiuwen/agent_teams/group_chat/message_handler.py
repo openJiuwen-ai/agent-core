@@ -68,6 +68,8 @@ class GroupMessageHandler(MessageHandler):
         return await super()._expand(message)
 
     async def _mailbox_delivery_mode(self, member_name, msg):
+        if not self._delivery_modes_enabled():
+            return None
         if not msg.broadcast or member_name not in group_metadata(msg).get("mentions", ()):
             return None
         if not self._round.has_in_flight_round():

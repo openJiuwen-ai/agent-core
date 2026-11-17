@@ -663,6 +663,8 @@ class NativeHarness(DeepAgent):
 
     def leader_stop(self) -> dict | None:
         """Return the persisted explicit-stop barrier, outside rollback state."""
+        if not (self._merge_follow_ups):
+            return None
         value = self._session.get_state("team_leader_stop") if self._session is not None else None
         return value if isinstance(value, dict) and value else None
 
@@ -1033,7 +1035,7 @@ class NativeHarness(DeepAgent):
           otherwise the started iteration (LLM + tools) runs to completion and
           the loop exits at the following model-call boundary.
         """
-        if cmd.immediate and self._session is not None:
+        if cmd.immediate and (self._merge_follow_ups) and self._session is not None:
             self._drain_follow_ups_discard(self._session)
             if self.leader_stop() is not None:
                 await self._session.commit()
@@ -1064,7 +1066,7 @@ class NativeHarness(DeepAgent):
             await self._rollback_to_snapshot(
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
-            if self._session is not None:
+            if (self._merge_follow_ups) and self._session is not None:
                 self._drain_follow_ups_discard(self._session)
             self._reset_coordinator()
             await self._emit_round_aborted(active.round_id, "abort")
