@@ -67,6 +67,20 @@ async def test_native_merge_preserves_different_context_fifo(running_native):
 
 
 @pytest.mark.asyncio
+async def test_native_steer_only_merges_runtime_fifo_not_mailbox(running_native, db):
+    harness = running_native
+    send = _leader_send(db)
+    old = await send.message_manager.send_message("Unrelated mailbox request", DEV_1,
+        meta={"private_delivery_mode": "follow_up", "target_tasks": {"A": 1}})
+    await harness.send("Runtime follow-up", immediate=False)
+    await harness.send("Automatic task-board update", immediate=True)
+    context = json.loads(harness.event_handler.interaction_queues.steering.get_nowait().content)
+    assert context["follow_up_context"] == ["Runtime follow-up"]
+    assert context["current_steer"] == "Automatic task-board update"
+    assert [row.message_id for row in await db.message.get_messages(TEAM_NAME, DEV_1, unread_only=True)] == [old]
+
+
+@pytest.mark.asyncio
 async def test_mailbox_merge_preserves_sources_retries_and_later_messages(db):
     send = _leader_send(db)
     old = await send.message_manager.send_message("Write docs AFTER implementation", DEV_1,

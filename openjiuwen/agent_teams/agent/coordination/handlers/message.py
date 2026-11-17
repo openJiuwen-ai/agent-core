@@ -383,7 +383,7 @@ class MessageHandler(BaseCoordinationHandler):
                     mode, target_tasks = read_delivery(msg) if self._delivery_modes_enabled() else (None, {})
                     if mode == "abort":
                         # Authorized aborts are handled by the prepass, never as text.
-                        team_logger.warning("Discarding unauthorized private abort {}", msg.message_id)
+                        team_logger.warning("Discarding unauthorized or stale private abort {}", msg.message_id)
                         delivered.append(msg)
                         continue
                     if self._delivery_modes_enabled() and is_receiver_routed(msg):
@@ -468,6 +468,10 @@ class MessageHandler(BaseCoordinationHandler):
         leader = await backend.resolve_leader_member_name()
         for index, msg in reversed(aborts):
             if msg.from_member_name != leader:
+                continue
+            _, targets = read_delivery(msg)
+            if targets and targets != await self._active_task_versions(member_name):
+                team_logger.info("[{}] ignoring stale abort {}", member_name, msg.message_id)
                 continue
             marker = {"message_id": msg.message_id, "timestamp": getattr(msg, "timestamp", 0)}
             self._round.set_leader_stop(marker)

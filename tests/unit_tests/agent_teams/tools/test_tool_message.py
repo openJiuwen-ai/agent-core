@@ -103,6 +103,35 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
 
 
 @pytest.mark.asyncio
+async def test_unread_broadcast_queries_do_not_fetch_covered_legacy_history(db, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    send = _leader_send(db)
+    for index in range(12):
+        await send.message_manager.broadcast_message(f"Old announcement {index}")
+    deferred = (await send.invoke({"to": "*", "content": "Useful after work"})).data["message_id"]
+    latest = await send.message_manager.broadcast_message("Latest announcement")
+    await db.message.save_delivery_mode(deferred, DEV_1, "follow_up", {"A": 1})
+    await db.message.mark_message_read(latest, DEV_1)
+    execute = AsyncSession.execute
+    fetched = []
+
+    async def observe(session, statement, *args, **kwargs):
+        result = await execute(session, statement, *args, **kwargs)
+        frozen = result.freeze()
+        fetched.append(len(frozen.data))
+        return frozen()
+
+    monkeypatch.setattr(AsyncSession, "execute", observe)
+    rows = await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
+    assert [row.message_id for row in rows] == [deferred]
+    assert max(fetched) <= 1
+    fetched.clear()
+    assert DEV_1 in await db.message.members_with_unread(TEAM_NAME, [DEV_1])
+    assert max(fetched) <= 1
+
+
+@pytest.mark.asyncio
 async def test_abort_and_resume_are_ordered_even_with_same_clock_tick(db, monkeypatch):
     monkeypatch.setattr("openjiuwen.agent_teams.tools.database.message_dao.get_current_time", lambda: 100)
     send = _leader_send(db)

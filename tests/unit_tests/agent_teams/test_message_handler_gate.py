@@ -126,6 +126,32 @@ async def test_follow_up_waits_for_task_end(delivery_handler):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("active", [{}, {"A": 2}, {"B": 1}])
+async def test_stale_abort_does_not_stop_new_work_or_clear_followups(delivery_handler, active):
+    h = delivery_handler
+    h._active_task_versions.return_value = active
+    pending = delivery_mail("later", "follow_up", target_tasks=active)
+    stale = delivery_mail("stale-stop", "abort", timestamp=2)
+    h._read_all_unread = AsyncMock(return_value=[pending, stale])
+    await h._process_unread_messages("dev-1")
+    h._round.cancel_agent.assert_not_awaited()
+    assert h._round.leader_stop() is None
+    marked = [msg for call in h._infra.message_manager.mark_messages_read.await_args_list for msg in call.args[0]]
+    assert stale in marked
+    if active:
+        assert pending not in marked
+        h._round.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unbound_abort_still_stops_current_work(delivery_handler):
+    h = delivery_handler
+    stop = delivery_mail("stop", "abort", target_tasks={})
+    assert await h._stop_for_abort("dev-1", [stop])
+    h._round.cancel_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_abort_clears_mailbox_and_only_new_leader_input_resumes(delivery_handler):
     h = delivery_handler
     peer_abort = delivery_mail("unauthorized", "abort", sender="peer")

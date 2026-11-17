@@ -7,7 +7,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Iterable, List, Optional
 
-from sqlalchemy import select, update, func
+from sqlalchemy import JSON, cast, select, type_coerce, update, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -174,6 +174,14 @@ class MessageDao:
             result = await session.execute(select(message_model).where(message_model.message_id == message_id))
             row = result.scalar_one_or_none()
         return await self._hydrate_row_off_loop(row)
+
+    @staticmethod
+    def _receiver_routed_clause(session, message_model):
+        # SQLite JSON operators consume the text directly; its CAST AS JSON
+        # produces a number. Other supported dialects need a JSON cast.
+        meta = (type_coerce(message_model.meta, JSON) if session.bind.dialect.name == "sqlite"
+                else cast(message_model.meta, JSON))
+        return meta["receiver_routed"].as_boolean().is_(True)
 
     @staticmethod
     def _feedback_unread(meta, member_name):
@@ -440,6 +448,13 @@ class MessageDao:
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
         async with self._sessions.read() as session:
+            read_result = await session.execute(
+                select(read_status_model).where(
+                    read_status_model.member_name == member_name,
+                    read_status_model.team_name == team_name,
+                )
+            )
+            read_status = read_result.scalar_one_or_none()
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
@@ -448,6 +463,11 @@ class MessageDao:
             if from_member_name is not None:
                 query = query.where(message_model.from_member_name == from_member_name)
 
+            if unread_only and read_status is not None and read_status.read_at is not None:
+                query = query.where(
+                    (message_model.timestamp > read_status.read_at)
+                    | self._receiver_routed_clause(session, message_model)
+                )
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
             from openjiuwen.agent_teams.group_chat.handler import group_metadata
@@ -458,14 +478,6 @@ class MessageDao:
                 addressed = member_name in meta["mentions"] if meta else row.from_member_name != member_name
                 if addressed:
                     rows.append(row)
-
-            read_result = await session.execute(
-                select(read_status_model).where(
-                    read_status_model.member_name == member_name,
-                    read_status_model.team_name == team_name,
-                )
-            )
-            read_status = read_result.scalar_one_or_none()
 
         if unread_only:
             rows = [row for row in rows if (
@@ -609,6 +621,7 @@ class MessageDao:
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
                 TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
+                ~covered_by_watermark | self._receiver_routed_clause(session, message_model),
             )
         )
         if only is not None:
