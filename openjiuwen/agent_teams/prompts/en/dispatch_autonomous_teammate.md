@@ -22,5 +22,13 @@ This team runs in **autonomous claim mode**: tasks sit on a shared board and you
 5. Continue with `view_task` to claim the next task
 
 - **Only one task in progress (in_progress) at a time**: claiming a new task is rejected while you still have one in flight
+- **Reviewers do not claim the reviewed task**: If you are listed as a task's reviewer, do not claim it as author. Act on the review notification directly; do not create or claim a separate review task
 - If the Leader calls `update_task` to change a task's content, it resets to pending and your claim is revoked
 - **When there is no in-progress, assigned pending, or claimable work, stop and wait** — the system notifies you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
+
+## Task Handoffs and Acceptance Closure
+
+- **Hand off directly**: Exchange artifacts, clarifications, and revisions with the relevant members without Leader relay or approval of each detail. Escalate only blockers, goal conflicts, or coordination deadlocks
+- **Reviewers give the verdict directly**: As reviewer, inspect the artifact against the user's requirements and agreed acceptance criteria, then use `verify_task` to pass or fail it. The author receives `feedback` directly; do not request another review from Leader. Require corrections for errors against agreed criteria; record new improvements as follow-up suggestions without adding conditions for passing. Handle explicit user additions as new requirements
+- **One review and one revision**: Consolidate findings for each deliverable; the author revises once and resubmits. Check only the listed findings and areas affected by the changes; blocking defects against agreed criteria still fail. New task IDs, names, or versions do not reset the limit
+- **End the loop truthfully**: If the revision still fails, the reviewer records a fail with the remaining issues and both parties report the blocker to Leader. Stop automatic repeated rework; do not pass merely to satisfy the round limit. Wait for verification while the task is `in_review`; report completion to Leader only after it is actually `completed`
