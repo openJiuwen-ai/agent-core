@@ -25,8 +25,11 @@ from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.message_template import completion_summary, completion_summary_truncated
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.models import TeamTaskBase
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -104,6 +107,58 @@ class TaskBoardHandler(BaseCoordinationHandler):
     _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self"
     _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self"
 
+    # Whether a TASK_CLAIMED for a task already in its working state
+    # (``in_progress``) is still delivered to its owner. A dispatch mode whose
+    # scheduler hands entered work to its owner through another channel
+    # turns this off to avoid a double delivery.
+    _ANNOUNCE_ENTERED_ASSIGNMENTS: ClassVar[bool] = True
+
+    def _is_announceable(self, task: TeamTaskBase | None, member_name: str) -> bool:
+        """Whether a self-addressed TASK_CLAIMED still needs announcing.
+
+        ``pending`` and own ``in_progress`` assignments are announced (the
+        ``assign()`` CAS and a state-keeping ``reassign()`` publish TASK_CLAIMED
+        after the task has already entered its working state). A dispatch
+        mode whose scheduler delivers entered work through its own handoff
+        turns ``_ANNOUNCE_ENTERED_ASSIGNMENTS`` off. Everything else —
+        ``planning`` (the plan gate), blocked, terminal, or no longer owned
+        by this member — stays silent: the board wakes the member once the
+        task unblocks, and planning work reaches it through plan approval.
+        """
+        if task is None:
+            return False
+        if task.status == TaskStatus.PENDING.value:
+            return True
+        if task.status != TaskStatus.IN_PROGRESS.value:
+            return False
+        if not self._ANNOUNCE_ENTERED_ASSIGNMENTS:
+            return False
+        # A notice that lost a race against a later reassignment must not
+        # wake the old owner — its TASK_REVOKED steers it off instead.
+        return task.assignee == member_name
+
+    def _assignment_notice_body(self, task: TeamTaskBase) -> str:
+        """Render the notice for an announceable directed assignment.
+
+        A pending task gets the full self-assignment prompt (body included,
+        no claim round-trip); an entered one gets the owner nudge, which
+        names the task and points at ``view_task`` instead of telling an
+        owner to claim work it already holds.
+        """
+        if task.status == TaskStatus.PENDING.value:
+            return t(
+                "dispatcher.task_assigned_to_self",
+                task_id=task.task_id,
+                title=task.title or "",
+                content=task.content or "",
+            )
+        return t(
+            "dispatcher.stale_claim_self",
+            task_id=task.task_id,
+            title=task.title or "",
+            time_info=format_time_context(task.updated_at, get_current_time()),
+        )
+
     async def on_task_claimed(self, event: EventMessage) -> None:
         """Directed assignment from another node.
 
@@ -122,8 +177,13 @@ class TaskBoardHandler(BaseCoordinationHandler):
         Self-assignment rendering is role-aware: a teammate / leader
         sees the teammate-oriented ``dispatcher.task_assigned_to_self``
         prompt, which carries the task title and body and says to claim it —
-        only once the task is workable (``pending``); a blocked assignment is
-        left to the board, which wakes the member when it unblocks. A human_agent
+        only once the task is workable (``pending``); a task that already
+        entered its working state (``in_progress`` — from ``assign()`` or a
+        ``reassign()`` that kept it running) is announced with the
+        owner-nudge template instead, which carries no claim instruction
+        (claiming an owned task is a no-op and is rejected outright for a
+        PLAN_MODE member). Blocked assignments are left to the board, which
+        wakes the member when it unblocks. A human_agent
         avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
         prompt, which frames the event as a notification for the
         controlling human and tells the avatar LLM not to autonomously
@@ -176,13 +236,16 @@ class TaskBoardHandler(BaseCoordinationHandler):
             )
         else:
             # The notice carries the task itself, so the member starts without
-            # a view_task round-trip. A task that is not workable yet (still
-            # blocked, or already gone) is not announced: the member is woken
-            # by the board once it unblocks.
+            # a view_task round-trip (pending) or is nudged as the owner of
+            # already-entered work. Anything else — a task still in the plan
+            # gate (``planning``), blocked, terminal, or gone — is not
+            # announced: the member is woken by the board once it unblocks,
+            # and planning work reaches the member through the
+            # plan-approval flow. See ``_is_announceable``.
             task = await self._infra.task_manager.get(payload.task_id)
-            if task is None or task.status != "pending":
+            if not self._is_announceable(task, member_name):
                 team_logger.debug(
-                    "[{}] assignment of {} not announced: task is {}",
+                    "[%s] assignment of %s not announced: task is %s",
                     member_name,
                     payload.task_id,
                     "gone" if task is None else task.status,
@@ -190,12 +253,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 return
             content = render_event(
                 kind="task-assigned",
-                body=t(
-                    "dispatcher.task_assigned_to_self",
-                    task_id=task.task_id,
-                    title=task.title or "",
-                    content=task.content or "",
-                ),
+                body=self._assignment_notice_body(task),
                 task_id=payload.task_id,
             )
 
@@ -206,9 +264,11 @@ class TaskBoardHandler(BaseCoordinationHandler):
             is_self_human,
         )
         await self._round.deliver_input(content)
-        if task is not None:
-            # The notice carried the task body (a human reads it on its own
-            # screen): that revision is now seen (F_129).
+        if task is not None and (is_self_human or task.status == TaskStatus.PENDING.value):
+            # The pending notice carried the task body (a human reads it on
+            # its own screen): that revision is now seen (F_129). The owner
+            # nudge names no body, so the member reads the task through
+            # view_task as usual.
             await self._infra.task_manager.observe_revision(task.task_id, int(task.revision or 0))
 
     async def _notify_passive_assignment(self, payload) -> None:
@@ -725,6 +785,12 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
     # assignment instead of surveying the board for work to claim.
     _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self_scheduled"
     _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self_scheduled"
+
+    # In-progress assignments are not announced under scheduled dispatch: the
+    # scheduler's own handoff already mails the owner of an entered task its
+    # start instruction, so an event-driven announce next to it would
+    # double-deliver.
+    _ANNOUNCE_ENTERED_ASSIGNMENTS: ClassVar[bool] = False
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """No startup board survey under scheduled dispatch (F_69).
