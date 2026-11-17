@@ -47,7 +47,6 @@ from openjiuwen.agent_teams.organization.tools import (
     OrgCreateTaskTool,
     OrgListAvailableTeamsTool,
     OrgListConfiguredTeamsTool,
-    OrgListExpertGroupsTool,
     OrgListLeaderMessagesTool,
     OrgReviewTaskTool,
     OrgSummaryCompleteTool,
@@ -92,7 +91,6 @@ def test_optional_organization_tool_schemas_use_empty_required_arrays() -> None:
     tools = [
         OrgListAvailableTeamsTool(runtime, "team-1", "session-1"),
         OrgListConfiguredTeamsTool(runtime, "team-1", "session-1"),
-        OrgListExpertGroupsTool(runtime, "team-1", "session-1"),
         OrgListLeaderMessagesTool(manager, "team-1", "leader-1", message_service),
         OrgViewPendingReviewsTool(manager, "team-1", "leader-1"),
     ]
@@ -4370,6 +4368,168 @@ async def test_accepted_last_child_wakes_summary_team_root(active_organization_r
     )
     assert turns[0]["team_name"] == "team-a"
     assert "org_create_summary_execution" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "executor,recipient,completed,expected",
+    [("team-b", "team-a", True, True), ("team-b", "team-b", True, False),
+     ("team-a", "team-a", True, False), ("team-b", "team-a", False, False)],
+)
+async def test_delegated_root_completion_wakes_creator_only(
+    active_organization_runtime, executor, recipient, completed, expected,
+):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-delegated-root-delivery"
+    manager, creator = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    assert (await manager.create_task(
+        task_id="direct-root", title="One-line result", description="No child task required",
+        created_by=creator, required_capabilities=["analysis"], delegated_to_team_id=executor,
+    )).ok
+    assert (await manager.start_task(task_id="direct-root", team_id=executor)).ok
+    assert (await manager.set_root_aggregation_mode(
+        task_id="direct-root", team_id=executor, leader_id=f"leader-{executor}",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )).ok
+    if completed:
+        assert (await manager.complete_task(
+            task_id="direct-root", team_id=executor, output_abstract="P05-QUICK-12: 12",
+        )).ok
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents, session_id, org_id,
+        OrgTaskCompletedEvent(organization_id=org_id, team_id=executor, task_id="direct-root"),
+        team_id=recipient,
+    )
+    assert len(turns) == int(expected)
+    if expected:
+        assert turns[0]["team_name"] == "team-a"
+        assert turns[0]["inputs"]["_org_relay_source"] == "org_root_delivery"
+        prompt = turns[0]["inputs"]["query"]
+        assert "direct-root" in prompt
+        assert "org_view_tasks" in prompt
+        assert "output_abstract" in prompt
+
+
+async def _prepare_durable_root(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    manager, creator = await _seed_two_team_org(runtime, agents, session_id, "org-root-durable")
+    assert (await manager.create_task(
+        task_id="durable-root", title="One-line result", description="A delegated root",
+        created_by=creator, required_capabilities=["analysis"], delegated_to_team_id="team-b",
+    )).ok
+    assert (await manager.start_task(task_id="durable-root", team_id="team-b")).ok
+    assert (await manager.set_root_aggregation_mode(
+        task_id="durable-root", team_id="team-b", leader_id="leader-team-b",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )).ok
+    return runtime, agents, session_id, manager
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledged,legacy,scheduled", [
+    (False, False, False), (False, False, True), (False, True, False), (True, False, False),
+])
+async def test_delegated_root_delivery_survives_rebind(
+    active_organization_runtime, acknowledged, legacy, scheduled,
+):
+    runtime, agents, session_id, manager = await _prepare_durable_root(active_organization_runtime)
+    assert (await manager.complete_task(
+        task_id="durable-root", team_id="team-b", output_abstract="Saved root output",
+    )).ok
+    service = agents["team-a"].team_backend.org_message_service
+    notices = await service.list_leader_messages(team_id="team-a", unread_only=True)
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["metadata"]["kind"] == "root_completed"
+    if scheduled:
+        turns = _capture_org_turns(runtime)
+        await _emit_team_task_event(agents, session_id, "org-root-durable", OrgTaskCompletedEvent(
+            organization_id="org-root-durable", team_id="team-b", task_id="durable-root",
+        ))
+        assert len(turns) == 1
+    if legacy:
+        # Simulate a root completed by the pre-notification implementation.
+        await service.purge_organization()
+    if acknowledged:
+        assert (await service.ack_leader_message(
+            message_id=notice["message_id"], team_id="team-a", leader_id="leader-team-a",
+            handling_result="Delivered saved output",
+        )).ok
+    # No TASK_COMPLETED event is delivered; restart drops all queued memory.
+    runtime._scheduled_leader_messages.clear()
+    turns = await _rebind_owner_after_clear(runtime, agents, session_id)
+    assert len(turns) == (0 if acknowledged else 1)
+    if not acknowledged:
+        assert turns[0]["inputs"]["_org_relay_source"] == "org_root_delivery"
+        assert notice["message_id"] in turns[0]["inputs"]["query"]
+        assert "org_ack_leader_message" in turns[0]["inputs"]["query"]
+    # Rebinding must neither create a second notice nor discard its receipt.
+    assert len(await service.list_leader_messages(team_id="team-a")) == 1
+
+
+@pytest.mark.asyncio
+async def test_root_completion_and_notice_rollback_together(active_organization_runtime, monkeypatch):
+    _, agents, _, manager = await _prepare_durable_root(active_organization_runtime)
+    stage = manager._stage_root_completion_notice
+
+    async def fail_after_staging(*args):
+        await stage(*args)
+        raise RuntimeError("simulated transaction failure")
+
+    monkeypatch.setattr(manager, "_stage_root_completion_notice", fail_after_staging)
+    with pytest.raises(RuntimeError, match="simulated transaction failure"):
+        await manager.complete_task(task_id="durable-root", team_id="team-b", output_abstract="saved output")
+    assert (await manager.get_task("durable-root")).status is OrgTaskStatus.IN_PROGRESS
+    service = agents["team-a"].team_backend.org_message_service
+    assert await service.list_leader_messages(team_id="team-a") == []
+
+
+@pytest.mark.asyncio
+async def test_root_delivery_receipt_survives_database_reopen(tmp_path):
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
+
+    config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "root-delivery.db"))
+    db = TeamDatabase(config)
+    try:
+        manager = OrgTaskManager(db=db, organization_id="disk-org")
+        await manager.ensure_organization()
+        for team in ("owner", "executor"):
+            await manager.register_leader(team_id=team, leader_id=f"leader-{team}", capabilities=["analysis"])
+        creator = OrgTaskCreator(
+            creator_type="team_leader", creator_id="leader-owner", team_id="owner", organization_id="disk-org",
+        )
+        assert (await manager.create_task(
+            task_id="disk-root", title="disk root", description="saved result", created_by=creator,
+            required_capabilities=["analysis"], delegated_to_team_id="executor",
+        )).ok
+        assert (await manager.start_task(task_id="disk-root", team_id="executor")).ok
+        assert (await manager.set_root_aggregation_mode(
+            task_id="disk-root", team_id="executor", leader_id="leader-executor",
+            aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+        )).ok
+        assert (await manager.complete_task(
+            task_id="disk-root", team_id="executor", output_abstract="durable result",
+        )).ok
+    finally:
+        await db.close()
+    reopened = TeamDatabase(config)
+    try:
+        recovered = OrgTaskManager(db=reopened, organization_id="disk-org")
+        pending = await recovered.ensure_root_completion_notices(team_id="owner")
+        assert len(pending) == 1
+        service = OrgMessageService(db=reopened, organization_id="disk-org")
+        assert (await service.ack_leader_message(
+            message_id=pending[0]["message_id"], team_id="owner", leader_id="leader-owner",
+        )).ok
+    finally:
+        await reopened.close()
+    acknowledged = TeamDatabase(config)
+    try:
+        recovered = OrgTaskManager(db=acknowledged, organization_id="disk-org")
+        assert await recovered.ensure_root_completion_notices(team_id="owner") == []
+    finally:
+        await acknowledged.close()
 
 
 @pytest.mark.asyncio

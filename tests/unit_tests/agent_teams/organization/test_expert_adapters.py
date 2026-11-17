@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Contract tests for expert-group Catalog / Launcher adapters and org tools."""
+"""Contract tests for expert-team launchers and organization control tools."""
 
 from __future__ import annotations
 
@@ -11,14 +11,12 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.organization.expert_adapters import (
-    ExpertGroupDescriptor,
     LaunchedExpertTeam,
 )
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.tools import (
     OrgCreateAndInviteExpertTeamTool,
-    OrgListExpertGroupsTool,
     create_org_control_tools,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
@@ -82,23 +80,6 @@ class FakeAgent:
             (),
             {"metadata": {"capabilities": list(capabilities or ["analysis"])}},
         )()
-
-
-class FakeCatalog:
-    def __init__(self, groups: list[ExpertGroupDescriptor]) -> None:
-        self._groups = list(groups)
-
-    def list(self, *, capabilities: set[str] | None = None) -> list[ExpertGroupDescriptor]:
-        if not capabilities:
-            return list(self._groups)
-        required = set(capabilities)
-        return [group for group in self._groups if required.issubset(set(group.capabilities))]
-
-    def get(self, name: str) -> ExpertGroupDescriptor:
-        for group in self._groups:
-            if group.agent_group_name == name:
-                return group
-        raise ValueError(f"expert group not found: {name}")
 
 
 class FakeLauncher:
@@ -173,12 +154,6 @@ async def active_organization_runtime():
 
 
 @pytest.mark.asyncio
-async def test_list_expert_groups_without_catalog_returns_empty(active_organization_runtime):
-    org_runtime, _, _ = active_organization_runtime
-    assert await org_runtime.list_expert_groups() == []
-
-
-@pytest.mark.asyncio
 async def test_dissolve_stops_temporary_expert_but_preserves_owner_and_invited_team(active_organization_runtime):
     org_runtime, agents, session_id = active_organization_runtime
     host = org_runtime._team_runtime_manager
@@ -218,60 +193,6 @@ async def test_dissolve_stops_temporary_expert_but_preserves_owner_and_invited_t
     assert agents["team-b"].spec.metadata["agent_group_name"] == "analysis-group"
     await org_runtime.create_organization(organization_id="org-next", owner_team_id="team-a", session_id=session_id)
     assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-next"
-
-
-@pytest.mark.asyncio
-async def test_list_expert_groups_filters_capabilities(active_organization_runtime):
-    org_runtime, _, _ = active_organization_runtime
-    org_runtime.set_expert_group_catalog(
-        FakeCatalog(
-            [
-                ExpertGroupDescriptor(
-                    agent_group_name="frontend-group",
-                    display_name="Frontend",
-                    description="UI experts",
-                    capabilities=("frontend", "react"),
-                ),
-                ExpertGroupDescriptor(
-                    agent_group_name="backend-group",
-                    display_name="Backend",
-                    description="API experts",
-                    capabilities=("backend", "api"),
-                ),
-            ]
-        )
-    )
-
-    all_groups = await org_runtime.list_expert_groups()
-    assert [item["agent_group_name"] for item in all_groups] == [
-        "frontend-group",
-        "backend-group",
-    ]
-
-    filtered = await org_runtime.list_expert_groups(capabilities={"frontend"})
-    assert [item["agent_group_name"] for item in filtered] == ["frontend-group"]
-    assert filtered[0]["capabilities"] == ["frontend", "react"]
-
-
-@pytest.mark.asyncio
-async def test_list_expert_groups_tool(active_organization_runtime):
-    org_runtime, _, session_id = active_organization_runtime
-    org_runtime.set_expert_group_catalog(
-        FakeCatalog(
-            [
-                ExpertGroupDescriptor(
-                    agent_group_name="sample-expert-group",
-                    display_name="Sample",
-                    description="demo",
-                    capabilities=("analysis",),
-                )
-            ]
-        )
-    )
-    tool = OrgListExpertGroupsTool(org_runtime, team_id="team-a", session_id=session_id)
-    result = await tool.invoke({"capabilities": ["analysis"]})
-    assert result.success
-    assert result.data["expert_groups"][0]["agent_group_name"] == "sample-expert-group"
 
 
 @pytest.mark.asyncio
@@ -382,41 +303,8 @@ def test_control_tools_include_expert_group_tools():
             session_id="session-1",
         )
     ]
-    assert "org_list_expert_groups" in names
+    assert "org_list_expert_groups" not in names
     assert "org_create_and_invite_expert_team" in names
-
-
-@pytest.mark.asyncio
-async def test_expert_adapter_installer_runs_on_first_list(active_organization_runtime):
-    org_runtime, _, _session_id = active_organization_runtime
-    calls: list[object] = []
-
-    def _install(runtime: OrganizationRuntimeManager) -> None:
-        calls.append(runtime)
-        runtime.set_expert_group_catalog(
-            FakeCatalog(
-                [
-                    ExpertGroupDescriptor(
-                        agent_group_name="lazy-group",
-                        display_name="Lazy",
-                        capabilities=("analysis",),
-                    )
-                ]
-            )
-        )
-        runtime.set_expert_team_launcher(FakeLauncher(team_id="team-b", leader_id="leader-team-b"))
-
-    org_runtime.set_expert_adapter_installer(_install)
-    assert org_runtime._expert_group_catalog is None
-    assert org_runtime._expert_team_launcher is None
-
-    groups = await org_runtime.list_expert_groups()
-    assert len(calls) == 1
-    assert [item["agent_group_name"] for item in groups] == ["lazy-group"]
-
-    # Second list does not re-install (adapters already present).
-    await org_runtime.list_expert_groups()
-    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -438,7 +326,6 @@ async def test_expert_adapter_installer_runs_on_first_create(active_organization
                 agent_group_name="sample-expert-group",
             )
         )
-        runtime.set_expert_group_catalog(FakeCatalog([]))
 
     org_runtime.set_expert_adapter_installer(_install)
     result = await org_runtime.create_and_invite_expert_team(
@@ -449,3 +336,18 @@ async def test_expert_adapter_installer_runs_on_first_create(active_organization
     )
     assert len(calls) == 1
     assert result["team_id"] == "team-b"
+
+
+@pytest.mark.asyncio
+async def test_launcher_installer_is_not_repeated_after_install(active_organization_runtime):
+    runtime, _, _ = active_organization_runtime
+    calls = []
+
+    def install(manager):
+        calls.append(manager)
+        manager.set_expert_team_launcher(FakeLauncher(team_id="team-b", leader_id="leader-team-b"))
+
+    runtime.set_expert_adapter_installer(install)
+    runtime._ensure_expert_adapters()
+    runtime._ensure_expert_adapters()
+    assert calls == [runtime]
