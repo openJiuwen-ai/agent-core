@@ -39,6 +39,7 @@ TEAM_STATIC_LONG_TEXT_SPECS: dict[str, tuple[tuple[str, bool], ...]] = {
 }
 TEAM_TASK_LONG_TEXT_SPECS: tuple[tuple[str, bool], ...] = (
     ("content", False),
+    ("reviewer", True),
     ("summary", True),
     ("note", True),
     ("change_notes", True),
@@ -183,7 +184,9 @@ class TeamTaskBase(SQLModel):
     # team-scale (small boards, "reviewer contains X" resolved by an in-memory
     # filter over the status-indexed IN_REVIEW rows), and the list also backs
     # the voting mechanism (vote rows live in team_review_vote_*). See F_59/F_62.
-    reviewer: Optional[str] = Field(default=None, nullable=True)
+    # LONGTEXT on MySQL: entries carry free-text instruction/description and
+    # easily exceed VARCHAR(255) once json.dumps'd.
+    reviewer: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     # Review round counter (F_62): bumped atomically with every
     # IN_PROGRESS -> IN_REVIEW flip so votes of a superseded round are
     # naturally void (vote rows record the round they were cast in). 0 means

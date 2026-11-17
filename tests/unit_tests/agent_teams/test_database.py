@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
     _ensure_dynamic_table_indexes,
     _ensure_team_member_options_column,
     _quote_ident,
+    _widen_text_columns,
 )
 from openjiuwen.agent_teams.tools.member_options import (
     build_member_options,
@@ -344,7 +345,7 @@ class TestTeamDatabaseInit:
 
         dialect = mysql_dialect()
         for table, columns in (
-            (task_table, ("content", "summary", "note", "change_notes")),
+            (task_table, ("content", "reviewer", "summary", "note", "change_notes")),
             (message_table, ("content", "meta")),
             (vote_table, ("feedback",)),
             (Team.__table__, ("desc", "prompt")),
@@ -354,6 +355,40 @@ class TestTeamDatabaseInit:
             for name in columns:
                 rendered = str(table.c[name].type.compile(dialect=dialect)).upper()
                 assert "LONGTEXT" in rendered, f"{table.name}.{name} -> {rendered}"
+
+    @pytest.mark.level0
+    def test_widen_text_columns_mysql_issues_modify_longtext(self):
+        """VARCHAR-bounded columns get ALTER ... MODIFY ... LONGTEXT on MySQL."""
+        from sqlalchemy import String
+
+        sync_conn = MagicMock()
+        sync_conn.dialect = mysql_dialects.dialect()
+        columns = {
+            "note": {"name": "note", "type": String(255)},
+            "content": {"name": "content", "type": String(255)},
+            # TEXT / unbounded — already wide; must not MODIFY.
+            "summary": {"name": "summary", "type": String()},
+        }
+        _widen_text_columns(
+            sync_conn,
+            "team_task_widen01",
+            columns,
+            (
+                ("content", False),
+                ("summary", True),
+                ("note", True),
+            ),
+        )
+        sqls = [call.args[0] for call in sync_conn.exec_driver_sql.call_args_list]
+        assert any(
+            s == "ALTER TABLE `team_task_widen01` MODIFY `note` LONGTEXT NULL" for s in sqls
+        ), sqls
+        assert any(
+            s == "ALTER TABLE `team_task_widen01` MODIFY `content` LONGTEXT NOT NULL"
+            for s in sqls
+        ), sqls
+        assert not any("`summary`" in s for s in sqls)
+        assert all("MODIFY" in s and "LONGTEXT" in s for s in sqls)
 
     @pytest.mark.level1
     def test_team_static_long_text_ensure_is_idempotent_on_sqlite(self):

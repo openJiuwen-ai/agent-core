@@ -398,14 +398,14 @@ def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
 
 def _drop_table(sync_conn, table_name: str) -> None:
     """Drop one table with raw SQL to avoid reflection-order issues."""
-    quoted_name = _quote_ident(sync_conn, table_name)
-    sync_conn.exec_driver_sql(f"DROP TABLE IF EXISTS {quoted_name}")
+    q_table = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DROP TABLE IF EXISTS {q_table}")
 
 
 def _clear_table(sync_conn, table_name: str) -> None:
     """Delete all rows from one reflected table."""
-    quoted_name = _quote_ident(sync_conn, table_name)
-    sync_conn.exec_driver_sql(f"DELETE FROM {quoted_name}")
+    q_table = _quote_ident(sync_conn, table_name)
+    sync_conn.exec_driver_sql(f"DELETE FROM {q_table}")
 
 def _create_static_tables(sync_conn) -> None:
     """Create the static team-scoped schema, and only that.
@@ -703,13 +703,17 @@ def _ensure_dynamic_table_indexes(
 
         if is_review_vote:
             # Widen only — review-vote tables have no legacy index rebuild.
-            vote_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
-            _widen_text_columns(
-                sync_conn,
-                table_name,
-                vote_column_defs,
-                TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
-            )
+            # Skip get_columns on non-MySQL: widen is a no-op there.
+            if _is_mysql_family(sync_conn):
+                vote_column_defs = {
+                    c["name"]: c for c in inspector.get_columns(table_name)
+                }
+                _widen_text_columns(
+                    sync_conn,
+                    table_name,
+                    vote_column_defs,
+                    TEAM_REVIEW_VOTE_LONG_TEXT_SPECS,
+                )
             continue
 
         q_table = _quote_ident(sync_conn, table_name)
@@ -740,10 +744,18 @@ def _ensure_dynamic_table_indexes(
                     table_name,
                 )
 
+            # One get_columns for ADD probes and (on MySQL) widen — avoid a
+            # second reflection solely for LONGTEXT MODIFY.
+            task_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
+            task_columns = set(task_column_defs)
+            text_ddl = _dialect_long_text_ddl(sync_conn)
+
             # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
-            task_columns = {c["name"] for c in inspector.get_columns(table_name)}
             if "reviewer" not in task_columns:
-                sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN reviewer TEXT")
+                q_col = _quote_ident(sync_conn, "reviewer")
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {q_table} ADD COLUMN {q_col} {text_ddl}"
+                )
                 team_logger.info("Migrated task table %s: added reviewer column", table_name)
 
             # F_62: review voting — round counter + per-task round ceiling.
@@ -755,8 +767,6 @@ def _ensure_dynamic_table_indexes(
             if "max_review_rounds" not in task_columns:
                 sync_conn.exec_driver_sql(f"ALTER TABLE {q_table} ADD COLUMN max_review_rounds INTEGER")
                 team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
-
-            text_ddl = _dialect_long_text_ddl(sync_conn)
 
             # F_118: author's completion note, read by handoff briefs / view_task.
             if "note" not in task_columns:
@@ -796,9 +806,6 @@ def _ensure_dynamic_table_indexes(
 
             # MySQL/MariaDB create() used to emit VARCHAR(255) for bare str
             # Fields. Widen existing short columns so long notes/content land.
-            task_column_defs = {
-                c["name"]: c for c in inspector.get_columns(table_name)
-            }
             _widen_text_columns(
                 sync_conn,
                 table_name,
@@ -828,13 +835,16 @@ def _ensure_dynamic_table_indexes(
         if not is_message:
             continue
 
-        message_column_defs = {c["name"]: c for c in inspector.get_columns(table_name)}
-        _widen_text_columns(
-            sync_conn,
-            table_name,
-            message_column_defs,
-            TEAM_MESSAGE_LONG_TEXT_SPECS,
-        )
+        if _is_mysql_family(sync_conn):
+            message_column_defs = {
+                c["name"]: c for c in inspector.get_columns(table_name)
+            }
+            _widen_text_columns(
+                sync_conn,
+                table_name,
+                message_column_defs,
+                TEAM_MESSAGE_LONG_TEXT_SPECS,
+            )
 
         legacy_message_indexes = [
             f"ix_{table_name}_to_member_name",
