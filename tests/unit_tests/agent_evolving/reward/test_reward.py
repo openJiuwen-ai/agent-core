@@ -499,6 +499,18 @@ async def test_metric_guides_are_scanned_and_the_fitting_ones_used(tmp_path, mon
     extra.write_text("keywords: 工单\n# Ticket guide")
     assert [n for n, _ in await guides.for_task("整理工单日报", {"metric_guides": [str(extra)]})] == ["extra"]
 
+    class DomainPicker:
+        def __init__(self, name):
+            self.name = name
+
+        async def json(self, system, user):
+            assert system.startswith("You choose which evaluation guides")
+            assert self.name in user
+            return {"guides": [self.name]}
+
+    assert [n for n, _ in await guides.for_task("守住小镇直到天亮", {}, DomainPicker("game"))] == ["game"]
+    assert [n for n, _ in await guides.for_task("把接送和买菜排清楚", {}, DomainPicker("personal_assistant"))] == ["personal_assistant"]
+
 
 @pytest.mark.asyncio
 async def test_the_chosen_guide_reaches_the_criteria_writer_and_the_reply(tmp_path, monkeypatch):
@@ -764,6 +776,7 @@ async def test_concurrent_runs_keep_their_own_progress_files(tmp_path):
 async def test_work_without_a_deliverable_file_is_scored_from_the_reply(tmp_path, monkeypatch):
     seen = []
     install(monkeypatch, [
+        ("You choose which evaluation guides", {"guides": []}),
         ("You write evaluation criteria", {"criteria": [{"id": "answer", "scope": "terminal", "name": "答案", "goal": "g",
                                                          "claims": [{"text": "给出距离", "level": "floor"},
                                                                     {"text": "说明是直线还是公路", "level": "challenge"}]}]}),

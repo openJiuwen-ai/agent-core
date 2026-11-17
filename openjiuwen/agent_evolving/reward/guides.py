@@ -60,8 +60,20 @@ opening. Choose a guide only when the work the Task asks for is of the kind the 
 async def for_task(task, config, model=None, log=lambda message: None, notes=None):
     """[(name, body)] of the guides that fit this Task: keyword matches, plus those without keywords that the model
     picks (none of them when there is no model; when the pick fails, a warning says so).
+
+    A task that hits no keyword is still offered every guide, including game and personal assistant.
+    An existing keyword match is left as it is; the selector is not asked to replace it.
     """
     chosen, undecided = by_keywords(task, config)
+    if not chosen and model is not None:
+        offered = []
+        for path in guide_files(config.get("metric_guides")):
+            try:
+                name, _keywords, body = read_guide(path)
+            except OSError:
+                continue
+            offered.append((name, body))
+        undecided = offered
     if undecided and model is not None:
         try:
             found = await model.json(PICK_PROMPT, json.dumps(

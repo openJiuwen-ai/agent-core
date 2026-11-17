@@ -239,6 +239,8 @@ async def test_the_agent_is_steered_to_run_pages_not_to_read_them(tmp_path, monk
     monkeypatch.setattr(models.Model, "__init__", lambda self, config: self.__dict__.update(name="m", vision=False))
 
     async def answer(self, system, user, images=()):
+        if system.startswith("You choose which evaluation guides"):
+            return {"guides": []}
         if system.startswith("You write evaluation criteria"):
             return {"criteria": [{"id": "play", "claims": [{"text": "Scores", "level": "floor"}]}]}
         judged.append(user)
