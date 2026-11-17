@@ -26,6 +26,39 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
 
 
 @pytest.mark.asyncio
+async def test_leader_abort_discards_followups_and_blocks_automatic_inputs():
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, sleep_seconds=5.0)
+        consumer = asyncio.create_task(drain_outputs(harness, []))
+        try:
+            await harness.send("working")
+            await wait_invoke_running(fake)
+            await harness.send("old follow-up", immediate=False)
+            harness.set_leader_stop({"message_id": "abort-1", "timestamp": 10})
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert harness.leader_stop()["message_id"] == "abort-1"
+            assert not harness._st.pending_queue
+            await harness.send("automatic task-board nudge", immediate=True)
+            await harness.send("late asynchronous result", immediate=False)
+            await harness.resume(query="automatic checkpoint continuation")
+            assert [inv["query"] for inv in fake.invocations] == ["working"]
+            harness.set_leader_stop(None)
+            fake.sleep_seconds = 0.0
+            await harness.send("new leader instruction", immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert [inv["query"] for inv in fake.invocations] == ["working", "new leader instruction"]
+            assert fake.cancelled_count == 1
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_graceful_abort_finishes_current_round_then_stops() -> None:
     """graceful abort lets the in-flight round finish, then returns to IDLE.
 

@@ -34,9 +34,11 @@ async def group(tmp_path, monkeypatch):
         "openjiuwen.agent_teams.tools.database.message_dao.get_current_time", lambda: clock["timestamp"],
     )
     host = SimpleNamespace(deliver_input=AsyncMock(), has_pending_interrupt=lambda: False,
+                           has_in_flight_round=lambda: False,
+                           active_input_snapshot=lambda: None,
                            auto_start_member=AsyncMock())
     blueprint = SimpleNamespace(member_name="alice", role=TeamRole.TEAMMATE, team_spec=backend.group_chat_spec)
-    infra = SimpleNamespace(team_backend=backend, message_manager=backend.message_manager)
+    infra = SimpleNamespace(team_backend=backend, message_manager=backend.message_manager, task_manager=None)
     handler = GroupMessageHandler(host, blueprint, infra, AsyncMock())
     try:
         yield SimpleNamespace(backend=backend, db=db, clock=clock, host=host, handler=handler)
@@ -48,6 +50,62 @@ async def group(tmp_path, monkeypatch):
 
 async def post(group, content, mentions=()):
     return await group.backend.append_group_message("user", content, client_message_id=content, mentions=mentions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("busy,mentioned,choice,steers", [
+    (True, False, "steer", None),
+    (False, True, "steer", False),
+    (True, True, "steer", True),
+    (True, True, "follow_up", False),
+    (True, True, "drop", True),
+    (True, True, None, True),
+])
+async def test_group_mention_selects_delivery_without_discarding(group, monkeypatch, busy, mentioned, choice, steers):
+    monkeypatch.setenv("JEV_BASE_URL", "http://unit-test.invalid")
+    group.host.has_in_flight_round = lambda: busy
+    client = SimpleNamespace(system_one=AsyncMock(), close=AsyncMock())
+    if choice is None:
+        client.system_one.side_effect = TimeoutError
+    else:
+        client.system_one.return_value = {"delivery": {"choice": choice}}
+    monkeypatch.setattr("openjiuwen.agent_evolving.attribution.jev.JevClient", lambda **kwargs: client)
+    await post(group, "change the current draft", ["alice"] if mentioned else ["bob"])
+    await group.handler.on_poll_mailbox(None)
+
+    if busy and mentioned:
+        client.system_one.assert_awaited_once()
+        state, questions = client.system_one.call_args.args
+        assert state["recipient"] == "alice"
+        assert set(questions["delivery"]["criteria"]) == {"steer", "follow_up"}
+        client.close.assert_awaited_once()
+    else:
+        client.system_one.assert_not_awaited()
+    if mentioned:
+        group.host.deliver_input.assert_awaited_once()
+        assert group.host.deliver_input.call_args.kwargs["use_steer"] is steers
+        assert await group.db.message.get_broadcast_read_at("group", "alice") == 10
+    else:
+        group.host.deliver_input.assert_not_awaited()
+        assert await group.db.message.get_broadcast_read_at("group", "alice") == 0
+
+
+@pytest.mark.asyncio
+async def test_group_steer_does_not_target_a_new_round(group, monkeypatch):
+    active = object()
+    group.host.has_in_flight_round = lambda: True
+    group.host.active_input_snapshot = lambda: (active, "Review the old draft")
+
+    async def decide(state):
+        nonlocal active
+        assert state["current_input"] == "Review the old draft"
+        active = object()
+        return "steer"
+
+    monkeypatch.setattr("openjiuwen.agent_teams.group_chat.message_handler.choose_group_delivery", decide)
+    await post(group, "correct the old draft", ["alice"])
+    await group.handler.on_poll_mailbox(None)
+    assert group.host.deliver_input.call_args.kwargs["use_steer"] is False
 
 
 @pytest.mark.asyncio
