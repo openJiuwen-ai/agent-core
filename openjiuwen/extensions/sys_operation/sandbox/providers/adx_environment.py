@@ -140,7 +140,9 @@ class _AdxEnvironmentBackend:
         url = urlsplit(base_url)
         if url.scheme not in {"https", "http"} or not url.netloc or url.path not in {"", "/"}:
             raise ValueError("ADX base_url must be an HTTP(S) origin")
-        if url.username is not None or url.password is not None or url.query or url.fragment:
+        if url.username is not None or url.password is not None:
+            raise ValueError("ADX base_url must be an HTTP(S) origin")
+        if url.query or url.fragment:
             raise ValueError("ADX base_url must be an HTTP(S) origin")
         scope = build_adx_shared_scope_key(base_url, self.endpoint.isolation_key) + self._scope_suffix + node_scope
         return url, scope

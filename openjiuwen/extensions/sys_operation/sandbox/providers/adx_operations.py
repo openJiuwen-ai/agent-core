@@ -132,7 +132,8 @@ def _select_text_lines(
         start, end = line_range
         if start <= 0 or end <= 0 or start > end:
             return [], True
-        return lines[start - 1 : end], False
+        start_index = start - 1
+        return lines[start_index:end], False
     return lines, False
 
 
@@ -141,7 +142,11 @@ def _read_chunks(content: str | bytes, mode: str, encoding: str, chunk_size: int
     if mode == "bytes":
         raw = content if isinstance(content, bytes) else str(content).encode(encoding)
         chunk_size = chunk_size if chunk_size > 0 else 8192
-        return [raw[start : start + chunk_size] for start in range(0, len(raw), chunk_size)]
+        chunks = []
+        for start in range(0, len(raw), chunk_size):
+            end = start + chunk_size
+            chunks.append(raw[start:end])
+        return chunks
     text = content if isinstance(content, str) else content.decode(encoding)
     return text.splitlines(keepends=True)
 

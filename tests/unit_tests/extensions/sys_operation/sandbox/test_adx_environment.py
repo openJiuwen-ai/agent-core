@@ -49,6 +49,7 @@ def test_local_rootfs_template_replaces_image_at_sdk_boundary(monkeypatch):
 
     factory = MagicMock()
     monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(adx_environment, "SDK_CAPABILITIES", {"local-rootfs-templates"}, raising=False)
     config = provider_config()
     config.launcher_config.extra_params["rootfs_template"] = "local-digest"
     provider = AdxEnvironmentFSProvider(
@@ -66,6 +67,7 @@ def test_different_local_rootfs_templates_do_not_share_cached_environment(monkey
 
     factory = MagicMock()
     monkeypatch.setattr(adx_environment, "Environment", factory)
+    monkeypatch.setattr(adx_environment, "SDK_CAPABILITIES", {"local-rootfs-templates"}, raising=False)
     for template in ("local-first", "local-second"):
         config = provider_config()
         config.launcher_config.extra_params["rootfs_template"] = template
@@ -76,6 +78,28 @@ def test_different_local_rootfs_templates_do_not_share_cached_environment(monkey
     assert factory.call_count == 2
     names = [call.kwargs["name"] for call in factory.call_args_list]
     assert names[0] != names[1]
+
+
+@pytest.mark.parametrize("capabilities", [None, ()])
+def test_local_rootfs_template_requires_sdk_capability(monkeypatch, capabilities):
+    import adx_environment
+
+    from openjiuwen.extensions.sys_operation.sandbox.providers.adx_environment import AdxEnvironmentFSProvider
+
+    factory = MagicMock()
+    monkeypatch.setattr(adx_environment, "Environment", factory)
+    if capabilities is None:
+        monkeypatch.delattr(adx_environment, "SDK_CAPABILITIES", raising=False)
+    else:
+        monkeypatch.setattr(adx_environment, "SDK_CAPABILITIES", capabilities, raising=False)
+    config = provider_config()
+    config.launcher_config.extra_params["rootfs_template"] = "local-unsupported"
+    provider = AdxEnvironmentFSProvider(
+        SandboxEndpoint(base_url="http://localhost:18080", isolation_key="unsupported-rootfs"), config
+    )
+    with pytest.raises(ValueError, match="Local rootfs templates require"):
+        provider._get_environment()
+    factory.assert_not_called()
 
 
 @pytest.mark.parametrize("state", ["stopped", "deleted", "failed"])
