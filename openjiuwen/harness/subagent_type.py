@@ -72,6 +72,9 @@ def resolve_subagent_type_name(
     back to a unique canonical match inside ``allowed_subagent_types``. When no
     unique match exists, it returns the normalized input so the caller keeps
     its existing "not found / not allowed" error path.
+
+    Callers that persist ``subagent_type`` into task metadata should resolve it
+    before writing, so execution-side code can rely on the canonical name.
     """
     normalized = normalize_subagent_type(subagent_type)
     resolved = normalized
