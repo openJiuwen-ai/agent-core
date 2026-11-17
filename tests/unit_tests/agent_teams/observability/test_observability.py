@@ -1233,6 +1233,91 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
         remove_team_span(team)
 
 
+@pytest.mark.asyncio
+async def test_task_created_span_carries_assignee_from_creation(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """TASK_CREATED with member_name states the assignee from creation time.
+
+    Scheduled dispatch seeds every task ``PENDING`` with an assignee. Both the
+    long-lived task span and the ``task.{id}.created`` event span must carry
+    ``AT_TASK_ASSIGNEE`` so trajectory lane grouping attributes a pending task
+    to its owner before the scheduler starts it. An unassigned creation
+    (autonomous claim-pool) sets no assignee attribute.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.extensions.observability.semconv import AT_TASK_ASSIGNEE
+
+    team = "assign_team"
+    owned_task_id = "task-with-owner"
+    pool_task_id = "task-pool"
+    assignee = "codex-reviewer"
+    handler, team_span = _new_plan_handler(team)
+    try:
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id=owned_task_id,
+            status=TaskStatus.PENDING.value, member_name=assignee,
+        )))
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id=pool_task_id,
+            status=TaskStatus.PENDING.value,
+        )))
+
+        owned_task_span = handler._task_spans.get(owned_task_id)
+        assert owned_task_span is not None, "owned task span missing after create"
+        assert _attr(owned_task_span, AT_TASK_ASSIGNEE) == assignee
+
+        pool_task_span = handler._task_spans.get(pool_task_id)
+        assert pool_task_span is not None, "pool task span missing after create"
+        assert _attr(pool_task_span, AT_TASK_ASSIGNEE) is None
+
+        finished = in_memory_exporter.get_finished_spans()
+        created_owned = next(
+            s for s in finished if s.name == f"task.{owned_task_id}.created")
+        assert _attr(created_owned, AT_TASK_ASSIGNEE) == assignee
+        created_pool = next(
+            s for s in finished if s.name == f"task.{pool_task_id}.created")
+        assert _attr(created_pool, AT_TASK_ASSIGNEE) is None
+    finally:
+        _close_team_span(team_span)
+        remove_team_span(team)
+
+
+@pytest.mark.asyncio
+async def test_task_created_span_names_the_suspended_parent(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A member-split subtask's created span names the parent it suspended (F_128).
+
+    Suspending the parent publishes no event, so ``agentteam.task.parent_id``
+    on the subtask's ``task.{id}.created`` span is what trajectory consumers
+    use to start the parent's waiting interval. Top-level tasks carry none.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    team = "subtask_trace_team"
+    handler, team_span = _new_plan_handler(team)
+    try:
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id="parent",
+            status=TaskStatus.PENDING.value, member_name="dev-1",
+        )))
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id="sub",
+            status=TaskStatus.PENDING.value, member_name="dev-2",
+            parent_task_id="parent",
+        )))
+
+        finished = in_memory_exporter.get_finished_spans()
+        created_sub = next(s for s in finished if s.name == "task.sub.created")
+        assert _attr(created_sub, "agentteam.task.parent_id") == "parent"
+        created_parent = next(s for s in finished if s.name == "task.parent.created")
+        assert _attr(created_parent, "agentteam.task.parent_id") is None
+    finally:
+        _close_team_span(team_span)
+        remove_team_span(team)
+
+
 # ---------------------------------------------------------------------------
 # ObservabilityRail: task iteration spans
 # ---------------------------------------------------------------------------

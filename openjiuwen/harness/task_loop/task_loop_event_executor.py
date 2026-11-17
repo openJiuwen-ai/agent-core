@@ -7,6 +7,8 @@ so it can be driven by the core TaskScheduler.
 """
 from __future__ import annotations
 
+import asyncio
+
 from typing import (
     Any,
     AsyncIterator,
@@ -296,6 +298,43 @@ class TaskLoopEventExecutor(TaskExecutor):
                 payload=payload,
                 last_chunk=True,
             )
+        except asyncio.CancelledError as exc:
+            # A hard cancel (round timeout, user abort, team stop) lands on the
+            # await above as BaseException, so the except-Exception branch below
+            # never runs its round-boundary cleanup — the task_iteration span
+            # and its llm child stay open until some later safety flush closes
+            # them with a misleading forced-close marker. Fire the cleanup here
+            # with a cancelled-shaped result so rails can distinguish a cancel
+            # from a failure, then propagate the cancellation as required by
+            # the asyncio cancel contract.
+            logger.info(
+                f"[OuterLoop] iteration={iteration} "
+                f"task_id={task_id} cancelled"
+            )
+            if not after_fired:
+                iter_inputs.result = {
+                    "result_type": "error",
+                    "stop_reason": "cancelled",
+                    "error": "cancelled",
+                }
+                ctx.inputs = iter_inputs
+                ctx.exception = exc
+                try:
+                    await ctx.fire(
+                        AgentCallbackEvent
+                        .AFTER_TASK_ITERATION
+                    )
+                except Exception:
+                    logger.error(
+                        "AFTER_TASK_ITERATION callback failed on the "
+                        "cancelled path for task %s",
+                        task_id,
+                        exc_info=True,
+                    )
+            # Cancellation is control flow, not task failure: no TASK_FAILED
+            # chunk (the wait side already returns its own timeout/cancel
+            # result), no TaskPlan mark — cancel() owns that.
+            raise
         except Exception as exc:
             logger.error(
                 f"Task {task_id} execution failed: "

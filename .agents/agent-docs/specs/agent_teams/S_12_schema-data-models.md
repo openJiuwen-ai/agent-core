@@ -801,8 +801,9 @@ CANCELLED    -> (terminal)
   排队，但同一时刻至多一个活跃任务。
 - 调度模式的开工由 `TeamTaskManager.start_task(task_id)` 经 DAO CAS
   `WHERE assignee=? AND status='pending'` 落库（目标态镜像 `assign` 的成员 mode 感知：
-  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化；**有子任务的任务一律
-  `IN_PROGRESS`**——那是挂起后恢复，计划已批过，F_128），并发 `TaskStartedEvent`。调用方是
+  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化；**`resume_pending` 为真的任务一律
+  `IN_PROGRESS`**——那是挂起后恢复，计划已批过，F_128），并发 `TaskStartedEvent`（`resumed` 取开工前的
+  `resume_pending`，区分恢复与首次开工）。调用方是
   `agent/scheduling/TeamScheduler`（F_62，见 `S_22`）。
 - `PLANNING` / `IN_PROGRESS` / `IN_REVIEW`（与终态一起）在 `TASK_DEPENDENCY_REJECT_STATUSES`
   里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
@@ -811,7 +812,9 @@ CANCELLED    -> (terminal)
   父任务 `depends_on` 子任务的边——顺序不可调换，执行中的任务不能加依赖。挂起的父任务不在活跃集里，不占名额；依赖
   刷新在全部子任务终态（COMPLETED 与 CANCELLED 都解边）后把它放回 `PENDING`。因此 **`BLOCKED` 不再只表示"没开工"**：
   有未终态子任务的 `BLOCKED` 父任务是"做了一半、在等子任务"，`TeamTaskManager.reassign` 拒绝改派它（理由同两个闸被排除出
-  `TASK_REASSIGNABLE_STATUSES`）；普通 `BLOCKED` 任务照旧可改派。
+  `TASK_REASSIGNABLE_STATUSES`）；普通 `BLOCKED` 任务照旧可改派。挂起本身不发事件，子任务的
+  `TaskCreatedEvent.parent_task_id` 标出被挂起的父任务；观测侧把它写成 `task.{id}.created` span 的
+  `agentteam.task.parent_id`，轨迹据此与父任务恢复时的 `TaskStartedEvent.resumed` 推出父任务等待子任务的区间。
 - 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）、F_128（成员子任务）。
 
 ### 任务行 `parent_task_id` / `created_by` 列（F_128）
