@@ -83,9 +83,6 @@ class _SendMessageBase(TeamTool, ABC):
         self.t = t
         self._team = team
         properties = {
-            "action": {"type": "string", "enum": ["send", "status"],
-                       "description": "send (default); status queries delivery without sending a message."},
-            "message_id": {"type": "string", "description": "Message ID returned by send; required for status."},
             "to": to_schema,
             "content": {"type": "string", "description": t("send_message", "content")},
             "summary": {"type": "string", "description": t("send_message", "summary")},
@@ -108,15 +105,10 @@ class _SendMessageBase(TeamTool, ABC):
         self.card.input_params = {
             "type": "object",
             "properties": properties,
-            "required": [],
+            "required": ["content"] if targets_schema is not None else ["to", "content"],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        action = inputs.get("action", "send")
-        if action == "status":
-            return await self._delivery_status(inputs.get("message_id"))
-        if action != "send":
-            return ToolOutput(success=False, error="Unknown message action")
         to_raw = inputs.get("to")
         targets_raw = inputs.get("targets")
         content = inputs.get("content", "").strip()
@@ -144,9 +136,7 @@ class _SendMessageBase(TeamTool, ABC):
             }:
                 return ToolOutput(success=False, error="Message mode requires one agent recipient in 'to'")
         try:
-            if mode is not None:
-                return await self._dispatch(to_raw, targets_raw, content, summary, mode=mode)
-            return await self._dispatch(to_raw, targets_raw, content, summary)
+            return await self._dispatch(to_raw, targets_raw, content, summary, mode=mode)
         except Exception as e:
             team_logger.exception("send_message failed")
             return ToolOutput(success=False, error=f"Internal error: {e}")
@@ -192,24 +182,6 @@ class _SendMessageBase(TeamTool, ABC):
                 limit=MAX_CONTENT_CHARS,
             ),
         )
-
-    async def _delivery_status(self, message_id: str | None) -> ToolOutput:
-        if not isinstance(message_id, str) or not message_id:
-            return ToolOutput(success=False, error="message_id is required for status")
-        row = await self.message_manager.db.message.get_message(message_id)
-        if (row is None or row.team_name != self.message_manager.team_name
-                or (row.from_member_name != self.message_manager.member_name
-                    and not (self._team is not None and self._team.is_leader))):
-            return ToolOutput(success=False, error="Message not found or not sent by you")
-        meta = json.loads(row.meta) if row.meta else {}
-        if "delivery_feedback" not in meta:
-            return ToolOutput(success=False, error="Delivery feedback is unavailable for this message")
-        return ToolOutput(success=True, data={
-            "type": "delivery_status", "message_id": message_id,
-            "recipients": meta["delivery_feedback"],
-            "note": "pending=not decided; deferred=waiting; submitted=runtime accepted (follow_up may still be queued), NOT acknowledgment; "
-                    "dropped=Jev chose to ignore; legacy_fallback=original delivery after Jev unavailable; stopped=abort applied; cleared=follow_up removed; held=preserved in history, requires explicit resend after leader review. Do not resend to pending/deferred recipients just because no reply arrived.",
-        })
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
         receiver_routed = self._team is not None and self._team.conversation_mode == "team"
@@ -397,10 +369,6 @@ class _SendMessageBase(TeamTool, ABC):
             return base
         if d["type"] == "broadcast":
             text = f"Broadcast Already sent from {d['from']} Success"
-            if d.get("message_id"):
-                text += f"\nmessage_id={d['message_id']}; query send_message(action='status', message_id=...) before resending."
-        elif d["type"] == "delivery_status":
-            return json.dumps(d, ensure_ascii=False)
         elif d["type"] == "multicast":
             return self._format_multicast_text(None, d)
         else:
@@ -476,7 +444,7 @@ class SendMessageTool(_SendMessageBase):
         steering the caller back to ``to`` alone.
         """
         if targets_raw is None:
-            return await self._dispatch_to(to_raw, content, summary, **({"mode": mode} if mode else {}))
+            return await self._dispatch_to(to_raw, content, summary, mode=mode)
         if to_raw is None:
             if not isinstance(targets_raw, list):
                 return ToolOutput(success=False, error="'targets' must be an array of strings")
@@ -508,7 +476,7 @@ class SendMessageTool(_SendMessageBase):
                     )
             if to == "*":
                 return await self._broadcast(content, summary)
-            return await self._send(to, content, summary, **({"mode": mode} if mode else {}))
+            return await self._send(to, content, summary, mode=mode)
         if to_raw is None:
             return ToolOutput(success=False, error="One of 'to' or 'targets' is required")
         return ToolOutput(success=False, error="'to' must be a string")
@@ -577,7 +545,7 @@ class ReportToLeaderTool(_SendMessageBase):
                     success=False,
                     error="cannot resolve the team leader to deliver to; the team has no leader on record",
                 )
-            return await self._send(leader, content, summary, **({"mode": mode} if mode else {}))
+            return await self._send(leader, content, summary, mode=mode)
         return ToolOutput(
             success=False,
             error=(
@@ -613,8 +581,8 @@ class ScheduledPeerMessageTool(SendMessageTool):
             leader = await self._resolve_leader()
             if not leader:
                 return self._unresolved_leader()
-            return await self._send(leader, content, summary, **({"mode": mode} if mode else {}))
-        return await super()._dispatch_to(to_raw, content, summary, **({"mode": mode} if mode else {}))
+            return await self._send(leader, content, summary, mode=mode)
+        return await super()._dispatch_to(to_raw, content, summary, mode=mode)
 
     async def _multicast(
         self,

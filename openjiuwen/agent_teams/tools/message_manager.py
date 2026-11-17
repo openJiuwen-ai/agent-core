@@ -109,8 +109,6 @@ class TeamMessageManager:
                 tool cannot provide arbitrary metadata.
         """
         sender = from_member_name or self.member_name
-        meta = dict(meta or {})
-        meta.setdefault("delivery_feedback", {to_member_name: {"state": "pending", "mode": meta.get("private_delivery_mode")}})
         message_id = str(uuid.uuid4())
 
         success = await self.db.message.create_message(
@@ -167,13 +165,6 @@ class TeamMessageManager:
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
-        feedback = {}
-        if receiver_routed:
-            members = await self.db.member.get_team_members(self.team_name)
-            feedback = {
-                member.member_name: {"state": "pending", "mode": None}
-                for member in members if member.member_name != sender
-            }
         success = await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
@@ -181,16 +172,13 @@ class TeamMessageManager:
             content=content,
             to_member_name=None,
             broadcast=True,
-            meta={"receiver_routed": True, "delivery_feedback": feedback} if receiver_routed else None,
+            meta={"receiver_routed": True, "delivery_feedback": {}} if receiver_routed else None,
         )
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
 
-        if receiver_routed:
-            await self.publish_broadcast(message_id, sender, receiver_routed=True)
-        else:
-            await self.publish_broadcast(message_id, sender)
+        await self.publish_broadcast(message_id, sender, receiver_routed=receiver_routed)
         return message_id
 
     async def publish_broadcast(

@@ -87,8 +87,7 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
     send = _leader_send(db)
     old = (await send.invoke({"to": "*", "content": "Useful later"})).data["message_id"]
     new = (await send.invoke({"to": "*", "content": "Urgent correction"})).data["message_id"]
-    await db.message.record_delivery(old, DEV_1, "deferred", mode="follow_up", target_tasks={"A": 1})
-    await db.message.record_delivery(new, DEV_1, "submitted", mode="steer")
+    await db.message.save_delivery_mode(old, DEV_1, "follow_up", {"A": 1})
     await send.message_manager.mark_messages_read([await db.message.get_message(new)], DEV_1)
     unread = await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
     assert [m.message_id for m in unread] == [old]
@@ -98,17 +97,6 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
     assert DEV_2 in await db.message.members_with_unread(TEAM_NAME, [DEV_2])
 
 
-@pytest.mark.asyncio
-async def test_private_delivery_status_respects_sender_and_leader_access(db):
-    sender = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_1, False), lang="cn"))
-    other = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_2, False), lang="en"))
-    sent = await sender.invoke({"to": DEV_2, "content": "Later request", "mode": "follow_up"})
-    message_id = sent.data["message_id"]
-    for viewer in (sender, _leader_send(db)):
-        status = await viewer.invoke({"action": "status", "message_id": message_id})
-        assert status.success
-        assert status.data["recipients"][DEV_2]["state"] == "pending"
-    assert not (await other.invoke({"action": "status", "message_id": message_id})).success
 
 
 @pytest.mark.asyncio
@@ -120,44 +108,8 @@ async def test_abort_and_resume_are_ordered_even_with_same_clock_tick(db, monkey
     assert (await db.message.get_message(resume)).timestamp > (await db.message.get_message(stop)).timestamp
 
 
-@pytest.mark.asyncio
-async def test_old_terminal_feedback_without_handled_flag_does_not_replay(db):
-    send = _leader_send(db)
-    message_id = (await send.invoke({"to": "*", "content": "Already delivered before upgrade"})).data["message_id"]
-    await db.message.record_delivery(message_id, DEV_1, "submitted", mode="steer")
-    assert not await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
-    await db.message.record_delivery(message_id, DEV_1, "pending")
-    feedback = (await send.invoke({"action": "status", "message_id": message_id})).data["recipients"]
-    assert feedback[DEV_1]["state"] == "submitted"
 
 
-@pytest.mark.asyncio
-async def test_broadcast_feedback_is_persistent_per_recipient_and_query_is_read_only(db):
-    import asyncio
-    send = _leader_send(db)
-    sent = await send.invoke({"to": "*", "content": "contract update"})
-    message_id = sent.data["message_id"]
-    before = await db.message.get_team_messages(TEAM_NAME)
-    status = await send.invoke({"action": "status", "message_id": message_id})
-    assert status.success
-    assert set(status.data["recipients"]) == {DEV_1, DEV_2}
-    assert all(v["state"] == "pending" for v in status.data["recipients"].values())
-    await asyncio.gather(
-        db.message.record_delivery(message_id, DEV_1, "deferred", mode="follow_up"),
-        db.message.record_delivery(message_id, DEV_2, "dropped", mode="drop"),
-    )
-    status = await send.invoke({"action": "status", "message_id": message_id})
-    assert status.data["recipients"][DEV_1]["state"] == "deferred"
-    assert status.data["recipients"][DEV_2]["state"] == "dropped"
-    await db.message.record_delivery(message_id, DEV_1, "submitted", mode="follow_up")
-    await db.message.record_delivery(message_id, DEV_1, "deferred", mode="follow_up")
-    status = await send.invoke({"action": "status", "message_id": message_id})
-    assert status.data["recipients"][DEV_1]["state"] == "submitted"
-    assert "NOT acknowledgment" in send.render_for_llm(status)
-    assert len(await db.message.get_team_messages(TEAM_NAME)) == len(before)
-    other = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_1, False), lang="en"))
-    assert not (await other.invoke({"action": "status", "message_id": message_id})).success
-    assert not (await send.invoke({"action": "status"})).success
 
 
 def _member_send(db, dispatch_mode: str = "autonomous"):
@@ -510,3 +462,33 @@ async def test_only_follow_up_binds_active_tasks(db, mode):
     )
     if mode == "abort":
         leader._team.task_manager.get_tasks_by_assignee.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_decision_and_read_mark_preserve_other_recipients(db):
+    import asyncio
+    import json
+    send = _leader_send(db)
+    message_id = (await send.invoke({"to": "*", "content": "An update"})).data["message_id"]
+    await asyncio.gather(
+        db.message.save_delivery_mode(message_id, DEV_1, "follow_up", {"A": 1}),
+        db.message.mark_message_read(message_id, DEV_2),
+    )
+    row = await db.message.get_message(message_id)
+    decisions = json.loads(row.meta)["delivery_feedback"]
+    assert decisions[DEV_1] == {"mode": "follow_up", "target_tasks": {"A": 1}}
+    assert decisions[DEV_2] == {"handled": True}
+    assert await db.message.members_with_unread(TEAM_NAME, [DEV_1, DEV_2]) == {DEV_1}
+    assert set(send.card.input_params["required"]) == {"content"}
+    assert "action" not in send.card.input_params["properties"]
+
+
+@pytest.mark.asyncio
+async def test_historical_terminal_broadcast_does_not_replay(db):
+    for state in ("submitted", "withdrawn", "merged"):
+        await db.message.create_message(message_id=state, team_name=TEAM_NAME, from_member_name=LEADER_NAME,
+            content="Already handled", broadcast=True,
+            meta={"receiver_routed": True, "delivery_feedback": {
+                DEV_1: {"state": state}, DEV_2: {"handled": True}}})
+    assert not await db.message.get_broadcast_messages(TEAM_NAME, DEV_1, unread_only=True)
+    assert not await db.message.members_with_unread(TEAM_NAME, [DEV_1, DEV_2])

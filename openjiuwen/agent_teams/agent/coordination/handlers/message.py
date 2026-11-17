@@ -44,6 +44,7 @@ from openjiuwen.agent_teams.message_template import (
 )
 from openjiuwen.agent_teams.tools.message_manager import ACTIVE_TASKS, is_receiver_routed, message_metadata, read_delivery
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader, load_template
+from openjiuwen.agent_teams.harness.state import follow_up_context
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
 from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
@@ -389,7 +390,6 @@ class MessageHandler(BaseCoordinationHandler):
                             continue
                         mode, target_tasks = await self._broadcast_mode(member_name, msg)
                         if mode == "drop":
-                            await self._record_delivery(msg, member_name, "dropped", mode)
                             delivered.append(msg)
                             continue
                     if not mode and not self._round.has_pending_interrupt():
@@ -397,7 +397,6 @@ class MessageHandler(BaseCoordinationHandler):
                     if mode == "follow_up" and target_tasks and not resumed_by_leader:
                         active = await self._active_task_versions(member_name)
                         if active.keys() & target_tasks.keys():
-                            await self._record_delivery(msg, member_name, "deferred", mode)
                             continue
                     # An external_runtime_failed JSON message is rendered as a
                     # <team-event> and never falls through to plain
@@ -443,10 +442,7 @@ class MessageHandler(BaseCoordinationHandler):
                                     member_name, {}).get("target_tasks", read_delivery(old)[1]),
                                 "content": self._format_message(old, expanded=await self._expand(old),
                                            is_human_agent=is_human_agent)} for old in merged]
-                            text = json.dumps({"follow_up_context": earlier,
-                                "follow_up_policy": "Earlier requests for context, not completed work. Keep after-task "
-                                                    "timing; use the current task board and newer instructions.",
-                                "current_steer": text}, ensure_ascii=False)
+                            text = follow_up_context(earlier, text)
                     if resumed_by_leader:
                         self._round.set_leader_stop(None)
                     try:
@@ -456,9 +452,6 @@ class MessageHandler(BaseCoordinationHandler):
                             self._round.set_leader_stop(stopped)
                         raise
                     delivered.extend([*merged, msg])
-                    for old in merged:
-                        await self._record_delivery(old, member_name, "merged", "follow_up")
-                    await self._record_delivery(msg, member_name, "submitted", mode)
                     await self._observe_shown_revision(expanded)
             finally:
                 if delivered:
@@ -481,26 +474,11 @@ class MessageHandler(BaseCoordinationHandler):
             # asynchronous completions cannot restart the stopped member.
             await self._round.cancel_agent()
             discarded = messages[:index + 1]
-            for old in discarded:
-                old_mode = read_delivery(old)[0]
-                old_meta = message_metadata(old)
-                entry = old_meta.get("delivery_feedback", {}).get(member_name, {})
-                old_mode = entry.get("mode") or old_mode
-                state = "stopped" if old is msg else ("cleared" if old_mode == "follow_up" else "held")
-                await self._record_delivery(old, member_name, state, old_mode)
             await self._infra.message_manager.mark_messages_read(discarded, member_name)
             team_logger.info("[{}] aborted; discarded {} pending mailbox inputs; waiting for leader",
                              member_name, len(discarded))
             return True
         return False
-
-    async def _record_delivery(self, msg: Any, member_name: str, state: str, mode: str | None) -> None:
-        meta = message_metadata(msg)
-        if not isinstance(meta, dict) or not ("delivery_feedback" in meta or is_receiver_routed(msg) or meta.get("type") == "group_chat"):
-            return
-        await self._infra.message_manager.db.message.record_delivery(
-            msg.message_id, member_name, state, mode=mode,
-        )
 
     async def _mailbox_delivery_mode(self, member_name: str, msg: Any) -> str | None:
         """Allow a conversation handler to select the runtime's input mode."""
@@ -532,18 +510,14 @@ class MessageHandler(BaseCoordinationHandler):
             ],
         })
         if mode == "legacy":
-            await self._infra.message_manager.db.message.record_delivery(
-                msg.message_id, member_name, "pending", routing="legacy_fallback",
-                reason="Jev not configured, unavailable, or invalid; original delivery applies",
-            )
             return None, {}
         if mode == "steer" and versions != await self._active_task_versions(member_name):
             team_logger.info("Broadcast {} for {} changed from steer to follow_up: task changed",
                              msg.message_id, member_name)
             mode = "follow_up"
         if mode == "follow_up":
-            await self._infra.message_manager.db.message.record_delivery(
-                msg.message_id, member_name, "deferred", mode=mode, target_tasks=versions,
+            await self._infra.message_manager.db.message.save_delivery_mode(
+                msg.message_id, member_name, mode, versions,
             )
         return mode, versions
 

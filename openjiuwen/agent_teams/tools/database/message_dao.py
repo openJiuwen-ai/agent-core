@@ -182,31 +182,22 @@ class MessageDao:
             return None
         entry = data["delivery_feedback"].get(member_name)
         # Keep historical withdrawn receipts terminal; no recall tool is exposed.
-        return entry is not None and not entry.get("handled", False) and entry.get("state") not in {
+        return not (entry or {}).get("handled", False) and (entry or {}).get("state") not in {
             "submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged",
         }
 
-    async def record_delivery(self, message_id: str, member_name: str, state: str, *, mode: str | None = None, **details) -> None:
-        """Persist receiver feedback; use a row lock to preserve concurrent recipients."""
-        model = _get_message_model()
+    async def save_delivery_mode(self, message_id: str, member_name: str, mode: str, target_tasks: dict) -> None:
+        """Remember only a deferred broadcast decision; read state stays in mark_read."""
         async with self._sessions.write() as session:
-            row = (await session.execute(
-                select(model).where(model.message_id == message_id).with_for_update()
-            )).scalar_one_or_none()
-            if row is None:
-                return
-            meta = json.loads(row.meta) if row.meta else {}
-            feedback = meta.setdefault("delivery_feedback", {})
-            previous = feedback.get(member_name, {})
-            # A retry after runtime acceptance must not make feedback regress.
-            if previous.get("state") in {"submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged"}:
-                return
-            feedback[member_name] = {
-                **previous, **details, "state": state, "mode": mode or previous.get("mode"),
-                "updated_at": get_current_time(),
-            }
-            row.meta = json.dumps(meta, ensure_ascii=False)
-            await session.commit()
+            model = _get_message_model()
+            row = (await session.execute(select(model).where(
+                model.message_id == message_id).with_for_update())).scalar_one_or_none()
+            if row is not None:
+                meta = json.loads(row.meta)
+                entry = meta.setdefault("delivery_feedback", {}).setdefault(member_name, {})
+                entry.update(mode=mode, target_tasks=target_tasks)
+                row.meta = json.dumps(meta, ensure_ascii=False)
+                await session.commit()
 
     async def create_message(
         self,
@@ -400,7 +391,7 @@ class MessageDao:
 
         if unread_only:
             rows = [row for row in rows if (json.loads(row.meta) if row.meta else {}).get(
-                "delivery_feedback", {}).get(to_member_name, {}).get("state") not in {"merged"}]
+                "delivery_feedback", {}).get(to_member_name, {}).get("state") != "merged"]
         return await self._hydrate_rows_off_loop(rows)
 
     async def get_unread_group_members(self, team_name: str) -> List[str]:
@@ -682,10 +673,8 @@ class MessageDao:
 
         if message.broadcast and self._feedback_unread(message.meta, member_name) is not None:
             meta = json.loads(message.meta)
-            feedback = meta["delivery_feedback"].get(member_name)
-            if feedback is not None:
-                feedback["handled"] = True
-                message.meta = json.dumps(meta, ensure_ascii=False)
+            meta["delivery_feedback"].setdefault(member_name, {})["handled"] = True
+            message.meta = json.dumps(meta, ensure_ascii=False)
             return True
 
         if message.broadcast:

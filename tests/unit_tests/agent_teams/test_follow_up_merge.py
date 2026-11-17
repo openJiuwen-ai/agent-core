@@ -109,5 +109,5 @@ async def test_mailbox_merge_preserves_sources_retries_and_later_messages(db, fa
     assert old in text and "AFTER implementation" in text and "Correct the API" in text
     assert "team_leader" in text
     assert [row.message_id for row in await db.message.get_messages(TEAM_NAME, DEV_1, unread_only=True)] == later
-    status = await send.invoke({"action": "status", "message_id": old})
-    assert status.data["recipients"][DEV_1]["state"] == "merged"
+    assert (await db.message.get_message(old)).is_read
+    assert "delivery_feedback" not in json.loads((await db.message.get_message(old)).meta)

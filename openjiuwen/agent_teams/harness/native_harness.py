@@ -44,7 +44,6 @@ control event and awaits an ack resolved solely by the supervisor coroutine):
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from enum import Enum
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
@@ -96,6 +95,7 @@ from openjiuwen.agent_teams.harness.snapshot_rail import (
     capture_snapshot,
 )
 from openjiuwen.agent_teams.harness.state import (
+    follow_up_context,
     ActiveRound,
     HarnessInternalState,
     HarnessState,
@@ -1876,12 +1876,7 @@ class NativeHarness(DeepAgent):
                 break
             queued.append(item)
         if queued:
-            content = json.dumps({
-                "follow_up_context": [item.content for item in queued],
-                "follow_up_policy": "Earlier follow_up context, not completed work. Keep after-task timing; "
-                                    "judge relevance using the task board and newer instructions. No second todo queue.",
-                "current_steer": msg.content,
-            }, ensure_ascii=False)
+            content = follow_up_context([item.content for item in queued], msg.content)
             if not self._push_steer(content, run_context=msg.run_context):
                 raise RuntimeError("Steering input queue is unavailable")
             for _ in queued:

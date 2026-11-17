@@ -169,7 +169,6 @@ async def test_abort_clears_mailbox_and_only_new_direct_leader_input_resumes():
     normal = message("normal")
     steer = message("steer", mode="steer")
     stop = message("stop", timestamp=2, mode="abort")
-    handler._record_delivery = AsyncMock()
     handler._read_all_unread = AsyncMock(return_value=[normal, follow, steer, stop])
     handler._expand = AsyncMock()
     await handler._process_unread_messages("dev-1")
@@ -177,10 +176,6 @@ async def test_abort_clears_mailbox_and_only_new_direct_leader_input_resumes():
     handler._expand.assert_not_awaited()
     handler._round.deliver_input.assert_not_awaited()
     manager.mark_messages_read.assert_awaited_once_with([normal, follow, steer, stop], "dev-1")
-    handler._record_delivery.assert_any_await(normal, "dev-1", "held", None)
-    handler._record_delivery.assert_any_await(follow, "dev-1", "cleared", "follow_up")
-    handler._record_delivery.assert_any_await(steer, "dev-1", "held", "steer")
-    handler._record_delivery.assert_any_await(stop, "dev-1", "stopped", "abort")
     assert barrier[0]["message_id"] == "stop"
 
     # A peer, a broadcast and a scheduler's leader-authored template cannot resume.
@@ -217,7 +212,7 @@ async def test_receiver_broadcast_defers_without_losing_newer_broadcast_or_block
     handler._infra.task_manager = SimpleNamespace(get_tasks_by_assignee=AsyncMock(return_value=[task]))
     manager = handler._infra.message_manager
     manager.mark_messages_read = AsyncMock()
-    manager.db = SimpleNamespace(message=SimpleNamespace(record_delivery=AsyncMock()))
+    manager.db = SimpleNamespace(message=SimpleNamespace(save_delivery_mode=AsyncMock()))
     handler._round.has_pending_interrupt = lambda: False
     handler._round.deliver_input = AsyncMock()
     handler._render_external_runtime_failed = lambda _: None
@@ -231,10 +226,10 @@ async def test_receiver_broadcast_defers_without_losing_newer_broadcast_or_block
                         broadcast=name != "private", meta={"receiver_routed": name != "private"})
         for name in ("older", "newer", "private")
     ]
-    async def record(message_id, member, state, **details):
+    async def record(message_id, member, mode, target_tasks):
         row = next(row for row in (older, newer, private) if row.message_id == message_id)
-        row.meta.setdefault("delivery_feedback", {}).setdefault(member, {}).update(state=state, **details)
-    manager.db.message.record_delivery.side_effect = record
+        row.meta.setdefault("delivery_feedback", {}).setdefault(member, {}).update(mode=mode, target_tasks=target_tasks)
+    manager.db.message.save_delivery_mode.side_effect = record
     handler._read_all_unread = AsyncMock(return_value=[older, newer, private])
     await handler._process_unread_messages("dev-1")
     manager.mark_messages_read.assert_awaited_once_with([newer, private], "dev-1")
@@ -243,7 +238,7 @@ async def test_receiver_broadcast_defers_without_losing_newer_broadcast_or_block
     if later_choice != "drop":
         handler._round.deliver_input.assert_any_await("newer", use_steer=True)
     assert choose.await_count == 2
-    manager.db.message.record_delivery.assert_any_await("older", "dev-1", "deferred", mode="follow_up")
+    manager.db.message.save_delivery_mode.assert_awaited_once_with("older", "dev-1", "follow_up", {"A": 1})
 
     handler._read_all_unread.return_value = [older]
     handler._infra.task_manager.get_tasks_by_assignee.return_value = []
@@ -252,9 +247,7 @@ async def test_receiver_broadcast_defers_without_losing_newer_broadcast_or_block
     manager.mark_messages_read.assert_awaited_with([older], "dev-1")
     handler._round.deliver_input.assert_awaited_with("older", use_steer=False)
     assert handler._round.deliver_input.await_count == (2 if later_choice == "drop" else 3)
-    calls = manager.db.message.record_delivery.await_args_list
-    assert any(c.args == ("older", "dev-1", "submitted") for c in calls)
-    assert any(c.args == ("newer", "dev-1", "dropped" if later_choice == "drop" else "submitted") for c in calls)
+    manager.db.message.save_delivery_mode.assert_awaited_once()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("group", [False, True])

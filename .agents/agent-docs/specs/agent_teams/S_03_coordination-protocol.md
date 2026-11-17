@@ -14,7 +14,7 @@ author_email: chengshuo5@huawei.com
 
 ## 私信模式的提示词约束与兼容
 
-普通集群的 Agent 私信由提示词要求显式选择 `steer` / `follow_up`，只有 Leader 可选择 `abort`。当前工作需要的信息使用 steer，可等当前任务结束的请求使用 follow_up；停止由成员向 Leader 申请。定向多人的通知在工具允许的收件人范围内拆成单独私信并分别选模式，不通过 targets 省略选择。广播、群聊、发给用户的消息和状态查询不适用。工具 schema 与运行时仍接受旧调用省略 mode；这是兼容行为，不是当前模型的推荐路径。提示词不保证模型每次遵循，需以实际调用观察。
+普通集群的 Agent 私信由提示词要求显式选择 `steer` / `follow_up`，只有 Leader 可选择 `abort`。当前工作需要的信息使用 steer，可等当前任务结束的请求使用 follow_up；停止由成员向 Leader 申请。定向多人的通知在工具允许的收件人范围内拆成单独私信并分别选模式，不通过 targets 省略选择。广播、群聊和发给用户的消息不适用。工具 schema 与运行时仍接受旧调用省略 mode；这是兼容行为，不是当前模型的推荐路径。提示词不保证模型每次遵循，需以实际调用观察。
 
 选择标准是“当前任务结束后收到是否太晚”：可能导致错误、返工、继续阻塞、使用旧接口或失去用途的信息用 steer，包括前置指导和依赖就绪通知；follow_up 仅用于不影响当前任务且结束后仍有价值的独立请求。不能因对方忙碌或消息标题是补充说明而延后；混合请求优先拆开，合发用 steer 并明确各部分时机。abort 仅用于执行本身必须立即停止，一般需求变更用 steer，不因暂时无回复而中止。仅允许联系 Leader 的调度工具不提示成员直联、多播或广播。
 
@@ -540,18 +540,18 @@ Leader 开启 goal（`LeaderSpec.goal`）后，团队完成判定多一个条件
 
 工具审批 JSON 沿用审批协议，先验证 Leader 身份和有效字段，再绑定 tool_call_id 恢复中断；在飞恢复期间保持未读，过时审批不转为普通输入。普通 steer/follow_up 不绕过待审批门禁。Leader abort 作为独立停止控制仍先于普通消息投递。
 
-## 消息逐条投递反馈
+## 消息模式与原有已读处理
 
 - 普通 receiver_routed 广播用各接收方 feedback.handled 判断是否仍待投递，不使用广播时间水位。较早 follow_up 不阻塞后续 steer/drop；follow_up 的目标任务持久化，各次轮询及恢复不重新调用 Jev 改判。群聊仍使用原时间游标保证上下文连续。
-- Jev 未配置、失败或非法输出时回退原投递机制：空闲直接处理、忙时 steer。不重试等待，不冒充 drop；普通广播反馈记录 routing=legacy_fallback。群聊同样回退原 steer 机制。
-- 私信也记录反馈并返回 message_id。Leader 可查询同团队消息；其他成员只能查询自己发送的消息。submitted 仅表示运行时接受，不是阅读、完成或验收。
+- Jev 未配置、失败或非法输出时回退原投递机制：空闲直接处理、忙时 steer。不重试等待，不冒充 drop；回退不新增持久化状态。群聊同样回退原 steer 机制。
+- 发送返回 message_id，广播返回仅确认写入成功。沿用原工具的发送操作和必填参数，不增加 status 查询，也不记录私信投递状态。广播仅持久化每位接收方的 follow_up 模式、目标任务和 handled 已读标记；兼容读取历史终态反馈。
 - 投递与已读沿用原处理器串行 drain 和 finally 批量标记；Native FIFO 由 supervisor 串行消费。不新增认领、预留令牌或超时租约；异常重试沿用原机制，不保证恰好消费一次。
-- abort 清除运行时 follow_up；中止之前的邮箱 follow_up 标记 cleared，其他邮箱输入标记 held 并保留历史，不自动重放；abort 自身标记 stopped。新 Leader 私信恢复。Native 团队忙时 steer 合并此前 follow_up 上下文并移出投递队列；这不表示任务完成。
+- abort 清除运行时 follow_up；中止之前的邮箱输入按原接口标记已读，保留历史但不自动重放，不再维护 cleared/held/stopped 反馈状态。新 Leader 私信恢复。Native 团队忙时 steer 合并此前 follow_up 上下文并移出投递队列；这不表示任务完成。
 - 同团队新建消息时间戳递增，防止同一时钟 tick 的 abort/恢复被错误排序。时间戳不表示精确物理时间。
 
 
 ## Steer 合并 follow_up 上下文（2026-11-16）
 
-Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后才按原已读接口移出邮箱并记 merged；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处都不建立额外持久化队列，失败保留原输入，晚到输入继续排队。运行时输入沿用原有渲染的消息来源，不生成合成数据库消息；其反馈仍为 submitted。submitted/merged 均不表示模型阅读或任务完成。
+Native TeamHarness 忙时 steer 复用原生输入通道：邮箱处理器附上此前未读 follow_up 的原文、来源、时间和任务绑定，投递成功后按原批量已读接口处理；Native supervisor 合并相同调用上下文的连续 FIFO，成功推入 steering 后才移出队列。两处共用 follow_up_context 包装函数，不建立额外持久化队列；失败保留原输入，晚到输入继续排队。输入沿用原有渲染的消息来源，不生成合成数据库消息。已读仅表示运行时接受，不表示模型阅读或任务完成。
 
 不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。

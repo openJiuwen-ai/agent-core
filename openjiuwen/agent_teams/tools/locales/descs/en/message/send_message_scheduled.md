@@ -11,7 +11,7 @@ This team runs in **scheduled assignment mode**: you never talk to other members
 
 ## Ordinary-team private messages: choose by when the information is useful
 
-Apply only to Agent recipients in ordinary teams. Messages to `user`, broadcasts, group chat, status queries take no mode. Set `mode` on every private send. Omission is accepted only for old callers, not the current Agent's calling convention. Idle recipients receive directly; do not query whether they are busy first.
+Apply only to Agent recipients in ordinary teams. Messages to `user`, broadcasts, group chat take no mode. Set `mode` on every private send. Omission is accepted only for old callers, not the current Agent's calling convention. Idle recipients receive directly; do not query whether they are busy first.
 
 Before sending, ask: **Would receiving this only after the current task ends be too late?** Choose by its effect on work, not labels such as "supplement" or "notification", tone, length, or whether the recipient is busy.
 

@@ -614,15 +614,15 @@ class TeamAgent(BaseAgent):
         self._user_input_delivered = None
 
     def leader_stop(self) -> dict | None:
-        harness = self.harness
-        getter = getattr(harness, "leader_stop", None)
+        getter = getattr(self.harness, "leader_stop", None)
         return getter() if getter is not None else getattr(self, "_leader_stop_marker", None)
 
     def set_leader_stop(self, marker: dict | None) -> None:
-        self._leader_stop_marker = marker
         setter = getattr(self.harness, "set_leader_stop", None)
         if setter is not None:
             setter(marker)
+        else:
+            self._leader_stop_marker = marker
 
     async def deliver_input(
         self,
