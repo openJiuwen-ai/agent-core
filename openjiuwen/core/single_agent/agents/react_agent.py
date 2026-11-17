@@ -47,6 +47,12 @@ from openjiuwen.core.context_engine.usage import (
     SessionKVCacheAggregator,
     request_usage_from_metadata,
 )
+from openjiuwen.core.events.builtins.event_types.prompt_compose import (
+    PROMPT_COMPOSE,
+    PromptComposeInput,
+    PromptComposeOutput,
+    PromptSectionSpec,
+)
 from openjiuwen.core.foundation.llm import (
     OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
     OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
@@ -56,6 +62,9 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage,
     ToolMessage,
     UserMessage,
+)
+from openjiuwen.core.foundation.llm import (
+    ToolCall as ToolCall,
 )
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -106,6 +115,7 @@ from openjiuwen.core.single_agent.rail.base import (
     reset_usage_invocation_id,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.tool_call_events import react_tool_call_scope
 
 _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
@@ -1052,7 +1062,7 @@ class ReActAgent(BaseAgent):
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
         return preview_messages
 
-    async def _call_model(
+    async def _execute_model_step(
         self,
         ctx: AgentCallbackContext,
         context: ModelContext,
@@ -1121,6 +1131,92 @@ class ReActAgent(BaseAgent):
         log_llm_response(logger, ai_message)
 
         return ai_message
+
+    @staticmethod
+    def _next_turn_step(ctx: AgentCallbackContext) -> tuple[str, int] | None:
+        turn_state = ctx.extra.get("_turn_state")
+        if turn_state is None:
+            return None
+        turn_id = getattr(turn_state, "turn_id", None)
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        step_index = getattr(turn_state, "step_index", None)
+        if not isinstance(step_index, int) or isinstance(step_index, bool):
+            return None
+        if step_index < 0:
+            return None
+        turn_state.step_index = step_index + 1
+        return turn_id, step_index
+
+    async def _call_model(
+        self,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
+        tools: Optional[List[ToolInfo]],
+    ) -> object:
+        """Run one model step directly or through the active turn event bus."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.events.builtins.event_types.turn import (
+            TURN_STEP,
+            TurnStepInput,
+            TurnStepTriggerContext,
+            apply_turn_step_output,
+            build_turn_step_message,
+            turn_step_core_executed,
+            validate_turn_step_identity,
+        )
+        from openjiuwen.core.runner import Runner
+
+        step = self._next_turn_step(ctx)
+        bus = Runner.get_extension_bus()
+        if step is None or bus is None:
+            return await self._execute_model_step(ctx, context, tools)
+
+        turn_id, index = step
+        step_input = TurnStepInput(
+            turn_id=turn_id,
+            index=index,
+            model=str(self._config.model_name or ""),
+            agent_id=getattr(self.card, "id", None),
+        )
+
+        async def execute_step(final_input: TurnStepInput) -> object:
+            if final_input != step_input:
+                raise_error(
+                    StatusCode.EVENTS_PAYLOAD_INVALID,
+                    reason="turn.step input cannot be modified",
+                )
+            return await self._execute_model_step(ctx, context, tools)
+
+        trigger_context = TurnStepTriggerContext(execute_step=execute_step)
+        output = await bus.trigger(
+            Event(TURN_STEP, step_input),
+            ctx.session,
+            trigger_context=trigger_context,
+        )
+        step_output = validate_turn_step_identity(output, turn_id, index)
+
+        if not turn_step_core_executed(trigger_context):
+            message = build_turn_step_message(
+                step_output,
+                turn_id=turn_id,
+                index=index,
+            )
+            ctx.inputs.response = message
+            return message
+
+        original = trigger_context.original_result
+        if not isinstance(original, AssistantMessage):
+            return original
+
+        message = apply_turn_step_output(
+            original,
+            step_output,
+            turn_id=turn_id,
+            index=index,
+        )
+        ctx.inputs.response = message
+        return message
 
     async def _recover_from_model_exception(
         self,
@@ -1224,6 +1320,7 @@ class ReActAgent(BaseAgent):
         ctx: AgentCallbackContext,
         *,
         model_client_config: Any = None,
+        compose: bool = True,
     ) -> tuple[ContextWindow, tuple[tuple[ContextCategory, str, str], ...]]:
         """Build the final context window used by a model request.
 
@@ -1237,8 +1334,16 @@ class ReActAgent(BaseAgent):
         # can otherwise reintroduce tools even when _call_model receives None.
         if ctx.extra.get("_finalizing_max_iterations"):
             ctx.inputs.tools = None
-        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
-        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        compose_output = await self._compose_prompt_sections(ctx) if compose else None
+        if compose_output is None:
+            ctx.extra.pop("_prompt_compose_sections", None)
+            final_prompt = self.prompt_builder.build()
+            usage_prompt_sections = tuple(self._context_usage_prompt_sections())
+        else:
+            ctx.extra["_prompt_compose_sections"] = compose_output.sections
+            final_prompt = self.prompt_builder.render_sections(section.text for section in compose_output.sections)
+            usage_prompt_sections = tuple(self._context_usage_prompt_sections(compose_output.sections))
+        final_system = [SystemMessage(content=final_prompt)]
         await self._sync_prompt_attachments(ctx, ctx.context)
 
         context_window_kwargs = self._build_context_window_kwargs(
@@ -1272,6 +1377,51 @@ class ReActAgent(BaseAgent):
             ctx.inputs.tools = None
         return context_window, usage_prompt_sections
 
+    async def _compose_prompt_sections(self, ctx: AgentCallbackContext) -> PromptComposeOutput | None:
+        """Trigger prompt composition at the final post-rail render boundary."""
+        from openjiuwen.core.events import Event
+        from openjiuwen.core.runner import Runner
+
+        bus = Runner.get_extension_bus()
+        if bus is None:
+            return None
+        if ctx.session is None:
+            return None
+
+        from openjiuwen.core.single_agent.agent_runtime import get_agent_runtime
+
+        session_id = ctx.session.get_session_id()
+        bound_agent = get_agent_runtime().get(session_id)
+        if bound_agent is None or not callable(getattr(bound_agent, "compose_prompt_sections", None)):
+            # Standalone ReActAgent callers can publish the Bus for unrelated
+            # events without having a DeepAgent composition owner.
+            return None
+
+        prompt_mode = getattr(self.prompt_builder, "mode", None)
+        compose_input = PromptComposeInput(
+            model=str(self._config.model_name or ""),
+            prompt_model=None,
+            surfaces=(),
+            tools=tuple(
+                str(getattr(tool, "name", ""))
+                for tool in (getattr(ctx.inputs, "tools", None) or ())
+                if str(getattr(tool, "name", ""))
+            ),
+            output_style=None,
+            traits=(),
+            detail={
+                "language": str(getattr(self.prompt_builder, "language", "")),
+                "prompt_mode": getattr(prompt_mode, "value", prompt_mode),
+            },
+        )
+        output = await bus.trigger(
+            Event(PROMPT_COMPOSE, compose_input),
+            ctx.session,
+        )
+        if not isinstance(output, PromptComposeOutput):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="prompt.compose returned an invalid output")
+        return output
+
     @staticmethod
     async def _hide_answered_images_shown_once(_context: ModelContext, window: ContextWindow) -> ContextWindow:
         """Leave out tool images marked ``keep_in_context: False`` once the model has answered after them.
@@ -1303,18 +1453,28 @@ class ReActAgent(BaseAgent):
         ]
         return message.model_copy(update={"content": content})
 
-    def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
+    def _context_usage_prompt_sections(
+        self,
+        composed_sections: Iterable[PromptSectionSpec] | None = None,
+    ) -> list[tuple[ContextCategory, str, str]]:
         """Return builder sections using the four-category product taxonomy."""
         sections: list[tuple[ContextCategory, str, str]] = []
-        get_sections_for_build = getattr(self.prompt_builder, "_get_sections_for_build", None)
-        prompt_sections = (
-            get_sections_for_build()
-            if callable(get_sections_for_build)
-            else self.prompt_builder.get_all_sections().values()
-        )
+        if composed_sections is None:
+            get_effective_sections = getattr(self.prompt_builder, "get_effective_sections", None)
+            prompt_sections = (
+                get_effective_sections()
+                if callable(get_effective_sections)
+                else self.prompt_builder.get_all_sections().values()
+            )
+        else:
+            prompt_sections = composed_sections
         for section in prompt_sections:
-            name = getattr(section, "name", "")
-            content = section.render(self.prompt_builder.language)
+            name = getattr(section, "id", getattr(section, "name", ""))
+            content = getattr(section, "text", None)
+            if content is None and hasattr(section, "render"):
+                content = section.render(self.prompt_builder.language)
+            if not isinstance(content, str):
+                continue
             if not content.strip():
                 continue
             raw_category = getattr(section, "category", None)
@@ -1527,7 +1687,9 @@ class ReActAgent(BaseAgent):
                 try:
                     report = build_report(
                         context_window,
-                        system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                        system_prompt_sections=tuple(
+                            self._context_usage_prompt_sections(ctx.extra.get("_prompt_compose_sections"))
+                        ),
                         model=model_name,
                         provider=model_provider or None,
                         deployment=str(self._config.api_base or "") or None,
@@ -1628,7 +1790,9 @@ class ReActAgent(BaseAgent):
                     agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
                     sequence=sequence,
                     provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
-                    system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                    system_prompt_sections=tuple(
+                        self._context_usage_prompt_sections(ctx.extra.get("_prompt_compose_sections"))
+                    ),
                     kv_cache=kv_cache,
                     deployment=str(self._config.api_base or "") or None,
                     attribution=attribution,
@@ -1668,8 +1832,10 @@ class ReActAgent(BaseAgent):
         run outside the normal model-call callback chain and therefore have no
         provider ``usage_metadata``.  The returned ``post_compact`` event is
         based on local measurement/estimation and is not an authoritative
-        provider token count.  The caller decides how to transport and persist
-        it.
+        provider token count.  They use the native prompt builder without
+        triggering prompt composition events, because those handlers may have
+        side effects and there is no provider request to compose.  The caller
+        decides how to transport and persist the snapshot.
         """
         if context is None:
             return None
@@ -1705,6 +1871,7 @@ class ReActAgent(BaseAgent):
         context_window, usage_prompt_sections = await self._build_model_context_window(
             ctx,
             model_client_config=getattr(self._llm, "model_client_config", None),
+            compose=False,
         )
 
         if isinstance(request_id, str) and request_id.strip():
@@ -2428,6 +2595,7 @@ class ReActAgent(BaseAgent):
             summary["redacted_values"] = redacted_values
         return summary
 
+    @react_tool_call_scope
     async def _execute_tool_call(
         self,
         ctx: AgentCallbackContext,
@@ -3037,6 +3205,9 @@ class ReActAgent(BaseAgent):
         attribution_token = bind_usage_attribution(ctx.context_usage_attribution)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
+            turn_state = inputs.get("_turn_state")
+            if turn_state is not None:
+                ctx.extra["_turn_state"] = turn_state
             if invoke_inputs.turn_number is not None:
                 ctx.extra["_turn_number"] = invoke_inputs.turn_number
             ctx.extra["user_id"] = inputs.get("user_id", "")
@@ -3405,8 +3576,12 @@ class ReActAgent(BaseAgent):
             "finalization_succeeded": False,
         }
         strategy = cast(ReActAgentConfig, self._config).on_max_iterations
-        logger.warning("ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
-                       result["iterations_used"], result["max_iterations"], strategy)
+        logger.warning(
+            "ReAct iteration limit reached: iterations_used=%s limit=%s strategy=%s",
+            result["iterations_used"],
+            result["max_iterations"],
+            strategy,
+        )
         if strategy == "error":
             return result
 

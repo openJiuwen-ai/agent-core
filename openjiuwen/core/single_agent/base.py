@@ -18,35 +18,34 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import uuid
-
 from abc import ABCMeta, abstractmethod
-from typing import Dict, List, Any, AsyncIterator, Union, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
+
 from pydantic import BaseModel
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine, ModelContext
-from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.schema.controller_output import ControllerOutput, ControllerOutputChunk
+from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.session import with_session_for_class
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     AgentRail,
     AnyAgentCallback,
     init_rail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.common.exception.errors import build_error, BaseError
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.skills import GitHubTree
-
 
 # =============================================================================
 # BaseAgent
@@ -107,7 +106,7 @@ class BaseAgent(metaclass=_AgentMeta):
             card: Agent card (required)
         """
         self.card = card
-        self._ability_manager = AbilityManager(owner_id=card.id)
+        self._ability_manager = self._create_ability_manager(owner_id=card.id)
         self._instance_id = uuid.uuid4().hex
         self._agent_callback_manager = AgentCallbackManager(
             card.id,
@@ -115,6 +114,18 @@ class BaseAgent(metaclass=_AgentMeta):
         )
         self._skill_util = None
         self.lazy_init_skill()
+
+    @staticmethod
+    def _create_ability_manager(owner_id: str) -> AbilityManager:
+        """Keep shared executors event-capable before tools are registered.
+
+        Harness shares this manager with its inner ReAct agent. Event dispatch
+        is active only inside the ReAct tool-call scope, so direct Ops calls
+        retain their separate boundary.
+        """
+        from openjiuwen.core.single_agent.tool_call_events import EventfulAbilityManager
+
+        return EventfulAbilityManager(owner_id=owner_id)
 
     def lazy_init_skill(self) -> None:
         """Lazy init SkillUtil
