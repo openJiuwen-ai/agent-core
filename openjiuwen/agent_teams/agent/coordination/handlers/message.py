@@ -65,9 +65,10 @@ async def choose_delivery(state, *, group=False):
         try:
             async with asyncio.timeout(5):
                 modes = ("steer", "follow_up") if group else ("steer", "follow_up", "drop")
+                instructions = load_template("broadcast_delivery", state.get("language", "en")).content
+                instructions = instructions.split("<!-- group-delivery -->")[int(group)].strip()
                 question = {"type": "choice", "criteria": {mode: mode for mode in modes},
-                            "instructions": load_template("group_delivery" if group else "broadcast_delivery",
-                                                          state.get("language", "en"))}
+                            "instructions": instructions}
                 answers = await client.system_one(state, {"delivery": question})
                 choice = (answers.get("delivery") or {}).get("choice")
                 if choice in modes:
