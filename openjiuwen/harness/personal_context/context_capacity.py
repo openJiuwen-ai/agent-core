@@ -50,8 +50,11 @@ from openjiuwen.harness.personal_context.source_markdown import rewrite_markdown
 
 _CAPACITY_WORKERS: dict[Path, dict] = {}
 _CAPACITY_WORKERS_LOCK = threading.Lock()
-_COMMIT_TIMEOUT_SECONDS = 1.0
-COMMIT_LOCK_SECONDS = 0.1
+# Keep the publication lock short, but leave room for subprocess import + disk
+# work under loaded CI (xdist). 100ms after .ready was flaking: parent killed
+# the child mid-unlink and tests saw status=failed / removed_count=0.
+_COMMIT_TIMEOUT_SECONDS = 3.0
+COMMIT_LOCK_SECONDS = 1.0
 _WORKER_STARTUP_SECONDS = 15.0
 _MIN_MAINTENANCE_SECONDS = 0.01
 _DEFAULT_MAINTENANCE_SECONDS = 5.0
