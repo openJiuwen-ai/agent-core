@@ -208,11 +208,46 @@ def test_cancel_kills_running_subprocess_from_another_thread(tmp_path: Path):
     while agent._active_process is None and time.monotonic() < deadline:
         time.sleep(0.05)
     assert agent._active_process is not None, "subprocess never started"
-    pid = agent._active_process.pid
 
     # Simulate frontend pause: cancel from the main thread
     agent.cancel()
     worker.join(timeout=20)
     assert not worker.is_alive(), "worker thread did not finish"
-    assert agent._cancelled is True
+    assert agent._cancel_generation >= 1
     assert agent._active_process is None
+
+
+def test_cancel_before_run_still_detected(tmp_path: Path):
+    """Covers the race window the reviewer identified: cancel() fires before
+    the worker thread enters run().  With the generation approach the
+    cancellation is never lost."""
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "run.py").write_text(_SLEEP_SCRIPT, encoding="utf-8")
+    logs = tmp_path / "logs"
+    results = tmp_path / "results"
+    logs.mkdir()
+    results.mkdir()
+    agent = ExperimentExecutionAgent({})
+    variant = ImplementedVariant(
+        name="proposed",
+        invocation=[sys.executable, "run.py", "--method", "proposed"],
+    )
+
+    # Cancel BEFORE _run_variant is called — simulates "cancel arrived while
+    # the worker thread was still queued in the thread pool".
+    cancel_gen = agent._cancel_generation
+    agent.cancel()
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        agent._run_variant(
+            variant,
+            code_dir=code_dir,
+            logs=logs,
+            results=results,
+            timeout=300,
+            max_transient_retries=0,
+            cancel_generation=cancel_gen,
+        )

@@ -420,15 +420,17 @@ class ExperimentExecutionAgent:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self._active_process: subprocess.Popen | None = None
-        self._cancelled = False
+        self._cancel_generation: int = 0
 
     def cancel(self) -> None:
         """Signal the agent to abort and kill any running subprocess tree.
 
         Thread-safe: designed to be called from the asyncio thread while
-        ``run()`` is executing inside ``asyncio.to_thread()``.
+        ``run()`` is executing inside ``asyncio.to_thread()``.  Uses a
+        monotonically increasing generation counter so that a cancel issued
+        before the worker thread enters ``run()`` is never lost.
         """
-        self._cancelled = True
+        self._cancel_generation += 1
         self._cleanup_active_process()
 
     def _cleanup_active_process(self) -> None:
@@ -449,7 +451,7 @@ class ExperimentExecutionAgent:
                 pass
 
     def run(self, inputs: ExperimentExecutionInput) -> ExperimentExecutionOutput:
-        self._cancelled = False
+        cancel_gen = self._cancel_generation
         load_project_dotenv()
         plan, implementation = inputs.plan, inputs.implementation
         if implementation.status != "ready":
@@ -501,6 +503,7 @@ class ExperimentExecutionAgent:
                     timeout=timeout,
                     max_transient_retries=max_transient_retries,
                     artifact_path=artifact_path,
+                    cancel_generation=cancel_gen,
                 )
                 result = result.model_copy(update={"code_commit": code_commit})
                 variant_results.append(result)
@@ -654,6 +657,7 @@ class ExperimentExecutionAgent:
         timeout: int,
         max_transient_retries: int,
         artifact_path: str | None = None,
+        cancel_generation: int | None = None,
     ) -> tuple[VariantResult, _VariantRun]:
         """Runs variant.invocation, retrying only launch_error/timeout
         failures (see _TRANSIENT_FAILURE_KINDS) up to max_transient_retries
@@ -670,7 +674,7 @@ class ExperimentExecutionAgent:
         attempt = 0
         log_sections: list[str] = []
         while True:
-            if self._cancelled:
+            if cancel_generation is not None and self._cancel_generation != cancel_generation:
                 raise RuntimeError("experiment execution cancelled")
             attempt += 1
             _remove_stale_metrics(metrics_path)
