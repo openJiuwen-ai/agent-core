@@ -31,7 +31,12 @@ class StoreProjectionHelper:
             return
 
         evo_log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
-        active_entries = [r for r in evo_log.entries if not r.change.skip_reason]
+        # delete/skip are advisory (or inert) — do not project their content as tips.
+        active_entries = [
+            r
+            for r in evo_log.entries
+            if not r.change.skip_reason and r.change.action not in {"delete", "skip"}
+        ]
         if not active_entries:
             await self.clear_rendered_outputs(skill_dir)
             return

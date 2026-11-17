@@ -307,6 +307,7 @@ def _to_index_item(record: EvolutionRecord) -> dict[str, Any]:
         "summary": getattr(record, "summary", "") or "",
         "target": target,
         "section": record.change.section,
+        "action": getattr(record.change, "action", "") or "append",
         "score": record.score,
         "updated_at": getattr(record, "timestamp", ""),
     }

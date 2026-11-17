@@ -16,16 +16,35 @@ DEFAULT_STATE: Dict[str, Any] = {
     "version": 1,
     "night": 0,
     "last_harvest": {},
+    "last_harvest_by_skill": {},
     "history": [],
     "task_archive": [],
 }
 
+_HARVEST_ISO_FMT = "%Y-%m-%dT%H:%M:%S"
+
 
 def _now_iso(clock: Optional[float] = None) -> str:
     return time.strftime(
-        "%Y-%m-%dT%H:%M:%S",
+        _HARVEST_ISO_FMT,
         time.localtime(clock if clock is not None else time.time()),
     )
+
+
+def _iso_to_ns(iso_ts: str) -> int:
+    text = str(iso_ts or "").strip()
+    if not text:
+        return 0
+    try:
+        seconds = time.mktime(time.strptime(text, _HARVEST_ISO_FMT))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 0
+    return int(seconds * 1_000_000_000)
+
+
+def _ns_to_iso(ns: int) -> str:
+    seconds = max(int(ns or 0), 0) / 1_000_000_000
+    return time.strftime(_HARVEST_ISO_FMT, time.localtime(seconds))
 
 
 def _merge_loaded(raw: object) -> Dict[str, Any]:
@@ -73,6 +92,37 @@ class SleepState:
         harvest = self.data.setdefault("last_harvest", {})
         if isinstance(harvest, dict):
             harvest[project] = iso_ts or _now_iso()
+
+    def get_skill_harvest_ns(self, skill_name: str) -> int:
+        """Return per-skill harvest watermark as Unix nano (0 if unset/invalid)."""
+        name = str(skill_name or "").strip()
+        if not name:
+            return 0
+        by_skill = self.data.get("last_harvest_by_skill")
+        if not isinstance(by_skill, dict):
+            return 0
+        return _iso_to_ns(str(by_skill.get(name) or ""))
+
+    def set_skill_harvest_ns(self, skill_name: str, ns: int) -> None:
+        """Persist per-skill harvest watermark from Unix nano."""
+        name = str(skill_name or "").strip()
+        if not name:
+            return
+        value = max(int(ns or 0), 0)
+        if value <= 0:
+            return
+        by_skill = self.data.setdefault("last_harvest_by_skill", {})
+        if isinstance(by_skill, dict):
+            by_skill[name] = _ns_to_iso(value)
+
+    def set_skill_harvest_iso(self, skill_name: str, iso_ts: str | None = None) -> None:
+        """Persist per-skill harvest watermark from ISO local timestamp."""
+        name = str(skill_name or "").strip()
+        if not name:
+            return
+        by_skill = self.data.setdefault("last_harvest_by_skill", {})
+        if isinstance(by_skill, dict):
+            by_skill[name] = str(iso_ts or "").strip() or _now_iso()
 
     def record_night(self, summary: Dict[str, Any]) -> None:
         history = self.data.setdefault("history", [])
