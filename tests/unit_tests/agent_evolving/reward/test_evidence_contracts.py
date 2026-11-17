@@ -521,10 +521,10 @@ async def test_pictures_reach_the_model_with_their_own_type():
     seen = []
 
     class Core:
-        async def invoke(self, messages, **kwargs):
+        async def stream(self, messages, **kwargs):
             del kwargs
             seen.append(messages[1]["content"])
-            return type("Answer", (), {"content": "{}"})()
+            yield type("Answer", (), {"content": "{}"})()
 
     model = models.Model.__new__(models.Model)
     model.name, model.extra = "m", {}
