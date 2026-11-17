@@ -346,7 +346,12 @@ def create_team_tools(
             if update_task_cls is UpdateTaskTool
             else update_task_cls(agent_team, t)
         ),
-        "view_task": ViewTaskToolV2(task_mgr, t, desc_key=_VIEW_TASK_DESC_KEY[dispatch_mode]),
+        "view_task": ViewTaskToolV2(
+            task_mgr,
+            t,
+            desc_key=_VIEW_TASK_DESC_KEY[dispatch_mode],
+            language=lang,
+        ),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
         "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),
