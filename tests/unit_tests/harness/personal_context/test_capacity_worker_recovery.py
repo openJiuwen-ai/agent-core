@@ -113,8 +113,7 @@ async def test_consecutive_timeouts_and_worker_crashes_do_not_leave_permanent_bu
                 tmp_path, limit_bytes=6000, timeout=0.15, cancelled=lambda: False,
             )
             assert result["status"] == "failed" and result["reason"] in {"time_budget", "worker_exited"}, result
-            assert worker["process"].returncode is not None
-            assert tmp_path not in capacity._CAPACITY_WORKERS
+            await until(lambda: worker["process"].returncode is not None and tmp_path not in capacity._CAPACITY_WORKERS)
     await _recover_and_reclaim(tmp_path)
 
 

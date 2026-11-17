@@ -15,7 +15,7 @@ from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir, get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     harness_failed,
     sanitize_diagnostic_payload,
@@ -35,6 +35,8 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
 # and smoke-tested the code; running it for real is a deterministic subprocess
 # invocation (variant.invocation) plus reading back metrics.json, not a task
 # that benefits from an LLM/agent loop.
+
+logger = get_logger(__name__)
 
 _OUTPUT_FLAG = "--output"
 _ENV_DIAGNOSTIC_KEYS = (
@@ -389,6 +391,9 @@ def _selected_variants(
     return [available[name] for name in target_variants]
 
 
+_TASKKILL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+
+
 def _kill_process_tree(pid: int) -> None:
     """Kill a process and all its descendants.
 
@@ -401,7 +406,7 @@ def _kill_process_tree(pid: int) -> None:
     if sys.platform == "win32":
         try:
             subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                [_TASKKILL, "/T", "/F", "/PID", str(pid)],
                 capture_output=True,
                 timeout=15,
             )
@@ -410,7 +415,7 @@ def _kill_process_tree(pid: int) -> None:
     else:
         try:
             os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+        except OSError:
             pass
 
 
@@ -443,12 +448,20 @@ class ExperimentExecutionAgent:
             if proc.poll() is None:
                 _kill_process_tree(proc.pid)
                 proc.wait(timeout=15)
-        except Exception:
+        except OSError:
+            logger.warning("process tree kill failed for pid=%s, falling back to proc.kill()", proc.pid, exc_info=True)
             try:
                 proc.kill()
                 proc.wait()
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("fallback proc.kill() also failed for pid=%s", proc.pid, exc_info=True)
+        except subprocess.TimeoutExpired:
+            logger.warning("proc.wait() timed out for pid=%s after tree kill, forcing kill", proc.pid)
+            try:
+                proc.kill()
+                proc.wait()
+            except OSError:
+                logger.warning("fallback proc.kill() also failed for pid=%s", proc.pid, exc_info=True)
 
     def run(self, inputs: ExperimentExecutionInput) -> ExperimentExecutionOutput:
         cancel_gen = self._cancel_generation
