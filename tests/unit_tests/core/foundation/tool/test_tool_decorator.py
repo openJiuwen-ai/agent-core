@@ -390,7 +390,10 @@ class TestToolDecorator:
 
 
 class TestLocalFunctionPublicIdentity:
-    """issue #2495: @tool 装饰对象应暴露公开的工具名与直接调用入口"""
+    """GitCode issue #2265: @tool 装饰对象应暴露公开的工具名与直接调用入口
+
+    ``#2265`` 是 GitCode 侧编号（GitHub 镜像仓的对应编号是 #2495）。
+    """
 
     def test_name_reflects_card_name(self):
         @tool
@@ -430,7 +433,7 @@ class TestLocalFunctionPublicIdentity:
             return base + sum(rest)
 
         # 原函数签名保持不变，可以直接按 Python 语义调用
-        assert str(__import__("inspect").signature(total.func)) == "(base: int, *rest: int) -> int"
+        assert str(inspect.signature(total.func)) == "(base: int, *rest: int) -> int"
         assert total.func(1, 2, 3) == 6
 
     @pytest.mark.asyncio
@@ -512,7 +515,7 @@ class TestLocalFunctionPublicIdentity:
     def test_the_other_tool_implementations_are_unaffected(self):
         """MCPTool / RestfulApi 不是 LocalFunction，本次改动不碰它们。
 
-        issue #2495 报的是 ``@tool`` 装饰的对象，所以 name 只落在
+        GitCode issue #2265 报的是 ``@tool`` 装饰的对象，所以 name 只落在
         LocalFunction 上。其他工具实现维持原状 —— 这正是把属性放在
         LocalFunction 而不是 Tool 基类上的另一个理由：基类上多一个
         只读属性，对这些类的所有子类都是潜在的行为变化。
