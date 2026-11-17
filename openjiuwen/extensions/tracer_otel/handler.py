@@ -1203,8 +1203,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                         "oj.span.dropped",
                         attributes={"reason": "end event undelivered by emitter"},
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    session_logger.warning(
+                        "otel workflow handler: mark dropped event failed: %s", exc
+                    )
             self._cleanup_stale_spans()
             self._cached_root_ctx = None
             self._cached_trace_id = None
