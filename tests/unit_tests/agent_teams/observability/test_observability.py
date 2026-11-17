@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.observability import (
 )
 from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
+from openjiuwen.extensions.observability.sequence_registry import materialize_stated_value
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     OJ_SPAN_OUTPUT,
@@ -184,9 +185,17 @@ def _spans_by_name(exporter: InMemorySpanExporter, name: str) -> list[Any]:
 
 
 def _attr(span: Any, key: str, default: Any = None) -> Any:
-    """Look up a span attribute, defaulting if absent."""
+    """Look up a span attribute, defaulting if absent.
+
+    Restated GenAI attributes state a sequence reference once the registry
+    holds their content, so a test reading one materializes it first; plain
+    values pass through unchanged.
+    """
     attrs = dict(span.attributes or {})
-    return attrs.get(key, default)
+    value = attrs.get(key, default)
+    if isinstance(value, str):
+        return materialize_stated_value(value)
+    return value
 
 
 def _prompt_messages(span: Any) -> list[dict[str, Any]]:
