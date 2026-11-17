@@ -165,7 +165,7 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 **文档位置**
 
-- 包内 `metrics/`：自带 `picture_book.md`（绘本）、`game.md`（游戏）、`personal_assistant.md`（个人助手）；
+- 包内 `metrics/`：自带 `game.md`（游戏）、`personal_assistant.md`（个人助手）。`picture_book.md` 仍在源码目录，当前不打进安装包；需要绘本原则时放到 `~/.reward/metrics/`。
 - `~/.reward/metrics/`（或 `$REWARD_HOME/metrics/`），放入即生效；
 - 配置项 `metric_guides` 列出的文件或目录。
 
