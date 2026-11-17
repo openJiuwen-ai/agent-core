@@ -153,6 +153,7 @@ generated: true
 |---|---|---|---|---|
 | [B_20261104_2030_cancellation-cause-lifecycle](core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261114_1107_interactive-memory-turn](harness/B_20261114_1107_interactive-memory-turn.md) | B | 交互式中断恢复后记忆丢失修复 | robin1217 | 无独立 D：本次按对话中确认的 D3 收敛方案修复，未建立独立 D 文档；外部 F08 的 D3 是决策编号，不是设计资产标识。 |
+| [B_20261117_2130_subagent-type-name-variants](harness/B_20261117_2130_subagent-type-name-variants.md) | B | subagent_type 名称机械变体导致子代理委派失败 | mulderlover | 无独立 D：确定性名称归一化缺陷修复，无独立设计；只映射到已注册/已允许名称，不做模糊匹配 |
 
 <a id="module-harness-subagents"></a>
 
