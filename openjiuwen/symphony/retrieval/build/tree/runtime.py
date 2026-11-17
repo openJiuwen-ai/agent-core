@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from openjiuwen.symphony.model_bridge import _BuildInterrupted
+
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Optional
@@ -312,6 +314,10 @@ class TreeBuilderRuntimeMixin(TreeBuilderMixin):
             try:
                 child_groups = future.result()
             except Exception as exc:
+                if isinstance(exc, _BuildInterrupted):
+                    raise
+                if not self.settings.config.task.allow_fallback_tree:
+                    raise
                 console.print(f"[red]Error processing {job.node.id}: {exc}[/red]")
                 continue
             for child_group in child_groups:

@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.symphony.models import CapabilityFingerprint, SourceSnapshot
+from openjiuwen.symphony._tasks import run_artifact_io
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
 from openjiuwen.symphony.orchestration.contracts import GraphMutationDelta, GraphMutationResult
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
@@ -80,12 +81,14 @@ class GraphMutationCoordinator:
         snapshot_factory: SnapshotFactory,
         graph_builder: GraphPayloadBuilder,
         prepare_artifact: PrepareArtifactHook | None,
+        snapshot_validator: Callable[[SourceSnapshot], Awaitable[None]],
     ) -> None:
         self._store = store
         self._journal = journal
         self._write_lock = write_lock
         self._model_available = model_available
         self._inventory_loader = inventory_loader
+        self._snapshot_validator = snapshot_validator
         self._matcher_factory = matcher_factory
         self._snapshot_factory = snapshot_factory
         self._graph_builder = graph_builder
@@ -331,13 +334,17 @@ class GraphMutationCoordinator:
         result: GraphMutationResult,
     ) -> None:
         try:
-            staged = await asyncio.to_thread(
+            staged = await run_artifact_io(
                 self._store.stage,
                 payload,
                 version=result.version,
                 reuse_existing=True,
             )
             await run_prepare_artifact(self._prepare_artifact, staged.graph_path.parent)
+            await self._snapshot_validator(state.target_snapshot)
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError
             published = self._store.activate_if_current(
                 staged,
                 expected_version=state.active.current_version,

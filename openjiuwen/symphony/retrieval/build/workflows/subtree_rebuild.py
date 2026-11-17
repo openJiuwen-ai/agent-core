@@ -5,15 +5,18 @@ import logging
 from typing import Any, Dict, Sequence
 
 from openjiuwen.symphony.retrieval.build.tree.prompts import SUBTREE_REBUILD_PROMPT
-from openjiuwen.symphony.retrieval.build.workflows.artifacts import ResolvedBuildConfig
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _BuildInterrupted, _is_transient_model_error, _model_scope, _response_content, _response_finish_reason
+from openjiuwen.symphony.retrieval.build.workflows.artifacts import can_build_tree_with_llm
 from openjiuwen.symphony.retrieval.build.workflows.tree_ops import slug_term, unique_child_cid
 
 LOGGER = logging.getLogger("index_builder")
 
 
 class IncrementalSubtreeRebuilder:
-    def __init__(self, config: ResolvedBuildConfig) -> None:
+    def __init__(self, config: RetrievalBuildConfig, model=None) -> None:
         self._config = config
+        self._model = model
 
     def rebuild(
         self,
@@ -22,7 +25,16 @@ class IncrementalSubtreeRebuilder:
         records_by_worker: Dict[str, Any],
         max_direct_leaf_children: int,
     ) -> list[dict[str, object]] | None:
-        if not self._config.llm_model:
+        with _model_scope(self._model) as model:
+            original = self._model
+            self._model = model
+            try:
+                return self._rebuild(nodes, root_cid, records_by_worker, max_direct_leaf_children)
+            finally:
+                self._model = original
+
+    def _rebuild(self, nodes, root_cid, records_by_worker, max_direct_leaf_children):
+        if not can_build_tree_with_llm(self._model):
             return None
         normalized = []
         for node in nodes:
@@ -72,6 +84,10 @@ class IncrementalSubtreeRebuilder:
             )
             return rebuilt
         except Exception as exc:
+            if isinstance(exc, _BuildInterrupted):
+                raise
+            if not self._config.task.allow_fallback_tree:
+                raise
             LOGGER.warning("incremental llm subtree rebuild skipped | branch=%s | error=%s", root_cid, exc)
             return None
 
@@ -85,7 +101,7 @@ class IncrementalSubtreeRebuilder:
         max_direct_leaf_children: int,
         depth: int,
     ) -> list[dict[str, object]] | None:
-        if depth >= max(1, int(self._config.tree_max_depth or 1)):
+        if depth >= max(1, int(self._config.structure.max_depth or 1)):
             return None
         groups = self._request_llm_subtree_groups(
             root_cid=root_cid,
@@ -105,7 +121,7 @@ class IncrementalSubtreeRebuilder:
             expanded_group = dict(group)
             expanded_group["skill_ids"] = skill_ids
             if len(skill_ids) > max_direct_leaf_children:
-                if depth + 1 >= max(1, int(self._config.tree_max_depth or 1)):
+                if depth + 1 >= max(1, int(self._config.structure.max_depth or 1)):
                     return None
                 raw_segment = str(group.get("id") or group.get("name") or f"group-{group_index}")
                 segment = slug_term(raw_segment, fallback=f"group-{group_index}")
@@ -136,7 +152,6 @@ class IncrementalSubtreeRebuilder:
         records_by_worker: Dict[str, Any],
         max_direct_leaf_children: int,
     ) -> list[dict[str, object]]:
-        client = self._llm_subtree_client()
         skills_payload = []
         for leaf in sorted(leaves, key=lambda item: str(item.get("worker_id") or "")):
             worker_id = str(leaf.get("worker_id") or "")
@@ -165,35 +180,31 @@ class IncrementalSubtreeRebuilder:
             skills_payload=json.dumps(skills_payload, ensure_ascii=False, indent=2),
             max_direct_leaf_children=max_direct_leaf_children,
         )
-        response = client.chat.completions.create(
-            model=self._config.llm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-            max_tokens=2048,
-            timeout=self._config.tree_timeout_seconds,
-        )
-        content = str(response.choices[0].message.content or "")
+        with _model_scope(self._model) as model:
+            for attempt in range(self._config.request.max_retries + 1):
+                try:
+                    response = model.invoke(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0,
+                        max_tokens=self._config.request.max_output_tokens or 2048,
+                        timeout=self._config.request.timeout_seconds,
+                    )
+                    break
+                except Exception as exc:
+                    if attempt >= self._config.request.max_retries or not _is_transient_model_error(exc):
+                        raise
+        if _response_finish_reason(response) == "length":
+            raise ValueError("model subtree output was truncated")
+        content = _response_content(response)
         payload = extract_json_object(content)
         valid_worker_ids = {str(item.get("worker_id") or "") for item in leaves}
-        return normalize_llm_subtree_groups(payload, valid_worker_ids=valid_worker_ids)
-
-    def _llm_subtree_client(self):
-        if self._config.llm_openai_client is not None:
-            return self._config.llm_openai_client
-        try:
-            from openai import OpenAI
-        except Exception as exc:
-            raise RuntimeError("openai package is required for incremental LLM subtree rebuild") from exc
-        if not self._config.tree_llm_api_key:
-            raise RuntimeError("llm_api_key is required for incremental LLM subtree rebuild")
-        return OpenAI(
-            api_key=self._config.tree_llm_api_key,
-            base_url=self._config.tree_llm_base_url or None,
-            max_retries=0,
-        )
+        groups = normalize_llm_subtree_groups(payload, valid_worker_ids=valid_worker_ids)
+        if not groups:
+            raise ValueError("model did not return valid subtree assignments")
+        return groups
 
     @staticmethod
     def _normalize_llm_subtree_groups(

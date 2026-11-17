@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+from openjiuwen.symphony.model_bridge import _BuildInterrupted
+
 import logging
 import shutil
 import tempfile
-from contextlib import ExitStack
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Any, Dict, Sequence
+
+from openjiuwen.symphony.config import RetrievalBuildConfig
 
 from openjiuwen.symphony.retrieval.build.models import TREE_INDEX_FILENAME
 from openjiuwen.symphony.retrieval.build.scanners import create_scanner, normalize_item_type
-from openjiuwen.symphony.retrieval.build.tree import DynamicTreeConfig, TreeBuildConfig, TreeManagerConfig
-from openjiuwen.symphony.retrieval.build.tree.schema import normalize_root_categories
+from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
+from openjiuwen.symphony.retrieval.build.tree.schema import TreeNode
 from openjiuwen.symphony.retrieval.build.workflows.item_sources import ResolvedItemPath, resolve_materialized_item_paths
 from openjiuwen.symphony.retrieval.build.workflows.output_writer import unlink_if_exists, write_index_outputs
 from openjiuwen.symphony.shared.profiling import StageTimer
 
 from .artifacts import (
-    ResolvedBuildConfig,
     build_catalog_records_from_nodes,
     build_fallback_tree_nodes,
     build_fallback_tree_nodes_from_records,
@@ -32,14 +34,16 @@ class _IndexBuildWorkflow:
         *,
         item_paths: Sequence[str],
         output_dir: Path,
-        resolved_config: ResolvedBuildConfig,
+        config: RetrievalBuildConfig,
+        model: Any = None,
         item_type: str,
         pre_scanned_skills: Dict[str, dict] | None = None,
         manifest_item_paths: Sequence[str] | None = None,
     ) -> None:
         self._item_paths = [str(path).strip() for path in item_paths if str(path).strip()]
         self._output_dir = output_dir.resolve()
-        self._config = resolved_config
+        self._config = config
+        self._model = model
         self._item_type = normalize_item_type(item_type)
         self._pre_scanned_skills = (
             {str(key): dict(value) for key, value in (pre_scanned_skills or {}).items()}
@@ -113,11 +117,11 @@ class _IndexBuildWorkflow:
         pre_scanned_skills: Dict[str, dict] | None,
         timer: StageTimer,
     ) -> dict:
-        if can_build_tree_with_llm(self._config):
+        if can_build_tree_with_llm(self._model):
             LOGGER.info(
                 "tree llm runtime | method=%s | timeout_seconds=%s",
                 "one-shot" if self._item_type == "skill" else "recursive",
-                self._config.tree_timeout_seconds,
+                self._config.request.timeout_seconds,
             )
             with timer.phase("build_tree_llm"):
                 from openjiuwen.symphony.retrieval.build.workflows import index_builder as public_module
@@ -128,35 +132,22 @@ class _IndexBuildWorkflow:
                     return public_module.build_tree(
                         skills_dir=aggregate_dir,
                         output_path=tree_output_path,
-                        config=DynamicTreeConfig(
-                            branching_factor=self._config.tree_branching_factor,
-                            max_depth=self._config.tree_max_depth,
-                            root_categories=normalize_root_categories(self._config.tree_root_categories),
-                        ),
-                        manager_config=_tree_manager_config(self._config),
-                        client=self._config.llm_openai_client,
-                        model=self._config.llm_model,
-                        api_key=self._config.tree_llm_api_key,
-                        base_url=self._config.tree_llm_base_url,
-                        llm_seed=self._config.llm_seed,
-                        max_workers=self._config.tree_max_workers,
-                        verbose=False,
-                        show_tree=False,
-                        display_skills_dir=(
-                            self._infer_display_skills_dir(resolved_item_paths) if pre_scanned_skills is None else None
-                        ),
+                        config=self._config,
+                        model=self._model,
                         item_type=self._item_type,
                         skill_entries=(list(pre_scanned_skills.values()) if pre_scanned_skills is not None else None),
                     )
-                except Exception:
-                    if not self._config.allow_fallback_tree:
+                except Exception as exc:
+                    if isinstance(exc, _BuildInterrupted):
+                        raise
+                    if not self._config.task.allow_fallback_tree:
                         raise
                     LOGGER.warning(
                         "build fallback: tree -> fallback_tree | reason=tree llm failed",
                         exc_info=True,
                     )
 
-        if not self._config.allow_fallback_tree:
+        if not self._config.task.allow_fallback_tree:
             raise ValueError("Tree build requested but no LLM capability is configured and fallback is disabled")
         LOGGER.warning("build fallback: tree -> fallback_tree | reason=tree llm is unavailable")
         with timer.phase("build_tree_fallback"):
@@ -165,17 +156,17 @@ class _IndexBuildWorkflow:
             return {"nodes": self._fallback_tree_nodes_from_scanned(pre_scanned_skills)}
 
     def _build_one_shot_tree(self, aggregate_dir: Path, pre_scanned_skills: Dict[str, dict] | None) -> dict:
-        from openjiuwen.symphony.retrieval.build.tree.one_shot import (
-            OneShotSkill,
-            OneShotSkillTreeBuilder,
-            OneShotTreeBuildConfig,
-        )
+        from openjiuwen.symphony.retrieval.build.tree.one_shot import OneShotSkill, OneShotSkillTreeBuilder
 
         entries = (
             list(pre_scanned_skills.values())
             if pre_scanned_skills is not None
             else create_scanner("skill", aggregate_dir).to_dict_list()
         )
+        builder = TreeBuilder(
+            skills_dir=aggregate_dir, config=self._config, model=self._model, skill_entries=entries,
+        )
+        entries = builder._enrich_skill_profiles(entries, verbose=self._config.output.verbose)
         skills = [
             OneShotSkill(
                 name=item.get("name") or item["id"],
@@ -185,28 +176,22 @@ class _IndexBuildWorkflow:
             )
             for item in entries
         ]
-        with ExitStack() as stack:
-            client = self._config.llm_openai_client
-            if client is None:
-                from openai import OpenAI
-
-                client = stack.enter_context(
-                    OpenAI(
-                        api_key=self._config.tree_llm_api_key,
-                        base_url=self._config.tree_llm_base_url or None,
-                        max_retries=0,
-                    )
-                )
-            result = OneShotSkillTreeBuilder(
-                client=client,
-                model=self._config.llm_model,
-                config=OneShotTreeBuildConfig(
-                    max_depth=self._config.tree_max_depth,
-                    max_output_tokens=self._config.tree_max_output_tokens or OneShotTreeBuildConfig.max_output_tokens,
-                    timeout_seconds=self._config.tree_timeout_seconds,
-                    seed=self._config.llm_seed,
-                ),
-            ).build(skills)
+        result = OneShotSkillTreeBuilder(model=self._model, config=self._config).build(skills)
+        builder.state.llm_calls += result.llm_calls
+        builder.state.input_tokens += result.prompt_tokens
+        builder.state.output_tokens += result.completion_tokens
+        builder.state.total_tokens += result.total_tokens
+        if self._config.output.cache_metrics_enabled:
+            builder.state.cache_unknown += result.llm_calls
+        # The one-shot assignment algorithm remains intact. Shared profile/repair
+        # stages operate on its resulting taxonomy, without another full build.
+        tree = _preset_tree(result.tree_preset, entries, builder)
+        builder._repair_tree(tree, source_skills=entries, verbose=self._config.output.verbose)
+        preset = builder.preset_writer.tree_to_orchestrator_preset(builder._tree_to_dict(tree), preserve_ids=True)
+        if self._config.output.show_tree:
+            builder._print_tree(builder._tree_to_dict(tree))
+        builder._print_cache_stats()
+        builder.close()
         LOGGER.info(
             "one-shot tree built | skills=%s | llm_calls=%s | prompt_tokens=%s | completion_tokens=%s "
             "| total_tokens=%s | elapsed_seconds=%.3f",
@@ -217,7 +202,7 @@ class _IndexBuildWorkflow:
             result.total_tokens,
             result.elapsed_seconds,
         )
-        return result.tree_preset
+        return preset
 
     def _write_outputs(
         self,
@@ -243,7 +228,7 @@ class _IndexBuildWorkflow:
                 catalog_records=catalog_records,
                 mode="full",
                 item_type=self._item_type,
-                generate_tree_html=self._config.generate_tree_html,
+                generate_tree_html=self._config.output.generate_tree_html,
             )
 
     @staticmethod
@@ -302,34 +287,26 @@ class _IndexBuildWorkflow:
         )
 
 
-def _tree_manager_config(config: ResolvedBuildConfig) -> TreeManagerConfig:
-    return TreeManagerConfig(
-        branching_factor=config.tree_branching_factor,
-        max_depth=config.tree_max_depth,
-        root_categories=normalize_root_categories(config.tree_root_categories),
-        build=TreeBuildConfig(
-            max_workers=config.tree_max_workers,
-            caching=config.tree_caching,
-            num_retries=config.tree_num_retries,
-            timeout=config.tree_timeout_seconds,
-            classify_batch_cap=config.tree_classify_batch_cap,
-            context_window=config.tree_context_window,
-            max_output_tokens=config.tree_max_output_tokens,
-            postprocess_enabled=config.tree_postprocess_enabled,
-            postprocess_max_passes=config.tree_postprocess_max_passes,
-            postprocess_min_skills=config.tree_postprocess_min_skills,
-            equiv_grouping_enabled=config.tree_equiv_grouping_enabled,
-            equiv_max_groups_per_parent=config.tree_equiv_max_groups_per_parent,
-            equiv_allow_singleton_groups=config.tree_equiv_allow_singleton_groups,
-            equiv_min_lexical_similarity=config.tree_equiv_min_lexical_similarity,
-            deterministic_prompts=config.tree_deterministic_prompts,
-            discovery_seed=config.tree_discovery_seed,
-            prompt_fingerprint_version=config.tree_prompt_fingerprint_version,
-            cache_observability=config.tree_cache_observability,
-            skill_profiles_enabled=config.tree_skill_profiles_enabled,
-            skill_profile_select_rules_enabled=config.tree_skill_profile_select_rules_enabled,
-            skill_profile_batch_size=config.tree_skill_profile_batch_size,
-            skill_profile_description_limit=config.tree_skill_profile_description_limit,
-            skill_profile_rule_limit=config.tree_skill_profile_rule_limit,
-        ),
-    )
+def _preset_tree(preset: dict, entries: list[dict], builder: TreeBuilder) -> TreeNode:
+    root = TreeNode(id="root", name="Root")
+    branches = {"": root}
+    by_id = {str(entry["id"]): entry for entry in entries}
+    raw_nodes = list(preset.get("nodes") or [])
+    for item in sorted(raw_nodes, key=lambda node: str(node.get("cid", "")).count(".")):
+        cid = str(item.get("cid") or "")
+        parent_id, _, segment = cid.rpartition(".")
+        parent = branches.get(parent_id, root)
+        if item.get("type") == "branch":
+            branch = TreeNode(
+                id=segment or cid, name=segment or cid,
+                description=str(item.get("description") or ""),
+                depth=cid.count(".") + 1, parent_id=parent.id,
+            )
+            parent.children.append(branch)
+            branches[cid] = branch
+        else:
+            entry = by_id.get(str(item.get("worker_id") or ""))
+            if entry is not None:
+                payload = {**entry, "skill_path": entry.get("skill_path") or entry.get("path") or ""}
+                parent.skills.append(builder._skill_from_data(payload, path=parent.id))
+    return root

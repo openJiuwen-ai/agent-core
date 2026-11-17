@@ -2,16 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Optional, TypedDict, Unpack
+from typing import Any
 
-if TYPE_CHECKING:
-    from openai import OpenAI
-else:
-    try:
-        from openai import OpenAI
-    except ModuleNotFoundError:
-        OpenAI = None
-
+from openjiuwen.symphony.config import RetrievalBuildConfig
+from openjiuwen.symphony.model_bridge import _ModelBridge, _model_identity
 from openjiuwen.symphony.retrieval.build.scanners import create_scanner
 from openjiuwen.symphony.shared.rich_compat import Panel
 
@@ -27,10 +21,11 @@ from .repair import TreeRepairEngine as ExternalTreeRepairEngine
 from .runtime import TreeBuilderRuntimeMixin
 from .schema import (
     DEFAULT_TREE_OUTPUT_PATH,
-    DynamicTreeConfig,
-    TreeManagerConfig,
+    ResolvedTreeStructure,
+    normalize_root_categories,
 )
 from .shared import console
+from .root_categories import resolve_tree_root_categories
 
 
 class TreeBuilder(
@@ -59,48 +54,37 @@ class TreeBuilder(
         self,
         skills_dir: Path | str | None = None,
         output_path: Path | str | None = None,
-        config: Optional[DynamicTreeConfig] = None,
-        manager_config: TreeManagerConfig | None = None,
-        client: OpenAI | None = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        llm_seed: int | None = None,
-        max_workers: Optional[int] = None,
-        display_skills_dir: Path | str | None = None,
+        *,
+        config: RetrievalBuildConfig | None = None,
+        model: Any = None,
         item_type: str = "skill",
         skill_entries: list[dict] | None = None,
     ):
-        mcfg = manager_config or TreeManagerConfig()
-        build_cfg = mcfg.build
+        policy = (config or RetrievalBuildConfig()).model_copy(deep=True)
         if skills_dir is None:
             raise ValueError("TreeBuilder requires a non-empty skills_dir")
-        self.scanner = create_scanner(item_type, skills_dir, display_items_dir=display_skills_dir)
+        if model is None:
+            raise ValueError("TreeBuilder requires an injected model")
+        self.scanner = create_scanner(
+            item_type, skills_dir, display_items_dir=policy.output.display_capability_root,
+        )
         self._skill_entries_override = (
             [dict(item) for item in (skill_entries or [])] if skill_entries is not None else None
         )
-        default_tree_path = DEFAULT_TREE_OUTPUT_PATH
-        self.output_path = Path(output_path) if output_path else default_tree_path
-        self.config = config or DynamicTreeConfig(
-            branching_factor=mcfg.branching_factor,
-            max_depth=mcfg.max_depth,
-            root_categories=mcfg.root_categories,
+        self.output_path = Path(output_path) if output_path else DEFAULT_TREE_OUTPUT_PATH
+        structure = policy.structure
+        self.config = ResolvedTreeStructure(
+            branching_factor=structure.branching_factor,
+            max_depth=structure.max_depth,
+            root_categories=normalize_root_categories(resolve_tree_root_categories(structure.root_categories)),
+            max_skills_per_node=int(structure.branching_factor * structure.max_capabilities_per_node_multiplier),
         )
-        self.model = str(model or "").strip()
-        self.api_key = str(api_key or "").strip()
-        self.base_url = str(base_url or "").strip()
-        if not self.model:
-            raise ValueError("TreeBuilder requires a non-empty llm model")
-        if client is None and not self.api_key:
-            raise ValueError("TreeBuilder requires a non-empty llm api key")
-        resolved_client = (
-            client
-            if client is not None
-            else (OpenAI(api_key=self.api_key, base_url=self.base_url) if OpenAI is not None else None)
-        )
-        self.max_workers = max_workers or build_cfg.max_workers
-        self.settings = TreeBuildSettings.from_manager_config(mcfg, llm_seed=llm_seed)
-        self.state = TreeBuildState(client=resolved_client, max_workers=self.max_workers)
+        self.model = _model_identity(model).get("model", "")
+        self.max_workers = policy.request.max_concurrency
+        self.settings = TreeBuildSettings.from_config(policy)
+        self._owns_model_bridge = not isinstance(model, _ModelBridge)
+        bridge = _ModelBridge(model) if self._owns_model_bridge else model
+        self.state = TreeBuildState(model=bridge, max_workers=self.max_workers)
         self.llm_runtime = ExternalTreeLLMRuntime(self)
         self.preset_writer = ExternalTreePresetWriter(self)
         self.expansion_engine = ExternalTreeExpansionEngine(self)
@@ -124,18 +108,23 @@ class TreeBuilder(
         """Get max output tokens for the model, with caching."""
         return self.llm_runtime.get_max_output_tokens()
 
-    def _merged_extra_body(self) -> dict:
-        return self.llm_runtime.merged_extra_body()
-
     def _model_limits(self) -> tuple[int, int]:
         """Resolve model limits."""
         return self.llm_runtime.model_limits()
 
-    def build(
-        self,
-        verbose: bool = False,
-        show_tree: bool = True,
-    ) -> dict:
+    def close(self) -> None:
+        if self._owns_model_bridge:
+            self.state.model.close()
+
+    def build(self) -> dict:
+        try:
+            return self._build()
+        finally:
+            self.close()
+
+    def _build(self) -> dict:
+        verbose = self.settings.config.output.verbose
+        show_tree = self.settings.config.output.show_tree
         console.print(Panel.fit("[bold cyan]Building Capability Tree[/bold cyan]", border_style="cyan"))
         step1_start = perf_counter()
         skill_entries = self._load_skill_entries()
@@ -162,46 +151,17 @@ class TreeBuilder(
         return preset_dict
 
 
-class TreeBuildOptions(TypedDict, total=False):
-    """Keyword options accepted by :func:`build_tree`."""
-
-    config: DynamicTreeConfig | None
-    manager_config: TreeManagerConfig | None
-    client: OpenAI | None
-    model: str | None
-    api_key: str | None
-    base_url: str | None
-    llm_seed: int | None
-    max_workers: int | None
-    verbose: bool
-    show_tree: bool
-    display_skills_dir: Path | str | None
-    item_type: str
-    skill_entries: list[dict] | None
-
-
 def build_tree(
     skills_dir: Path | str | None = None,
     output_path: Path | str | None = None,
-    **options: Unpack[TreeBuildOptions],
+    *,
+    config: RetrievalBuildConfig | None = None,
+    model: Any = None,
+    item_type: str = "skill",
+    skill_entries: list[dict] | None = None,
 ) -> dict:
-    """Build capability tree."""
-    builder = TreeBuilder(
-        skills_dir,
-        output_path,
-        config=options.get("config"),
-        manager_config=options.get("manager_config"),
-        client=options.get("client"),
-        model=options.get("model"),
-        api_key=options.get("api_key"),
-        base_url=options.get("base_url"),
-        llm_seed=options.get("llm_seed"),
-        max_workers=options.get("max_workers"),
-        display_skills_dir=options.get("display_skills_dir"),
-        item_type=options.get("item_type", "skill"),
-        skill_entries=options.get("skill_entries"),
-    )
-    return builder.build(
-        verbose=options.get("verbose", False),
-        show_tree=options.get("show_tree", True),
-    )
+    """Build a recursive capability tree using the shared policy and model."""
+    return TreeBuilder(
+        skills_dir, output_path, config=config, model=model,
+        item_type=item_type, skill_entries=skill_entries,
+    ).build()
