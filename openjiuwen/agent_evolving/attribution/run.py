@@ -345,6 +345,7 @@ async def run_diagnosis(
     status_sink: StatusSink | None = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    generate_improvements: bool = False,
 ) -> DiagnosisResult:
     """Run stage two: keyword signals, then Reward when artifacts exist.
 
@@ -394,6 +395,7 @@ async def run_diagnosis(
                 status_sink=status_sink,
                 model_name=model_name,
                 status_counter=counter,
+                generate_improvements=generate_improvements,
             )
             reward = RewardResult.from_payload(payload)
         except Exception as exc:  # noqa: BLE001 - fallback to rule/Jev signals, as for the Reward agent

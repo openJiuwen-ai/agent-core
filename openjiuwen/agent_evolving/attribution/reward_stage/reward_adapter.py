@@ -441,6 +441,7 @@ async def run_reward(
     status_sink: Any = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    generate_improvements: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Score the stage-one deliverables with Reward.
 
@@ -506,6 +507,30 @@ async def run_reward(
         "claims": len(result.get("sub_category_items") or ()),
         "warnings": list((result.get("meta") or {}).get("warnings") or ()),
     }
+    if generate_improvements:
+        from tempfile import gettempdir
+
+        from openjiuwen.agent_evolving.reward import suggestion
+
+        evidence = Path(gettempdir()) / "jiuwen-reward-evidence" / str(started)
+        saved = result.get("meta") or {}
+        suggestion.write_evidence(evidence, {**result, "meta": {**saved, "task": task}})
+        meta["evidence_dir"] = str(evidence)
+        try:
+            policy = suggestion.suggestion_policy(config, saved.get("guides") or [])
+        except (TypeError, ValueError) as exc:
+            meta["suggestion_failed"] = f"{type(exc).__name__}: {exc}"
+        else:
+            if policy["status"] != "enabled":
+                meta["suggestion_skipped"] = policy
+            else:
+                try:
+                    from openjiuwen.agent_evolving.reward.models import Model
+
+                    meta["artifact_improvement"] = await suggestion.suggest(
+                        evidence, Model(config["producer"]), language)
+                except Exception as exc:  # noqa: BLE001 - a suggestion failure must not erase the score
+                    meta["suggestion_failed"] = f"{type(exc).__name__}: {exc}"
     return payload, meta
 
 
