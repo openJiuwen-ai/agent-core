@@ -314,6 +314,10 @@ class TaskCreatedEvent(BaseEventMessage):
     """Event published when a task is created"""
     task_id: str = Field(..., description="Task unique identifier")
     status: str = Field(..., description="Initial task status")
+    parent_task_id: Optional[str] = Field(
+        default=None,
+        description="Parent task a member split this subtask from; creating it suspends the parent",
+    )
 
 
 class TaskPlanRequestEvent(BaseEventMessage):
@@ -359,6 +363,10 @@ class TaskStartedEvent(BaseEventMessage):
     when the scheduler dispatches it to the assignee.
     """
     task_id: str = Field(..., description="Task unique identifier")
+    resumed: bool = Field(
+        default=False,
+        description="True when a parent task restarts after its subtasks finished, not a first start",
+    )
 
 
 class TaskCompletedEvent(BaseEventMessage):

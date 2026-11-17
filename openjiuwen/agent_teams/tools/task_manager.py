@@ -264,7 +264,12 @@ class TeamTaskManager:
         created: list[TeamTaskBase] = []
         for node in new_tasks:
             status = status_by_id.get(node.task_id, node.initial_status)
-            await self._publish_task_created(node.task_id, status)
+            await self._publish_task_created(
+                node.task_id,
+                status,
+                member_name=node.assignee or None,
+                parent_task_id=node.parent_task_id,
+            )
             task = TeamTaskBase(
                 task_id=node.task_id,
                 team_name=self.team_name,
@@ -319,8 +324,23 @@ class TeamTaskManager:
             return TaskCreateResult.fail(f"Failed to create task {task_id or title!r}: {result.reason}")
         return TaskCreateResult.success(result.tasks[0])
 
-    async def _publish_task_created(self, task_id: str, status: str) -> None:
-        """Publish a task-created event; log-and-continue on failure."""
+    async def _publish_task_created(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        member_name: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+    ) -> None:
+        """Publish a task-created event; log-and-continue on failure.
+
+        ``member_name`` carries the task's assignee at creation time (scheduled
+        dispatch seeds every task ``PENDING`` with an assignee). Trajectory
+        consumers read it to attribute a pending task to its owner before the
+        scheduler starts it; unassigned tasks leave it ``None``.
+        ``parent_task_id`` marks a member-split subtask (F_128); its creation
+        suspends the parent, which emits no event of its own.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -329,6 +349,8 @@ class TeamTaskManager:
                         team_name=self.team_name,
                         task_id=task_id,
                         status=status,
+                        member_name=member_name,
+                        parent_task_id=parent_task_id,
                     )
                 ),
             )
@@ -1850,6 +1872,7 @@ class TeamTaskManager:
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=member_name,
+                resumed=bool(task.resume_pending),
             ),
             error_label=f"Task started event for {task_id}",
         )
