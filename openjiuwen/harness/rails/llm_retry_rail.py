@@ -34,6 +34,18 @@ _MODEL_CALL_FAILED_MARKERS = (
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 
+def _is_truncated_stream_exception(exc: Optional[BaseException]) -> bool:
+    """截断判死（181006）判定——按错误码枚举判，不依赖文案。
+
+    截断刻意不进重试链（见 on_model_exception 顶部注释），与按文案
+    marker 分类的三类可重试失败正交。
+    """
+    return (
+            exc is not None
+            and getattr(exc, "status", None) is StatusCode.MODEL_STREAM_TRUNCATED
+    )
+
+
 class LLMRetryRail(DeepAgentRail):
     """Retry selected streaming model failures.
 
@@ -142,6 +154,12 @@ class LLMRetryRail(DeepAgentRail):
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Retry only LLM retry rail model-call failures."""
+        # 截断判死（181006）刻意不重试：断流=模型服务异常，重发只会把
+        # 完整答案拼在已下发的半截增量之后。不调
+        # request_retry 即放行——异常照常上抛，穿透为轮次失败终态。
+        if _is_truncated_stream_exception(ctx.exception):
+            return
+
         if self._is_repeat_exception(ctx.exception):
             await self._request_retry_or_reset(ctx, "repeat")
             return

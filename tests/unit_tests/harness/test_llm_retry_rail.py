@@ -14,7 +14,6 @@ from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.llm_retry_rail import LLMRetryRail
 
-
 _DEFAULT_ABC_REPEAT_COUNT = 54
 
 
@@ -58,7 +57,7 @@ class _RetryStreamModel:
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg="LLM stream timeout: stream frame timeout: stage=idle_chunk",
             )
-        yield AssistantMessageChunk(content="recovered")
+        yield AssistantMessageChunk(content="recovered", finish_reason="stop")
 
 
 @pytest.mark.asyncio
@@ -283,6 +282,27 @@ async def test_retry_notice_carries_structured_flag():
     assert len(written) == 1
     assert written[0].payload["retry_notice"] is True
     assert "模型调用异常" in written[0].payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_stream_error_is_not_retried():
+    """截断判死（181006）刻意不进重试链：rail 放行，request_retry 零调用。
+
+    断流=模型服务异常，重发只会把完整答案拼在已下发的半截增量之后。
+    on_model_exception 的兼容兜底会重试一切模型
+    异常，本用例钉死截断码在兜底之前被显式放行。
+    """
+    rail = LLMRetryRail(max_retries=2)
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    ctx.exception = build_error(
+        StatusCode.MODEL_STREAM_TRUNCATED,
+        error_msg="stream ended without finish_reason (truncated mid-stream)",
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
 
 
 @pytest.mark.asyncio

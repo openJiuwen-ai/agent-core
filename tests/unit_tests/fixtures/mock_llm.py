@@ -181,12 +181,17 @@ class MockLLMModel(BaseModelClient):
         """
         self.call_history.append(messages if isinstance(messages, list) else [messages])
         result = self._get_next_response()
-        # Convert AssistantMessage to AssistantMessageChunk for streaming
+        # Convert AssistantMessage to AssistantMessageChunk for streaming.
+        # finish_reason 按生产契约补齐（合法流必带收尾原因；此前丢该字段，
+        # 会被截断判定误伤——mock 本就应模拟"正常收尾"）。
+        # 注意 schema 默认值就是字符串 "null"（真值），or 兜底无效须显式判。
+        _fr = result.finish_reason
         chunk = AssistantMessageChunk(
             content=result.content,
             reasoning_content=result.reasoning_content,
             tool_calls=result.tool_calls,
-            usage_metadata=result.usage_metadata
+            usage_metadata=result.usage_metadata,
+            finish_reason=_fr if _fr not in (None, "", "null") else "stop",
         )
         yield chunk
 
