@@ -65,9 +65,9 @@ class MemberHandler(BaseCoordinationHandler):
             TeamEvent.MEMBER_SHUTDOWN,
         }
     )
-    # Member events that imply a status without carrying one. Both mean the
-    # member is on its way up, i.e. active — the status it settles into
-    # arrives later as its own MEMBER_STATUS_CHANGED.
+    # Conservative fallbacks when a lifecycle notification cannot be resolved
+    # against the current member row. Spawn/restart may finish after the new
+    # runtime has already published READY, so these are not current statuses.
     _ACTIVITY_STATUS_BY_EVENT: ClassVar[dict[str, MemberStatus]] = {
         TeamEvent.MEMBER_SPAWNED: MemberStatus.STARTING,
         TeamEvent.MEMBER_RESTARTED: MemberStatus.RESTARTING,
@@ -218,9 +218,11 @@ class MemberHandler(BaseCoordinationHandler):
         these events are the only channel carrying other members' transitions
         into this process (its own arrive locally — the messager self-filter
         drops self-published events). ``MEMBER_STATUS_CHANGED`` carries the
-        status; the two spawn-side events do not, but their meaning is a fixed
-        status each, so they are mapped rather than round-tripped through the
-        database. Everything else is either redundant (``MEMBER_SHUTDOWN`` is
+        status; the two spawn-side events do not, and may arrive after the
+        member has settled or begun another turn. Resolve those notifications
+        against one current member row rather than rolling activity back to
+        STARTING/RESTARTING. Ordinary status events and idle checks remain
+        database-free. Everything else is either redundant (``MEMBER_SHUTDOWN`` is
         preceded by a status change to SHUTDOWN_REQUESTED) or not a status
         transition at all.
         """
@@ -230,6 +232,31 @@ class MemberHandler(BaseCoordinationHandler):
             status = parse_member_status(payload.get("new_status"))
         else:
             status = self._ACTIVITY_STATUS_BY_EVENT.get(event_type)
+            if status is not None:
+                status = await self._resolve_lifecycle_status(target_id, status)
         if status is None:
             return
         await self._lifecycle.observe_member_status(target_id, status)
+
+    async def _resolve_lifecycle_status(self, member_name: str, fallback: MemberStatus) -> MemberStatus:
+        """Reconcile a possibly late spawn/restart notification with its row.
+
+        UNSTARTED still needs the active fallback: a spawn notification can
+        precede the runtime's first state write. Missing/unreadable rows also
+        stay conservative instead of declaring a running member idle.
+        """
+        backend = self._infra.team_backend
+        if backend is None:
+            return fallback
+        try:
+            member = await backend.get_member(member_name)
+        except Exception as exc:
+            team_logger.warning(
+                "[{}] cannot reconcile member {} activity: {}",
+                self._blueprint.member_name, member_name, type(exc).__name__,
+            )
+            return fallback
+        current = parse_member_status(getattr(member, "status", None))
+        if current is None or current is MemberStatus.UNSTARTED:
+            return fallback
+        return current

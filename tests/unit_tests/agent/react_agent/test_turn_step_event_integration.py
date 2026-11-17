@@ -159,6 +159,7 @@ async def test_turn_step_handler_can_invoke_ops_tool_call_before_model_step() ->
         ):
             result = await agent._call_model(ctx, context, None)
     finally:
+        get_agent_runtime().unbind(session.get_session_id(), deep)
         Runner.set_extension_bus(None)
         agent.ability_manager.teardown_tools()
         await Runner.stop()
@@ -222,6 +223,7 @@ async def test_turn_step_core_receives_user_forwarded_input_after_ops_prefetch()
             with pytest.raises(BaseError, match="turn.step input cannot be modified"):
                 await agent._call_model(ctx, context, None)
     finally:
+        get_agent_runtime().unbind(session.get_session_id(), deep)
         Runner.set_extension_bus(None)
         agent.ability_manager.teardown_tools()
         await Runner.stop()
