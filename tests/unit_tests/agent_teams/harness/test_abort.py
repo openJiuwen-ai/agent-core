@@ -36,6 +36,7 @@ async def test_leader_abort_discards_followups_and_blocks_automatic_inputs():
             await harness.send("working")
             await wait_invoke_running(fake)
             await harness.send("old follow-up", immediate=False)
+            harness._merge_follow_ups = True
             harness.set_leader_stop({"message_id": "abort-1", "timestamp": 10})
             await harness.abort(immediate=True)
             assert await wait_for_state(harness, HarnessState.IDLE)

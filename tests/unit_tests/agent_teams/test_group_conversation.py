@@ -25,6 +25,7 @@ async def group(tmp_path, monkeypatch):
     for name, role in (("leader", "leader"), ("alice", "teammate"), ("bob", "teammate")):
         await db.member.create_member(name, "group", name, "{}", "unstarted", role=role)
     backend = TeamBackend("group", "leader", True, db, SimpleNamespace(publish=AsyncMock()))
+    backend.enable_message_delivery_modes = True
     backend.group_chat_spec = SimpleNamespace(
         language="cn", workspace=None,
     )
@@ -417,3 +418,15 @@ def test_context_notice_makes_reading_history_conditional():
     assert "回答任务前" not in STRINGS["cn"]["conversation.context"]
     assert "without reading the file" in STRINGS["en"]["conversation.context"]
     assert "Before answering" not in STRINGS["en"]["conversation.context"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_group_delivery_uses_original_mention_wakeup(group, monkeypatch):
+    group.backend.enable_message_delivery_modes = False
+    group.host.has_in_flight_round = lambda: True
+    decide = AsyncMock(side_effect=AssertionError("Jev must not run"))
+    monkeypatch.setattr("openjiuwen.agent_teams.group_chat.message_handler.choose_delivery", decide)
+    await post(group, "update this draft", ["alice"])
+    await group.handler.on_poll_mailbox(None)
+    assert group.host.deliver_input.call_args.kwargs["use_steer"] is True
+    decide.assert_not_awaited()

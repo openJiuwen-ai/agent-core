@@ -3712,6 +3712,7 @@ async def test_rearm_allows_completion_to_conclude_again():
 @pytest.mark.asyncio
 async def test_stop_barrier_keeps_runtime_without_native_stop_hooks_compatible():
     agent = _make_leader()
+    agent.team_backend.enable_message_delivery_modes = True
     runtime = SimpleNamespace(send=AsyncMock())
     agent._configurator.harness = runtime
     await agent.deliver_input("before stop")

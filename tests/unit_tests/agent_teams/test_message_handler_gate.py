@@ -86,6 +86,7 @@ async def test_gate_lets_a_running_round_absorb_the_request():
 def delivery_handler():
     handler = _gate(status=MemberStatus.BUSY.value, lifetime=None, unread=set(), in_flight=True)
     backend = handler._infra.team_backend
+    backend.enable_message_delivery_modes = True
     backend.is_human_agent = AsyncMock(return_value=False)
     backend.resolve_leader_member_name = AsyncMock(return_value="leader")
     manager = handler._infra.message_manager
@@ -203,3 +204,18 @@ async def test_jev_invalid_stop_choice_falls_back(monkeypatch, group):
     client = SimpleNamespace(system_one=AsyncMock(return_value={"delivery": {"choice": "abort"}}), close=AsyncMock())
     monkeypatch.setattr("openjiuwen.agent_evolving.attribution.jev.JevClient", lambda **_: client)
     assert await choose_delivery({}, group=group) == ("steer" if group else "legacy")
+
+
+@pytest.mark.asyncio
+async def test_disabled_modes_deliver_legacy_input_without_jev_or_stop(delivery_handler):
+    h = delivery_handler
+    h._infra.team_backend.enable_message_delivery_modes = False
+    message = delivery_mail("old", "follow_up")
+    h._read_all_unread = AsyncMock(side_effect=[[message], []])
+    h._stop_for_abort = AsyncMock()
+    h._broadcast_mode = AsyncMock()
+    await h._process_unread_messages("dev-1")
+    h._round.deliver_input.assert_awaited_once()
+    assert h._round.deliver_input.call_args.kwargs["use_steer"] is True
+    h._stop_for_abort.assert_not_awaited()
+    h._broadcast_mode.assert_not_awaited()

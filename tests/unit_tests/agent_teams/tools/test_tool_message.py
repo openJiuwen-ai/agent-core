@@ -69,6 +69,7 @@ def _backend(db, member_name: str, is_leader: bool) -> TeamBackend:
         team_name=TEAM_NAME,
         member_name=member_name,
         is_leader=is_leader,
+        enable_message_delivery_modes=True,
         db=db,
         messager=AsyncMock(spec=Messager),
     )
@@ -390,6 +391,7 @@ async def test_direct_message_starts_idle_task_scoped_recipient(db):
 async def test_broadcast_does_not_start_idle_task_scoped_member(db):
     """The tool does not wake an unstarted recipient before its own decision."""
     backend = await _idle_task_scoped_member(db, "tmp-1")
+    backend.enable_message_delivery_modes = True
     send = _send_tool(create_team_tools(role="leader", agent_team=backend, lang="cn"))
 
     result = await send.invoke({"to": "*", "content": "status, everyone"})
@@ -424,3 +426,19 @@ async def test_private_modes_enforce_abort_role_and_single_recipient(db):
     for recipients in ({"to": "*"}, {"targets": [DEV_1, DEV_2]}, {"to": "user"}):
         result = await leader.invoke({**recipients, "content": "Stop", "mode": "abort"})
         assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_default_off_uses_legacy_broadcast_and_rejects_control_modes(db):
+    backend = TeamBackend(TEAM_NAME, LEADER_NAME, True, db, AsyncMock(spec=Messager))
+    backend.autostart_unstarted = AsyncMock(return_value=[])
+    send = _send_tool(create_team_tools(role="leader", agent_team=backend))
+    result = await send.invoke({"to": DEV_1, "content": "stop", "mode": "abort"})
+    assert not result.success
+    assert not await db.message.get_messages(TEAM_NAME, DEV_1, unread_only=True)
+    result = await send.invoke({"to": "*", "content": "global change"})
+    assert result.success
+    backend.autostart_unstarted.assert_awaited_once()
+    import json
+    row = await db.message.get_message(result.data["message_id"])
+    assert not json.loads(row.meta or "{}").get("receiver_routed")
