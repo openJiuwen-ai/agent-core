@@ -407,6 +407,7 @@ def _clear_table(sync_conn, table_name: str) -> None:
     q_table = _quote_ident(sync_conn, table_name)
     sync_conn.exec_driver_sql(f"DELETE FROM {q_table}")
 
+
 def _create_static_tables(sync_conn) -> None:
     """Create the static team-scoped schema, and only that.
 
