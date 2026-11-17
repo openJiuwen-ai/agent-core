@@ -147,3 +147,28 @@ Local work configuration for LOCAL mode security boundaries and command restrict
 * **sandbox_root**(List[str], optional): Filesystem operation security boundary. When `restrict_to_sandbox` is `True`, denies access to paths outside this list. Default: `None`.
 * **restrict_to_sandbox**(bool, optional): Whether to restrict filesystem operations within `sandbox_root`. Default: `False`.
 * **dangerous_patterns**(List[str], optional): Dangerous command regex pattern list. If `None`, uses built-in default patterns. Default: `None`.
+
+
+### ADX registered Local rootfs
+
+The `adx-environment` provider accepts `rootfs_template` in launcher `extra_params`
+with SDK 0.1.0rc5 or newer. This selects a deployment-registered Local artifact;
+when configured, the provider omits `image` from the SDK request. Template names
+are part of the environment cache scope, so changing the selected artifact does
+not reuse a tool environment created from a different rootfs. Artifact import,
+image-reference mapping and distribution belong to deployment tooling.
+
+### ADX tool restart policy
+
+The `adx-environment` provider defaults to three node-local restarts after an
+unexpected runtime exit. Configure `restart_policy` in launcher `extra_params`
+using `maxAttempts`, `initialBackoffSeconds` and `maxBackoffSeconds` (defaults:
+`3`, `1`, `30`). Explicit `None` disables automatic restart. This applies to
+runsc and Conch; existing Environments retain their creation-time policy.
+
+While a cached Environment is failed, an enabled policy keeps ADX responsible
+for recovery and the retry budget. Tool calls report the failed state instead
+of creating a replacement or replaying commands. A later call reuses the same
+Environment after recovery. After retry exhaustion, inspect/recover or delete
+the failed Environment explicitly. Idle-deleted Environments are recreated on
+the next call as before.
