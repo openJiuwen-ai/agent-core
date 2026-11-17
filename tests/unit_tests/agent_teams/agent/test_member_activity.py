@@ -10,6 +10,7 @@ marker chunk the leader puts on its stream when the team goes quiet.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -22,11 +23,13 @@ from openjiuwen.agent_teams.agent.member_activity import (
     parse_member_status,
 )
 from openjiuwen.agent_teams.agent.state import TeamAgentState
+from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberSpawnedEvent,
+    MemberRestartedEvent,
     MemberStatusChangedEvent,
     TeamEvent,
 )
@@ -542,20 +545,21 @@ class _FakePoll:
         return None
 
 
-def _leader_handler(host: _RecordingHost) -> MemberHandler:
+def _leader_handler(host: _RecordingHost, backend=None) -> MemberHandler:
     blueprint = SimpleNamespace(
         member_name=LEADER,
         role=TeamRole.LEADER,
         lifecycle="temporary",
         spec=SimpleNamespace(reliability=None),
     )
-    return MemberHandler(host, blueprint, TeamInfra(), _FakePoll())
+    return MemberHandler(host, blueprint, TeamInfra(team_backend=backend), _FakePoll())
 
 
 @pytest.mark.asyncio
 async def test_status_changed_event_feeds_the_registry():
     host = _RecordingHost()
-    handler = _leader_handler(host)
+    backend = SimpleNamespace(get_member=AsyncMock())
+    handler = _leader_handler(host, backend)
 
     await handler.on_member_event(
         EventMessage.from_event(
@@ -569,6 +573,7 @@ async def test_status_changed_event_feeds_the_registry():
     )
 
     assert host.observed == [("dev-1", MemberStatus.READY)]
+    backend.get_member.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -601,3 +606,260 @@ async def test_unknown_status_value_is_ignored():
     )
 
     assert host.observed == []
+
+
+@pytest.mark.asyncio
+async def test_late_restart_notification_preserves_ready_and_emits_idle(fast_debounce):
+    queue: asyncio.Queue = asyncio.Queue()
+    agent = _leader_agent(queue)
+    backend = SimpleNamespace(get_member=AsyncMock(return_value=SimpleNamespace(status=MemberStatus.READY)))
+    handler = _leader_handler(agent, backend)
+    await agent.observe_member_status(LEADER, MemberStatus.READY)
+    await agent.observe_member_status("dev-1", MemberStatus.BUSY)
+    await handler.on_member_event(EventMessage.from_event(MemberStatusChangedEvent(
+        team_name="t", member_name="dev-1", old_status="busy", new_status="ready",
+    )))
+    pending = agent.stream_controller._idle_marker_task
+    assert pending is not None
+
+    await handler.on_member_event(EventMessage.from_event(MemberRestartedEvent(
+        team_name="t", member_name="dev-1", restart_count=1,
+    )))
+
+    assert agent.state.member_registry.snapshot()["dev-1"] == "ready"
+    assert agent.state.member_registry.is_idle()
+    await asyncio.wait_for(pending, timeout=1)
+    assert queue.get_nowait().payload["event_type"] == "team.idle"
+    assert queue.empty()
+    # The same team can start work again; fixing completion must not freeze it.
+    await agent.observe_member_status("dev-1", MemberStatus.BUSY)
+    assert not agent.state.member_registry.is_idle()
+    await agent.observe_member_status("dev-1", MemberStatus.READY)
+    await asyncio.wait_for(agent.stream_controller._idle_marker_task, timeout=1)
+    assert queue.get_nowait().payload["event_type"] == "team.idle"
+
+
+@pytest.mark.asyncio
+async def test_restart_publishes_notification_after_teammate_has_settled(fast_debounce):
+    queue: asyncio.Queue = asyncio.Queue()
+    agent = _leader_agent(queue)
+    await agent.observe_member_status(LEADER, MemberStatus.READY)
+    await agent.observe_member_status("dev-1", MemberStatus.RESTARTING)
+    member = SimpleNamespace(status=MemberStatus.RESTARTING.value)
+    backend = SimpleNamespace(team_name="t", get_member=AsyncMock(side_effect=lambda _: member))
+    handler = _leader_handler(agent, backend)
+    ready_seen = asyncio.Event()
+    allow_spawn_return = asyncio.Event()
+    published = []
+
+    async def publish(*, topic_id, message):
+        published.append(message.event_type)
+        await handler.on_member_event(message)
+
+    manager = SpawnManager(
+        state=TeamAgentState(),
+        configurator=SimpleNamespace(member_name=LEADER, team_name="t", team_backend=backend,
+                                     messager=SimpleNamespace(publish=publish)),
+        team_agent_getter=lambda: agent,
+    )
+    manager.cleanup_teammate = AsyncMock()
+    manager.build_context_from_db = AsyncMock(return_value=SimpleNamespace(member_name="dev-1"))
+
+    async def spawn(*args, **kwargs):
+        member.status = MemberStatus.READY.value
+        await handler.on_member_event(EventMessage.from_event(MemberStatusChangedEvent(
+            team_name="t", member_name="dev-1", old_status="restarting", new_status="ready",
+        )))
+        ready_seen.set()
+        await allow_spawn_return.wait()
+        return SimpleNamespace()
+
+    manager.spawn_teammate = spawn
+    restart = asyncio.create_task(manager.restart_teammate("dev-1"))
+    try:
+        await asyncio.wait_for(ready_seen.wait(), timeout=1)
+        assert agent.state.member_registry.snapshot()["dev-1"] == "ready"
+        allow_spawn_return.set()
+        assert await asyncio.wait_for(restart, timeout=1)
+        assert published == [TeamEvent.MEMBER_RESTARTED]
+        assert agent.state.member_registry.snapshot()["dev-1"] == "ready"
+        await asyncio.wait_for(agent.stream_controller._idle_marker_task, timeout=1)
+        assert queue.get_nowait().payload["event_type"] == "team.idle"
+    finally:
+        restart.cancel()
+        await asyncio.gather(restart, return_exceptions=True)
+        agent.stream_controller.cancel_team_idle()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_class", [MemberSpawnedEvent, MemberRestartedEvent])
+@pytest.mark.parametrize("current", [
+    MemberStatus.STARTING, MemberStatus.RESTARTING, MemberStatus.BUSY,
+    MemberStatus.READY, MemberStatus.PAUSED, MemberStatus.SHUTDOWN,
+])
+async def test_lifecycle_notification_uses_current_member_status(event_class, current):
+    host = _RecordingHost()
+    backend = SimpleNamespace(get_member=AsyncMock(return_value=SimpleNamespace(status=current.value)))
+    handler = _leader_handler(host, backend)
+
+    await handler.on_member_event(EventMessage.from_event(event_class(team_name="t", member_name="dev-1")))
+
+    assert host.observed == [("dev-1", current)]
+    backend.get_member.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_class,fallback", [
+    (MemberSpawnedEvent, MemberStatus.STARTING),
+    (MemberRestartedEvent, MemberStatus.RESTARTING),
+])
+@pytest.mark.parametrize("row", [None, SimpleNamespace(status="unstarted"), SimpleNamespace(status="invalid")])
+async def test_unresolved_lifecycle_notification_stays_active(event_class, fallback, row):
+    host = _RecordingHost()
+    handler = _leader_handler(host, SimpleNamespace(get_member=AsyncMock(return_value=row)))
+
+    await handler.on_member_event(EventMessage.from_event(event_class(team_name="t", member_name="dev-1")))
+
+    assert host.observed == [("dev-1", fallback)]
+
+
+@pytest.mark.asyncio
+async def test_failed_lifecycle_lookup_does_not_declare_member_idle():
+    host = _RecordingHost()
+    handler = _leader_handler(host, SimpleNamespace(get_member=AsyncMock(side_effect=RuntimeError("offline"))))
+
+    await handler.on_member_event(EventMessage.from_event(MemberRestartedEvent(team_name="t", member_name="dev-1")))
+
+    assert host.observed == [("dev-1", MemberStatus.RESTARTING)]
+
+
+@pytest.mark.asyncio
+async def test_reconciled_summary_can_finalize_and_repeat_its_idle_cycle(fast_debounce):
+    from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
+
+    queue: asyncio.Queue = asyncio.Queue()
+    leader = _leader_agent(queue)
+    await leader.observe_member_status(LEADER, MemberStatus.READY)
+    backend = SimpleNamespace(get_member=AsyncMock(return_value=SimpleNamespace(status="ready")))
+    handler = _leader_handler(leader, backend)
+    pooled_agent = SimpleNamespace(
+        _state=leader.state, lifecycle="persistent", has_in_flight_round=lambda: False,
+        is_task_board_settled=AsyncMock(return_value=True), is_shutdown_requested=AsyncMock(return_value=False),
+        pause_coordination=AsyncMock(), stop_coordination=AsyncMock(), invalidate_workspace_cache=Mock(),
+    )
+    runtime = TeamRuntimeManager()
+    entry = ActiveTeam(team_name="summary", agent=pooled_agent, current_session_id="s")
+    await runtime.pool.add(entry)
+
+    for _ in range(2):
+        entry.state = RuntimeState.RUNNING
+        await leader.observe_member_status("dev-1", MemberStatus.BUSY)
+        assert not await OrganizationRuntimeManager._team_is_idle_settled_for_org_wake(entry)
+        await handler.on_member_event(EventMessage.from_event(MemberRestartedEvent(
+            team_name="summary", member_name="dev-1",
+        )))
+        await asyncio.wait_for(leader.stream_controller._idle_marker_task, timeout=1)
+        assert queue.get_nowait().payload["event_type"] == "team.idle"
+        assert await OrganizationRuntimeManager._team_is_idle_settled_for_org_wake(entry)
+        await runtime.finalize(team_name="summary", session_id="s")
+        assert (await runtime.pool.get("summary")).state is RuntimeState.PAUSED
+
+    assert pooled_agent.pause_coordination.await_count == 2
+    pooled_agent.stop_coordination.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart_path", ["cold", "wake", "health", "session"])
+@pytest.mark.parametrize("ready_before_notice", [False, True])
+async def test_restart_claim_replaces_old_quiescent_status_before_notification(
+    tmp_path, fast_debounce, restart_path, ready_before_notice,
+):
+    """A persisted idle row is claimed before spawn; only a new READY settles it."""
+    from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+    from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
+    from openjiuwen.agent_teams.tools.team import TeamBackend
+
+    token = set_session_id("restart-activity")
+    database = TeamDatabase(DatabaseConfig(
+        db_type=DatabaseType.SQLITE, connection_string=str(tmp_path / "team.db"),
+    ))
+    queue: asyncio.Queue = asyncio.Queue()
+    leader = _leader_agent(queue)
+    await leader.observe_member_status(LEADER, MemberStatus.BUSY)
+    old_status = MemberStatus.DORMANT if restart_path == "wake" else MemberStatus.READY
+    published = []
+
+    async def publish(*, topic_id, message):
+        published.append(message.event_type)
+        await handler.on_member_event(message)
+
+    backend = TeamBackend(
+        team_name="t", member_name=LEADER, is_leader=True,
+        db=database, messager=SimpleNamespace(publish=publish),
+    )
+    handler = _leader_handler(leader, backend)
+    configurator = SimpleNamespace(
+        member_name=LEADER, role=TeamRole.LEADER, team_name="t",
+        team_backend=backend, messager=backend.messager,
+    )
+    manager = SpawnManager(
+        state=TeamAgentState(), configurator=configurator, team_agent_getter=lambda: leader,
+    )
+    manager.build_context_from_db = AsyncMock(return_value=SimpleNamespace(member_name="dev-1"))
+    backend._on_member_restarted = manager.restart_teammate
+
+    async def mark_ready():
+        assert await database.member.update_member_status("dev-1", "t", MemberStatus.READY.value)
+        await handler.on_member_event(EventMessage.from_event(MemberStatusChangedEvent(
+            team_name="t", member_name="dev-1", old_status="restarting", new_status="ready",
+        )))
+
+    async def spawn(*args, **kwargs):
+        # Real recovery callers and the DAO must replace the previous run's
+        # READY/DORMANT before an asynchronous child can be considered idle.
+        row = await backend.get_member("dev-1")
+        assert row.status == MemberStatus.RESTARTING.value
+        if ready_before_notice:
+            await mark_ready()
+        return SimpleNamespace()
+
+    manager.spawn_teammate = AsyncMock(side_effect=spawn)
+    try:
+        await database.initialize()
+        assert await database.team.create_team("t", "Team", LEADER)
+        assert await database.member.create_member("dev-1", "t", "Dev", "{}", old_status.value)
+        await leader.observe_member_status("dev-1", old_status)
+        recovery = RecoveryManager(configurator, manager)
+        if restart_path == "cold":
+            assert await recovery.recover_team() == ["dev-1"]
+        elif restart_path == "wake":
+            assert await backend.wake_member("dev-1")
+        elif restart_path == "health":
+            await manager.on_teammate_unhealthy("dev-1")
+        else:
+            await recovery.restart_for_session_switch([("dev-1", old_status)], cleanup_first=True)
+
+        manager.spawn_teammate.assert_awaited_once()
+        assert published == [TeamEvent.MEMBER_RESTARTED]
+        if not ready_before_notice:
+            assert (await backend.get_member("dev-1")).status == MemberStatus.RESTARTING.value
+            assert leader.state.member_registry.snapshot()["dev-1"] == "restarting"
+            assert not leader.state.member_registry.is_idle()
+            assert leader.stream_controller._idle_marker_task is None
+            assert queue.empty()
+            await mark_ready()
+
+        assert (await backend.get_member("dev-1")).status == MemberStatus.READY.value
+        assert leader.state.member_registry.snapshot()["dev-1"] == "ready"
+        await leader.observe_member_status(LEADER, MemberStatus.READY)
+        assert leader.state.member_registry.is_idle()
+        await asyncio.wait_for(leader.stream_controller._idle_marker_task, timeout=1)
+        assert queue.get_nowait().payload["event_type"] == "team.idle"
+        assert queue.empty()
+    finally:
+        leader.stream_controller.cancel_team_idle()
+        await database.close()
+        reset_session_id(token)
