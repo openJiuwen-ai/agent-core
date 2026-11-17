@@ -12,11 +12,16 @@ from pathlib import Path
 
 DEFAULT_DOMAINS = ["game"]
 
-PROMPT = """Write the next revision of this delivered work from the recorded score only.
-Do not invent a new scoring rubric, a new requirement, or a check that is not in the record.
-Unknown and unscored claims stay unknown. A met claim is not a defect.
-Return one JSON object: {"preserve": ["..."], "improve": ["..."], "explore": ["..."]}.
-Each list may be empty. Each string is one concrete change or strength a person can verify.
+PROMPT = """Write how the next version of this game is played. The recorded score says what was seen and what is still unknown.
+A met claim is already in the game; keep it. An unmet or partial claim is a play problem to solve in the next version.
+An unknown claim is not proof the feature is missing. Do not turn unknowns into a test checklist.
+The player must be able to see one new choice and its consequence in the opening they already have.
+Do not ask only for larger text, captions, or API notes.
+Return one JSON object with four nonempty strings:
+{"play": "what the player does in the next version",
+ "keep": "what stays",
+ "how": "how to put that play into the current game",
+ "compare": "which scenes to compare with the previous version"}.
 """
 
 
@@ -83,20 +88,20 @@ def _claims(result):
 
 
 def render(advice, language="zh") -> str:
-    """Markdown the existing diagnosis card can place in the composer."""
+    """The next-version play text the existing diagnosis card hands to the worker."""
     zh = str(language).lower().startswith("zh")
-    groups = (
-        ("保留" if zh else "Preserve", advice.get("preserve") or []),
-        ("改善" if zh else "Improve", advice.get("improve") or []),
-        ("探索" if zh else "Explore", advice.get("explore") or []),
+    fields = (
+        ("play", "下一版怎么玩" if zh else "How the next version is played"),
+        ("keep", "保留" if zh else "Keep"),
+        ("how", "做法" if zh else "How to build it"),
+        ("compare", "和上一版比" if zh else "Compare with the previous version"),
     )
     parts = []
-    for heading, items in groups:
-        lines = [str(item).strip() for item in items if str(item).strip()]
-        if lines:
-            parts.append(heading + "\n" + "\n".join(f"- {line}" for line in lines))
-    if not parts:
-        raise ValueError("suggestion rendered no text")
+    for key, heading in fields:
+        text = advice.get(key)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"suggestion {key} must be nonempty text")
+        parts.append("## " + heading + "\n" + text.strip())
     return "\n\n".join(parts)
 
 
@@ -109,8 +114,6 @@ async def suggest(evidence_dir, model, language="zh") -> str:
         "claims": _claims(result),
     }
     advice = await model.json(PROMPT, json.dumps(payload, ensure_ascii=False))
-    if not isinstance(advice, dict) or any(
-            key not in advice or not isinstance(advice[key], list)
-            for key in ("preserve", "improve", "explore")):
-        raise ValueError("suggestion must return preserve, improve and explore lists")
+    if not isinstance(advice, dict):
+        raise ValueError("suggestion must return play, keep, how and compare")
     return render(advice, language)

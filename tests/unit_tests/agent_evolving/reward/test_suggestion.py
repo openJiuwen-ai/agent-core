@@ -34,7 +34,10 @@ async def test_suggestion_reads_the_saved_score(tmp_path):
     class Model:
         async def json(self, system, user):
             assert "开局能看清目标" in user
-            return {"preserve": ["规则能玩"], "improve": ["把目标放进开局画面"], "explore": []}
+            return {"play": "开局先选守桥还是守坡，选完路上的敌人会改道。",
+                    "keep": "原来的波次和失败条件还在。",
+                    "how": "在现有开局加两个按钮，点下去立刻能看到敌人改道。",
+                    "compare": "比上一版的开局按钮和第一波敌人路线。"}
 
     text = await suggestion.suggest(tmp_path, Model(), "zh")
-    assert "把目标放进开局画面" in text and "规则能玩" in text
+    assert "下一版怎么玩" in text and "守桥还是守坡" in text and "和上一版比" in text
