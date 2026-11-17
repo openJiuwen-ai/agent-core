@@ -24,7 +24,13 @@ from openjiuwen.symphony.retrieval.build.scanners.common import (
     sha256_file,
 )
 from openjiuwen.symphony.config import RetrievalBuildConfig
-from openjiuwen.symphony.model_bridge import _BuildInterrupted, _bind_model_to_loop, _model_identity, _model_scope, _validate_model_binding
+from openjiuwen.symphony.model_bridge import (
+    _BuildInterrupted,
+    _bind_model_to_loop,
+    _model_identity,
+    _model_scope,
+    _validate_model_binding,
+)
 from openjiuwen.symphony.retrieval.build.tree.root_categories import resolve_tree_root_categories
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import resolve_build_config
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
@@ -142,7 +148,7 @@ class AgenticSkillRetrievalToolkit:
             source_file_hashes=source_file_hashes,
         )
         previous_root_state = self._read_state()
-        previous_index_state = self._read_committed_index_state(
+        previous_index_state = self.read_committed_index_state(
             fallback=previous_root_state,
         )
         previous_index_available = _is_complete_index(self.index_dir)
@@ -308,7 +314,8 @@ class AgenticSkillRetrievalToolkit:
                 config = build_cfg.model_copy(deep=True)
                 if previous_index_available and build_cfg.task.preserve_previous_index_on_failure:
                     # A successful flat fallback must not replace a usable taxonomy after an LLM failure.
-                    config = config.model_copy(update={"task": config.task.model_copy(update={"allow_fallback_tree": False})})
+                    task_config = config.task.model_copy(update={"allow_fallback_tree": False})
+                    config = config.model_copy(update={"task": task_config})
                 if plan.operation == "build":
                     _run_index_builder(
                         operation=plan.operation,
@@ -618,7 +625,7 @@ class AgenticSkillRetrievalToolkit:
     ) -> dict[str, Any]:
         state = self._read_state()
         build = dict(state.get("build") or {})
-        committed = self._read_committed_index_state(fallback=state)
+        committed = self.read_committed_index_state(fallback=state)
         index_exists = _is_complete_index(self.index_dir)
         if not index_exists:
             committed = {}
@@ -660,7 +667,7 @@ class AgenticSkillRetrievalToolkit:
         capability_category_paths: list[dict[str, Any]] = []
         if build.get("status") == "success":
             capability_category_paths = list(build.get("capability_category_paths") or [])
-        current_records = self._current_records(refresh=refresh_inventory)
+        current_records = self.current_records(refresh=refresh_inventory)
         model_identity_checked = self._model is not None
         current_policy = (
             _build_policy_fingerprint(self._config, model=self._model)
@@ -774,7 +781,8 @@ class AgenticSkillRetrievalToolkit:
             records = []
         return [record for record in records if record.enabled and record.resolved_worker_id]
 
-    def _current_records(self, *, refresh: bool = False) -> list[SkillRecord]:
+    def current_records(self, *, refresh: bool = False) -> list[SkillRecord]:
+        """Return the enabled Skill records used for index comparisons."""
         if refresh and self._skills_dir is not None:
             self._skills = scan_skill_records(self._skills_dir)
         return [record for record in self._skills if record.enabled and record.resolved_worker_id]
@@ -812,7 +820,7 @@ class AgenticSkillRetrievalToolkit:
         state = (
             dict(committed_state)
             if committed_state is not None
-            else self._read_committed_index_state(fallback=self._read_state())
+            else self.read_committed_index_state(fallback=self._read_state())
         )
         expected_policy = policy_fingerprint or _build_policy_fingerprint(self._config, model=self._model)
         if (str(state.get("build_policy_fingerprint") or "") != expected_policy
@@ -847,7 +855,7 @@ class AgenticSkillRetrievalToolkit:
         return _IndexBuildPlan("build", tuple(records))
 
     def _is_fresh(self, fingerprint: str) -> bool:
-        state = self._read_committed_index_state(fallback=self._read_state())
+        state = self.read_committed_index_state(fallback=self._read_state())
         return (
             _is_complete_index(self.index_dir)
             and str(state.get("fingerprint") or "") == fingerprint
@@ -856,12 +864,12 @@ class AgenticSkillRetrievalToolkit:
 
 
     def _index_readiness_error(self, *, refresh_inventory: bool = False) -> str | None:
-        state = self._read_committed_index_state(fallback=self._read_state())
+        state = self.read_committed_index_state(fallback=self._read_state())
         if not _is_complete_index(self.index_dir):
             return f"Skill index is missing or incomplete: {self.index_dir}"
         if not _matches_build_policy(state, self._config, model=self._model, check_model=self._model is not None):
             return "Skill index is stale because build settings or the signature protocol changed."
-        records = self._current_records(refresh=refresh_inventory)
+        records = self.current_records(refresh=refresh_inventory)
         if not records:
             return None
         expected = _index_fingerprint(
@@ -1029,7 +1037,7 @@ class AgenticSkillRetrievalToolkit:
 
     def _cancelled_result(self, *, build_id: str, started: float, fingerprint: str) -> dict[str, Any]:
         state = self._read_state()
-        committed = self._read_committed_index_state(fallback=state)
+        committed = self.read_committed_index_state(fallback=state)
         previous_build = dict(state.get("build") or {})
         now = _now_iso()
         build = {
@@ -1134,11 +1142,12 @@ class AgenticSkillRetrievalToolkit:
         except Exception:
             return {}
 
-    def _read_committed_index_state(
+    def read_committed_index_state(
         self,
         *,
         fallback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Read the published index state under the index publication lock."""
         self.index_root.mkdir(parents=True, exist_ok=True)
         with portalocker.Lock(
             str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),

@@ -35,7 +35,8 @@ class DirectoryInventory:
         )
         result = scanner.scan()
         if any(item.severity == "error" for item in result.diagnostics):
-            raise ValueError("Capability inventory is incomplete: " + ", ".join(item.code for item in result.diagnostics))
+            codes = ", ".join(item.code for item in result.diagnostics)
+            raise ValueError(f"Capability inventory is incomplete: {codes}")
         self.last_scan = result
         return result
 

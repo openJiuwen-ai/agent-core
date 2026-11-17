@@ -272,6 +272,8 @@ def _response_usage(response: Any) -> tuple[int, int, int]:
     usage = response.get("usage_metadata") if isinstance(response, dict) else getattr(response, "usage_metadata", None)
     if usage is None:
         return 0, 0, 0
+
     def value(name: str) -> int:
         return int((usage.get(name) if isinstance(usage, dict) else getattr(usage, name, 0)) or 0)
+
     return value("input_tokens"), value("output_tokens"), value("total_tokens")

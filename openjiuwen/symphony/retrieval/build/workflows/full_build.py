@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from openjiuwen.symphony.model_bridge import _BuildInterrupted
-
 import logging
 import shutil
 import tempfile
@@ -9,11 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Sequence
 
 from openjiuwen.symphony.config import RetrievalBuildConfig
-
+from openjiuwen.symphony.model_bridge import _BuildInterrupted
 from openjiuwen.symphony.retrieval.build.models import TREE_INDEX_FILENAME
 from openjiuwen.symphony.retrieval.build.scanners import create_scanner, normalize_item_type
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
-from openjiuwen.symphony.retrieval.build.tree.schema import TreeNode
 from openjiuwen.symphony.retrieval.build.workflows.item_sources import ResolvedItemPath, resolve_materialized_item_paths
 from openjiuwen.symphony.retrieval.build.workflows.output_writer import unlink_if_exists, write_index_outputs
 from openjiuwen.symphony.shared.profiling import StageTimer
@@ -156,8 +153,6 @@ class _IndexBuildWorkflow:
             return {"nodes": self._fallback_tree_nodes_from_scanned(pre_scanned_skills)}
 
     def _build_one_shot_tree(self, aggregate_dir: Path, pre_scanned_skills: Dict[str, dict] | None) -> dict:
-        from openjiuwen.symphony.retrieval.build.tree.one_shot import OneShotSkill, OneShotSkillTreeBuilder
-
         entries = (
             list(pre_scanned_skills.values())
             if pre_scanned_skills is not None
@@ -166,36 +161,11 @@ class _IndexBuildWorkflow:
         builder = TreeBuilder(
             skills_dir=aggregate_dir, config=self._config, model=self._model, skill_entries=entries,
         )
-        entries = builder._enrich_skill_profiles(entries, verbose=self._config.output.verbose)
-        skills = [
-            OneShotSkill(
-                name=item.get("name") or item["id"],
-                description=item.get("description") or "",
-                worker_id=item["id"],
-                skill_path=item.get("path") or "",
-            )
-            for item in entries
-        ]
-        result = OneShotSkillTreeBuilder(model=self._model, config=self._config).build(skills)
-        builder.state.llm_calls += result.llm_calls
-        builder.state.input_tokens += result.prompt_tokens
-        builder.state.output_tokens += result.completion_tokens
-        builder.state.total_tokens += result.total_tokens
-        if self._config.output.cache_metrics_enabled:
-            builder.state.cache_unknown += result.llm_calls
-        # The one-shot assignment algorithm remains intact. Shared profile/repair
-        # stages operate on its resulting taxonomy, without another full build.
-        tree = _preset_tree(result.tree_preset, entries, builder)
-        builder._repair_tree(tree, source_skills=entries, verbose=self._config.output.verbose)
-        preset = builder.preset_writer.tree_to_orchestrator_preset(builder._tree_to_dict(tree), preserve_ids=True)
-        if self._config.output.show_tree:
-            builder._print_tree(builder._tree_to_dict(tree))
-        builder._print_cache_stats()
-        builder.close()
+        preset, result = builder.build_one_shot(entries)
         LOGGER.info(
             "one-shot tree built | skills=%s | llm_calls=%s | prompt_tokens=%s | completion_tokens=%s "
             "| total_tokens=%s | elapsed_seconds=%.3f",
-            len(skills),
+            len(entries),
             result.llm_calls,
             result.prompt_tokens,
             result.completion_tokens,
@@ -285,28 +255,3 @@ class _IndexBuildWorkflow:
                 for worker_id, item in scanned_items.items()
             }
         )
-
-
-def _preset_tree(preset: dict, entries: list[dict], builder: TreeBuilder) -> TreeNode:
-    root = TreeNode(id="root", name="Root")
-    branches = {"": root}
-    by_id = {str(entry["id"]): entry for entry in entries}
-    raw_nodes = list(preset.get("nodes") or [])
-    for item in sorted(raw_nodes, key=lambda node: str(node.get("cid", "")).count(".")):
-        cid = str(item.get("cid") or "")
-        parent_id, _, segment = cid.rpartition(".")
-        parent = branches.get(parent_id, root)
-        if item.get("type") == "branch":
-            branch = TreeNode(
-                id=segment or cid, name=segment or cid,
-                description=str(item.get("description") or ""),
-                depth=cid.count(".") + 1, parent_id=parent.id,
-            )
-            parent.children.append(branch)
-            branches[cid] = branch
-        else:
-            entry = by_id.get(str(item.get("worker_id") or ""))
-            if entry is not None:
-                payload = {**entry, "skill_path": entry.get("skill_path") or entry.get("path") or ""}
-                parent.skills.append(builder._skill_from_data(payload, path=parent.id))
-    return root

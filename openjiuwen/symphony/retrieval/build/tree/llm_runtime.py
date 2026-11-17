@@ -4,7 +4,14 @@ import hashlib
 from typing import TYPE_CHECKING, Optional
 
 from openjiuwen.core.foundation.llm import ReasoningConfig
-from openjiuwen.symphony.model_bridge import _BuildInterrupted, _is_authentication_error, _is_transient_model_error, _response_content, _response_finish_reason, _response_usage
+from openjiuwen.symphony.model_bridge import (
+    _BuildInterrupted,
+    _is_authentication_error,
+    _is_transient_model_error,
+    _response_content,
+    _response_finish_reason,
+    _response_usage,
+)
 from openjiuwen.symphony.shared.rich_compat import Console, Panel
 
 from .schema import parse_json_from_response

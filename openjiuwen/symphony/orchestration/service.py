@@ -121,6 +121,11 @@ class OrchestrationService:
         self._build_id = ""
         self._write_lock = asyncio.Lock()
 
+    @property
+    def build_task(self) -> asyncio.Task[Any] | None:
+        """Return the task that owns the current build, if one has started."""
+        return self._build_task
+
     def status(self, *, expected_snapshot: dict[str, Any] | None = None) -> GraphArtifactStatus:
         if expected_snapshot is None:
             capabilities = self._sync_capabilities()
@@ -184,7 +189,11 @@ class OrchestrationService:
                                 graph_path=self.graph_artifact_root / "versions" / str(status.version) / "graph.json",
                                 generated_at=str(status.generated_at),
                                 build_id=build_id,
-                                counts={"graph_reused_count": 1, "relation_reused_count": 0, "relation_resolved_count": 0},
+                                counts={
+                                    "graph_reused_count": 1,
+                                    "relation_reused_count": 0,
+                                    "relation_resolved_count": 0,
+                                },
                             )
                     except FileNotFoundError:
                         pass

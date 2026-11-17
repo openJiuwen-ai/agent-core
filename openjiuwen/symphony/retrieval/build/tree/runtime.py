@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from openjiuwen.symphony.model_bridge import _BuildInterrupted
-
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Optional
 
+from openjiuwen.symphony.model_bridge import _BuildInterrupted
 from openjiuwen.symphony.shared.rich_compat import (
     BarColumn,
     Panel,

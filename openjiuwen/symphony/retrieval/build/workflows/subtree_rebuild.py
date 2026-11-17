@@ -4,9 +4,15 @@ import json
 import logging
 from typing import Any, Dict, Sequence
 
-from openjiuwen.symphony.retrieval.build.tree.prompts import SUBTREE_REBUILD_PROMPT
 from openjiuwen.symphony.config import RetrievalBuildConfig
-from openjiuwen.symphony.model_bridge import _BuildInterrupted, _is_transient_model_error, _model_scope, _response_content, _response_finish_reason
+from openjiuwen.symphony.model_bridge import (
+    _BuildInterrupted,
+    _is_transient_model_error,
+    _model_scope,
+    _response_content,
+    _response_finish_reason,
+)
+from openjiuwen.symphony.retrieval.build.tree.prompts import SUBTREE_REBUILD_PROMPT
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import can_build_tree_with_llm
 from openjiuwen.symphony.retrieval.build.workflows.tree_ops import slug_term, unique_child_cid
 

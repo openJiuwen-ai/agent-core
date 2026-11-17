@@ -8,6 +8,7 @@ import argparse
 import importlib.util
 import inspect
 import json
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +21,7 @@ from pydantic.fields import FieldInfo
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "openjiuwen/symphony/config.py"
 OUTPUT_PATH = CONFIG_PATH.with_name("config.tree.txt")
+LOGGER = logging.getLogger(__name__)
 
 
 def load_config() -> ModuleType:
@@ -144,13 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     output = args.output or (OUTPUT_PATH.with_name("config.reference.txt") if args.include_internal else OUTPUT_PATH)
     document = render_document(load_config(), include_internal=args.include_internal)
     if output.is_file() and output.read_text(encoding="utf-8") == document:
-        print(f"配置树已是最新：{output}")
+        LOGGER.info("配置树已是最新：%s", output)
         return 0
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(document, encoding="utf-8")
-    print(f"已导出配置树：{output}")
+    LOGGER.info("已导出配置树：%s", output)
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     raise SystemExit(main())

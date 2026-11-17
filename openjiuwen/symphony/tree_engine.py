@@ -73,7 +73,7 @@ class TreeEngine:
     def _changes(toolkit, committed):
         from openjiuwen.symphony.agent.retrieval_toolkit import _record_hashes
 
-        current = _record_hashes(toolkit._current_records())
+        current = _record_hashes(toolkit.current_records())
         previous = dict(committed.get("record_hashes") or {})
         return {
             "capability_count": len(current),
@@ -91,7 +91,7 @@ class TreeEngine:
                 "counts": self._changes(toolkit, {}), "diagnostics": [],
             }
         status = toolkit.load_index_status(build_id=build_id, include_logs=False)
-        committed = toolkit._read_committed_index_state()
+        committed = toolkit.read_committed_index_state()
         return {
             **status, "enabled": True, "version": str(committed.get("build_id") or ""),
             "counts": self._changes(toolkit, committed),
@@ -152,7 +152,9 @@ class TreeEngine:
 
         worker = None
         try:
-            records = await asyncio.to_thread(self._records, capability_directories, disabled_capability_ids, source_by_id)
+            records = await asyncio.to_thread(
+                self._records, capability_directories, disabled_capability_ids, source_by_id,
+            )
             if not records:
                 raise ValueError("Cannot build a taxonomy from an empty capability inventory")
             toolkit = self._toolkit(records=records, model=_bind_model_to_loop(self.model, loop))
@@ -190,7 +192,7 @@ class TreeEngine:
         if not (self.artifact_root / "index").is_dir():
             raise FileNotFoundError("No published Symphony taxonomy is available")
         toolkit = self._toolkit()
-        committed = toolkit._read_committed_index_state()
+        committed = toolkit.read_committed_index_state()
         result = toolkit.load_index_tree(validate_fresh=False)
         return {**result, "version": str(committed.get("build_id") or ""),
                 "build_id": str(committed.get("build_id") or ""), "diagnostics": []}
@@ -212,7 +214,10 @@ class TreeEngine:
                        config: RetrievalConfig | None = None, pin_index_revision=False, **snapshot):
         self._check()
         settings = (config or self.config).model_copy(deep=True)
-        records = lambda: self._records(capability_directories, disabled_capability_ids, source_by_id)
+
+        def records():
+            return self._records(capability_directories, disabled_capability_ids, source_by_id)
+
         environment = SkillFS(
             records, settings=settings, visible_skill_names=visible_capability_ids,
             artifact_root=self.artifact_root, index_root=self.artifact_root,

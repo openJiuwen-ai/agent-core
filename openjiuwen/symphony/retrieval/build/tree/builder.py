@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.symphony.config import RetrievalBuildConfig
 from openjiuwen.symphony.model_bridge import _ModelBridge, _model_identity
@@ -18,14 +18,18 @@ from .grouping import TreeGroupingEngine
 from .llm_runtime import TreeLLMRuntime as ExternalTreeLLMRuntime
 from .preset_writer import TreePresetWriter as ExternalTreePresetWriter
 from .repair import TreeRepairEngine as ExternalTreeRepairEngine
+from .root_categories import resolve_tree_root_categories
 from .runtime import TreeBuilderRuntimeMixin
 from .schema import (
     DEFAULT_TREE_OUTPUT_PATH,
     ResolvedTreeStructure,
+    TreeNode,
     normalize_root_categories,
 )
 from .shared import console
-from .root_categories import resolve_tree_root_categories
+
+if TYPE_CHECKING:
+    from .one_shot import OneShotTreeBuildResult
 
 
 class TreeBuilder(
@@ -121,6 +125,67 @@ class TreeBuilder(
             return self._build()
         finally:
             self.close()
+
+    def build_one_shot(self, skill_entries: list[dict]) -> tuple[dict, OneShotTreeBuildResult]:
+        """Build and repair a preset using the one-shot assignment algorithm."""
+        from .one_shot import OneShotSkill, OneShotSkillTreeBuilder
+
+        output = self.settings.config.output
+        try:
+            entries = self._enrich_skill_profiles(skill_entries, verbose=output.verbose)
+            skills = [
+                OneShotSkill(
+                    name=item.get("name") or item["id"],
+                    description=item.get("description") or "",
+                    worker_id=item["id"],
+                    skill_path=item.get("path") or "",
+                )
+                for item in entries
+            ]
+            result = OneShotSkillTreeBuilder(model=self.state.model, config=self.settings.config).build(skills)
+            self.state.llm_calls += result.llm_calls
+            self.state.input_tokens += result.prompt_tokens
+            self.state.output_tokens += result.completion_tokens
+            self.state.total_tokens += result.total_tokens
+            if output.cache_metrics_enabled:
+                self.state.cache_unknown += result.llm_calls
+
+            tree = self._tree_from_preset(result.tree_preset, entries)
+            self._repair_tree(tree, source_skills=entries, verbose=output.verbose)
+            tree_dict = self._tree_to_dict(tree)
+            preset = self.preset_writer.tree_to_orchestrator_preset(tree_dict, preserve_ids=True)
+            if output.show_tree:
+                self._print_tree(tree_dict)
+            self._print_cache_stats()
+            return preset, result
+        finally:
+            self.close()
+
+    def _tree_from_preset(self, preset: dict, entries: list[dict]) -> TreeNode:
+        root = TreeNode(id="root", name="Root")
+        branches = {"": root}
+        by_id = {str(entry["id"]): entry for entry in entries}
+        raw_nodes = list(preset.get("nodes") or [])
+        for item in sorted(raw_nodes, key=lambda node: str(node.get("cid", "")).count(".")):
+            cid = str(item.get("cid") or "")
+            parent_id, _, segment = cid.rpartition(".")
+            parent = branches.get(parent_id, root)
+            if item.get("type") == "branch":
+                branch = TreeNode(
+                    id=segment or cid,
+                    name=segment or cid,
+                    description=str(item.get("description") or ""),
+                    depth=cid.count(".") + 1,
+                    parent_id=parent.id,
+                )
+                parent.children.append(branch)
+                branches[cid] = branch
+            else:
+                entry = by_id.get(str(item.get("worker_id") or ""))
+                if entry is not None:
+                    payload = {**entry, "skill_path": entry.get("skill_path") or entry.get("path") or ""}
+                    parent.skills.append(self._skill_from_data(payload, path=parent.id))
+        return root
 
     def _build(self) -> dict:
         verbose = self.settings.config.output.verbose

@@ -8,12 +8,18 @@ from typing import Any, Sequence
 
 from openjiuwen.core.foundation.llm import ReasoningConfig
 from openjiuwen.symphony.config import OneShotTreeBuildConfig, RetrievalBuildConfig
-from openjiuwen.symphony.model_bridge import _is_transient_model_error, _model_scope, _response_content, _response_finish_reason, _response_usage
-from .root_categories import resolve_tree_root_categories
-from .schema import normalize_root_categories
+from openjiuwen.symphony.model_bridge import (
+    _is_transient_model_error,
+    _model_scope,
+    _response_content,
+    _response_finish_reason,
+    _response_usage,
+)
 from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, text_tokens, unique_child_cid
 
 from .json_parser import parse_json_from_response
+from .root_categories import resolve_tree_root_categories
+from .schema import normalize_root_categories
 
 _FORBIDDEN_CATEGORY_TERMS = frozenset({"composio", "mcp", "rube"})
 _KEBAB_CASE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -146,6 +152,7 @@ class OneShotSkillTreeBuilder:
         if model is None:
             raise ValueError("model is required")
         self.model = model
+        self._llm_calls = 0
         self.policy = config.model_copy(deep=True) if isinstance(config, RetrievalBuildConfig) else None
         if self.policy is None:
             self.config = (config or OneShotTreeBuildConfig()).model_copy(deep=True)
@@ -332,7 +339,9 @@ class OneShotSkillTreeBuilder:
                 if not configured:
                     break
                 if label not in configured:
-                    raise _ResponseValidationError((f"classification path {raw_path!r} violates configured categories",))
+                    raise _ResponseValidationError(
+                        (f"classification path {raw_path!r} violates configured categories",)
+                    )
                 configured = configured[label].get("children")
             if configured:
                 raise _ResponseValidationError((f"classification path {raw_path!r} stops above configured categories",))
