@@ -3,6 +3,8 @@
 import asyncio
 import json
 import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -222,6 +224,10 @@ async def test_the_agent_is_steered_to_run_pages_not_to_read_them(tmp_path, monk
     assert "score rules" in notes["output"]                                       # documents are read as before
     saved, _ = await checks.run_check({"tool": "read", "id": "c3"}, tmp_path, ["read"])
     assert "read_evidence" in saved["skipped"]
+    alone = Path(tempfile.mkdtemp())
+    (alone / "schedule.md").write_text("买泳镜 09:50")
+    implied, _ = await checks.run_check({"tool": "read"}, alone, ["read"])
+    assert "买泳镜 09:50" in implied["output"] and implied.get("path") == "schedule.md"
     shown = evidence_agent.shown({"tool": "browser", "actions": [
         {"index": 0, "action": {"type": "probe", "script": "() => " + "x" * 2000}, "ok": True, "value": {"score": 3}}]})
     assert shown["actions"] == [{"index": 0, "ok": True, "value": {"score": 3}}]  # the outcome, not the echo
