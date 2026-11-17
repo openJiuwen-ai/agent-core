@@ -7,10 +7,12 @@ import pathlib
 import sqlite3
 from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Callable, Literal
 
 from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeout
+
+from openjiuwen.core.common.logging import sys_operation_logger
 
 
 class _ManagedReadWriteLock(ReadWriteLock):
@@ -140,13 +142,15 @@ class HybridAsyncReadWriteLock:
             try:
                 await asyncio.shield(task)
                 return
-            except asyncio.CancelledError:
-                try:
-                    await task
-                except FileLockTimeout:
-                    pass
-                else:
+            except asyncio.CancelledError as exc:
+                async def settle_acquisition(acquisition=task) -> None:
+                    try:
+                        await acquisition
+                    except FileLockTimeout:
+                        return
                     await self._file.release()
+
+                await self._finish_cleanup(settle_acquisition(), original_error=exc)
                 raise
             except FileLockTimeout:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -154,13 +158,37 @@ class HybridAsyncReadWriteLock:
                     raise self._timeout() from None
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
-    async def _release_file(self) -> None:
-        task = asyncio.create_task(self._file.release())
+    async def _finish_cleanup(self, operation, *, original_error: BaseException | None = None) -> None:
+        """清理完成后再传播取消。"""
+        task = asyncio.create_task(operation)
+        cancelled = False
         try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            task.result()
+        except Exception:
+            # 诊断失败也不能覆盖正在传播的业务异常或取消。
+            with suppress(Exception):
+                sys_operation_logger.exception("File lock cleanup failed: %s", self._lock_file)
+            if original_error is None:
+                raise
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _release_guard(self, mode: Literal["read", "write"]) -> None:
+        async with self._condition:
+            if mode == "write" or self._readers == 1:
+                await self._file.release()
+            # 释放失败时保留占用标记，避免写者误入。
+            if mode == "write":
+                self._writer = False
+            else:
+                self._readers -= 1
+            self._condition.notify_all()
 
     @asynccontextmanager
     async def read(self, timeout: float):
@@ -171,14 +199,14 @@ class HybridAsyncReadWriteLock:
                 await self._acquire_file("read", deadline)
             self._readers += 1
 
+        error = None
         try:
             yield
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            async with self._condition:
-                self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+            await self._finish_cleanup(self._release_guard("read"), original_error=error)
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -192,13 +220,14 @@ class HybridAsyncReadWriteLock:
             await self._acquire_file("write", deadline)
             self._writer = True
 
+        error = None
         try:
             yield
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+            await self._finish_cleanup(self._release_guard("write"), original_error=error)
 
     async def close(self) -> None:
         async with self._condition:

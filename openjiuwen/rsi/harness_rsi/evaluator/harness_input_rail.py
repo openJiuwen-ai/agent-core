@@ -4,11 +4,11 @@
 import json
 from pathlib import Path
 
-from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
-from openjiuwen.harness.security.file_guard import (
+from agent_shield.tool_permission.fileguard.file_guard import (
     FileGuardChecker,
     normalize_path_guard_config,
 )
+from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.security.models import PermissionLevel
 
 

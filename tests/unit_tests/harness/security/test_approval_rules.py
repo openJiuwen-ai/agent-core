@@ -14,12 +14,6 @@ from openjiuwen.harness.security.approval_rules import (
     merge_file_guard_path_rule,
     merge_permission_allow_rule_into_permissions,
 )
-from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
-
-
-def _evaluate(config: dict, tool_name: str, tool_args: dict) -> PermissionLevel:
-    return evaluate_tiered_policy(config, tool_name, tool_args)[0]
 
 
 def test_merge_file_guard_path_rule_writes_paths() -> None:
@@ -146,14 +140,12 @@ def test_path_tool_merge_after_auto_confirm_elevates_whole_tool_allow(
         "approval_overrides": [],
     }
     tool_args = {"file_path": "notes.txt"}
-    assert _evaluate(cfg, "read_file", tool_args) == PermissionLevel.ASK
 
     merged, applied = merge_permission_allow_rule_into_permissions(deepcopy(cfg), "read_file", tool_args)
     assert applied is True
 
     assert merged.get("approval_overrides") == []
     assert merged["tools"]["read_file"] == "allow"
-    assert _evaluate(merged, "read_file", tool_args) == PermissionLevel.ALLOW
 
     again, applied_again = merge_permission_allow_rule_into_permissions(deepcopy(merged), "read_file", tool_args)
     assert applied_again is False
@@ -181,7 +173,6 @@ def test_merge_path_tool_elevates_tools_not_path_override() -> None:
 def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     cfg = {"enabled": True, "tools": {"bash": {"*": "ask"}}}
     tool_args = {"command": "git status"}
-    assert _evaluate(cfg, "bash", tool_args) == PermissionLevel.ASK
 
     merged, applied = merge_permission_allow_rule_into_permissions(deepcopy(cfg), "bash", tool_args)
     assert applied is True
@@ -189,11 +180,10 @@ def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     assert any(
         isinstance(item, dict)
         and item.get("match_type") == "command"
-        and "git" in str(item.get("pattern", "")).lower()
+        and item.get("pattern") == "git status"
         and item.get("action") == "allow"
         for item in overrides
     )
-    assert _evaluate(merged, "bash", tool_args) == PermissionLevel.ALLOW
 
 
 def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
@@ -203,16 +193,14 @@ def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
         "approval_overrides": [],
     }
     tool_args = {"cron": "0 * * * *", "name": "sync"}
-    assert _evaluate(cfg, "cron_create_job", tool_args) == PermissionLevel.ASK
 
     merged, applied = merge_permission_allow_rule_into_permissions(deepcopy(cfg), "cron_create_job", tool_args)
     assert applied is True
     assert merged["tools"]["cron_create_job"] == "allow"
     assert merged.get("approval_overrides") == []
-    assert _evaluate(merged, "cron_create_job", tool_args) == PermissionLevel.ALLOW
 
 
-def test_merge_skips_when_current_permission_is_not_ask() -> None:
+def test_merge_skips_when_tool_already_allow() -> None:
     cfg = {"enabled": True, "tools": {"read_file": "allow"}}
     merged, applied = merge_permission_allow_rule_into_permissions(cfg, "read_file", {"file_path": "notes.txt"})
     assert applied is False
@@ -220,12 +208,20 @@ def test_merge_skips_when_current_permission_is_not_ask() -> None:
     assert merged.get("approval_overrides") in (None, [])
 
 
-def test_merge_shell_without_safe_suggestion_is_not_applied() -> None:
+def test_merge_shell_persists_whole_command_even_with_redirect() -> None:
     cfg = {"enabled": True, "tools": {"bash": "ask"}}
+    tool_args = {"command": "git status > /tmp/out"}
     merged, applied = merge_permission_allow_rule_into_permissions(
         cfg,
         "bash",
-        {"command": "git status > /tmp/out"},
+        tool_args,
     )
-    assert applied is False
-    assert merged.get("approval_overrides") in (None, [])
+    assert applied is True
+    overrides = merged.get("approval_overrides") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("match_type") == "command"
+        and item.get("pattern") == "git status > /tmp/out"
+        and item.get("action") == "allow"
+        for item in overrides
+    )

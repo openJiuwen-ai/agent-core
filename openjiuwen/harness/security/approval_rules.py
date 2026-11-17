@@ -14,11 +14,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
-from agent_shield.tool_permission.toolguard.shell_ast import parse_shell_for_permission
-
-from .models import PermissionLevel
-from .suggestions import PermissionSuggestion, build_permission_suggestions
-
 logger = logging.getLogger(__name__)
 
 _SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
@@ -46,52 +41,6 @@ class _ApprovalOverrideSignature:
     pattern: str
     existing_pattern: str | None
     existing_action: str
-
-
-def _evaluate_current_permission(
-    permissions: PermissionsSection | dict[str, Any],
-    tool_name: str,
-    tool_args: dict[str, Any],
-) -> PermissionLevel:
-    """Evaluate the current decision through core's synchronous compatibility path.
-
-    The allow-always merge only proceeds when the current decision is ASK.
-    """
-    from .tiered_policy import evaluate_tiered_policy
-
-    return evaluate_tiered_policy(permissions, tool_name, tool_args)[0]
-
-
-def _persist_tiered_approval_override_suggestions(
-    permissions: PermissionsSection,
-    suggestions: list[PermissionSuggestion],
-) -> bool:
-    """Write command-class approval overrides; path suggestions are ignored."""
-    if not suggestions:
-        return False
-    overrides = permissions.get("approval_overrides")
-    if not isinstance(overrides, list):
-        overrides = []
-        permissions["approval_overrides"] = overrides
-
-    persisted_any = False
-    for suggestion in suggestions:
-        if str(suggestion.match_type or "").strip().lower() == "path":
-            logger.info(
-                "[PermissionEngine] permission.persist.skip reason=path_suggestion_use_file_guard pattern=%s",
-                suggestion.pattern,
-            )
-            continue
-        for tool_name in suggestion.tools:
-            if _ensure_single_allow_override(
-                overrides,
-                tool_name=tool_name,
-                match_type=suggestion.match_type,
-                pattern=suggestion.pattern,
-                action=suggestion.action,
-            ):
-                persisted_any = True
-    return persisted_any
 
 
 def _ensure_single_allow_override(
@@ -164,7 +113,7 @@ def _persist_tiered_tool_allow(
     permissions: PermissionsSection,
     tool_name: str,
 ) -> bool:
-    """Persist whole-tool allow for tools without safe parameter suggestions."""
+    """Persist whole-tool allow for non-shell tools."""
     if not tool_name:
         return False
     tools = permissions.get("tools")
@@ -346,50 +295,51 @@ def merge_permission_allow_rule_into_permissions(
 ) -> tuple[PermissionsSection, bool]:
     """Merge an "always allow" rule into a copy of ``permissions``.
 
-    ``applied`` is false when nothing changed (e.g. the current decision is not
-    ASK, or there is no safe suggestion).
+    Shell tools persist the whole command text as a ``command`` approval
+    override (exact match). Non-shell tools raise ``tools.<name>`` to allow.
+    Path details stay in the rail's ``file_guard`` path, not here.
+
+    ``applied`` is false when nothing changed (e.g. empty shell command, or
+    the tool is already allow).
     """
     perms = cast(PermissionsSection, deepcopy(permissions))
-    current_permission = _evaluate_current_permission(perms, tool_name, tool_args)
-    if current_permission != PermissionLevel.ASK:
-        logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
-            tool_name,
-            current_permission.value,
-        )
-        return cast(PermissionsSection, perms), False
-    shell_ast_result = None
+
     if tool_name in _SHELL_APPROVAL_TOOLS:
-        shell_ast_result = parse_shell_for_permission(
-            str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+        command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+        if not command:
+            logger.warning(
+                "[PermissionEngine] permission.merge.skip tool=%s reason=empty_shell_command",
+                tool_name,
+            )
+            return cast(PermissionsSection, perms), False
+        overrides = perms.get("approval_overrides")
+        if not isinstance(overrides, list):
+            overrides = []
+            perms["approval_overrides"] = overrides
+        _ensure_single_allow_override(
+            overrides,
+            tool_name=tool_name,
+            match_type="command",
+            pattern=command,
+            action="allow",
         )
-    suggestions = build_permission_suggestions(
-        tool_name,
-        tool_args,
-        shell_ast_result=shell_ast_result,
-    )
-    # Path suggestions are not written to approval_overrides (path details are
-    # persisted by the rail's file_guard); a path tool currently at ASK is
-    # raised to whole-tool allow instead.
-    non_path = [suggestion for suggestion in suggestions if str(suggestion.match_type or "").lower() != "path"]
-    if not _persist_tiered_approval_override_suggestions(perms, non_path):
-        if tool_name not in _SHELL_APPROVAL_TOOLS:
-            if _persist_tiered_tool_allow(perms, tool_name):
-                logger.info(
-                    "[PermissionEngine] permission.merge.ok tool=%s target=tools",
-                    tool_name,
-                )
-                return cast(PermissionsSection, perms), True
-        logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
+        logger.info(
+            "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
             tool_name,
         )
-        return cast(PermissionsSection, perms), False
-    logger.info(
-        "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
+        return cast(PermissionsSection, perms), True
+
+    if _persist_tiered_tool_allow(perms, tool_name):
+        logger.info(
+            "[PermissionEngine] permission.merge.ok tool=%s target=tools",
+            tool_name,
+        )
+        return cast(PermissionsSection, perms), True
+    logger.warning(
+        "[PermissionEngine] permission.merge.skip tool=%s reason=tool_already_allow",
         tool_name,
     )
-    return cast(PermissionsSection, perms), True
+    return cast(PermissionsSection, perms), False
 
 
 __all__ = [
