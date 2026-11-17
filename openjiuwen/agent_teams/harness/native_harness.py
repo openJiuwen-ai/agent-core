@@ -125,7 +125,8 @@ def _is_user_direct_text(content: Any) -> bool:
     """用户直接输入的纯文本——区别于系统注入。
 
     判定优先级：
-    1. ``SystemText`` 显式标记（异步工具完成/spawn 摘要/重试重驱）→ 系统；
+    1. ``SystemText`` 显式标记（异步工具完成/spawn 摘要/重试重驱/调度器
+       摘要与升级/可靠性通报）→ 系统；
     2. 非 str（``DeferredInput``/``GodViewMessage`` 等类型化输入）→ 系统；
     3. ``<team-event`` 包装（看板事件）→ 系统；
     4. ``<team-inbound`` 包装按发件人分化（``inbound_render.render_inbound``
