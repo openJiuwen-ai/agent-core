@@ -164,7 +164,7 @@ def _command_text(tool_args: dict[str, Any]) -> str:
     return str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
 
 
-def _shell_pattern_matches(pattern: str, command: str) -> bool:
+def _shell_pattern_matches(pattern: str, command: str, *, restrictive: bool = False) -> bool:
     if not pattern or not command:
         return False
     p = pattern.strip()
@@ -201,6 +201,18 @@ def _shell_pattern_matches(pattern: str, command: str) -> bool:
         return False
     glob_chars = frozenset("*?[")
     if any(ch in p for ch in glob_chars):
+        if restrictive:
+            # ASK/DENY inspect the whole command, including opaque syntax.
+            # ALLOW and approval overrides retain the bounded argv wildcard.
+            normalized = p.replace("\\", "/")
+            optional_args = normalized.endswith(" *")
+            body = normalized[:-2] if optional_args else normalized
+            expression = "".join(".*" if char == "*" else "." if char == "?" else re.escape(char)
+                                 for char in body)
+            if optional_args:
+                expression += "(?: .*)?"
+            flags = re.DOTALL | (re.IGNORECASE if sys.platform == "win32" else 0)
+            return re.fullmatch(expression, command.replace("\\", "/"), flags) is not None
         return match_wildcard(command, p)
     return command == p
 
@@ -285,12 +297,15 @@ def _collect_param_rule_hits(
         ):
             if not restrictive or _tool_category(tool_name, permission_config) != "shell":
                 continue
-            from openjiuwen.harness.security.permission_engine.approve.command_identity import restriction_command_views
+            if not _shell_pattern_matches(pattern, _command_text(tool_args), restrictive=True):
+                from openjiuwen.harness.security.permission_engine.approve.command_identity import (
+                    restriction_command_views,
+                )
 
-            if restriction_views is None:
-                restriction_views = restriction_command_views(tool_name, tool_args)
-            if not any(_shell_pattern_matches(pattern, view) for view in restriction_views):
-                continue
+                if restriction_views is None:
+                    restriction_views = restriction_command_views(tool_name, tool_args)
+                if not any(_shell_pattern_matches(pattern, view, restrictive=True) for view in restriction_views):
+                    continue
         action = rule.get("action")
         if not (isinstance(action, str) and action.strip()):
             logger.debug(

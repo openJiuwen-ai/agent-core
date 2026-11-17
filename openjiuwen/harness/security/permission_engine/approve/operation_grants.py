@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import extract_fetch_url, url_hostname
@@ -302,15 +303,30 @@ def has_shared_file_operation(config: Mapping, tool: str, args: dict, workspace:
 
 def has_shell_subcommand_grant(config: Mapping, tool: str, args: dict) -> bool:
     """Match one literal child; never expose these grants to the final override."""
+    command = str(args.get("command") or args.get("cmd") or "")
     grants = config.get("approval_overrides") or []
+    if not grants:
+        return False
     subject = operation_subject(tool, args, config)
-    return any(
-        isinstance(g, dict) and (
-            (g.get("match_type") == SHELL_GRANT_MATCH_TYPE
-             and matches_operation_grant({**g, "match_type": GRANT_MATCH_TYPE}, tool, subject))
-            or _runtime_command_matches(g, subject))
-        for g in grants
-    )
+    for g in grants:
+        if not _matches_shell_subcommand_grant(g, tool, subject):
+            continue
+        logger.info("[PermissionEngine] permission.shell_grant.match tool=%s grant_id=%s "
+                    "grant_type=%s command_sha256=%s",
+                    tool, g.get("id"), g.get("match_type"), hashlib.sha256(command.encode("utf-8")).hexdigest())
+        return True
+    return False
+
+
+def _matches_shell_subcommand_grant(grant: Any, tool: str, subject: dict) -> bool:
+    """Match a shell-child grant or a native runtime command receipt."""
+    if not isinstance(grant, dict):
+        return False
+    if grant.get("match_type") == SHELL_GRANT_MATCH_TYPE:
+        normalized = {**grant, "match_type": GRANT_MATCH_TYPE}
+        if matches_operation_grant(normalized, tool, subject):
+            return True
+    return _runtime_command_matches(grant, subject)
 
 
 def _runtime_command_matches(grant: dict, subject: dict) -> bool:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import ipaddress
 import re
 from typing import Any, Mapping
 from urllib.parse import urlparse
@@ -78,6 +79,24 @@ def match_net_pattern(pattern: str, url: str) -> bool:
         if "*" in pat or "?" in pat:
             return _match_url_glob(normalized, pat)
         return normalized == pat or normalized.startswith(pat)
+    endpoint = re.fullmatch(r"(\[[^\]]+\]|[^:/#@\[\]]+):([0-9]+)", pat)
+    if endpoint:
+        try:
+            port = int(endpoint[2])
+            target = urlparse(normalized if "://" in normalized else f"//{normalized}")
+            target_port = target.port
+            if target_port is None:
+                target_port = {"http": 80, "https": 443}.get(target.scheme.lower())
+            host = target.hostname
+        except ValueError:
+            return False
+        if not host or not 0 < port <= 65535 or target_port != port:
+            return False
+        pattern_host = endpoint[1].removeprefix("[").removesuffix("]")
+        try:
+            return ipaddress.ip_address(host) == ipaddress.ip_address(pattern_host)
+        except ValueError:
+            return match_wildcard(host.lower().rstrip("."), pattern_host.lower().rstrip("."))
     host = url_hostname(normalized)
     if not host:
         return False
