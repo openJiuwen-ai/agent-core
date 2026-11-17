@@ -223,3 +223,23 @@ class LocalWorkConfig(BaseModel)
 * **sandbox_root**(List[str], 可选)：文件系统操作的安全边界。当 `restrict_to_sandbox` 为 `True` 时，拒绝访问此列表之外的路径。默认值：`None`。
 * **restrict_to_sandbox**(bool, 可选)：是否限制文件系统操作在 `sandbox_root` 内。默认值：`False`。
 * **dangerous_patterns**(List[str], 可选)：危险命令的正则模式列表。如果为 `None`，使用内置默认模式。默认值：`None`。
+
+
+### ADX 已登记的本地 rootfs
+
+`adx-environment` provider 支持在 launcher 的 `extra_params` 中设置 `rootfs_template`，
+需要 SDK 0.1.0rc5 或更新版本。该名称选择部署侧登记的 Local 制品；配置后，provider
+向 SDK 下发模板名称，省略 `image`。缓存作用域包含模板名称，因此切换制品不会复用
+旧 rootfs 的工具环境。镜像导入、镜像引用映射和跨节点分发由部署侧负责。
+
+### ADX 工具沙箱重启策略
+
+`adx-environment` provider 默认在运行时异常退出后原节点重拉最多 3 次。
+可在 launcher 的 `extra_params.restart_policy` 中配置 `maxAttempts`、
+`initialBackoffSeconds`、`maxBackoffSeconds`，默认分别为 `3`、`1`、`30`。
+显式设为 `None` 可关闭自动重启。runsc 和 Conch 均支持；已有 Environment
+保持创建时的策略。
+
+策略开启时，缓存实例处于 failed 状态会向工具调用方返回错误，由 ADX 负责恢复和
+次数限制，provider 不另建实例、不重放命令。恢复后的新调用继续复用原实例；
+次数耗尽后需明确检查、恢复或删除该失败实例。空闲删除后的下次调用仍会重新创建。
