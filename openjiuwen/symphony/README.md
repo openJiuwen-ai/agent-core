@@ -93,14 +93,12 @@ shared/fingerprint
 - `retrieval` 构建并读取能力树索引，向 Agent 渐进披露分支和候选能力。
 - `orchestration/graph` 生成关系候选、进行 IO/语义匹配、判断关系并构建能力图。
 - `orchestration` 管理图产物，并根据候选能力和任务目标生成执行路线。
-- `experience` 评估会话轨迹、沉淀能力使用经验，并支持经验检索。
 - `evaluation` 提供可注册的静态质量和调用方轨迹评估，不固化业务准入阈值。
 - `interfaces` 定义使用方需要实现或传入的协议。
 - `agent` 提供 Agent-facing toolkit；使用方负责将 toolkit 方法接入自己的调用体系。
 
 能力图是编排领域的内部组成，不是一个独立的 Runtime 服务；公共运行时通过
-`SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService`、`EvaluationSuite` 和
-experience 领域能力已可独立使用，但尚未组合进 `SymphonyRuntime`。
+`SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService` 和 `EvaluationSuite` 可独立使用。
 
 ### 检索树中的 Skill 等价群
 
@@ -140,7 +138,6 @@ agent-core
 │       │   │   ├── candidates
 │       │   │   └── matcher              # 内部实现，不作为公共 API
 │       │   └── planning
-│       ├── experience                    # 独立模块已实现，Runtime 接入待完成
 │       ├── evaluation
 │       ├── models
 │       └── shared
@@ -162,7 +159,7 @@ agent-core
 
 ## 当前可运行接口
 
-当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。`openjiuwen.symphony.experience` 已提供可单独导入的领域能力，但尚未组合到 Runtime。
+当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。
 
 ```python
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
@@ -517,8 +514,7 @@ revision，通常由下一次规划读取。`flush_observations()` 只用于测�
 ## 最终 Runtime 与统一接口蓝图（部分尚未接入）
 
 以下接口展示 Symphony 多能力域统一接入 Runtime 后的目标形态。当前版本尚不存在 `runtime.retrieval`、
-`runtime.experience`、`runtime.evaluation` 或 `runtime.agent_toolkit(...)`；指纹、评估和经验能力当前通过各自的
-公开服务或领域包独立使用。
+`runtime.evaluation` 或 `runtime.agent_toolkit(...)`。指纹和评估通过各自的公开服务独立使用。
 
 ### Adapter 协议
 
@@ -547,8 +543,6 @@ class ArtifactPathProvider(Protocol):
     def tree_artifact_root(self) -> Path: ...
 
     def graph_artifact_root(self) -> Path: ...
-
-    def experience_artifact_root(self) -> Path: ...
 ```
 
 能力清单使用 `capability_id` 作为统一标识，并通过 `capability_type` 区分不同资产类型。
@@ -582,7 +576,7 @@ candidate_ids = [
 
 ### 多服务 Runtime
 
-最终 `SymphonyRuntime` 将组合检索、编排、经验和评估子服务：
+最终 `SymphonyRuntime` 将组合检索、编排和评估子服务：
 
 ```python
 # 最终目标示例；当前不可运行。
@@ -592,7 +586,6 @@ symphony = SymphonyRuntime(
     inventory_provider=adapter.capability_inventory_provider(),
     tree_artifact_root=adapter.tree_artifact_root(),
     graph_artifact_root=adapter.graph_artifact_root(),
-    experience_artifact_root=adapter.experience_artifact_root(),
     retrieval_settings=adapter.retrieval_settings(),
     orchestration_settings=adapter.orchestration_settings(),
     model=adapter.model(),
@@ -610,22 +603,6 @@ plan = await symphony.orchestration.plan(
     candidate_ids=candidate_ids,
 )
 ```
-
-### 经验沉淀
-
-当前独立的 [`openjiuwen.symphony.experience`](experience/API.md) 包已提供轨迹解析、评估、经验库构建和检索。下例展示未来统一 Runtime facade 的目标形态，当前不可运行：
-
-```python
-# 最终目标示例；当前不可运行。
-records = await symphony.experience.evaluate(traces)
-await symphony.experience.build(records)
-experience_result = await symphony.experience.search(
-    "读取 PDF 内容并生成摘要",
-)
-candidate_ids = experience_result.candidate_ids
-```
-
-现有领域对象包括轨迹记录、轨迹评估器、经验库、经验库构建器和经验检索器；统一 Runtime 接口将在集成时以现有实现和测试为准。
 
 ### 能力评估
 
@@ -667,7 +644,7 @@ plan = await toolkit.orchestration.plan(
 
 ## 最终运行时产物
 
-指纹、检索、编排和当前独立的经验模块使用调用方指定的产物目录：
+指纹、检索和编排使用调用方指定的产物目录：
 
 ```text
 fingerprint_artifact_root/
@@ -690,22 +667,13 @@ graph_artifact_root/
         ├── current.json
         ├── observations/<observation-revision>/overlay.json
         └── merged/<merged-revision>/manifest.json
-
-experience_kb/
-├── meta.json
-├── scalar/metadata.jsonl
-└── vector/
-    ├── faiss_index.bin
-    └── embeddings.npy
-
 ```
 
 - `fingerprint.json` 当前保存标准化能力指纹、质量结果、诊断和 source snapshot。
 - `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
 - `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
 - `evolution/evidence.sqlite3` 是 append-only 规范证据日志；`observations` 与 `merged` 保存不可变派生版本。
-- `experience_kb` 是当前独立经验库的调用方指定目录；canonical Trajectory 的归档仍由 Harness 管理，
-  GraphEngine 只持久化脱敏后的规范边证据。
+- canonical Trajectory 的归档由 Harness 管理，GraphEngine 只持久化脱敏后的规范边证据。
 - 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
 
 ## 开发与验证
@@ -728,7 +696,7 @@ make type-check COMMITS=1
 
 - 公开导入路径以 `openjiuwen.symphony` 开头。
 - 公共 capability、fingerprint 和 evaluation 模型位于 `models/`；编排 graph 的构建模型属于内部实现。
-- 编排公共领域模型及 Symphony 最终统一契约使用 `capability_id`、`capability_type` 和 `candidate_ids`。当前独立 experience API 中的 `skills` 和 `skill_ids` 是待 Runtime 集成时统一的过渡命名。
+- 编排公共领域模型及 Symphony 最终统一契约使用 `capability_id`、`capability_type` 和 `candidate_ids`。
 - 运行时资源随 `openjiuwen.symphony` 一同打包。
 - Symphony 保持使用方无关，不包含使用方专属的 gateway、Web/TUI、卡片类型或 prompt rail。
 - 使用方负责将 Symphony 服务或最终 Toolkit 接入自己的调用体系，并将内部标识映射为公共能力标识。

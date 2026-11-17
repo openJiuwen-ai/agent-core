@@ -1,3 +1,17 @@
+---
+title: Prompt Attachment Agent Loop 事件接入
+author: yangzequ
+author_email: yangzequ1@huawei.com
+author_note: 由 Git 首次新增记录 03054a1ad 补充
+id: F_26_prompt-attachment-event-agent-loop
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 正文引用设计依据 2026-11-03-openjiuwen-prompt-attachment-event-agent-loop-plan，本仓 designs/ 中未找到对应 D，待核实
+---
+
 # Prompt Attachment Agent Loop 事件接入
 
 ## 元信息

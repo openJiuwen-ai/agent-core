@@ -1,3 +1,17 @@
+---
+title: Team 扩展机制接入（契约层 + 成员侧接线）
+author: zhanglongmin
+author_email: zhanglongmin@huawei.com
+author_note: 由 Git 首次新增记录 2ad759e70 补充（原位于 openjiuwen/agent_teams/docs/features/）
+id: F_100_team-extension-wiring
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 正文未引用独立设计，历史设计关联待核实，不等同于没有关联设计
+---
+
 # Team 扩展机制接入（契约层 + 成员侧接线）
 
 - 日期：2026-10-24
