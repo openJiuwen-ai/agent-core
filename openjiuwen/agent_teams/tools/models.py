@@ -14,11 +14,40 @@ import hashlib
 import json
 from typing import Dict, Optional, cast
 
-from sqlalchemy import BigInteger, Index, Table
+from sqlalchemy import BigInteger, Index, Table, Text
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlmodel import Field, SQLModel
 from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.context import get_session_id
+
+# Bare ``str`` Fields become VARCHAR(255) on MySQL/MariaDB. Task/message bodies,
+# completion notes, team/member descriptions, prompts, and agent cards exceed
+# that; match the KV store's LONGTEXT variant.
+_TEAM_LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql").with_variant(LONGTEXT(), "mariadb")
+
+# (column_name, nullable) — engine MODIFY / ADD 共用；单一事实源。
+TEAM_STATIC_LONG_TEXT_SPECS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "team_info": (("desc", True), ("prompt", True)),
+    "team_member": (
+        ("desc", True),
+        ("agent_card", False),
+        ("prompt", True),
+        ("options", True),
+    ),
+    "team_session_settings": (("settings_json", False),),
+}
+TEAM_TASK_LONG_TEXT_SPECS: tuple[tuple[str, bool], ...] = (
+    ("content", False),
+    ("summary", True),
+    ("note", True),
+    ("change_notes", True),
+)
+TEAM_MESSAGE_LONG_TEXT_SPECS: tuple[tuple[str, bool], ...] = (
+    ("content", False),
+    ("meta", True),
+)
+TEAM_REVIEW_VOTE_LONG_TEXT_SPECS: tuple[tuple[str, bool], ...] = (("feedback", True),)
 
 TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_dependency_",
@@ -43,7 +72,7 @@ class TeamSessionSettings(SQLModel, table=True):
     __tablename__ = "team_session_settings"
 
     session_id: str = Field(primary_key=True)
-    settings_json: str = Field(default="{}")
+    settings_json: str = Field(default="{}", sa_type=_TEAM_LONG_TEXT)
     version: int = Field(default=0)
 
 
@@ -55,8 +84,8 @@ class Team(SQLModel, table=True):
     team_name: str = Field(primary_key=True)
     display_name: str = Field(nullable=False)
     leader_member_name: str = Field(nullable=False)
-    desc: Optional[str] = Field(default=None, nullable=True)
-    prompt: Optional[str] = Field(default=None, nullable=True)
+    desc: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
+    prompt: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     # Effective dispatch mode chosen by the leader at build_team time
     # ("autonomous" / "scheduled", F_62). Persisted so cold recovery — which
     # rebuilds the leader backend from the spec ceiling — restores the same
@@ -79,8 +108,8 @@ class TeamMember(SQLModel, table=True):
     member_name: str = Field(primary_key=True)
     team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
     display_name: str = Field(nullable=False)
-    desc: Optional[str] = Field(default=None, nullable=True)
-    agent_card: str = Field(nullable=False)
+    desc: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
+    agent_card: str = Field(nullable=False, sa_type=_TEAM_LONG_TEXT)
     status: str = Field(nullable=False)
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
@@ -96,10 +125,11 @@ class TeamMember(SQLModel, table=True):
     # the same backfilled default via the schema-migration step in
     # ``database/engine.py``.
     role: str = Field(nullable=False, default="teammate")
-    prompt: Optional[str] = Field(default=None, nullable=True)
+    prompt: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     options: Optional[str] = Field(
         default=None,
         nullable=True,
+        sa_type=_TEAM_LONG_TEXT,
         description=(
             "JSON object for extensible member configuration. "
             "Current shape: {model_ref: {model_name, model_index}, "
@@ -138,7 +168,7 @@ class TeamTaskBase(SQLModel):
     # cascade semantics.
     team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     title: str = Field(nullable=False)
-    content: str = Field(nullable=False)
+    content: str = Field(nullable=False, sa_type=_TEAM_LONG_TEXT)
     # status keeps a standalone index (get_team_tasks / recovery sweep /
     # cancel_all filter by status alone). assignee folds into the composite
     # (assignee, status) injected in _get_task_model (D4) — get_tasks_by_assignee
@@ -167,12 +197,12 @@ class TeamTaskBase(SQLModel):
     # where. Rendered in lightweight places (leader digest, upstream briefs);
     # stored in full, truncated only when rendered. Cleared together with
     # ``note`` whenever the task leaves its assignee (reassign / reset).
-    summary: Optional[str] = Field(default=None, nullable=True)
+    summary: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     # Author's completion note (F_118 / D7): artifact paths and key decisions
     # written by ``member_complete_task(note=...)``. Persisted so downstream
     # members, reviewers and the leader (``view_task``) can read it; events
     # never carry it. Since F_119 it is the full detail behind ``summary``.
-    note: Optional[str] = Field(default=None, nullable=True)
+    note: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     # Member subtasks (F_128): the task its creator was executing when it
     # split the work. NULL marks a top-level (leader-created) task. Written
     # by the tool from the caller's active task, never by the model. No
@@ -197,7 +227,7 @@ class TeamTaskBase(SQLModel):
     parent_revision: int = Field(default=0, nullable=False)
     # Edit notes (F_129 / D8): JSON list of ``{"revision", "note", "by"}``,
     # appended with the revision bump they describe. Kept as audit history.
-    change_notes: Optional[str] = Field(default=None, nullable=True)
+    change_notes: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:
@@ -300,7 +330,7 @@ class TeamTaskReviewVoteBase(SQLModel):
     review_round: int = Field(nullable=False)
     reviewer: str = Field(nullable=False)
     decision: str = Field(nullable=False)
-    feedback: Optional[str] = Field(default=None, nullable=True)
+    feedback: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
     created_at: int = Field(sa_type=BigInteger, nullable=False)
 
 
@@ -319,7 +349,7 @@ class TeamMessageBase(SQLModel):
     team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     from_member_name: str = Field(nullable=False)
     to_member_name: Optional[str] = Field(default=None, nullable=True)
-    content: str = Field(nullable=False)
+    content: str = Field(nullable=False, sa_type=_TEAM_LONG_TEXT)
     timestamp: int = Field(sa_type=BigInteger, nullable=False)
     broadcast: bool = Field(nullable=False)
     protocol: str = Field(
@@ -353,7 +383,7 @@ class TeamMessageBase(SQLModel):
     #      templated messages are ordinary "plain" LLM-facing text.
     # Shape: {"template": <prompts/<lang>/<key>.md>, "refs": {"task": id,
     # "member": name}, "params": {<scalar>}}. See ``message_template.py``.
-    meta: Optional[str] = Field(default=None, nullable=True)
+    meta: Optional[str] = Field(default=None, nullable=True, sa_type=_TEAM_LONG_TEXT)
 
 
 class MessageReadStatusBase(SQLModel):
