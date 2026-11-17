@@ -99,38 +99,16 @@ async def test_reading_newer_broadcast_preserves_old_deferred_for_same_recipient
 
 
 @pytest.mark.asyncio
-async def test_private_delivery_status_and_withdraw_before_replacement(db):
-    send = _leader_send(db)
-    sent = await send.invoke({"to": DEV_1, "content": "Old instruction", "mode": "follow_up"})
+async def test_private_delivery_status_respects_sender_and_leader_access(db):
+    sender = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_1, False), lang="cn"))
+    other = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_2, False), lang="en"))
+    sent = await sender.invoke({"to": DEV_2, "content": "Later request", "mode": "follow_up"})
     message_id = sent.data["message_id"]
-    status = await send.invoke({"action": "status", "message_id": message_id})
-    assert status.data["recipients"][DEV_1]["state"] == "pending"
-    other = _send_tool(create_team_tools(role="teammate", agent_team=_backend(db, DEV_2, False), lang="cn"))
-    assert not (await other.invoke({"action": "withdraw", "message_id": message_id})).success
-    result = await send.invoke({"action": "withdraw", "message_id": message_id})
-    assert result.data["recipients"][DEV_1]["state"] == "withdrawn"
-    assert not await db.message.claim_delivery(message_id, DEV_1)
-    assert not await db.message.get_messages(TEAM_NAME, DEV_1, unread_only=True)
-
-
-@pytest.mark.asyncio
-async def test_withdraw_does_not_recall_a_claimed_runtime_input(db):
-    send = _leader_send(db)
-    message_id = (await send.invoke({"to": DEV_1, "content": "Work"})).data["message_id"]
-    assert await db.message.claim_delivery(message_id, DEV_1)
-    result = await send.invoke({"action": "withdraw", "message_id": message_id})
-    assert result.data["recipients"][DEV_1]["state"] == "dispatching"
-
-
-@pytest.mark.asyncio
-async def test_withdraw_broadcast_only_cancels_recipients_not_yet_submitted(db):
-    send = _leader_send(db)
-    message_id = (await send.invoke({"to": "*", "content": "Old shared rule"})).data["message_id"]
-    await db.message.record_delivery(message_id, DEV_1, "submitted", mode="steer")
-    result = await send.invoke({"action": "withdraw", "message_id": message_id})
-    assert result.data["recipients"][DEV_1]["state"] == "submitted"
-    assert result.data["recipients"][DEV_2]["state"] == "withdrawn"
-    assert not await db.message.get_broadcast_messages(TEAM_NAME, DEV_2, unread_only=True)
+    for viewer in (sender, _leader_send(db)):
+        status = await viewer.invoke({"action": "status", "message_id": message_id})
+        assert status.success
+        assert status.data["recipients"][DEV_2]["state"] == "pending"
+    assert not (await other.invoke({"action": "status", "message_id": message_id})).success
 
 
 @pytest.mark.asyncio
@@ -511,7 +489,8 @@ async def test_private_modes_enforce_abort_role_and_single_recipient(db):
     )
 
 @pytest.mark.asyncio
-async def test_busy_abort_records_exact_task_on_the_wire(db):
+@pytest.mark.parametrize("mode", ["follow_up", "abort"])
+async def test_only_follow_up_binds_active_tasks(db, mode):
     from types import SimpleNamespace
 
     leader = _leader_send(db)
@@ -522,11 +501,13 @@ async def test_busy_abort_records_exact_task_on_the_wire(db):
     ])
     leader.message_manager.send_message = AsyncMock(return_value="message-id")
 
-    result = await leader.invoke({"to": DEV_1, "content": "Stop the current task", "mode": "abort"})
+    result = await leader.invoke({"to": DEV_1, "content": "Control current work", "mode": mode})
 
     assert result.success
     leader.message_manager.send_message.assert_awaited_once_with(
-        content="Stop the current task",
+        content="Control current work",
         to_member_name=DEV_1,
-        meta={"private_delivery_mode": "abort", "target_tasks": {"task-A": 123}},
+        meta={"private_delivery_mode": mode, "target_tasks": {"task-A": 123} if mode == "follow_up" else {}},
     )
+    if mode == "abort":
+        leader._team.task_manager.get_tasks_by_assignee.assert_not_awaited()

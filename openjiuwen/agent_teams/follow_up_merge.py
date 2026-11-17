@@ -77,7 +77,7 @@ class TeamFollowUpMerger:
                              "content": row.content})
         policy = (
             "FOLLOW_UP_CONTEXT: These earlier follow-up messages are included for context, NOT proof of "
-            "execution or completion. Judge their relevance against the current task board, contract version, "
+            "execution or completion. Judge their relevance against the current task board "
             "and newer authoritative instructions. Keep explicit after-task timing. A new steer alone does "
             "not supersede every earlier request. If information is obsolete, use the latest applicable "
             "requirements; if instructions conflict, ask the leader. Use the existing task board to track "

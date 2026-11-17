@@ -46,7 +46,7 @@ async def test_snapshot_keeps_later_input_without_a_second_task_queue(db):
     status = await send.invoke({"action": "status", "message_id": old})
     assert status.data["recipients"][DEV_1]["state"] == "merged"
     assert "obligation" not in status.data["recipients"][DEV_1]
-    assert set(receiver.card.input_params["properties"]["action"]["enum"]) == {"send", "status", "withdraw"}
+    assert set(receiver.card.input_params["properties"]["action"]["enum"]) == {"send", "status"}
     assert not (await receiver.invoke({"action": "pending"})).success
     # The delivery receipt does not keep the member busy after the queue drains.
     await db.message.mark_message_read(current, DEV_1)

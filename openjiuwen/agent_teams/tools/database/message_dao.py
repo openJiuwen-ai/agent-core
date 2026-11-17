@@ -181,6 +181,7 @@ class MessageDao:
         if not data.get("receiver_routed") or "delivery_feedback" not in data:
             return None
         entry = data["delivery_feedback"].get(member_name)
+        # Keep historical withdrawn receipts terminal; no recall tool is exposed.
         return entry is not None and not entry.get("handled", False) and entry.get("state") not in {
             "submitted", "dropped", "withdrawn", "stopped", "cleared", "held", "merged",
         }
@@ -246,36 +247,15 @@ class MessageDao:
                 else:
                     entry["state"] = entry.get("merge_previous_state", "pending")
                     if entry.get("merge_synthetic"):
-                        entry.update(state="withdrawn", handled=True)
+                        entry.update(state="cleared", handled=True)
                         row.is_read = True
                 for key in ("merge_token", "merge_previous_state", "merge_synthetic"):
                     entry.pop(key, None)
                 row.meta = json.dumps(meta, ensure_ascii=False)
             await session.commit()
 
-    async def withdraw_pending(self, message_id: str, team_name: str, sender: str) -> dict | None:
-        """Withdraw only inputs not yet accepted by a runtime, under the write lock."""
-        model = _get_message_model()
-        async with self._sessions.write() as session:
-            row = (await session.execute(select(model).where(
-                model.message_id == message_id, model.team_name == team_name,
-                model.from_member_name == sender,
-            ).with_for_update())).scalar_one_or_none()
-            if row is None:
-                return None
-            meta = json.loads(row.meta) if row.meta else {}
-            feedback = meta.get("delivery_feedback", {})
-            for entry in feedback.values():
-                if not entry.get("handled") and entry.get("state") not in {"merging", "merged", "dispatching", "submitted", "dropped", "stopped", "cleared", "held"}:
-                    entry.update(state="withdrawn", handled=True, updated_at=get_current_time())
-            if not row.broadcast and feedback.get(row.to_member_name, {}).get("state") == "withdrawn":
-                row.is_read = True
-            row.meta = json.dumps(meta, ensure_ascii=False)
-            await session.commit()
-            return feedback
-
     async def claim_delivery(self, message_id: str, member_name: str) -> bool:
-        """Serialize withdrawal against the final handoff to the runtime."""
+        """Claim an unhandled delivery before handing it to the runtime."""
         model = _get_message_model()
         async with self._sessions.write() as session:
             row = (await session.execute(select(model).where(model.message_id == message_id).with_for_update())).scalar_one_or_none()

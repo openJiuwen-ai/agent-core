@@ -58,9 +58,6 @@ class TeamMessageManager:
         self.db = db
         self.messager = messager
 
-    async def withdraw_pending(self, message_id: str) -> dict | None:
-        return await self.db.message.withdraw_pending(message_id, self.team_name, self.member_name)
-
     async def claim_delivery(self, message_id: str, member_name: str) -> bool:
         return await self.db.message.claim_delivery(message_id, member_name)
 

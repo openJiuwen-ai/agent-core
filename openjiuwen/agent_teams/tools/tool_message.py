@@ -84,8 +84,8 @@ class _SendMessageBase(TeamTool, ABC):
         self.t = t
         self._team = team
         properties = {
-            "action": {"type": "string", "enum": ["send", "status", "withdraw"],
-                       "description": "send (default); status queries delivery; withdraw recalls your own not-yet-submitted delivery. Submitted or merged context cannot be recalled."},
+            "action": {"type": "string", "enum": ["send", "status"],
+                       "description": "send (default); status queries delivery without sending a message."},
             "message_id": {"type": "string", "description": "Message ID returned by send; required for status."},
             "to": to_schema,
             "content": {"type": "string", "description": t("send_message", "content")},
@@ -116,15 +116,6 @@ class _SendMessageBase(TeamTool, ABC):
         action = inputs.get("action", "send")
         if action == "status":
             return await self._delivery_status(inputs.get("message_id"))
-        if action == "withdraw":
-            message_id = inputs.get("message_id")
-            if not isinstance(message_id, str) or not message_id:
-                return ToolOutput(success=False, error="message_id is required for withdraw")
-            feedback = await self.message_manager.withdraw_pending(message_id)
-            if feedback is None:
-                return ToolOutput(success=False, error="Message not found or not sent by you")
-            return ToolOutput(success=True, data={"type": "withdrawal", "message_id": message_id, "recipients": feedback,
-                "note": "Only pending inputs withdrawn. Submitted inputs cannot be recalled. Send the replacement separately."})
         if action != "send":
             return ToolOutput(success=False, error="Unknown message action")
         to_raw = inputs.get("to")
@@ -254,7 +245,7 @@ class _SendMessageBase(TeamTool, ABC):
         options = {}
         if mode is not None:
             target_tasks = {}
-            if mode in {"follow_up", "abort"} and await self._team.get_member_status(to) == MemberStatus.BUSY.value:
+            if mode == "follow_up" and await self._team.get_member_status(to) == MemberStatus.BUSY.value:
                 tasks = await self._team.task_manager.get_tasks_by_assignee(to)
                 target_tasks = {task.task_id: task.updated_at for task in tasks if task.status in ACTIVE_TASKS}
             options["meta"] = {MODE_KEY: mode, "target_tasks": target_tasks}
@@ -409,7 +400,7 @@ class _SendMessageBase(TeamTool, ABC):
             text = f"Broadcast Already sent from {d['from']} Success"
             if d.get("message_id"):
                 text += f"\nmessage_id={d['message_id']}; query send_message(action='status', message_id=...) before resending."
-        elif d["type"] in {"delivery_status", "withdrawal"}:
+        elif d["type"] == "delivery_status":
             return json.dumps(d, ensure_ascii=False)
         elif d["type"] == "multicast":
             return self._format_multicast_text(None, d)
