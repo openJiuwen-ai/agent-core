@@ -269,6 +269,8 @@ run_id**——人工交互靠 `correlation_id` 路由，设计如此）。`deliv
 
 ## 加一个 handler / 一个事件之前
 
+普通集群的 Leader 私信 abort 是控制操作：优先于邮箱中的旧输入，取消当前执行、清空旧待投递输入与运行时 follow_up，正文不投模型。停止屏障由运行时持有；只有更新的显式 Leader 私信能解除，广播、队友和调度模板均不能解除。不得因停止而把任务记为 completed。
+
 1. **先问该不该做**：coordination 不做业务决策。新行为是不是应该做成一个 team tool，让 LLM
    自己决定调？（`../AGENTS.md` 铁律 1）
 2. 新事件 = 在对应业务域 handler 的 `EVENT_METHOD_MAP` 加一行 + 写方法。**不改

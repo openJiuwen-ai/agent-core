@@ -12,7 +12,7 @@ author_email: chengshuo5@huawei.com
 
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-11-10
+最近一次修订日期：2026-11-17
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -274,3 +274,12 @@ replace 使用 expected_version 做 CAS。平台应在成员执行前初始化�
 
 冷恢复接入当前 runtime_spec.build_context 时，build_context_seed 同步深拷贝当前值（包括 None），
 避免 leader 使用新策略而进程派生成员从 checkpoint 的旧 seed 重建。见 `B_20261104_2054_recovered-context-seed-and-execution-environment`。
+
+
+## Steer 合并 follow_up 上下文（2026-11-16）
+
+Native TeamHarness 忙时 steer 将此前 follow_up 邮箱输入及相同调用上下文的运行时 FIFO 快照合并，保留原消息 ID、发送者、原模式、时间、任务绑定和正文。成功提交 steering 通道后移出原队列，反馈记 merged；失败保留输入，快照之后的新输入不清除。merged 只表示上下文提交，不代表阅读、执行或任务完成。
+
+不新增待办队列、不增加 pending/resolve 工具、不维护消息完成状态、不发送自动后续提醒。成员按当前任务看板、契约版本和最新有效指令判断旧信息的适用性，有冲突询问 Leader。原定后续工作仍由任务看板管理。外部 CLI 运行时保持原行为。
+
+Leader 停止标记同样阻止 goal 自动续跑：无论轮次收尾还是 IDLE 时 nudge_goal，均不得启动新的目标尝试或重新打开已阻塞目标。只有新的显式 Leader 私信成功投递后，才清除此停止标记。工具审批仍按原有 Leader 校验与待审批协议处理，普通 steer/follow_up 不得绕过待审批门禁。
