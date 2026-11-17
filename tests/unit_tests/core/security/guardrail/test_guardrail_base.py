@@ -12,12 +12,10 @@ from openjiuwen.core.security.guardrail import (
     GuardrailBackend,
     GuardrailContext,
     GuardrailContentType,
-    GuardrailError,
     GuardrailResult,
     RiskAssessment,
     RiskLevel,
 )
-from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class TestBaseGuardrail:
@@ -144,15 +142,24 @@ class TestBaseGuardrailDetect:
 
     @pytest.mark.asyncio
     async def test_detect_without_backend_raises(self):
-        """Test _detect_callback() without backend raises ValueError in base class."""
-        # Create a guardrail that directly calls super().detect()
-        # instead of checking for backend first
+        """Test direct detect() without backend still raises ValueError."""
         guardrail = DirectBaseCallGuardrail()
 
         with pytest.raises(ValueError) as exc_info:
-            await guardrail.call_detect_callback("test_event", data={})
+            await guardrail.detect("test_event", data={})
 
         assert "No backend configured" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_callback_without_backend_returns_pass(self):
+        """Test the callback turns a missing backend into a pass result."""
+        guardrail = DirectBaseCallGuardrail()
+
+        result = await guardrail.call_detect_callback("test_event", data={})
+
+        assert result.is_safe is True
+        assert result.event == "test_event"
+        assert result.details["error"].startswith("ValueError:")
 
     @pytest.mark.asyncio
     async def test_detect_with_safe_backend(self, mock_backend):
@@ -405,9 +412,7 @@ class TestGuardrailBackend:
 
     @pytest.mark.asyncio
     async def test_backend_analyze_exception_propagates(self):
-        """Test backend analyze() exception propagates up."""
-        # Note: The guardrail detect method does NOT catch exceptions from backend.
-        # This is intentional - callers should handle exceptions if needed.
+        """Test a backend error on the callback path becomes a pass result."""
 
         class FailingBackend(GuardrailBackend):
             async def analyze(self, data):
@@ -416,9 +421,24 @@ class TestGuardrailBackend:
         backend = FailingBackend()
         guardrail = CustomTestGuardrail(backend=backend)
 
-        # Exception should propagate (not be caught by guardrail)
+        result = await guardrail.call_detect_callback("test_event", data={})
+
+        assert result.is_safe is True
+        assert result.event == "test_event"
+        assert result.details["error"] == "RuntimeError: Detection failed"
+
+    @pytest.mark.asyncio
+    async def test_detect_runtime_error_propagates(self):
+        """Test direct detect() still lets a backend RuntimeError escape."""
+
+        class FailingBackend(GuardrailBackend):
+            async def analyze(self, data):
+                raise RuntimeError("Detection failed")
+
+        guardrail = CustomTestGuardrail(backend=FailingBackend())
+
         with pytest.raises(RuntimeError) as exc_info:
-            await guardrail.call_detect_callback("test_event", data={})
+            await guardrail.detect("test_event", data={})
 
         assert str(exc_info.value) == "Detection failed"
 
@@ -428,64 +448,57 @@ class TestDetectCallback:
 
     @pytest.mark.asyncio
     async def test_detect_callback_safe_no_exception(self, mock_backend):
-        """Test _detect_callback() does not raise when result is safe."""
+        """Test _detect_callback() returns a safe GuardrailResult."""
         guardrail = CustomTestGuardrail(backend=mock_backend)
 
-        # Should not raise any exception
         result = await guardrail.call_detect_callback("test_event", data={"test": "value"})
 
-        # Result should be None (callback doesn't return GuardrailResult)
-        assert result is None
+        assert isinstance(result, GuardrailResult)
+        assert result.is_safe is True
+        assert result.event == "test_event"
+        assert result.confidence == 0.0
 
     @pytest.mark.asyncio
     async def test_detect_callback_risky_raises_guardrail_error(self, risky_backend):
-        """Test _detect_callback() raises GuardrailError when risk detected."""
+        """Test _detect_callback() returns the risky result instead of raising."""
         guardrail = CustomTestGuardrail(backend=risky_backend)
 
-        with pytest.raises(GuardrailError) as exc_info:
-            await guardrail.call_detect_callback("test_event", data={"test": "value"})
+        result = await guardrail.call_detect_callback("test_event", data={"test": "value"})
 
-        error = exc_info.value
-        assert error.status == StatusCode.GUARDRAIL_BLOCKED
-        assert "prompt_injection" in error.message or "blocked" in error.message.lower()
+        assert result.is_safe is False
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "test_risk"
+        assert result.event == "test_event"
 
     @pytest.mark.asyncio
     async def test_detect_callback_error_contains_risk_info(self, risky_backend):
-        """Test GuardrailError contains correct risk information in details."""
+        """Test the callback result carries risk fields and the event name."""
         guardrail = CustomTestGuardrail(backend=risky_backend)
 
-        with pytest.raises(GuardrailError) as exc_info:
-            await guardrail.call_detect_callback("user_input_event", data={"text": "test"})
+        result = await guardrail.call_detect_callback("user_input_event", data={"text": "test"})
 
-        error = exc_info.value
-        assert error.details is not None
-        assert error.details["risk_type"] == "test_risk"
-        assert error.details["risk_level"] == "HIGH"
-        assert error.details["event"] == "user_input_event"
+        assert result.is_safe is False
+        assert result.risk_type == "test_risk"
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.event == "user_input_event"
 
     @pytest.mark.asyncio
     async def test_detect_callback_error_with_details(self, risky_backend_with_details):
-        """Test GuardrailError includes backend details in error details."""
+        """Test backend details stay on the result and are not folded elsewhere."""
         guardrail = CustomTestGuardrail(backend=risky_backend_with_details)
 
-        with pytest.raises(GuardrailError) as exc_info:
-            await guardrail.call_detect_callback("llm_input_event", data={"prompt": "test"})
+        result = await guardrail.call_detect_callback("llm_input_event", data={"prompt": "test"})
 
-        error = exc_info.value
-        assert error.details is not None
-        # Check core risk info
-        assert error.details["risk_type"] == "prompt_injection"
-        assert error.details["risk_level"] == "HIGH"
-        assert error.details["event"] == "llm_input_event"
-        # Check backend-specific details are merged
-        assert "matched_pattern" in error.details
-        assert error.details["matched_pattern"] == "ignore previous instructions"
-        assert "confidence" in error.details
-        assert error.details["confidence"] == 0.95
+        assert result.is_safe is False
+        assert result.risk_type == "prompt_injection"
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.event == "llm_input_event"
+        assert result.details["matched_pattern"] == "ignore previous instructions"
+        assert result.details["confidence"] == 0.95
 
     @pytest.mark.asyncio
     async def test_detect_callback_unknown_risk_type(self):
-        """Test _detect_callback() handles unknown risk type gracefully."""
+        """Test a missing risk type stays None on the returned result."""
         class UnknownRiskBackend(GuardrailBackend):
             async def analyze(self, data):
                 return RiskAssessment(
@@ -497,31 +510,25 @@ class TestDetectCallback:
 
         guardrail = CustomTestGuardrail(backend=UnknownRiskBackend())
 
-        with pytest.raises(GuardrailError) as exc_info:
-            await guardrail.call_detect_callback("test_event", data={})
+        result = await guardrail.call_detect_callback("test_event", data={})
 
-        error = exc_info.value
-        assert error.details["risk_type"] == "unknown"
-        assert error.details["risk_level"] == "MEDIUM"
+        assert result.is_safe is False
+        assert result.risk_type is None
+        assert result.risk_level == RiskLevel.MEDIUM
+        assert result.event == "test_event"
 
     @pytest.mark.asyncio
     async def test_detect_callback_integration_with_framework(self, framework, risky_backend):
-        """Test _detect_callback() integration with callback framework handles error gracefully.
-
-        Note: The callback framework catches exceptions from callbacks and continues execution.
-        The GuardrailError is logged but not re-raised. This is by design - the framework
-        should not let one failing callback stop the entire event processing.
-        """
+        """Test trigger() keeps the GuardrailResult instead of dropping a raised error."""
         guardrail = CustomTestGuardrail(backend=risky_backend)
         await guardrail.register(framework)
 
-        # Trigger the event - callback framework catches the GuardrailError internally
-        # and continues execution (does not re-raise)
         results = await framework.trigger("test_event", data={"text": "malicious input"})
 
-        # The callback was executed (but exception was caught by framework)
-        # Results will be empty because the callback raised an exception
-        assert results == []
+        assert len(results) == 1
+        assert results[0].is_safe is False
+        assert results[0].risk_type == "test_risk"
+        assert results[0].event == "test_event"
 
     @pytest.mark.asyncio
     async def test_guardrail_called_via_framework(self, framework):
@@ -545,12 +552,11 @@ class TestDetectCallback:
         guardrail = CustomTestGuardrail(backend=mock_backend)
         await guardrail.register(framework)
 
-        # Trigger event - should complete without raising exception
         results = await framework.trigger("test_event", data={"safe": "content"})
 
-        # Safe callback returns None, which is collected in results
-        # Note: callback framework collects all callback return values
-        assert results == [None]  # detect returns None when safe
+        assert len(results) == 1
+        assert results[0].is_safe is True
+        assert results[0].event == "test_event"
 
     @pytest.mark.asyncio
     async def test_guardrail_receives_correct_kwargs(self, framework):

@@ -752,3 +752,24 @@ class TestIgnoredToolCallsAndExemptWall:
         )
         assert processor._is_tool_call_exempt(hit) is True
         assert processor._is_tool_call_exempt(miss) is False
+
+
+@pytest.mark.asyncio
+async def test_compaction_logs_to_context_engine_logger():
+    """Compaction must be visible in context_engine.log, not console-only."""
+    from unittest.mock import patch
+
+    with patch(
+        "openjiuwen.core.context_engine.processor.compressor."
+        "reasoning_tool_loop_compact_processor.context_engine_logger.info"
+    ) as info:
+        config = ReasoningToolLoopCompactProcessorConfig(consecutive_threshold=3)
+        ctx = await _create_context(config)
+        await ctx.add_messages(UserMessage(content="请生成研究想法"))
+        for index in range(1, 4):
+            await ctx.add_messages(_todo_round(index))
+
+    messages = ctx.get_messages()
+    assert len(_loop_summary_messages(messages)) == 1
+    logged = " ".join(str(call) for call in info.call_args_list)
+    assert "compacted consecutive identical" in logged

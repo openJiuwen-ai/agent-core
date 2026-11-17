@@ -21,6 +21,7 @@ sliding windows and the leader's bound anomaly sink across cycles.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -30,6 +31,8 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.experts.bound_group import BoundAgentGroup
+    from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
@@ -37,6 +40,15 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
     from openjiuwen.harness.tools.worktree import WorktreeManager
+
+
+@dataclass(frozen=True)
+class ExpertBinding:
+    """Team-spec data the leader's ``spawn_expert`` works with."""
+
+    bound_group: Optional["BoundAgentGroup"] = None
+    persona_workspace: Optional[str] = None
+    persona_language: Optional[str] = None
 
 
 class TeamHandleKey:
@@ -52,6 +64,10 @@ class TeamHandleKey:
     SWARMFLOW_HUMAN_BASE_SPEC = "team.swarmflow_human_base_spec"
     SWARMFLOW_CONCURRENCY_GOVERNOR = "team.swarmflow_concurrency_governor"
     SWARMFLOW_BUDGET = "team.swarmflow_budget"
+    SWARMFLOW_EXTERNAL_CLI_AGENTS = "team.swarmflow_external_cli_agents"
+    SWARMFLOW_EXPERT_SPECS = "team.swarmflow_expert_specs"
+    EXPERT_CATALOG = "team.expert_catalog"
+    EXPERT_BINDING = "team.expert_binding"
     RELIABILITY_COMPONENTS = "team.reliability_components"
     PERMISSIONS_OVERRIDE = "team.permissions_override"
     WORKTREE_MANAGER = "team.worktree_manager"
@@ -70,6 +86,10 @@ def inject_team_handles(
     swarmflow_human_base_spec: Optional["DeepAgentSpec"] = None,
     swarmflow_concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
+    swarmflow_external_cli_agents: tuple[Any, ...] = (),
+    swarmflow_expert_specs: Optional[dict[str, Any]] = None,
+    expert_catalog: Optional["ExpertCatalog"] = None,
+    expert_binding: Optional[ExpertBinding] = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
     permissions_override: Optional[dict[str, str]] = None,
     worktree_manager: Optional["WorktreeManager"] = None,
@@ -96,6 +116,11 @@ def inject_team_handles(
         swarmflow_budget: The leader's shared ``BudgetLedger``, capping the tokens
             all its swarmflow runs may burn. Non-None only for a swarmflow leader;
             unbounded (``total=None``) unless ``swarmflow_budget`` is configured.
+        swarmflow_external_cli_agents: Declared external CLI agent entries for
+            this team's swarmflow runs; empty when none are configured.
+        swarmflow_expert_specs: AgentGroup members a swarmflow script may pick via
+            ``agent_template`` (member name → expert entry). Empty / None when the
+            session has no AgentGroup bound.
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
@@ -115,6 +140,10 @@ def inject_team_handles(
     extras[TeamHandleKey.SWARMFLOW_HUMAN_BASE_SPEC] = swarmflow_human_base_spec
     extras[TeamHandleKey.SWARMFLOW_CONCURRENCY_GOVERNOR] = swarmflow_concurrency_governor
     extras[TeamHandleKey.SWARMFLOW_BUDGET] = swarmflow_budget
+    extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = swarmflow_external_cli_agents
+    extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = dict(swarmflow_expert_specs or {})
+    extras[TeamHandleKey.EXPERT_CATALOG] = expert_catalog
+    extras[TeamHandleKey.EXPERT_BINDING] = expert_binding
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
     extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
     extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
@@ -176,6 +205,26 @@ def get_swarmflow_budget(context: Any) -> Any:
     return _get(context, TeamHandleKey.SWARMFLOW_BUDGET)
 
 
+def get_swarmflow_external_cli_agents(context: Any) -> tuple[Any, ...]:
+    """Return the declared external CLI agent entries for swarmflow runs, or empty tuple."""
+    return tuple(_get(context, TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS) or ())
+
+
+def get_swarmflow_expert_specs(context: Any) -> dict[str, Any]:
+    """Return the swarmflow expert table (member name → entry), or {}."""
+    return dict(_get(context, TeamHandleKey.SWARMFLOW_EXPERT_SPECS) or {})
+
+
+def get_expert_catalog(context: Any) -> Optional["ExpertCatalog"]:
+    """Return the host's expert catalog (leader only), or None."""
+    return _get(context, TeamHandleKey.EXPERT_CATALOG)
+
+
+def get_expert_binding(context: Any) -> Optional[ExpertBinding]:
+    """Return the leader's expert binding (bound AgentGroup, persona workspace), or None."""
+    return _get(context, TeamHandleKey.EXPERT_BINDING)
+
+
 def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"]:
     """Return the reused reliability components handle, or None.
 
@@ -201,6 +250,7 @@ def get_worktree_manager(context: Any) -> Optional["WorktreeManager"]:
 
 
 __all__ = [
+    "ExpertBinding",
     "TeamHandleKey",
     "inject_team_handles",
     "get_team_backend",
@@ -214,6 +264,10 @@ __all__ = [
     "get_swarmflow_human_base_spec",
     "get_swarmflow_concurrency_governor",
     "get_swarmflow_budget",
+    "get_swarmflow_external_cli_agents",
+    "get_swarmflow_expert_specs",
+    "get_expert_catalog",
+    "get_expert_binding",
     "get_reliability_components",
     "get_worktree_manager",
 ]

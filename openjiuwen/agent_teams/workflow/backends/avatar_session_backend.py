@@ -20,18 +20,74 @@ This object is owned by :class:`TeamWorkerBackend`, which delegates the engine's
 no process-global state: every session is an instance-scoped row, cleaned up on
 ``close_session`` / ``aclose``.
 """
+
 from __future__ import annotations
 
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
-from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
+try:
+    from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
+except ImportError:  # current tree exposes the hooks on kv_cache_hooks
+    from openjiuwen.agent_teams.kv_cache import (
+        kv_cache_hooks as kv_cache_harness_session_lifecycle_hook,
+    )
+try:
+    from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
+        cancellation_safe_release_then_dispose,
+    )
+except ImportError:  # current tree names it cancellation_safe_evict_then_dispose
+    import asyncio as _asyncio
+    import contextlib as _contextlib
+    from collections.abc import Awaitable as _Awaitable
+    from collections.abc import Callable as _Callable
+
+    from openjiuwen.core.common.logging import team_logger as _team_logger
+
+    async def cancellation_safe_release_then_dispose(
+        *,
+        release_kvc: _Callable[[], _Awaitable[bool]] | None,
+        dispose: _Callable[[], _Awaitable[None]],
+        owner_id: str,
+        timeout: float = 30.0,
+    ) -> None:
+        """Compat shim: release KVC then dispose without swallowing cancellation."""
+
+        async def _release_then_dispose() -> None:
+            if release_kvc is not None:
+                try:
+                    await release_kvc()
+                except Exception as exc:
+                    _team_logger.warning("KVC release failed for %s: %s", owner_id, exc)
+            await dispose()
+
+        cleanup_task = _asyncio.create_task(_release_then_dispose())
+        try:
+            await _asyncio.wait_for(_asyncio.shield(cleanup_task), timeout=timeout)
+        except _asyncio.CancelledError:
+            try:
+                await _asyncio.wait_for(_asyncio.shield(cleanup_task), timeout=timeout)
+            except Exception as exc:
+                _team_logger.warning(
+                    "KVC cleanup after cancellation failed for %s: %s", owner_id, exc
+                )
+            raise
+        except _asyncio.TimeoutError as exc:
+            cleanup_task.cancel()
+            with _contextlib.suppress(_asyncio.CancelledError):
+                await cleanup_task
+            _team_logger.warning("KVC cleanup timed out for %s: %s", owner_id, exc)
+        except Exception as exc:
+            _team_logger.warning("KVC cleanup failed for %s: %s", owner_id, exc)
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.tools.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
+)
 from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
@@ -39,23 +95,41 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
 from openjiuwen.agent_teams.workflow.backends._result_text import (
     prefer_natural_or_structured_text,
 )
-from openjiuwen.agent_teams.tools.structured_output_tool import (
-    StructuredOutputFinishRail,
-    StructuredOutputTool,
-)
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+try:
+    from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
+except ImportError:  # current tree keeps KVC types under foundation/agent_teams
+    try:
+        from openjiuwen.agent_teams.kv_cache.kv_cache_lifecycle import (
+            KVCacheRuntimeBinding as KVCacheRuntimeProtocol,
+        )
+    except ImportError:  # pragma: no cover
+        KVCacheRuntimeProtocol = Any  # type: ignore[misc,assignment]
+from openjiuwen.core.session.vcs.codec import encode_message
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # Multi-turn role prompt — the session counterpart of the worker's single-shot prompt.
+# Mirrors the worker prompt's "do the work, THEN submit" semantics: a turn that
+# carries a task must be executed with tools (observing each result) before the
+# reply; only plain no-tool questions may be answered directly. The previous
+# "answer each new message directly and concisely" wording made execution-style
+# turns (e.g. an AppWorld writer) reply with intentions instead of running
+# tools — reproduced across GLM-5.3-Flash and deepseek-v4-flash.
 _SESSION_SYS_PROMPT_AGENT = (
     "You are a stateful swarmflow session agent in a multi-turn conversation. "
-    "You remember every prior turn; answer each new message directly and "
-    "concisely, using the accumulated context. Do not restate the whole history."
+    "You remember every prior turn and can use the accumulated context. "
+    "When a message gives you a task to perform or asks you to change anything "
+    "in the world, DO the work first with your tools — execute every step, "
+    "observe each result, and only then reply with the outcome. Never answer "
+    "with intentions, plans, or \"starting now\" narrations instead of executed "
+    "work. Reply directly and concisely only for plain questions that need no "
+    "tool work. Do not restate the whole history."
 )
 # Role prompt for a human session's avatar: it does NOT invent answers — it renders a
 # real person's reply faithfully into the form the turn asked for.
@@ -68,12 +142,38 @@ _SESSION_SYS_PROMPT_HUMAN = (
 )
 # Appended to a turn's user prompt when that turn requested structured output.
 _SCHEMA_TURN_NUDGE = (
-    "When you have the answer for THIS message, call the `structured_output` tool "
-    "EXACTLY ONCE with the result conforming to its schema. Do NOT write the "
+    "When the work of THIS message is DONE and you have the result, call the "
+    "`structured_output` tool EXACTLY ONCE with the result conforming to its "
+    "schema. Do NOT call it before the work is executed, and do NOT write the "
     "result as plain text — it is captured only through that tool call."
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
+
+# Wire marker for an explicit skip: the person pressed "skip" instead of
+# answering, so the turn is skipped immediately rather than keeping the
+# question pending until the human timeout. Transports send this verbatim
+# (the host maps its own skip flag onto it); a real reply never equals it.
+HUMAN_REPLY_SKIP = "__swarmflow_skip__"
+
+# One-shot intent classification (see ``_classify_intent``): is the person's raw
+# reply a request to edit the script/flow and rerun, or a plain continue? Kept
+# as module constants (like the tiny-agent title/summary presets) — minimal.
+_INTENT_CLASSIFY_PROMPT = (
+    "Decide whether the user's reply asks to edit the script and re-run. "
+    "If they want to change the script/prompt/workflow and re-run, set "
+    "intent=edit_rerun and note the edit points; otherwise intent=continue. "
+    "Output structured results only."
+)
+
+_INTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["continue", "edit_rerun"]},
+        "edit_instructions": {"type": ["string", "null"]},
+    },
+    "required": ["intent"],
+}
 
 
 @dataclass
@@ -88,8 +188,18 @@ class _SessionState:
     """This avatar's token rail, mounted for the session's whole life (unlike a
     worker's, which lives for one call). Its tally is cumulative across turns, so
     a turn's own cost is the delta across the round."""
+    # The picked expert's own prompt, prepended to the session role prompt so the
+    # avatar answers in that expert's voice. None = no agent_template on this session.
+    persona: str | None = None
     harness: Any = None  # TeamHarness, built lazily by open_session
     turns_executed: int = 0
+    # The child session id this avatar runs on — a stable derived id (not a
+    # random uuid) so ``pre_run`` recovery / ``_read_persisted_messages`` can
+    # locate the prior run's saved ``state["context"]`` (see _derive_avatar_session_id).
+    session_id: str | None = None
+    # Guards the fork-context / mirror seeding so a resumed child never seeds its
+    # context twice (a second seed would clobber what the avatar already rebuilt).
+    context_seeded: bool = False
     # Per-turn rendezvous: the round driver awaits ``turn_future``; the harness
     # callbacks (running in its supervisor coroutine) fill ``last_finished`` and
     # resolve the future on the RUNNING→IDLE settle.
@@ -97,6 +207,11 @@ class _SessionState:
     last_finished: dict | None = None
     failed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one turn at a time
+    # The engine-assigned correlation id of the turn currently driving this
+    # avatar (set per ``send_turn``). The activity rail tags live tool events
+    # with it at emit time, so a spectator can match activity to that turn's
+    # started/completed events.
+    current_correlation_id: str | None = None
 
 
 class AvatarSessionManager:
@@ -115,6 +230,11 @@ class AvatarSessionManager:
         budget: The run's shared token ledger — every avatar bills its model
             calls to it and is cut short once it is dry, so sessions draw down
             the same pool as single-shot workers. ``None`` runs unbounded.
+        team_backend: The host team backend handle. ``None`` (tests / a backend
+            without a team) is fine for native sessions.
+        gate_agent_template: Validates a call's ``agent_template`` option and
+            returns the picked expert entry (``None`` when the option is
+            absent). Same gate the single-shot worker path uses.
     """
 
     def __init__(
@@ -130,12 +250,20 @@ class AvatarSessionManager:
         messager: Any = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        workflow_name: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
+        workflow_budget: BudgetLedger | None = None,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
+        skill_visibility_fn: Callable[[Any, str], Any] | None = None,
+        gate_agent_template: Callable[[dict], Awaitable[Any]] | None = None,
+        team_backend: Any = None,
+        progress_sink: Any = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
+        self._workflow_budget = workflow_budget
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._team_name = team_name
@@ -151,6 +279,15 @@ class AvatarSessionManager:
         # inbound reply arrives on the dedicated messager topic (subscribed lazily
         # on the first human session) and is routed by ``_on_reply_event``.
         self._pending_human: dict[str, asyncio.Future] = {}
+        # Human replies that arrive during a pause window (no live future, so the
+        # usual path would drop them) are parked here and consumed by
+        # ``_await_human_reply`` before it registers a new future.
+        self._pending_reply_buffer: dict[str, str] = {}
+        # Raw replies already handed to a human turn, kept so a retry of a
+        # failed classify/format attempt reuses them instead of re-asking the
+        # person. Peeked (not popped): every retry of the same correlation
+        # reads the same reply; a newer buffered/waited reply overwrites it.
+        self._human_reply_reuse: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -159,30 +296,262 @@ class AvatarSessionManager:
         # Scopes the reply topic so concurrent runs don't cross-resolve.
         # None falls back to the legacy session+team scope.
         self._run_id = run_id
+        self._workflow_name = workflow_name
+        self._kv_cache_runtime = kv_cache_runtime
+        # Optional Skill-rail applier hook (swarmflow cut keeps this as a
+        # pass-through; team Skill visibility is not in this migration).
+        self._skill_visibility_fn = skill_visibility_fn
         self._reply_topic_subscribed = False
+        self._gate_agent_template = gate_agent_template
+        self._team_backend = team_backend
+        # The host backend's run progress sink, forwarded from
+        # ``TeamWorkerBackend`` (None = tests / a backend without one). The
+        # session avatar's activity rail emits through it.
+        self._progress_sink = progress_sink
 
     # ------------------------------------------------------------------
     # Engine session-backend surface (delegated from TeamWorkerBackend)
     # ------------------------------------------------------------------
 
-    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
-        """Mint a member identity, build the avatar harness, and start it."""
-        base = self._human_base_spec if kind == "human" else self._worker_base_spec
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Reserve this session's member identity without building its avatar.
+
+        Pure in-process bookkeeping (a counter increment + name mint) — no
+        harness, no LLM, no spawn/budget slot. Called on a session's first turn
+        regardless of cache hit so a fully-hit resume still knows the member
+        name ``capture_fork`` needs to locate the parent's persisted context.
+        """
+        return self._next_member_name(kind, opts)
+
+    async def open_session(
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
+    ) -> str:
+        """Build the avatar harness for a session and start it.
+
+        ``member_name`` is the identity already reserved by :meth:`ensure_member_name`
+        on the first turn — reused here so we never re-mint a name (which would
+        drift the counter across a resume). When ``None`` (human sessions, or a
+        backend invoked directly) a fresh name is minted.
+        """
+        if opts.get("agent_type"):
+            raise BackendError(
+                "agent_type is not supported in this build "
+                "(external CLI swarmflow sessions were removed)",
+                retryable=False,
+            )
+        if opts.get("builtin_model") is not None or opts.get("effort") is not None:
+            raise BackendError(
+                "builtin_model / effort are not supported in this build "
+                "(they only applied to removed external CLI sessions)",
+                retryable=False,
+            )
+        if kind == "human" and opts.get("agent_template"):
+            raise BackendError(
+                "agent_template is not valid for human sessions (a person answers, not an expert avatar)"
+            )
+        gate = self._gate_agent_template
+        if kind != "human" and opts.get("agent_template") and gate is None:
+            raise BackendError("this backend has no expert gate; agent_template is unavailable")
+        expert = await gate(opts) if (kind != "human" and gate is not None) else None
+        if kind == "human":
+            base = self._human_base_spec
+        elif expert is not None:
+            base = expert.spec
+        else:
+            base = self._worker_base_spec
         if base is None:
             raise BackendError(f"no base spec available for {kind!r} sessions")
-        member_name = self._next_member_name(kind, opts)
+        if member_name is None:
+            member_name = self._next_member_name(kind, opts)
         state = _SessionState(
             kind=kind,
             spec_base=base,
             instructions=instructions,
             member_name=member_name,
-            budget_rail=SwarmflowBudgetRail(self._budget),
+            persona=expert.persona if expert is not None else None,
+            budget_rail=SwarmflowBudgetRail(self._budget, workflow_budget=self._workflow_budget),
+            session_id=self._derive_avatar_session_id(member_name),
         )
         self._sessions[member_name] = state
         if kind == "human":
             await self._ensure_reply_subscription()
-        await self._start_avatar(state, opts)
+        await self._start_avatar(state, opts, fork_data)
         return member_name
+
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Eagerly snapshot a session's context per ``fork_mode`` / ``keep_rounds``.
+
+        Called at ``AgentSession.fork()`` time so the parent's context is frozen
+        at the fork point. ``session_id`` is the parent's reserved member name.
+
+        Two capture sources, in order of preference:
+        1. a **live** parent avatar (in this run's ``_sessions``) — snapshotted
+           from its native context, which carries ToolMessage;
+        2. the parent's **persisted** ``state["context"]`` (after a fully-hit
+           resume the avatar was never rebuilt, so there is no live native) —
+           recovered from the checkpointer by the reserved member name, also
+           carrying ToolMessage.
+
+        Returns a serializable ``fork_data`` dict for injection into a fresh
+        child session, or ``None`` when neither source is available — the engine
+        then falls back to its history mirror (degraded, no ToolMessage).
+
+        ``keep_rounds`` is the split point in **rounds** (each prior ``send()``
+        is one round). The engine requires it for every mode but ``full``;
+        a value beyond the parent's actual round count is not an error — a
+        warning is logged and the fork silently degrades to full-context,
+        mirroring the team fork's "wrong name → full-context" guard.
+        """
+        parent = self._sessions.get(session_id)
+        if parent is not None and parent.harness is not None:
+            native = parent.harness.get_deep_agent()
+            return self._fork_data_from_native(native, session_id, fork_mode, keep_rounds)
+
+        # No live parent avatar (fully-hit resume): recover from the persisted
+        # session context via the reserved member name.
+        persisted = await self._persisted_messages(session_id)
+        if persisted is None:
+            return None
+        fork_ctx = self._fork_ctx_from_messages(persisted, session_id, fork_mode, keep_rounds)
+        if fork_ctx is None:
+            return None
+        return {
+            "messages": fork_ctx.messages,
+            "compact_split": fork_ctx.compact_split,
+            "compact_direction": fork_ctx.compact_direction,
+        }
+
+    def _fork_data_from_native(self, native, member_name: str, fork_mode: str, keep_rounds: int | None) -> dict:
+        """Build fork_data from a live parent avatar's native context."""
+        from openjiuwen.agent_teams.fork import ForkContext
+
+        if fork_mode == "full":
+            fork_ctx = ForkContext.from_agent(native)
+        elif fork_mode in ("before", "after"):
+            idx = _round_boundary_index(
+                native.get_current_context(),
+                keep_rounds,
+                keep_after=(fork_mode == "after"),
+            )
+            if idx is None:
+                self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+                fork_ctx = ForkContext.from_agent(native)  # out-of-range → full
+            else:
+                fork_ctx = ForkContext.from_agent(
+                    native,
+                    checkpoint=idx,
+                    keep="after" if fork_mode == "after" else "before",
+                )
+        else:  # compact modes: full capture + mark split; compaction at inject time
+            fork_ctx = ForkContext.from_agent(native)
+            idx = _round_boundary_index(
+                native.get_current_context(),
+                keep_rounds,
+                keep_after=False,
+            )
+            if idx is None:
+                self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+                fork_ctx.compact_split = len(fork_ctx.messages)
+            else:
+                fork_ctx.compact_split = idx
+            fork_ctx.compact_direction = "after" if fork_mode == "keep_before_compact_after" else "before"
+        return {
+            "messages": fork_ctx.messages,
+            "compact_split": fork_ctx.compact_split,
+            "compact_direction": fork_ctx.compact_direction,
+        }
+
+    def _fork_ctx_from_messages(self, msgs, member_name: str, fork_mode: str, keep_rounds: int | None):
+        """Build fork_data from a persisted message list (no live native)."""
+        from openjiuwen.agent_teams.fork import ForkContext
+
+        fork_ctx = ForkContext(messages=[encode_message(m) for m in msgs])
+        if fork_mode == "full":
+            return fork_ctx
+        idx = _round_boundary_index(msgs, keep_rounds, keep_after=(fork_mode == "after"))
+        if idx is None:
+            self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+            return fork_ctx  # full fallback
+        if fork_mode in ("before", "after"):
+            if fork_mode == "after":
+                fork_ctx.messages = fork_ctx.messages[idx:]
+            else:
+                fork_ctx.messages = fork_ctx.messages[:idx]
+        else:  # compact: mark split on the full capture, compaction at inject time
+            fork_ctx.compact_split = idx
+            fork_ctx.compact_direction = "after" if fork_mode == "keep_before_compact_after" else "before"
+        return fork_ctx
+
+    async def _persisted_messages(self, member_name: str) -> list | None:
+        """Recover a parent avatar's persisted conversation from the checkpointer.
+
+        After a fully-hit resume the parent avatar is never rebuilt, so there is
+        no live native to snapshot. The checkpointer still holds its final
+        ``state["context"]`` (committed at the prior run's teardown). Recover it
+        by constructing a *standalone* session that reuses the parent's stable
+        ``session_id`` and ``{team}_{member}`` card id (so ``pre_agent_execute``
+        hits the same AgentStorage bucket) and running ``pre_run`` — which drives
+        the checkpointer's restore (and also fires ``AGENT_SESSION_CREATED``);
+        no harness, no LLM, no supervisor.
+        """
+        from openjiuwen.agent_teams.fork import ForkContext
+        from openjiuwen.core.session.agent import create_agent_session
+        from openjiuwen.core.single_agent import AgentCard
+
+        member_name = member_name or self._next_member_name("agent", {})
+        fixed_id = self._derive_avatar_session_id(member_name)
+        try:
+            # The real avatar's card.id is ``{team_name}_{member_name}``
+            # (derive_member_spec, _member_spec.py:48) — that is the agent_id
+            # the checkpointer keys AgentStorage by. The recovery card must
+            # match it, or pre_agent_execute cannot locate the persisted state.
+            sess = create_agent_session(
+                session_id=fixed_id,
+                card=AgentCard(id=f"{self._team_name}_{member_name}", name=member_name),
+            )
+            await sess.pre_run()
+            states = sess.get_state("context")
+        except Exception:  # noqa: BLE001 - best-effort persisted recovery
+            team_logger.debug("[swarmflow] fork persisted recovery failed for %s", member_name, exc_info=True)
+            return None
+        if not isinstance(states, dict):
+            return None
+        ctx_state = states.get("default_context_id")
+        if not isinstance(ctx_state, dict):
+            return None
+        messages = ctx_state.get("messages")
+        if not isinstance(messages, list):
+            return None
+        return ForkContext.normalize_messages(messages)
+
+    @staticmethod
+    def _warn_out_of_range(session_id: str, fork_mode: str, keep_rounds: int | None) -> None:
+        """Log when keep_rounds has no matching round (degrades to full-context fork)."""
+        team_logger.warning(
+            "[swarmflow] fork out-of-range: session %s fork_mode=%s keep_rounds=%r has no "
+            "matching round; falling back to a full-context fork",
+            session_id,
+            fork_mode,
+            keep_rounds,
+        )
+
+    def _derive_avatar_session_id(self, member_name: str) -> str:
+        """Stable, unique child session id for an avatar.
+
+        ``{team}/{workflow}/{member}`` — stable across a same-process resume (so
+        ``pre_run`` / ``_read_persisted_messages`` can locate the prior run's
+        saved ``state["context"]``) and unique across sessions (``member_name``
+        is already unique per manager, ``workflow_name`` separates different
+        scripts running under the same session).
+        """
+        wf = self._workflow_name or "workflow"
+        return f"{self._team_name}/{wf}/{member_name}"
 
     async def _ensure_reply_subscription(self) -> None:
         """Subscribe (once) to the dedicated human-reply topic for this run.
@@ -224,34 +593,77 @@ class AvatarSessionManager:
     ) -> AgentResult:
         """Advance one turn on a session (serialised per session by its lock).
 
-        ``history`` is unused on the live (cold-run) path — the avatar harness
-        keeps its own context across rounds. It is the seam a later stage uses to
-        rebuild context after a partial-hit resume. ``correlation_id`` is the
+        ``history`` is the engine-side conversation mirror. On the live
+        (cold-run) path the avatar harness keeps its own context across rounds,
+        so it is unused — except as a **degraded seed** for a fork child whose
+        backend snapshot was unavailable (``fork_data`` was ``None``): the
+        first turn rebuilds a ``(user, assistant)`` conversation from the mirror
+        so the child still has something to work on. ``correlation_id`` is the
         engine's deterministic id for a human turn (matches a person's reply).
         """
         state = self._sessions.get(session_id)
         if state is None:
             raise BackendError(f"unknown session {session_id!r}")
         async with state.lock:
+            # Track the turn's correlation id so the avatar's activity rail tags
+            # live tool events with the same id this turn's started/completed
+            # events carry (see ``_SessionState.current_correlation_id``).
+            state.current_correlation_id = correlation_id
+            await self._seed_mirror_fallback(state, history)
             if state.kind == "human":
                 return await self._human_turn(state, prompt, opts, schema_json, correlation_id)
             return await self._agent_turn(state, prompt, schema_json)
 
+    async def _seed_mirror_fallback(self, state: _SessionState, history: Sequence[dict]) -> None:
+        """Seed a fork child's context from the history mirror (degraded path).
+
+        Only fires when the child was opened with no ``fork_data`` (the backend
+        could not capture the parent's context) **and** no fork context was
+        seeded, and the mirror actually carries prior turns. This is a fallback,
+        not the primary path: a mirror rebuild has no ToolMessage and loses the
+        KV prefix, so it only keeps the fork meaningful when nothing better is
+        available. Seeding happens once (``context_seeded`` guards double-writes
+        — a second seed would clobber what the avatar rebuilt).
+        """
+        if state.turns_executed != 0 or state.context_seeded or not history:
+            return
+        state.context_seeded = True
+        messages: list[Any] = []
+        for entry in history:
+            role = entry.get("role")
+            content = entry.get("content")
+            if role == "user":
+                messages.append(UserMessage(content=content))
+            elif role == "assistant":
+                messages.append(AssistantMessage(content=content))
+        if not messages:
+            return
+        native = state.harness.get_deep_agent()
+        child_sid = native.session_id  # bound child session, set by harness.start
+        await native.create_new_context_engine(session_id=child_sid, messages=messages)
+        team_logger.info(
+            "[swarmflow] session %s seeded context from history mirror (%d messages)",
+            state.member_name,
+            len(messages),
+        )
+
     async def close_session(self, session_id: str) -> None:
         """Dispose one session's avatar and drop its row (idempotent)."""
         state = self._sessions.pop(session_id, None)
-        if state is None or state.harness is None:
+        if state is None:
             return
-        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
+        if state.harness is None:
+            return
+        session = state.harness.current_session()
+        release_kvc = getattr(session, "release_kvc", None)
         try:
-            await cancellation_safe_evict_then_dispose(
-                binding=binding,
+            await cancellation_safe_release_then_dispose(
+                release_kvc=release_kvc if callable(release_kvc) else None,
                 dispose=state.harness.dispose,
-                reason="swarmflow-stateful-session-close",
                 owner_id=session_id,
             )
         finally:
-            kv_cache_hooks.clear_harness_session_hooks(state.harness)
+            kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(state.harness)
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -259,6 +671,8 @@ class AvatarSessionManager:
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
+        self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -284,44 +698,64 @@ class AvatarSessionManager:
         resume, so a person's reply still matches). Avatars are disposed by
         ``aclose`` on the run's unwind; an aborted-but-not-disposed harness is
         harmless — resume rebuilds fresh avatars, and journal-hit turns build none.
+
+        Harnesses abort in parallel: each avatar owns an independent control
+        queue / supervisor / TaskScheduler, and the shared KVCacheRuntime guards
+        its state with an internal condition lock, so concurrent aborts only
+        shorten the pause's wall time (serial: sum of every avatar's abort +
+        rollback; parallel: the slowest one).
         """
         for fut in list(self._pending_human.values()):
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
-        for state in list(self._sessions.values()):
-            if state.harness is not None:
-                try:
-                    await state.harness.abort(immediate=True)
-                except Exception:  # noqa: BLE001 - best effort during pause
-                    team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
+        self._pending_reply_buffer.clear()
+        self._human_reply_reuse.clear()
+        live = [state for state in list(self._sessions.values()) if state.harness is not None]
+        results = await asyncio.gather(
+            *(state.harness.abort(immediate=True) for state in live),
+            return_exceptions=True,
+        )
+        for state, exc in zip(live, results):
+            if isinstance(exc, Exception):  # noqa: BLE001 - best effort during pause
+                team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
 
     def submit_human_reply(self, correlation_id: str, answer: str) -> bool:
         """Resolve a pending human turn with the person's raw reply.
 
         The inbound seam: whatever transport carries a real person's answer
         (messager round-trip from ``interact_agent_team``) calls this with the
-        ``correlation_id`` from the outbound prompt. An unknown / already-resolved
-        correlation is rejected (returns ``False``) — an illegal id from an
-        external caller is dropped, not applied to some other turn.
+        ``correlation_id`` from the outbound prompt. A live pending future is
+        resolved directly; a reply for an unknown / paused correlation (no live
+        future) is buffered instead of dropped, so a resume that re-awaits the
+        turn still sees the person's answer.
         """
         fut = self._pending_human.get(correlation_id)
-        if fut is None or fut.done():
-            team_logger.warning(
-                "[swarmflow] rejected human reply for unknown/closed correlation_id %r",
-                correlation_id,
-            )
-            return False
-        fut.set_result(answer)
+        if fut is not None and not fut.done():
+            fut.set_result(answer)
+            return True
+        # No live future: buffer instead of drop (pause window or late reply).
+        self._pending_reply_buffer[correlation_id] = answer
+        team_logger.info("[swarmflow] buffered reply for pending correlation_id %r", correlation_id)
         return True
 
     # ------------------------------------------------------------------
     # Avatar lifecycle
     # ------------------------------------------------------------------
 
-    async def _start_avatar(self, state: _SessionState, opts: dict) -> None:
-        """Build the session's ``TeamHarness`` and start its supervisor once."""
+    async def _start_avatar(self, state: _SessionState, opts: dict, fork_data: dict | None = None) -> None:
+        """Build the session's ``TeamHarness`` and start its supervisor once.
+
+        ``fork_data`` (from :meth:`capture_fork`) seeds a fork child's context
+        right after start — the child's context is only lazily materialised on
+        its first model call, so it must be injected into the context engine
+        here (via ``create_new_context_engine`` with the child's bound session
+        id), before that call ever happens. ``compact_split`` / direction then
+        drive ``compact_context`` on the child's own native.
+        """
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
         model = self._resolve_model(opts.get("model"))
         spec = derive_member_spec(
@@ -332,6 +766,30 @@ class AvatarSessionManager:
             model=model,
             description="swarmflow session",
         )
+        # Mount the avatar's own workspace, mirroring the single-shot worker's
+        # `_setup_worker_workspace`: the file/shell toolset is mounted on a spec
+        # that carries a WorkspaceSpec, and a minimal team spec (no workspace on
+        # the teammate) would otherwise leave the session avatar with no tools
+        # at all — able to answer text but never execute anything.
+        from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
+        from openjiuwen.agent_teams.workspace_layout import (
+            ensure_team_member_workspace_link,
+        )
+
+        avatar_ws_root = ensure_team_member_workspace_link(self._team_name, state.member_name)
+        if state.spec_base.workspace is not None:
+            avatar_workspace = state.spec_base.workspace.model_copy(
+                update={"root_path": avatar_ws_root, "stable_base": True}
+            )
+        else:
+            avatar_workspace = WorkspaceSpec(
+                root_path=avatar_ws_root,
+                language=self._language,
+                stable_base=True,
+            )
+        spec = spec.model_copy(update={"workspace": avatar_workspace})
+        if self._skill_visibility_fn is not None:
+            spec = self._skill_visibility_fn(spec, state.member_name)
         build_context = derive_member_build_context(
             self._build_context,
             team_name=self._team_name,
@@ -353,24 +811,116 @@ class AvatarSessionManager:
             # End each schema turn's round as soon as structured_output is
             # captured (added before start so it registers with the harness).
             harness.add_rail(StructuredOutputFinishRail())
-            # Cold start: the harness creates and owns its child session, so
-            # DeepAgentState / context persist across this session's turns.
-            kv_cache_hooks.configure_harness_session_hooks(
+            # Live activity: mirror the single-shot worker's rail (opts carry the
+            # injected engine node key in ``agent_id``). The emitter tags events
+            # with the CURRENT turn's correlation id, read off the state row, so
+            # a spectator can match them to that turn's started/completed events.
+            agent_id = opts.get("agent_id")
+            if agent_id and self._progress_sink is not None:
+                from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+
+                harness.add_rail(
+                    SwarmflowActivityRail(
+                        emit=self._make_activity_emitter(state, agent_id, opts.get("phase"), opts.get("label")),
+                    )
+                )
+            # Cold start: bind a stable child session (F_37 decision 3) so the
+            # avatar's DeepAgentState / context persist across this session's
+            # turns *and* across a same-process resume (pre_run recovery needs a
+            # deterministic session_id to locate the prior run's state).
+            team_session = self._team_session_for(state)
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=False,
             )
-            await harness.start()
+            # The supervisor task spawned by ``start`` drives every later turn
+            # and copies the context it is created in, so binding the avatar's
+            # trajectory subject around ``start`` covers the whole session.
+            avatar_subject = team_member_execution_subject(
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                member_name=state.member_name,
+                display_name=opts.get("label") or state.member_name,
+            )
+            from openjiuwen.extensions.observability.span_context import (
+                bind_root_span_context,
+                get_root_span,
+            )
+
+            team_root = (
+                get_root_span(session_id=self._session_id)
+                if self._session_id
+                else None
+            )
+            # The avatar callback looks up by its child session id. Bind the
+            # owning Team root only in the context copied by its supervisor;
+            # child ids are not globally unique across concurrent Team runs.
+            with bind_root_span_context(team_root, session_id=state.session_id):
+                with execution_subject_scope(avatar_subject):
+                    await harness.start(team_session=team_session)
+            if fork_data is not None and fork_data.get("messages"):
+                await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(
                 on_state=self._make_state_cb(state),
                 on_round=self._make_round_cb(state),
             )
         except Exception as e:
             if harness is not None:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
+
+    def _team_session_for(self, state: _SessionState) -> Any:
+        """Build the team session carrying the avatar's stable child session id."""
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+
+        return TeamSession(
+            session_id=state.session_id,
+            team_id=self._team_name,
+        )
+
+    async def _seed_fork_context(self, harness: Any, state: _SessionState, fork_data: dict) -> None:
+        """Inject the fork snapshot into the child avatar's context engine.
+
+        Two writes, so the fork context survives the child's first ``_init_context``:
+        the context engine is seeded with the fork messages, **and** the messages are
+        written back to the child session's ``state["context"]`` (overwriting whatever
+        ``pre_run`` recovered from the checkpointer). Without the second write,
+        ``_init_context`` hits the pool and ``_load_state_from_session`` re-loads the
+        stale prior context, clobbering the injected fork messages.
+        """
+        from openjiuwen.agent_teams.fork import ForkContext
+        from openjiuwen.agent_teams.fork_compact import compact_context
+
+        native = harness.get_deep_agent()
+        child_sid = native.session_id  # bound child session, set by harness.start
+        fork_ctx = ForkContext(messages=fork_data["messages"])
+        await native.create_new_context_engine(
+            session_id=child_sid,
+            messages=fork_ctx.to_messages(),
+        )
+        compact_split = fork_data.get("compact_split")
+        if compact_split is not None:
+            await compact_context(
+                native,
+                split_at=compact_split,
+                session_id=child_sid,
+                direction=fork_data.get("compact_direction") or "before",
+            )
+        # Persist the (possibly compacted) messages back to the child session's
+        # state so the child's first model call loads the fork context, not the
+        # prior run's stale context recovered by pre_run.
+        child = harness.current_session()
+        if child is not None:
+            try:
+                final_msgs = native.get_current_context(session_id=child_sid)
+            except Exception:  # noqa: BLE001 - best-effort; keep the injected pool context
+                final_msgs = None
+            if final_msgs is not None:
+                child.update_state({"context": {"default_context_id": {"messages": final_msgs}}})
+        state.context_seeded = True
 
     @staticmethod
     def _make_state_cb(state: _SessionState):
@@ -412,6 +962,9 @@ class AvatarSessionManager:
         submit: StructuredOutputTool | None = None
         turn_prompt = prompt
         tokens_before = state.budget_rail.call_tokens
+        cache_before = state.budget_rail.call_cache_tokens
+        input_before = state.budget_rail.call_input_tokens
+        output_before = state.budget_rail.call_output_tokens
         if schema_json is not None:
             # Mount the capture tool only for this turn; the harness is IDLE
             # between turns so add/remove is safe. The ability manager owner-
@@ -430,6 +983,9 @@ class AvatarSessionManager:
 
         state.turns_executed += 1
         turn_tokens = state.budget_rail.call_tokens - tokens_before
+        turn_cache_tokens = state.budget_rail.call_cache_tokens - cache_before
+        turn_input = state.budget_rail.call_input_tokens - input_before
+        turn_output = state.budget_rail.call_output_tokens - output_before
 
         try:
             self._raise_on_interrupt_or_fail(state, result)
@@ -447,16 +1003,23 @@ class AvatarSessionManager:
                     tokens=turn_tokens or None,
                 )
             # Prefer free-text narration from the round; fall back to JSON capture.
-            text = prefer_natural_or_structured_text(
-                _output_text(result, tokens=turn_tokens or None), submit.captured
-            )
+            text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
             return AgentResult(
                 text=text,
                 structured=submit.captured,
                 tokens=turn_tokens,
+                cache_tokens=turn_cache_tokens or None,
+                input_tokens=turn_input or None,
+                output_tokens=turn_output or None,
             )
-        text = _output_text(result, tokens=turn_tokens or None)
-        return AgentResult(text=text, tokens=turn_tokens)
+        text = _output_text(result)
+        return AgentResult(
+            text=text,
+            tokens=turn_tokens,
+            cache_tokens=turn_cache_tokens or None,
+            input_tokens=turn_input or None,
+            output_tokens=turn_output or None,
+        )
 
     @staticmethod
     async def _drive_round(state: _SessionState, prompt: str) -> dict | None:
@@ -486,9 +1049,7 @@ class AvatarSessionManager:
                 "human interaction is a future feature",
                 state.member_name,
             )
-            raise BackendError(
-                f"session '{state.member_name}' interrupted (avatar HITL not supported)"
-            )
+            raise BackendError(f"session '{state.member_name}' interrupted (avatar HITL not supported)")
 
     async def _human_turn(
         self,
@@ -506,8 +1067,21 @@ class AvatarSessionManager:
         yields ``skipped`` so the engine returns ``None`` for the turn.
         """
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
-        if raw is None:  # timed out / no answer
+        if raw is None or raw == HUMAN_REPLY_SKIP:  # timed out / explicit skip
             return AgentResult(skipped=True)
+        # NEW: classify intent before formatting (best-effort; any failure
+        # degrades to the existing formatting path rather than failing the turn).
+        try:
+            intent = await self._classify_intent(raw, prompt)
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify raised; degrade to continue")
+            intent = None
+        if intent and intent.get("intent") == "edit_rerun":
+            raise WorkflowAborted(
+                reason="early_return",
+                reply=raw,
+                edit_hints=intent.get("edit_instructions"),
+            )
         format_prompt = (
             f"You put this question to the person:\n{prompt}\n\n"
             f"The person replied:\n{raw}\n\n"
@@ -517,6 +1091,49 @@ class AvatarSessionManager:
         # The avatar (human stand-in) formats the raw reply; reuse the agent turn
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
+
+    async def _classify_intent(self, raw: str, prompt: str) -> dict | None:
+        """One-shot TinyAgent classification: is this reply 'edit & rerun' or 'continue'?
+
+        Reuses the ``worker_base_spec.model`` already resolved on the base spec (the
+        path ``TeamWorkerBackend._sessions()`` takes). Ephemeral: async with
+        auto-dispose. Returns None when there is no base model or on any failure
+        (degrades to existing formatting path).
+        """
+        from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+        from openjiuwen.agent_teams.tiny_agent import TinyAgent
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.harness.prompts import PromptMode
+
+        base_model = self._worker_base_spec.model if self._worker_base_spec else None
+        if base_model is None:
+            return None
+        user_prompt = f"Question:\n{prompt}\n\nReply:\n{raw}"
+        try:
+            # Build a TinyAgent straight from the already-resolved TeamModelConfig,
+            # skipping the name → resolver hop entirely.
+            spec = DeepAgentSpec(
+                card=AgentCard(id="intent-classifier", name="intent-classifier", description="tiny agent"),
+                system_prompt=_INTENT_CLASSIFY_PROMPT,
+                model=base_model,
+                tools=None,
+                auto_create_workspace=False,
+                max_iterations=3,
+                enable_security_rail=False,
+                language=self._language,
+                enable_read_image_multimodal=False,
+                prompt_mode=PromptMode.NONE.value,
+                enable_sys_operation=False,
+            )
+            classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language, budget=self._budget)
+            async with classifier:
+                return await classifier.run(
+                    user_prompt,
+                    schema=_INTENT_SCHEMA,
+                )
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify failed; degrade to continue")
+            return None
 
     async def _await_human_reply(
         self,
@@ -536,6 +1153,20 @@ class AvatarSessionManager:
         issued for an interrupted-then-resumed turn still matches.
         """
         corr = correlation_id or f"{state.member_name}:{state.turns_executed}"
+        # Consume a buffered reply first (don't re-push the prompt).
+        buffered = self._pending_reply_buffer.pop(corr, None)
+        if buffered is not None:
+            self._human_reply_reuse[corr] = buffered
+            if self._on_human_replied is not None:
+                try:
+                    self._on_human_replied(state.member_name, corr, buffered)
+                except Exception:
+                    team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+            return buffered
+        # A retry of a failed classify/format attempt reuses the raw reply it
+        # already obtained instead of asking the person again.
+        if self._human_reply_reuse.get(corr) is not None:
+            return self._human_reply_reuse[corr]
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut
@@ -561,16 +1192,60 @@ class AvatarSessionManager:
                 self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+        self._human_reply_reuse[corr] = raw
         return raw
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
+    def _make_activity_emitter(
+        self, state: _SessionState, agent_id: str, phase: str | None, label: str | None
+    ) -> Callable[[str, str | None, str | None, str | None], None]:
+        """Return a sink for the session avatar's activity rail.
+
+        Mirrors ``TeamWorkerBackend._make_activity_emitter`` (same structured
+        payload, same truncation cap, ``message`` kept for legacy consumers) and
+        adds the CURRENT turn's ``correlation_id`` — read off ``state`` at emit
+        time, so every turn's tool events carry that turn's id. The closure
+        no-ops when no sink is bound (tests / a backend without one).
+        """
+        from openjiuwen.agent_teams.workflow.backends.activity_emitter import build_activity_event
+
+        sink = self._progress_sink
+
+        def emit(
+            activity_type: str,
+            tool_call_id: str | None,
+            tool_name: str | None,
+            content: str | None,
+        ) -> None:
+            if sink is None:
+                return
+            try:
+                sink(
+                    build_activity_event(
+                        activity_type=activity_type,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        content=content,
+                        agent_id=agent_id,
+                        phase=phase,
+                        label=label,
+                        correlation_id=state.current_correlation_id,
+                    )
+                )
+            except Exception:
+                team_logger.debug("[swarmflow] session activity emit failed: agent_id=%s", agent_id, exc_info=True)
+
+        return emit
+
     @staticmethod
     def _session_system_prompt(state: _SessionState) -> str:
-        """Compose the avatar's system prompt: role prompt + caller instructions."""
+        """Compose the avatar's system prompt: [persona +] role prompt [+ caller instructions]."""
         base = _SESSION_SYS_PROMPT_HUMAN if state.kind == "human" else _SESSION_SYS_PROMPT_AGENT
+        if state.persona:
+            base = f"{state.persona}\n\n{base}"
         if state.instructions:
             return f"{base}\n\n{state.instructions}"
         return base
@@ -584,28 +1259,76 @@ class AvatarSessionManager:
     def _next_member_name(self, kind: str, opts: dict) -> str:
         """Mint a unique, pattern-valid session member name from the call label.
 
-        ``wf-sess-<label-slug>-<n>`` (or ``wf-human-...``) — lowercase ASCII with a
-        leading letter, so it satisfies member-name routing constraints. ``n`` is a
-        per-manager counter; the synchronous read-increment keeps it collision-free
-        under the engine's concurrent fan-out.
+        ``{run_prefix}-sess-<label-slug>-<n>`` (or ``wf-sess-...`` /
+        ``wf-human-...`` when no run id is set) — lowercase ASCII with a leading
+        letter, so it satisfies member-name routing constraints. The run prefix
+        mirrors TeamWorkerBackend's worker names: without it two runs of the
+        same script mint the same member name, and the avatars then share one
+        NativeHarness session id, one workspace dir and one owner-qualified
+        resource-manager key — the "Tool instance not found" cross-run
+        collision. ``n`` is a per-manager counter; the synchronous
+        read-increment keeps it collision-free under the engine's concurrent
+        fan-out, and a resumed run replays identical names because fan-out
+        order is deterministic.
+        ``{run_prefix}-sess-<label-slug>-<n>`` (``-human-`` for human sessions);
+        ``wf-sess-…`` / ``wf-human-…`` when no run id is set. The run prefix makes
+        the avatar's child session id run-scoped: the same script re-run under a
+        new run id starts with fresh memory, and two concurrent runs of it never
+        read each other's context.
         """
         n = self._counter
         self._counter += 1
         label = str(opts.get("label") or kind)
         slug = _SLUG_RE.sub("-", label.lower()).strip("-") or kind
-        prefix = "wf-human" if kind == "human" else "wf-sess"
-        return f"{prefix}-{slug}-{n}"
+        kind_prefix = "human" if kind == "human" else "sess"
+        run_prefix = "wf"
+        if self._run_id:
+            run_prefix = _SLUG_RE.sub("-", self._run_id.lower()).strip("-") or "wf"
+        return f"{run_prefix}-{kind_prefix}-{slug}-{n}"
 
 
-def _output_text(result: Any, *, tokens: int | None = None) -> str:
+def _output_text(result: Any) -> str:
     """Extract the final output text from a round result dict."""
     if isinstance(result, dict):
         err = result.get("error")
         if err or result.get("result_type") == "error":
             msg = str(err or result.get("output") or "session turn failed")
-            raise BackendError(msg, tokens=tokens)
+            raise BackendError(msg)
         return str(result.get("output", ""))
     return str(result or "")
+
+
+def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_after: bool) -> int | None:
+    """Map a round-based split to a message index, or ``None`` when out of range.
+
+    ``keep_after=False`` (the "before" family): the boundary is the index just
+    past the ``keep_rounds``-th ``UserMessage`` (its assistant reply and any
+    closing ToolMessage travel with it, so the kept head is not cut mid-call).
+
+    ``keep_after=True`` (the "after" family): the boundary is the index of the
+    ``keep_rounds``-th ``UserMessage`` itself (the tail from that round on is
+    kept, and ``ForkContext``'s ``_trim_leading_orphan_tool_messages`` drops any
+    leading orphan ToolMessages whose assistant is not inherited).
+
+    A ``None`` ``keep_rounds`` or a value larger than the actual round count
+    returns ``None`` — the caller silently falls back to a full-context fork
+    (mirroring the team fork's "wrong name silently falls back to full" guard).
+    """
+    if keep_rounds is None:
+        return None
+    count = 0
+    for i, m in enumerate(msgs):
+        if not isinstance(m, UserMessage):
+            continue
+        count += 1
+        if count == keep_rounds:
+            if keep_after:
+                return i
+            for j in range(i + 1, len(msgs)):
+                if isinstance(msgs[j], UserMessage):
+                    return j
+            return len(msgs)
+    return None
 
 
 __all__ = ["AvatarSessionManager"]

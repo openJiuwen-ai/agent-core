@@ -153,7 +153,7 @@ def _backend(
 
 
 @pytest.mark.asyncio
-async def test_stateful_workflow_success_aclose_evicts_then_disposes(
+async def test_stateful_workflow_success_aclose_disposes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -176,10 +176,10 @@ async def run(args):
     result = await run_workflow(script, backend=backend)
 
     assert result == {"answer": "reply:hello"}
-    assert events == ["start", "send", "evict", "dispose"]
+    assert events == ["start", "send", "dispose"]
     assert harnesses[0].model.offload_calls == []
     assert harnesses[0].model.prefetch_calls == []
-    assert len(harnesses[0].model.evict_calls) == 1
+    assert harnesses[0].model.evict_calls == []
 
 
 @pytest.mark.asyncio
@@ -206,8 +206,8 @@ async def run(args):
     with pytest.raises(RuntimeError, match="business boom"):
         await run_workflow(script, backend=backend)
 
-    assert events == ["start", "send", "evict", "dispose"]
-    assert len(harnesses[0].model.evict_calls) == 1
+    assert events == ["start", "send", "dispose"]
+    assert harnesses[0].model.evict_calls == []
 
 
 @pytest.mark.asyncio
@@ -247,5 +247,5 @@ async def run(args):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert events == ["start", "send", "evict", "dispose"]
-    assert len(harnesses[0].model.evict_calls) == 1
+    assert events == ["start", "send", "dispose"]
+    assert harnesses[0].model.evict_calls == []

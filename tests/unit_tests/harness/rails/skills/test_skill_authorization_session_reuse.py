@@ -2,9 +2,7 @@
 
 import os
 
-from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from openjiuwen.harness.rails.skills.skill_authorization_rail import SkillAuthorizationRail
-from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.security.skill_authorization import (
     GrantDecision,
     GrantStatus,
@@ -104,16 +102,6 @@ def test_session_grant_is_not_reused_after_manifest_identity_changes() -> None:
         )
         is None
     )
-
-
-def test_permission_rail_exposes_request_scoped_snapshot_hook() -> None:
-    expected = {"enabled": True, "tools": {"write_file": "ask"}}
-    rail = PermissionInterruptRail(
-        config={"enabled": True},
-        host=ToolPermissionHost(get_permissions_snapshot=lambda: expected),
-    )
-
-    assert rail._get_permissions_snapshot(object()) == expected
 
 
 def test_explicit_permission_template_overrides_legacy_environment_flag() -> None:

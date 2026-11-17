@@ -122,10 +122,37 @@ def _parse_html(html: str) -> BeautifulSoup:
 
 def _normalized_domain(url: str) -> str:
     """Return a normalized domain for ranking/filtering."""
-    netloc = urlparse(url).netloc.lower().strip()
-    if netloc.startswith("www."):
-        return netloc[4:]
-    return netloc
+    hostname = (urlparse(url).hostname or "").lower().strip()
+    if hostname.startswith("www."):
+        return hostname[4:]
+    return hostname
+
+
+def _domain_allowed(url: str, allowed_domains: tuple[str, ...] | list[str] | None) -> bool:
+    """Return whether ``url`` belongs to one of the configured domains.
+
+    Domain matching is suffix-aware for subdomains but never accepts a
+    lookalike such as ``cnki.net.example.org``.  An empty allowlist means the
+    caller has not requested source restriction.
+    """
+
+    if not allowed_domains:
+        return True
+    domain = _normalized_domain(url)
+    if not domain:
+        return False
+    for raw_allowed in allowed_domains:
+        allowed = str(raw_allowed or "").strip().lower()
+        if not allowed:
+            continue
+        if "://" in allowed:
+            allowed = _normalized_domain(allowed)
+        allowed = allowed.strip("./")
+        if allowed.startswith("www."):
+            allowed = allowed[4:]
+        if domain == allowed or domain.endswith(f".{allowed}"):
+            return True
+    return False
 
 
 def _decode_ddg_redirect(url: str) -> str:
@@ -206,13 +233,36 @@ def _safe_env_choice(name: str, default: str, allowed: set[str]) -> str:
     return default
 
 
-def _get_web_proxy_url() -> str:
+def _env_url(name: str, default: str) -> str:
+    """Read an endpoint URL from the environment, falling back when blank.
+
+    ``os.environ.get(name, default)`` only falls back when the key is absent.
+    Deployments commonly declare the endpoint overrides as empty values to mean
+    "use the official default", so a plain ``get`` would hand back an empty URL
+    and the request would fail with a message-less transport error. Treat unset
+    and blank alike.
+
+    Args:
+        name: Environment variable name holding the endpoint override.
+        default: Official endpoint used when the variable is unset or blank.
+
+    Returns:
+        The configured endpoint URL, or ``default`` when unset or blank.
+    """
+    return str(os.environ.get(name, "") or "").strip() or default
+
+
+def _get_web_proxy_url(configured_proxy: str | None = None) -> str:
     """Return the configured proxy URL used by all web tools.
 
-    Prefers ``WEB_PROXY_URL``; falls back to the legacy ``FREE_SEARCH_PROXY_URL``
-    so existing deployments keep working. The proxy applies to search and fetch
+    A task-scoped value takes precedence. Otherwise this prefers
+    ``WEB_PROXY_URL`` and falls back to the legacy ``FREE_SEARCH_PROXY_URL`` so
+    existing deployments keep working. The proxy applies to search and fetch
     alike, not just free search.
     """
+    explicit = str(configured_proxy or "").strip()
+    if explicit:
+        return explicit
     return str(
         os.environ.get(_WEB_PROXY_URL_ENV)
         or os.environ.get(_FREE_SEARCH_PROXY_URL_ENV)
@@ -221,8 +271,8 @@ def _get_web_proxy_url() -> str:
 
 
 def _free_search_ssl_verify() -> bool:
-    """Whether to verify TLS certificates (default off for intranet usage)."""
-    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=False)
+    """Whether to verify TLS certificates (default on)."""
+    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=True)
 
 
 def _no_proxy_entries() -> list[str]:
@@ -240,9 +290,9 @@ def _host_in_cidr(hostname: str, entry: str) -> bool:
         return False
 
 
-def _should_bypass_proxy(url: str) -> bool:
+def _should_bypass_proxy(url: str, configured_proxy: str | None = None) -> bool:
     """Whether the configured proxy should be bypassed for this URL."""
-    proxy_url = _get_web_proxy_url()
+    proxy_url = _get_web_proxy_url(configured_proxy)
     if not proxy_url:
         return True
     try:
@@ -263,10 +313,10 @@ def _should_bypass_proxy(url: str) -> bool:
     return False
 
 
-def _resolve_proxy(url: str) -> str | None:
+def _resolve_proxy(url: str, configured_proxy: str | None = None) -> str | None:
     """Resolve the proxy URL to use for a request, or None to go direct."""
-    proxy_url = _get_web_proxy_url()
-    if not proxy_url or _should_bypass_proxy(url):
+    proxy_url = _get_web_proxy_url(configured_proxy)
+    if not proxy_url or _should_bypass_proxy(url, configured_proxy):
         return None
     return proxy_url
 

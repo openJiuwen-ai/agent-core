@@ -531,14 +531,14 @@ class SkillUseRail(DeepAgentRail):
                 continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
+                # Name filter first: a disallowed entry costs no filesystem call.
+                if not self._is_skill_name_allowed(item.name):
+                    skipped_by_filter += 1
+                    continue
                 if not item.is_dir():
                     continue
 
                 scanned_dirs += 1
-                if not self._is_skill_name_allowed(item.name):
-                    skipped_by_filter += 1
-                    continue
-
                 skill_md_path = item / "SKILL.md"
                 if not skill_md_path.exists():
                     continue
@@ -914,6 +914,9 @@ class SkillUseRail(DeepAgentRail):
                 continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
+                # Same filter as the refresh: a disallowed SKILL.md never reaches self.skills.
+                if not self._is_skill_name_allowed(item.name):
+                    continue
                 if not item.is_dir():
                     continue
 

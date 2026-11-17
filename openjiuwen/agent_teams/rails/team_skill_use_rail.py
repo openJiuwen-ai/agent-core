@@ -1,0 +1,336 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Team-scoped Skill rail: one physical library, per-member visibility.
+
+Skills exist exactly once on disk, in the library returned by
+``openjiuwen.agent_teams.paths.global_skills_dir``. A team member owns no Skill
+directory, no symlink view and no sandbox copy of it; what it may see is
+declared in ``skills-visibility.json`` at its own workspace root, composed with
+the team-wide document (see ``openjiuwen.agent_teams.skill.visibility``).
+
+:class:`TeamSkillUseRail` is the team's own subclass of the shared
+``SkillUseRail``. It changes three things and inherits everything else:
+
+- visibility is applied *before* the base filter-before-load scan, so a grant
+  written mid-session is eligible for loading on the next ``_prepare_skills``;
+- the allow / deny sets are recomputed again on every filter pass, snapshot
+  signature build, and ``get_skills_for_session`` call, so a grant or revoke
+  from another process lands without rebuilding the agent;
+- the snapshot signature carries the composed decision itself, so a change of
+  grants forces a prompt rebuild even when nothing under the library moved.
+
+Empty allow keeps its inherited meaning: "do not filter", i.e. inherit the whole
+library. Deny always wins over allow.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from openjiuwen.harness.skills.library_state import collect_disabled_skills
+from openjiuwen.agent_teams.skill.visibility import (
+    SCOPE_MEMBER,
+    SkillVisibilityProvider,
+    bootstrap_skill_visibility,
+    build_skill_visibility_provider,
+)
+from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+
+# Provenance recorded in a member declaration seeded from the team blueprint.
+# Decisions read the document's ``authority`` field, never this string.
+MEMBER_BOOTSTRAP_SOURCE = "config:agents.skills"
+
+# Filler timestamp for the synthetic allow / deny entries appended to the
+# snapshot signature. The signature is a tuple of ``(token, mtime)`` pairs used
+# only for equality comparison, and a grant carries no mtime of its own.
+_VISIBILITY_SIGNATURE_MTIME = 0.0
+
+
+class TeamSkillUseRail(SkillUseRail):
+    """SkillUseRail narrowed by the member's and the team's visibility documents.
+
+    The rail always scans the one shared Skill library. Which of the Skills it
+    finds there reach the model is decided by a
+    :class:`~openjiuwen.agent_teams.skill.visibility.SkillVisibilityProvider`,
+    re-read on every refresh rather than frozen at construction.
+    """
+
+    def __init__(
+        self,
+        *,
+        skills_dir: str | list[str],
+        visibility_provider: SkillVisibilityProvider,
+        skill_mode: str = "all",
+        include_tools: bool = True,
+    ) -> None:
+        """Initialize the team Skill rail.
+
+        Args:
+            skills_dir: The shared Skill library root (or roots).
+            visibility_provider: Recomputes ``(enabled, disabled)`` from the
+                member and team visibility declarations.
+            skill_mode: ``all`` (list every visible Skill in the system prompt)
+                or ``auto_list``; same meaning as on the base rail.
+            include_tools: Whether the rail registers its own read_file / bash
+                fallback tools. Off when a system-operation rail already owns
+                them, otherwise every build logs duplicate-ability warnings.
+        """
+        super().__init__(
+            skills_dir=skills_dir,
+            skill_mode=skill_mode,
+            include_tools=include_tools,
+        )
+        self.visibility_provider = visibility_provider
+        # Until the first successful provider read, empty allow must NOT mean
+        # "whole library" (base-rail semantics) — that would leak Skills on a
+        # first-read failure. See ``_visibility_ready``.
+        self._visibility_ready = False
+        # Seed the sets before the first refresh so an early call to
+        # ``get_skills_for_session`` already sees the member's real view.
+        self._apply_visibility()
+
+    def _apply_visibility(self) -> None:
+        """Recompute the allow / deny sets from the visibility provider.
+
+        After a successful read, a failing provider keeps the last known-good
+        sets. Before any successful read, failure stays fail-closed (no Skill
+        visible): falling back to base-rail "empty allow = unrestricted" would
+        leak the whole library across members.
+        """
+        try:
+            enabled, disabled = self.visibility_provider()
+        except Exception as exc:  # noqa: BLE001 - a broken declaration must not stop the member
+            if self._visibility_ready:
+                team_logger.warning(
+                    "Skill visibility provider failed ({}); keeping the previous allow/deny sets",
+                    exc,
+                )
+            else:
+                team_logger.warning(
+                    "Skill visibility provider failed on first read ({}); "
+                    "fail-closed until a successful refresh",
+                    exc,
+                )
+            return
+        self.enabled_skills = set(enabled)
+        self.disabled_skills = set(disabled)
+        self._visibility_ready = True
+
+    def _is_skill_name_visible(self, skill_name: str) -> bool:
+        """Return whether one Skill name survives the current allow / deny sets.
+
+        Args:
+            skill_name: Skill name, which is also its directory name.
+
+        Returns:
+            True when the member may see the Skill. An empty allow set means
+            "no allow filtering" **only after** a successful visibility read;
+            deny always wins.
+        """
+        if not self._visibility_ready:
+            return False
+        if self.enabled_skills and skill_name not in self.enabled_skills:
+            return False
+        return skill_name not in self.disabled_skills
+
+    async def _prepare_skills(self) -> None:
+        """Refresh visibility before the base filter-before-load scan.
+
+        The base ``_prepare_skills`` uses ``enabled_skills`` while discovering
+        directories, then runs ``_filter_skills``. Applying visibility only
+        inside ``_filter_skills`` is too late for mid-session grants: the new
+        name was never loaded, so the rebuilt prompt has nothing to show.
+        """
+        self._apply_visibility()
+        await super()._prepare_skills()
+
+    def _filter_skills(self, skills: list[Skill]) -> list[Skill]:
+        """Apply the freshly composed visibility before the inherited filter."""
+        self._apply_visibility()
+        # Base SkillUseRail treats empty allow as unrestricted; before the
+        # first successful provider read we must not fall through to that.
+        if not self._visibility_ready:
+            return []
+        return super()._filter_skills(skills)
+
+    def _build_library_snapshot_signature(self) -> list[tuple[str, float]]:
+        """Scan every Skill directory under ``skills_dir``, ignoring allow/deny.
+
+        ``SkillUseRail._build_skills_snapshot_signature`` now mirrors
+        filter-before-load and skips names outside ``enabled_skills``. That is
+        wrong for the team rail: empty allow means inherit-all, so a newly
+        installed Skill must move the signature even when the grant sets did
+        not change. Scanning here keeps the library half of the signature as
+        the full physical inventory.
+        """
+        entries: list[tuple[str, float]] = []
+        for root in self.normalize_skill_dirs(self.skills_dir):
+            if not root.exists() or not root.is_dir():
+                continue
+            for item in sorted(root.iterdir(), key=lambda p: p.name):
+                if not item.is_dir():
+                    continue
+                skill_md_path = item / "SKILL.md"
+                if not skill_md_path.exists():
+                    continue
+                if self._is_plain_skill_directory(item):
+                    key = str(item)
+                else:
+                    key = str(item.resolve())
+                entries.append((key, skill_md_path.stat().st_mtime))
+        return entries
+
+    def _build_skills_snapshot_signature(self) -> tuple[tuple[str, float], ...]:
+        """Extend the full-library snapshot with the composed visibility decision.
+
+        The library half tracks every Skill directory and SKILL.md mtime (not
+        the allow-filtered subset the base rail may walk). Appending the
+        composed allow / deny sets makes a grant change force a prompt rebuild
+        even when nothing under the library moved.
+        """
+        self._apply_visibility()
+        entries = self._build_library_snapshot_signature()
+        entries.extend(
+            (f"skill-visibility.allow:{name}", _VISIBILITY_SIGNATURE_MTIME)
+            for name in sorted(self.enabled_skills)
+        )
+        entries.extend(
+            (f"skill-visibility.deny:{name}", _VISIBILITY_SIGNATURE_MTIME)
+            for name in sorted(self.disabled_skills)
+        )
+        return tuple(entries)
+
+    def get_skills_for_session(self, session: Any = None) -> list[Skill]:
+        """Return the session's Skill view, re-checked against current grants.
+
+        This is the path the ``skill`` and ``list_skill`` tools resolve a name
+        through, and the session baseline is persisted state: without this
+        re-check a revoked Skill would stay invokable until the session ended.
+        The system prompt keeps quoting the unfiltered baseline for cache
+        stability; the runtime attachment already announces the removal.
+
+        Args:
+            session: The session whose baseline is being resolved, or None.
+
+        Returns:
+            The visible subset of the merged baseline / current Skill view.
+        """
+        # Re-read declarations here: tool lookup can land after an external
+        # revoke without another ``_prepare_skills`` in between.
+        self._apply_visibility()
+        merged = super().get_skills_for_session(session)
+        return [skill for skill in merged if self._is_skill_name_visible(skill.name)]
+
+
+def global_disabled_skills(skills_dir: list[str]) -> list[str]:
+    """Return the Skill names switched off globally in the shared library.
+
+    The library-wide on/off switch lives in ``skills_state.json`` next to the
+    Skills themselves and is written by the marketplace / install flow, not by
+    any team. It is read through the team package's own reader
+    (:func:`openjiuwen.harness.skills.library_state.collect_disabled_skills`)
+    rather than through another layer's private helper, so a refactor there
+    cannot break the team rail silently.
+
+    Args:
+        skills_dir: The Skill library roots to inspect.
+
+    Returns:
+        Sorted Skill names whose stored config says ``enabled: false``.
+    """
+    return collect_disabled_skills(list(skills_dir))
+
+
+def create_team_skill_use_rail(
+    *,
+    member_name: str,
+    team_name: str,
+    member_visibility_path: str | Path,
+    team_visibility_path: str | Path | None,
+    skills_dir: list[str],
+    bootstrap_allow: list[str],
+    skill_mode: str = "all",
+    include_tools: bool = False,
+) -> TeamSkillUseRail:
+    """Seed the member declaration and build the rail over the shared library.
+
+    This is the *only* writer of a member's seed declaration. Every assembly
+    path — the team ``AgentConfigurator``, the swarmflow worker backend and an
+    embedder that declares ``core.team.skill_use`` in its own catalogue —
+    reaches the member's Skill rail through here, so the seed is written once
+    per build, by the component that also consumes the document. An embedder
+    must not seed the same file from a second provider of its own: the two
+    writers would contend for the same lock and their skip rules would drift.
+
+    Seeding follows :func:`bootstrap_skill_visibility`: same-rank ``config:…``
+    seeds refresh ``allow`` from the latest blueprint while preserving any
+    stored ``deny``. A document with higher authority
+    (:data:`~openjiuwen.agent_teams.skill.visibility.AUTHORITY_EXPLICIT` /
+    migration) is left untouched, so an operator or migration grant is never
+    rolled back by a stale config value. An empty allow-list seeds an
+    unrestricted document, which lets a member with no configured Skills pick
+    up newly installed ones without any metadata change.
+
+    A seeding failure is logged and swallowed: a missing declaration reads back
+    as "no restriction", which beats refusing to start the member.
+
+    Args:
+        member_name: Member identity; also the declaration's entity id.
+        team_name: Team identity; the team declaration's entity id.
+        member_visibility_path: Declaration path at the member workspace root.
+        team_visibility_path: Declaration path at the team workspace root, or
+            None when the team has no shared workspace.
+        skills_dir: The shared Skill library roots.
+        bootstrap_allow: Seed allow-list from the blueprint.
+        skill_mode: ``all`` or ``auto_list``.
+        include_tools: Whether the rail registers its read_file / bash fallback.
+
+    Returns:
+        A configured :class:`TeamSkillUseRail`.
+    """
+    try:
+        bootstrap_skill_visibility(
+            member_visibility_path,
+            scope=SCOPE_MEMBER,
+            entity_id=member_name,
+            allow=bootstrap_allow,
+            bootstrapped_from=MEMBER_BOOTSTRAP_SOURCE,
+        )
+    except Exception as exc:  # noqa: BLE001 - seeding must not stop the member
+        # Lock timeouts, JSON/parse errors, and OS errors are all swallowed:
+        # a missing declaration reads back as unrestricted at runtime, which
+        # beats refusing to start the member (see docstring above). Log loudly:
+        # on a shared high-sensitivity library this is an authorization widening.
+        team_logger.error(
+            "Failed to seed Skill visibility for member {} at {} ({}); "
+            "member will inherit the whole library until a declaration exists",
+            member_name,
+            member_visibility_path,
+            exc,
+        )
+
+    provider = build_skill_visibility_provider(
+        member_path=member_visibility_path,
+        member_id=member_name,
+        team_path=team_visibility_path,
+        team_id=team_name,
+        global_disabled_loader=lambda: global_disabled_skills(skills_dir),
+    )
+    return TeamSkillUseRail(
+        skills_dir=skills_dir,
+        visibility_provider=provider,
+        skill_mode=skill_mode,
+        include_tools=include_tools,
+    )
+
+
+__all__ = [
+    "MEMBER_BOOTSTRAP_SOURCE",
+    "TeamSkillUseRail",
+    "create_team_skill_use_rail",
+    "global_disabled_skills",
+]

@@ -33,7 +33,18 @@ class _RequestRecorder:
         self.handler = handler
         self.calls: list[dict] = []
 
-    async def __call__(self, session, method, url, *, headers=None, json_body=None, timeout_seconds, max_bytes=None):
+    async def __call__(
+        self,
+        session,
+        method,
+        url,
+        *,
+        headers=None,
+        json_body=None,
+        timeout_seconds,
+        max_bytes=None,
+        proxy_url=None,
+    ):
         self.calls.append(
             {
                 "method": method,
@@ -42,6 +53,7 @@ class _RequestRecorder:
                 "json_body": json_body,
                 "timeout_seconds": timeout_seconds,
                 "max_bytes": max_bytes,
+                "proxy_url": proxy_url,
             }
         )
         return self.handler(method, url, json_body)
@@ -294,7 +306,7 @@ def test_web_proxy_url_precedence_and_legacy_fallback(monkeypatch):
 async def test_paid_invoke_invalid_provider():
     tool = WebPaidSearchTool(language="cn")
     result = await tool.invoke({"query": "test", "provider": "invalid"})
-    assert "[ERROR]: provider must be one of" in result
+    assert "[ERROR]: provider must be auto or a configured search provider." in result
 
 
 @pytest.mark.asyncio

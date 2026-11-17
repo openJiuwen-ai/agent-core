@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.harness.image_modality_probe import get_declared_image_support
 from openjiuwen.harness.schema.config import is_vision_model_config_complete
 
 
@@ -56,9 +57,11 @@ def should_enable_read_image_multimodal(
     1. an explicit caller-provided value wins outright;
     2. a deep_config verdict that is already resolved decides on its own:
        ``True`` (main model confirmed image-capable) keeps native inline even
-       when vision tools are configured, ``False``/``None`` (not supported or
-       probe still pending — ``None`` reads as falsy everywhere) disables it;
-    3. agents without a deep_config keep the conservative legacy rule: a
+       when vision tools are configured, ``False`` (not supported) disables it;
+    3. while the verdict is unresolved, a per-model ``supports_vision``
+       declaration is authoritative and needs no probe;
+    4. otherwise a deep agent stays metadata-only until the probe lands, and
+       agents without a deep_config keep the conservative legacy rule: a
        complete vision tool/config takes over and read_file stays metadata-only.
     """
     if explicit_value is not None:
@@ -69,6 +72,7 @@ def should_enable_read_image_multimodal(
         configured_value = getattr(deep_config, "enable_read_image_multimodal", None)
         if configured_value is not None:
             return bool(configured_value)
-        return False
+        declared = get_declared_image_support(getattr(deep_config, "model", None))
+        return declared is True
 
     return not has_complete_registered_vision_tool(agent)

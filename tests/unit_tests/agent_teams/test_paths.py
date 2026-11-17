@@ -74,3 +74,20 @@ def test_workflow_path_sanitizes_untrusted_segments():
 
     # Spaces and unsafe characters collapse to underscores.
     assert paths.workflow_run_dir("demo-team", "s", "My Flow!").name == "My_Flow"
+
+
+@pytest.mark.level0
+def test_member_visibility_path_sanitizes_traversal_names():
+    """Path-like member/team ids must not escape the team home tree."""
+    custom_home = Path("/tmp/custom-home/.jiuwenclaw")
+    paths.configure_openjiuwen_home(custom_home)
+
+    member_vis = paths.member_skill_visibility_path("demo-team", "../../other-team/eve")
+    workspaces = paths.team_home("demo-team") / "workspaces"
+    assert workspaces in member_vis.parents
+    assert ".." not in member_vis.parts
+
+    team_vis = paths.team_skill_visibility_path("../escape-team")
+    teams_root = paths.get_agent_teams_home()
+    assert teams_root in team_vis.parents
+    assert ".." not in team_vis.parts

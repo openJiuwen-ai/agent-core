@@ -13,7 +13,19 @@ import copy
 from typing import Any
 
 from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.tiered_policy import _parse_level, strictest
+
+_STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
+
+
+def _parse_level(value: str) -> PermissionLevel:
+    v = (value or "").strip().lower()
+    return PermissionLevel(v)
+
+
+def strictest(*levels: PermissionLevel) -> PermissionLevel:
+    if not levels:
+        return PermissionLevel.ASK
+    return min(levels, key=lambda p: _STRICT_ORDER[p])
 
 
 def narrow_permissions(
@@ -29,7 +41,7 @@ def narrow_permissions(
     ``strictest()``.
 
     This guarantees the result is never less restrictive than either input.
-    All other fields (``defaults``, ``rules``, ``approval_overrides`,
+    All other fields (``defaults``, ``rules``, ``approval_overrides``,
     ``permission_mode``, etc.) are preserved unchanged.
 
     Args:

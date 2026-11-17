@@ -285,3 +285,4 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 /.codex/
 /.agents/
+.pytest_tmp*/

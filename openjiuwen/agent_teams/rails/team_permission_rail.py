@@ -121,6 +121,7 @@ class TeamPermissionRail(PermissionInterruptRail):
         self,
         normalized_name: str,
         tool_args: dict,
+        ask_accesses: list[tuple[str, str]] | None = None,
     ) -> bool:
         """Leader approvals are session-scoped; never persist to disk."""
         return False

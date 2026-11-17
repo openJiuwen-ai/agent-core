@@ -428,7 +428,10 @@ async def test_failed_old_pause_never_stops_a_replacement_runtime():
 @pytest.mark.parametrize("boundary", ["inspect", "pre_run", "gate_reset"])
 async def test_resume_rechecks_stop_ownership_after_slow_await(monkeypatch, boundary):
     manager = TeamRuntimeManager()
-    agent = SimpleNamespace(stop_coordination=AsyncMock())
+    agent = SimpleNamespace(
+        stop_coordination=AsyncMock(),
+        apply_runtime_capabilities=lambda _runtime_spec: None,
+    )
     entry = ActiveTeam(team_name="t", agent=agent, current_session_id="s", state=RuntimeState.PAUSED)
     await manager.pool.add(entry)
     session = SimpleNamespace(get_session_id=lambda: "s")

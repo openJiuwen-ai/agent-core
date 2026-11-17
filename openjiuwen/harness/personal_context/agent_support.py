@@ -707,7 +707,6 @@ def _make_sys_operation(sandbox: Path) -> SysOperation:
         shell_allowlist=[],
         sandbox_root=[str(sandbox)],
         restrict_to_sandbox=True,
-        dangerous_patterns=[],
     )
     card = SysOperationCard(
         id=f"personal-context-agent-sys-{uuid.uuid4().hex}",

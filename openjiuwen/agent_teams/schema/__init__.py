@@ -12,6 +12,11 @@ from openjiuwen.agent_teams.schema.blueprint import (
     register_storage,
     register_transport,
 )
+from openjiuwen.agent_teams.schema.runtime_capabilities import (
+    apply_runtime_capabilities,
+    apply_runtime_capabilities_inplace,
+    resolve_effective_model_pool,
+)
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     AudioModelSpec,
     ProgressiveToolSpec,
@@ -51,4 +56,7 @@ __all__ = [
     "TeamRole",
     "TeamRuntimeContext",
     "TeamSpec",
+    "apply_runtime_capabilities",
+    "apply_runtime_capabilities_inplace",
+    "resolve_effective_model_pool",
 ]

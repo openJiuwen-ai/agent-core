@@ -60,8 +60,27 @@ async def inprocess_spawn(
     )
 
     teammate = _TeamAgent(card)
+    # Share the leader's team-level workspace manager BEFORE configure.
+    team_agent.share_workspace_cache_with(teammate)
+    # Share team-level swarmflow handles BEFORE configure so the teammate's
+    # setup_agent wires the leader's governor / budget / resolver instances
+    # (one L1/L3 authority and one token pool per team).
+    team_agent.share_swarmflow_with(teammate)
     teammate.configure(spec, ctx)
     kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
+    # Attach the leader's session-level background task controller AFTER
+    # configure (before it the teammate has no harness). A leader without a
+    # controller attaches nothing.
+    controller = team_agent.background_task_controller
+    if controller is not None:
+        teammate.set_background_task_controller(controller)
+    # Share the leader's checkpoint namespace after configure.
+    team_agent.share_checkpoints_with(teammate)
+    backend = teammate.team_backend
+    set_store = getattr(backend, "set_store_checkpoint_fn", None) if backend is not None else None
+    set_checkpoint = getattr(team_agent, "set_checkpoint", None)
+    if callable(set_store) and callable(set_checkpoint):
+        set_store(set_checkpoint)
 
     # Empty query means "no first round": the teammate comes up, subscribes,
     # and idles until a real mailbox message arrives. Only a genuine

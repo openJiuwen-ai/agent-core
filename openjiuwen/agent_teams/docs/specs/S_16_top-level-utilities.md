@@ -11,7 +11,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-07-03 |
+| 最近一次修订日期 | 2026-11-12 |
 | 关联 feature | F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
@@ -46,12 +46,20 @@
 
 1. **任何 team-owned 文件路径都必须经 `paths.py` 构造**，禁止散落 `Path("…")` /
    `os.path.join(...)` 硬编码 team 目录。下游需要新子目录就在 `paths.py` 加新函数。
-2. **路径根可被运行时重写一次**：`configure_openjiuwen_home(path)` 是合法重写入口；运行时
-   一旦写入，所有派生路径（`get_agent_teams_home` / `team_home` / `team_memory_dir` /
-   `independent_member_workspace` / `worktree_remote` 的 remote_repos 缓存目录）都必须看
-   到新值。`reset_openjiuwen_home()` 是唯一回退路径，不允许直接清 `_configured_openjiuwen_home`。
+2. **根路径按评估上下文、进程配置、默认目录的顺序解析。** `get_openjiuwen_home()` 优先使用
+   当前评估任务通过 `set_task_openjiuwen_home(path)` 绑定的目录，其次使用
+   `configure_openjiuwen_home(path)` 配置的进程级目录，最后回退到 `~/.openjiuwen`。
+   task home 仅用于单次评估隔离。调用方必须在同一上下文的 `finally` 中使用原 token 调用
+   `reset_task_openjiuwen_home(token)`，恢复上一层绑定。业务运行时的长期目录使用进程级配置，
+   通过 `reset_openjiuwen_home()` 清除该配置。依赖 home 的派生路径统一调用
+   `get_openjiuwen_home()` 或其下游路径函数。
+
+   **Skill 库与可见性声明各自解析。** `global_skills_dir()` 优先返回宿主显式配置的 Skill 库，
+   该配置在评估上下文中同样生效。宿主未配置时，Skill 库默认位于
+   `get_openjiuwen_home() / "workspace" / "skills"`。团队和成员的默认 Skill 可见性声明位于
+   各自工作区，随当前 home 派生。
 3. **独立 DeepAgent 工作区落在 `OPENJIUWEN_HOME` 下，不进入 team 子目录**。`independent_member_workspace`
-   产物在加入 / 离开 team 时必须存活，因此 path = `~/.openjiuwen/{member}_workspace`，
+   产物在加入 / 离开 team 时必须存活，因此路径由 `get_openjiuwen_home() / f"{member}_workspace"` 派生，
    而不是 `~/.openjiuwen/.agent_teams/{team}/...`。
 4. **目录创建是调用方的责任**，`paths.py` 只算路径，不 `mkdir`。`team_home(...)` 不存在
    不是错误，调用方需要自己保证写入前父目录存在。
@@ -144,8 +152,13 @@
 ```python
 def configure_openjiuwen_home(path: str | Path) -> None
 def reset_openjiuwen_home() -> None
+def set_task_openjiuwen_home(path: str | Path) -> Token
+def reset_task_openjiuwen_home(token: Token) -> None
 def get_openjiuwen_home() -> Path
 def get_agent_teams_home() -> Path
+def configure_global_skills_dir(path: str | Path) -> None
+def reset_global_skills_dir() -> None
+def global_skills_dir() -> Path
 def team_home(team_name: str) -> Path
 def independent_member_workspace(member_name: str) -> Path
 def team_memory_dir(team_name: str) -> Path

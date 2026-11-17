@@ -12,28 +12,27 @@ additional customization.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from openjiuwen.core.security.guardrail.guardrail import BaseGuardrail
-from openjiuwen.core.security.guardrail.context import (
-    GuardrailContext,
-    GuardrailContentType,
-    ModelOutputParser,
-    BertBinaryParser,
-    QwenGuardParser,
-)
-from openjiuwen.core.security.guardrail.backends import (
-    GuardrailBackend,
-    RuleBasedPromptInjectionBackend,
-    RuleBasedBackendConfig,
+from agent_shield.detection import (
     APIModelBackend,
     APIModelBackendConfig,
+    BertBinaryParser,
+    GuardrailBackend,
+    GuardrailContentType,
+    GuardrailContext,
     LocalModelBackend,
     LocalModelBackendConfig,
+    ModelOutputParser,
+    QwenGuardParser,
+    RiskLevel,
+    RuleBasedBackendConfig,
+    RuleBasedPromptInjectionBackend,
 )
-from openjiuwen.core.security.guardrail.enums import RiskLevel
+
 from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
+from openjiuwen.core.security.guardrail.guardrail import BaseGuardrail
 
 
 @dataclass

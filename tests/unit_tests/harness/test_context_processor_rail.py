@@ -329,7 +329,7 @@ async def test_init_logs_processor_config_module_paths(tmp_path: Path):
     agent = _make_agent(sys_operation, workspace)
     rail = ContextProcessorRail(preset=True)
 
-    with patch("openjiuwen.harness.rails.context_engineer.context_processor_rail.logger.info") as info:
+    with patch("openjiuwen.harness.rails.context_engineer.context_processor_rail.runner_logger.info") as info:
         await agent.register_rail(rail)
         await agent.ensure_initialized()
 
@@ -1391,3 +1391,40 @@ async def test_init_leaves_compact_ignored_empty_without_ras(tmp_path: Path):
     await agent.ensure_initialized()
 
     assert _compact_ignored_rules(agent) == []
+
+
+# =============================================================================
+# ContextProcessorRail - Loop Bailout Logging Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_loop_bailout_emits_runner_log_warning(monkeypatch):
+    """Bail-out must be visible in runner.log, not only as a raised AbortError."""
+    import openjiuwen.harness.rails.context_engineer.context_processor_rail as rail_mod
+    from openjiuwen.core.runner.callback.errors import AbortError
+    from openjiuwen.core.context_engine import ReasoningToolLoopCompactProcessorConfig
+
+    rail = ContextProcessorRail(preset=False)
+    rail._all_processors = [
+        (
+            "ReasoningToolLoopCompactProcessor",
+            ReasoningToolLoopCompactProcessorConfig(tool_args_bailout_threshold=2),
+        ),
+    ]
+
+    mock_session = Mock()
+    mock_session.get_state.return_value = 2
+
+    ctx = AgentCallbackContext(
+        agent=Mock(),
+        inputs=ModelCallInputs(messages=[]),
+        session=mock_session,
+    )
+
+    with patch(rail_mod.__name__ + ".runner_logger.warning") as warning:
+        with pytest.raises(AbortError):
+            await rail.before_model_call(ctx)
+
+    warning.assert_called_once()
+    assert "aborting run" in str(warning.call_args)

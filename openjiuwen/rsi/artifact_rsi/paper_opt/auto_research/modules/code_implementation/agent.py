@@ -1,0 +1,1916 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import importlib.util
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import traceback
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
+    validate_metrics_contract,
+    validate_smoke_live_path,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    agent_workspace_dir,
+    design_dir,
+    design_report_path,
+    generated_code_dir,
+    resolve_project_reference,
+    smoke_test_dir,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
+    current_commit,
+    force_rmtree,
+    host_commit,
+    seed_output_from_head,
+    sync_tree_into_repo,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationInput,
+    CodeImplementationManifest,
+    CodeImplementationOutput,
+    ImplementedVariant,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ExperimentPlan
+
+# Uses OpenJiuwen directly — see docs/code_implementation_design.md for the
+# reasoning behind create_code_agent + LspRail/SysOperationRail + task loop.
+# Check auto_research/extensions/ for reusable Tool/Rail/Agent classes before
+# adding anything new here; this module's own coding agent is told to do the
+# same for the code *it* generates (see prompts/system_prompt.md).
+
+_CONVENTIONS_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "experiment_design"
+    / "prompts"
+    / "openjiuwen_conventions.md"
+)
+_PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
+
+_ENTRY_POINT = "run.py"
+_REQUIREMENTS_FILE = "requirements.txt"
+_ASSUMPTIONS_FILE = "ASSUMPTIONS.md"
+_OUTPUT_SUBDIR = "output"
+_PROMOTION_LOG = "promotion.log"
+# Host git lives on generated_code/. Agent output/.git is never the
+# checkpoint — skip it on copy so a host seed cannot be overwritten by an
+# agent-created repo, and so Windows read-only git objects are not rmtree'd
+# as part of the deliverable snapshot.
+_PROMOTION_SKIP_NAMES = {".git", "__pycache__", "logs"}
+_PROMOTE_ATTEMPTS = 3
+# Cap on how much of a failing variant's stderr/stdout gets inlined into
+# CodeImplementationManifest.notes — enough to capture a real Python
+# traceback's tail (where the actual exception line lives), without letting
+# a noisy/verbose failure balloon the manifest. Full output always stays on
+# disk under smoke_test_dir regardless of this cap.
+_NOTES_TAIL_CHARS = 4000
+
+# Blocks history-rewriting / remote-touching git operations the coding agent
+# has no legitimate reason to run in a disposable, no-remote workspace.
+# Enforced via GuardedSysOperationRail (see that module for why a subclass is
+# needed on Windows) — actual matching is a case-insensitive regex .search()
+# against each pipeline sub-command, not a full-string match.
+_GIT_DENY_PATTERNS = [
+    r"git\s+push",
+    r"git\s+reset\s+--hard",
+    r"git\s+clean\s+-[a-zA-Z]*f",
+    r"git\s+branch\s+-D",
+    r"git\s+commit\s+--amend",
+    r"git\s+(?:push|commit|merge)\b[^\n]*--no-verify",
+    r"git\s+remote\s+(?:add|set-url)",
+]
+PYTHON_EXE = sys.executable
+
+# A value guaranteed not to be a real --method choice, used to force
+# argparse's own "invalid choice: ... (choose from 'a', 'b', 'c')" error —
+# see _discover_variant_names below and the discussion in
+# docs/code_implementation_design.md of why the host discovers the real
+# variant list from the entry point itself rather than trusting a
+# separately-tracked list that can silently drift out of sync with what the
+# coding agent actually built (observed directly in run-39825ece and
+# run-ff1abb51: the agent built every variant the design asked for, but the
+# host only ever smoke-tested/promoted whatever a stale short list named).
+_INVALID_METHOD_SENTINEL = "__invalid__"
+# argparse's choices-list formatting in its own error message has changed
+# across Python versions — 3.11 and earlier quote each item
+# ("choose from 'a', 'b'"), 3.12+ do not ("choose from a, b"). Split on
+# commas and strip optional quotes rather than assuming either form.
+_ARGPARSE_CHOICES_RE = re.compile(r"choose from ([^\n)]+)")
+# Absolute paths mentioned as plain text in the design/instruction context
+# (e.g. a dataset path) that the coding agent would otherwise have to
+# rediscover via a broad, unbounded find/grep across the whole workspace or
+# user home directory -- see _extract_path_candidates/_stage_referenced_paths.
+_WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
+_POSIX_ABS_PATH_RE = re.compile(r"(?<![:\w])/(?:[^\s\"'<>|]+)")
+# A dataset path is often named without a drive letter (e.g.
+# "demo-input\sentiment_icl_v1.json") -- the two absolute-path patterns above
+# never match that, so the pre-verification/staging below silently skips it
+# and the coding agent has to rediscover it itself via an unbounded
+# find/grep across every drive (observed directly: several tool calls per
+# retry spent on `find`/`ls` across C:\ and other drives before the dataset
+# was located). Resolved against _referenced_path_roots, not treated as a
+# host-relative path on its own.
+_RELATIVE_PATH_RE = re.compile(r"(?<![:/\\\w.])[\w.-]+(?:[\\/][\w.-]+)+\.[A-Za-z0-9]{1,8}\b")
+# Candidates are extracted from free text that may have been authored on a
+# different OS than the one this runs on (e.g. a "\"-separated path mentioned
+# in a design doc, staged on a Linux/Mac sandbox). pathlib splits only on the
+# host's own separator(s), so joining a raw candidate onto a root via `/`
+# silently fails to resolve on the "other" platform. Split on both
+# separators ourselves before rejoining with the host's own Path semantics.
+_PATH_SEP_RE = re.compile(r"[\\/]+")
+_REFERENCED_PATH_TRAILING_PUNCT = ".,;:)]'\"\\"
+_MAX_REFERENCED_CANDIDATES = 8
+_MAX_REFERENCED_FILE_BYTES = 50 * 1024 * 1024
+_REFERENCED_PATHS_SUBDIR = "referenced_paths"
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ReferencedPath:
+    """One absolute path found in free-text instructions and verified to
+    exist on the host, ready to describe to the coding agent so it doesn't
+    need to search for it."""
+
+    kind: str  # "file" | "dir" | "file_too_large"
+    host_path: str
+    workspace_rel: str | None = None
+    size_bytes: int | None = None
+
+
+@dataclass
+class CandidateValidation:
+    """Host-side verdict for one staged `output/` candidate."""
+
+    ok: bool
+    stage: str = ""
+    variant: str = ""
+    command: list[str] = field(default_factory=list)
+    exit_code: int | None = None
+    errors: list[str] = field(default_factory=list)
+    fingerprint: str = ""
+    stderr_tail: str = ""
+    variants: list[ImplementedVariant] = field(default_factory=list)
+    failures: dict[str, str] = field(default_factory=dict)
+    error_trees: dict[str, str] = field(default_factory=dict)
+    candidate_hash: str = ""
+    cycle: int = 1
+    skipped_redundant_smoke: bool = False
+    repeated: bool = False
+    log_dir: str = ""
+
+    def summary(self) -> str:
+        bits = [
+            f"cycle={self.cycle}",
+            f"ok={self.ok}",
+            f"stage={self.stage or '(none)'}",
+            f"hash={self.candidate_hash or '(none)'}",
+            f"fingerprint={self.fingerprint or '(none)'}",
+        ]
+        if self.variant:
+            bits.append(f"variant={self.variant}")
+        if self.exit_code is not None:
+            bits.append(f"exit_code={self.exit_code}")
+        if self.skipped_redundant_smoke:
+            bits.append("skipped_redundant_smoke=true")
+        if self.repeated:
+            bits.append("repeated=true")
+        if self.errors:
+            bits.append("errors=" + "; ".join(self.errors[:4]))
+        return "; ".join(bits)
+
+
+def _fingerprint_errors(stage: str, variant: str, errors: list[str]) -> str:
+    blob = "|".join([stage, variant, *errors])
+    if not blob.strip("|"):
+        return ""
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def _hash_staged_deliverable(root: Path) -> str:
+    digest = hashlib.sha256()
+    if not root.exists():
+        return digest.hexdigest()[:16]
+    files = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if ".git" in path.parts or "__pycache__" in path.parts:
+            continue
+        if path.suffix == ".pyc":
+            continue
+        files.append(path)
+    files.sort()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+_SMOKE_METRICS_STDOUT_MARKER = "SMOKE_METRICS_JSON:"
+
+
+def _extract_stdout_metrics(stdout: str) -> tuple[bool, dict[str, Any] | None]:
+    """Pull the smoke-test metrics payload out of stdout, if the candidate
+    printed one (see the "Required entry-point contract" prompt section).
+
+    This is a second, filesystem-independent channel for the same payload
+    the candidate also writes to `--output`: the packaged desktop host has
+    been observed changing its own process's cwd before running the
+    candidate script, so a relative `--output` value can silently resolve
+    somewhere other than the path the host asked for. Stdout is not subject
+    to that.
+
+    The prompt asks for the JSON "compact, one line", but a candidate that
+    pretty-prints it instead (indented, spanning multiple lines) is still
+    printing a perfectly parseable JSON value -- newlines inside a JSON
+    object are legal whitespace. Using ``json.JSONDecoder.raw_decode``
+    instead of ``json.loads`` on a single split line tolerates that: it
+    parses one complete value starting right after the marker regardless
+    of how many lines it spans, and simply ignores whatever (if anything)
+    follows it, rather than requiring the marker and the entire payload to
+    share one line (confirmed directly against a real packaged run: the
+    candidate printed ``SMOKE_METRICS_JSON:{`` followed by several more
+    indented lines, which the old single-line parser rejected outright even
+    though the payload itself was entirely valid).
+
+    Returns ``(found, payload)``: ``found`` is True whenever a marker exists
+    at all, even with unparsable JSON after it -- callers must treat "no
+    marker" (fall back to the file) differently from "marker present but
+    broken" (a real bug worth surfacing, not masking). Scans the whole
+    string, not just the tail, and keeps the last match in case the
+    candidate's own logging prints the marker more than once. The marker
+    itself must still start a line (ignoring leading whitespace) so the
+    literal marker text appearing inside an unrelated JSON string value
+    elsewhere in stdout is never mistaken for the real one.
+    """
+    marker_start: int | None = None
+    search_from = 0
+    while True:
+        idx = stdout.find(_SMOKE_METRICS_STDOUT_MARKER, search_from)
+        if idx == -1:
+            break
+        line_start = stdout.rfind("\n", 0, idx) + 1
+        if stdout[line_start:idx].strip() == "":
+            marker_start = idx
+        search_from = idx + len(_SMOKE_METRICS_STDOUT_MARKER)
+    if marker_start is None:
+        return False, None
+    payload_start = marker_start + len(_SMOKE_METRICS_STDOUT_MARKER)
+    while payload_start < len(stdout) and stdout[payload_start].isspace():
+        payload_start += 1
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(stdout, payload_start)
+    except json.JSONDecodeError:
+        return True, None
+    return True, (payload if isinstance(payload, dict) else None)
+
+
+def _discover_variant_names(code_dir: Path, *, timeout: float = 30) -> list[str]:
+    """Ask the entry point's own argparse --method flag what it actually
+    supports, instead of trusting a separately-tracked list. The task
+    prompt already requires --method be declared via argparse
+    choices=[...] (see _build_task_prompt's "Required entry-point
+    contract"), so this is discovering ground truth from a contract the
+    generated code is already required to satisfy, not inventing a new one.
+    Returns [] if the entry point is missing or doesn't expose a
+    discoverable choices list — callers must treat that as a failure, not a
+    vacuous empty-but-passing smoke test."""
+    entry = code_dir / _ENTRY_POINT
+    if not entry.is_file():
+        return []
+    try:
+        # Pass the bare filename, not the joined path: with cwd= set below,
+        # a *relative* code_dir combined with an already-joined script path
+        # gets resolved against the new cwd a second time, doubling the
+        # prefix (observed directly: .../generated_code/.../generated_code/
+        # run.py — same class of cwd-boundary bug _run_async's own comment
+        # already warns about elsewhere in this file). _run_smoke_tests
+        # avoids this correctly today by using the same bare _ENTRY_POINT.
+        proc = subprocess.run(
+            [PYTHON_EXE, _ENTRY_POINT, "--method", _INVALID_METHOD_SENTINEL, "--smoke-test"],
+            cwd=code_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    match = _ARGPARSE_CHOICES_RE.search(proc.stderr)
+    if not match:
+        return []
+    items = (item.strip().strip("'\"") for item in match.group(1).split(","))
+    return [item for item in items if item]
+
+
+def _pyright_lsp_command() -> tuple[str, list[str]] | None:
+    """Argv that can be Popen'd without a Windows shell (not a .cmd shim).
+
+    Delegates to the harness's own pyright resolution first
+    (`harness.lsp.servers.servers.python._resolve_pyright_command`): it
+    covers both an npm-global install (spawned via `node`, sidestepping
+    Python entirely) and a `pyright-langserver` `.cmd` shim on Windows by
+    parsing the actual `node ... langserver.index.js` invocation out of it
+    -- a bare `.cmd` fails CreateProcess with WinError 87 without
+    `shell=True`, observed as `[LSP] Server 'pyright' failed` while the
+    coding agent kept running with no diagnostics. Reusing it here instead
+    of re-deriving a weaker version keeps the two in sync.
+
+    Only fall back to `sys.executable -m pyright.langserver` (a
+    pip-installed `pyright`) when the harness resolution finds nothing --
+    on the packaged desktop host, `sys.executable` is the launcher binary
+    itself, which has no `-m` module-runner (the same class of failure
+    `_compile_staged_python` hit with `-m compileall`; see that method's
+    docstring). This fallback is kept only because it is harmless when it
+    fails: `_try_lsp_rail` treats a broken LSP as "no diagnostics", not a
+    hard error.
+
+    The delegation itself is wrapped: the harness resolver shells out to
+    `npm`/reads a `.cmd` file, and an import or resolution failure there
+    must degrade to "no pyright found", not crash agent construction --
+    that would turn an optional dev-tooling feature into a hard dependency
+    for the coding agent to even start.
+    """
+    try:
+        from openjiuwen.harness.lsp.servers.servers.python import _resolve_pyright_command
+
+        resolved = _resolve_pyright_command()
+    except Exception:
+        resolved = None
+    if resolved is not None:
+        return resolved
+    if importlib.util.find_spec("pyright") is not None:
+        return sys.executable, ["-m", "pyright.langserver", "--stdio"]
+    return None
+
+
+def _try_lsp_rail(agent_workspace: Path):
+    """LspRail if Pyright is spawnable; otherwise None (pyright is optional)."""
+    command = _pyright_lsp_command()
+    if command is None:
+        return None
+    from openjiuwen.harness.lsp import InitializeOptions
+    from openjiuwen.harness.lsp.types import CustomServerConfig
+    from openjiuwen.harness.rails.lsp_rail import LspRail
+
+    executable, args = command
+    try:
+        return LspRail(
+            options=InitializeOptions(
+                cwd=str(agent_workspace),
+                custom_servers={
+                    "pyright": CustomServerConfig(
+                        command=executable,
+                        args=args,
+                        extensions=[".py"],
+                        language_id="python",
+                    )
+                },
+            ),
+            verbose=True,
+        )
+    except Exception:  # noqa: BLE001 — a dead rail is worse than no rail
+        return None
+
+
+class CodeImplementationAgent:
+    """Turns an ExperimentPlan into a runnable OpenJiuwen codebase under
+    experiments/<run_id>/generated_code/, and smoke-tests every variant before
+    handing off to experiment_execution. See docs/code_implementation_design.md.
+
+    The coding DeepAgent gets its own scratch workspace
+    (experiments/<run_id>/agent_workspace/) separate from the curated
+    deliverable — it's told to place final files under an output/
+    subdirectory there, which gets promoted (copied) into
+    generated_code_dir(run_id) after the run. This keeps harness bookkeeping
+    (.agent_history, coding_memory/, etc.) and any of the agent's own scratch
+    files out of the folder experiment_execution actually runs.
+    """
+
+    def __init__(self, config: dict[str, Any], *, model: Any | None = None):
+        self.config = config
+        self._injected_model = model
+
+    def run(self, inputs: CodeImplementationInput) -> CodeImplementationOutput:
+        return asyncio.run(self._run_async(inputs))
+
+    async def arun(self, inputs: CodeImplementationInput) -> CodeImplementationOutput:
+        return await self._run_async(inputs)
+
+    async def _run_async(self, inputs: CodeImplementationInput) -> CodeImplementationOutput:
+        plan = inputs.plan
+        design_context = self._gather_design_context(plan)
+        # Resolved to absolute paths deliberately: these helpers return paths
+        # relative to the current process cwd, and OpenJiuwen's harness does
+        # its own ambient cwd/workspace tracking internally (init_cwd) —
+        # handing it a relative workspace path let its own workspace-scaffold
+        # builder resolve it against an unexpected cwd and nest a duplicate
+        # copy of the path inside itself. Same class of bug as the
+        # results_dir/logs_dir fix in experiment_execution — always cross a
+        # cwd boundary with an absolute path.
+        agent_workspace = agent_workspace_dir(plan.run_id).resolve()
+        output_dir = agent_workspace / _OUTPUT_SUBDIR
+        code_dir = generated_code_dir(plan.run_id).resolve()
+        # Seed the working copy from generated_code HEAD at the start of each
+        # manager code round (not inner smoke cycles). Drops output/.git so
+        # the coding agent cannot treat a leftover workspace repo as truth.
+        seed_output_from_head(code_dir, output_dir)
+        agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
+        referenced_candidates = self._extract_path_candidates(design_context, inputs.extra_host_instructions)
+        referenced_roots = self._referenced_path_roots(inputs.artifact_path)
+        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace, roots=referenced_roots)
+        referenced_prompt = self._build_referenced_paths_prompt(referenced_paths)
+
+        # Only a last-resort fallback now — see _build_output, which discovers
+        # the real variant list from the entry point itself rather than
+        # trusting this (plan.baselines is empty today; kept here so a future
+        # populated plan.baselines still works as a fallback if discovery
+        # can't run at all).
+        variant_names = [*plan.baselines, "proposed"]
+        artifact_prompt = self._build_artifact_prompt(agent_artifact_path)
+        task_prompt = (
+            artifact_prompt
+            + referenced_prompt
+            + inputs.extra_host_instructions
+            + self._build_task_prompt(plan, design_context)
+        )
+        max_cycles = self._max_validation_cycles()
+        smoke_root = active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id).resolve())
+        smoke_root.mkdir(parents=True, exist_ok=True)
+
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.harness.lsp import shutdown_lsp
+
+        agent_message = ""
+        validation: CandidateValidation | None = None
+        previous_hash = ""
+        previous_fingerprint = ""
+        fingerprint_hits = 0
+        await Runner.start()
+        try:
+            for cycle in range(1, max_cycles + 1):
+                # Each validation cycle gets a fresh agent/session.  A failed
+                # cycle can leave a stale tool id after a process-level Runner
+                # restart; reusing that agent would make every repair attempt
+                # fail with "Tool instance not found in resource_mgr" too.
+                agent = self._build_coding_agent(
+                    agent_workspace,
+                    run_id=plan.run_id,
+                    cycle=cycle,
+                )
+                conversation_id = f"code_implementation-{plan.run_id}-cycle-{cycle}"
+                query = task_prompt
+                if cycle > 1:
+                    query += "\n\n" + self._build_validation_repair_prompt(validation)
+                try:
+                    result = await Runner.run_agent(
+                        agent,
+                        {"query": query, "conversation_id": conversation_id},
+                    )
+                    agent_message = (
+                        str(result.get("output", result)) if isinstance(result, dict) else str(result)
+                    )
+                except Exception as exc:  # noqa: BLE001 — keep the session for a later cycle
+                    agent_message = f"{type(exc).__name__}: {exc}"
+                finally:
+                    await self._cleanup_coding_agent(agent)
+
+                candidate_hash = _hash_staged_deliverable(output_dir)
+                cycle_dir = smoke_root / f"cycle_{cycle:03d}"
+                cycle_dir.mkdir(parents=True, exist_ok=True)
+
+                unchanged = (
+                    cycle > 1
+                    and bool(previous_hash)
+                    and candidate_hash == previous_hash
+                    and bool(previous_fingerprint)
+                    and validation is not None
+                    and not validation.ok
+                )
+                if unchanged:
+                    validation = replace(
+                        validation,
+                        cycle=cycle,
+                        candidate_hash=candidate_hash,
+                        skipped_redundant_smoke=True,
+                        errors=[
+                            *validation.errors,
+                            "unchanged candidate and failure fingerprint; skipped redundant smoke",
+                        ],
+                    )
+                else:
+                    validation = self._validate_candidate(
+                        plan.run_id,
+                        output_dir,
+                        cycle=cycle,
+                        fallback_names=variant_names,
+                        log_dir=cycle_dir,
+                        artifact_path=inputs.artifact_path,
+                    )
+                    validation.candidate_hash = candidate_hash
+                    if not validation.ok and validation.fingerprint:
+                        if (
+                            previous_hash
+                            and candidate_hash != previous_hash
+                            and validation.fingerprint == previous_fingerprint
+                        ):
+                            fingerprint_hits += 1
+                        else:
+                            fingerprint_hits = 1
+                        validation.repeated = fingerprint_hits >= 2
+                    else:
+                        fingerprint_hits = 0
+
+                previous_hash = candidate_hash
+                previous_fingerprint = validation.fingerprint
+                self._write_validation_artifact(cycle_dir, validation)
+                self._publish_cycle_artifacts(cycle_dir, smoke_root)
+                if validation.ok:
+                    break
+        finally:
+            await shutdown_lsp()
+
+        if validation is not None and validation.ok:
+            last_exc: BaseException | None = None
+            for promote_attempt in range(_PROMOTE_ATTEMPTS):
+                try:
+                    self.promote_output(
+                        output_dir,
+                        code_dir,
+                        log_path=smoke_root / _PROMOTION_LOG,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if promote_attempt + 1 < _PROMOTE_ATTEMPTS:
+                        await asyncio.sleep(0.05 * (2 ** promote_attempt))
+            if last_exc is not None:
+                return self._promotion_failure_output(
+                    plan, code_dir, validation, agent_message, last_exc
+                )
+            return self._build_output(
+                plan,
+                code_dir,
+                variant_names,
+                agent_message,
+                validation=validation,
+            )
+        # workspace_dir must name the same directory `files` was just listed
+        # from (output_dir, on any failure where the agent wrote something) —
+        # not generated_code/, which was never touched this cycle. This field
+        # flows verbatim into the manager's CodeHandoff and gets echoed into
+        # the next repair contract; reporting generated_code/ here previously
+        # sent repair instructions at a directory the coding agent's own
+        # prompt forbids writing to and the sandbox denies access to
+        # (observed directly: retries burning tool calls probing write access
+        # to generated_code/ instead of fixing output/run.py).
+        return self._build_output(
+            plan,
+            output_dir if output_dir.exists() else code_dir,
+            variant_names,
+            agent_message,
+            validation=validation,
+        )
+
+    # -- promoting the deliverable out of the agent's scratch workspace ------
+
+    @staticmethod
+    def _force_rmtree(path: Path) -> None:
+        """Delete a tree that may contain read-only Git objects (Windows)."""
+        force_rmtree(path)
+
+    @staticmethod
+    def _promotion_ignore(_directory: str, names: list[str]) -> list[str]:
+        return [
+            name
+            for name in names
+            if name in _PROMOTION_SKIP_NAMES or name.endswith(".pyc")
+        ]
+
+    @staticmethod
+    def _file_manifest(root: Path) -> str:
+        if not root.exists():
+            return "(missing)"
+        files = sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and ".git" not in path.parts
+        )
+        return ", ".join(files[:80]) or "(empty)"
+
+    @staticmethod
+    def _write_promotion_log(log_path: Path | None, lines: list[str]) -> None:
+        if log_path is None:
+            return
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    @classmethod
+    def _copy_deliverable(cls, source_dir: Path, destination_dir: Path) -> list[str]:
+        return sync_tree_into_repo(source_dir, destination_dir)
+
+    @classmethod
+    def promote_output(
+        cls, output_dir: Path, code_dir: Path, *, log_path: Path | None = None
+    ) -> None:
+        """Copy a passing staged candidate into generated_code/ in place.
+
+        ``generated_code/.git`` stays put. Files from ``output/`` overwrite the
+        working tree (skipping ``.git`` and ``logs/``), extras are deleted, then
+        the host commits. Agent ``output/.git`` is not the checkpoint.
+        """
+        lines = [
+            "--- promotion ---",
+            f"source={output_dir}",
+            f"destination={code_dir}",
+        ]
+        skipped: list[str] = []
+        stage = "start"
+        try:
+            if not output_dir.exists():
+                stage = "copy"
+                lines.extend(
+                    [
+                        "stage=copy",
+                        "status=failed",
+                        "skipped=(none)",
+                        "note=source missing; destination left unchanged",
+                        "source_files: (missing)",
+                        f"destination_files: {cls._file_manifest(code_dir)}",
+                    ]
+                )
+                cls._write_promotion_log(log_path, lines)
+                raise FileNotFoundError(f"promotion source missing: {output_dir}")
+
+            stage = "sync"
+            skipped = sync_tree_into_repo(output_dir, code_dir)
+
+            stage = "commit"
+            sha = host_commit(code_dir, "code_implementation promote")
+            stage = "done"
+            lines.extend(
+                [
+                    "stage=sync",
+                    "status=ok",
+                    f"code_commit={sha or '(none)'}",
+                    f"skipped={', '.join(skipped) or '(none)'}",
+                    f"source_files: {cls._file_manifest(output_dir)}",
+                    f"destination_files: {cls._file_manifest(code_dir)}",
+                ]
+            )
+            cls._write_promotion_log(log_path, lines)
+        except Exception as exc:
+            lines.extend(
+                [
+                    f"stage={stage}",
+                    "status=failed",
+                    f"error_type={type(exc).__name__}",
+                    f"error={exc}",
+                    f"skipped={', '.join(skipped) or '(none)'}",
+                    "--- traceback ---",
+                    traceback.format_exc(),
+                ]
+            )
+            cls._write_promotion_log(log_path, lines)
+            raise
+
+    # -- design context -----------------------------------------------------
+
+    def _gather_design_context(self, plan: ExperimentPlan) -> str:
+        """Assemble what the coding agent needs inlined in the task prompt.
+
+        Prefers ``code_agent_instruction.md`` (the current work order:
+        goal, scope, required work, validation). The living summary
+        ``experiment_design.md`` is *not* inlined — it grows across
+        revisions; the agent reads it on demand via ``design_read_file``.
+        Falls back to inlining ``design_path`` when no instruction exists,
+        then to the legacy design/report.md stopgap for hand-built plans.
+        """
+        instruction = self._read_project_file(plan.code_agent_instruction_path)
+        if instruction:
+            return instruction
+        design = self._read_project_file(plan.design_path)
+        if design:
+            return design
+
+        path = design_report_path(plan.run_id)
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = self._render_design_report(plan)
+        path.write_text(text, encoding="utf-8")
+        return text
+
+    def _living_design_note(self, plan: ExperimentPlan) -> str:
+        """Pointer to the living summary when the instruction was inlined."""
+        if not self._read_project_file(plan.code_agent_instruction_path):
+            return ""
+        design_path = (plan.design_path or "").strip()
+        if not design_path:
+            return ""
+        return (
+            "## Living experiment design (read on demand)\n\n"
+            f"The full living summary is at `{design_path}`. It is **not** "
+            "inlined here — it grows across revisions (claims, grounding, "
+            "Current Experiment). Your workspace `read_file` cannot reach "
+            f"`experiments/{plan.run_id}/design/`. Use `design_read_file` "
+            "with `file_path` set to that project-relative path, "
+            "`design/experiment_design.md`, or `experiment_design.md`. "
+            "Read it when this instruction is missing method/variant detail, "
+            "decision metrics, or Current Experiment specifics.\n\n"
+        )
+
+    @staticmethod
+    def _read_project_file(relative_path: str) -> str | None:
+        """None if relative_path is empty, escapes the project root, or the
+        file doesn't exist — any of which means "nothing usable here", not an
+        error; the caller falls back to the legacy path."""
+        if not relative_path:
+            return None
+        try:
+            abs_path = resolve_project_reference(relative_path)
+        except ValueError:
+            return None
+        if not abs_path.is_file():
+            return None
+        return abs_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _render_design_report(plan: ExperimentPlan) -> str:
+        observations = [f"- {item}" for item in plan.observations] or ["- (none)"]
+        lines = [
+            f"# Experiment design report — {plan.run_id}",
+            "",
+            "## Setup",
+            plan.setup,
+            "",
+            "## Variables",
+            *(f"- {v}" for v in plan.variables),
+            "",
+            "## Baselines",
+            *(f"- {b}" for b in plan.baselines),
+            "",
+            "## Metrics",
+            *(f"- {m}" for m in plan.metrics),
+            "",
+            "## Primary metric",
+            f"{plan.primary_metric or '(unspecified)'} ({plan.primary_direction or 'unspecified'})",
+            "",
+            "## Observations to log (advisory)",
+            *observations,
+            "",
+            "## Expected outcomes",
+            plan.expected_outcomes,
+            "",
+        ]
+        return "\n".join(lines)
+
+    # -- agent construction --------------------------------------------------
+
+    def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
+        from openjiuwen.core.foundation.llm import init_model
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+        from openjiuwen.harness.subagents import create_code_agent
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.python_runtime import (
+            discover_python_runtime,
+            ensure_on_path,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
+            DesignReferenceRail,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.exploration_budget_rail import (
+            ExplorationBudgetRail,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.guarded_sys_operation_rail import (
+            GuardedSysOperationRail,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+            with_observability,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.openjiuwen_reference_rail import (
+            OpenJiuwenReferenceRail,
+        )
+
+        # bash_deny_patterns (and the tool-layer injection check) are only
+        # enforced when this SDK flag is set — without it BashTool/PowerShellTool
+        # silently skip the whole permission pipeline. Only set if unset, so an
+        # explicit override (e.g. OPENJIUWEN_BASH_STRICT=0 for local debugging)
+        # is respected.
+        os.environ.setdefault("OPENJIUWEN_BASH_STRICT", "1")
+
+        # On the packaged desktop host, a bare `python`/`py` typed in this
+        # agent's bash tool can resolve to Windows' own App Execution Alias
+        # placeholder instead of a real interpreter (prints a "go install
+        # from the Microsoft Store" message rather than running anything) —
+        # observed directly burning an attempt's entire retry budget on the
+        # agent re-locating a real interpreter from scratch instead of ever
+        # writing `output/run.py`. Prepend a verified real interpreter's
+        # directory to PATH once so every bash call in this process resolves
+        # correctly without the agent having to rediscover it each attempt.
+        ensure_on_path(discover_python_runtime())
+
+        model = self._injected_model or init_model(
+            provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
+            model_name=self._setting("model", "MODEL_NAME", default="default"),
+            api_key=self._setting("api_key", "API_KEY", required=True, secret=True),
+            api_base=self._setting("base_url", "API_BASE", required=True),
+            # init_model's own default (60s) is tuned for short completions;
+            # this agent's turns can be large multi-file code-writes after a
+            # context that's grown from tool output (SDK introspection, LSP
+            # diagnostics, etc.), and a timed-out completion surfaces as
+            # status="failed" with a useless agent_message like
+            # {'error': 'completion_timeout'} — observed directly. Same
+            # MODEL_TIMEOUT knob experiment_design already uses (120s there),
+            # higher default here since code-gen completions tend to run
+            # longer than experiment_design's more structured turns.
+            timeout=float(self._setting("timeout", "MODEL_TIMEOUT", default="300")),
+        )
+        module_cfg = self.config.get("code_implementation", {}) or {}
+        max_iterations = max(1, int(module_cfg.get("max_iterations", 40) or 40))
+        design_root = design_dir(run_id)
+        design_root.mkdir(parents=True, exist_ok=True)
+        rails = with_observability(
+            [
+                GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
+                OpenJiuwenReferenceRail(),
+                DesignReferenceRail(design_root=design_root),
+                # Nudges toward attempting an implementation once too many
+                # tool calls have passed with no write under output/ — see
+                # module docstring for the repeated failure pattern this
+                # addresses (environment/SDK exploration burning the whole
+                # attempt's budget before run.py ever gets written).
+                ExplorationBudgetRail(),
+                # The pipeline's configured cap is also applied to the outer
+                # loop via TaskCompletionRail, otherwise a stuck tool/model
+                # session can run until the Provider's much larger watchdog
+                # fires.
+                TaskCompletionRail(max_rounds=max_iterations),
+            ]
+        )
+        lsp_rail = _try_lsp_rail(agent_workspace)
+        if lsp_rail is not None:
+            rails.append(lsp_rail)
+        return create_code_agent(
+            model,
+            card=AgentCard(
+                name="experiment_code_implementer",
+                description="Implements an experiment design report as a runnable OpenJiuwen codebase.",
+            ),
+            system_prompt=self._render_system_prompt(),
+            rails=rails,
+            enable_task_loop=True,
+            # create_code_agent's own signature defaults max_iterations to 15
+            # when omitted -- NOT unbounded (only DeepAgentConfig.max_iterations
+            # =None means unbounded, since the 2026-09-22 harness fix made this
+            # value genuinely enforced even under enable_task_loop=True). Must
+            # pass the pipeline's configured value through explicitly, or every
+            # coding session silently reverts to a 15-round inner ReAct cap
+            # regardless of this module's own config (observed directly: every
+            # retry after 2026-09-22 capped at ~15 rounds / 24-33 tool calls,
+            # never reaching a write_file(output/run.py) call).
+            max_iterations=max_iterations,
+            tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
+            workspace=str(agent_workspace),
+            # Code implementation can legitimately take longer than the
+            # harness default one-round completion timeout.  The pipeline
+            # already bounds outer task-loop rounds with TaskCompletionRail;
+            # do not impose a second wall-clock timeout that can leave the
+            # manager waiting on a task whose cancellation is incomplete.
+            completion_timeout=None,
+            # We don't use the harness's own memory/skills/todo scaffold for
+            # this one-shot codegen task — skip it so agent_workspace/ only
+            # contains what the agent itself actually writes.
+            auto_create_workspace=False,
+        )
+
+    @staticmethod
+    async def _cleanup_coding_agent(agent: Any) -> None:
+        """Release this agent's tools without stopping the process-global Runner."""
+        cleanup = getattr(agent, "cleanup_task_resources", None)
+        if callable(cleanup):
+            await cleanup()
+
+        unregister = getattr(agent, "unregister_rail", None)
+        configured_rails = getattr(agent, "configured_rails", None)
+        if callable(unregister) and callable(configured_rails):
+            for rail in reversed(list(configured_rails())):
+                try:
+                    await unregister(rail)
+                except Exception as exc:  # noqa: BLE001 - cleanup must continue
+                    logger.warning("code agent rail cleanup failed: %s", exc)
+
+        ability_manager = getattr(agent, "ability_manager", None)
+        teardown = getattr(ability_manager, "teardown_tools", None)
+        if callable(teardown):
+            teardown()
+
+        sys_operation = getattr(getattr(agent, "deep_config", None), "sys_operation", None)
+        sys_operation_id = getattr(sys_operation, "id", None)
+        if sys_operation_id:
+            from openjiuwen.core.runner import Runner
+
+            try:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id)
+            except Exception as exc:  # noqa: BLE001 - cleanup must continue
+                logger.warning("code agent sys-operation cleanup failed: %s", exc)
+
+    def _setting(
+        self,
+        config_key: str,
+        env_key: str,
+        *,
+        default: str | None = None,
+        required: bool = False,
+        secret: bool = False,
+    ) -> str | None:
+        # env wins over configs/*.yaml, not the other way around — a checked-in
+        # config file may ship a non-null placeholder (or a stale value from a
+        # previous run) that would otherwise silently shadow a real local
+        # override. api_key is never read from configs/*.yaml at all — only
+        # env, so secrets don't end up committed alongside pipeline config.
+        oj_cfg = {} if secret else (self.config.get("openjiuwen", {}) or {})
+        value = os.environ.get(env_key) or oj_cfg.get(config_key) or default
+        if required and not value:
+            raise RuntimeError(
+                f"code_implementation needs a model {config_key} — set "
+                f"the {env_key} environment variable"
+                + ("" if secret else f" or configs['openjiuwen']['{config_key}']") + "."
+            )
+        return value
+
+    @staticmethod
+    def _render_system_prompt() -> str:
+        template = _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+        conventions = (
+            _CONVENTIONS_PATH.read_text(encoding="utf-8") if _CONVENTIONS_PATH.exists() else ""
+        )
+        return template.format(openjiuwen_conventions=conventions)
+
+    # -- task prompt ---------------------------------------------------------
+
+    @staticmethod
+    def _stage_artifact_input(artifact_path: str | None, agent_workspace: Path) -> Path | None:
+        """Make the host-staged source paper visible inside the coding sandbox."""
+        if not artifact_path:
+            return None
+        source = Path(artifact_path).expanduser().resolve()
+        if not source.is_file() and not source.is_dir():
+            raise FileNotFoundError(f"artifact_path does not exist: {artifact_path}")
+        destination = agent_workspace / "artifact_path"
+        if destination.exists() or destination.is_symlink():
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination / source.name)
+        return destination
+
+    @staticmethod
+    def _build_artifact_prompt(agent_artifact_path: Path | None) -> str:
+        if agent_artifact_path is None:
+            return ""
+        return (
+            "## Supplied paper input\n\n"
+            f"The real uploaded paper/task input is available inside your workspace at "
+            f"`{agent_artifact_path.name}`. Read it before implementing the experiment; "
+            "look for the supplied paper source, `paper_facts.json`, and `task_spec.json` "
+            "where present. Use only facts and constraints from this input for the smoke "
+            "case. Do not replace a missing read with synthetic fallback data, parser-only "
+            "stubs, or invented paper content. The host will expose the same input to the "
+            "generated program through `ARTIFACT_PATH` at execution time, so do not "
+            "hardcode this workspace path into the generated code.\n\n"
+        )
+
+    @staticmethod
+    def _extract_path_candidates(*texts: str, limit: int = _MAX_REFERENCED_CANDIDATES) -> list[str]:
+        """Pull absolute Windows/POSIX path-looking tokens out of free-text
+        instructions (e.g. a dataset path mentioned in the design context),
+        so they can be verified and handed to the agent directly instead of
+        it discovering them via a broad, unbounded find/grep. Candidates are
+        capped BEFORE any filesystem I/O -- existence checks happen later in
+        _stage_referenced_paths, which is the real filter against regex false
+        positives (URLs, code fences, import lines); this cap only bounds how
+        many of those checks we're willing to do.
+        """
+        seen: dict[str, None] = {}
+        for text in texts:
+            if not text:
+                continue
+            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE, _RELATIVE_PATH_RE):
+                for match in pattern.finditer(text):
+                    candidate = match.group(0).rstrip(_REFERENCED_PATH_TRAILING_PUNCT)
+                    if candidate and candidate not in seen:
+                        seen[candidate] = None
+                    if len(seen) >= limit:
+                        return list(seen)
+        return list(seen)
+
+    @staticmethod
+    def _referenced_path_roots(artifact_path: str | None, *, max_levels: int = 3) -> list[Path]:
+        """Ancestor directories of the staged artifact_path, used to resolve
+        a relative path token (e.g. "demo-input/sentiment_icl_v1.json")
+        named in the instructions without a drive letter. A same-run dataset
+        file has been observed sitting a couple of levels above artifact_path
+        (artifact_path itself pointing at a paper/ subfolder, the dataset at
+        a demo-input/ sibling of that subfolder's parent), so climbing a
+        bounded number of ancestors covers that layout without an unbounded
+        filesystem walk.
+        """
+        if not artifact_path:
+            return []
+        roots: list[Path] = []
+        try:
+            current = Path(artifact_path).expanduser().resolve()
+        except (OSError, ValueError):
+            return []
+        if current.is_file():
+            current = current.parent
+        for _ in range(max_levels + 1):
+            roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return roots
+
+    @staticmethod
+    def _split_relative_candidate(candidate: str) -> list[str]:
+        """Split a possibly foreign-separator relative path into components,
+        dropping empty segments and any ``..`` so a root can only resolve to
+        a descendant of itself, never escape it."""
+        return [part for part in _PATH_SEP_RE.split(candidate) if part and part != ".." and part != "."]
+
+    @staticmethod
+    def _stage_referenced_paths(
+        candidates: list[str], agent_workspace: Path, *, roots: list[Path] | None = None
+    ) -> list["_ReferencedPath"]:
+        """Verify each candidate path actually exists on the host, and stage
+        existing files into the sandbox (mirroring _stage_artifact_input) so
+        the coding agent can read them without depending on whether its
+        sandboxed file tools permit arbitrary host paths. Directories and
+        oversized files are reported but not copied. Every candidate is
+        handled independently under a broad try/except: a regex-mangled
+        string can raise almost anything when handed to Path()/.exists() on
+        Windows, and continuing past one bad candidate matters more than
+        being precise about which exception type to catch.
+
+        A candidate that is not itself absolute (see _RELATIVE_PATH_RE) is
+        tried against each of ``roots`` in order and resolved to the first
+        hit; it is dropped, not passed through as a host-relative path, if
+        none of them contain it.
+        """
+        results: list[_ReferencedPath] = []
+        referenced_root = agent_workspace / _REFERENCED_PATHS_SUBDIR
+        search_roots = roots or []
+        for candidate in candidates:
+            try:
+                path = Path(candidate)
+                if not path.is_absolute():
+                    parts = CodeImplementationAgent._split_relative_candidate(candidate)
+                    resolved = (
+                        next(
+                            (
+                                root.joinpath(*parts)
+                                for root in search_roots
+                                if root.joinpath(*parts).is_file()
+                            ),
+                            None,
+                        )
+                        if parts
+                        else None
+                    )
+                    if resolved is None:
+                        continue
+                    path = resolved
+                if not path.exists():
+                    continue
+                if path.is_dir():
+                    results.append(_ReferencedPath(kind="dir", host_path=str(path)))
+                    continue
+                size = path.stat().st_size
+                if size > _MAX_REFERENCED_FILE_BYTES:
+                    results.append(
+                        _ReferencedPath(kind="file_too_large", host_path=str(path), size_bytes=size)
+                    )
+                    continue
+                subdir = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:10]
+                dest_dir = referenced_root / subdir
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / path.name
+                shutil.copy2(path, dest)
+                results.append(
+                    _ReferencedPath(
+                        kind="file",
+                        host_path=str(path),
+                        workspace_rel=f"{_REFERENCED_PATHS_SUBDIR}/{subdir}/{path.name}",
+                        size_bytes=size,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — one malformed candidate must not drop the rest
+                continue
+        return results
+
+    @staticmethod
+    def _build_referenced_paths_prompt(records: list["_ReferencedPath"]) -> str:
+        if not records:
+            return ""
+        lines: list[str] = []
+        for record in records:
+            if record.kind == "file":
+                lines.append(f"- `{record.workspace_rel}` (staged from `{record.host_path}`)")
+            elif record.kind == "dir":
+                lines.append(
+                    f"- `{record.host_path}` — confirmed to exist as a directory; "
+                    "list/read it directly, do not `find` for it"
+                )
+            else:
+                size_mb = (record.size_bytes or 0) / (1024 * 1024)
+                lines.append(
+                    f"- `{record.host_path}` — confirmed to exist (~{size_mb:.0f} MB, not copied); "
+                    "read it directly at that path if your sandbox allows, do not search for it"
+                )
+        return (
+            "## Verified paths from your instructions\n\n"
+            "These absolute paths were mentioned in your task instructions and have "
+            "already been located and verified for you:\n\n"
+            f"{chr(10).join(lines)}\n\n"
+            "Do not run `find`/`grep` across the workspace or user home directories "
+            "to rediscover them.\n\n"
+        )
+
+    def _build_task_prompt(self, plan: ExperimentPlan, design_context: str) -> str:
+        living = self._living_design_note(plan)
+        return (
+            "Implement the following experiment design as a runnable OpenJiuwen codebase.\n\n"
+            "## Authority order\n\n"
+            "If instructions conflict, obey them in this order: (1) original-task "
+            "constraints, (2) the manager repair contract for this attempt, (3) the "
+            "generic code-agent guidance in the system prompt and this template.\n\n"
+            f"## Code agent instruction\n\n{design_context}\n\n"
+            f"{living}"
+            "## Local checks vs host validation\n\n"
+            "You may run local smoke checks from inside `output/` with whatever "
+            "interpreter is available in this workspace. Do **not** spend the session "
+            "trying to invoke an absolute host interpreter path from the sandboxed "
+            "shell — that path is often blocked, and those local checks are not the "
+            "readiness gate. After you stop, the host compiles, smoke-tests, and "
+            "validates metrics on `output/` with its own interpreter. Only that host "
+            "loop decides readiness. If the host sends a repair request, make a "
+            "targeted edit and leave an updated `output/`. Do not document an "
+            "outstanding LSP or runtime error in `ASSUMPTIONS.md` and stop.\n\n"
+            "## Where to put your files — read this first\n\n"
+            f"Your workspace has an `{_OUTPUT_SUBDIR}/` subdirectory. Everything you want kept — "
+            f"every file that matters for actually running the experiment — must be written under "
+            f"`{_OUTPUT_SUBDIR}/`, not the workspace root. Only what's inside `{_OUTPUT_SUBDIR}/` "
+            "gets used afterwards; anything you leave outside it (notes, scratch scripts, etc.) is "
+            f"discarded. Do not copy files into `generated_code/` and do not create a git repo in "
+            f"`{_OUTPUT_SUBDIR}/` — the host owns checkpoint/restore on `generated_code/`. "
+            f"If you run a local check, use `{_OUTPUT_SUBDIR}/` as the working directory "
+            f"(e.g. `cd {_OUTPUT_SUBDIR} && python {_ENTRY_POINT} ...`) so you are testing "
+            "exactly what the host will validate later — not a version that also sees files "
+            "you left elsewhere in your workspace.\n\n"
+            "## Variants to implement\n\n"
+            "Implement every variant the code-agent instruction above names for comparison — "
+            "if that instruction does not list the full method set, read the living summary "
+            "with `design_read_file` and use its Current Experiment section. Do not implement "
+            "only a subset because a shorter example elsewhere in this prompt might suggest otherwise. "
+            "Exactly one of them — the one that embodies the design's actual hypothesis — must "
+            "be named `proposed` (the orchestration depends on this literal name downstream), "
+            "**even if the design's own prose calls it something else** (e.g. \"Variant C: Full "
+            "ACI\" becomes `--method proposed`, not a separate `full_aci` choice that duplicates "
+            "it). Every other comparison variant should use the design's own given name as-is "
+            "(e.g. `shell_only`, `baseline`) — do not rename them to a generic placeholder, and "
+            "do not add `proposed` as an extra alias alongside a variant that already has its "
+            "own name; it replaces that name, it doesn't sit next to it. All variants must share "
+            "the same data loading and metric "
+            "computation code so the comparison across them is fair; dispatch between them with "
+            "a `--method <name>` flag on a single entry point rather than duplicating scripts "
+            "per variant.\n\n"
+            "## Required entry-point contract\n\n"
+            f"Write a single entry point at `{_OUTPUT_SUBDIR}/{_ENTRY_POINT}` that accepts:\n"
+            "  --method <name>   one of the variant names above, declared via argparse's own "
+            "`choices=[...]` on this argument — **required**, not a style preference: the "
+            "orchestration discovers which variants exist by passing an invalid --method value "
+            "and reading argparse's own \"invalid choice: ... (choose from ...)\" error, so a "
+            "custom validator, a plain string check, or swallowing the error yourself will hide "
+            "real variants from the host and make them silently never get run or checked.\n"
+            "  --smoke-test      run the same invoke/run_method path as a full run on exactly "
+            "one item (synthetic context or the first dataset row), call the live model via "
+            "API_KEY/API_BASE/MODEL_NAME, write top-level n_questions=1, "
+            "per_question=[<one item-result object>] and model_call_count >= 1, "
+            "and exit 0/1 — no full-dataset run. Parser-only stubs and dummy model replies "
+            "are invalid.\n"
+            "  --output <path>   a complete path (may be absolute) chosen by the host — "
+            "treat it as opaque and use it exactly as given for `open(...)`/file writing. "
+            "Do not reinterpret it as a bare filename, do not join it with a directory "
+            "convention of your own, and do not derive your own path from just its "
+            "basename: the host may run you under a launcher whose current working "
+            "directory is not what you expect, so anything other than the literal "
+            "`--output` value can silently write the file somewhere the host will never "
+            "look.\n\n"
+            "The host invokes each variant separately as "
+            f"`{_ENTRY_POINT} --method <name> --output /abs/path/to/<name>.metrics.json`. "
+            "Do not require `--method all`. Do not refuse a full (non-smoke) "
+            "`--method proposed` or `--method <baseline>` run. Each invocation "
+            "must write exactly that variant's JSON to `--output`.\n\n"
+            "Redundant recovery channel for `--smoke-test` only (skip this on a full, "
+            "non-smoke run): after writing `--output`, also print one line to stdout — "
+            f"`{_SMOKE_METRICS_STDOUT_MARKER}<the same JSON object, compact, one line>` — "
+            "so the host can recover the result even if the file above did not end up "
+            "where it asked. If you print this line more than once, only the last one "
+            "is read.\n\n"
+            f"Declared plan metrics, identically across all variants: {', '.join(plan.metrics) or '(none)'}.\n"
+            + (
+                f"Primary metric (must always be present as a finite number): "
+                f"`{plan.primary_metric}` ({plan.primary_direction or 'unspecified'}).\n"
+                if plan.primary_metric
+                else ""
+            )
+            + (
+                "Requested observations (best effort, under `metrics.observations.<name>`; "
+                "missing ones are noted by reflection, never rejected by the host): "
+                + ", ".join(plan.observations)
+                + ".\n"
+                if plan.observations
+                else ""
+            )
+            + "Write every declared plan metric under a top-level `metrics` object keyed by "
+            "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
+            "metadata (`method`, `status`, `n_questions`, `model_call_count`, item records) "
+            "stays at the root. You may also duplicate scalars at the root, but "
+            "`metrics.<name>` is the canonical location the host reads.\n"
+            "Unknown extra keys are never rejected. Log anything else that would help a "
+            "later judge: per-item records, parse-failure counts (`parsed_count`), latency, "
+            "token/call counts. An unparseable model reply is a number to record, not a "
+            "fatal error — do not raise and exit non-zero for a bad completion; exit "
+            "non-zero only for infrastructure faults (dataset download, agent init, "
+            "metrics write, runtime setup).\n\n"
+            "If the non-smoke path fails, still write `--output` as JSON so the host can "
+            "diagnose it, and print one stderr line: "
+            "`Harness failed at {failure_stage}/{failure_substage}: {detail}`. "
+            "The JSON must include:\n"
+            "  - `status`: `failed`\n"
+            "  - `failure_stage`: short snake_case stage (for example `dataset_download`, "
+            "`agent_init`, `tool_call`, `metrics_write`, `runtime_setup`)\n"
+            "  - `failure_substage`: short snake_case name of the step that actually failed\n"
+            "  - `error_type`: exception class name\n"
+            "  - `error_code`: stable token derived from that same cause\n"
+            "  - `detail`: human-readable cause with the concrete reason "
+            "(HTTP status, exception message, validation rule). A fingerprint hash may be "
+            "added, but must not replace the readable cause. Do not invent extra required "
+            "environment variables or install-time plugins to explain a dataset/protocol "
+            "failure.\n"
+            "  - `retryable`: boolean\n"
+            "  - `fingerprint`: short stable hash of the cause for dedup\n"
+            "  - optional `diagnostics_path`: workspace-relative JSON sidecar with request/"
+            "validation metadata (status, URL without secrets, attempt count, "
+            "`validation_error`). The sidecar and `detail` must exclude API keys and "
+            "protected benchmark item text (prompts, answers, raw dataset rows). Do not "
+            "collapse every failure to `{\"error\": \"RuntimeError\"}` with an empty "
+            "traceback.\n\n"
+            "## Proposed vs baseline\n\n"
+            "Follow the experiment design for what each variant should be. A no-tool "
+            "**baseline** may be a single live-model completion (`chat.completions` / "
+            "equivalent). When the design asks for an agent, prefer an OpenJiuwen "
+            "`create_deep_agent` / `ReActAgent` / `Runner` with the tools the design "
+            "requires; if the SDK is a poor fit, write plain Python instead of forcing a "
+            "mismatched OpenJiuwen class. The host does not reject a harness for using a "
+            "one-shot completion on a baseline or for omitting OpenJiuwen on an edge case — "
+            "readiness is the smoke test. `--smoke-test` must call the same variant "
+            "construction and invoke path as the full run (including solver_prompt / "
+            "agent create) with the live model on one item; it may use synthetic "
+            "context or the first dataset row, but must not skip construction or "
+            "substitute a parser-only stub. The non-smoke path must actually run the "
+            "method on the full requested set.\n\n"
+            "## Explore OpenJiuwen source before writing SDK calls\n\n"
+            "You choose the files. The host does not inject a preselected file list. "
+            "Do not start at `en/SUMMARY.md`.\n\n"
+            "1. When the instruction names a symbol, search that symbol with "
+            "`openjiuwen_ref_search` and `scopes: [\"source\"]`. When it does not, "
+            "infer one short query from the required behavior. Do not paste the "
+            "whole task into one query.\n"
+            "2. Open the `public-export` hit with `openjiuwen_ref_read_file` on "
+            "`source/openjiuwen/...`. Read the signature, return value, and imports. "
+            "A public export is the API to call. An implementation detail explains "
+            "behavior and is not copied when a public export is in the hits. Then "
+            "search and read each imported name until the constructor, invoke method, "
+            "and result location are known.\n"
+            "3. If the signature does not show how to unpack a result, open one "
+            "in-repo caller. An example is a usage sample, not a higher authority "
+            "than the definition.\n"
+            "4. On an empty source result, search one smaller reusable OpenJiuwen "
+            "piece (a public model client rather than a full agent, a single tool "
+            "rather than a workflow) and use only that piece. Do not invent a class "
+            "from the task wording.\n"
+            "5. If that also misses, or the public export does not fit, write plain "
+            "Python.\n\n"
+            "Call `openjiuwen_ref_search` and `openjiuwen_ref_read_file` yourself. "
+            "SDK-reading **subagents cannot access these tools**. After a smoke "
+            "error names a missing attribute, search that exact name and read it "
+            "before editing.\n\n"
+            "## Before you stop\n\n"
+            f"1. Optional: from inside `{_OUTPUT_SUBDIR}/`, run a local "
+            f"`python {_ENTRY_POINT} --method <name> --smoke-test` check. The host will "
+            "re-run every variant with its own interpreter and reject a candidate that "
+            "exits non-zero, writes no metrics, fails the metrics contract, or skips "
+            "the live 1-item invoke path (empty item records or model_call_count < 1).\n"
+            f"2. Inside `{_OUTPUT_SUBDIR}/`, write `{_REQUIREMENTS_FILE}` listing any pip packages "
+            "you used beyond the pipeline's own dependencies (pyyaml, pydantic, openjiuwen) — one "
+            "package per line.\n"
+            f"3. Inside `{_OUTPUT_SUBDIR}/`, write `{_ASSUMPTIONS_FILE}` as a bullet list of the "
+            "judgment calls you made to turn the abstract design above into concrete code (library "
+            "choices, synthetic data shape, hyperparameter defaults, anything not fully specified "
+            "by the report) — including, for each variant, which OpenJiuwen symbol you reused "
+            "and why, or that source search found nothing reusable.\n"
+        )
+
+    # -- acceptance gate -------------------------------------------------
+
+    def _max_validation_cycles(self) -> int:
+        module_cfg = self.config.get("code_implementation", {}) or {}
+        retries = int(module_cfg.get("max_smoke_test_retries", 2) or 0)
+        return max(1, retries + 1)
+
+    @staticmethod
+    def _tail(text: str, limit: int = _NOTES_TAIL_CHARS) -> str:
+        """Last `limit` chars of text — where a traceback's actual exception
+        line lives, not its (often long, irrelevant) leading frames."""
+        cleaned = text.strip()
+        if not cleaned:
+            return ""
+        if len(cleaned) <= limit:
+            return cleaned
+        return "...(truncated; see full log on disk)...\n" + cleaned[-limit:]
+
+    @staticmethod
+    def _resolve_smoke_metrics(
+        stdout: str, metrics_path: Path, variant_name: str
+    ) -> tuple[dict[str, Any], str]:
+        """Recover one variant's smoke metrics, preferring stdout over the
+        `--output` file the candidate was asked to write.
+
+        The file channel alone is not trustworthy end-to-end: the
+        candidate's own `open(args.output, ...)` runs inside a subprocess
+        whose actual cwd we do not fully control (the packaged desktop host
+        has been observed changing it before the candidate script runs), so
+        a relative interpretation of `--output` can silently land elsewhere.
+        `smoke_test_dir` is documented as a kept-on-disk debugging/
+        reflection artifact (see workspace.smoke_test_dir), so when stdout
+        saves the validation but the file never showed up, repair it here
+        from this (trusted) host process instead of leaving a silent gap
+        that would only surface much later.
+        """
+        file_metrics: dict[str, Any] | None = None
+        file_state = "present"
+        if not metrics_path.is_file():
+            file_state = "missing"
+        else:
+            try:
+                payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                file_state = "invalid_json"
+            else:
+                if isinstance(payload, dict):
+                    file_metrics = payload
+                else:
+                    file_state = "invalid_json"
+
+        stdout_found, stdout_metrics = _extract_stdout_metrics(stdout)
+        if not stdout_found:
+            return (file_metrics or {}), file_state
+        if stdout_metrics is None:
+            # The stdout echo is broken, but that is a redundant channel --
+            # if the file the candidate actually wrote to --output parsed
+            # fine on its own, use it instead of discarding a genuinely
+            # valid result over a formatting slip in the echo alone. Still
+            # surfaced (not silently swallowed): this means the candidate
+            # did not follow the stdout-echo contract, which is worth
+            # knowing even when it doesn't block this run.
+            if file_metrics is not None:
+                logger.warning(
+                    "smoke stdout marker present but unparsable for variant=%s; "
+                    "falling back to the --output file, which parsed fine",
+                    variant_name,
+                )
+                return file_metrics, "present"
+            return {}, "invalid_json"
+
+        if file_metrics is None:
+            try:
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path.write_text(
+                    json.dumps(stdout_metrics, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError as exc:
+                logger.warning(
+                    "could not repair missing smoke metrics file variant=%s path=%s: %s",
+                    variant_name, metrics_path, exc,
+                )
+            else:
+                logger.warning(
+                    "smoke metrics file missing/invalid at %s; recovered from stdout "
+                    "and repaired variant=%s",
+                    metrics_path, variant_name,
+                )
+        return stdout_metrics, "present"
+
+    @staticmethod
+    def _write_validation_artifact(log_dir: Path, validation: CandidateValidation) -> None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ok": validation.ok,
+            "stage": validation.stage,
+            "variant": validation.variant,
+            "cycle": validation.cycle,
+            "candidate_hash": validation.candidate_hash,
+            "fingerprint": validation.fingerprint,
+            "exit_code": validation.exit_code,
+            "command": validation.command,
+            "errors": validation.errors,
+            "failures": validation.failures,
+            "repeated": validation.repeated,
+            "skipped_redundant_smoke": validation.skipped_redundant_smoke,
+            "summary": validation.summary(),
+        }
+        (log_dir / "validation.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _publish_cycle_artifacts(cycle_dir: Path, dest_dir: Path) -> None:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if not cycle_dir.exists():
+            return
+        for path in cycle_dir.iterdir():
+            if path.is_file():
+                shutil.copy2(path, dest_dir / path.name)
+
+    @staticmethod
+    def _failed_validation(
+        *,
+        stage: str,
+        errors: list[str],
+        cycle: int,
+        log_dir: Path,
+        variant: str = "",
+        command: list[str] | None = None,
+        exit_code: int | None = None,
+        stderr_tail: str = "",
+        variants: list[ImplementedVariant] | None = None,
+        failures: dict[str, str] | None = None,
+        error_trees: dict[str, str] | None = None,
+        candidate_hash: str = "",
+    ) -> CandidateValidation:
+        return CandidateValidation(
+            ok=False,
+            stage=stage,
+            variant=variant,
+            command=list(command or []),
+            exit_code=exit_code,
+            errors=list(errors),
+            fingerprint=_fingerprint_errors(stage, variant, errors),
+            stderr_tail=stderr_tail,
+            variants=list(variants or []),
+            failures=dict(failures or {}),
+            error_trees=dict(error_trees or {}),
+            candidate_hash=candidate_hash,
+            cycle=cycle,
+            log_dir=str(log_dir),
+        )
+
+    def _validate_candidate(
+        self,
+        run_id: str,
+        code_dir: Path,
+        *,
+        cycle: int,
+        fallback_names: list[str],
+        log_dir: Path | None = None,
+        artifact_path: str | None = None,
+    ) -> CandidateValidation:
+        """Staged host validation of `output/` before any promotion."""
+        smoke_dir = log_dir or active_artifact_dir(run_id, smoke_test_dir(run_id))
+        smoke_dir.mkdir(parents=True, exist_ok=True)
+        candidate_hash = _hash_staged_deliverable(code_dir)
+
+        entry = code_dir / _ENTRY_POINT
+        if not entry.is_file():
+            return self._failed_validation(
+                stage="deliverable",
+                errors=[f"missing entry point {_ENTRY_POINT}"],
+                cycle=cycle,
+                log_dir=smoke_dir,
+                candidate_hash=candidate_hash,
+            )
+
+        discovered = _discover_variant_names(code_dir)
+        variant_names = discovered or list(fallback_names)
+        if not variant_names:
+            return self._failed_validation(
+                stage="deliverable",
+                errors=[
+                    (
+                        f"{_ENTRY_POINT} did not expose a discoverable --method choices list "
+                        "and no fallback variant names were provided"
+                    )
+                ],
+                cycle=cycle,
+                log_dir=smoke_dir,
+                candidate_hash=candidate_hash,
+            )
+
+        missing_contract = [
+            name
+            for name in (_REQUIREMENTS_FILE, _ASSUMPTIONS_FILE)
+            if not (code_dir / name).is_file()
+        ]
+        if missing_contract:
+            return self._failed_validation(
+                stage="deliverable",
+                errors=[f"missing contract file: {name}" for name in missing_contract],
+                cycle=cycle,
+                log_dir=smoke_dir,
+                candidate_hash=candidate_hash,
+            )
+
+        static_error = self._compile_staged_python(code_dir)
+        if static_error:
+            return self._failed_validation(
+                stage="static",
+                errors=[static_error],
+                cycle=cycle,
+                log_dir=smoke_dir,
+                stderr_tail=self._tail(static_error),
+                candidate_hash=candidate_hash,
+            )
+
+        return self._run_smoke_and_metrics(
+            run_id,
+            code_dir,
+            variant_names,
+            cycle=cycle,
+            log_dir=smoke_dir,
+            candidate_hash=candidate_hash,
+            artifact_path=artifact_path,
+        )
+
+    def _compile_staged_python(self, code_dir: Path) -> str:
+        """Syntax-check every staged .py file.
+
+        Deliberately in-process (``compile()``) rather than shelling out to
+        ``sys.executable -m compileall``: under a frozen desktop host,
+        ``sys.executable`` resolves to the host launcher binary, which has no
+        ``-m`` module-runner and no bundled ``compileall`` -- the subprocess
+        always failed with ImportError there regardless of whether the staged
+        code was actually valid. Compiling in-process needs no interpreter
+        subprocess at all, so it works the same from source and from the
+        packaged build.
+        """
+        py_files = [
+            path
+            for path in code_dir.rglob("*.py")
+            if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts
+        ]
+        if not py_files:
+            return "no Python files to compile"
+        errors: list[str] = []
+        for path in py_files:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"{path}: {exc}")
+                continue
+            try:
+                compile(source, str(path), "exec")
+            except SyntaxError as exc:
+                errors.append(f"{path}:{exc.lineno}: {exc.msg}")
+        if not errors:
+            return ""
+        return self._tail("\n".join(errors))
+
+    def _run_smoke_and_metrics(
+        self,
+        run_id: str,
+        code_dir: Path,
+        variant_names: list[str],
+        *,
+        cycle: int,
+        log_dir: Path,
+        candidate_hash: str,
+        artifact_path: str | None = None,
+    ) -> CandidateValidation:
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import (
+            _variant_env,
+        )
+
+        variants = [
+            ImplementedVariant(name=name, invocation=[sys.executable, _ENTRY_POINT, "--method", name])
+            for name in variant_names
+        ]
+        module_cfg = self.config.get("code_implementation", {}) or {}
+        timeout = module_cfg.get("smoke_test_timeout_seconds")
+        failures: dict[str, str] = {}
+        error_trees: dict[str, str] = {}
+        first_stage = "smoke"
+        first_variant = ""
+        first_command: list[str] = []
+        first_exit: int | None = None
+        first_stderr = ""
+        errors: list[str] = []
+
+        for variant in variants:
+            metrics_path = (log_dir / f"{variant.name}.metrics.json").resolve()
+            log_path = log_dir / f"{variant.name}.log"
+            command = [*variant.invocation, "--smoke-test", "--output", str(metrics_path)]
+            try:
+                proc = subprocess.run(
+                    command,
+                    cwd=code_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    env=_variant_env(artifact_path),
+                )
+                log_path.write_text(
+                    f"$ {' '.join(command)}\n\n--- stdout ---\n{proc.stdout}\n"
+                    f"--- stderr ---\n{proc.stderr}",
+                    encoding="utf-8",
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                stdout = getattr(exc, "stdout", "") or ""
+                stderr = getattr(exc, "stderr", "") or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                log_path.write_text(
+                    f"$ {' '.join(command)}\n\n--- execution failed ---\n{exc}",
+                    encoding="utf-8",
+                )
+                tree = python_error_tree(stderr) or python_error_tree(stdout)
+                detail = f"execution failed: {exc}"
+                if tree:
+                    detail = f"{detail}\n{tree}"
+                    error_trees[variant.name] = tree
+                failures[variant.name] = detail
+                errors.append(f"{variant.name}: {detail}")
+                if not first_variant:
+                    first_stage = "smoke"
+                    first_variant = variant.name
+                    first_command = command
+                    first_stderr = detail
+                continue
+
+            tree = python_error_tree(proc.stderr) or python_error_tree(proc.stdout)
+            diagnostic = tree or self._tail(proc.stderr) or self._tail(proc.stdout)
+            if proc.returncode != 0:
+                detail = f"exit_code={proc.returncode}\n{diagnostic or '(no output captured)'}"
+                failures[variant.name] = detail
+                if tree:
+                    error_trees[variant.name] = tree
+                errors.append(f"{variant.name}: exit_code={proc.returncode}")
+                if not first_variant:
+                    first_stage = "smoke"
+                    first_variant = variant.name
+                    first_command = command
+                    first_exit = proc.returncode
+                    first_stderr = diagnostic
+                continue
+
+            metrics, metrics_state = self._resolve_smoke_metrics(
+                proc.stdout, metrics_path, variant.name
+            )
+
+            contract = validate_metrics_contract(
+                metrics, expected_method=variant.name, metrics_state=metrics_state
+            )
+            if contract.ok:
+                smoke_path = validate_smoke_live_path(metrics)
+                if not smoke_path.ok:
+                    contract = smoke_path
+            if not contract.ok:
+                detail = "; ".join(contract.errors) or contract.reason
+                failures[variant.name] = (
+                    f"metrics contract failed: {detail}\n{diagnostic or ''}"
+                ).strip()
+                errors.extend(f"{variant.name}: {item}" for item in contract.errors)
+                if not first_variant:
+                    first_stage = "metrics"
+                    first_variant = variant.name
+                    first_command = command
+                    first_exit = proc.returncode
+                    first_stderr = diagnostic or detail
+
+        if failures:
+            return self._failed_validation(
+                stage=first_stage,
+                errors=errors or [f"smoke test failed for: {', '.join(failures)}"],
+                cycle=cycle,
+                log_dir=log_dir,
+                variant=first_variant,
+                command=first_command,
+                exit_code=first_exit,
+                stderr_tail=first_stderr,
+                variants=variants,
+                failures=failures,
+                error_trees=error_trees,
+                candidate_hash=candidate_hash,
+            )
+        return CandidateValidation(
+            ok=True,
+            stage="metrics",
+            variants=variants,
+            candidate_hash=candidate_hash,
+            cycle=cycle,
+            log_dir=str(log_dir),
+        )
+
+    def _run_smoke_tests(
+        self, run_id: str, code_dir: Path, variant_names: list[str]
+    ) -> tuple[bool, list[ImplementedVariant], dict[str, str]]:
+        """Back-compat wrapper around staged smoke+metrics validation."""
+        validation = self._validate_candidate(
+            run_id, code_dir, cycle=1, fallback_names=variant_names
+        )
+        return validation.ok, validation.variants, validation.failures
+
+    @staticmethod
+    def _build_validation_repair_prompt(validation: CandidateValidation | None) -> str:
+        if validation is None:
+            return (
+                "Host validation failed before a structured result was recorded. "
+                "Inspect `output/run.py`, make a targeted repair, and leave an updated "
+                "`output/` for the host to re-validate.\n"
+            )
+        command = " ".join(validation.command) if validation.command else "(not run)"
+        errors = "\n".join(f"- {item}" for item in validation.errors) or "- (none)"
+        failures = "\n\n".join(
+            f"--- {name} ---\n{detail}" for name, detail in validation.failures.items()
+        ) or "(none)"
+        repeated_note = ""
+        if validation.skipped_redundant_smoke:
+            repeated_note = (
+                "The staged deliverable hash and failure fingerprint are unchanged. "
+                "Do not rerun the same check hoping it will change. Edit the failing code.\n\n"
+            )
+        elif validation.repeated and validation.stage != "metrics":
+            repeated_note = (
+                "This failure fingerprint has survived a changed candidate twice. "
+                "Isolate the smallest failing SDK call and inspect the exact local "
+                "OpenJiuwen reference with `openjiuwen_ref_read_file` before editing again.\n\n"
+            )
+        if validation.stage == "metrics":
+            repeated_note += (
+                "Repair the JSON written to the exact --output path above using the errors below. "
+                "For smoke, use top-level n_questions=1, per_question=[<one real item-result object>] "
+                "and model_call_count >= 1. task_records, records and item_records are accepted "
+                "aliases for per_question; a console SMOKE_OK message is not a metrics record. "
+                "Preserve real model calls and results; do not fabricate records to pass validation. "
+                "For schema/field errors, inspect the metrics writer, not SDK reference docs.\n\n"
+            )
+        return (
+            "Host validation of `output/` failed. Do not restart the implementation. "
+            "Make a targeted repair and leave an updated `output/`.\n\n"
+            f"{repeated_note}"
+            f"Failing stage: {validation.stage or '(unknown)'}\n"
+            f"Failing variant: {validation.variant or '(none)'}\n"
+            f"Host command: {command}\n"
+            f"Exit code: {validation.exit_code if validation.exit_code is not None else '(n/a)'}\n"
+            f"Failure fingerprint: {validation.fingerprint or '(none)'}\n"
+            f"Repeated: {'yes' if validation.repeated else 'no'}\n"
+            f"Candidate hash: {validation.candidate_hash or '(none)'}\n"
+            f"Cycle: {validation.cycle}\n\n"
+            f"Metrics-contract / validation errors:\n{errors}\n\n"
+            f"Bounded stderr/traceback:\n{validation.stderr_tail or '(none)'}\n\n"
+            f"Per-variant failures:\n{failures}\n"
+        )
+
+    @staticmethod
+    def _promotion_failure_output(
+        plan: ExperimentPlan,
+        code_dir: Path,
+        validation: CandidateValidation,
+        agent_message: str,
+        exc: BaseException,
+    ) -> CodeImplementationOutput:
+        files: list[str] = []
+        if code_dir.exists():
+            files = sorted(
+                str(path.relative_to(code_dir))
+                for path in code_dir.rglob("*")
+                if path.is_file() and ".git" not in path.parts
+            )
+        notes = (
+            f"promotion failed after a passing candidate; previous generated_code/ retained.\n"
+            f"{validation.summary()}\n"
+            f"{type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}\n"
+            f"Agent's final message: {agent_message}"
+        )
+        return CodeImplementationOutput(
+            implementation=CodeImplementationManifest(
+                run_id=plan.run_id,
+                workspace_dir=str(code_dir),
+                files=files,
+                variants=list(validation.variants),
+                smoke_test_passed=True,
+                status="failed",
+                readiness="promotion_failed",
+                smoke_failures={"promotion": f"{type(exc).__name__}: {exc}"},
+                error_trees=dict(validation.error_trees),
+                notes=notes,
+            )
+        )
+
+    def _build_output(
+        self,
+        plan: ExperimentPlan,
+        code_dir: Path,
+        variant_names: list[str],
+        agent_message: str,
+        *,
+        validation: CandidateValidation | None = None,
+        workspace_dir: str | None = None,
+    ) -> CodeImplementationOutput:
+        if validation is None:
+            validation = self._validate_candidate(
+                plan.run_id, code_dir, cycle=1, fallback_names=variant_names
+            )
+        files: list[str] = []
+        if code_dir.exists():
+            files = sorted(
+                str(path.relative_to(code_dir))
+                for path in code_dir.rglob("*")
+                if path.is_file() and ".git" not in path.parts
+            )
+        dependencies = self._read_list_file(code_dir / _REQUIREMENTS_FILE)
+        assumptions = self._read_list_file(code_dir / _ASSUMPTIONS_FILE)
+        smoke_test_passed = validation.ok
+        status = "ready" if smoke_test_passed else "failed"
+        failures = dict(validation.failures)
+        if status == "ready":
+            notes = (
+                f"{validation.summary()}\n"
+                if validation.cycle > 1 or validation.candidate_hash
+                else ""
+            )
+        else:
+            failure_blocks = "\n\n".join(
+                f"--- {name} ---\n{detail}" for name, detail in failures.items()
+            )
+            error_block = "\n".join(f"- {item}" for item in validation.errors)
+            log_dir = validation.log_dir or active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id))
+            notes = (
+                f"{validation.summary()}\n"
+                f"{error_block}\n\n"
+                f"{failure_blocks}\n\n"
+                f"Full logs under {log_dir}. "
+                f"Agent's final message: {agent_message}"
+            )
+        manifest = CodeImplementationManifest(
+            run_id=plan.run_id,
+            workspace_dir=workspace_dir or str(code_dir),
+            files=files,
+            variants=list(validation.variants),
+            dependencies=dependencies,
+            assumptions=assumptions,
+            smoke_test_passed=smoke_test_passed,
+            status=status,
+            readiness="smoke_ready" if status == "ready" else "failed",
+            smoke_failures=failures,
+            error_trees=dict(validation.error_trees),
+            notes=notes.strip(),
+            code_commit=current_commit(code_dir) if smoke_test_passed else "",
+        )
+        return CodeImplementationOutput(implementation=manifest)
+
+    @staticmethod
+    def _read_list_file(path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        return [
+            line.lstrip("-*").strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]

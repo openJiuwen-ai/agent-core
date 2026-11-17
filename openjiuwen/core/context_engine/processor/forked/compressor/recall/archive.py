@@ -18,7 +18,14 @@ from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     INTERNAL_USER_PREFIXES,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    AssistantMessage,
+    BaseMessage,
+    ToolMessage,
+    UserMessage,
+)
 
 ARCHIVE_SCHEMA_VERSION = 1
 DEFAULT_CHUNK_SIZE_TOKENS = 3_000
@@ -469,6 +476,14 @@ def _latest_non_empty_query(turns: list[_Turn]) -> str:
 
 def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(message, UserMessage):
+        return False
+    metadata = getattr(message, "metadata", None)
+    if (
+        isinstance(metadata, dict)
+        and metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA) == OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL
+    ):
+        # Harness-injected user messages (e.g. the multimodal tool-image
+        # bridge) are not genuine user turns for turn grouping either.
         return False
     content = _content_to_query_text(message.content).lstrip()
     return not content.startswith(INTERNAL_USER_PREFIXES)

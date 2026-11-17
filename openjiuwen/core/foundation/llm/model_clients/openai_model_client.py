@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import os
 import re
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
@@ -368,6 +369,71 @@ def _parse_gateway_stream_line(line: str) -> Optional[AssistantMessageChunk]:
         reasoning_content=reasoning_content,
         finish_reason=finish_reason,
     )
+
+
+# finish_reason values treated as "missing" across the codebase: the OpenAI SDK
+# yields None, some gateways send explicit null, and the local chunk parser
+# normalizes absence to the string "null" (see _parse_stream_chunk above).
+_FINISH_REASON_MISSING_VALUES = (None, "", "null")
+
+
+def _finish_reason_normalize_enabled() -> bool:
+    """Whether a stream ending without any finish_reason is normalized to
+    "length" (default) so downstream truncation machinery engages. Observation
+    (warning log + metadata detail) is NOT gated by this switch."""
+    return os.getenv("OPENJIUWEN_FINISH_REASON_NORMALIZE", "true").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _tool_call_arguments_complete(tool_calls: Any) -> bool:
+    """Whether every streamed tool call carries complete JSON arguments.
+
+    A gateway cut mid-arguments leaves a fragment such as ``{"tasks":["a","b"``;
+    normalizing that turn to "tool_calls" would let downstream bracket-repair
+    silently complete the JSON and execute partial side effects. Empty or
+    non-string arguments count as complete (nothing streamed for them / already
+    parsed).
+    """
+    for call in tool_calls or []:
+        if isinstance(call, dict):
+            fn = call.get("function")
+            arguments = fn.get("arguments") if isinstance(fn, dict) else None
+            if arguments is None:
+                arguments = call.get("arguments")
+        else:
+            fn = getattr(call, "function", None)
+            arguments = getattr(fn, "arguments", None) if fn is not None else None
+            if arguments is None:
+                arguments = getattr(call, "arguments", None)
+        if not isinstance(arguments, str):
+            continue
+        if not arguments.strip():
+            continue
+        try:
+            json.loads(arguments)
+        except ValueError:
+            return False
+    return True
+
+
+def _normalize_missing_finish_reason(msg: Any) -> Tuple[str, Optional[str]]:
+    """Return (finish_reason, detail) for a final accumulated message.
+
+    detail is None when the provider supplied a real finish_reason. When it is
+    missing (connection closed cleanly without a terminal chunk), detail is
+    "gateway_cut" and the normalized value is "tool_calls" only if the stream
+    produced tool_calls whose arguments all parse as complete JSON (arguments
+    truncated mid-stream fall back to "length" so the truncation machinery
+    retries the call instead of executing repaired fragments), otherwise
+    "length".
+    """
+    finish_reason = getattr(msg, "finish_reason", None)
+    if finish_reason not in _FINISH_REASON_MISSING_VALUES:
+        return finish_reason, None
+    if getattr(msg, "tool_calls", None) and _tool_call_arguments_complete(msg.tool_calls):
+        return "tool_calls", "gateway_cut"
+    return "length", "gateway_cut"
 
 
 class OpenAIModelClient(BaseModelClient):
@@ -1820,6 +1886,7 @@ class OpenAIModelClient(BaseModelClient):
                 params["timeout"] = timeout
 
             final_message = None
+            chunk_count = 0
             if self._uses_affinity_gateway() and not output_parser:
                 async for parsed_chunk in self._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
                         params,
@@ -1833,6 +1900,7 @@ class OpenAIModelClient(BaseModelClient):
                         final_message = final_message + parsed_chunk
                     else:
                         final_message = parsed_chunk
+                    chunk_count += 1
                     yield parsed_chunk
             else:
                 response_stream = await self._create_chat_completion_with_disabled_thinking_fallback(
@@ -1850,6 +1918,7 @@ class OpenAIModelClient(BaseModelClient):
                             final_message = final_message + parsed_result
                         else:
                             final_message = parsed_result
+                        chunk_count += 1
                         yield parsed_result
                 else:
                     async for chunk in response_stream:
@@ -1863,7 +1932,48 @@ class OpenAIModelClient(BaseModelClient):
                                 final_message = final_message + parsed_chunk
                             else:
                                 final_message = parsed_chunk
+                            chunk_count += 1
                             yield parsed_chunk
+
+            # A stream that ends cleanly but never delivered a finish_reason
+            # chunk was cut mid-generation (gateway budget/rate cut, proxy
+            # idle timeout, LB node removal, ...). Timeout / connection-reset
+            # failures raise instead and never reach this point. Record the
+            # real cause for observability (not switch-gated), and normalize
+            # the terminal state so downstream truncation machinery engages.
+            if final_message is not None:
+                normalized_fr, cut_detail = _normalize_missing_finish_reason(final_message)
+                if cut_detail is not None:
+                    normalize_enabled = _finish_reason_normalize_enabled()
+                    final_message.metadata = {
+                        **(final_message.metadata or {}),
+                        "finish_reason_detail": cut_detail,
+                    }
+                    if normalize_enabled:
+                        final_message.finish_reason = normalized_fr
+                    llm_logger.warning(
+                        "finish_reason missing at stream end; stream likely cut "
+                        "by gateway/proxy",
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider,
+                        is_stream=True,
+                        chunks=chunk_count,
+                        content_chars=len(final_message.content or ""),
+                        tool_calls=len(final_message.tool_calls or []),
+                        normalized_to=normalized_fr,
+                        normalize_enabled=normalize_enabled,
+                        detail=cut_detail,
+                    )
+                    if normalize_enabled:
+                        # Consumers accumulate the chunks yielded above (this
+                        # generator's local final_message is not returned), so
+                        # re-emit the correction as a content-free final chunk:
+                        # __add__ merges only finish_reason + metadata.
+                        yield AssistantMessageChunk(
+                            content="",
+                            finish_reason=normalized_fr,
+                            metadata=dict(final_message.metadata),
+                        )
 
             if tracer_record_data:
                 await tracer_record_data(llm_response=final_message)

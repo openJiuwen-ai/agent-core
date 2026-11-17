@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from openjiuwen.agent_teams.workflow.engine import (
     MockBackend,
     ProgressKind,
@@ -19,8 +21,6 @@ from openjiuwen.agent_teams.workflow.engine import (
     run_workflow,
 )
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
-
-import pytest
 
 _FANOUT_SCRIPT = '''
 from swarmflow import agent, parallel, phase, log
@@ -113,6 +113,49 @@ def test_run_with_mock_backend_and_progress_events(tmp_path):
     assert started and started[0].phase == "Greet" and started[0].prompt == "say hi"
 
 
+def test_workflow_started_carries_script_path(tmp_path):
+    """WORKFLOW_STARTED carries the absolute script path for cold-start resume advisory."""
+    script = _write(tmp_path, "metaonly.py", 'META = {"name": "m", "description": "d"}\nasync def run(args):\n    return 1\n')
+    events: list[WorkflowProgressEvent] = []
+
+    asyncio.run(
+        run_workflow(str(script), backend=MockBackend(), progress_sink=events.append)
+    )
+
+    started = events[0]
+    assert started.kind == ProgressKind.WORKFLOW_STARTED
+    assert started.script_path == str(script)
+
+
+_ARGS_ECHO_SCRIPT = '''
+META = {"name": "argsecho", "description": "echo args", "phases": []}
+
+async def run(args):
+    return args
+'''
+
+
+def test_cold_start_resume_recovers_args(tmp_path):
+    """A cold-start resume recovers the launch args from the run-level journal record."""
+    script = _write(tmp_path, "argsecho.py", _ARGS_ECHO_SCRIPT)
+    journal_path = str(tmp_path / "journal.jsonl")
+
+    first = asyncio.run(run_workflow(
+        str(script), backend=MockBackend(), args="hello",
+        run_id="wf_args1", journal_path=journal_path, resume=journal_path,
+    ))
+    assert first == "hello"
+
+    # Second run omits args (mirrors the advisory template: resume_id + script_path).
+    second = asyncio.run(run_workflow(
+        str(script), backend=MockBackend(), args=None,
+        run_id="wf_args1", journal_path=journal_path, resume=journal_path,
+    ))
+    assert second == "hello"  # recovered from __run__:args, not run with None
+
+
+
+
 _FOR_LOOP_SAME_LABEL_SCRIPT = '''
 from swarmflow import agent, parallel
 
@@ -174,7 +217,9 @@ def test_resume_replays_from_journal_without_backend(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+        async def run(
+            self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+        ) -> AgentResult:
             self.calls += 1
             if schema_json is not None:
                 return AgentResult(structured={"msg": f"r{self.calls}"})
@@ -347,14 +392,23 @@ def test_load_workflow_meta_rejects_non_literal_meta(tmp_path):
         load_workflow_meta(str(script))
 
 
-# ── isolation / agent_type pass-through + per-call fan-out cap ──────────────
+# ── isolation pass-through + per-call fan-out cap ──────────────
 _ISOLATION_SCRIPT = '''
 from swarmflow import agent
 
-META = {"name": "iso", "description": "isolation + agent_type pass-through", "phases": []}
+META = {"name": "iso", "description": "isolation pass-through", "phases": []}
 
 async def run(args):
-    return await agent("hi", label="iso", options={"isolation": "worktree", "agent_type": "Explore"})
+    return await agent("hi", label="iso", options={"isolation": "worktree"})
+'''
+
+_AGENT_TYPE_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "atype", "description": "agent_type rejected", "phases": []}
+
+async def run(args):
+    return await agent("hi", label="ext", options={"agent_type": "codex"})
 '''
 
 _OVERLIMIT_PARALLEL_SCRIPT = '''
@@ -376,26 +430,165 @@ async def run(args):
 '''
 
 
-def test_agent_accepts_isolation_and_agent_type(tmp_path):
-    """isolation / agent_type are accepted on the surface (a no-op in the reference engine)."""
+def test_agent_accepts_isolation(tmp_path):
+    """isolation is accepted on the surface (a no-op in the reference engine)."""
     script = _write(tmp_path, "iso.py", _ISOLATION_SCRIPT)
     result = asyncio.run(run_workflow(script, backend=MockBackend()))
     assert result is not None
 
 
+def test_agent_rejects_agent_type(tmp_path):
+    """agent_type is not part of this build — unknown option fail-fast."""
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    script = _write(tmp_path, "atype.py", _AGENT_TYPE_SCRIPT)
+    with pytest.raises(EngineError, match="unknown option"):
+        asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
 def test_parallel_rejects_fan_out_beyond_cap(tmp_path):
     """A single parallel() above the per-call cap is an explicit error, not silent truncation."""
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 
     script = _write(tmp_path, "over_par.py", _OVERLIMIT_PARALLEL_SCRIPT)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=MockBackend()))
 
 
 def test_pipeline_rejects_fan_out_beyond_cap(tmp_path):
     """A single pipeline() above the per-call cap is an explicit error too."""
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 
     script = _write(tmp_path, "over_pipe.py", _OVERLIMIT_PIPELINE_SCRIPT)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
+# ── reported model flows into AGENT_COMPLETED / AGENT_FAILED ─────────────────
+_ONE_AGENT_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "one", "description": "single agent", "phases": []}
+
+async def run(args):
+    return await agent("say ok", label="x")
+'''
+
+
+def test_agent_completed_carries_reported_model(tmp_path):
+    """A backend reporting a model puts it on the AGENT_COMPLETED event."""
+    class _ModelBackend(AgentBackend):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            return AgentResult(text="ok", model="GLM-5.3")
+
+    script = _write(tmp_path, "model_ok.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=_ModelBackend(), progress_sink=events.append))
+
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(completed) == 1
+    assert completed[0].model == "GLM-5.3"
+
+
+def test_agent_failed_carries_reported_model(tmp_path):
+    """A backend error carrying a model puts it on the AGENT_FAILED event."""
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+
+    class _FailingModelBackend(AgentBackend):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            raise BackendError("model call failed", model="gpt-5.5")
+
+    script = _write(tmp_path, "model_fail.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=_FailingModelBackend(), progress_sink=events.append))
+
+    failed = [e for e in events if e.kind == ProgressKind.AGENT_FAILED]
+    assert len(failed) == 1
+    assert failed[0].model == "gpt-5.5"
+
+
+def test_native_result_leaves_reported_model_none(tmp_path):
+    """A backend that never reports a model leaves the field None (native semantics)."""
+    script = _write(tmp_path, "native.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(completed) == 1
+    assert completed[0].model is None
+
+
+def test_agent_started_carries_agent_template_and_display_name(tmp_path):
+    """AGENT_STARTED names the picked expert (member name + backend-described display name);
+    a plain call leaves both None."""
+    from openjiuwen.agent_teams.workflow.engine import run_workflow
+    from openjiuwen.agent_teams.workflow.engine.backends.mock import MockBackend
+
+    class _ExpertMock(MockBackend):
+        KNOWN_OPTIONS = frozenset({"agent_template"})
+
+        def describe_agent_template(self, opts):
+            return {"clip": "视频镜头师"}.get(opts.get("agent_template") or "")
+
+    script = tmp_path / "exp.py"
+    script.write_text(
+        'from swarmflow import agent\n'
+        'META = {"name": "exp", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    a = await agent("one", label="a", options={"agent_template": "clip"})\n'
+        '    b = await agent("two", label="b")\n'
+        '    return [a, b]\n',
+        encoding="utf-8",
+    )
+    events: list = []
+    asyncio.run(run_workflow(str(script), backend=_ExpertMock(), progress_sink=events.append))
+    started = {e.label: e for e in events if e.kind == "agent_started"}
+    assert started["a"].agent_template == "clip" and started["a"].display_name == "视频镜头师"
+    assert started["b"].agent_template is None and started["b"].display_name is None
+
+
+def test_non_string_agent_template_is_rejected_by_engine(tmp_path):
+    """A non-string agent_template fails the run in the engine, before any agent starts."""
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    script = _write(
+        tmp_path,
+        "badtpl.py",
+        'from swarmflow import agent\n'
+        'META = {"name": "badtpl", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    return await agent("one", label="a", options={"agent_template": 123})\n',
+    )
+    events: list = []
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+    assert "agent_template" in str(exc.value)
+    assert not [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+
+
+def test_non_string_agent_template_is_rejected_on_the_session_path(tmp_path):
+    """The same _build_opts validator covers agent_session().send()."""
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    script = _write(
+        tmp_path,
+        "badtplsession.py",
+        'from swarmflow import agent_session\n'
+        'META = {"name": "badtplsession", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    s = agent_session(label="chat", options={"agent_template": 123})\n'
+        '    return await s.send("x")\n',
+    )
+    events: list = []
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+    assert "agent_template" in str(exc.value)
+    assert not [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+
+
+def test_team_event_schema_carries_expert_fields():
+    from openjiuwen.agent_teams.schema.events import WorkflowProgressTeamEvent
+
+    ev = WorkflowProgressTeamEvent(team_name="t", kind="agent_started", agent_template="clip", display_name="X")
+    assert ev.agent_template == "clip" and ev.display_name == "X"
+    assert WorkflowProgressTeamEvent(team_name="t", kind="agent_started").agent_template is None

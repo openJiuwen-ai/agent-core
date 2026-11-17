@@ -559,6 +559,25 @@ def _resolve_legacy_path(raw_path: str, package_dir: Path) -> Path:
     return candidate.resolve(strict=True)
 
 
+def build_unversioned_plugin_spec(payload: dict[str, Any], package_dir: Path) -> PluginSpec:
+    """Build a PluginSpec from an unversioned Harness manifest and its sidecars."""
+    normalized = dict(payload)
+    resources = normalized.pop("resources", {})
+    for key, value in resources.items():
+        _merge_items(normalized, key, value)
+    _merge_legacy_prompt_sections(normalized)
+    _drop_legacy_agent_control_fields(normalized)
+    _merge_sidecar_prompt_sections(normalized, package_dir)
+    for key in ("tools", "rails", "skills"):
+        _merge_list_file(normalized, package_dir / key / f"{key}.yaml", key)
+    normalized["skills"] = _normalize_skills(normalized.get("skills", []))
+    for key, kind in (("tools", "tool"), ("rails", "rail")):
+        normalized[key] = _normalize_resource_items(normalized.get(key, []), kind=kind, package_dir=package_dir)
+    normalized = {key: value for key, value in normalized.items() if key in PluginSpec.model_fields}
+    normalized.setdefault("id", normalized.get("name") or package_dir.name)
+    return PluginSpec.model_validate(normalized)
+
+
 def _normalize_legacy_plugin_yaml(manifest: Path) -> dict[str, Any]:
     payload = _load_yaml_mapping(manifest)
     package_dir = manifest.parent

@@ -51,49 +51,40 @@ Usage (Advanced - Direct Registration):
     await guardrail.register(Runner.callback_framework)
 """
 
-from openjiuwen.core.security.guardrail.enums import (
-    RiskLevel,
-    GuardrailContentType,
-)
-
 # Data Models
-from openjiuwen.core.security.guardrail.models import (
-    GuardrailResult,
-    RiskAssessment,
-)
-
 # Context and Parsers
-from openjiuwen.core.security.guardrail.context import (
-    GuardrailContext,
-    ModelOutputParser,
-    BertBinaryParser,
-    QwenGuardParser,
-)
-
 # Base Classes and Backends
-from openjiuwen.core.security.guardrail.backends import (
-    GuardrailBackend,
-    RuleBasedPromptInjectionBackend,
-    RuleBasedBackendConfig,
-    LLMPromptInjectionBackend,
-    LLMPromptInjectionBackendConfig,
+from agent_shield.detection import (
     APIModelBackend,
     APIModelBackendConfig,
+    BertBinaryParser,
+    GuardrailBackend,
+    GuardrailContentType,
+    GuardrailContext,
+    GuardrailResult,
+    LLMPromptInjectionBackend,
+    LLMPromptInjectionBackendConfig,
     LocalModelBackend,
     LocalModelBackendConfig,
+    ModelOutputParser,
+    QwenGuardParser,
+    RiskAssessment,
+    RiskLevel,
+    RuleBasedBackendConfig,
+    RuleBasedPromptInjectionBackend,
+    to_guardrail_result,
 )
-from openjiuwen.core.security.guardrail.guardrail import BaseGuardrail
+
+# Exceptions
+from openjiuwen.core.common.exception.errors import GuardrailError
+from openjiuwen.core.common.logging import logger
 
 # Builtin Guardrails
 from openjiuwen.core.security.guardrail.builtin import (
     PromptInjectionGuardrail,
     PromptInjectionGuardrailConfig,
 )
-
-# Exceptions
-from openjiuwen.core.common.exception.errors import GuardrailError
-
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.security.guardrail.guardrail import BaseGuardrail
 
 # Global reference to Runner (lazy import)
 _Runner = None
@@ -144,6 +135,7 @@ __all__ = [
     # Data Models
     "GuardrailResult",
     "RiskAssessment",
+    "to_guardrail_result",
     # Context and Parsers
     "GuardrailContext",
     "ModelOutputParser",

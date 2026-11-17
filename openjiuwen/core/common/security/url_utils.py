@@ -27,6 +27,9 @@ class UrlUtils:
             ip_address = socket.gethostbyname(hostname)
         except socket.error as e:
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="resolving IP address failed") from e
+        if os.getenv("SSRF_PROTECT_ENABLED", "true").lower() == "false":
+            # only if set SSRF_PROTECT_ENABLED to false, then allow inner ip
+            return
         if UrlUtils._is_inner_ipaddress(ip_address):
             raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="illegal ip address")
 

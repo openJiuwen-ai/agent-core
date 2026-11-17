@@ -173,6 +173,21 @@ def get_cached_image_support(llm) -> Optional[bool]:
     return _probe_results.get(key)
 
 
+def get_declared_image_support(llm) -> Optional[bool]:
+    """Return the per-model ``supports_vision`` declaration, or None when absent.
+
+    ``ModelClientConfig`` carries ``supports_vision`` as an optional field, so a
+    model entry may declare its native image capability explicitly. Precedence is:
+    an application-level ``enable_read_image_multimodal`` flag > this declaration
+    > the cached probe; a declaration is authoritative only while the flag is unset.
+    """
+    client_config = getattr(llm, "model_client_config", None)
+    if client_config is None:
+        return None
+    value = getattr(client_config, "supports_vision", None)
+    return value if isinstance(value, bool) else None
+
+
 def reset_image_support_cache() -> None:
     """Drop cached verdicts and pending probes. For tests and reconfiguration."""
     _probe_results.clear()

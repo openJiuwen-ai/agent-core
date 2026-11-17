@@ -17,7 +17,7 @@ It complements:
 |--------|------|
 | **`SecurityRail`** | Default harness rail: safety-oriented prompts / scope hints. |
 | **`PermissionInterruptRail`** | Runs on **`before_tool_call`** for **all tools**; `ask` uses the Confirm interrupt flow. |
-| **`PermissionEngine`** | Holds `permissions` policy and evaluates decisions. |
+| **`PermissionEngine` (agent-security)** | Holds `permissions` policy and evaluates decisions; core keeps only the rail caller. |
 | **`ToolPermissionHost`** | Injected by the app or CLI: YAML path, hot snapshot, ACP, persistence, workspace, optional channel gate and scene hook. |
 
 Runnable example (repo root):
@@ -94,7 +94,7 @@ For the built-in YAML writer, **`_resolve_agent_config_yaml_path`** uses **only*
 
 | Path | Notes |
 |------|--------|
-| `openjiuwen/harness/security/core.py` | `PermissionEngine` |
+| agent-security `agent_shield/tool_permission/engine.py` | `PermissionEngine` |
 | `openjiuwen/harness/security/host.py` | `ToolPermissionHost` |
 | `openjiuwen/harness/security/factory.py` | `build_permission_interrupt_rail` |
 | `openjiuwen/harness/rails/security/tool_security_rail.py` | `PermissionInterruptRail` |

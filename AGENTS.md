@@ -17,8 +17,10 @@ settings, and `Makefile` defines the common lint/test entry points.
   memory, retrieval, security, and system operations.
 - `openjiuwen/harness/`: coding-agent framework built on core
   primitives; includes prompts, rails, tools, subagents, task loop, and
-  workspace handling. Tool permission engine lives in `openjiuwen/harness/security/`;
-  prompt/tool security rails live in `openjiuwen/harness/rails/security/`.
+  workspace handling. Tool permission judgment lives in agent-security
+  (`agent_shield.tool_permission`); core keeps only the caller rail and host
+  contracts under `openjiuwen/harness/security/`. Prompt/tool security rails
+  live in `openjiuwen/harness/rails/security/`.
   Cross-repo contract index (which files are governed by jiuwenswarm
   specs S_01~S_21): `openjiuwen/harness/AGENTS.md` — read it before
   changing files listed there.

@@ -64,6 +64,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
+    get_declared_image_support,
     schedule_image_support_probe,
 )
 from openjiuwen.harness.rails import DeepAgentRail
@@ -253,6 +254,9 @@ class DeepAgent(BaseAgent):
         self._interaction_lease_hold = False
         self._interaction_started = False
         self._agent_ras_setting: Any = None
+        self._subagent_tool_binding = None
+        # Hosts set this before the first spawn. None uses SubagentRuntimeConfig defaults.
+        self.subagent_runtime_config = None
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
@@ -310,7 +314,13 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
+        if isinstance(config, DeepAgentConfig):
+            config.validate_iteration_policy()
         self._filter_disabled_tools(config)
+        from openjiuwen.harness.subagent_runtime.binding import current_tool_binding
+
+        # None outside a spawn frame clears a binding left by an earlier configure.
+        self._subagent_tool_binding = current_tool_binding()
         if self._deep_config is None:
             self._initial_configure(config)
         else:
@@ -478,6 +488,8 @@ class DeepAgent(BaseAgent):
         new_react_config.max_iterations = (
             sys.maxsize if config.enable_task_loop else config.max_iterations
         )
+        new_react_config.on_max_iterations = config.on_max_iterations
+        new_react_config.max_iterations_hard_limit = config.max_iterations_hard_limit
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -918,6 +930,14 @@ class DeepAgent(BaseAgent):
             return bool(cfg.enable_read_image_multimodal)
         if cfg.model is None:
             return None
+        declared = get_declared_image_support(cfg.model)
+        if declared is not None:
+            # A declared capability is authoritative: no probe round-trip and
+            # no "unknown" window where user uploads would look unsupported.
+            # Deliberately not written back into the config: reading the
+            # declaration is cheap, and latching it would turn the auto (None)
+            # state into an explicit verdict that outlives the declaration.
+            return declared
         cached = get_cached_image_support(cfg.model)
         if cached is None:
             return None
@@ -942,6 +962,8 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
+        react_config.on_max_iterations = cfg.on_max_iterations
+        react_config.max_iterations_hard_limit = cfg.max_iterations_hard_limit
         react_config.max_iterations = (
             sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         )
@@ -1071,6 +1093,18 @@ class DeepAgent(BaseAgent):
                 "[DeepAgent] no model configured; disabling read_file image multimodal",
             )
             config.enable_read_image_multimodal = False
+            return
+
+        declared = get_declared_image_support(config.model)
+        if declared is not None:
+            # Not written back into the config: read paths resolve the
+            # declaration on demand, and latching it here would freeze auto
+            # (None) into an explicit verdict the host never asked for.
+            logger.info(
+                "[DeepAgent] read_file image multimodal from model declaration "
+                "(supports_vision): %s",
+                declared,
+            )
             return
 
         cached = get_cached_image_support(config.model)
@@ -1262,6 +1296,16 @@ class DeepAgent(BaseAgent):
         Raises:
             BaseError: If subagent spec not found.
         """
+        from openjiuwen.harness.subagent_runtime.binding import FORK_TYPE, current_spawn_frame
+        from openjiuwen.harness.subagent_runtime.fork_build import build_fork_agent
+        from openjiuwen.harness.tools.subagent.type_aliases import canonicalize_subagent_type
+
+        frame = current_spawn_frame()
+        if canonicalize_subagent_type(subagent_type) == FORK_TYPE and frame is not None:
+            return self._bind_inherited_artifact_root(
+                build_fork_agent(frame, frame.task_description),
+            )
+
         spec = self._find_subagent_spec(subagent_type)
         if spec is None:
             raise build_error(
@@ -1363,6 +1407,17 @@ class DeepAgent(BaseAgent):
             # 默认 600s 偏短，提升至 1800s（30 分钟）。
             "completion_timeout": 1800.0,
         }
+        if frame is not None and not isinstance(spec, DeepAgent):
+            from openjiuwen.harness.subagent_runtime.fork_build import nested_runtime_overrides
+
+            create_kwargs.update(
+                nested_runtime_overrides(
+                    spec,
+                    child_depth=frame.child_depth,
+                    max_spawn_depth=frame.control.config.max_spawn_depth,
+                    language=str(getattr(self._deep_config, "language", None) or "cn"),
+                )
+            )
 
         # Inherit the parent's image-modality decision only when the child
         # reuses (or derives from) the parent model. A distinct model keeps

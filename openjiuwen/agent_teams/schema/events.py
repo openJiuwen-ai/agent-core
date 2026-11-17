@@ -12,6 +12,7 @@ from enum import Enum
 from typing import (
     Any,
     Dict,
+    Literal,
     Optional,
     Type,
 )
@@ -19,6 +20,34 @@ from typing import (
 from pydantic import BaseModel, Field
 
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
+
+# Inlined from the removed ``external_runtime_reliability`` module so event
+# payloads that still name these fields keep a closed schema without importing
+# the deleted swarmflow external-CLI reliability package.
+ExternalRuntimeFailureCategory = Literal[
+    "auth_required",
+    "quota_exceeded",
+    "rate_limited",
+    "request_rejected",
+    "server_unavailable",
+    "network_timeout",
+    "process_start_failed",
+    "sdk_error",
+    "unknown",
+]
+ExternalRuntimeAgentKind = str
+ExternalRuntimePhase = Literal["startup", "turn"]
+
+
+class ExternalRuntimeFailureReason(BaseModel):
+    """Structured reason for an external runtime failure (event payload only)."""
+
+    message: str = Field(default="", description="Raw SDK error message text")
+    sdk_error_type: str = Field(default="", description="SDK exception type name, if any")
+    sdk_error_code: str = Field(default="", description="SDK error code, if any")
+    http_status: int | None = Field(
+        default=None, description="HTTP status code of the failing call, if any"
+    )
 
 
 class TeamTopic(str, Enum):
@@ -118,6 +147,7 @@ class TeamEvent:
 
     # Reliability events
     ANOMALY_DETECTED = "anomaly_detected"
+    EXTERNAL_RUNTIME_RETRYING = "external_runtime_retrying"
 
     # Messaging events
     MESSAGE = "message"
@@ -418,12 +448,47 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     run_id: Optional[str] = Field(
         default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
     )
+    relaunch_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "How this run's launch differs from a fresh one: 'resume' (normal "
+            "pause→resume, the tree continues) or 'relaunch' (script-edit re-run "
+            "under the same run_id, the phase/agent structure is reset). None on "
+            "a fresh launch."
+        ),
+    )
+    executor: Optional[str] = Field(
+        default=None,
+        description=(
+            "Member name currently hosting the run, leader included (the "
+            "relaunch host when resumed). The single attribution key: narration "
+            "routing, completion injections and resume handoff all read it. "
+            "None only when no team context is available (or on legacy events)."
+        ),
+    )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
+    script_path: Optional[str] = Field(
+        default=None,
+        description="Absolute path of the script driving this run, on workflow_started. The "
+                    "embedder's snapshot reads it here so a cold-start resume can relaunch "
+                    "through resume_id + script_path.",
+    )
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
     prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
     model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
+    agent_type: Optional[str] = Field(
+        default=None,
+        description="External provider kind (claude / codex) on agent_started; None for native workers",
+    )
+    agent_template: Optional[str] = Field(
+        default=None,
+        description="AgentGroup member picked via options.agent_template on agent_started; None for the generic worker",
+    )
+    display_name: Optional[str] = Field(
+        default=None, description="Display name of that expert on agent_started; None when absent"
+    )
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
     text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")
     phases: Optional[list[PhasePlan]] = Field(
@@ -452,12 +517,132 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     budget: Optional[dict] = Field(
         default=None, description="Leader shared-pool snapshot {total,spent,remaining,scope,exhausted}."
     )
+    workflow_budget: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Per-run ledger snapshot (same shape as budget, scope=workflow); "
+            "None when the script declares no workflow_token_limit."
+        ),
+    )
+    budget_exhausted_scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which ledger actually triggered the workflow_failed: 'session' "
+            "or 'workflow'; None on non-budget failures. Frontend uses this "
+            "(not error-text matching) to decide the exhausted layer."
+        ),
+    )
     phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
     nested_phase: Optional[str] = Field(
         default=None, description="Display name (▸ name #N) inside a sub-workflow; prefer over phase for card matching."
     )
     parent_phase: Optional[str] = Field(
         default=None, description="Parent author phase name when this is a child phase declaration."
+    )
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Parent session's avatar member name on agent_started turns of a "
+            "fork child (node_type=agent_session_fork), so a UI can draw the "
+            "parent→child fork edge. Unique per session, so chained and "
+            "same-label forks resolve to the exact parent. None on non-fork nodes."
+        ),
+    )
+    member_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The session's avatar member name on session-node agent_started "
+            "turns (agent_session / agent_session_fork / human_session); the "
+            "join key for parent_session_id. None on one-shot agent()/human()."
+        ),
+    )
+    verify_reviewers: Optional[int] = Field(
+        default=None, description="Reviewer count, on verify_started / verify_completed (verify_settled alias)."
+    )
+    verify_verdict: Optional[str] = Field(
+        default=None,
+        description=(
+            "Verify round verdict on verify_completed: 'pass' / 'fail' / None "
+            "(undecided — a reviewer did not vote; never a silent pass)."
+        ),
+    )
+    verify_threshold: Optional[float] = Field(
+        default=None, description="Score-pool threshold, on verify_started / verify_completed."
+    )
+    verify_votes: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "Per-reviewer votes on verify_completed: "
+            "[{name, agent_id, kind, role, decision, score, feedback, voted}]; name mirrors the "
+            "reviewer agent node's label, agent_id its deterministic node id, role is display-only."
+        ),
+    )
+    verify_reviewer_labels: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Reviewer label roster on verify_started, in fan-out order — unique across "
+            "rounds (verify() prefixes each label with the round's base label). A UI "
+            "builds its verify container and pre-attaches child rows from this."
+        ),
+    )
+    verify_reviewer_roles: Optional[list[Optional[str]]] = Field(
+        default=None,
+        description=(
+            "Reviewer business role roster on verify_started, same fan-out order as "
+            "verify_reviewer_labels: verifier / inspector / challenger. Display-only — "
+            "judgement reads the vote kind, never a role."
+        ),
+    )
+    verify_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Node id on verify_started / verify_completed — the verify analog of "
+            "an agent node's agent_id (structural call position). Concurrent "
+            "same-label rounds stay distinct by this id; a UI folds same-label "
+            "rounds into one card xN, pairing started/completed by verify id."
+        ),
+    )
+    cache_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Prompt-cache-hit tokens on agent_completed (AgentResult.cache_tokens); "
+            "a subset of tokens, reported alongside, never billed twice."
+        ),
+    )
+    token_input: Optional[int] = Field(
+        default=None,
+        description=(
+            "Prompt input tokens on agent_completed (AgentResult.input_tokens); "
+            "display split of tokens, None when the provider reported no split."
+        ),
+    )
+    token_output: Optional[int] = Field(
+        default=None,
+        description=(
+            "Completion output tokens on agent_completed (AgentResult.output_tokens); "
+            "display split of tokens, None when the provider reported no split."
+        ),
+    )
+    activity_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "AGENT_ACTIVITY only: 'tool_call' / 'tool_result' — which half of the "
+            "activity pair this event carries."
+        ),
+    )
+    tool_call_id: Optional[str] = Field(
+        default=None,
+        description="AGENT_ACTIVITY only: pairs a tool_call with its tool_result.",
+    )
+    tool_name: Optional[str] = Field(
+        default=None,
+        description="AGENT_ACTIVITY only: the invoked tool's name.",
+    )
+    content: Optional[str] = Field(
+        default=None,
+        description=(
+            "AGENT_ACTIVITY only: 512-char args/result preview (engine-truncated)."
+        ),
     )
 
 
@@ -518,6 +703,28 @@ class AnomalyDetectedEvent(BaseEventMessage):
     peer_member: Optional[str] = Field(default=None, description="Peer member for team-level anomalies")
 
 
+class ExternalRuntimeRetryingEvent(BaseEventMessage):
+    """Published when a Claude/Codex SDK runtime is auto-retrying.
+
+    Member-scoped: ``member_name`` (from BaseEventMessage) is the retrying
+    member. Non-persistent progress signal — it does not end the current
+    round and does not change the member's final status.
+    """
+
+    agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the retry")
+    model: str = Field(default="", description="Effective model confirmed by the CLI or SDK, if known")
+    phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
+    category: ExternalRuntimeFailureCategory = Field(..., description="Failure category of the retrying error")
+    summary: str = Field(..., description="One-line description for human/LLM")
+    reason: ExternalRuntimeFailureReason = Field(
+        default_factory=ExternalRuntimeFailureReason,
+        description="Structured reason snapshot",
+    )
+    attempt: Optional[int] = Field(default=None, description="Retry attempt number, if known")
+    max_attempts: Optional[int] = Field(default=None, description="Max retry attempts, if known")
+    round_id: Optional[int] = Field(default=None, description="Member round id, None for startup")
+
+
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -557,6 +764,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
     TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
     TeamEvent.ANOMALY_DETECTED: AnomalyDetectedEvent,
+    TeamEvent.EXTERNAL_RUNTIME_RETRYING: ExternalRuntimeRetryingEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

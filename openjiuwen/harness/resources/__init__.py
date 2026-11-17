@@ -10,6 +10,12 @@ from openjiuwen.harness.resources.extension_loader import (
     load_plugin_package,
     normalize_package_mcps,
 )
+from openjiuwen.harness.resources.template_card import (
+    AgentTemplateCard,
+    load_agent_template_card,
+    parse_agent_template_card,
+    read_agent_template_card,
+)
 from openjiuwen.harness.resources.extension_resolver import (
     ExtensionParts,
     LoadRecord,
@@ -32,6 +38,7 @@ from openjiuwen.harness.schema.extension_spec import (
 )
 
 __all__ = [
+    "AgentTemplateCard",
     "AgentTemplateSpec",
     "ExtensionParts",
     "LoadRecord",
@@ -48,9 +55,12 @@ __all__ = [
     "SkillSpec",
     "find_agent_template_manifest",
     "find_plugin_manifest",
+    "load_agent_template_card",
     "load_agent_template_package",
     "load_plugin_package",
     "normalize_package_mcps",
+    "parse_agent_template_card",
+    "read_agent_template_card",
     "resolve_agent_template_parts",
     "resolve_plugin_parts",
 ]

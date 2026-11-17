@@ -4,14 +4,15 @@
 
 import os
 import shutil
-import subprocess
+import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
+from agent_shield.tool_permission import PermissionLevel, get_permission_manager
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import set_workspace
@@ -107,47 +108,33 @@ async def test_silent_command_empty_content(sys_op) -> None:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-# ── destructive warning ──────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_destructive_warning_present(sys_op) -> None:
-    tool = BashTool(sys_op)
-    # Run the amend inside a throwaway repo via workdir so it can never rewrite
-    # the real repository HEAD; we only assert the destructive warning surfaces.
-    repo = tempfile.mkdtemp()
-    try:
-        for setup in (
-            ["git", "init", "-q"],
-            ["git", "config", "user.email", "t@e2e.local"],
-            ["git", "config", "user.name", "t"],
-            ["git", "commit", "--allow-empty", "-q", "-m", "init"],
-        ):
-            subprocess.run(
-                setup, cwd=repo, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        # git commit --amend triggers a destructive warning, now prepended to content.
-        res = await tool.invoke({"command": "git commit --amend -m test", "workdir": repo})
-        assert "rewrite" in res.data["content"].lower()
-    finally:
-        shutil.rmtree(repo, ignore_errors=True)
-
-
 # ── injection blocked ────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_injection_backtick_blocked(sys_op) -> None:
-    tool = BashTool(sys_op)
-    res = await tool.invoke({"command": "echo `whoami`"})
-    assert res.success is False
-    assert "injection" in res.error.lower()
+_PERMISSION_CONFIG = {
+    "enabled": True,
+    "tools": {"bash": "allow"},
+    "package_builtin_rules": True,
+    "permission_mode": "strict",
+    "shell_allowlist": None,
+}
 
 
 @pytest.mark.asyncio
-async def test_injection_dollar_paren_blocked(sys_op) -> None:
-    tool = BashTool(sys_op)
-    res = await tool.invoke({"command": "echo $(id)"})
-    assert res.success is False
+async def test_injection_backtick_blocked() -> None:
+    result = await get_permission_manager().check_permission(
+        "bash", {"command": "echo `whoami`"}, config=_PERMISSION_CONFIG
+    )
+    assert result.permission == PermissionLevel.DENY
+    assert "injection" in (result.reason or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_injection_dollar_paren_blocked() -> None:
+    result = await get_permission_manager().check_permission(
+        "bash", {"command": "echo $(id)"}, config=_PERMISSION_CONFIG
+    )
+    assert result.permission == PermissionLevel.DENY
+    assert "injection" in (result.reason or "").lower()
 
 
 # ── workspace sandbox ─────────────────────────────────────────
@@ -277,9 +264,14 @@ async def test_small_output_not_persisted(sys_op) -> None:
 @pytest.mark.asyncio
 async def test_timeout_returns_collected_output(sys_op) -> None:
     tool = BashTool(sys_op)
-    # echo runs first, then sleep blows the 1s timeout: the kill must not drop
-    # the output already collected before it.
-    res = await tool.invoke({"command": "echo partial; sleep 5", "timeout": 1})
+    # print first, then block so the 1s timeout kills the process: the kill must
+    # not drop the output already collected before it. Using the interpreter
+    # avoids shell-dialect differences between cmd, bash, and Git Bash.
+    command = (
+        f'"{sys.executable}" -c '
+        f'"import time; print(\'partial\', flush=True); time.sleep(5)"'
+    )
+    res = await tool.invoke({"command": command, "timeout": 1})
     assert res.success is False
     assert "partial" in res.data["content"]
 
@@ -464,3 +456,151 @@ async def test_env_injected_into_subprocess(sys_op) -> None:
     })
     assert res.success is True
     assert "from-env" in res.data["content"]
+
+
+# ── Windows multiline empty-output guard ──────────────────────
+
+
+def _fake_empty_success_result(command: str, cwd: str, resolved_shell=None):
+    """Build an execute_cmd result that 'succeeded' with zero output.
+
+    ``resolved_shell`` mirrors what the shell operation reports about the shell
+    that actually ran the command (cmd /c drops all lines after the first yet
+    still exits 0)."""
+    from openjiuwen.core.sys_operation.result.shell_operation_result import (
+        ExecuteCmdData,
+        ExecuteCmdResult,
+    )
+
+    return ExecuteCmdResult(
+        code=0,
+        message="Command executed successfully",
+        data=ExecuteCmdData(
+            command=command,
+            cwd=cwd,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            resolved_shell=resolved_shell,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_windows_multiline_empty_output_returns_hint(monkeypatch, tmp_path):
+    """On Windows, a multiline command that cmd 'succeeds' on with zero output
+    must not be a silent empty success: the model would retry the identical call."""
+    import openjiuwen.harness.tools.shell.bash._tool as bash_tool_mod
+
+    monkeypatch.setattr(bash_tool_mod.os, "name", "nt", raising=False)
+
+    command = "cd \"E:/work\" && python -c \"\nprint('hi')\n\""
+    op = MagicMock()
+    op.shell.return_value.execute_cmd = AsyncMock(
+        return_value=_fake_empty_success_result(command, str(tmp_path), resolved_shell="cmd"),
+    )
+
+    tool = BashTool(op)
+    res = await tool.invoke({"command": command, "workdir": str(tmp_path)})
+
+    assert res.success is True
+    assert res.data["content"] != "", (
+        "multiline empty output resolved to cmd must carry an actionable hint"
+    )
+    assert "cmd" in res.data["content"] or "多行" in res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_windows_multiline_empty_output_stays_empty_for_bash(monkeypatch, tmp_path):
+    """A multiline command actually run by bash can legitimately produce no
+    output; claiming cmd truncated it would be a false diagnosis."""
+    import openjiuwen.harness.tools.shell.bash._tool as bash_tool_mod
+
+    monkeypatch.setattr(bash_tool_mod.os, "name", "nt", raising=False)
+
+    command = "cd /e/work\nmkdir -p out"
+    op = MagicMock()
+    op.shell.return_value.execute_cmd = AsyncMock(
+        return_value=_fake_empty_success_result(command, str(tmp_path), resolved_shell="bash"),
+    )
+
+    tool = BashTool(op)
+    res = await tool.invoke({"command": command, "workdir": str(tmp_path)})
+
+    assert res.success is True
+    assert res.data["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_windows_multiline_empty_output_stays_empty_for_explicit_powershell(monkeypatch, tmp_path):
+    """Explicit bash/sh/powershell support multiline natively; empty output is
+    a normal success and must not be rewritten into a cmd-truncation warning."""
+    import openjiuwen.harness.tools.shell.bash._tool as bash_tool_mod
+
+    monkeypatch.setattr(bash_tool_mod.os, "name", "nt", raising=False)
+
+    command = "Write-Output 'a'\nWrite-Output 'b'"
+    op = MagicMock()
+    op.shell.return_value.execute_cmd = AsyncMock(
+        return_value=_fake_empty_success_result(command, str(tmp_path), resolved_shell="powershell"),
+    )
+
+    tool = BashTool(op)
+    res = await tool.invoke({
+        "command": command,
+        "shell_type": "powershell",
+        "workdir": str(tmp_path),
+    })
+
+    assert res.success is True
+    assert res.data["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_windows_multiline_empty_output_skips_unknown_shell(monkeypatch, tmp_path):
+    """When the provider cannot report the resolved shell, stay silent rather
+    than asserting a cmd truncation that may not have happened."""
+    import openjiuwen.harness.tools.shell.bash._tool as bash_tool_mod
+
+    monkeypatch.setattr(bash_tool_mod.os, "name", "nt", raising=False)
+
+    command = "cd /e/work\nmkdir -p out"
+    op = MagicMock()
+    op.shell.return_value.execute_cmd = AsyncMock(
+        return_value=_fake_empty_success_result(command, str(tmp_path)),
+    )
+
+    tool = BashTool(op)
+    res = await tool.invoke({"command": command, "workdir": str(tmp_path)})
+
+    assert res.success is True
+    assert res.data["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_singleline_empty_output_stays_empty(monkeypatch, tmp_path):
+    """Single-line commands with legitimately empty output keep the silent-empty contract."""
+    import openjiuwen.harness.tools.shell.bash._tool as bash_tool_mod
+
+    monkeypatch.setattr(bash_tool_mod.os, "name", "nt", raising=False)
+
+    op = MagicMock()
+    op.shell.return_value.execute_cmd = AsyncMock(
+        return_value=_fake_empty_success_result("mkdir sub", str(tmp_path)),
+    )
+
+    tool = BashTool(op)
+    res = await tool.invoke({"command": "mkdir sub", "workdir": str(tmp_path)})
+
+    assert res.success is True
+    assert res.data["content"] == ""
+
+
+def test_bash_description_warns_about_multiline_inline_scripts():
+    """The tool schema must steer models away from multiline inline scripts on Windows."""
+    from openjiuwen.harness.prompts.tools.bash import DESCRIPTION
+
+    assert "多行脚本" in DESCRIPTION["cn"]
+    assert "临时文件" in DESCRIPTION["cn"]
+    assert "multiline" in DESCRIPTION["en"]
+    assert "temp file" in DESCRIPTION["en"]

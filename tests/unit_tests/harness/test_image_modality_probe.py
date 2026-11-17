@@ -12,6 +12,7 @@ import pytest
 from openjiuwen.harness import image_modality_probe
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
+    get_declared_image_support,
     probe_cache_key,
     probe_image_support,
     reset_image_support_cache,
@@ -73,6 +74,21 @@ async def test_probe_uses_small_budget_and_disables_thinking() -> None:
     # before the color does not truncate the answer.
     assert 8 < kwargs["max_tokens"] <= 64
     assert kwargs["extra_body"] == image_modality_probe._THINKING_DISABLED_EXTRA_BODY
+
+
+def test_declared_image_support_reads_supports_vision() -> None:
+    """模型条目的 supports_vision 声明是权威值；缺失或非布尔时视为未声明。"""
+    llm = _make_llm()
+    assert get_declared_image_support(llm) is None
+
+    llm.model_client_config.supports_vision = True
+    assert get_declared_image_support(llm) is True
+
+    llm.model_client_config.supports_vision = False
+    assert get_declared_image_support(llm) is False
+
+    llm.model_client_config.supports_vision = "yes"
+    assert get_declared_image_support(llm) is None
 
 
 @pytest.mark.asyncio

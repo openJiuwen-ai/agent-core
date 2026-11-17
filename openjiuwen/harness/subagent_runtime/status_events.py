@@ -165,6 +165,10 @@ def build_subagent_updated_payload(
     closed_at_ms: float | None,
     status: SubagentStatus,
     revision: int,
+    parent_id: str = "",
+    depth: int = 1,
+    kind: str = "",
+    descendant_count: int = 0,
 ) -> dict[str, Any]:
     """Build the external subagent status payload."""
     view = map_status_to_view(status)
@@ -185,6 +189,10 @@ def build_subagent_updated_payload(
         "created_at": created_at_ms,
         "updated_at": updated_at_ms,
         "revision": revision,
+        "parent_id": parent_id,
+        "depth": depth,
+        "kind": kind or subagent_type,
+        "descendant_count": descendant_count,
         **lifecycle,
     }
 

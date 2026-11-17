@@ -1,6 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""子 Agent 委托审批注册表：保持子 Agent 协程存活，路由答案到 pending Future。"""
+"""子 Agent 委托审批注册表：保持子 Agent 协程存活，路由答案到 pending Future。
+
+审批路由依赖 harness 的会话 / 子 Agent 生命周期，因此实现留在 core；
+权限语义由本包 :mod:`.models` / :mod:`.grant_store` 提供。
+"""
 
 from __future__ import annotations
 
@@ -134,20 +138,16 @@ class SubagentApprovalRegistry:
         future = loop.create_future()
         with self._guard:
             if any(
-                item.request.session_id == sid
-                and item.request.agent_scope_id == scope
+                item.request.session_id == sid and item.request.agent_scope_id == scope
                 for item in self._pending.values()
             ):
                 raise SubagentApprovalCapacityError(
                     f"scope already has a pending approval: session={sid!r} scope={scope!r}",
                 )
-            session_count = sum(
-                item.request.session_id == sid for item in self._pending.values()
-            )
+            session_count = sum(item.request.session_id == sid for item in self._pending.values())
             if session_count >= self._max_pending_per_session:
                 raise SubagentApprovalCapacityError(
-                    f"session pending approval limit reached: session={sid!r} "
-                    f"limit={self._max_pending_per_session}",
+                    f"session pending approval limit reached: session={sid!r} limit={self._max_pending_per_session}",
                 )
             self._pending[approval_id] = _PendingApproval(request, future, loop)
             session_lock = self._session_locks.setdefault(sid, asyncio.Lock())
@@ -210,9 +210,7 @@ class SubagentApprovalRegistry:
                 if current is not None and current.future is future:
                     self._pending.pop(approval_id, None)
                 # 该 session 已无 pending 时回收锁，避免长跑进程泄漏。
-                if not any(
-                    item.request.session_id == sid for item in self._pending.values()
-                ):
+                if not any(item.request.session_id == sid for item in self._pending.values()):
                     self._session_locks.pop(sid, None)
             if not future.done():
                 future.cancel()
@@ -244,7 +242,10 @@ class SubagentApprovalRegistry:
                 logger.warning(
                     "[skill_authorization] subagent.approval_scope_mismatch "
                     "session=%s expected_scope=%s got_scope=%s kind=%s",
-                    sid, request.agent_scope_id, scope, kind.value,
+                    sid,
+                    request.agent_scope_id,
+                    scope,
+                    kind.value,
                 )
                 return False
             self._pending.pop(rid, None)
@@ -266,8 +267,7 @@ class SubagentApprovalRegistry:
         sid = str(session_id or "").strip()
         scope = str(agent_scope_id or "").strip()
         return self._cancel_matching(
-            lambda item: item.request.session_id == sid
-            and item.request.agent_scope_id == scope,
+            lambda item: item.request.session_id == sid and item.request.agent_scope_id == scope,
         )
 
     def cancel_session(self, session_id: str) -> int:
@@ -318,8 +318,7 @@ class SubagentApprovalRegistry:
             )
         except Exception:  # noqa: BLE001 — UI终态通知失败不能覆盖原超时/取消语义
             logger.warning(
-                "[skill_authorization] subagent.approval_expiry_notify_failed "
-                "kind=%s session=%s scope=%s reason=%s",
+                "[skill_authorization] subagent.approval_expiry_notify_failed kind=%s session=%s scope=%s reason=%s",
                 request.kind.value,
                 request.session_id,
                 request.agent_scope_id,

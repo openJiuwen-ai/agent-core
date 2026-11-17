@@ -1,15 +1,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""工具权限引擎与宿主注入（供 openjiuwen 与上层产品集成）。
+"""工具权限宿主注入与配置持久化（供 openjiuwen 与上层产品集成）。
 
-可运行示例见仓库 ``examples/permissions/permission_demo.py``::
+权限判定由 agent-security 的 ``agent_shield`` 负责；core 仅保留宿主回调契约与
+权限配置的持久化落盘。可运行示例见仓库 ``examples/permissions/permission_demo.py``::
 
     uv run python examples/permissions/permission_demo.py
 """
 
-from openjiuwen.harness.security.core import (
-    PermissionEngine,
-)
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.security.host import (
     PermissionConfirmationRequest,
@@ -26,7 +24,6 @@ from openjiuwen.harness.security.models import (
     PermissionResult,
     PermissionsSection,
 )
-
 from openjiuwen.harness.security.patterns import (
     build_command_allow_pattern,
     merge_external_directory_allow_into_permissions,
@@ -44,7 +41,6 @@ __all__ = [
     "PermissionSceneHook",
     "PermissionSceneHookInput",
     "RequestPermissionConfirmationHook",
-    "PermissionEngine",
     "ApprovalOverrideEntry",
     "PermissionLevel",
     "PermissionResult",

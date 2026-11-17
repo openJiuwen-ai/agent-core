@@ -677,6 +677,26 @@ def test_before_model_call_limits_screenshot_use_for_multimodal_model() -> None:
     assert "pixel-level visual evidence" in prompt
 
 
+def test_before_model_call_honors_model_vision_declaration_in_auto_mode() -> None:
+    """声明为 auto 模式下的权威依据，未回写 deep_config 时也要识别。"""
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    builder = SystemPromptBuilder(language="en")
+    agent = MagicMock()
+    agent.deep_config = SimpleNamespace(
+        enable_read_image_multimodal=None,
+        model=SimpleNamespace(
+            model_client_config=SimpleNamespace(supports_vision=True),
+        ),
+    )
+    agent.system_prompt_builder = builder
+    rail = BrowserRuntimeRail(runtime)
+
+    _run(rail.before_model_call(AgentCallbackContext(agent=agent)))
+
+    prompt = builder.build()
+    assert "The current model can inspect image input" in prompt
+
+
 def test_before_model_call_injects_progress_attachment() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.service = MagicMock()

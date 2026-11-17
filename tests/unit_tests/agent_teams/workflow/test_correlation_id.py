@@ -3,8 +3,8 @@
 
 """Correlation ID: ``_branch_disambig`` encoding and ``_correlation_id`` with disambig."""
 
-from openjiuwen.agent_teams.workflow.engine.primitives import _branch_disambig
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
+from openjiuwen.agent_teams.workflow.engine.primitives import _branch_disambig
 
 
 def test_disambig_no_branch():

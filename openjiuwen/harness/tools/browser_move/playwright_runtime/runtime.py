@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
+from openjiuwen.harness.image_modality_probe import get_declared_image_support
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
     PromptAttachmentManager,
@@ -2453,7 +2454,13 @@ class BrowserRuntimeRail(AgentRail):
             getattr(agent, "deep_config", None)
             or getattr(agent, "_deep_config", None)
         )
-        return getattr(deep_config, "enable_read_image_multimodal", None) is True
+        configured = getattr(deep_config, "enable_read_image_multimodal", None)
+        if configured is not None:
+            return bool(configured)
+        # Auto mode is resolved on demand, mirroring read_file: a per-model
+        # supports_vision declaration counts even though it is never latched
+        # into the config.
+        return get_declared_image_support(getattr(deep_config, "model", None)) is True
 
     async def _effective_browser_tool_allowlist(
         self,

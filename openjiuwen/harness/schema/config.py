@@ -254,6 +254,8 @@ class DeepAgentConfig:
     enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False
     max_iterations: int = 15
+    on_max_iterations: str = "error"
+    max_iterations_hard_limit: int | None = None
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None
@@ -309,6 +311,21 @@ class DeepAgentConfig:
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
 
+    def __post_init__(self) -> None:
+        self.validate_iteration_policy()
+
+    def validate_iteration_policy(self) -> None:
+        """Validate the iteration policy after construction or reconfiguration."""
+        if self.on_max_iterations not in {"error", "return_observations"}:
+            raise ValueError("Unsupported iteration-limit policy")
+        ceiling = self.max_iterations_hard_limit
+        if ceiling is not None:
+            if self.enable_task_loop or type(ceiling) is not int or ceiling < 1:
+                raise ValueError("Iteration ceiling requires bounded single-round execution")
+            if type(self.max_iterations) is not int or not 1 <= self.max_iterations <= ceiling:
+                raise ValueError("max_iterations exceeds the host ceiling")
+
+
 
 @dataclass
 class SubAgentConfig:
@@ -340,3 +357,6 @@ class SubAgentConfig:
     enable_plan_mode: bool = False
     parallel_tool_calls: bool = True
     restrict_to_work_dir: bool = True
+    # When true, and the child is still above the depth floor, create_subagent
+    # opens the persistent runtime. general-purpose sets this; fork does not.
+    can_delegate: bool = False

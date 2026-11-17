@@ -15,12 +15,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.file_guard import (
+from agent_shield.tool_permission.engine import PermissionEngine
+from agent_shield.tool_permission.fileguard.file_guard import (
     FileGuardChecker,
     normalize_path_guard_config,
 )
+
 from openjiuwen.harness.security.models import PermissionLevel
 
 
@@ -31,6 +31,10 @@ def _legacy_cfg(external_action: str = "ask", **extra) -> dict:
     }
     cfg.update(extra)
     return cfg
+
+
+def _engine(cfg: dict, workspace_root: Path) -> PermissionEngine:
+    return PermissionEngine({**cfg, "runtime": {"workspace_root": str(workspace_root)}})
 
 
 # ---------- normalize / enabled ----------
@@ -168,26 +172,6 @@ def test_legacy_deny_star(tmp_path: Path) -> None:
 # ---------- 引擎挂载 + 开关隔离 ----------
 
 
-def test_engine_update_trusted_dirs_switches_verdict(tmp_path: Path) -> None:
-    """PermissionEngine.update_trusted_dirs 热更新后，路径层判定跟随变化。"""
-    workspace = tmp_path / "ws"
-    external_dir = tmp_path / "external"
-    external_file = external_dir / "secrets.txt"
-    args = {"file_path": str(external_file)}
-
-    engine = PermissionEngine(_legacy_cfg("ask"), workspace_root=workspace)
-
-    level, _rule = engine.evaluate_global_policy_directly("read_file", args)
-    assert level == PermissionLevel.ASK
-
-    engine.update_trusted_dirs([external_dir])
-    assert engine.trusted_dirs == [external_dir]
-    level_none, rule = engine.evaluate_global_policy_directly("read_file", args)
-    assert rule is None or "external_directory" not in (rule or "")
-    assert "file_guard" not in (rule or "")
-    assert level_none is None or level_none == PermissionLevel.ALLOW
-
-
 @pytest.mark.asyncio
 async def test_engine_file_guard_disabled_skips_path_layer(tmp_path: Path) -> None:
     """file_guard.enabled=false 时，即使 '*'=deny，也不再拦截外部路径。"""
@@ -199,12 +183,12 @@ async def test_engine_file_guard_disabled_skips_path_layer(tmp_path: Path) -> No
         "external_directory": {"*": "deny"},
         "file_guard": {"enabled": False},
     }
-    engine = PermissionEngine(cfg, workspace_root=workspace)
+    engine = _engine(cfg, workspace)
     result = await engine.check_permission(
         "read_file", {"file_path": str(external_file)}
     )
     assert result.permission == PermissionLevel.ALLOW
-    assert result.external_paths is None
+    assert not result.external_paths
 
 
 @pytest.mark.asyncio
@@ -217,6 +201,6 @@ async def test_engine_file_guard_disabled_does_not_change_tool_rules(tmp_path: P
         "external_directory": {"*": "deny"},
         "file_guard": {"enabled": False},
     }
-    engine = PermissionEngine(cfg, workspace_root=workspace)
+    engine = _engine(cfg, workspace)
     result = await engine.check_permission("bash", {"command": "echo hi"})
     assert result.permission == PermissionLevel.ASK

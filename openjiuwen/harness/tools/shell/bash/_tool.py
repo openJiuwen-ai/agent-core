@@ -17,9 +17,15 @@ from typing import (
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.session import get_current_session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.filesystem import (
+    _detect_and_record_deletions,
+    _parse_rm_targets,
+    _record_rm_targets_before_deletion,
+)
 from openjiuwen.harness.tools.shell.bash._output import (
     CommandOutput,
     persist_large_output,
@@ -28,26 +34,46 @@ from openjiuwen.harness.tools.shell.bash._output import (
     truncate_output,
 )
 from openjiuwen.harness.tools.shell.bash._permission import (
-    check_permission,
     PermissionConfig,
     PermissionMode,
-)
-from openjiuwen.harness.tools.shell.bash._security import (
-    check_injection,
-    get_destructive_warning,
+    check_permission,
 )
 from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
-from openjiuwen.core.session import get_current_session
-from openjiuwen.harness.tools.filesystem import (
-    _detect_and_record_deletions,
-    _parse_rm_targets,
-    _record_rm_targets_before_deletion,
-)
 
 # Matches sudo not already followed by -n / -En / --non-interactive
 _SUDO_NEEDS_N_RE = re.compile(
     r"\bsudo\b(?!(?:\s+-[a-zA-Z]*n|\s+--non-interactive))(?=\s)"
 )
+
+_MULTILINE_EMPTY_HINT_CN = (
+    "命令退出码为 0 但没有任何输出。注意：Windows 下 cmd 只执行多行命令的第一行，"
+    "后续行会被静默丢弃。若预期应有输出，请先把多行脚本写入临时文件再单行执行"
+    "（如 `python script.py`），或将命令改写为单行 `&&` 链。"
+)
+
+_MULTILINE_EMPTY_HINT_EN = (
+    "Command exited 0 but produced no output. Note: Windows cmd only runs the "
+    "first line of a multiline command and silently drops the rest. If output "
+    "was expected, write the script to a temp file and run it on a single line "
+    "(e.g. `python script.py`), or rewrite the command as a single `&&` chain."
+)
+
+
+def _multiline_empty_output_hint(command: str, language: str, resolved_shell: Optional[str]) -> Optional[str]:
+    """Detect the Windows cmd truncation signature and return an actionable hint.
+
+    ``cmd /c`` runs only up to the first newline of a command while still
+    exiting 0 with empty output, which otherwise looks like a silent success
+    and invites identical retries (observed as the [153001] tool-args loop).
+    Only flag the exact signature: Windows host + multiline command + the
+    command actually resolved to cmd. Bash runs multiline commands natively,
+    and ``auto`` routes them to Git Bash when it is available.
+    """
+    if os.name != "nt" or "\n" not in (command or "") or resolved_shell != "cmd":
+        return None
+    if (language or "cn").strip().lower().startswith("en"):
+        return _MULTILINE_EMPTY_HINT_EN
+    return _MULTILINE_EMPTY_HINT_CN
 
 
 def _make_sudo_noninteractive(command: str) -> str:
@@ -89,6 +115,9 @@ class BashTool(Tool):
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
+        self._language = language
+        # Tool-local guard for call-site policy (team worktree deny patterns etc.).
+        # Agent-level adjudication still lives in PermissionInterruptRail.
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
             deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
@@ -194,18 +223,15 @@ class BashTool(Tool):
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                return guard
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            return ToolOutput(success=False, error=perm.reason)
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
 
         if p.workdir and not os.path.isdir(resolved_cwd):
             return ToolOutput(success=False, error=f"workdir does not exist: {resolved_cwd}")
-
-        warning = get_destructive_warning(p.command)
 
         if p.description:
             sys_operation_logger.debug("BashTool: %s — %s", p.description, p.command)
@@ -279,7 +305,6 @@ class BashTool(Tool):
                         stdout=res.data.stdout or "",
                         stderr=res.data.stderr or "",
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
-                        warning=warning,
                         max_output_chars=p.max_output_chars,
                     ),
                     res.message,
@@ -303,11 +328,18 @@ class BashTool(Tool):
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,
         )
+        if not is_error and not content:
+            hint = _multiline_empty_output_hint(
+                p.command,
+                self._language,
+                res.data.resolved_shell if res.data else None,
+            )
+            if hint:
+                content = hint
         return ToolOutput(
             success=not is_error,
             data={"content": content},
@@ -325,16 +357,13 @@ class BashTool(Tool):
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            yield ToolOutput(success=False, error=perm.reason)
+            return
+
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
-
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                yield guard
-                return
-
-        warning = get_destructive_warning(p.command)
 
         if p.description:
             sys_operation_logger.debug("BashTool(stream): %s — %s", p.description, p.command)
@@ -352,6 +381,7 @@ class BashTool(Tool):
         accumulated_stdout = ""
         accumulated_stderr = ""
         final_exit_code: int = -1
+        resolved_shell: Optional[str] = None
 
         async for chunk in self._operation.shell().execute_cmd_stream(
                 p.command,
@@ -366,6 +396,7 @@ class BashTool(Tool):
 
             data = chunk.data
             elapsed = round(time.monotonic() - start, 2)
+            resolved_shell = getattr(data, "resolved_shell", None) or resolved_shell
 
             if data.exit_code is not None:
                 final_exit_code = data.exit_code
@@ -398,25 +429,16 @@ class BashTool(Tool):
                 stdout=accumulated_stdout,
                 stderr=accumulated_stderr,
                 exit_code=final_exit_code,
-                warning=warning,
                 max_output_chars=p.max_output_chars,
             ),
             meaning.is_error,
         )
+        if not is_error and not content:
+            hint = _multiline_empty_output_hint(p.command, self._language, resolved_shell)
+            if hint:
+                content = hint
         yield ToolOutput(
             success=not is_error,
             data={"content": content},
             error=content if is_error else None,
         )
-
-    def _guard(self, p: _BashInputs):
-        # tool-layer injection check (supplements sys_operation safety)
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
-
-        # permission pipeline (deny/allow patterns + mode enforcement)
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
-        return None

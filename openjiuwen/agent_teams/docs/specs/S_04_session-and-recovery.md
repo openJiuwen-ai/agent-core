@@ -23,8 +23,8 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-19 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_74_reset-clears-pending-resume.md` |
+| 最近一次修订日期 | 2026-11-10 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_74_reset-clears-pending-resume.md`、`F_84_apply-runtime-capabilities.md` |
 
 ## 范围 / 边界
 
@@ -168,11 +168,22 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
   路径以 `cleanup_first=True` 走 cleanup 不会找到任何活 handle，对单次 build 是
   no-op；保留 `True` 是为了 cold-recover 之外、由调用方手动 `resume_for_new_session`
   的低阶用法仍有清理保障。`RESUME_FROM_PAUSE` 不调用此方法——pause 后 pool 里同
-  实例继续跑，没有 session 切换。
+  实例继续跑，没有 session 切换；activate 仅对 mounted spec/allocator 做 tip
+  overlay（见 F_84），**不**重建 live DeepAgent、skill rail 或 skills-visibility。
 - `recover_for_existing_session`：来自 `COLD_RECOVER` 分支
   （`TeamAgent.recover_from_session(...)` 之后 `agent.recover_team()`）。recover_team
   自身在 leader 路径里会重新拉起 teammate，因此调用方此前已经把旧 spawn handle
   清空（或干脆是新 build 的 agent），本路径以 `cleanup_first=False` 跳过重复清理。
+
+`recover_from_session(session, team_name, runtime_spec=tip)` 在 `configure` 前会把
+checkpoint 反序列化出的 spec 与当前 tip 做能力 overlay（见
+`schema/runtime_capabilities.apply_runtime_capabilities`）：`model` / `skills` /
+团队级 pool·router 字段取 tip，identity 与 layout 仍以 checkpoint 为准。随后再
+reinject `build_context` / `memory.embedding_config` 这类 `Field(exclude=True)`
+字段，并把 `context.team_spec` 的 flat pool 与 tip 对齐；同时按 tip pool
+刷新（或清空）`context.member_model`，避免 `configure` 继续优先使用
+checkpoint 凭证而与 teammate 的 tip 解析分叉。省略 `runtime_spec` 时行为与历史
+一致（纯 checkpoint）。
 
 两条入口在 leader-only 路径下都收敛到 `RecoveryManager.restart_for_session_switch`，
 区别只剩 `cleanup_first`。teammate / 非 leader 路径直接早返回。

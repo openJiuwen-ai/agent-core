@@ -1,7 +1,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""技能级动态授权：以 Skill 生命周期为作用域的临时权限授权。"""
+"""技能级动态授权：以 Skill 生命周期为作用域的临时权限授权。
 
+权限语义（声明校验、权限合成、Grant 记录）实现在本包内；
+harness 侧负责 Skill 目录约定、审批卡协议与委托审批路由，并在此统一对外导出。
+"""
+
+from .approval_card import (
+    SKILL_APPROVAL_CARD_EXTENSION_KEY,
+    SKILL_APPROVAL_CARD_KIND,
+    SKILL_APPROVAL_CARD_VERSION,
+    SKILL_APPROVAL_PAYLOAD_SCHEMA,
+    SkillApprovalAction,
+    SkillApprovalCard,
+    SkillPermissionDiff,
+)
 from .composer import (
     SkillAuthorizationContext,
     command_rule_fingerprint,
@@ -16,26 +29,21 @@ from .grant_store import (
     get_skill_authorization_generation,
     get_skill_grant_store,
     set_skill_grant_store,
-    sync_grants_on_permissions_reload,
 )
 from .manifest import (
     load_skill_manifest,
 )
 from .models import (
-    SKILL_APPROVAL_CARD_KIND,
-    SKILL_APPROVAL_CARD_VERSION,
     GrantDecision,
     GrantStatus,
-    SkillApprovalAction,
-    SkillApprovalCard,
     SkillGrant,
     SkillManifest,
-    SkillPermissionDiff,
     SkillTrustLevel,
 )
+from .reload import (
+    sync_grants_on_permissions_reload,
+)
 from .schema import (
-    SKILL_APPROVAL_CARD_EXTENSION_KEY,
-    SKILL_APPROVAL_PAYLOAD_SCHEMA,
     SKILL_AUTHORIZATION_ENABLED_ENV,
     SKILL_PERMISSION_FILENAME,
     SkillPermissionValidationError,

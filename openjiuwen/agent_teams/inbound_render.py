@@ -183,6 +183,24 @@ def render_event(
     return _render_block("team-event", attrs, body, _render_note(note_kind, note_text))
 
 
+def render_clock(*, now: str) -> str:
+    """Render the current-time anchor as a self-closing ``<team-clock>``.
+
+    Every ``time`` attribute written into a member's history is an absolute
+    send time. A relative diff would go stale in history, so the member gets
+    the current time once per admitted input and measures elapsed time against
+    the newest anchor itself.
+
+    Args:
+        now: The current time, already rendered by
+            ``timefmt.format_absolute_time``.
+
+    Returns:
+        The rendered ``<team-clock now="..."/>`` element.
+    """
+    return f'<team-clock now="{_esc_attr(now)}"/>'
+
+
 def render_team_context(*, body: str) -> str:
     """Render standing team state as a ``<team-context>`` XML block.
 
@@ -260,6 +278,7 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "render_clock",
     "render_event",
     "render_inbound",
     "render_team_context",

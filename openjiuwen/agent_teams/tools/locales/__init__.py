@@ -110,7 +110,7 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str) -> str:
     return rendered
 
 
-def make_translator(lang: str = "cn") -> Translator:
+def make_translator(lang: str = "cn", ws_cache: object | None = None) -> Translator:
     """Create a language-bound translator closure.
 
     Each call returns an independent closure — safe for concurrent use
@@ -118,6 +118,9 @@ def make_translator(lang: str = "cn") -> Translator:
 
     Args:
         lang: Language code; anything other than ``"en"`` resolves to ``cn``.
+        ws_cache: Optional workspace cache for evolved tool descriptions.
+            Accepted for API compatibility with swarmflow worker wiring;
+            when ``None`` (default / unit tests) the framework defaults apply.
 
     Returns:
         ``t(desc_key, key="_desc", **kwargs) -> str``. ``kwargs`` interpolate
@@ -125,6 +128,7 @@ def make_translator(lang: str = "cn") -> Translator:
         use this); Markdown ``_desc`` slots are filled from shared fragments
         and take no ``kwargs``.
     """
+    del ws_cache  # reserved for evolved-desc lookup; current tree has no WorkspaceCache path
     if lang == "en":
         from openjiuwen.agent_teams.tools.locales import en as mod
     else:

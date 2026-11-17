@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
 from openjiuwen.core.session.agent import Session
 
@@ -185,13 +186,13 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
         block_send=block_send,
         send_started=send_started,
     )
-    abort_event = asyncio.Event()
+    abort_event = AbortSignal()
 
     task = asyncio.create_task(
         run_workflow(script, backend=pause_backend, journal_path=journal, abort_event=abort_event)
     )
     await send_started.wait()
-    abort_event.set()
+    abort_event.set("pause")
     await pause_backend.abort_sessions()
     task.cancel()
     block_send.set()
@@ -199,18 +200,18 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
         await task
 
     # Pause cancels the workflow task; engine-runner finally reaches aclose,
-    # making the old avatar physically terminal. KVC follows that existing
-    # dispose point with evict, without introducing pause offload/prefetch.
-    assert pause_events == ["start", "send", "abort:True", "evict", "dispose"]
+    # making the old avatar physically terminal. Session cleanup releases KVC
+    # via session.release_kvc (not model.evict_kvc) then disposes.
+    assert pause_events == ["start", "send", "abort:True", "dispose"]
     old_harness = pause_harnesses[0]
     old_identity = old_harness.started_identity
     assert old_identity is not None
     assert old_identity.parent_cache_id == "team-session-a"
     assert old_harness.model.offload_calls == []
     assert old_harness.model.prefetch_calls == []
-    assert len(old_harness.model.evict_calls) == 1
+    assert old_harness.model.evict_calls == []
     await pause_backend.aclose()
-    assert pause_events == ["start", "send", "abort:True", "evict", "dispose"]
+    assert pause_events == ["start", "send", "abort:True", "dispose"]
 
     resume_events: list[str] = []
     resume_harnesses: list[_PauseHarness] = []
@@ -219,7 +220,7 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
     result = await run_workflow(script, backend=resume_backend, journal_path=journal, resume=journal)
 
     assert result == "reply:work"
-    assert resume_events == ["start", "send", "evict", "dispose"]
+    assert resume_events == ["start", "send", "dispose"]
     assert len(resume_harnesses) == 1
     new_harness = resume_harnesses[0]
     assert new_harness is not old_harness
@@ -228,4 +229,4 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
     assert new_harness.started_identity.parent_cache_id == "team-session-a"
     assert new_harness.model.offload_calls == []
     assert new_harness.model.prefetch_calls == []
-    assert len(new_harness.model.evict_calls) == 1
+    assert new_harness.model.evict_calls == []

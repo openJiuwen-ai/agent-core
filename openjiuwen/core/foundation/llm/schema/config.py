@@ -121,6 +121,13 @@ class ModelClientConfig(BaseModel):
     api_mode: Optional[LLMApiMode] = Field(default=None, description="LLM API mode")
     auth_mode: LLMAuthMode = Field(default=LLMAuthMode.ApiKey, description="LLM authentication mode")
     endpoint_profile: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint profile name")
+    supports_vision: Optional[bool] = Field(
+        default=None,
+        description="Explicit native image-input declaration for this model entry. When set, "
+                    "the image modality probe is skipped; None means undeclared and falls back "
+                    "to the probe. An application-level enable_read_image_multimodal flag still "
+                    "takes precedence over this declaration."
+    )
     extensions: LLMExtensionsConfig = Field(default_factory=LLMExtensionsConfig)
     legacy_client_provider: Optional[str] = Field(default=None, description="Original provider before normalization")
     model_config = {

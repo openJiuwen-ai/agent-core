@@ -49,6 +49,33 @@ class TestInvokeTextWithRetry:
         assert llm.invoke.await_args_list[1].kwargs["messages"][0]["content"] == "short prompt"
 
     @pytest.mark.asyncio
+    async def test_retries_same_prompt_after_timeout_without_retry_prompt(self):
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(content='{"ok": true}'),
+            ]
+        )
+
+        result = await invoke_text_with_retry(
+            llm=llm,
+            model="test-model",
+            prompt="full prompt",
+            policy=LLMInvokePolicy(
+                attempt_timeout_secs=5,
+                total_budget_secs=10,
+                max_attempts=2,
+                backoff_base_secs=0,
+            ),
+        )
+
+        assert result == '{"ok": true}'
+        assert llm.invoke.await_count == 2
+        assert llm.invoke.await_args_list[0].kwargs["messages"][0]["content"] == "full prompt"
+        assert llm.invoke.await_args_list[1].kwargs["messages"][0]["content"] == "full prompt"
+
+    @pytest.mark.asyncio
     async def test_does_not_use_retry_prompt_for_non_timeout_error(self):
         llm = Mock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("boom"))

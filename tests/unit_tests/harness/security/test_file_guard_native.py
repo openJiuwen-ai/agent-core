@@ -8,12 +8,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.file_guard import (
+from agent_shield.tool_permission.engine import PermissionEngine
+from agent_shield.tool_permission.fileguard.file_guard import (
     FileGuardChecker,
     normalize_path_guard_config,
 )
+
 from openjiuwen.harness.security.models import PermissionLevel
 
 
@@ -26,6 +26,10 @@ def _native_cfg(paths: list[dict], *, defaults: dict | None = None, enabled: boo
             "paths": paths,
         },
     }
+
+
+def _engine(cfg: dict, workspace_root: Path) -> PermissionEngine:
+    return PermissionEngine({**cfg, "runtime": {"workspace_root": str(workspace_root)}})
 
 
 def test_native_mode_when_paths_present(tmp_path: Path) -> None:
@@ -92,7 +96,7 @@ def test_native_workspace_axis_skipped_without_root(tmp_path: Path, caplog: pyte
             "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
         },
     }
-    with caplog.at_level(logging.WARNING, logger="openjiuwen.harness.security.file_guard"):
+    with caplog.at_level(logging.WARNING, logger="agent_shield.tool_permission.fileguard.file_guard"):
         effective = normalize_path_guard_config(cfg, workspace_root=None)
     assert effective.mode == "native"
     assert effective.paths == ()
@@ -181,24 +185,6 @@ def test_native_write_allow_implies_read_allow(tmp_path: Path) -> None:
     assert checker.evaluate("read_file", {"file_path": str(target)}) is None
 
 
-def test_native_explicit_read_deny_wins_over_write_allow_implication(tmp_path: Path) -> None:
-    data = tmp_path / "data"
-    target = data / "f.txt"
-    effective = normalize_path_guard_config(
-        _native_cfg([
-            {"path": str(data), "read": "deny", "write": "allow", "exec": "ask"},
-        ]),
-        workspace_root=tmp_path / "ws",
-    )
-    rule = next(r for r in effective.paths if "data" in r.path.replace("\\", "/"))
-    assert rule.read == PermissionLevel.DENY
-    assert rule.write == PermissionLevel.ALLOW
-    checker = FileGuardChecker(effective)
-    result = checker.evaluate("read_file", {"file_path": str(target)})
-    assert result is not None
-    assert result.permission == PermissionLevel.DENY
-
-
 def test_native_glob_ssh_and_env(tmp_path: Path) -> None:
     """Glob：覆盖 path_ask_ssh / path_ask_env 类 pattern。"""
     workspace = tmp_path / "ws"
@@ -262,6 +248,6 @@ async def test_engine_native_strictest_with_tool_allow(tmp_path: Path) -> None:
             "paths": [],
         },
     }
-    engine = PermissionEngine(cfg, workspace_root=workspace)
+    engine = _engine(cfg, workspace)
     result = await engine.check_permission("read_file", {"file_path": str(secret)})
     assert result.permission == PermissionLevel.DENY

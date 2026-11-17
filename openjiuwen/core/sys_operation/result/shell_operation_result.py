@@ -15,6 +15,11 @@ class ExecuteCmdData(BaseModel):
     exit_code: Optional[int] = Field(default=None, description="Command exit code")
     stdout: str = Field(default="", description="The command's standard output (stdout) stream")
     stderr: str = Field(default="", description="The command's standard error (stderr) stream")
+    resolved_shell: Optional[str] = Field(
+        default=None,
+        description="Shell that actually executed the command (e.g. cmd/bash/powershell); "
+                    "None when the provider cannot report it",
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -26,6 +31,10 @@ class ExecuteCmdChunkData(BaseModel):
     type: Optional[Literal["stdout", "stderr"]] = Field(default=None, description="Type of the output chunk")
     chunk_index: int = Field(..., description="Index of current chunk (starting from 0)")
     exit_code: Optional[int] = Field(default=None, description="Command exit code")
+    resolved_shell: Optional[str] = Field(
+        default=None,
+        description="Shell that actually executed the command; None when the provider cannot report it",
+    )
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Data for command")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

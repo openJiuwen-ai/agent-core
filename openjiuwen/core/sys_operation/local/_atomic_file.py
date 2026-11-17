@@ -13,6 +13,8 @@ import stat
 import sys
 from pathlib import Path
 
+from openjiuwen.core.common.logging import sys_operation_logger
+
 _SE_FILE_OBJECT = 1
 _OWNER_SECURITY_INFORMATION = 0x00000001
 _GROUP_SECURITY_INFORMATION = 0x00000002
@@ -22,6 +24,30 @@ _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 _UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000
 _SE_DACL_PROTECTED = 0x1000
 _SE_DACL_AUTO_INHERITED = 0x0400
+_SDDL_REVISION_1 = 1
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
+_ERROR_ACCESS_DENIED = 5
+_WINDOWS_MISSING_TARGET_ERRORS = frozenset({_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND})
+
+
+def _winerror(error: BaseException) -> int | None:
+    """Return the Win32 code carried by an OS error, if any."""
+    code = getattr(error, "winerror", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(error, "errno", None)
+    return code if isinstance(code, int) else None
+
+
+def _windows_error(code: int, message: str) -> OSError:
+    """Build an OSError that keeps the Win32 code available to callers."""
+    error = OSError(code, message)
+    try:
+        error.winerror = code
+    except (AttributeError, TypeError):  # pragma: no cover - POSIX OSError without winerror
+        pass
+    return error
 
 
 def _read_posix_access_acl(fd: int) -> bytes | None:
@@ -49,8 +75,12 @@ def _restore_posix_access_acl(fd: int, acl: bytes | None) -> None:
                 raise
 
 
-def _copy_windows_security(source: Path, destination: Path) -> None:
-    """Preserve owner/group/DACL and its inheritance policy before publication."""
+def _copy_windows_security(source: Path, destination: Path, information: int = _FILE_SECURITY_INFORMATION) -> None:
+    """Apply owner/group/DACL and its inheritance policy before publication.
+
+    ``information`` narrows the copied parts. The DACL is what gates access, so a
+    DACL-only copy keeps the target access policy when owner/group cannot be set.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -62,11 +92,11 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
     put.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD, *([ctypes.c_void_p] * 4)]
     put.restype = wintypes.DWORD
     owner, group, dacl, descriptor = (ctypes.c_void_p() for _ in range(4))
-    information = _FILE_SECURITY_INFORMATION
+    requested = information
     error = get(
         str(source),
         _SE_FILE_OBJECT,
-        information,
+        requested,
         ctypes.byref(owner),
         ctypes.byref(group),
         ctypes.byref(dacl),
@@ -104,11 +134,11 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
             ]
             get_raw.restype = wintypes.BOOL
             needed = wintypes.DWORD()
-            get_raw(str(source), _FILE_SECURITY_INFORMATION, None, 0, ctypes.byref(needed))
+            get_raw(str(source), requested, None, 0, ctypes.byref(needed))
             if not needed.value:
                 raise ctypes.WinError(ctypes.get_last_error())
             raw = ctypes.create_string_buffer(needed.value)
-            if not get_raw(str(source), _FILE_SECURITY_INFORMATION, raw, needed.value, ctypes.byref(needed)):
+            if not get_raw(str(source), requested, raw, needed.value, ctypes.byref(needed)):
                 raise ctypes.WinError(ctypes.get_last_error())
             put_legacy = api.SetFileSecurityW
             put_legacy.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
@@ -120,6 +150,185 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
         free.argtypes = [ctypes.c_void_p]
         free.restype = ctypes.c_void_p
         free(descriptor)
+
+
+def _normalized_security_sddl(sddl: str) -> str:
+    """Drop the DACL auto-inherited bookkeeping flag from an SDDL string.
+
+    ReplaceFileW may set SE_DACL_AUTO_INHERITED while merging, and a freshly
+    created temporary file may not carry it. The flag records whether inheritance
+    has been applied, not which accesses are granted, so the owner, group and ACE
+    list are what decide whether two descriptors are equivalent.
+    """
+    head, separator, dacl = sddl.partition("D:")
+    if not separator:
+        return sddl
+    flags, ace_start, aces = dacl.partition("(")
+    return f"{head}D:{flags.replace('AI', '')}{ace_start}{aces}"
+
+
+def _windows_security_sddl(path: Path, information: int = _FILE_SECURITY_INFORMATION) -> str:
+    """Read owner/group/DACL as SDDL with the inheritance bookmark normalized."""
+    import ctypes
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("advapi32", use_last_error=True)
+    get = api.GetNamedSecurityInfoW
+    get.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD, *([ctypes.POINTER(ctypes.c_void_p)] * 5)]
+    get.restype = wintypes.DWORD
+    owner, group, dacl, descriptor = (ctypes.c_void_p() for _ in range(4))
+    error = get(
+        str(path),
+        _SE_FILE_OBJECT,
+        information,
+        ctypes.byref(owner),
+        ctypes.byref(group),
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if error:
+        raise _windows_error(error, f"Cannot read the security descriptor of {path} (WinError {error})")
+    free = ctypes.WinDLL("kernel32").LocalFree
+    free.argtypes = [ctypes.c_void_p]
+    free.restype = ctypes.c_void_p
+    try:
+        convert = api.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        convert.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        convert.restype = wintypes.BOOL
+        text, size = wintypes.LPWSTR(), wintypes.DWORD()
+        if not convert(descriptor, _SDDL_REVISION_1, information, ctypes.byref(text), ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return _normalized_security_sddl(text.value)
+        finally:
+            free(text)
+    finally:
+        free(descriptor)
+
+
+def _windows_security_matches(source: Path, destination: Path, information: int = _FILE_SECURITY_INFORMATION) -> bool:
+    """Return True only when both files carry the same owner, group and DACL."""
+    try:
+        return _windows_security_sddl(source, information) == _windows_security_sddl(destination, information)
+    except OSError as exc:
+        sys_operation_logger.debug("Cannot compare the security descriptors of %s and %s: %s", source, destination, exc)
+        return False
+
+
+def _copy_windows_security_or_dacl(source: Path, destination: Path) -> None:
+    """Copy file security, degrading to the DACL when owner/group is denied.
+
+    Copying OWNER/GROUP needs WRITE_OWNER access on the temporary file, which a
+    parent directory ACL that grants only Modify does not provide. The DACL still
+    gates access and a file owner holds implicit WRITE_DAC, so the reduced copy
+    preserves the access policy; the degradation is logged and then verified so a
+    partially applied descriptor cannot be published.
+    """
+    try:
+        _copy_windows_security(source, destination)
+        return
+    except OSError as exc:
+        sys_operation_logger.warning(
+            "Cannot copy owner/group from %s to %s (WinError %s): %s",
+            source,
+            destination,
+            _winerror(exc),
+            exc,
+        )
+    _copy_windows_security(source, destination, _DACL_SECURITY_INFORMATION)
+    if not _windows_security_matches(source, destination, _DACL_SECURITY_INFORMATION):
+        raise _windows_error(
+            _ERROR_ACCESS_DENIED,
+            f"DACL copy from {source} to {destination} reported success but did not apply; "
+            "the replacement must not be published",
+        )
+
+
+def _replace_file_windows(target: Path, temporary: Path) -> int:
+    """Publish ``temporary`` over ``target`` with ReplaceFileW; 0 on success or WinError.
+
+    ReplaceFileW merges the replaced file's owner/group/DACL into the replacement
+    natively, so publication needs neither WRITE_OWNER nor WRITE_DAC on the
+    temporary file and keeps a protected DACL intact. The REPLACEFILE_IGNORE_*
+    flags are deliberately never passed: they let the call succeed without
+    preserving ACLs, which would silently widen access.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    replace = ctypes.WinDLL("kernel32", use_last_error=True).ReplaceFileW
+    replace.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    replace.restype = wintypes.BOOL
+    if replace(str(target), str(temporary), None, 0, None, None):
+        return 0
+    return ctypes.get_last_error() or _ERROR_ACCESS_DENIED
+
+
+def _replace_windows_target(target: Path, temporary: Path) -> None:
+    """Publish an existing file without widening its owner/group/DACL boundary.
+
+    ReplaceFileW is the only path that preserves the target security descriptor
+    without WRITE_OWNER/WRITE_DAC on the temporary file. Every fallback still has
+    to apply or prove the target access policy before anything is published.
+    """
+    error = _replace_file_windows(target, temporary)
+    if not error:
+        return
+    sys_operation_logger.warning(
+        "ReplaceFileW could not publish %s (WinError %s); trying an explicit security copy",
+        target,
+        error,
+    )
+    if error in _WINDOWS_MISSING_TARGET_ERRORS:
+        # The target vanished after validation: publishing becomes a plain create,
+        # so no existing security descriptor can be relaxed.
+        os.replace(temporary, target)
+        return
+    copy_error = None
+    try:
+        _copy_windows_security_or_dacl(target, temporary)
+    except OSError as exc:
+        copy_error = exc
+        sys_operation_logger.warning(
+            "Cannot copy the security descriptor of %s to %s (WinError %s): %s",
+            target,
+            temporary,
+            _winerror(exc),
+            exc,
+        )
+    else:
+        os.replace(temporary, target)
+        return
+    if not os.path.lexists(target):
+        os.replace(temporary, target)
+        return
+    if _windows_security_matches(target, temporary):
+        sys_operation_logger.warning(
+            "Publishing %s without a security copy: the replacement already carries the target owner/group/DACL",
+            target,
+        )
+        os.replace(temporary, target)
+        return
+    raise _windows_error(
+        _winerror(copy_error) or error,
+        f"Cannot atomically publish {target}: ReplaceFileW failed (WinError {error}) and the "
+        f"target owner/group/DACL could not be applied to the replacement "
+        f"(WinError {_winerror(copy_error)}); the existing file was left unchanged",
+    )
 
 
 def _replace_file(
@@ -185,15 +394,20 @@ def _replace_file(
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise OSError("Unsafe atomic-write temporary file")
-        if os.name == "nt" and existing is not None:
-            _copy_windows_security(path, parent / name)
         current = parent.stat()
         if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
             raise OSError("File parent changed during atomic write")
-        if parent_fd is not None:
-            os.replace(name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        if os.name == "nt" and existing is not None and not os.path.islink(path):
+            _replace_windows_target(path, parent / name)
         else:
-            os.replace(parent / name, path)
+            if os.name == "nt" and existing is not None:
+                # A reparse point keeps the os.replace rename semantics; only harden
+                # the security copy, because ReplaceFileW follows the reparse target.
+                _copy_windows_security_or_dacl(path, parent / name)
+            if parent_fd is not None:
+                os.replace(name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            else:
+                os.replace(parent / name, path)
         owned = False
     finally:
         if owned:

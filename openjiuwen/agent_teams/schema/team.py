@@ -106,6 +106,8 @@ class TeamRole(str, Enum):
     HUMAN_AGENT = "human_agent"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
+    EXTERNAL_CLI = "external_cli"
+    """Teammate driven by a third-party CLI subprocess (Claude / Codex / …)."""
 
 
 class BridgeMailboxInjectMode(str, Enum):
@@ -243,6 +245,35 @@ class ExternalCliModelConfig(BaseModel):
     api_key: str | None = Field(default=None, min_length=1)
     """API key injected into the target CLI subprocess environment."""
 
+    effort: str | None = Field(default=None, min_length=1)
+    """Reasoning effort passed to the target CLI runtime (e.g. ``"low"`` / ``"high"``)."""
+
+
+class ExternalCliBuiltinModel(BaseModel):
+    """One model the CLI offers on its own login (e.g. a subscription).
+
+    Declared on ``ExternalCliAgentSpec.builtin_models``; the leader may only
+    pick models and efforts listed here.
+    """
+
+    name: str = Field(min_length=1)
+    """Model id or alias the CLI accepts (``"sonnet"``, ``"gpt-5.5"``)."""
+
+    description: str = ""
+    """When the leader should pick this model; shown in the tool catalog."""
+
+    efforts: list[str] = Field(default_factory=list)
+    """Selectable reasoning efforts; empty when the model has none."""
+
+    default_effort: str | None = None
+    """Effort used when the leader picks the model without one; ``None`` keeps the CLI default."""
+
+    @model_validator(mode="after")
+    def _validate_default_effort(self) -> "ExternalCliBuiltinModel":
+        if self.default_effort is not None and self.default_effort not in self.efforts:
+            raise ValueError(f"builtin model '{self.name}' default_effort must be one of its efforts")
+        return self
+
 
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
@@ -258,10 +289,18 @@ class ExternalCliAgentSpec(BaseModel):
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
-    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend,
-    ``"codex"`` the Codex Python SDK backend, and other values built-in adapters.
-    This is passed to ``spawn_member(cli_agent=...)``. See
-    ``agent_teams/external/cli_agent``."""
+    ``"openclaw"`` / ``"hermes"`` / a registered adapter name).
+    ``"claude"`` selects the SDK backend, ``"codex"`` the Codex Python SDK
+    backend; other built-in names use their subprocess adapters. Passed to
+    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
+
+    skills: list[str | dict[str, Any]] = Field(default_factory=list)
+    """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
+    skill_conflict: Literal["skip", "replace", "append"] = "skip"
+    """Keep, replace, or add a uniquely named copy of an existing project skill."""
+
+    system_prompt_mode: Literal["append", "replace"] | None = None
+    """Prompt policy for Claude/Codex; None keeps each provider's default."""
 
     command: Optional[list[str]] = None
     """Full launch argv overriding an adapter backend's built-in command.
@@ -328,6 +367,18 @@ class ExternalCliAgentSpec(BaseModel):
     replayed because they may already have produced external side effects.
     """
 
+    claude_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Claude turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK message refreshes the
+    timer; a stalled turn is interrupted and finalized as a network timeout.
+    """
+
+    claude_max_buffer_size: int | None = Field(default=None, ge=1)
+    """Optional per-line stdout buffer ceiling (bytes) for the Claude SDK
+    transport; ``None`` keeps the harness default.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -342,6 +393,13 @@ class ExternalCliAgentSpec(BaseModel):
     The public YAML key is ``model_config``. The Python attribute is named
     ``external_model_config`` to avoid colliding with Pydantic's class-level
     ``model_config`` setting.
+    """
+
+    builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
+    """Models the CLI offers on its own login that the leader may pick.
+
+    Non-empty enables builtin_model / effort selection for members of this
+    kind; empty keeps the member on ``model_config`` / the pool / the CLI default.
     """
 
     ssh_transport: SshTransportConfig | None = None
@@ -376,9 +434,29 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
+            raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
+        if self.cli_agent != "claude" and self.claude_max_buffer_size is not None:
+            raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
+        names = [model.name for model in self.builtin_models]
+        if len(names) != len(set(names)):
+            raise ValueError("builtin_models names must be unique")
         return self
+
+    def find_builtin_model(self, name: str) -> ExternalCliBuiltinModel | None:
+        """Return the declared built-in model called ``name``, if any."""
+        return next((model for model in self.builtin_models if model.name == name), None)
+
+
+class ExternalCliMemberSpec(TeamMemberSpec):
+    """Predefined teammate backed by one existing external CLI config."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    role_type: Literal[TeamRole.EXTERNAL_CLI] = TeamRole.EXTERNAL_CLI
+    external_cli: ExternalCliAgentSpec
 
 
 class TeamSpec(BaseModel):
@@ -402,6 +480,17 @@ class TeamSpec(BaseModel):
 
     Carried on the runtime spec so external CLI member MCP tools expose the
     same plan/build-mode tool set described by the spawned system prompt.
+    """
+    enable_member_messaging: bool = False
+    """Scheduled peer messaging — mirrors ``TeamAgentSpec.enable_member_messaging``.
+
+    Carried for external CLI spawn so tool assembly and prompt rendering see
+    the same mode axes as in-process members.
+    """
+    max_subtask_depth: int = 0
+    """Member subtask ceiling — mirrors ``TeamAgentSpec.max_subtask_depth``.
+
+    Carried for the same reason as ``enable_member_messaging``.
     """
     enable_taskless_completion: bool = True
     """Emergency-rollback switch for the taskless-completion publish gate.
@@ -515,6 +604,8 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliBuiltinModel",
+    "ExternalCliMemberSpec",
     "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",

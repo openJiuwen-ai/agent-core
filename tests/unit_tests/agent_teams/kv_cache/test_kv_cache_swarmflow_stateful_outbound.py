@@ -16,7 +16,6 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.foundation.kv_cache import (
-    KVC_SESSION_EVICT_TIMEOUT_SECONDS,
     KVCacheAffinityConfig,
     KVCacheIdentity,
 )
@@ -272,17 +271,6 @@ async def test_stateful_worker_two_turns_final_outbound_payload(
 
     await manager.close_session(session_id)
 
-    if expect_hint:
-        identity = harness.started_identity
-        assert identity is not None
-        assert harness.model.evict_calls == [
-            {
-                "target": "session",
-                "session_id": identity.cache_id,
-                "parent_session_id": "team-session-a",
-                "timeout": KVC_SESSION_EVICT_TIMEOUT_SECONDS,
-            }
-        ]
-    else:
-        assert harness.model.evict_calls == []
+    # Close releases KVC through session.release_kvc, not model.evict_kvc.
+    assert harness.model.evict_calls == []
     assert harness.disposes == 1
