@@ -581,6 +581,9 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
     # one DeepAgent gathers evidence for every criterion, starting from the default walk
     gathered = await evidence_agent.gather(criteria, ctx, evidence_route, log, limits,
                                            prefetched=[walked] if walked else [])
+    if options.materials is not None:
+        shots = {label: data for _, images in gathered.values() for label, data in images}
+        options.materials.update(screenshots=list(shots.items()), deliverable=deliverable, knowledge=knowledge)
     browser_checks = {}   # a check serving several criteria counts once
     for evidence, _ in gathered.values():
         for f in evidence:
