@@ -1,12 +1,10 @@
 ---
 title: 设计文档索引
-author: yidaaichixia
-author_email: 1046386000@qq.com
+author: sync_documents.py
 generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-16T17:32+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -16,17 +14,17 @@ generated: true
 
 | 模块 |
 |---|
-| [agent_evolving](#module-1) |
-| [agent_evolving/trajectory](#module-2) |
-| [agent_teams](#module-3) |
-| [agent_teams/workflow](#module-4) |
-| [core/foundation/llm](#module-5) |
-| [extensions/observability](#module-6) |
-| [harness](#module-7) |
-| [harness_providers](#module-8) |
-| [未分类](#module-9) |
+| [agent_evolving](#module-agent_evolving) |
+| [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
+| [agent_teams](#module-agent_teams) |
+| [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core/foundation/llm](#module-core-foundation-llm) |
+| [extensions/observability](#module-extensions-observability) |
+| [harness](#module-harness) |
+| [harness_providers](#module-harness_providers) |
+| [未分类](#module-unclassified) |
 
-<a id="module-1"></a>
+<a id="module-agent_evolving"></a>
 
 ## agent_evolving
 
@@ -36,7 +34,7 @@ generated: true
 |---|---|---|---|---|---|
 | [SDD-0024](proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | draft | @alan_cheng | observability | 2026-09-15 |
 
-<a id="module-2"></a>
+<a id="module-agent_evolving-trajectory"></a>
 
 ## agent_evolving/trajectory
 
@@ -46,7 +44,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
 
-<a id="module-3"></a>
+<a id="module-agent_teams"></a>
 
 ## agent_teams
 
@@ -75,7 +73,7 @@ generated: true
 | [SDD-0016](archive/SDD-0016-third-party-agent-reliability/design.md) | 三方 Agent 可靠性设计 | shipped | @zhanglongmin | core | 2026-08-31 |
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 
-<a id="module-4"></a>
+<a id="module-agent_teams-workflow"></a>
 
 ## agent_teams/workflow
 
@@ -110,7 +108,7 @@ generated: true
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 | [SDD-0027](archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | shipped | @xiajing | core | 2026-09-16 |
 
-<a id="module-5"></a>
+<a id="module-core-foundation-llm"></a>
 
 ## core/foundation/llm
 
@@ -120,7 +118,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
 
-<a id="module-6"></a>
+<a id="module-extensions-observability"></a>
 
 ## extensions/observability
 
@@ -137,7 +135,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
 
-<a id="module-7"></a>
+<a id="module-harness"></a>
 
 ## harness
 
@@ -161,7 +159,7 @@ generated: true
 |---|---|---|---|---|---|
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
-<a id="module-8"></a>
+<a id="module-harness_providers"></a>
 
 ## harness_providers
 
@@ -171,7 +169,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
 
-<a id="module-9"></a>
+<a id="module-unclassified"></a>
 
 ## 未分类
 

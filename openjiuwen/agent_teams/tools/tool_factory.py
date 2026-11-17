@@ -187,6 +187,7 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     dispatch_mode: str = "autonomous",
+    extension_bus: Any = None,
     lifecycle: str = "temporary",
     team_mode: str = "default",
     bootstrap_mode: str = "leader",
@@ -309,6 +310,7 @@ def create_team_tools(
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
             loader=loader,
+            extension_bus=extension_bus,
         ),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per kind of member: AI teammate (local

@@ -13,7 +13,17 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.events.builtins.event_types.turn import (
+    TURN_COMPLETE,
+    TURN_START,
+    TurnCompleteInput,
+    TurnCompleteOutput,
+    TurnStartInput,
+    TurnStartOutput,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
@@ -28,12 +38,14 @@ from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Ok
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
     AgentRail,
+    InvokeInputs,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
@@ -397,7 +409,7 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
     assert rail.after_invoke_count == 1
     assert agent.is_initialized is True
     assert {key: value for key, value in fake_react.invoke_calls[0]["inputs"].items()
-            if key != "_steering_queue"} == {
+            if key not in {"_steering_queue", "_turn_state"}} == {
         "query": "hello",
         "conversation_id": "c1",
     }
@@ -515,6 +527,152 @@ async def test_invoke_task_loop_delegates_to_event_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invoke_starts_new_turn_and_resume_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+    session = Session(session_id="invoke-turn")
+    starts: list[TurnStartInput] = []
+    completes: list[TurnCompleteInput] = []
+
+    async def trigger(event, event_session):
+        assert event_session is session
+        if event.event_type == TURN_START:
+            persisted = agent.load_state(session).turn_state
+            assert persisted is not None
+            assert event.event_input.turn_id == persisted.turn_id
+            assert fake_react.invoke_calls == []
+            starts.append(event.event_input)
+            return TurnStartOutput(turn_id=event.event_input.turn_id)
+        assert event.event_type == TURN_COMPLETE
+        completes.append(event.event_input)
+        return TurnCompleteOutput(
+            text="normalized",
+            usage={"total_tokens": len(completes)},
+        )
+
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: SimpleNamespace(trigger=trigger)),
+    )
+
+    first_result = await agent.invoke("new work", session=session)
+    started = agent.load_state(session).turn_state
+    assert started is not None
+    assert started.step_index == 0
+    assert fake_react.invoke_calls[0]["inputs"]["_turn_state"] == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    assert completes == [
+        TurnCompleteInput(
+            turn_id=started.turn_id,
+            reason="completed",
+            answer="echo:new work",
+        )
+    ]
+    assert first_result == {
+        "output": "normalized",
+        "result_type": "answer",
+        "usage": {"total_tokens": 1},
+    }
+
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    resumed_result = await agent.invoke(resume, session=session)
+
+    assert agent.load_state(session).turn_state == started
+    assert fake_react.invoke_calls[1]["inputs"]["_turn_state"] == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+    assert completes[-1].turn_id == started.turn_id
+    assert resumed_result["output"] == "normalized"
+    assert resumed_result["usage"] == {"total_tokens": 2}
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_turn_start_identity_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=True)
+    session = Session(session_id="invoke-turn-forged")
+    bus = SimpleNamespace(
+        trigger=AsyncMock(return_value=TurnStartOutput(turn_id="forged"))
+    )
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: bus),
+    )
+
+    with pytest.raises(BaseError) as invalid:
+        await agent.invoke("new work", session=session)
+
+    persisted = agent.load_state(session).turn_state
+    assert invalid.value.status is StatusCode.EVENTS_PAYLOAD_INVALID
+    assert persisted is not None
+    assert persisted.turn_id != "forged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected_reason"),
+    [
+        ({"output": "done", "result_type": "answer"}, "completed"),
+        ({"output": "stopped", "error": "aborted"}, "aborted"),
+        ({"output": "failed", "result_type": "error"}, "error"),
+        ({"output": "paused", "result_type": "interrupt"}, None),
+    ],
+)
+async def test_turn_complete_maps_structured_terminal_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    result: dict[str, Any],
+    expected_reason: str | None,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    session = Session(session_id="turn-complete-reason")
+    turn_state = agent._start_turn(session)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="work"),
+        session=session,
+    )
+    ctx.extra["_turn_state"] = turn_state
+    captured: list[TurnCompleteInput] = []
+
+    async def trigger(event, event_session):
+        assert event.event_type == TURN_COMPLETE
+        assert event_session is session
+        captured.append(event.event_input)
+        return TurnCompleteOutput(
+            text=event.event_input.answer,
+            usage=event.event_input.usage,
+        )
+
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: SimpleNamespace(trigger=trigger)),
+    )
+
+    returned = await agent._trigger_turn_complete(ctx, session, result)
+
+    if expected_reason is None:
+        assert captured == []
+        assert returned is result
+    else:
+        assert captured[0].turn_id == turn_state.turn_id
+        assert captured[0].reason == expected_reason
+        assert returned is not result
+        assert returned == result
+
+
+@pytest.mark.asyncio
 async def test_stream_single_round_branch() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     fake_react = FakeReactAgent()
@@ -524,13 +682,58 @@ async def test_stream_single_round_branch() -> None:
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
     assert {key: value for key, value in fake_react.stream_calls[0]["inputs"].items()
-            if key != "_steering_queue"} == {
+            if key not in {"_steering_queue", "_turn_state"}} == {
         "query": "stream_input",
     }
 
 
 @pytest.mark.asyncio
-async def test_stream_sets_result_before_after_invoke() -> None:
+async def test_stream_starts_new_turn_and_resume_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+    session = Session(session_id="stream-turn")
+    starts: list[TurnStartInput] = []
+
+    async def trigger(event, event_session):
+        persisted = agent.load_state(session).turn_state
+        assert event_session is session
+        assert persisted is not None
+        assert event.event_input.turn_id == persisted.turn_id
+        assert fake_react.stream_calls == []
+        starts.append(event.event_input)
+        return TurnStartOutput(turn_id=event.event_input.turn_id)
+
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: SimpleNamespace(trigger=trigger)),
+    )
+
+    _ = [chunk async for chunk in agent.stream("new work", session=session)]
+    started = agent.load_state(session).turn_state
+    assert started is not None
+    assert started.step_index == 0
+    assert fake_react.stream_calls[0]["inputs"]["_turn_state"] == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    _ = [chunk async for chunk in agent.stream(resume, session=session)]
+
+    assert agent.load_state(session).turn_state == started
+    assert fake_react.stream_calls[1]["inputs"]["_turn_state"] == started
+    assert starts == [TurnStartInput(turn_id=started.turn_id, text="new work")]
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_result_before_after_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class AnswerStreamingReactAgent(FakeReactAgent):
         async def stream(
             self,
@@ -565,15 +768,38 @@ async def test_stream_sets_result_before_after_invoke() -> None:
     rail = CountingRail()
     agent.add_rail(rail)
     agent.set_react_agent(AnswerStreamingReactAgent(), initialized=False)
+    session = Session(session_id="stream-complete")
+    complete_inputs: list[TurnCompleteInput] = []
 
-    chunks = [chunk async for chunk in agent.stream("stream_input")]
+    async def trigger(event, event_session):
+        assert event_session is session
+        if event.event_type == TURN_START:
+            return TurnStartOutput(turn_id=event.event_input.turn_id)
+        assert event.event_type == TURN_COMPLETE
+        complete_inputs.append(event.event_input)
+        return TurnCompleteOutput(
+            text="normalized stream",
+            usage={"total_tokens": 3},
+        )
+
+    monkeypatch.setattr(
+        Runner,
+        "get_extension_bus",
+        classmethod(lambda cls: SimpleNamespace(trigger=trigger)),
+    )
+
+    chunks = [chunk async for chunk in agent.stream("stream_input", session=session)]
 
     assert [chunk.type for chunk in chunks] == ["llm_output", "llm_output", "answer"]
+    assert complete_inputs[0].reason == "completed"
+    assert complete_inputs[0].answer == "hello world"
     assert rail.after_invoke_count == 1
     assert rail.after_invoke_result == {
-        "output": "hello world",
+        "output": "normalized stream",
         "result_type": "answer",
+        "usage": {"total_tokens": 3},
     }
+    assert chunks[-1].payload == rail.after_invoke_result
 
 
 @pytest.mark.asyncio
